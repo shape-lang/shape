@@ -11,15 +11,15 @@ use crate::mir_compiler::preflight;
 use shape_ast::ast::{Item, Span, Statement};
 use shape_runtime::engine::{ProgramExecutor, ShapeEngine};
 use shape_runtime::initialize_shared_runtime;
-use shape_vm::BytecodeExecutor;
 use shape_vm::bytecode::MirFunctionData;
 use shape_vm::mir::lowering::lower_function_detailed;
-use shape_vm::mir::solver::{CalleeSummaries, analyze};
+use shape_vm::mir::solver::{analyze, CalleeSummaries};
 use shape_vm::mir::storage_planning::{
-    StoragePlannerInput, collect_closure_captures, plan_storage,
+    collect_closure_captures, plan_storage, StoragePlannerInput,
 };
 use shape_vm::mir::{Rvalue, StatementKind};
 use shape_vm::type_tracking::BindingSemantics;
+use shape_vm::BytecodeExecutor;
 use shape_wire::WireValue;
 use std::collections::HashMap;
 

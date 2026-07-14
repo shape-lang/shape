@@ -1207,6 +1207,7 @@ impl BytecodeCompiler {
                 }
             }
             Statement::SetReturnExpr { expression, .. }
+            | Statement::SetParamTypeExpr { expression, .. }
             | Statement::SetParamValue { expression, .. }
             | Statement::ReplaceBodyExpr { expression, .. }
             | Statement::ReplaceModuleExpr { expression, .. } => {

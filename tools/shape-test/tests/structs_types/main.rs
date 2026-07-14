@@ -1,5 +1,6 @@
 mod complex;
 mod generics_comptime;
+mod option_field_mutation;
 mod stress_decl;
 mod stress_fields;
 mod stress_methods;

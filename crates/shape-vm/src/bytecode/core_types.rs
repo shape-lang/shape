@@ -113,7 +113,9 @@ pub struct NativeAbiSpec {
     /// `NativeResolutionSet.by_package_alias` load target at link-now — this is
     /// runtime metadata, so it is excluded from the content hash (host-stable
     /// per A7: identical source declarations hash identically across hosts).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    // SnapshotStore uses bincode for BytecodeProgram; bincode is positional, so
+    // `None` must still be encoded rather than skipped.
+    #[serde(default)]
     pub package_key: Option<String>,
 }
 

@@ -320,8 +320,19 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                 // `v2_typed_array_elem_kind` → handle_int_map ckpt3_surface)
                 // because no consume-via-stamp is performed; the routing
                 // is structural at the Call terminator.
-                if let Operand::Constant(MirConstant::Method(_)) = func {
+                if let Operand::Constant(MirConstant::Method(method_name)) = func {
                     let key = (terminator.span, self.caller_function_id);
+                    if std::env::var_os("SHAPE_DEBUG_FIELD_STAMPS").is_some()
+                        && method_name == "summary"
+                    {
+                        eprintln!(
+                            "[terminator-debug] method={} key={:?} direct_hit={} caller={:?}",
+                            method_name,
+                            key,
+                            self.monomorphized_method_call_sites.contains_key(&key),
+                            self.caller_function_id
+                        );
+                    }
                     if let Some(&specialized_idx) = self.monomorphized_method_call_sites.get(&key) {
                         let func_ref_opt =
                             self.user_func_refs.get(&(specialized_idx as u16)).copied();
@@ -417,6 +428,18 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                 //   [receiver, arg0, ..., method_name_string, arg_count_number]
                 // then call jit_call_method(ctx, total_count).
                 if let Operand::Constant(MirConstant::Method(method_name)) = func {
+                    if std::env::var_os("SHAPE_DEBUG_FIELD_STAMPS").is_some()
+                        && method_name == "summary"
+                    {
+                        eprintln!(
+                            "[terminator-debug] method={} generic_path destination={:?} slot_kinds={:?} local_structs={:?} concrete_types={:?}",
+                            method_name,
+                            destination,
+                            self.slot_kinds,
+                            self.mir.local_struct_type_names,
+                            self.concrete_types
+                        );
+                    }
                     // ── STAGE-M1 jit-string-method-return-carrier deopt ──────
                     // CARRIER-SHAPE MISMATCH (CONFIRMED machine-killer — the
                     // 804GiB/ASCII-as-pointer heap corruption). When the proven
@@ -600,8 +623,8 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                     let receiver_is_vm_only_heap = args
                         .first()
                         .map(|recv| {
-                            use shape_value::NativeKind;
                             use shape_value::heap_value::HeapKind;
+                            use shape_value::NativeKind;
                             matches!(
                                 self.operand_slot_kind(recv),
                                 Some(NativeKind::Ptr(
@@ -1005,10 +1028,9 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                                 } else {
                                     val
                                 };
-                                self.builder.ins().call(
-                                    self.ffi.print_typed_object,
-                                    &[self.ctx_ptr, widened],
-                                );
+                                self.builder
+                                    .ins()
+                                    .call(self.ffi.print_typed_object, &[self.ctx_ptr, widened]);
                             }
                             // ── Phase 3 cluster-2 Round 3 cw-D-fam12
                             //    Scalar Char (Family 1) arm ─────────────
@@ -2173,6 +2195,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                                     | NativeKind::NullableUIntSize
                             )
                         );
+                        let raw_string = matches!(return_kind, Some(NativeKind::String));
                         self.builder.ins().store(
                             MemFlags::new(),
                             ret_val,
@@ -2181,6 +2204,8 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                         );
                         let tag_value = if raw_int {
                             crate::context::RETURN_TAG_I64
+                        } else if raw_string {
+                            crate::context::RETURN_TAG_STRING
                         } else if return_kind.is_none() {
                             crate::context::RETURN_TAG_UNIT
                         } else {

@@ -230,10 +230,7 @@ fn build_json_enum_heap_value(value: serde_json::Value, json_schema_id: u64) -> 
     // do not.
     let payload_is_heap = matches!(
         payload_kind,
-        NativeKind::String
-            | NativeKind::StringV2
-            | NativeKind::DecimalV2
-            | NativeKind::Ptr(_)
+        NativeKind::String | NativeKind::StringV2 | NativeKind::DecimalV2 | NativeKind::Ptr(_)
     );
     let heap_mask = if payload_is_heap { 1u64 << 1 } else { 0u64 };
     build_typed_object(
@@ -303,8 +300,8 @@ fn build_field_slot_from_json(
 ) -> Result<(ValueSlot, shape_value::NativeKind, bool), String> {
     use crate::type_schema::FieldType;
     use serde_json::Value;
-    use shape_value::heap_value::HeapKind;
     use shape_value::NativeKind;
+    use shape_value::heap_value::HeapKind;
     let typed_object_kind = NativeKind::Ptr(HeapKind::TypedObject);
     match (value, field_type) {
         (Value::Null, _) => Ok((ValueSlot::none(), NativeKind::Null, false)),
@@ -409,7 +406,10 @@ fn build_typed_object_from_json(
             // native kind when it resolves (so a downstream read pushes the
             // declared kind with null/zero bits, which the clone/drop paths
             // treat as an absent value), else fall back to `Null`.
-            let declared = field.field_type.to_native_kind().unwrap_or(NativeKind::Null);
+            let declared = field
+                .field_type
+                .to_native_kind()
+                .unwrap_or(NativeKind::Null);
             (ValueSlot::none(), declared, false)
         };
         slots[field.index as usize] = slot;

@@ -39,6 +39,10 @@ pub struct Cli {
     #[arg(long, value_name = "HASH")]
     pub resume: Option<String>,
 
+    /// Snapshot store directory. Also read from SHAPE_SNAPSHOT_STORE when unset.
+    #[arg(long, value_name = "DIR", global = true)]
+    pub snapshot_store: Option<PathBuf>,
+
     /// Path to data providers configuration file
     #[arg(long, value_name = "PATH")]
     pub providers_config: Option<PathBuf>,

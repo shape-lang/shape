@@ -9,4 +9,5 @@
 mod async_let;
 mod async_scope;
 mod for_await;
+mod future_handles;
 mod join_strategies;

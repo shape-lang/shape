@@ -301,6 +301,134 @@ impl BytecodeCompiler {
         }
     }
 
+    fn future_payload_type_name(ty: &shape_runtime::type_system::Type) -> Option<String> {
+        use shape_ast::ast::TypeAnnotation;
+        use shape_runtime::type_system::Type;
+
+        let is_future_name = |n: &str| n == "Future";
+
+        match ty {
+            Type::Generic { base, args } if args.len() == 1 => {
+                let base_name = match base.as_ref() {
+                    Type::Concrete(ann) => ann.as_type_name_str()?.to_string(),
+                    _ => return None,
+                };
+                if !is_future_name(&base_name) {
+                    return None;
+                }
+                Self::type_to_simple_name(&args[0])
+            }
+            Type::Concrete(TypeAnnotation::Generic { name, args })
+                if is_future_name(name) && args.len() == 1 =>
+            {
+                Some(args[0].to_type_string())
+            }
+            Type::Concrete(TypeAnnotation::Basic(s)) => {
+                Self::first_generic_arg_of_baked_name(s, is_future_name)
+            }
+            _ => None,
+        }
+    }
+
+    fn future_payload_type_name_from_baked(type_name: &str) -> Option<String> {
+        Self::first_generic_arg_of_baked_name(type_name.trim(), |n| n == "Future")
+    }
+
+    fn future_payload_type_name_for_expr(&mut self, expr: &Expr) -> Option<String> {
+        if let Ok(inferred) = self.infer_expr_type(expr) {
+            if let Some(payload) = Self::future_payload_type_name(&inferred) {
+                return Some(payload);
+            }
+        }
+
+        if let Expr::Identifier(name, _) = expr {
+            if let Some(type_name) = self.tracker_type_name_for_identifier(name) {
+                return Self::future_payload_type_name_from_baked(&type_name);
+            }
+        }
+
+        self.last_expr_type_info
+            .as_ref()
+            .and_then(|info| info.type_name.as_deref())
+            .and_then(Self::future_payload_type_name_from_baked)
+    }
+
+    fn last_expr_future_payload_type_name(&self) -> Option<String> {
+        self.last_expr_type_info
+            .as_ref()
+            .and_then(|info| info.type_name.as_deref())
+            .and_then(Self::future_payload_type_name_from_baked)
+    }
+
+    fn clear_last_expr_if_stale_future_handle(&mut self) {
+        if self.last_expr_future_payload_type_name().is_some() {
+            self.last_expr_schema = None;
+            self.last_expr_type_info = None;
+        }
+    }
+
+    fn future_payload_type_name_for_expr_without_last_expr(
+        &mut self,
+        expr: &Expr,
+    ) -> Option<String> {
+        if let Ok(inferred) = self.infer_expr_type(expr) {
+            if let Some(payload) = Self::future_payload_type_name(&inferred) {
+                return Some(payload);
+            }
+        }
+
+        if let Expr::Identifier(name, _) = expr {
+            if let Some(type_name) = self.tracker_type_name_for_identifier(name) {
+                return Self::future_payload_type_name_from_baked(&type_name);
+            }
+        }
+
+        None
+    }
+
+    fn stamp_future_handle_type_for_async_let(
+        &mut self,
+        expr: &Expr,
+        payload_hint: Option<String>,
+    ) {
+        let payload_name = self
+            .future_payload_type_name_for_expr(expr)
+            .or(payload_hint)
+            .or_else(|| {
+                self.last_expr_type_info
+                    .as_ref()
+                    .and_then(|info| info.type_name.as_deref())
+                    .and_then(Self::future_payload_type_name_from_baked)
+            })
+            .or_else(|| {
+                self.last_expr_type_info
+                    .as_ref()
+                    .and_then(|info| info.type_name.clone())
+            });
+
+        if let Some(payload_name) = payload_name {
+            self.last_expr_schema = None;
+            self.last_expr_type_info =
+                Some(VariableTypeInfo::named(format!("Future<{payload_name}>")));
+        } else {
+            self.last_expr_schema = None;
+            self.last_expr_type_info = None;
+        }
+    }
+
+    pub(super) fn stamp_awaited_future_payload_type(&mut self, inner: &Expr) {
+        if let Some(payload_name) = self
+            .future_payload_type_name_for_expr_without_last_expr(inner)
+            .or_else(|| self.last_expr_future_payload_type_name())
+        {
+            self.last_expr_schema = None;
+            self.last_expr_type_info = None;
+            self.stamp_last_expr_from_type_name(&payload_name);
+        } else {
+            self.clear_last_expr_if_stale_future_handle();
+        }
+    }
+
     /// Render a `Type` to a simple type-name string (best effort).
     fn type_to_simple_name(ty: &shape_runtime::type_system::Type) -> Option<String> {
         use shape_runtime::type_system::Type;
@@ -733,11 +861,12 @@ impl BytecodeCompiler {
         // `FunctionCall`, and keep their already-overlapping Future path.
         // Arg-bearing calls keep the eager path (no cross-isolation argument
         // marshal in this lane).
-        if let Some((func_id, ret_type_name)) =
-            self.deferrable_async_call_target(&async_let.expr)
-        {
+        if let Some((func_id, ret_type_name)) = self.deferrable_async_call_target(&async_let.expr) {
             let const_idx = self.program.add_constant(Constant::Function(func_id));
-            self.emit(Instruction::new(OpCode::PushConst, Some(Operand::Const(const_idx))));
+            self.emit(Instruction::new(
+                OpCode::PushConst,
+                Some(Operand::Const(const_idx)),
+            ));
             self.emit(Instruction::simple(OpCode::SpawnTask));
 
             let local_idx = self.declare_local(&async_let.name)?;
@@ -749,13 +878,10 @@ impl BytecodeCompiler {
             self.type_tracker
                 .set_local_binding_semantics(local_idx, Self::owned_immutable_binding_semantics());
 
-            // Stamp the binding's awaited type from the callee's declared
-            // return type so `let v = await x` narrows under strict typing
-            // (the eager path derives this from `compile_expr`'s
-            // `last_expr_type_info`; the deferred path sets it directly).
-            if let Some(name) = ret_type_name {
-                self.last_expr_type_info = Some(VariableTypeInfo::named(name));
-            }
+            // Stamp the binding as the Future<T> handle produced by
+            // SpawnTask. The declared scalar return type is the awaited
+            // payload T for this deferred user-async-fn path.
+            self.stamp_future_handle_type_for_async_let(&async_let.expr, ret_type_name);
             self.propagate_initializer_type_to_slot(local_idx, true, false, None);
 
             self.emit(Instruction::new(
@@ -806,23 +932,10 @@ impl BytecodeCompiler {
         self.type_tracker
             .set_local_binding_semantics(local_idx, Self::owned_immutable_binding_semantics());
 
-        // Propagate the RHS expression's type to the local slot. Without a
-        // surface `Future<T>` type in the tracker lattice, the binding's
-        // type unifies with the RHS expression's type — the runtime
-        // sync-resolution path at `async_ops/mod.rs::op_spawn_task`'s
-        // non-callable arm preserves the inner value's kind end-to-end, so
-        // `let va = await a` later resolves `va` to the same kind as the
-        // original RHS. Without this propagation, multi-binding patterns
-        // like `let va = await a; let vb = await b; print(va + vb)` fail
-        // strict typing as `unknown + unknown` because the post-`compile_expr`
-        // type info is unread by `compile_async_let`.
-        //
-        // `propagate_assignment_type_to_slot` reads `last_expr_type_info` /
-        // `last_expr_schema` set by `compile_expr(&async_let.expr)` above and
-        // stamps the local accordingly. U4-4: an `async let` binds a Future
-        // wrapper, not a bare numeric — pass `None` so the stamp comes from
-        // `last_expr_type_info` (the future/awaited-type carrier), never a
-        // numeric derivation.
+        // Propagate the Future<T> handle type to the local slot. The RHS
+        // expression proves the awaited payload T; SpawnTask replaces that
+        // value with a Future handle at runtime.
+        self.stamp_future_handle_type_for_async_let(&async_let.expr, None);
         self.propagate_initializer_type_to_slot(local_idx, true, false, None);
 
         // `async let` is an expression — push the future back onto the stack

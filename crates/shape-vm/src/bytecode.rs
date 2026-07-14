@@ -14,12 +14,14 @@ use std::collections::HashMap;
 
 const DEFAULT_TRAIT_IMPL_SELECTOR: &str = "__default__";
 
+mod closure_layout_fallback;
 mod content_addressed;
 mod core_types;
 mod opcode_defs;
 mod program_impl;
 pub mod verifier;
 
+pub use closure_layout_fallback::*;
 pub use content_addressed::*;
 pub use core_types::*;
 pub use opcode_defs::*;

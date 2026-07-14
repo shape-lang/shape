@@ -1569,6 +1569,38 @@ fn test_annotation_typed_comptime_directives_parse() {
 }
 
 #[test]
+fn test_annotation_set_param_type_expr_directive_parse() {
+    let content = r#"
+        annotation schema() {
+            targets: [function]
+            comptime post(target, ctx) {
+                set param uri: (string)
+                set param value: (target.params[0].type_ref)
+            }
+        }
+    "#;
+
+    let result = parse_program_helper(content).expect("parse should succeed");
+    let ann = match &result[0] {
+        crate::ast::Item::AnnotationDef(ann_def, _) => ann_def,
+        other => panic!("expected AnnotationDef, got {:?}", other),
+    };
+    let handler = &ann.handlers[0];
+    let body_items = match &handler.body {
+        crate::ast::Expr::Block(block, _) => &block.items,
+        other => panic!("expected block body, got {:?}", other),
+    };
+    assert!(body_items.iter().any(|item| matches!(
+        item,
+        crate::ast::BlockItem::Statement(crate::ast::Statement::SetParamType { .. })
+    )));
+    assert!(body_items.iter().any(|item| matches!(
+        item,
+        crate::ast::BlockItem::Statement(crate::ast::Statement::SetParamTypeExpr { .. })
+    )));
+}
+
+#[test]
 fn test_annotation_replace_body_expr_directive_parse() {
     let content = r#"
         annotation schema() {
@@ -1627,4 +1659,82 @@ fn test_annotation_replace_module_expr_directive_parse() {
         item,
         crate::ast::BlockItem::Statement(crate::ast::Statement::ReplaceModuleExpr { .. })
     )));
+}
+
+// ===== Regression: temporal-nav identifier hijack =====
+//
+// The deleted `back_nav` / `forward_nav` grammar rules sat ahead of `ident` in the
+// `primary` alternation, so a call to a user-defined function named `back` or
+// `forward` with a literal numeric argument was silently rewritten into a Duration
+// (`back(3)` evaluated to -PT3S instead of calling the function). Silent wrong
+// results, no diagnostic. These tests pin the identifiers as ordinary calls.
+
+/// Pull the initializer expression out of the first `let` in a program.
+fn first_let_init(items: &[crate::ast::Item]) -> &crate::ast::Expr {
+    items
+        .iter()
+        .find_map(|item| match item {
+            crate::ast::Item::Statement(crate::ast::Statement::VariableDecl(decl, _), _) => {
+                decl.value.as_ref()
+            }
+            _ => None,
+        })
+        .expect("expected a variable declaration")
+}
+
+/// `back(3)` must parse as a CALL to the user's function, never as a Duration.
+#[test]
+fn back_is_an_ordinary_identifier_not_temporal_nav() {
+    let items = parse_program_helper("fn back(x: int) -> int { return x * 2 }\nlet r = back(3)\n")
+        .expect("parse should succeed");
+
+    match first_let_init(&items) {
+        crate::ast::Expr::FunctionCall { name, .. } => {
+            assert_eq!(name, "back", "call must target the user fn `back`");
+        }
+        crate::ast::Expr::Duration(d, _) => {
+            panic!("`back(3)` was hijacked into a Duration ({d:?}) — the temporal-nav regression");
+        }
+        other => panic!("expected a call to `back`, got {other:?}"),
+    }
+}
+
+/// Same for `forward`, the sibling temporal-nav rule.
+#[test]
+fn forward_is_an_ordinary_identifier_not_temporal_nav() {
+    let items =
+        parse_program_helper("fn forward(x: int) -> int { return x + 1 }\nlet r = forward(10)\n")
+            .expect("parse should succeed");
+
+    match first_let_init(&items) {
+        crate::ast::Expr::FunctionCall { name, .. } => {
+            assert_eq!(name, "forward", "call must target the user fn `forward`");
+        }
+        crate::ast::Expr::Duration(d, _) => {
+            panic!(
+                "`forward(10)` was hijacked into a Duration ({d:?}) — the temporal-nav regression"
+            );
+        }
+        other => panic!("expected a call to `forward`, got {other:?}"),
+    }
+}
+
+/// Duration LITERALS are a separate, working feature — deleting temporal-nav must not break them.
+#[test]
+fn duration_literals_still_parse() {
+    let items = parse_program_helper("let a = 5m\nlet b = 1.5d\n").expect("parse should succeed");
+    let durations = items
+        .iter()
+        .filter(|item| {
+            matches!(
+                item,
+                crate::ast::Item::Statement(crate::ast::Statement::VariableDecl(decl, _), _)
+                    if matches!(decl.value, Some(crate::ast::Expr::Duration(..)))
+            )
+        })
+        .count();
+    assert_eq!(
+        durations, 2,
+        "both `5m` and `1.5d` must remain Duration literals"
+    );
 }

@@ -861,22 +861,9 @@ impl BytecodeCompiler {
             }
         }
 
-        // Keep the registry synchronized with the final mutated function shape.
-        // This is used by expansion/inspection tooling.
-        self.function_defs
-            .insert(effective_def.name.clone(), effective_def.clone());
-        // Comptime handlers can add `return_type` after `register_function` ran.
-        // Keep the structural return side table aligned to the effective shape.
-        if let Some(return_type) = effective_def.return_type.as_ref()
-            && let Some(ct) =
-                crate::compiler::monomorphization::type_resolution::declared_annotation_concrete_type(
-                    self,
-                    return_type,
-                )
-        {
-            self.type_tracker
-                .register_function_return_concrete_type(&effective_def.name, ct);
-        }
+        // Keep the public function registry and arity/pass-mode side tables
+        // synchronized with the final post-directive function shape.
+        self.refresh_function_signature_metadata(&effective_def)?;
 
         // Lower every compiled function to MIR and run the shared borrow analysis.
         // MIR borrow analysis is the primary authority for functions with clean

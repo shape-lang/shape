@@ -102,6 +102,7 @@ async fn main() -> Result<()> {
         mode,
         extensions,
         resume,
+        snapshot_store,
         providers_config,
         extension_dir,
         #[cfg(feature = "jit-trace")]
@@ -155,6 +156,7 @@ async fn main() -> Result<()> {
                     extensions,
                     &run_provider_opts,
                     resume,
+                    snapshot_store.clone(),
                     cli_limits,
                     eager_link,
                 )
@@ -220,9 +222,13 @@ async fn main() -> Result<()> {
         (Some(Commands::Snapshot { action }), _) => {
             use cli_args::SnapshotAction;
             match action {
-                SnapshotAction::List => run_snapshot_list().await?,
-                SnapshotAction::Info { hash } => run_snapshot_info(hash).await?,
-                SnapshotAction::Delete { hash } => run_snapshot_delete(hash).await?,
+                SnapshotAction::List => run_snapshot_list(snapshot_store.clone()).await?,
+                SnapshotAction::Info { hash } => {
+                    run_snapshot_info(hash, snapshot_store.clone()).await?
+                }
+                SnapshotAction::Delete { hash } => {
+                    run_snapshot_delete(hash, snapshot_store.clone()).await?
+                }
             }
         }
         (Some(Commands::Tree { native }), _) => {
@@ -352,6 +358,7 @@ async fn main() -> Result<()> {
                 sandbox,
                 max_concurrent,
                 ffi_languages,
+                snapshot_store.clone(),
             )
             .await?;
         }
@@ -367,6 +374,7 @@ async fn main() -> Result<()> {
                     extensions,
                     &provider_opts,
                     resume,
+                    snapshot_store.clone(),
                     shape_vm::resource_limits::ResourceLimits::unlimited(),
                     false,
                 )
@@ -382,8 +390,9 @@ async fn main() -> Result<()> {
                 extensions,
                 &provider_opts,
                 resume,
+                snapshot_store.clone(),
                 shape_vm::resource_limits::ResourceLimits::unlimited(),
-                    false,
+                false,
             )
             .await?;
         }
@@ -403,8 +412,9 @@ async fn main() -> Result<()> {
                             extensions,
                             &provider_opts,
                             resume,
+                            snapshot_store.clone(),
                             shape_vm::resource_limits::ResourceLimits::unlimited(),
-                    false,
+                            false,
                         )
                         .await?;
                     } else {

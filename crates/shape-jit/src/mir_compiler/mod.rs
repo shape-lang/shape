@@ -145,10 +145,11 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use crate::ffi_refs::FFIFuncRefs;
-use shape_value::v2::ConcreteType;
 use shape_value::v2::closure_layout::ClosureLayout;
 use shape_value::v2::struct_layout::FieldKind;
+use shape_value::v2::ConcreteType;
 use shape_vm::bytecode::MirFunctionData;
+use shape_vm::mir::analysis::OwnershipDecision;
 use shape_vm::mir::types::*;
 use shape_vm::type_tracking::NativeKind;
 
@@ -214,6 +215,15 @@ pub struct MirToIR<'a, 'b> {
     pub(crate) mir: &'a MirFunction,
     /// Borrow analysis (for ownership decisions).
     pub(crate) mir_data: &'a MirFunctionData,
+    /// Current statement-local ownership decision for a simple
+    /// `Assign(_, Use(Copy|Move(Local(_))))` site. Threaded into operand
+    /// lowering so the JIT can honor the MIR solver's `Move` vs
+    /// `Copy`/`Clone` classification instead of treating every raw MIR
+    /// `Move` as destructive.
+    pub(crate) current_stmt_local_ownership: Option<(Point, SlotId, OwnershipDecision)>,
+    /// Current MIR statement position while lowering a body. Used only for
+    /// liveness-gated skips of compiler-generated dead readbacks.
+    pub(crate) current_stmt_position: Option<(BasicBlockId, usize)>,
     /// String table for resolving StringId constants.
     pub(crate) strings: &'a [String],
     /// Function name → index mapping for resolving Call terminators.
@@ -263,6 +273,21 @@ pub struct MirToIR<'a, 'b> {
     /// the kind is available for cross-block field reads, mirroring how
     /// `slot_kinds` is computed pre-codegen via `infer_slot_kinds`.
     pub(crate) field_native_kinds: HashMap<String, NativeKind>,
+    /// Schema ids whose `ObjectStore` allocation cannot be represented by the
+    /// current JIT `typed_object_alloc(schema_id, data_size)` ABI because the
+    /// schema needs runtime/per-field kind data that is not passed to the FFI.
+    pub(crate) unsupported_object_store_schemas: HashMap<u32, String>,
+
+    /// Field names whose schema type is `Option<T>`. This is intentionally
+    /// separate from `field_native_kinds`: Option fields are dynamic at the
+    /// schema layer, but JIT construction/writes need to recognize `None`
+    /// literals and route stores through the runtime-kind field setter.
+    pub(crate) field_option_names: HashSet<String>,
+    /// Schema id + field index pairs whose schema type is `Option<T>`. Used
+    /// by `ObjectStore` construction, where a field can be initialized from
+    /// `None` before any later `Place::Field` read/write has populated the
+    /// name-based map above.
+    pub(crate) field_option_slots: HashSet<(u32, usize)>,
 
     /// γ-CP5 7a (jit-typedarray-ptr): field-name → v2 typed-array
     /// **element** `NativeKind` for struct fields declared `Array<T>`
@@ -708,7 +733,7 @@ pub fn preflight(mir_data: &MirFunctionData) -> MirPreflightResult {
                                  routes to the bytecode interpreter (which \
                                  restamps the cast result kind). Tracked v0.4 \
                                  JIT-lowering followup. at {:?}",
-                                target, stmt.span
+                                 target, stmt.span
                             ));
                         }
                         Rvalue::EnumPayload { variant, .. } => {
@@ -741,7 +766,10 @@ pub fn preflight(mir_data: &MirFunctionData) -> MirPreflightResult {
                 StatementKind::TaskBoundary(_, _) => {
                     // TaskBoundary is a borrow-checker annotation — no-op at codegen time.
                 }
-                StatementKind::ClosureCapture { function_id, .. } => {
+                StatementKind::ClosureCapture {
+                    function_id,
+                    ..
+                } => {
                     // ClosureCapture is supported when function_id has been patched
                     if function_id.is_none() {
                         blockers.push("ClosureCapture missing function_id".to_string());
@@ -753,9 +781,9 @@ pub fn preflight(mir_data: &MirFunctionData) -> MirPreflightResult {
 
         match &block.terminator.kind {
             TerminatorKind::Goto(_)
-            | TerminatorKind::SwitchBool { .. }
             | TerminatorKind::Return
             | TerminatorKind::Unreachable => {}
+            TerminatorKind::SwitchBool { .. } => {}
             TerminatorKind::Call { .. } => {
                 // Call terminators are now supported via FFI dispatch.
             }
@@ -1167,6 +1195,8 @@ impl<'a, 'b> MirToIR<'a, 'b> {
             next_var: 0,
             mir: &mir_data.mir,
             mir_data,
+            current_stmt_local_ownership: None,
+            current_stmt_position: None,
             strings,
             function_indices,
             user_func_refs,
@@ -1175,6 +1205,9 @@ impl<'a, 'b> MirToIR<'a, 'b> {
             ref_stack_slots: HashMap::new(),
             field_byte_offsets: HashMap::new(),
             field_native_kinds,
+            unsupported_object_store_schemas: HashMap::new(),
+            field_option_names: HashSet::new(),
+            field_option_slots: HashSet::new(),
             field_array_elem_kinds: HashMap::new(),
             non_escaping_closure_slots,
             stack_closure_slots: HashMap::new(),
@@ -1294,7 +1327,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
         &mut self,
         registry: &shape_runtime::type_schema::TypeSchemaRegistry,
     ) {
-        use shape_runtime::type_schema::FieldType;
+        use shape_runtime::type_schema::{FieldType, TypeSchema};
         // Collect every field name referenced in this function's MIR.
         let referenced_names: std::collections::HashSet<&str> = self
             .mir
@@ -1391,6 +1424,397 @@ impl<'a, 'b> MirToIR<'a, 'b> {
             }
         }
 
+        fn object_store_alloc_surface(ft: &FieldType) -> Option<&'static str> {
+            match ft {
+                FieldType::Any => Some("Any"),
+                FieldType::HashMap { .. } => Some("HashMap"),
+                FieldType::Set(_) => Some("Set"),
+                // `jit_typed_object_alloc` handles `Option<T>` specially as a
+                // schema-backed `__Option` typed-object edge. The remaining
+                // field types either project through `to_native_kind()` or are
+                // intentionally surfaced at field-read sites.
+                _ => None,
+            }
+        }
+
+        #[derive(Clone)]
+        struct SchemaFieldStamp {
+            field_name: String,
+            schema_id: u32,
+            field_index: usize,
+            field_type: FieldType,
+        }
+
+        fn schema_for_concrete_struct<'a>(
+            concrete_type: &ConcreteType,
+            registry: &'a shape_runtime::type_schema::TypeSchemaRegistry,
+        ) -> Option<&'a TypeSchema> {
+            let ConcreteType::Struct(named) = concrete_type else {
+                return None;
+            };
+            let type_name = named.name_str()?;
+            registry.get(type_name).or_else(|| {
+                type_name
+                    .rsplit("::")
+                    .next()
+                    .filter(|short| *short != type_name)
+                    .and_then(|short| registry.get(short))
+            })
+        }
+
+        fn collect_place_schema_stamps(
+            place: &Place,
+            field_name_table: &HashMap<FieldIdx, String>,
+            concrete_types: &[ConcreteType],
+            registry: &shape_runtime::type_schema::TypeSchemaRegistry,
+            out: &mut Vec<SchemaFieldStamp>,
+        ) {
+            match place {
+                Place::Local(_) => {}
+                Place::Field(base, field_idx) => {
+                    collect_place_schema_stamps(
+                        base,
+                        field_name_table,
+                        concrete_types,
+                        registry,
+                        out,
+                    );
+                    let Some(field_name) = field_name_table.get(field_idx) else {
+                        return;
+                    };
+                    let base_slot = base.root_local();
+                    let Some(concrete_type) = concrete_types.get(base_slot.0 as usize) else {
+                        return;
+                    };
+                    let Some(schema) = schema_for_concrete_struct(concrete_type, registry) else {
+                        return;
+                    };
+                    let Some(field) = schema.get_field(field_name) else {
+                        return;
+                    };
+                    out.push(SchemaFieldStamp {
+                        field_name: field.name.clone(),
+                        schema_id: schema.id,
+                        field_index: field.index as usize,
+                        field_type: field.field_type.clone(),
+                    });
+                }
+                Place::Index(base, index) => {
+                    collect_place_schema_stamps(
+                        base,
+                        field_name_table,
+                        concrete_types,
+                        registry,
+                        out,
+                    );
+                    collect_operand_schema_stamps(
+                        index,
+                        field_name_table,
+                        concrete_types,
+                        registry,
+                        out,
+                    );
+                }
+                Place::Deref(base) => {
+                    collect_place_schema_stamps(
+                        base,
+                        field_name_table,
+                        concrete_types,
+                        registry,
+                        out,
+                    );
+                }
+            }
+        }
+
+        fn collect_operand_schema_stamps(
+            operand: &Operand,
+            field_name_table: &HashMap<FieldIdx, String>,
+            concrete_types: &[ConcreteType],
+            registry: &shape_runtime::type_schema::TypeSchemaRegistry,
+            out: &mut Vec<SchemaFieldStamp>,
+        ) {
+            match operand {
+                Operand::Copy(place) | Operand::Move(place) | Operand::MoveExplicit(place) => {
+                    collect_place_schema_stamps(
+                        place,
+                        field_name_table,
+                        concrete_types,
+                        registry,
+                        out,
+                    );
+                }
+                Operand::Constant(_) => {}
+            }
+        }
+
+        fn collect_rvalue_schema_stamps(
+            rvalue: &Rvalue,
+            field_name_table: &HashMap<FieldIdx, String>,
+            concrete_types: &[ConcreteType],
+            registry: &shape_runtime::type_schema::TypeSchemaRegistry,
+            out: &mut Vec<SchemaFieldStamp>,
+        ) {
+            match rvalue {
+                Rvalue::Use(operand)
+                | Rvalue::UnaryOp(_, operand)
+                | Rvalue::Clone(operand)
+                | Rvalue::EnumTest { operand, .. }
+                | Rvalue::EnumPayload { operand, .. }
+                | Rvalue::TypePatternTest { operand, .. }
+                | Rvalue::EnumDiscriminantTest { operand, .. }
+                | Rvalue::PrimitiveCast { operand, .. } => collect_operand_schema_stamps(
+                    operand,
+                    field_name_table,
+                    concrete_types,
+                    registry,
+                    out,
+                ),
+                Rvalue::Borrow(_, place) => collect_place_schema_stamps(
+                    place,
+                    field_name_table,
+                    concrete_types,
+                    registry,
+                    out,
+                ),
+                Rvalue::BinaryOp(_, lhs, rhs) => {
+                    collect_operand_schema_stamps(
+                        lhs,
+                        field_name_table,
+                        concrete_types,
+                        registry,
+                        out,
+                    );
+                    collect_operand_schema_stamps(
+                        rhs,
+                        field_name_table,
+                        concrete_types,
+                        registry,
+                        out,
+                    );
+                }
+                Rvalue::FuzzyComparison {
+                    lhs,
+                    rhs,
+                    tolerance: _,
+                    ..
+                } => {
+                    collect_operand_schema_stamps(
+                        lhs,
+                        field_name_table,
+                        concrete_types,
+                        registry,
+                        out,
+                    );
+                    collect_operand_schema_stamps(
+                        rhs,
+                        field_name_table,
+                        concrete_types,
+                        registry,
+                        out,
+                    );
+                }
+                Rvalue::Aggregate(operands) => {
+                    for operand in operands {
+                        collect_operand_schema_stamps(
+                            operand,
+                            field_name_table,
+                            concrete_types,
+                            registry,
+                            out,
+                        );
+                    }
+                }
+            }
+        }
+
+        let mut exact_field_stamps = Vec::new();
+        for block in &self.mir.blocks {
+            for stmt in &block.statements {
+                match &stmt.kind {
+                    StatementKind::Assign(place, rvalue) => {
+                        collect_place_schema_stamps(
+                            place,
+                            &self.mir.field_name_table,
+                            &self.concrete_types,
+                            registry,
+                            &mut exact_field_stamps,
+                        );
+                        collect_rvalue_schema_stamps(
+                            rvalue,
+                            &self.mir.field_name_table,
+                            &self.concrete_types,
+                            registry,
+                            &mut exact_field_stamps,
+                        );
+                    }
+                    StatementKind::Drop(place) => collect_place_schema_stamps(
+                        place,
+                        &self.mir.field_name_table,
+                        &self.concrete_types,
+                        registry,
+                        &mut exact_field_stamps,
+                    ),
+                    StatementKind::TaskBoundary(operands, _)
+                    | StatementKind::ClosureCapture { operands, .. }
+                    | StatementKind::ArrayStore { operands, .. }
+                    | StatementKind::ObjectStore { operands, .. }
+                    | StatementKind::EnumStore { operands, .. }
+                    | StatementKind::ModuleBindingStore { operands, .. } => {
+                        for operand in operands {
+                            collect_operand_schema_stamps(
+                                operand,
+                                &self.mir.field_name_table,
+                                &self.concrete_types,
+                                registry,
+                                &mut exact_field_stamps,
+                            );
+                        }
+                    }
+                    StatementKind::Nop => {}
+                }
+            }
+
+            match &block.terminator.kind {
+                TerminatorKind::SwitchBool { operand, .. } => collect_operand_schema_stamps(
+                    operand,
+                    &self.mir.field_name_table,
+                    &self.concrete_types,
+                    registry,
+                    &mut exact_field_stamps,
+                ),
+                TerminatorKind::Call {
+                    func,
+                    args,
+                    destination,
+                    ..
+                } => {
+                    collect_operand_schema_stamps(
+                        func,
+                        &self.mir.field_name_table,
+                        &self.concrete_types,
+                        registry,
+                        &mut exact_field_stamps,
+                    );
+                    for arg in args {
+                        collect_operand_schema_stamps(
+                            arg,
+                            &self.mir.field_name_table,
+                            &self.concrete_types,
+                            registry,
+                            &mut exact_field_stamps,
+                        );
+                    }
+                    collect_place_schema_stamps(
+                        destination,
+                        &self.mir.field_name_table,
+                        &self.concrete_types,
+                        registry,
+                        &mut exact_field_stamps,
+                    );
+                }
+                TerminatorKind::Goto(_)
+                | TerminatorKind::Return
+                | TerminatorKind::Unreachable => {}
+            }
+        }
+
+        if std::env::var_os("SHAPE_DEBUG_FIELD_STAMPS").is_some()
+            && self.mir.name.contains("summary")
+        {
+            eprintln!(
+                "[field-stamps] function={} param_slots={:?} concrete_types={:?} fields={:?} stamps={}",
+                self.mir.name,
+                self.mir.param_slots,
+                self.concrete_types,
+                self.mir.field_name_table,
+                exact_field_stamps.len()
+            );
+            for stamp in &exact_field_stamps {
+                eprintln!(
+                    "[field-stamps] stamp {} schema={} index={} type={:?}",
+                    stamp.field_name, stamp.schema_id, stamp.field_index, stamp.field_type
+                );
+            }
+        }
+
+        for stamp in exact_field_stamps {
+            let byte_off = (stamp.field_index as u16) * 8;
+            self.field_byte_offsets
+                .insert(stamp.field_name.clone(), byte_off);
+            if let Some(kind) = field_type_to_native_kind(&stamp.field_type) {
+                self.field_native_kinds
+                    .insert(stamp.field_name.clone(), kind);
+            }
+            if matches!(stamp.field_type, FieldType::Option(_)) {
+                self.field_option_names.insert(stamp.field_name.clone());
+                self.field_option_slots
+                    .insert((stamp.schema_id, stamp.field_index));
+            }
+            if let Some(elem_kind) = array_elem_to_native_kind(&stamp.field_type) {
+                self.field_array_elem_kinds
+                    .insert(stamp.field_name.clone(), elem_kind);
+            }
+        }
+
+        for block in &self.mir.blocks {
+            for stmt in &block.statements {
+                let StatementKind::ObjectStore {
+                    schema_id: Some(schema_id),
+                    ..
+                } = &stmt.kind
+                else {
+                    continue;
+                };
+                let schema = registry
+                    .get_by_id(*schema_id)
+                    .cloned()
+                    .or_else(|| registry.lookup_predeclared_by_id(*schema_id));
+                let Some(schema) = schema else {
+                    self.unsupported_object_store_schemas
+                        .entry(*schema_id)
+                        .or_insert_with(|| {
+                            format!(
+                                "ObjectStore: SURFACE — schema id {} is not \
+                                 resolvable in the program TypeSchemaRegistry \
+                                 during JIT compilation. The `jit_typed_object_alloc` \
+                                 FFI would return TAG_NULL for this id, and field \
+                                 writes/reads would then operate on a non-object \
+                                 carrier. Whole-function deopt to the bytecode \
+                                 interpreter until this schema id is threaded into \
+                                 the JIT-visible registry. ADR-006 §2.7.5 / §2.7.7 #9.",
+                                schema_id,
+                            )
+                        });
+                    continue;
+                };
+                let Some((field_name, field_shape)) =
+                    schema.fields.iter().find_map(|field| {
+                        object_store_alloc_surface(&field.field_type)
+                            .map(|shape| (field.name.as_str(), shape))
+                    })
+                else {
+                    continue;
+                };
+                self.unsupported_object_store_schemas
+                    .entry(*schema_id)
+                    .or_insert_with(|| {
+                        format!(
+                            "ObjectStore: SURFACE — schema id {} (`{}`) field \
+                             `{}` has {} shape, but JIT typed-object allocation \
+                             currently receives only `(schema_id, data_size)` and \
+                             cannot pass the runtime/per-field NativeKind table \
+                             required to materialize this object safely. Whole-function \
+                             deopt to the bytecode interpreter; refusing to emit \
+                             `jit_typed_object_alloc` because it would return TAG_NULL \
+                             and a later `jit_typed_object_set_field` would not be a \
+                             real object store. ADR-006 §2.7.5 / §2.7.7 #9.",
+                            schema_id, schema.name, field_name, field_shape,
+                        )
+                    });
+            }
+        }
+
         // Walk every registered schema; map name → position (i*8).
         // Existing `field_byte_offsets` / `field_native_kinds` entries
         // from the local ObjectStore-walk (statements.rs:243 +
@@ -1403,6 +1827,9 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                 continue;
             };
             for (i, field) in schema.fields.iter().enumerate() {
+                if matches!(field.field_type, FieldType::Option(_)) {
+                    self.field_option_slots.insert((schema.id, i));
+                }
                 if !referenced_names.contains(field.name.as_str()) {
                     continue;
                 }
@@ -1432,6 +1859,9 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                         .entry(field.name.clone())
                         .or_insert(kind);
                 }
+                if matches!(field.field_type, FieldType::Option(_)) {
+                    self.field_option_names.insert(field.name.clone());
+                }
                 // γ-CP5 7a: stamp the v2 typed-array element kind for
                 // scalar `Array<T>` fields so `v2_typed_array_elem_kind`
                 // can recognise a `Place::Field` base and emit the v2
@@ -1440,6 +1870,66 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                     self.field_array_elem_kinds
                         .entry(field.name.clone())
                         .or_insert(elem_kind);
+                }
+            }
+        }
+
+        // The constructor computes `slot_kinds` before this schema pre-pass
+        // has filled `field_native_kinds`. Re-run the producer-side kind
+        // inference with the schema map so temps assigned from
+        // `Use(Copy(Field(self, ...)))` inherit the field's declared kind,
+        // which later f-string / arithmetic BinaryOps consume through
+        // `Operand::Copy(Local(tmp))`.
+        //
+        // Do not seed this recompute from the earlier `self.slot_kinds`
+        // wholesale: that first pass ran without schema-derived field kinds
+        // and can already have polluted field-read temporaries with the base
+        // object's `Ptr(HeapKind::TypedObject)` kind. Keep only the hard
+        // concrete/ABI facts, then let the field projection pass classify
+        // those temporaries from `field_native_kinds`.
+        let mut schema_recompute_seed: Vec<Option<NativeKind>> = self
+            .concrete_types
+            .iter()
+            .map(types::native_kind_from_concrete_type)
+            .collect();
+        if schema_recompute_seed.len() < self.mir.num_locals as usize {
+            schema_recompute_seed.resize(self.mir.num_locals as usize, None);
+        }
+        if let Some(return_kind) = self.slot_kinds.first().copied().flatten() {
+            if let Some(slot) = schema_recompute_seed.first_mut() {
+                *slot = Some(return_kind);
+            }
+        }
+        for param_slot in &self.mir.param_slots {
+            let idx = param_slot.0 as usize;
+            if let Some(kind) = self.slot_kinds.get(idx).copied().flatten() {
+                if let Some(slot) = schema_recompute_seed.get_mut(idx) {
+                    *slot = Some(kind);
+                }
+            }
+        }
+        self.slot_kinds = types::infer_slot_kinds_with_concrete_function_returns_and_field_kinds(
+            self.mir,
+            &schema_recompute_seed,
+            &self.concrete_types,
+            Some(self.function_indices),
+            Some(&self.user_func_return_kinds),
+            Some(&self.field_native_kinds),
+        );
+        if std::env::var_os("SHAPE_DEBUG_FIELD_STAMPS").is_some()
+            && self.mir.name.contains("summary")
+        {
+            eprintln!(
+                "[field-stamps] final byte_offsets={:?} field_kinds={:?} slot_kinds={:?}",
+                self.field_byte_offsets, self.field_native_kinds, self.slot_kinds
+            );
+            for block in &self.mir.blocks {
+                eprintln!(
+                    "[field-stamps] block {:?} term {:?}",
+                    block.id, block.terminator.kind
+                );
+                for stmt in &block.statements {
+                    eprintln!("[field-stamps] stmt {:?}", stmt.kind);
                 }
             }
         }
@@ -1575,8 +2065,8 @@ impl<'a, 'b> MirToIR<'a, 'b> {
         // `Err` routes through the established `[jit-fallback]` path in
         // `executor.rs`. Root-cause fix (per-point Copy/Clone/Move liveness
         // in JIT operand lowering) is v0.4.
-        if self.mir_has_move_then_read_divergence() {
-            return Err(
+        if let Some(reason) = self.mir_move_then_read_divergence_reason() {
+            return Err(format!(
                 "v0.3.3 move-semantics SURFACE (ADR-006 §2.7.14): a slot is \
                  `Move`/`MoveExplicit`-sourced and read again at a later program \
                  point. `compile_operand` nulls the moved source slot, but the VM \
@@ -1586,9 +2076,8 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                  when the nulled slot is a live loop counter). Whole-program \
                  deopting to the bytecode interpreter preserves VM == JIT. \
                  Root-cause fix (per-point Copy/Clone/Move liveness in JIT operand \
-                 lowering) is v0.4."
-                    .to_string(),
-            );
+                 lowering) is v0.4. {reason}"
+            ));
         }
 
         // Cluster-2 closure-wave-F tracing-crate migration (2026-05-16):
@@ -1631,8 +2120,12 @@ impl<'a, 'b> MirToIR<'a, 'b> {
             // Cranelift's SSA handles undefined variables as 0/default.
 
             // Compile statements.
-            for stmt in &block.statements {
-                self.compile_statement(stmt)?;
+            for (stmt_idx, stmt) in block.statements.iter().enumerate() {
+                let prior_stmt_position = self.current_stmt_position;
+                self.current_stmt_position = Some((block.id, stmt_idx));
+                let result = self.compile_statement(stmt);
+                self.current_stmt_position = prior_stmt_position;
+                result?;
             }
 
             // Compile terminator.

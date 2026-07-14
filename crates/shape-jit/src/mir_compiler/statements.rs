@@ -10,130 +10,249 @@ use super::MirToIR;
 use shape_vm::mir::types::*;
 use shape_vm::type_tracking::NativeKind;
 
+fn dead_readback_destination(place: &Place, rvalue: &Rvalue) -> Option<SlotId> {
+    let Place::Local(dst) = place else {
+        return None;
+    };
+    let Rvalue::Use(Operand::Copy(Place::Field(..))) = rvalue else {
+        return None;
+    };
+    Some(*dst)
+}
+
 impl<'a, 'b> MirToIR<'a, 'b> {
+    fn is_dead_field_projection_readback(&self, place: &Place, rvalue: &Rvalue) -> bool {
+        let Some((block, stmt_idx)) = self.current_stmt_position else {
+            return false;
+        };
+        let Some(dst) = dead_readback_destination(place, rvalue) else {
+            return false;
+        };
+        if self.mir.binding_slots.contains(&dst) {
+            return false;
+        }
+        !self
+            .mir_data
+            .borrow_analysis
+            .liveness
+            .is_live_after(block, stmt_idx, dst, self.mir)
+    }
+
+    fn field_name_is_option(&self, name: &str) -> bool {
+        !name.is_empty() && self.field_option_names.contains(name)
+    }
+
+    fn object_store_field_is_option(&self, schema_id: u32, field_idx: usize, name: &str) -> bool {
+        self.field_option_slots.contains(&(schema_id, field_idx))
+            || self.field_name_is_option(name)
+    }
+
+    fn emit_schema_option_none_value(&mut self) -> Value {
+        let inst = self.builder.ins().call(self.ffi.schema_option_none, &[]);
+        self.builder.inst_results(inst)[0]
+    }
+
+    fn emit_schema_option_variant(
+        &mut self,
+        name: &str,
+        container_slot: SlotId,
+        operands: &[Operand],
+    ) -> Result<(), String> {
+        let option_bits = match name {
+            "None" => {
+                if !operands.is_empty()
+                    && !(operands.len() == 1 && operand_is_none_literal(&operands[0]))
+                {
+                    return Err(format!(
+                        "EnumStore: SURFACE — Option::None expects no payload, \
+                         got {} operand(s). Producer-site contract violated. \
+                         ADR-006 §2.7.5 / Wave-19B schema-backed Option ABI.",
+                        operands.len()
+                    ));
+                }
+                self.emit_schema_option_none_value()
+            }
+            "Some" => {
+                if operands.len() != 1 {
+                    return Err(format!(
+                        "EnumStore: SURFACE — Option::Some expects 1 payload \
+                         operand, got {}. Producer-site contract violated. \
+                         ADR-006 §2.7.5 / Wave-19B schema-backed Option ABI.",
+                        operands.len()
+                    ));
+                }
+                let payload_kind = self.operand_slot_kind(&operands[0]).ok_or_else(|| {
+                    "EnumStore: SURFACE — Option::Some payload kind is not \
+                     proven at the MIR producer site. Schema-backed __Option \
+                     construction requires a payload NativeKind for the carrier \
+                     field_kinds/heap_mask metadata; refusing UInt64 fallback. \
+                     ADR-006 §2.7.5 / §2.7.7 #9."
+                        .to_string()
+                })?;
+                let payload = self.compile_operand(&operands[0])?;
+                let payload = self.widen_to_i64(payload);
+                let kind_code = super::super::ffi::stack_kind_code::encode(payload_kind);
+                let kind_code_val = self.builder.ins().iconst(types::I8, kind_code as i64);
+                let inst = self
+                    .builder
+                    .ins()
+                    .call(self.ffi.schema_option_some, &[payload, kind_code_val]);
+                self.builder.inst_results(inst)[0]
+            }
+            _ => unreachable!("caller filtered Option variants"),
+        };
+
+        let place = Place::Local(container_slot);
+        self.release_old_value_if_heap(&place)?;
+        self.write_place(&place, option_bits)?;
+        Ok(())
+    }
+
     /// Compile a single MIR statement.
     pub(crate) fn compile_statement(&mut self, stmt: &MirStatement) -> Result<(), String> {
         match &stmt.kind {
             StatementKind::Assign(place, rvalue) => {
-                // v2 fast path: when the destination is `Place::Local(s)` whose
-                // ConcreteType is `Array<scalar>`, allocate a real v2 typed
-                // array via FFI and bypass the legacy NaN-boxed Aggregate path.
-                if let (Rvalue::Aggregate(operands), Some(elem_kind)) =
-                    (rvalue, self.v2_typed_array_elem_kind(place))
-                {
-                    if let Some(arr_val) = self.emit_v2_array_aggregate(operands, elem_kind)? {
-                        self.release_old_value_if_heap(place)?;
-                        self.write_place(place, arr_val)?;
-                        return Ok(());
-                    }
-                }
-
-                // v2 fast path: when the destination is a TypedObject slot
-                // (`ConcreteType::Struct(_)` / `Enum(_)` / `Option(_)` /
-                // `Result(_, _)` / `Tuple(_)`), the bytecode/MIR lowering
-                // emits a redundant `Assign(Aggregate)` (a scratch step
-                // mirroring the AST shape) followed by a real
-                // `StatementKind::ObjectStore` (or `EnumStore`) that does
-                // the actual `typed_object_alloc` + per-field set. Skip
-                // the kind-blind Aggregate compilation here — the real
-                // allocation arrives at the ObjectStore site. This is
-                // the §2.7.5 conduit's user-visible benefit: with the
-                // top-level slot's `ConcreteType` threaded from the
-                // bytecode compiler, the JIT no longer surfaces-and-stops
-                // on `Point { x, y }`-style struct literals (W12-top-level-
-                // concrete-types-conduit close, 2026-05-12).
-                //
-                // ADR-006 §2.7.5 forbidden list — this is NOT a Bool-
-                // default fallback. The condition is "the bytecode
-                // compiler proved this slot's `ConcreteType`"; when
-                // unproven the slot's `concrete_types[slot]` is
-                // `ConcreteType::Void` and `is_typed_object_slot`
-                // returns `false` — codegen surfaces-and-stops at the
-                // Aggregate site, not silently leaks. Per §2.7.5 the
-                // kind is stamped at compile time from the proven
-                // type information, never decoded from runtime bits.
-                if matches!(rvalue, Rvalue::Aggregate(_)) && self.is_typed_object_slot(place) {
+                if self.is_dead_field_projection_readback(place, rvalue) {
+                    self.release_old_value_if_heap(place)?;
                     return Ok(());
                 }
 
-                // Session 2: propagate stack-closure call metadata on simple
-                // local→local moves/copies. MIR frequently shuffles a closure
-                // handle between slots (e.g. `let f = <closure>; f(x)` lowers
-                // to `SlotId(X) <- ClosureCapture; SlotId(Y) <- Move SlotId(X);
-                // Call Copy(SlotId(Y))`). Without this copy the Call
-                // terminator's stack-closure fast path can't find the side-
-                // table entry keyed on the original slot.
-                if let (
-                    Place::Local(dst),
+                let prior_stmt_local_ownership = self.current_stmt_local_ownership;
+                self.current_stmt_local_ownership = match rvalue {
                     Rvalue::Use(
-                        Operand::Move(Place::Local(src))
-                        | Operand::Copy(Place::Local(src))
-                        | Operand::MoveExplicit(Place::Local(src)),
-                    ),
-                ) = (place, rvalue)
-                {
-                    if let Some(info) = self.stack_closure_call_info.get(src).cloned() {
-                        self.stack_closure_call_info.insert(*dst, info);
-                    }
-                    if let Some(ss) = self.stack_closure_slots.get(src).copied() {
-                        self.stack_closure_slots.insert(*dst, ss);
-                    }
-                }
+                        Operand::Move(Place::Local(src)) | Operand::Copy(Place::Local(src)),
+                    ) => Some((
+                        stmt.point,
+                        *src,
+                        self.mir_data.borrow_analysis.ownership_at(stmt.point),
+                    )),
+                    _ => None,
+                };
 
-                // Release old value if overwriting a heap local.
-                self.release_old_value_if_heap(place)?;
-                // Compile the rvalue.
-                //
-                // W10 jit-call-method-user-trait-fix (2026-05-17): if the
-                // rvalue is a `BinaryOp` / `UnaryOp` whose source span is
-                // recorded in `operator_trait_dispatch_sites`, lower it as
-                // a method-call equivalent (writing the destination place
-                // directly) and return early. Otherwise fall through to
-                // the standard `compile_rvalue` path.
-                if let Rvalue::BinaryOp(binop, lhs, rhs) = rvalue {
-                    if let Some((method_name, _arg_count)) =
-                        self.operator_trait_dispatch_sites.get(&stmt.span).cloned()
+                let result = (|| -> Result<(), String> {
+                    // v2 fast path: when the destination is `Place::Local(s)` whose
+                    // ConcreteType is `Array<scalar>`, allocate a real v2 typed
+                    // array via FFI and bypass the legacy NaN-boxed Aggregate path.
+                    if let (Rvalue::Aggregate(operands), Some(elem_kind)) =
+                        (rvalue, self.v2_typed_array_elem_kind(place))
                     {
-                        // VM-parity: Ord comparisons dispatch `cmp` then
-                        // compare-against-0; `!=` dispatches `eq` then
-                        // negates. Thread the op so the JIT applies the
-                        // same post-transform (see
-                        // `emit_user_trait_method_call_with_result_op`).
-                        // `==`/`Add`/`Sub`/bitwise/... return their value
-                        // directly (result_op = None).
-                        let result_op = match binop {
-                            BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge | BinOp::Ne => {
-                                Some(*binop)
-                            }
-                            _ => None,
-                        };
-                        self.emit_user_trait_method_call_with_result_op(
-                            &method_name,
-                            std::slice::from_ref(lhs),
-                            std::slice::from_ref(rhs),
-                            place,
-                            result_op,
-                        )?;
+                        if let Some(arr_val) = self.emit_v2_array_aggregate(operands, elem_kind)? {
+                            self.release_old_value_if_heap(place)?;
+                            self.write_place(place, arr_val)?;
+                            return Ok(());
+                        }
+                    }
+
+                    // v2 fast path: when the destination is a TypedObject slot
+                    // (`ConcreteType::Struct(_)` / `Enum(_)` / `Option(_)` /
+                    // `Result(_, _)` / `Tuple(_)`), the bytecode/MIR lowering
+                    // emits a redundant `Assign(Aggregate)` (a scratch step
+                    // mirroring the AST shape) followed by a real
+                    // `StatementKind::ObjectStore` (or `EnumStore`) that does
+                    // the actual `typed_object_alloc` + per-field set. Skip
+                    // the kind-blind Aggregate compilation here — the real
+                    // allocation arrives at the ObjectStore site. This is
+                    // the §2.7.5 conduit's user-visible benefit: with the
+                    // top-level slot's `ConcreteType` threaded from the
+                    // bytecode compiler, the JIT no longer surfaces-and-stops
+                    // on `Point { x, y }`-style struct literals (W12-top-level-
+                    // concrete-types-conduit close, 2026-05-12).
+                    //
+                    // ADR-006 §2.7.5 forbidden list — this is NOT a Bool-
+                    // default fallback. The condition is "the bytecode
+                    // compiler proved this slot's `ConcreteType`"; when
+                    // unproven the slot's `concrete_types[slot]` is
+                    // `ConcreteType::Void` and `is_typed_object_slot`
+                    // returns `false` — codegen surfaces-and-stops at the
+                    // Aggregate site, not silently leaks. Per §2.7.5 the
+                    // kind is stamped at compile time from the proven
+                    // type information, never decoded from runtime bits.
+                    if matches!(rvalue, Rvalue::Aggregate(_)) && self.is_typed_object_slot(place) {
                         return Ok(());
                     }
-                }
-                if let Rvalue::UnaryOp(_, operand) = rvalue {
-                    if let Some((method_name, _arg_count)) =
-                        self.operator_trait_dispatch_sites.get(&stmt.span).cloned()
+
+                    // Session 2: propagate stack-closure call metadata on simple
+                    // local→local moves/copies. MIR frequently shuffles a closure
+                    // handle between slots (e.g. `let f = <closure>; f(x)` lowers
+                    // to `SlotId(X) <- ClosureCapture; SlotId(Y) <- Move SlotId(X);
+                    // Call Copy(SlotId(Y))`). Without this copy the Call
+                    // terminator's stack-closure fast path can't find the side-
+                    // table entry keyed on the original slot.
+                    if let (
+                        Place::Local(dst),
+                        Rvalue::Use(
+                            Operand::Move(Place::Local(src))
+                            | Operand::Copy(Place::Local(src))
+                            | Operand::MoveExplicit(Place::Local(src)),
+                        ),
+                    ) = (place, rvalue)
                     {
-                        self.emit_user_trait_method_call(
-                            &method_name,
-                            std::slice::from_ref(operand),
-                            &[],
-                            place,
-                        )?;
-                        return Ok(());
+                        if let Some(info) = self.stack_closure_call_info.get(src).cloned() {
+                            self.stack_closure_call_info.insert(*dst, info);
+                        }
+                        if let Some(ss) = self.stack_closure_slots.get(src).copied() {
+                            self.stack_closure_slots.insert(*dst, ss);
+                        }
                     }
-                }
-                let val = self.compile_rvalue(rvalue)?;
-                // Write the new value.
-                self.write_place(place, val)?;
-                Ok(())
+
+                    // Release old value if overwriting a heap local.
+                    self.release_old_value_if_heap(place)?;
+                    // Compile the rvalue.
+                    //
+                    // W10 jit-call-method-user-trait-fix (2026-05-17): if the
+                    // rvalue is a `BinaryOp` / `UnaryOp` whose source span is
+                    // recorded in `operator_trait_dispatch_sites`, lower it as
+                    // a method-call equivalent (writing the destination place
+                    // directly) and return early. Otherwise fall through to
+                    // the standard `compile_rvalue` path.
+                    if let Rvalue::BinaryOp(binop, lhs, rhs) = rvalue {
+                        if let Some((method_name, _arg_count)) =
+                            self.operator_trait_dispatch_sites.get(&stmt.span).cloned()
+                        {
+                            // VM-parity: Ord comparisons dispatch `cmp` then
+                            // compare-against-0; `!=` dispatches `eq` then
+                            // negates. Thread the op so the JIT applies the
+                            // same post-transform (see
+                            // `emit_user_trait_method_call_with_result_op`).
+                            // `==`/`Add`/`Sub`/bitwise/... return their value
+                            // directly (result_op = None).
+                            let result_op = match binop {
+                                BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge | BinOp::Ne => {
+                                    Some(*binop)
+                                }
+                                _ => None,
+                            };
+                            self.emit_user_trait_method_call_with_result_op(
+                                &method_name,
+                                std::slice::from_ref(lhs),
+                                std::slice::from_ref(rhs),
+                                place,
+                                result_op,
+                            )?;
+                            return Ok(());
+                        }
+                    }
+                    if let Rvalue::UnaryOp(_, operand) = rvalue {
+                        if let Some((method_name, _arg_count)) =
+                            self.operator_trait_dispatch_sites.get(&stmt.span).cloned()
+                        {
+                            self.emit_user_trait_method_call(
+                                &method_name,
+                                std::slice::from_ref(operand),
+                                &[],
+                                place,
+                            )?;
+                            return Ok(());
+                        }
+                    }
+                    let val = self.compile_rvalue(rvalue)?;
+                    // Write the new value.
+                    self.write_place(place, val)?;
+                    Ok(())
+                })();
+
+                self.current_stmt_local_ownership = prior_stmt_local_ownership;
+                result
             }
 
             StatementKind::Drop(place) => {
@@ -220,6 +339,9 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                         ));
                     }
                 };
+                if let Some(reason) = self.unsupported_object_store_schemas.get(&sid) {
+                    return Err(reason.clone());
+                }
 
                 let schema_id = self
                     .builder
@@ -249,7 +371,14 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                 // widened to I64 before the FFI call so the Cranelift
                 // verifier accepts the parameter types.
                 for (i, op) in operands.iter().enumerate() {
-                    let val_raw = self.compile_operand_raw(op)?;
+                    let val_raw = if field_names.get(i).is_some_and(|name| {
+                        self.object_store_field_is_option(sid, i, name)
+                            && operand_is_none_literal(op)
+                    }) {
+                        self.emit_schema_option_none_value()
+                    } else {
+                        self.compile_operand(op)?
+                    };
                     let val = self.widen_to_i64(val_raw);
                     let offset_val = self
                         .builder
@@ -304,17 +433,21 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                     if is_collection_ctor_name(name) {
                         return self.emit_collection_ctor(name, *container_slot, operands);
                     }
-                    if is_result_option_variant_name(name) {
+                    if matches!(name, "Some" | "None") {
+                        return self.emit_schema_option_variant(name, *container_slot, operands);
+                    }
+                    if is_legacy_result_variant_name(name) {
                         return Err(format!(
-                            "EnumStore: SURFACE — JIT Result/Option variant '{}' \
+                            "EnumStore: SURFACE — JIT Result variant '{}' \
                              construction is disabled by W88A before FFI allocation. \
                              The old jit_v2_make_result_* / jit_v2_make_option_* \
                              imports would allocate Arc<ResultData>/Arc<OptionData>; \
-                             the replacement must build schema-backed __Result / \
-                             __Option TypedObjectStorage from a statically known \
-                             helper ABI. Whole-function deopt to the interpreter \
-                             preserves correctness until that ABI exists. \
-                             ADR-006 §2.7.5 / W84C deletion step 1.",
+                             the remaining replacement must build schema-backed \
+                             __Result TypedObjectStorage from a statically known \
+                             helper ABI. Schema-backed __Option is handled above. \
+                             Whole-function deopt to the interpreter preserves \
+                             correctness until the Result ABI exists. ADR-006 \
+                             §2.7.5 / W84C deletion step 1.",
                             name
                         ));
                     }
@@ -328,12 +461,13 @@ impl<'a, 'b> MirToIR<'a, 'b> {
 
                 // Pre-W88A this Round 7A branch dispatched Result/Option
                 // variants to Arc-shape producers in `ffi/result.rs`.
-                // The W88A guard above now surfaces Ok / Err / Some / None
-                // before this point, because those imports would allocate old
-                // `Arc<ResultData>` / `Arc<OptionData>` carriers. The code
+                // The W88A guard above still surfaces Ok / Err before this
+                // point, because those imports would allocate old
+                // `Arc<ResultData>` carriers. `Some` / `None` now use the
+                // schema-backed __Option constructor above. The code
                 // below is retained only as a stale-structure backstop until
-                // the broader schema-backed `__Result` / `__Option` JIT ABI
-                // replaces it and the old FuncRefs can be deleted.
+                // the broader schema-backed `__Result` JIT ABI replaces it
+                // and the old FuncRefs can be deleted.
                 //
                 // Payload kind is stamped from the operand's MIR-inferred
                 // kind via `operand_slot_kind(op)` → `stack_kind_code::
@@ -377,27 +511,25 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                     ));
                 };
 
-                // None has no payload — handled separately (empty operands
-                // already returned above, but `MirConstant::None` lowers
-                // to `MirConstant::None` operand which still gets here
-                // with operands.len()==1 in some paths). For safety:
+                // None has no payload and must have routed through the
+                // schema-backed __Option path above. If a future producer
+                // bypasses that route, fail closed instead of reaching the
+                // retired `jit_v2_make_option_none` producer.
                 if matches!(variant_tag, shape_vm::mir::types::VariantTag::None_) {
-                    // Unreachable under W88A's `is_result_option_variant_name`
-                    // guard above. If reached, this stale path calls the
-                    // fail-closed FFI backstop rather than allocating
-                    // `Arc<OptionData>`.
-                    let inst = self.builder.ins().call(self.ffi.v2_make_option_none, &[]);
-                    let arc_bits = self.builder.inst_results(inst)[0];
-                    let place = Place::Local(*container_slot);
-                    self.release_old_value_if_heap(&place)?;
-                    self.write_place(&place, arc_bits)?;
-                    return Ok(());
+                    return Err(
+                        "EnumStore: SURFACE — stale Option::None path reached \
+                         after schema-backed __Option routing. Refusing retired \
+                         jit_v2_make_option_none producer. ADR-006 §2.7.5 / \
+                         Wave-19B."
+                            .to_string(),
+                    );
                 }
 
-                // Stale Ok / Err / Some single-payload branch. W88A should
-                // surface before this point; if a future edit bypasses the
-                // guard, the FFI backstop still fails closed before old
-                // carrier allocation.
+                // Stale Ok / Err single-payload branch. W88A should surface
+                // before this point; if a future edit bypasses the guard, the
+                // FFI backstop still fails closed before old Result carrier
+                // allocation. Option variants must not use the retired
+                // `jit_v2_make_option_*` producers.
                 if operands.len() != 1 {
                     return Err(format!(
                         "EnumStore: SURFACE — variant '{}' expects 1 \
@@ -436,7 +568,15 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                 let func_ref = match variant_tag {
                     shape_vm::mir::types::VariantTag::Ok => self.ffi.v2_make_result_ok,
                     shape_vm::mir::types::VariantTag::Err => self.ffi.v2_make_result_err,
-                    shape_vm::mir::types::VariantTag::Some_ => self.ffi.v2_make_option_some,
+                    shape_vm::mir::types::VariantTag::Some_ => {
+                        return Err(
+                            "EnumStore: SURFACE — stale Option::Some path reached \
+                             after schema-backed __Option routing. Refusing retired \
+                             jit_v2_make_option_some producer. ADR-006 §2.7.5 / \
+                             Wave-19B."
+                                .to_string(),
+                        );
+                    }
                     shape_vm::mir::types::VariantTag::None_ => unreachable!("handled above"),
                 };
 
@@ -1162,8 +1302,12 @@ fn is_collection_ctor_name(name: &str) -> bool {
     )
 }
 
-fn is_result_option_variant_name(name: &str) -> bool {
-    matches!(name, "Ok" | "Err" | "Some" | "None")
+fn is_legacy_result_variant_name(name: &str) -> bool {
+    matches!(name, "Ok" | "Err")
+}
+
+fn operand_is_none_literal(operand: &Operand) -> bool {
+    matches!(operand, Operand::Constant(MirConstant::None))
 }
 
 impl<'a, 'b> super::MirToIR<'a, 'b> {
@@ -1412,16 +1556,16 @@ mod enumstore_containment_tests {
     use super::*;
 
     #[test]
-    fn result_option_variants_are_caught_before_ffi_producers() {
-        for name in ["Ok", "Err", "Some", "None"] {
+    fn legacy_result_variants_are_caught_before_ffi_producers() {
+        for name in ["Ok", "Err"] {
             assert!(
-                is_result_option_variant_name(name),
-                "{name} must deopt before jit_v2_make_result/option_*"
+                is_legacy_result_variant_name(name),
+                "{name} must deopt before jit_v2_make_result_*"
             );
         }
-        for name in ["HashMap", "Set", "UserVariant"] {
+        for name in ["Some", "None", "HashMap", "Set", "UserVariant"] {
             assert!(
-                !is_result_option_variant_name(name),
+                !is_legacy_result_variant_name(name),
                 "{name} must keep its existing EnumStore path"
             );
         }
@@ -1582,7 +1726,7 @@ mod phase_h1_tests {
         CaptureKind, ClosureLayout, HEAP_CLOSURE_HEADER_SIZE, STACK_CLOSURE_HEADER_SIZE,
     };
     use shape_value::v2::concrete_type::ConcreteType;
-    use shape_value::v2::heap_header::{HEAP_KIND_V2_CLOSURE, HeapHeader};
+    use shape_value::v2::heap_header::{HeapHeader, HEAP_KIND_V2_CLOSURE};
     use shape_value::v2::struct_layout::FieldKind;
 
     // Test-local helper: immutable-only layout.

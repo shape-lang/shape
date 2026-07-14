@@ -90,7 +90,11 @@ impl Default for TypeSchemaRegistry {
 
 impl Clone for TypeSchemaRegistry {
     fn clone(&self) -> Self {
-        let by_content = self.by_content.read().map(|g| g.clone()).unwrap_or_default();
+        let by_content = self
+            .by_content
+            .read()
+            .map(|g| g.clone())
+            .unwrap_or_default();
         let predeclared_cache = self
             .predeclared_cache
             .read()
@@ -1217,18 +1221,25 @@ mod tests {
         assert_eq!(a, b, "structurally identical anonymous schemas dedup");
 
         // A distinct structure gets a distinct handle.
-        let c = r.register_type_scoped(
-            "__inline_obj_3",
-            vec![("z".to_string(), FieldType::I64)],
-        );
+        let c = r.register_type_scoped("__inline_obj_3", vec![("z".to_string(), FieldType::I64)]);
         assert_ne!(a, c);
 
         // Named/branded types are nominal: same fields, different name ->
         // distinct handles.
-        let named_a =
-            r.register_type_scoped("A", vec![("x".to_string(), FieldType::I64), ("y".to_string(), FieldType::I64)]);
-        let named_b =
-            r.register_type_scoped("B", vec![("x".to_string(), FieldType::I64), ("y".to_string(), FieldType::I64)]);
+        let named_a = r.register_type_scoped(
+            "A",
+            vec![
+                ("x".to_string(), FieldType::I64),
+                ("y".to_string(), FieldType::I64),
+            ],
+        );
+        let named_b = r.register_type_scoped(
+            "B",
+            vec![
+                ("x".to_string(), FieldType::I64),
+                ("y".to_string(), FieldType::I64),
+            ],
+        );
         assert_ne!(named_a, named_b, "named types are nominally distinct");
         // ... and both distinct from the structurally-identical anonymous one.
         assert_ne!(named_a, a);
@@ -1252,19 +1263,28 @@ mod tests {
         // NAMED nominal: same fields, different user name -> DISTINCT handles.
         let named_a = r.register_type_scoped("A", xy.clone());
         let named_b = r.register_type_scoped("B", xy.clone());
-        assert_ne!(named_a, named_b, "type A {{x,y}} != type B {{x,y}} (nominal)");
+        assert_ne!(
+            named_a, named_b,
+            "type A {{x,y}} != type B {{x,y}} (nominal)"
+        );
 
         // ANONYMOUS structural: two distinct anon names, same fields -> SAME handle.
         let anon_1 = r.register_type_scoped("__inline_obj_10", xy.clone());
         let anon_2 = r.register_type_scoped("__inline_obj_11", xy.clone());
-        assert_eq!(anon_1, anon_2, "two anonymous {{x,y}} intern equal (structural)");
+        assert_eq!(
+            anon_1, anon_2,
+            "two anonymous {{x,y}} intern equal (structural)"
+        );
         // ...and distinct from either named handle (name in the branded hash).
         assert_ne!(anon_1, named_a);
         assert_ne!(anon_1, named_b);
 
         // Field ORDER is layout-significant: {x,y} != {y,x} for anonymous too.
         let anon_yx = r.register_type_scoped("__inline_obj_12", yx);
-        assert_ne!(anon_1, anon_yx, "{{x,y}} != {{y,x}} (declaration-order layout)");
+        assert_ne!(
+            anon_1, anon_yx,
+            "{{x,y}} != {{y,x}} (declaration-order layout)"
+        );
 
         // The u32 handle resolves back to the correct arity via get_by_id.
         assert_eq!(r.get_by_id(anon_1).unwrap().field_count(), 2);
@@ -1326,7 +1346,10 @@ mod tests {
 
         // Core: inline [z] and merged [x,y,z] are DISTINCT handles in both orders.
         assert_ne!(inline_z_1, merged_xyz_1, "order 1: [z] != [x,y,z]");
-        assert_ne!(inline_z_2, merged_xyz_2, "order 2 (Snapshot-seeded): [z] != [x,y,z]");
+        assert_ne!(
+            inline_z_2, merged_xyz_2,
+            "order 2 (Snapshot-seeded): [z] != [x,y,z]"
+        );
 
         // Arity is correct in both — get_by_id resolves the right structure.
         assert_eq!(r1.get_by_id(inline_z_1).unwrap().field_count(), 1);
@@ -1354,11 +1377,12 @@ mod tests {
             r_mut.by_name.insert("Loaded".to_string(), schema);
             r_mut.rebuild_content_index();
             // A fresh intern must not reuse handle 500 or below.
-            let fresh = r_mut.register_type_scoped(
-                "__inline_obj_1",
-                vec![("g".to_string(), FieldType::I64)],
+            let fresh = r_mut
+                .register_type_scoped("__inline_obj_1", vec![("g".to_string(), FieldType::I64)]);
+            assert!(
+                fresh > 500,
+                "fresh handle {fresh} must be past the loaded tail"
             );
-            assert!(fresh > 500, "fresh handle {fresh} must be past the loaded tail");
         }
     }
 }

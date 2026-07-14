@@ -46,8 +46,8 @@ pub fn create_toml_module() -> ModuleExports {
         "string",
         ConcreteType::Result(Box::new(ConcreteType::JsonValue("Json".to_string()))),
         |text: Arc<String>, _ctx| {
-            let parsed: serde_json::Value = toml::from_str(text.as_str())
-                .map_err(|e| format!("toml.parse() failed: {}", e))?;
+            let parsed: serde_json::Value =
+                toml::from_str(text.as_str()).map_err(|e| format!("toml.parse() failed: {}", e))?;
             let result = crate::json_value::serde_json_to_json_value(parsed);
             Ok(TypedReturn::Ok(ConcreteReturn::JsonValue(result)))
         },
@@ -150,7 +150,10 @@ mod tests {
     #[test]
     fn test_toml_stringify_object_roundtrip() {
         let value = JsonValue::Object(vec![
-            ("name".to_string(), JsonValue::String("my-project".to_string())),
+            (
+                "name".to_string(),
+                JsonValue::String("my-project".to_string()),
+            ),
             ("version".to_string(), JsonValue::Int(1)),
         ]);
         let toml_value = crate::json_value::json_value_to_toml_value(&value);
@@ -174,9 +177,11 @@ mod tests {
                     JsonValue::Object(inner) => {
                         assert!(inner.iter().any(|(k, v)| k == "host"
                             && *v == JsonValue::String("localhost".to_string())));
-                        assert!(inner
-                            .iter()
-                            .any(|(k, v)| k == "port" && *v == JsonValue::Int(8080)));
+                        assert!(
+                            inner
+                                .iter()
+                                .any(|(k, v)| k == "port" && *v == JsonValue::Int(8080))
+                        );
                     }
                     other => panic!("expected nested object, got {:?}", other),
                 }

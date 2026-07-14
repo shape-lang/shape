@@ -26,14 +26,16 @@
 //! | Int8/Bool | I8            | 1            |
 
 use cranelift::prelude::*;
-use shape_value::HeapKind;
 use shape_value::v2::ConcreteType;
+use shape_value::HeapKind;
+use shape_vm::mir::analysis::OwnershipDecision;
 use shape_vm::mir::types::{Operand, Place, SlotId};
+use shape_vm::mir::Point;
 use shape_vm::type_tracking::NativeKind;
 use std::collections::HashMap;
 
-use super::MirToIR;
 use super::types::is_v2_typed_array_slot;
+use super::MirToIR;
 
 // ── TypedArrayHeader field offsets ───────────────────────────────────────────
 
@@ -354,10 +356,18 @@ impl<'a, 'b> MirToIR<'a, 'b> {
 
         let record_operand =
             |op: &Operand,
+             point: Option<Point>,
              bi: usize,
              si: usize,
              moves: &mut HashMap<SlotId, Vec<(usize, usize)>>,
              reads: &mut HashMap<SlotId, Vec<(usize, usize)>>| {
+                let stmt_ownership = point.and_then(|point| {
+                    self.mir_data
+                        .borrow_analysis
+                        .ownership_decisions
+                        .get(&point)
+                        .copied()
+                });
                 // v0.3.3 move-then-read divergence: a `let q = p` whole-value
                 // bind lowers as `Use(Move(Local(p)))`, which `compile_operand`
                 // nulls. A SUBSEQUENT read of `p` — including a field/element
@@ -372,12 +382,27 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                 // segfaulted instead of deopting.)
                 match op {
                     Operand::Move(place) | Operand::MoveExplicit(place) => {
-                        if let Place::Local(s) = place {
-                            moves.entry(*s).or_default().push((bi, si));
+                        let destructive_move = !self.place_is_known_copy_value(place)
+                            && (matches!(op, Operand::MoveExplicit(_))
+                            || matches!(
+                                stmt_ownership.unwrap_or(OwnershipDecision::Move),
+                                OwnershipDecision::Move
+                            ));
+                        if destructive_move {
+                            if let Place::Local(s) = place {
+                                moves.entry(*s).or_default().push((bi, si));
+                            }
                         }
                         reads.entry(place.root_local()).or_default().push((bi, si));
                     }
                     Operand::Copy(place) => {
+                        if !self.place_is_known_copy_value(place)
+                            && matches!(stmt_ownership, Some(OwnershipDecision::Move))
+                        {
+                            if let Place::Local(s) = place {
+                                moves.entry(*s).or_default().push((bi, si));
+                            }
+                        }
                         reads.entry(place.root_local()).or_default().push((bi, si));
                     }
                     _ => {}
@@ -386,25 +411,26 @@ impl<'a, 'b> MirToIR<'a, 'b> {
 
         let record_rvalue_reads =
             |rv: &Rvalue,
+             point: Option<Point>,
              bi: usize,
              si: usize,
              moves: &mut HashMap<SlotId, Vec<(usize, usize)>>,
              reads: &mut HashMap<SlotId, Vec<(usize, usize)>>| {
                 match rv {
                     Rvalue::Use(op) | Rvalue::Clone(op) | Rvalue::UnaryOp(_, op) => {
-                        record_operand(op, bi, si, moves, reads);
+                        record_operand(op, point, bi, si, moves, reads);
                     }
                     Rvalue::BinaryOp(_, lhs, rhs) => {
-                        record_operand(lhs, bi, si, moves, reads);
-                        record_operand(rhs, bi, si, moves, reads);
+                        record_operand(lhs, point, bi, si, moves, reads);
+                        record_operand(rhs, point, bi, si, moves, reads);
                     }
                     Rvalue::FuzzyComparison { lhs, rhs, .. } => {
-                        record_operand(lhs, bi, si, moves, reads);
-                        record_operand(rhs, bi, si, moves, reads);
+                        record_operand(lhs, point, bi, si, moves, reads);
+                        record_operand(rhs, point, bi, si, moves, reads);
                     }
                     Rvalue::Aggregate(ops) => {
                         for op in ops {
-                            record_operand(op, bi, si, moves, reads);
+                            record_operand(op, point, bi, si, moves, reads);
                         }
                     }
                     // A borrow reads the slot's value (the JIT loads it). Key on
@@ -418,7 +444,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                     | Rvalue::TypePatternTest { operand, .. }
                     | Rvalue::EnumDiscriminantTest { operand, .. }
                     | Rvalue::PrimitiveCast { operand, .. } => {
-                        record_operand(operand, bi, si, moves, reads);
+                        record_operand(operand, point, bi, si, moves, reads);
                     }
                 }
             };
@@ -430,7 +456,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                         if let Place::Local(d) = dest {
                             reinits.entry(*d).or_default().push(si);
                         }
-                        record_rvalue_reads(rv, bi, si, &mut moves, &mut reads);
+                        record_rvalue_reads(rv, Some(stmt.point), bi, si, &mut moves, &mut reads);
                     }
                     StatementKind::ArrayStore { operands, .. }
                     | StatementKind::ObjectStore { operands, .. }
@@ -439,7 +465,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                     | StatementKind::ModuleBindingStore { operands, .. }
                     | StatementKind::TaskBoundary(operands, _) => {
                         for op in operands {
-                            record_operand(op, bi, si, &mut moves, &mut reads);
+                            record_operand(op, Some(stmt.point), bi, si, &mut moves, &mut reads);
                         }
                     }
                     StatementKind::Drop(_) | StatementKind::Nop => {}
@@ -449,13 +475,13 @@ impl<'a, 'b> MirToIR<'a, 'b> {
             // every real statement in the same block.
             match &block.terminator.kind {
                 TerminatorKind::Call { func, args, .. } => {
-                    record_operand(func, bi, usize::MAX, &mut moves, &mut reads);
+                    record_operand(func, None, bi, usize::MAX, &mut moves, &mut reads);
                     for op in args {
-                        record_operand(op, bi, usize::MAX, &mut moves, &mut reads);
+                        record_operand(op, None, bi, usize::MAX, &mut moves, &mut reads);
                     }
                 }
                 TerminatorKind::SwitchBool { operand, .. } => {
-                    record_operand(operand, bi, usize::MAX, &mut moves, &mut reads);
+                    record_operand(operand, None, bi, usize::MAX, &mut moves, &mut reads);
                 }
                 TerminatorKind::Goto(_) | TerminatorKind::Return | TerminatorKind::Unreachable => {}
             }

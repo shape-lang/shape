@@ -26,6 +26,8 @@
 
 mod allocation;
 mod field_access;
+mod option;
 
 pub use allocation::*;
 pub use field_access::*;
+pub use option::*;

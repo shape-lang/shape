@@ -27,23 +27,23 @@ CRATE_ROOTS = {
 
 EXPECTED_COUNTS = {
     "shape-vm": {
-        "phase_2c_surface": 93,
+        "phase_2c_surface": 76,
         "active_feature_gap": 0,
         "stale_semantic_expectation": 0,
         "deleted_v1_path": 5,
         "diagnostic_only": 1,
     },
     "shape-jit": {
-        "deleted_v1_path": 21,
+        "deleted_v1_path": 19,
         "active_feature_gap": 0,
-        "process_aborting_extern_c_todo": 3,
+        "process_aborting_extern_c_todo": 2,
         "stale_semantic_expectation": 0,
     },
 }
 
 EXPECTED_SOURCE_ONLY_STATUS = {
     "shape-vm": {
-        "deep-tests": 47,
+        "deep-tests": 44,
     },
     "shape-jit": {
         "cfg-any": 1,
@@ -346,8 +346,8 @@ def main() -> int:
         total = sum(counts[crate].values())
         print(f"  {crate}: {total}")
         print(
-            "    reported --lib ignored baseline "
-            f"(not source-derived): {REPORTED_LIB_IGNORED_BASELINE[crate]}"
+            "    last reported --lib ignored baseline "
+            f"(not source-derived, not refreshed): {REPORTED_LIB_IGNORED_BASELINE[crate]}"
         )
         for category, count in sorted(counts[crate].items()):
             print(f"    {category}: {count}")

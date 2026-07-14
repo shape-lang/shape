@@ -1,0 +1,18 @@
+// JIT GC barrier control: same loop shape, scalar field overwrite.
+//
+// This controls for field-store and loop overhead that is unrelated to
+// jit_write_barrier.
+type ScalarBox {
+    value: int
+}
+
+let mut holder = ScalarBox { value: 0 }
+var checksum = 0
+var i = 0
+while i < 5000000 {
+    holder.value = i
+    checksum = checksum + holder.value
+    i = i + 1
+}
+
+print(checksum)

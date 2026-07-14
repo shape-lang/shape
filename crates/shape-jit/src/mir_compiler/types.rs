@@ -231,8 +231,27 @@ pub(crate) fn infer_slot_kinds_with_concrete_and_function_returns(
     function_indices: Option<&HashMap<String, u16>>,
     function_return_kinds: Option<&HashMap<u16, NativeKind>>,
 ) -> Vec<Option<NativeKind>> {
+    infer_slot_kinds_with_concrete_function_returns_and_field_kinds(
+        mir,
+        existing,
+        concrete_types,
+        function_indices,
+        function_return_kinds,
+        None,
+    )
+}
+
+pub(crate) fn infer_slot_kinds_with_concrete_function_returns_and_field_kinds(
+    mir: &MirFunction,
+    existing: &[Option<NativeKind>],
+    concrete_types: &[ConcreteType],
+    function_indices: Option<&HashMap<String, u16>>,
+    function_return_kinds: Option<&HashMap<u16, NativeKind>>,
+    schema_field_kinds: Option<&HashMap<String, NativeKind>>,
+) -> Vec<Option<NativeKind>> {
     let n = mir.num_locals as usize;
     let mut kinds: Vec<Option<NativeKind>> = vec![None; n];
+    let local_struct_type_names = propagated_local_struct_type_names(mir);
 
     // Seed from existing slot_kinds (from bytecode compiler).
     for (i, &k) in existing.iter().enumerate() {
@@ -322,6 +341,16 @@ pub(crate) fn infer_slot_kinds_with_concrete_and_function_returns(
                                         name,
                                         args,
                                         concrete_types,
+                                    )
+                                })
+                                .or_else(|| {
+                                    user_method_return_kind_from_receiver(
+                                        name,
+                                        args,
+                                        concrete_types,
+                                        &local_struct_type_names,
+                                        function_indices,
+                                        function_return_kinds,
                                     )
                                 })
                                 // Wave 1b SEAM B (2026-06-15): iterator lazy
@@ -418,6 +447,23 @@ pub(crate) fn infer_slot_kinds_with_concrete_and_function_returns(
         }
         fk
     };
+    let field_kinds_for_projection: std::collections::HashMap<String, NativeKind> = {
+        let mut merged = schema_field_kinds.cloned().unwrap_or_default();
+        // Local ObjectStore facts are more specific than the registry-wide
+        // schema pre-population and preserve the existing name-collision
+        // precedence.
+        merged.extend(
+            field_kinds_pre
+                .iter()
+                .map(|(name, kind)| (name.clone(), *kind)),
+        );
+        merged
+    };
+    let field_kinds_for_projection = if field_kinds_for_projection.is_empty() {
+        None
+    } else {
+        Some(&field_kinds_for_projection)
+    };
 
     // Forward pass: infer from constants and operations.
     for block in &mir.blocks {
@@ -438,7 +484,7 @@ pub(crate) fn infer_slot_kinds_with_concrete_and_function_returns(
                             if let Some(inferred) = infer_rvalue_kind_with_projections(
                                 rvalue,
                                 &kinds,
-                                Some(&field_kinds_pre),
+                                field_kinds_for_projection,
                                 Some(&mir.field_name_table),
                                 Some(concrete_types),
                             ) {
@@ -449,7 +495,7 @@ pub(crate) fn infer_slot_kinds_with_concrete_and_function_returns(
                             if let Some(inferred) = infer_rvalue_kind_with_projections(
                                 rvalue,
                                 &kinds,
-                                Some(&field_kinds_pre),
+                                field_kinds_for_projection,
                                 Some(&mir.field_name_table),
                                 Some(concrete_types),
                             ) {
@@ -716,6 +762,16 @@ pub(crate) fn infer_slot_kinds_with_concrete_and_function_returns(
                         let ret_kind = match func {
                             Operand::Constant(MirConstant::Method(name)) => {
                                 method_return_kind_from_in_pass_kinds(name, args, &kinds)
+                                    .or_else(|| {
+                                        user_method_return_kind_from_receiver(
+                                            name,
+                                            args,
+                                            concrete_types,
+                                            &local_struct_type_names,
+                                            function_indices,
+                                            function_return_kinds,
+                                        )
+                                    })
                             }
                             Operand::Constant(MirConstant::Function(name)) => {
                                 named_function_return_kind(
@@ -843,6 +899,41 @@ pub(crate) fn infer_slot_kinds_with_concrete_and_function_returns(
     kinds
 }
 
+fn propagated_local_struct_type_names(mir: &MirFunction) -> HashMap<SlotId, String> {
+    let mut names = mir.local_struct_type_names.clone();
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for block in &mir.blocks {
+            for stmt in &block.statements {
+                let StatementKind::Assign(
+                    Place::Local(dst),
+                    Rvalue::Use(
+                        Operand::Copy(Place::Local(src))
+                        | Operand::Move(Place::Local(src))
+                        | Operand::MoveExplicit(Place::Local(src)),
+                    ),
+                ) = &stmt.kind
+                else {
+                    continue;
+                };
+                match (names.get(dst).cloned(), names.get(src).cloned()) {
+                    (Some(name), None) => {
+                        names.insert(*src, name);
+                        changed = true;
+                    }
+                    (None, Some(name)) => {
+                        names.insert(*dst, name);
+                        changed = true;
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+    names
+}
+
 fn named_function_return_kind(
     name: &str,
     function_indices: Option<&HashMap<String, u16>>,
@@ -852,6 +943,48 @@ fn named_function_return_kind(
     let function_return_kinds = function_return_kinds?;
     let idx = resolve_named_function_index(name, function_indices)?;
     function_return_kinds.get(&idx).copied()
+}
+
+/// Resolve a user-defined method call's return kind from the receiver's
+/// concrete struct name and the JIT-visible function return table.
+///
+/// Extend-generated methods use `Type.method`; impl methods use
+/// `Type::method`. The runtime `jit_call_method` user-method fallback checks
+/// both forms before invoking a JIT-compiled callee; this compile-time helper
+/// mirrors that lookup only to stamp the call destination kind. The return
+/// kind itself is sourced from the existing function-return conduit.
+fn user_method_return_kind_from_receiver(
+    method_name: &str,
+    args: &[Operand],
+    concrete_types: &[ConcreteType],
+    local_struct_type_names: &HashMap<SlotId, String>,
+    function_indices: Option<&HashMap<String, u16>>,
+    function_return_kinds: Option<&HashMap<u16, NativeKind>>,
+) -> Option<NativeKind> {
+    let function_indices = function_indices?;
+    let function_return_kinds = function_return_kinds?;
+    let receiver = args.first()?;
+    let receiver_slot = match receiver {
+        Operand::Copy(place) | Operand::Move(place) | Operand::MoveExplicit(place) => {
+            place.root_local()
+        }
+        Operand::Constant(_) => return None,
+    };
+    let type_name = match concrete_types.get(receiver_slot.0 as usize) {
+        Some(ConcreteType::Struct(named)) => named
+            .name_str()
+            .or_else(|| local_struct_type_names.get(&receiver_slot).map(String::as_str))?,
+        _ => local_struct_type_names.get(&receiver_slot).map(String::as_str)?,
+    };
+    let candidates = [
+        format!("{}::{}", type_name, method_name),
+        format!("{}.{}", type_name, method_name),
+    ];
+    candidates.iter().find_map(|candidate| {
+        function_indices
+            .get(candidate)
+            .and_then(|idx| function_return_kinds.get(idx).copied())
+    })
 }
 
 fn resolve_named_function_index(
@@ -1136,9 +1269,7 @@ fn parametric_method_return_kind_from_receiver(
         // the f64 mean bits as an i64. Special-case `mean` to Float64; the VM
         // handler is the source of truth.
         ("mean", ConcreteType::Array(_)) => Some(NativeKind::Float64),
-        ("sum" | "min" | "max", ConcreteType::Array(elem)) => {
-            native_kind_from_concrete_type(elem)
-        }
+        ("sum" | "min" | "max", ConcreteType::Array(elem)) => native_kind_from_concrete_type(elem),
         // `Array.get(i) -> Option<T>` — bounds-safe accessor (book C4).
         // The VM-side `array_basic::handle_get_v2` returns the canonical
         // fixed-layout `Option<T>` carrier built by
@@ -1592,7 +1723,10 @@ fn infer_rvalue_kind_with_projections(
                 field_name_table,
                 concrete_types,
             );
+            let either_string =
+                matches!(lk, Some(NativeKind::String)) || matches!(rk, Some(NativeKind::String));
             match (lk, rk) {
+                _ if matches!(op, BinOp::Add) && either_string => Some(NativeKind::String),
                 (Some(l), Some(r)) if l == r => {
                     // Both operands same type.
                     // Arithmetic on floats → float, on ints → int.

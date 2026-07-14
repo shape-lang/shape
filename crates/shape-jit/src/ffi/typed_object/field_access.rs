@@ -23,7 +23,7 @@ pub extern "C" fn jit_typed_object_get_field(obj_bits: u64, offset: u64) -> u64 
     // through the out-of-line slot buffer — no NaN-box unwrap, no inline-cell
     // offset.
     use shape_value::heap_value::TypedObjectStorage;
-    if obj_bits == 0 {
+    if obj_bits == 0 || obj_bits == TAG_NULL {
         return TAG_NULL;
     }
     let ptr = obj_bits as *const TypedObjectStorage;
@@ -70,7 +70,7 @@ pub extern "C" fn jit_typed_object_set_field(obj_bits: u64, offset: u64, value: 
     // projection (sound on a shared carrier per Q14 / ADR-006 §2.7.13) — the
     // same primitive the VM's `DerefStore` uses.
     use shape_value::heap_value::TypedObjectStorage;
-    if obj_bits == 0 {
+    if obj_bits == 0 || obj_bits == TAG_NULL {
         return TAG_NULL;
     }
     let ptr = obj_bits as *mut TypedObjectStorage;
@@ -116,9 +116,95 @@ pub extern "C" fn jit_typed_object_schema_id(obj_bits: u64) -> u32 {
     // Read `schema_id` (u64) directly at offset 8. Used by
     // `call_method::receiver_type_name` for receiver classification.
     use shape_value::heap_value::TypedObjectStorage;
-    if obj_bits == 0 {
+    if obj_bits == 0 || obj_bits == TAG_NULL {
         return 0;
     }
     let ptr = obj_bits as *const TypedObjectStorage;
     unsafe { (*ptr).schema_id as u32 }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use shape_value::heap_value::TypedObjectStorage;
+    use shape_value::native_kind::NativeKind;
+    use shape_value::slot::ValueSlot;
+    use std::sync::Arc;
+
+    #[test]
+    fn jit_typed_object_set_field_overwrites_scalar_slot() {
+        let kinds: Arc<[NativeKind]> = Arc::from(vec![NativeKind::Int64, NativeKind::Int64]);
+        let ptr = TypedObjectStorage::_new(
+            3401,
+            vec![ValueSlot::from_int(1), ValueSlot::from_int(2)].into_boxed_slice(),
+            0,
+            kinds,
+        );
+
+        unsafe {
+            let result = jit_typed_object_set_field(ptr as u64, 8, 99);
+            assert_eq!(result, ptr as u64);
+            assert_eq!(jit_typed_object_get_field(ptr as u64, 0), 1);
+            assert_eq!(jit_typed_object_get_field(ptr as u64, 8), 99);
+            assert_eq!((&(*ptr).field_kinds)[1], NativeKind::Int64);
+            assert_eq!((*ptr).heap_mask, 0);
+            TypedObjectStorage::_drop(ptr);
+        }
+    }
+}
+
+#[cfg(all(test, feature = "gc"))]
+mod gc_barrier_tests {
+    use super::*;
+    use shape_value::HeapKind;
+    use shape_value::heap_value::TypedObjectStorage;
+    use shape_value::gc;
+    use shape_value::native_kind::NativeKind;
+    use shape_value::slot::ValueSlot;
+    use shape_value::v2::heap_element::HeapElement;
+    use shape_value::v2::refcount::{v2_get_refcount, v2_release, v2_retain};
+    use std::sync::Arc;
+
+    #[test]
+    fn jit_typed_object_set_field_threads_field_kind_to_barrier() {
+        gc::clear_candidate_buffer();
+        let leaf_kinds: Arc<[NativeKind]> = Arc::from(vec![NativeKind::Int64]);
+        let field_kinds: Arc<[NativeKind]> =
+            Arc::from(vec![NativeKind::Ptr(HeapKind::TypedObject)]);
+
+        unsafe {
+            let old = TypedObjectStorage::_new(
+                3402,
+                vec![ValueSlot::from_int(7)].into_boxed_slice(),
+                0,
+                leaf_kinds,
+            );
+            v2_retain(&(*old).header);
+            assert_eq!(v2_get_refcount(&(*old).header), 2);
+
+            let holder = TypedObjectStorage::_new(
+                3403,
+                vec![ValueSlot::from_typed_object_raw(old)].into_boxed_slice(),
+                0b1,
+                field_kinds,
+            );
+
+            let result = jit_typed_object_set_field(holder as u64, 0, 0);
+            assert_eq!(result, holder as u64);
+            assert_eq!(
+                gc::candidate_buffer_snapshot(),
+                vec![old as usize],
+                "setter must call jit_write_barrier with the field's TypedObject kind"
+            );
+
+            // The FFI setter buffers the overwritten survivor; the caller owns
+            // the actual release of that overwritten edge.
+            v2_release(&(*old).header);
+            assert_eq!(v2_get_refcount(&(*old).header), 1);
+            gc::clear_candidate_buffer();
+
+            TypedObjectStorage::_drop(holder);
+            TypedObjectStorage::release_elem(old);
+        }
+    }
 }

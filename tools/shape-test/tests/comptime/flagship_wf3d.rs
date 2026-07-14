@@ -59,7 +59,9 @@ fn wf3d_f1_generated_free_fn_vm() {
 
 #[test]
 fn wf3d_f1_generated_free_fn_jit() {
-    ShapeTest::new(F1_PROGRAM).with_jit().expect_string("User schema");
+    ShapeTest::new(F1_PROGRAM)
+        .with_jit()
+        .expect_string("User schema");
 }
 
 // ============================================================================
@@ -90,7 +92,9 @@ fn wf3d_f2_type_info_fields_and_kind_vm() {
 
 #[test]
 fn wf3d_f2_type_info_fields_and_kind_jit() {
-    ShapeTest::new(F2_PROGRAM).with_jit().expect_string(F2_EXPECTED);
+    ShapeTest::new(F2_PROGRAM)
+        .with_jit()
+        .expect_string(F2_EXPECTED);
 }
 
 // ============================================================================
@@ -144,5 +148,7 @@ fn wf3d_f4_method_emission_dispatch_vm() {
 
 #[test]
 fn wf3d_f4_method_emission_dispatch_jit() {
-    ShapeTest::new(F4_PROGRAM).with_jit().expect_string("lbl-emitted");
+    ShapeTest::new(F4_PROGRAM)
+        .with_jit()
+        .expect_string("lbl-emitted");
 }

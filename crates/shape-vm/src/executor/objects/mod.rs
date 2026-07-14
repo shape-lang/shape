@@ -230,7 +230,8 @@ fn typed_array_method_registry(
         // ARRAY_METHODS covers `.length`/`.first`/etc.
         | V2ElemType::TraitObject
         | V2ElemType::TypedArray
-        | V2ElemType::Callable => None,
+        | V2ElemType::Callable
+        | V2ElemType::Content => None,
     }
 }
 

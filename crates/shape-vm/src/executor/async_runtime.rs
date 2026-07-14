@@ -117,7 +117,7 @@ pub(crate) fn run_isolated_async_fn(
     // binding (`Null`) and fails the value-call dispatch.
     vm.populate_module_objects();
     let result = vm
-        .execute_function_by_id(func_id, Vec::new(), None)
+        .execute_function_by_id_at_host_boundary(func_id, Vec::new(), None)
         .map_err(|e| e.to_string())?;
     let bits = result.raw();
     let kind = result.kind();

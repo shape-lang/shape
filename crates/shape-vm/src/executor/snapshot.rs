@@ -129,6 +129,27 @@ fn w17_snapshot_surface(op: &str) -> String {
 }
 
 impl super::VirtualMachine {
+    fn guard_future_snapshot_slot(
+        &self,
+        location: &str,
+        bits: u64,
+        kind: shape_value::NativeKind,
+    ) -> Result<(), VMError> {
+        if !matches!(
+            kind,
+            shape_value::NativeKind::Ptr(shape_value::HeapKind::Future)
+        ) {
+            return Ok(());
+        }
+        let status = self.task_scheduler.future_snapshot_status(bits);
+        Err(VMError::NotImplemented(format!(
+            "FUTURE_SNAPSHOT_BARRIER: cannot checkpoint while Future({bits}) \
+             is still live at {location}: {status}. Await it, cancel it, or \
+             move snapshot() after it resolves; resumable futures are not \
+             implemented yet."
+        )))
+    }
+
     /// Create a serializable snapshot of VM state.
     ///
     /// **W17-snapshot-roundtrip (Phase 2d Wave 2.6, 2026-05-11).** Uses
@@ -169,6 +190,7 @@ impl super::VirtualMachine {
         for i in 0..self.sp {
             let bits = self.stack[i];
             let kind = self.kinds[i];
+            self.guard_future_snapshot_slot(&format!("stack[{i}]"), bits, kind)?;
             let sv = slot_to_serializable_ctx(bits, kind, store, &mut ident).map_err(|msg| {
                 VMError::NotImplemented(format!(
                     "VirtualMachine::snapshot stack[{i}] kind={kind:?}: {msg}"
@@ -187,6 +209,7 @@ impl super::VirtualMachine {
         for i in 0..mb_len {
             let bits = self.module_bindings[i];
             let kind = self.module_binding_kinds[i];
+            self.guard_future_snapshot_slot(&format!("module_binding[{i}]"), bits, kind)?;
             // Same shared `ident` ctx as the stack walk above — this is
             // where a module-binding SharedCell dedupes against a stack
             // reference into the same cell (STAGE-R5, §2.7.30.5).
@@ -213,7 +236,7 @@ impl super::VirtualMachine {
         let loop_stack = self.snapshot_loop_stack_for_export();
         let timeframe_stack = self.snapshot_timeframe_stack_for_export();
         let exception_handlers = self.snapshot_exception_handlers_for_export();
-        let call_stack = self.snapshot_call_stack_for_export();
+        let call_stack = self.snapshot_call_stack_for_export()?;
         let _: &Vec<SerializableLoopContext> = &loop_stack;
         let _: &Vec<SerializableExceptionHandler> = &exception_handlers;
 
@@ -611,7 +634,7 @@ impl super::VirtualMachine {
 
     fn snapshot_call_stack_for_export(
         &self,
-    ) -> Vec<shape_runtime::snapshot::SerializableCallFrame> {
+    ) -> Result<Vec<shape_runtime::snapshot::SerializableCallFrame>, VMError> {
         // **W17-state-tier-roundtrip (Phase 2d Wave 3, 2026-05-12).**
         // Per-frame upvalues now project through `OwnedClosureBlock::
         // read_capture_kinded` per the §2.7.8 / Q10 cell-storage
@@ -631,16 +654,16 @@ impl super::VirtualMachine {
         .ok();
         self.call_stack
             .iter()
-            .map(|frame| {
+            .map(|frame| -> Result<_, VMError> {
                 let (upvalues, upvalue_kinds) = if let Some(ref s) = store {
-                    match snapshot_frame_upvalues_serializable(self, frame, s) {
+                    match snapshot_frame_upvalues_serializable(self, frame, s)? {
                         Some((svs, kinds)) => (Some(svs), Some(kinds)),
                         None => (None, None),
                     }
                 } else {
                     (None, None)
                 };
-                shape_runtime::snapshot::SerializableCallFrame {
+                Ok(shape_runtime::snapshot::SerializableCallFrame {
                     return_ip: frame.return_ip,
                     locals_base: frame.base_pointer,
                     locals_count: frame.locals_count,
@@ -651,7 +674,7 @@ impl super::VirtualMachine {
                     // Stage 0 (design §4.2.4): record the per-upvalue kind at
                     // capture so restore never Bool-defaults a no-layout frame.
                     upvalue_kinds,
-                }
+                })
             })
             .collect()
     }
@@ -699,6 +722,16 @@ fn render_capture_barrier(e: &VMError) -> String {
     let lower = raw.to_ascii_lowercase();
 
     // Order matters: match the most specific families first.
+    if let Some((_, message)) = raw.split_once("FUTURE_SNAPSHOT_BARRIER:") {
+        return message.trim().to_string();
+    }
+    if lower.contains("snapshot cannot capture future(")
+        || lower.contains("pending-future state")
+    {
+        return "cannot checkpoint while a future is still pending: pending async work is \
+                not saved by this build. Await or cancel the future before checkpointing."
+            .to_string();
+    }
     if lower.contains("non-promoted reference")
         || lower.contains("kl-4")
         || lower.contains("owning sharedcell")
@@ -971,27 +1004,35 @@ fn snapshot_frame_upvalues_serializable(
     vm: &super::VirtualMachine,
     frame: &super::CallFrame,
     store: &shape_runtime::snapshot::SnapshotStore,
-) -> Option<(
-    Vec<shape_runtime::snapshot::SerializableVMValue>,
-    Vec<shape_value::NativeKind>,
-)> {
+) -> Result<
+    Option<(
+        Vec<shape_runtime::snapshot::SerializableVMValue>,
+        Vec<shape_value::NativeKind>,
+    )>,
+    VMError,
+> {
     use shape_runtime::snapshot::slot_to_serializable;
     use shape_value::v2::closure_raw::{
         OwnedClosureBlock, retain_typed_closure, typed_closure_function_id,
     };
 
-    let bits = frame.closure_heap_bits?;
+    let Some(bits) = frame.closure_heap_bits else {
+        return Ok(None);
+    };
     if bits == 0 {
-        return None;
+        return Ok(None);
     }
     let ptr = bits as *const u8;
     // SAFETY: closure_heap_bits is a live closure block per §2.7.8 / Q10.
     let fn_id = unsafe { typed_closure_function_id(ptr) };
-    let layout = vm
+    let Some(layout) = vm
         .program
         .closure_function_layouts
         .get(fn_id as usize)
-        .and_then(|opt| opt.clone())?;
+        .and_then(|opt| opt.clone())
+    else {
+        return Ok(None);
+    };
     // Retain a borrow share. SAFETY: ptr is a live OwnedClosureBlock
     // allocation; retain_typed_closure bumps the strong-count atomically
     // so the resulting OwnedClosureBlock's Drop doesn't free the live
@@ -1009,8 +1050,19 @@ fn snapshot_frame_upvalues_serializable(
     for idx in 0..count {
         // SAFETY: idx < count; the block is borrowed live.
         let (cap_bits, cap_kind) = unsafe { block.read_capture_kinded(idx) };
+        vm.guard_future_snapshot_slot(
+            &format!("call_stack closure upvalue[{idx}]"),
+            cap_bits,
+            cap_kind,
+        )?;
         let sv = match slot_to_serializable(cap_bits, cap_kind, store) {
             Ok(v) => v,
+            Err(msg) if msg.contains("Future(") || msg.contains("pending-future state") => {
+                return Err(VMError::NotImplemented(format!(
+                    "FUTURE_SNAPSHOT_BARRIER: cannot checkpoint while a nested \
+                     Future handle is live at call_stack closure upvalue[{idx}]: {msg}"
+                )));
+            }
             Err(_) => {
                 // Unsupported capture kind — surface as IteratorOpaque
                 // sentinel so the wire payload is still serializable.
@@ -1022,7 +1074,7 @@ fn snapshot_frame_upvalues_serializable(
         out.push(sv);
         kinds.push(cap_kind);
     }
-    Some((out, kinds))
+    Ok(Some((out, kinds)))
 }
 
 /// Pick the `expected_kind` for [`serializable_to_slot`] from a
@@ -1415,6 +1467,103 @@ mod tests {
         assert_eq!(snap.stack.len(), 0);
         assert_eq!(snap.call_stack.len(), 0);
         assert_eq!(snap.ip, 0);
+    }
+
+    #[test]
+    fn test_snapshot_refuses_pending_future_on_stack() {
+        use shape_value::{HeapKind, NativeKind};
+
+        let mut vm = VirtualMachine::new(VMConfig::default());
+        vm.task_scheduler.register(77, 0, NativeKind::Int64);
+        vm.push_kinded(77, NativeKind::Ptr(HeapKind::Future))
+            .expect("push Future handle");
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let store = SnapshotStore::new(tmp.path()).expect("snapshot store");
+        let err = vm
+            .snapshot(&store)
+            .expect_err("pending Future handle must block snapshot capture");
+        let msg = err.to_string();
+
+        assert!(msg.contains("FUTURE_SNAPSHOT_BARRIER"), "got: {msg}");
+        assert!(msg.contains("Future(77)"), "got: {msg}");
+        assert!(msg.contains("stack[0]"), "got: {msg}");
+        assert!(msg.contains("pending callable"), "got: {msg}");
+        assert!(
+            msg.contains("resumable futures are not implemented yet"),
+            "got: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_snapshot_refuses_pending_external_future_module_binding() {
+        use shape_value::{HeapKind, NativeKind};
+
+        let mut vm = VirtualMachine::new(VMConfig::default());
+        let _tx = vm.task_scheduler.register_external(88);
+        vm.module_binding_write_kinded(0, 88, NativeKind::Ptr(HeapKind::Future));
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let store = SnapshotStore::new(tmp.path()).expect("snapshot store");
+        let err = vm
+            .snapshot(&store)
+            .expect_err("pending external Future must block snapshot capture");
+        let msg = err.to_string();
+
+        assert!(msg.contains("FUTURE_SNAPSHOT_BARRIER"), "got: {msg}");
+        assert!(msg.contains("Future(88)"), "got: {msg}");
+        assert!(msg.contains("module_binding[0]"), "got: {msg}");
+        assert!(msg.contains("pending external completion"), "got: {msg}");
+    }
+
+    #[test]
+    fn test_snapshot_refuses_nested_future_handle() {
+        use shape_value::heap_value::TypedObjectStorage;
+        use shape_value::{HeapKind, NativeKind, ValueSlot};
+        use std::sync::Arc;
+
+        let mut vm = VirtualMachine::new(VMConfig::default());
+        vm.task_scheduler.register(123, 0, NativeKind::Int64);
+        let object = TypedObjectStorage::_new(
+            700,
+            vec![ValueSlot::from_raw(123)].into_boxed_slice(),
+            0,
+            Arc::<[NativeKind]>::from(
+                vec![NativeKind::Ptr(HeapKind::Future)].into_boxed_slice(),
+            ),
+        );
+        vm.push_kinded(object as u64, NativeKind::Ptr(HeapKind::TypedObject))
+            .expect("push typed object carrying Future handle");
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let store = SnapshotStore::new(tmp.path()).expect("snapshot store");
+        let err = vm
+            .snapshot(&store)
+            .expect_err("nested Future handle must block snapshot capture");
+        let msg = err.to_string();
+
+        assert!(msg.contains("stack[0]"), "got: {msg}");
+        assert!(msg.contains("Future(123)"), "got: {msg}");
+        assert!(msg.contains("pending-future state"), "got: {msg}");
+    }
+
+    #[test]
+    fn test_snapshot_keeps_materialized_future_result_behavior() {
+        use shape_runtime::snapshot::SerializableVMValue as SV;
+        use shape_value::NativeKind;
+
+        let mut vm = VirtualMachine::new(VMConfig::default());
+        vm.task_scheduler.complete(91, 42, NativeKind::Int64);
+        vm.push_kinded(42, NativeKind::Int64)
+            .expect("push materialized future result");
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let store = SnapshotStore::new(tmp.path()).expect("snapshot store");
+        let snap = vm
+            .snapshot(&store)
+            .expect("materialized future result snapshots as its value");
+
+        assert!(matches!(snap.stack.as_slice(), [SV::Int(42)]));
     }
 
     /// WF-2F axis B (polyglot-distributed §4.5): a capture attempted while a

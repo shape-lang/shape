@@ -1,36 +1,26 @@
 // Content-addressed VM state primitives (`std::state` module).
 //
-// **W17-snapshot-resume surface — see ADR-006 §2.7.4 + §2.7.5.1.** The
-// body of every `state.*` builtin in this module depended on the
-// deleted `ValueWord` type, the deleted `state_diff` runtime module
-// (1486 LoC of ValueWord-typed value-diff/patch logic), and the deleted
-// `nanboxed_to_serializable` / `serializable_to_nanboxed` snapshot
-// helpers. Per ADR-006 §2.7.4, snapshot serialization is deferred to a
-// Phase-2c rebuild session that can design a kind-threaded
-// `slot_to_serializable(bits, kind, store)` / inverse pair. W17
-// converts the previous `todo!()`-driven VM-thread abort into a
-// structured `Err(String)` surface return so the broken capability
-// surfaces as a recoverable runtime error rather than crashing the VM.
-// Placeholder serializers stay forbidden per CLAUDE.md "Forbidden
-// rationalizations" (silent persisted-state corruption is the bug
-// §2.7.4 explicitly rules out).
-//
-// The module-construction surface (`create_state_module`) stays so the
-// `std::core::state` module continues to register with the runtime —
-// the schema metadata is consumable by tooling/LSP. The function
-// bodies all return W17 surface errors until the Phase-2c rebuild
-// lands.
+// W17 keeps unsupported state surfaces as structured `Err(String)` returns
+// instead of `todo!()` panics. The scalar lane below uses the current
+// kind-threaded snapshot codec; diff/patch, full resume, and polymorphic
+// `any` projection remain surfaced until their honest carriers land.
 
 use super::introspection::{
-    state_args_stub, state_caller_stub, state_capture_all_stub, state_capture_call_stub,
-    state_capture_module_stub, state_capture_stub, state_locals_stub, state_resume_frame_stub,
-    state_resume_stub,
+    callable_content_hash, state_args_stub, state_caller_stub, state_capture_all_stub,
+    state_capture_call_stub, state_capture_module_stub, state_capture_stub, state_locals_stub,
+    state_resume_frame_stub, state_resume_stub,
 };
 use shape_runtime::marshal::register_typed_function;
 use shape_runtime::module_exports::{ModuleContext, ModuleExports, ModuleParam};
 use shape_runtime::type_schema::{FieldType, TypeSchema};
-use shape_runtime::typed_module_exports::{ConcreteType, TypedReturn};
-use shape_value::KindedSlot;
+use shape_runtime::typed_module_exports::{ConcreteReturn, ConcreteType, TypedReturn};
+use shape_value::heap_value::{
+    HashMapData, HashMapKindedRef, HeapValue, TypedObjectPtr, TypedObjectStorage,
+};
+use shape_value::v2::string_obj::StringObj;
+use shape_value::v2::typed_array::{stamp_elem_type, TypedArray, ELEM_TYPE_STRING};
+use shape_value::{HeapKind, KindedSlot, NativeKind, ValueSlot};
+use std::sync::Arc;
 
 // ---------------------------------------------------------------------------
 // Module constructor
@@ -38,10 +28,8 @@ use shape_value::KindedSlot;
 
 /// Create the `state` extension module with all content-addressed builtins.
 ///
-/// **W17-snapshot-resume surface — see ADR-006 §2.7.4 + §2.7.5.1.** The
-/// schemas and registration surface are intact so the module is
-/// discoverable; the per-function bodies return structured W17 surface
-/// errors until the snapshot/diff rebuild lands.
+/// Schemas and export metadata stay discoverable even while some bodies
+/// remain W17-surfaced.
 pub fn create_state_module() -> ModuleExports {
     let mut module = ModuleExports::new("std::core::state");
     module.description = "Content-addressed VM state primitives".to_string();
@@ -62,31 +50,57 @@ pub fn create_state_module() -> ModuleExports {
             ("function_name".to_string(), FieldType::String),
             ("blob_hash".to_string(), FieldType::String),
             ("ip".to_string(), FieldType::I64),
-            ("locals".to_string(), FieldType::Any),
-            ("args".to_string(), FieldType::Any),
-            ("upvalues".to_string(), FieldType::Any),
+            ("arg_count".to_string(), FieldType::I64),
+            ("local_count".to_string(), FieldType::I64),
+            ("upvalue_count".to_string(), FieldType::I64),
         ],
     ));
 
     module.add_type_schema(TypeSchema::new(
         "VmState",
         vec![
-            ("frames".to_string(), FieldType::Any),
-            ("module_bindings".to_string(), FieldType::Any),
+            (
+                "frames".to_string(),
+                FieldType::Array(Box::new(FieldType::Object("FrameState".to_string()))),
+            ),
+            (
+                "module_bindings".to_string(),
+                FieldType::HashMap {
+                    key: Box::new(FieldType::String),
+                    value: Box::new(FieldType::Any),
+                },
+            ),
             ("instruction_count".to_string(), FieldType::I64),
         ],
     ));
 
-    module.add_type_schema(TypeSchema::new(
-        "ModuleState",
-        vec![("bindings".to_string(), FieldType::Any)],
-    ));
+    module.add_type_schema(TypeSchema::new("ModuleState", vec![
+        ("bindings".to_string(), FieldType::Any),
+        ("schemas".to_string(), FieldType::HashMap { key: Box::new(FieldType::String), value: Box::new(FieldType::String) }),
+    ]));
 
     module.add_type_schema(TypeSchema::new(
         "CallPayload",
         vec![
             ("hash".to_string(), FieldType::String),
             ("args".to_string(), FieldType::Any),
+        ],
+    ));
+
+    module.add_type_schema(TypeSchema::new(
+        "Delta",
+        vec![
+            (
+                "changed".to_string(),
+                FieldType::HashMap {
+                    key: Box::new(FieldType::String),
+                    value: Box::new(FieldType::Any),
+                },
+            ),
+            (
+                "removed".to_string(),
+                FieldType::Array(Box::new(FieldType::String)),
+            ),
         ],
     ));
 
@@ -142,7 +156,7 @@ pub fn create_state_module() -> ModuleExports {
     register_typed_function(
         &mut module,
         "serialize",
-        "Serialize a value to MessagePack bytes",
+        "Serialize a value to state bytes",
         vec![ModuleParam {
             name: "value".into(),
             type_name: "any".into(),
@@ -157,12 +171,12 @@ pub fn create_state_module() -> ModuleExports {
     register_typed_function(
         &mut module,
         "deserialize",
-        "Deserialize MessagePack bytes back to a value",
+        "Deserialize state bytes back to a value",
         vec![ModuleParam {
             name: "bytes".into(),
             type_name: "Array<int>".into(),
             required: true,
-            description: "MessagePack byte array".into(),
+            description: "State byte array".into(),
             ..Default::default()
         }],
         ConcreteType::Any,
@@ -354,32 +368,15 @@ pub fn create_state_module() -> ModuleExports {
 // ===========================================================================
 // Content addressing implementations
 // ===========================================================================
-//
-// **W17-snapshot-resume surface-and-stop — see ADR-006 §2.7.4 + §2.7.5.1.**
-// Every body below depended on the deleted `ValueWord` type, `state_diff`
-// runtime module, or `nanboxed_to_serializable` / `serializable_to_nanboxed`
-// snapshot helpers. The replacement design — a kind-threaded slot
-// content-hash + slot diff/patch + slot serialization triple, all
-// taking `(bits, kind)` or `KindedSlot` directly and dispatching on
-// `HeapKind` payload variants — is Phase-2c scope. W17 converts the
-// previous `todo!()` panics to structured `Err(...)` returns so callers
-// observe a runtime error rather than a VM-thread abort.
 
-/// Common W17-snapshot-resume surface-and-stop message for the
-/// content-addressing / serialize / diff family. The `op` parameter
-/// names the specific stdlib function so the error message points the
-/// caller at the exact entry point.
+/// Common W17-snapshot-resume surface message for unsupported state calls.
 fn content_surface(op: &str) -> String {
     format!(
-        "{op}: W17-snapshot-resume surface — kind-threaded \
-         slot_to_serializable / serializable_to_slot replacement for the \
-         deleted nanboxed_to_serializable / serializable_to_nanboxed \
-         pair has not landed; state.diff / state.patch additionally \
-         depend on the deleted 1486-LoC `state_diff` runtime module's \
-         kind-threaded rebuild. Tracked as W17-snapshot-resume per \
-         docs/cluster-audits/phase-2d-playbook.md §3. \
-         ADR-006 §2.7.4 (snapshot serialization deferral) + §2.7.5.1 \
-         (post-proof wire-format shape for new HeapKinds).",
+        "{op}: W17-snapshot-resume surface — this state call cannot \
+         proceed with the provided arguments or remaining unsupported \
+         state surface. Broad object/array/path state.diff and state.patch, \
+         polymorphic state.deserialize, and full resume remain follow-ups. \
+         ADR-006 §2.7.4 + §2.7.5.1.",
     )
 }
 
@@ -435,6 +432,90 @@ fn slot_to_serialized_bytes(slot: &KindedSlot) -> Result<Vec<u8>, String> {
     Ok(bytes)
 }
 
+fn serializable_arm_name(sv: &shape_runtime::snapshot::SerializableVMValue) -> &'static str {
+    use shape_runtime::snapshot::SerializableVMValue as SV;
+    match sv {
+        SV::Int(_) => "Int",
+        SV::Number(_) => "Number",
+        SV::Bool(_) => "Bool",
+        SV::String(_) => "String",
+        SV::None => "None",
+        SV::Unit => "Unit",
+        SV::Array(_) => "Array",
+        SV::TypedObject { .. } => "TypedObject",
+        SV::HashMap { .. } => "HashMap",
+        SV::HeapNode { .. } => "HeapNode",
+        SV::HeapRef { .. } => "HeapRef",
+        _ => "complex",
+    }
+}
+
+fn bytes_from_array_arg(arg: &KindedSlot) -> Result<Vec<u8>, String> {
+    use shape_runtime::snapshot::{slot_to_serializable, SerializableVMValue as SV};
+
+    let store = ephemeral_store()?;
+    let sv = slot_to_serializable(arg.slot().raw(), arg.kind(), &store).map_err(|e| {
+        format!(
+            "state.deserialize: byte-array argument could not be projected \
+             through slot_to_serializable: {e}. ADR-006 §2.7.5.1."
+        )
+    })?;
+
+    let items = match sv {
+        SV::Array(items) => items,
+        other => {
+            return Err(format!(
+                "state.deserialize: expected Array<int> byte argument, got \
+                 SerializableVMValue::{}; no raw-bit restamping is attempted. \
+                 ADR-006 §2.7.5.1.",
+                serializable_arm_name(&other)
+            ));
+        }
+    };
+
+    let mut out = Vec::with_capacity(items.len());
+    for (idx, item) in items.into_iter().enumerate() {
+        let value = match item {
+            SV::Int(value) => value,
+            other => {
+                return Err(format!(
+                    "state.deserialize: bytes[{idx}] was SerializableVMValue::{}, \
+                     expected int 0..=255. ADR-006 §2.7.5.1.",
+                    serializable_arm_name(&other)
+                ));
+            }
+        };
+        let byte = u8::try_from(value).map_err(|_| {
+            format!(
+                "state.deserialize: bytes[{idx}]={value} is outside 0..=255; \
+                 refusing to truncate. ADR-006 §2.7.5.1."
+            )
+        })?;
+        out.push(byte);
+    }
+    Ok(out)
+}
+
+fn scalar_serializable_to_typed_return(
+    sv: shape_runtime::snapshot::SerializableVMValue,
+) -> Result<TypedReturn, String> {
+    use shape_runtime::snapshot::SerializableVMValue as SV;
+    match sv {
+        SV::Int(i) => Ok(TypedReturn::Concrete(ConcreteReturn::I64(i))),
+        SV::Number(n) => Ok(TypedReturn::Concrete(ConcreteReturn::F64(n))),
+        SV::Bool(b) => Ok(TypedReturn::Concrete(ConcreteReturn::Bool(b))),
+        SV::String(s) => Ok(TypedReturn::Concrete(ConcreteReturn::String(s))),
+        other => Err(format!(
+            "state.deserialize: SerializableVMValue::{} is not honestly \
+             projectable at the current `any` return boundary; only Int, \
+             Number, Bool, and String round-trip in this lane. None, arrays, \
+             objects, and heap values remain W17 follow-ups. ADR-006 §2.7.4 \
+             + §2.7.5.1.",
+            serializable_arm_name(&other)
+        )),
+    }
+}
+
 /// `state.hash(value) -> string`
 ///
 /// **W17-state-tier-roundtrip (Phase 2d Wave 3, 2026-05-12).** Wired
@@ -463,63 +544,12 @@ pub(crate) fn state_fn_hash(
     args: &[KindedSlot],
     ctx: &ModuleContext,
 ) -> Result<TypedReturn, String> {
-    use shape_value::{HeapKind, NativeKind};
-
     let Some(arg) = args.first() else {
         return Err(content_surface("state.fn_hash"));
     };
-    // Function values flow as one of:
-    //  - NativeKind::Ptr(HeapKind::Closure) — raw OwnedClosureBlock bits
-    //  - NativeKind::Ptr(HeapKind::FunctionRef) — typed fn handle
-    //  - Inline function-id (Int64-kinded) for bare function references
-    let bits = arg.slot().raw();
-    let function_id = match arg.kind() {
-        NativeKind::Int64 | NativeKind::UInt64 => Some(bits as u16),
-        NativeKind::Ptr(HeapKind::Closure) => {
-            if bits == 0 {
-                None
-            } else {
-                // SAFETY: bits is OwnedClosureBlock::ptr per §2.7.8.
-                let ptr = bits as *const u8;
-                Some(unsafe { shape_value::v2::closure_raw::typed_closure_function_id(ptr) })
-            }
-        }
-        _ => None,
-    };
-    let Some(fid) = function_id else {
-        return Err(format!(
-            "state.fn_hash: W17-snapshot-resume surface — argument is not a \
-             function value (kind={:?}); function-handle decoding for \
-             HeapKind::FunctionRef / TraitObject not yet wired. ADR-006 \
-             §2.7.4.",
-            arg.kind()
-        ));
-    };
-    // Look up the function's content hash via ctx.function_hashes.
-    let Some(hashes) = ctx.function_hashes else {
-        return Err(format!(
-            "state.fn_hash: W17-snapshot-resume surface — \
-             ctx.function_hashes is None at this dispatch surface; \
-             content-addressed metadata not propagated through \
-             invoke_module_fn_id_stub. ADR-006 §2.7.4."
-        ));
-    };
-    let Some(maybe_hash) = hashes.get(fid as usize) else {
-        return Err(format!(
-            "state.fn_hash: function_id {fid} out of range \
-             (program has {} functions). ADR-006 §2.7.4.",
-            hashes.len()
-        ));
-    };
-    let Some(hash_bytes) = maybe_hash else {
-        return Err(format!(
-            "state.fn_hash: W17-snapshot-resume surface — function_id {fid} \
-             has no content-addressed hash entry (compiled without \
-             content-addressed metadata). ADR-006 §2.7.4."
-        ));
-    };
+    let hash = callable_content_hash("state.fn_hash", arg, ctx)?;
     Ok(TypedReturn::Concrete(
-        shape_runtime::typed_module_exports::ConcreteReturn::String(hex::encode(hash_bytes)),
+        shape_runtime::typed_module_exports::ConcreteReturn::String(hash),
     ))
 }
 
@@ -586,11 +616,9 @@ pub(crate) fn state_schema_hash(
 
 /// `state.serialize(value) -> Array<int>`
 ///
-/// **W17-state-tier-roundtrip (Phase 2d Wave 3, 2026-05-12).** The body
-/// computes the bincode-encoded `SerializableVMValue` bytes via the
-/// kind-threaded `slot_to_serializable` API. The `Array<int>` return
-/// shape needs the marshal-return `Bytes` arm follow-up at
-/// `project_typed_return` — body succeeds, marshal surfaces clean.
+/// **Wave-9B scalar state lane (2026-07-09).** The body returns the
+/// bincode-encoded `SerializableVMValue` bytes via the existing
+/// `ConcreteReturn::Bytes` / `Array<int>` marshal surface.
 pub(crate) fn state_serialize(
     args: &[KindedSlot],
     _ctx: &ModuleContext,
@@ -598,56 +626,420 @@ pub(crate) fn state_serialize(
     let Some(arg) = args.first() else {
         return Err(content_surface("state.serialize"));
     };
-    let _bytes = slot_to_serialized_bytes(arg)?;
-    Err(format!(
-        "state.serialize: W17-snapshot-resume surface — body computed \
-         {} bytes via slot_to_serializable but the Array<int>/Bytes return \
-         arm needs the W17-marshal-return-arms follow-up at \
-         project_typed_return. ADR-006 §2.7.4 + §2.7.5.1.",
-        _bytes.len()
-    ))
+    let bytes = slot_to_serialized_bytes(arg)?;
+    Ok(TypedReturn::Concrete(ConcreteReturn::Bytes(bytes)))
 }
 
 /// `state.deserialize(bytes) -> Any`
 ///
-/// **W17-state-tier-roundtrip (Phase 2d Wave 3, 2026-05-12).** Mirror of
-/// `state_serialize`: requires the `Any` return arm (typed-Arc payload
-/// projection — same W17-marshal-return-arms follow-up).
+/// **Wave-9B scalar state lane (2026-07-09).** Decodes the
+/// bincode-encoded `SerializableVMValue` bytes produced by
+/// [`state_serialize`] and projects only scalar/string/bool arms through
+/// existing `ConcreteReturn` leaves. Heap-shaped `any`, arrays, and None
+/// remain surfaced until a true polymorphic return carrier exists.
 pub(crate) fn state_deserialize(
-    _args: &[KindedSlot],
+    args: &[KindedSlot],
     _ctx: &ModuleContext,
 ) -> Result<TypedReturn, String> {
-    Err(content_surface("state.deserialize"))
+    let Some(arg) = args.first() else {
+        return Err(content_surface("state.deserialize"));
+    };
+    let bytes = bytes_from_array_arg(arg)?;
+    let sv = bincode::deserialize(&bytes).map_err(|e| {
+        format!(
+            "state.deserialize: failed to decode SerializableVMValue bytes: \
+             {e}. ADR-006 §2.7.5.1."
+        )
+    })?;
+    scalar_serializable_to_typed_return(sv)
 }
 
 // ===========================================================================
 // Diffing implementations
 // ===========================================================================
 
+const ROOT_DELTA_PATH: &str = "$";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ScalarDeltaKind {
+    Int,
+    Number,
+    Bool,
+    String,
+}
+
+impl ScalarDeltaKind {
+    fn label(self) -> &'static str {
+        match self {
+            ScalarDeltaKind::Int => "int",
+            ScalarDeltaKind::Number => "number",
+            ScalarDeltaKind::Bool => "bool",
+            ScalarDeltaKind::String => "string",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+enum ScalarDeltaValue {
+    Int(i64),
+    Number(f64),
+    Bool(bool),
+    String(String),
+}
+
+impl ScalarDeltaValue {
+    fn kind(&self) -> ScalarDeltaKind {
+        match self {
+            ScalarDeltaValue::Int(_) => ScalarDeltaKind::Int,
+            ScalarDeltaValue::Number(_) => ScalarDeltaKind::Number,
+            ScalarDeltaValue::Bool(_) => ScalarDeltaKind::Bool,
+            ScalarDeltaValue::String(_) => ScalarDeltaKind::String,
+        }
+    }
+}
+
+fn slot_to_i64(slot: &KindedSlot) -> Option<i64> {
+    match slot.kind() {
+        NativeKind::Int64 => Some(slot.raw() as i64),
+        NativeKind::Int32 => Some(slot.raw() as i32 as i64),
+        NativeKind::Int16 => Some(slot.raw() as i16 as i64),
+        NativeKind::Int8 => Some(slot.raw() as i8 as i64),
+        NativeKind::UInt64 => Some(slot.raw() as i64),
+        NativeKind::UInt32 => Some((slot.raw() as u32) as i64),
+        NativeKind::UInt16 => Some((slot.raw() as u16) as i64),
+        NativeKind::UInt8 => Some((slot.raw() as u8) as i64),
+        NativeKind::IntSize => Some(slot.raw() as isize as i64),
+        NativeKind::UIntSize => Some((slot.raw() as usize) as i64),
+        _ => None,
+    }
+}
+
+fn slot_to_f64(slot: &KindedSlot) -> Option<f64> {
+    match slot.kind() {
+        NativeKind::Float64 => Some(f64::from_bits(slot.raw())),
+        NativeKind::Float32 => Some(f64::from(f32::from_bits(slot.raw() as u32))),
+        _ => None,
+    }
+}
+
+fn slot_to_delta_scalar(op: &str, label: &str, slot: &KindedSlot) -> Result<ScalarDeltaValue, String> {
+    if let Some(value) = slot_to_i64(slot) {
+        return Ok(ScalarDeltaValue::Int(value));
+    }
+    if let Some(value) = slot_to_f64(slot) {
+        return Ok(ScalarDeltaValue::Number(value));
+    }
+    if let Some(value) = slot.as_bool() {
+        return Ok(ScalarDeltaValue::Bool(value));
+    }
+    if matches!(
+        slot.kind(),
+        NativeKind::String | NativeKind::StringV2 | NativeKind::Ptr(HeapKind::String)
+    ) {
+        return slot
+            .as_str()
+            .map(|value| ScalarDeltaValue::String(value.to_string()))
+            .ok_or_else(|| {
+                format!(
+                    "{op}: state-diff carrier surface — {label} has string \
+                     kind {:?}, but the string payload could not be borrowed. \
+                     Refusing to reinterpret raw bits. ADR-006 §2.7.5.1.",
+                    slot.kind()
+                )
+            });
+    }
+    Err(format!(
+        "{op}: state-diff carrier surface — {label} has unsupported kind \
+         {:?}. This wave only computes root replacement deltas for \
+         homogeneous int, number, bool, and string values; arrays, maps, \
+         typed objects, and heap-shaped state remain follow-ups. ADR-006 \
+         §2.7.4 + §2.7.5.1.",
+        slot.kind()
+    ))
+}
+
+fn changed_map_slot(
+    kind: ScalarDeltaKind,
+    value: Option<&ScalarDeltaValue>,
+) -> Result<KindedSlot, String> {
+    match kind {
+        ScalarDeltaKind::Int => {
+            let mut data: HashMapData<i64> = HashMapData::new();
+            if let Some(ScalarDeltaValue::Int(value)) = value {
+                unsafe { data.insert(ROOT_DELTA_PATH, *value) };
+            }
+            Ok(KindedSlot::from_hashmap(Arc::new(HashMapKindedRef::I64(
+                Arc::new(data),
+            ))))
+        }
+        ScalarDeltaKind::Number => {
+            let mut data: HashMapData<f64> = HashMapData::new();
+            if let Some(ScalarDeltaValue::Number(value)) = value {
+                unsafe { data.insert(ROOT_DELTA_PATH, *value) };
+            }
+            Ok(KindedSlot::from_hashmap(Arc::new(HashMapKindedRef::F64(
+                Arc::new(data),
+            ))))
+        }
+        ScalarDeltaKind::Bool => {
+            let mut data: HashMapData<u8> = HashMapData::new();
+            if let Some(ScalarDeltaValue::Bool(value)) = value {
+                unsafe { data.insert(ROOT_DELTA_PATH, u8::from(*value)) };
+            }
+            Ok(KindedSlot::from_hashmap(Arc::new(HashMapKindedRef::Bool(
+                Arc::new(data),
+            ))))
+        }
+        ScalarDeltaKind::String => {
+            let mut data: HashMapData<*const StringObj> = HashMapData::new();
+            if let Some(ScalarDeltaValue::String(value)) = value {
+                let value_ptr = StringObj::new(value.as_str()) as *const StringObj;
+                unsafe { data.insert(ROOT_DELTA_PATH, value_ptr) };
+            }
+            Ok(KindedSlot::from_hashmap(Arc::new(
+                HashMapKindedRef::String(Arc::new(data)),
+            )))
+        }
+    }
+}
+
+fn empty_removed_slot() -> KindedSlot {
+    let removed = TypedArray::<*const StringObj>::with_capacity(0);
+    unsafe { stamp_elem_type(removed as *mut u8, ELEM_TYPE_STRING) };
+    KindedSlot::new(
+        ValueSlot::from_raw(removed as usize as u64),
+        NativeKind::Ptr(HeapKind::TypedArray),
+    )
+}
+
+fn delta_typed_return(
+    ctx: &ModuleContext,
+    kind: ScalarDeltaKind,
+    value: Option<&ScalarDeltaValue>,
+) -> Result<TypedReturn, String> {
+    let Some(schema) = ctx.schemas.get("Delta") else {
+        return Err(format!(
+            "state.diff: state-diff carrier surface — schema-backed Delta \
+             construction requires `Delta` in ctx.schemas, but it was not \
+             registered. Refusing to return an anonymous object. ADR-006 \
+             §2.7.4 + §2.7.5.1."
+        ));
+    };
+    let changed = changed_map_slot(kind, value)?;
+    let removed = empty_removed_slot();
+    let mut heap_mask = 0u64;
+    let fields = [changed, removed];
+    let mut slots = Vec::with_capacity(fields.len());
+    let mut field_kinds = Vec::with_capacity(fields.len());
+    for (idx, field) in fields.into_iter().enumerate() {
+        if field.kind().is_refcounted() {
+            heap_mask |= 1u64 << idx;
+        }
+        slots.push(field.slot());
+        field_kinds.push(field.kind());
+        std::mem::forget(field);
+    }
+    let ptr = TypedObjectStorage::_new(
+        schema.id as u64,
+        slots.into_boxed_slice(),
+        heap_mask,
+        Arc::from(field_kinds.into_boxed_slice()),
+    );
+    Ok(TypedReturn::Concrete(ConcreteReturn::OpaqueTypedObject(
+        Arc::new(HeapValue::TypedObject(TypedObjectPtr::new(ptr))),
+    )))
+}
+
+fn scalar_to_return(value: ScalarDeltaValue) -> TypedReturn {
+    match value {
+        ScalarDeltaValue::Int(value) => TypedReturn::Concrete(ConcreteReturn::I64(value)),
+        ScalarDeltaValue::Number(value) => TypedReturn::Concrete(ConcreteReturn::F64(value)),
+        ScalarDeltaValue::Bool(value) => TypedReturn::Concrete(ConcreteReturn::Bool(value)),
+        ScalarDeltaValue::String(value) => TypedReturn::Concrete(ConcreteReturn::String(value)),
+    }
+}
+
+fn delta_storage<'a>(ctx: &ModuleContext, slot: &'a KindedSlot) -> Result<&'a TypedObjectStorage, String> {
+    if slot.kind() != NativeKind::Ptr(HeapKind::TypedObject) || slot.raw() == 0 {
+        return Err(format!(
+            "state.patch: state-diff carrier surface — delta argument must \
+             be a schema-backed Delta typed object, got kind {:?}. ADR-006 \
+             §2.7.4 + §2.7.5.1.",
+            slot.kind()
+        ));
+    }
+    let storage = slot.as_typed_object_storage().ok_or_else(|| {
+        "state.patch: state-diff carrier surface — delta typed-object bits \
+         could not be borrowed as TypedObjectStorage. Refusing raw-pointer \
+         reinterpretation. ADR-006 §2.7.5.1."
+            .to_string()
+    })?;
+    let Some(schema) = ctx.schemas.get("Delta") else {
+        return Err(format!(
+            "state.patch: state-diff carrier surface — schema-backed Delta \
+             parsing requires `Delta` in ctx.schemas. ADR-006 §2.7.4."
+        ));
+    };
+    if storage.schema_id != schema.id as u64 {
+        return Err(format!(
+            "state.patch: state-diff carrier surface — delta object schema_id \
+             {} does not match registered Delta schema_id {}. ADR-006 \
+             §2.7.4.",
+            storage.schema_id, schema.id
+        ));
+    }
+    Ok(storage)
+}
+
+fn removed_is_empty(delta: &TypedObjectStorage) -> Result<bool, String> {
+    if delta.field_kinds.get(1) != Some(&NativeKind::Ptr(HeapKind::TypedArray)) {
+        return Err(format!(
+            "state.patch: state-diff carrier surface — Delta.removed must be \
+             Array<string>, got {:?}. Removed-path patching is not in this \
+             wave. ADR-006 §2.7.4.",
+            delta.field_kinds.get(1)
+        ));
+    }
+    let removed = delta.slots()[1].raw() as *const TypedArray<*const StringObj>;
+    if removed.is_null() {
+        return Err(
+            "state.patch: state-diff carrier surface — Delta.removed was a null typed array."
+                .to_string(),
+        );
+    }
+    Ok(unsafe { TypedArray::len(removed) } == 0)
+}
+
+fn root_change_from_map(changed: &HashMapKindedRef) -> Result<Option<ScalarDeltaValue>, String> {
+    if changed.is_empty() {
+        return Ok(None);
+    }
+    if changed.len() != 1 || !changed.contains_key(ROOT_DELTA_PATH) {
+        return Err(format!(
+            "state.patch: state-diff carrier surface — this wave only applies \
+             root replacement deltas at path `{ROOT_DELTA_PATH}`; field, map, \
+             array, removed-path, and multi-path deltas remain follow-ups. \
+             ADR-006 §2.7.4 + §2.7.5.1."
+        ));
+    }
+    match changed {
+        HashMapKindedRef::I64(data) => {
+            let idx = data.get_index(ROOT_DELTA_PATH).expect("contains_key checked");
+            Ok(Some(ScalarDeltaValue::Int(unsafe {
+                data.value_at_raw(idx)
+            })))
+        }
+        HashMapKindedRef::F64(data) => {
+            let idx = data.get_index(ROOT_DELTA_PATH).expect("contains_key checked");
+            Ok(Some(ScalarDeltaValue::Number(unsafe {
+                data.value_at_raw(idx)
+            })))
+        }
+        HashMapKindedRef::Bool(data) => {
+            let idx = data.get_index(ROOT_DELTA_PATH).expect("contains_key checked");
+            let raw = unsafe { data.value_at_raw(idx) };
+            match raw {
+                0 => Ok(Some(ScalarDeltaValue::Bool(false))),
+                1 => Ok(Some(ScalarDeltaValue::Bool(true))),
+                other => Err(format!(
+                    "state.patch: state-diff carrier surface — bool delta \
+                     root value must be encoded as 0 or 1, got {other}. \
+                     ADR-006 §2.7.5.1."
+                )),
+            }
+        }
+        HashMapKindedRef::String(data) => {
+            let idx = data.get_index(ROOT_DELTA_PATH).expect("contains_key checked");
+            let ptr = unsafe { data.value_at_raw(idx) };
+            let value = unsafe { StringObj::as_str(ptr) }.to_string();
+            Ok(Some(ScalarDeltaValue::String(value)))
+        }
+        other => Err(format!(
+            "state.patch: state-diff carrier surface — Delta.changed carries \
+             unsupported value kind {:?}. This wave only applies int, number, \
+             bool, and string root replacements. ADR-006 §2.7.4.",
+            other.values_kind()
+        )),
+    }
+}
+
+fn delta_root_change(delta: &TypedObjectStorage) -> Result<Option<ScalarDeltaValue>, String> {
+    if !removed_is_empty(delta)? {
+        return Err(format!(
+            "state.patch: state-diff carrier surface — Delta.removed is \
+             non-empty. Removed-path patching is not in this wave. ADR-006 \
+             §2.7.4."
+        ));
+    }
+    if delta.field_kinds.first() != Some(&NativeKind::Ptr(HeapKind::HashMap)) {
+        return Err(format!(
+            "state.patch: state-diff carrier surface — Delta.changed must be \
+             a kinded HashMap carrier, got {:?}. ADR-006 §2.7.4.",
+            delta.field_kinds.first()
+        ));
+    }
+    let changed = delta.slots()[0].raw() as *const HashMapKindedRef;
+    if changed.is_null() {
+        return Err(
+            "state.patch: state-diff carrier surface — Delta.changed was a null HashMap."
+                .to_string(),
+        );
+    }
+    root_change_from_map(unsafe { &*changed })
+}
+
 /// `state.diff(old, new) -> Delta`
 ///
-/// **W17-state-tier-roundtrip surface-and-stop — see ADR-006 §2.7.4.**
-/// `state_diff` depends on the deleted 1486-LoC `state_diff` runtime
-/// module (`crates/shape-runtime/src/state_diff.rs` pre-bulldozer) whose
-/// kind-threaded rebuild is its own substantial workstream — out of
-/// W17-state-tier-roundtrip's scope. Surfaces clean.
+/// Wave-26A implements the first real Delta carrier: homogeneous scalar/string
+/// root replacement. `Delta.changed["$"]` carries the new value, and
+/// `Delta.removed` is empty. Object/array/map/path deltas surface honestly.
 pub(crate) fn state_diff(
-    _args: &[KindedSlot],
-    _ctx: &ModuleContext,
+    args: &[KindedSlot],
+    ctx: &ModuleContext,
 ) -> Result<TypedReturn, String> {
-    Err(content_surface("state.diff"))
+    let [old, new] = args else {
+        return Err(content_surface("state.diff"));
+    };
+    let old_value = slot_to_delta_scalar("state.diff", "old", old)?;
+    let new_value = slot_to_delta_scalar("state.diff", "new", new)?;
+    if old_value.kind() != new_value.kind() {
+        return Err(format!(
+            "state.diff: state-diff carrier surface — old projects as {}, \
+             but new projects as {}. Delta<T> root replacement in this wave \
+             requires one homogeneous scalar/string T; no Any box is \
+             fabricated. ADR-006 §2.7.4.",
+            old_value.kind().label(),
+            new_value.kind().label()
+        ));
+    }
+    let replacement = if old_value == new_value {
+        None
+    } else {
+        Some(&new_value)
+    };
+    delta_typed_return(ctx, old_value.kind(), replacement)
 }
 
 /// `state.patch(base, delta) -> Any`
 ///
-/// **W17-state-tier-roundtrip surface-and-stop — see ADR-006 §2.7.4.**
-/// Same dependency on the deleted `state_diff` module as
-/// `state_diff`. Surfaces clean.
+/// Applies Wave-26A's bounded root-replacement Delta. Empty deltas return the
+/// supported scalar/string base value unchanged.
 pub(crate) fn state_patch(
-    _args: &[KindedSlot],
-    _ctx: &ModuleContext,
+    args: &[KindedSlot],
+    ctx: &ModuleContext,
 ) -> Result<TypedReturn, String> {
-    Err(content_surface("state.patch"))
+    let [base, delta] = args else {
+        return Err(content_surface("state.patch"));
+    };
+    let delta = delta_storage(ctx, delta)?;
+    match delta_root_change(delta)? {
+        Some(value) => Ok(scalar_to_return(value)),
+        None => Ok(scalar_to_return(slot_to_delta_scalar(
+            "state.patch",
+            "base",
+            base,
+        )?)),
+    }
 }
 
 #[cfg(test)]
@@ -667,15 +1059,10 @@ mod tests {
             .unwrap_or_else(|| panic!("schema '{}' not found", name))
     }
 
-    /// Schema metadata is exercisable independent of the Phase-2c
-    /// body rebuild — `create_state_module` registers the schemas in
-    /// the type registry and the per-function bodies are unreachable
-    /// from this assertion path.
     #[test]
     fn test_state_schemas_have_concrete_field_types() {
         let module = create_state_module();
 
-        // --- FunctionRef: both fields should be String ---
         let func_ref = find_schema(&module, "FunctionRef");
         assert_eq!(
             func_ref.get_field("name").unwrap().field_type,
@@ -686,7 +1073,6 @@ mod tests {
             FieldType::String
         );
 
-        // --- FrameState: 3 typed, 3 dynamic ---
         let frame = find_schema(&module, "FrameState");
         assert_eq!(
             frame.get_field("function_name").unwrap().field_type,
@@ -698,16 +1084,18 @@ mod tests {
         );
         assert_eq!(frame.get_field("ip").unwrap().field_type, FieldType::I64);
         assert_eq!(
-            frame.get_field("locals").unwrap().field_type,
-            FieldType::Any
+            frame.get_field("arg_count").unwrap().field_type,
+            FieldType::I64
         );
-        assert_eq!(frame.get_field("args").unwrap().field_type, FieldType::Any);
         assert_eq!(
-            frame.get_field("upvalues").unwrap().field_type,
-            FieldType::Any
+            frame.get_field("local_count").unwrap().field_type,
+            FieldType::I64
+        );
+        assert_eq!(
+            frame.get_field("upvalue_count").unwrap().field_type,
+            FieldType::I64
         );
 
-        // --- VmState: 1 typed, 2 dynamic ---
         let vm_state = find_schema(&module, "VmState");
         assert_eq!(
             vm_state.get_field("instruction_count").unwrap().field_type,
@@ -715,21 +1103,22 @@ mod tests {
         );
         assert_eq!(
             vm_state.get_field("frames").unwrap().field_type,
-            FieldType::Any
+            FieldType::Array(Box::new(FieldType::Object("FrameState".to_string())))
         );
         assert_eq!(
             vm_state.get_field("module_bindings").unwrap().field_type,
-            FieldType::Any
+            FieldType::HashMap {
+                key: Box::new(FieldType::String),
+                value: Box::new(FieldType::Any),
+            }
         );
 
-        // --- ModuleState: all dynamic ---
         let mod_state = find_schema(&module, "ModuleState");
         assert_eq!(
             mod_state.get_field("bindings").unwrap().field_type,
             FieldType::Any
         );
 
-        // --- CallPayload: 1 typed, 1 dynamic ---
         let call = find_schema(&module, "CallPayload");
         assert_eq!(
             call.get_field("hash").unwrap().field_type,

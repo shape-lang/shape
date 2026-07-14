@@ -127,7 +127,8 @@ print(p.product())
 
 #[test]
 fn comptime_post_with_annotation_param_in_method() {
-    // TDD: comptime post handlers with annotation params error "too many annotation arguments"
+    // Annotation arguments are available to the handler without breaking
+    // ordinary generated methods.
     ShapeTest::new(
         r#"
 annotation add_label(label_text) {
@@ -150,9 +151,9 @@ print(i.label())
     .expect_output("widget");
 }
 
-// TDD: set param directive not yet implemented (known bug ct_45)
 #[test]
 fn comptime_post_set_param_default() {
+    // The call omits `y`, proving the directive-installed default is used.
     ShapeTest::new(
         r#"
 annotation default_y(val) {
@@ -167,11 +168,11 @@ fn add(x: int, y: int) -> int {
   x + y
 }
 
-print(add(5, 3))
+print(add(5))
 "#,
     )
     .expect_run_ok()
-    .expect_output_contains("8");
+    .expect_output("15");
 }
 
 #[test]

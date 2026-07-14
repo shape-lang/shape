@@ -1353,6 +1353,13 @@ fn typed_object_wrapper_metadata(wrapper: FrameReturnWrapper) -> FrameReturnMeta
     }
 }
 
+fn future_return_metadata() -> FrameReturnMetadata {
+    FrameReturnMetadata {
+        return_kind: Some(shape_value::NativeKind::Ptr(shape_value::HeapKind::Future)),
+        wrapper: FrameReturnWrapper::Plain,
+    }
+}
+
 /// Classify return metadata directly off the `TypeAnnotation` AST.
 /// Resolved concrete types provide the ABI kind for scalars and structs;
 /// a head-only fallback preserves Option/Result wrapper metadata even
@@ -1361,6 +1368,17 @@ fn classify_type_annotation_metadata(
     compiler: &BytecodeCompiler,
     return_type: &shape_ast::ast::TypeAnnotation,
 ) -> FrameReturnMetadata {
+    // `Future<T>` is an inline scheduler-id ABI carrier, not a v2
+    // `ConcreteType`. Its declaration is still sufficient proof to stamp the
+    // exact return carrier consumed by the remote host boundary.
+    if matches!(
+        return_type,
+        shape_ast::ast::TypeAnnotation::Generic { name, args }
+            if name.as_str() == "Future" && args.len() == 1
+    ) {
+        return future_return_metadata();
+    }
+
     if let Some(concrete) =
         crate::compiler::monomorphization::type_resolution::declared_annotation_concrete_type(
             compiler,
@@ -3859,7 +3877,31 @@ impl BytecodeCompiler {
         let arity = func.arity as usize;
         let proven_params: Option<Vec<StorageHint>> = if arity > 0 && proven_hints.is_none() {
             (0..arity.min(func.locals_count as usize))
-                .map(|slot| self.type_tracker.get_local_storage_hint(slot as u16))
+                .map(|slot| {
+                    self.type_tracker.get_local_storage_hint(slot as u16).or_else(|| {
+                        let annotation = func_def?
+                            .params
+                            .get(slot)?
+                            .type_annotation
+                            .as_ref()?;
+                        let concrete = crate::compiler::monomorphization::type_resolution::declared_annotation_concrete_type(
+                            self, annotation,
+                        )?;
+
+                        // `native_kind_from_concrete_type` is deliberately
+                        // total only for concrete value carriers. A void
+                        // annotation has no parameter ABI value to describe.
+                        if matches!(concrete, shape_value::v2::ConcreteType::Void) {
+                            None
+                        } else {
+                            Some(
+                                shape_value::v2::closure_layout::native_kind_from_concrete_type(
+                                    &concrete,
+                                ),
+                            )
+                        }
+                    })
+                })
                 .collect()
         } else {
             None
@@ -8337,6 +8379,44 @@ mod frame_return_metadata_tests {
         assert_eq!(frame.return_kind, Some(NativeKind::Int64));
         assert_eq!(frame.return_wrapper, FrameReturnWrapper::Plain);
         assert_eq!(frame.effective_return_wrapper(), FrameReturnWrapper::Plain);
+    }
+
+    #[test]
+    fn future_return_stamps_future_abi_carrier() {
+        let program = compile(
+            r#"
+            async fn future_value() -> Future<int> {
+                async let value = 42
+                value
+            }
+            "#,
+        );
+        let frame = frame_for(&program, "future_value");
+
+        assert_eq!(frame.return_kind, Some(NativeKind::Ptr(HeapKind::Future)));
+        assert_eq!(frame.return_wrapper, FrameReturnWrapper::Plain);
+    }
+
+    #[test]
+    fn runtime_before_hook_impl_stamps_declared_typed_array_parameter_prefix() {
+        let program = compile(
+            r#"
+            annotation preserve_args() {
+              targets: [function]
+              before(args, ctx) {
+                args
+              }
+            }
+
+            @preserve_args()
+            fn compute(data: Array<int>) -> Array<int> {
+              data
+            }
+            "#,
+        );
+        let frame = frame_for(&program, "compute___impl");
+
+        assert_eq!(frame.slots, vec![NativeKind::Ptr(HeapKind::TypedArray)],);
     }
 }
 

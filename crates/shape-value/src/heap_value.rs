@@ -533,7 +533,12 @@ impl IoHandleData {
 pub enum MiriSlotProvenance {
     None,
     String(*const String),
+    TypedArray(*mut u8),
     TypedObject(*const TypedObjectStorage),
+    TraitObject(*const TraitObjectStorage),
+    HashMap(*const HashMapKindedRef),
+    SharedCell(*const crate::v2::closure_layout::SharedCell),
+    Reference(*const crate::reference::RefTarget),
 }
 
 #[cfg(miri)]
@@ -4202,6 +4207,79 @@ impl TypedObjectStorage {
         }
     }
 
+    #[inline]
+    unsafe fn release_typed_array_field(&self, idx: usize, bits: u64) {
+        #[cfg(not(miri))]
+        let _ = idx;
+        #[cfg(miri)]
+        let _ = bits;
+        #[cfg(miri)]
+        match self.field_provenance.get(idx).copied() {
+            Some(MiriSlotProvenance::TypedArray(ptr)) if !ptr.is_null() => {
+                unsafe { crate::v2::typed_array::release_v2_typed_array(ptr) };
+            }
+            _ => {
+                panic!(
+                    "TypedObjectStorage::drop_fields: missing Miri provenance for TypedArray field {}",
+                    idx
+                );
+            }
+        }
+        #[cfg(not(miri))]
+        {
+            unsafe { crate::v2::typed_array::release_v2_typed_array(bits as *mut u8) };
+        }
+    }
+
+    #[inline]
+    unsafe fn release_trait_object_field(&self, idx: usize, bits: u64) {
+        use crate::v2::heap_element::HeapElement;
+        #[cfg(not(miri))]
+        let _ = idx;
+        #[cfg(miri)]
+        let _ = bits;
+        #[cfg(miri)]
+        match self.field_provenance.get(idx).copied() {
+            Some(MiriSlotProvenance::TraitObject(ptr)) if !ptr.is_null() => {
+                unsafe { TraitObjectStorage::release_elem(ptr) };
+            }
+            _ => {
+                panic!(
+                    "TypedObjectStorage::drop_fields: missing Miri provenance for TraitObject field {}",
+                    idx
+                );
+            }
+        }
+        #[cfg(not(miri))]
+        {
+            unsafe { TraitObjectStorage::release_elem(bits as *const TraitObjectStorage) };
+        }
+    }
+
+    #[inline]
+    unsafe fn release_hashmap_field(&self, idx: usize, bits: u64) {
+        #[cfg(not(miri))]
+        let _ = idx;
+        #[cfg(miri)]
+        let _ = bits;
+        #[cfg(miri)]
+        match self.field_provenance.get(idx).copied() {
+            Some(MiriSlotProvenance::HashMap(ptr)) if !ptr.is_null() => {
+                unsafe { std::sync::Arc::decrement_strong_count(ptr) };
+            }
+            _ => {
+                panic!(
+                    "TypedObjectStorage::drop_fields: missing Miri provenance for HashMap field {}",
+                    idx
+                );
+            }
+        }
+        #[cfg(not(miri))]
+        {
+            unsafe { std::sync::Arc::decrement_strong_count(bits as *const HashMapKindedRef) };
+        }
+    }
+
     /// Wave 2 Agent D1 (2026-05-14): v2-raw raw-pointer allocator.
     ///
     /// Allocates a new `TypedObjectStorage` on the heap and returns a raw
@@ -4531,7 +4609,7 @@ impl TypedObjectStorage {
                     // `TypedObject` field arm below (4-table lockstep,
                     // ADR-006 §2.3 / §2.7.7).
                     HeapKind::TypedArray => {
-                        crate::v2::typed_array::release_v2_typed_array(bits as *mut u8);
+                        self.release_typed_array_field(i, bits);
                     }
                     // Wave 2 Agent D4 ckpt-2 (ADR-006 §2.3 / §2.7.5
                     // amendment, 2026-05-14): a `TypedObject` field of
@@ -4557,7 +4635,7 @@ impl TypedObjectStorage {
                         // shape. Release dispatches outer Arc decrement;
                         // enum Drop chains to per-V `Arc<HashMapData<V>>`
                         // release.
-                        std::sync::Arc::decrement_strong_count(bits as *const HashMapKindedRef);
+                        self.release_hashmap_field(i, bits);
                     }
                     HeapKind::HashSet => {
                         std::sync::Arc::decrement_strong_count(bits as *const HashSetData);
@@ -4584,8 +4662,7 @@ impl TypedObjectStorage {
                     // `impl HeapElement for TraitObjectStorage`).
                     // Mirror of the TypedObject arm above.
                     HeapKind::TraitObject => {
-                        use crate::v2::heap_element::HeapElement;
-                        TraitObjectStorage::release_elem(bits as *const TraitObjectStorage);
+                        self.release_trait_object_field(i, bits);
                     }
                     HeapKind::Decimal => {
                         std::sync::Arc::decrement_strong_count(
@@ -4814,6 +4891,33 @@ impl TypedObjectStorage {
             *slot_ptr = crate::slot::ValueSlot::from_raw(new_bits);
             prior
         }
+    }
+
+    /// Miri-only companion to [`Self::write_slot_in_place`] that updates the
+    /// provenance sidecar for the newly installed heap slot while preserving
+    /// the production `(u64, NativeKind)` storage ABI.
+    #[cfg(miri)]
+    #[inline]
+    pub unsafe fn write_slot_in_place_with_miri_provenance(
+        this: *mut Self,
+        idx: usize,
+        new_bits: u64,
+        new_provenance: MiriSlotProvenance,
+    ) -> u64 {
+        let prior = unsafe { Self::write_slot_in_place(this, idx, new_bits) };
+        unsafe {
+            let provenance_ptr: *mut [MiriSlotProvenance] = &raw mut *(*this).field_provenance;
+            debug_assert!(
+                idx < provenance_ptr.len(),
+                "TypedObjectStorage::write_slot_in_place_with_miri_provenance: \
+                 idx {} out of bounds (field_provenance.len = {})",
+                idx,
+                provenance_ptr.len(),
+            );
+            let cell_ptr = (provenance_ptr as *mut MiriSlotProvenance).add(idx);
+            *cell_ptr = new_provenance;
+        }
+        prior
     }
 }
 
@@ -6022,6 +6126,263 @@ mod typed_object_storage_drop {
                 v2_get_refcount(&(*inner_ptr).header),
                 1,
                 "dropping outer storage releases the original field share"
+            );
+
+            TypedObjectStorage::release_elem(inner_ptr);
+        }
+    }
+
+    /// Miri-only mutation probe for the raw in-place writer.
+    ///
+    /// This drives the same `write_slot_in_place` storage primitive used by
+    /// VM/JIT field mutation, but with the Miri sidecar updated in lockstep.
+    /// The old field share is released by the caller, the new field share is
+    /// released by the outer object drop, and the field kind / heap mask stay
+    /// invariant across the overwrite.
+    #[cfg(miri)]
+    #[test]
+    fn miri_write_slot_in_place_replaces_typed_object_field_and_preserves_metadata() {
+        use crate::v2::heap_element::HeapElement;
+        use crate::v2::refcount::{v2_get_refcount, v2_retain};
+
+        unsafe {
+            let leaf_kinds: Arc<[NativeKind]> = Arc::from(vec![NativeKind::Int64]);
+            let old_ptr = TypedObjectStorage::_new(
+                2401,
+                vec![ValueSlot::from_int(11)].into_boxed_slice(),
+                0,
+                Arc::clone(&leaf_kinds),
+            );
+            let new_ptr = TypedObjectStorage::_new(
+                2402,
+                vec![ValueSlot::from_int(22)].into_boxed_slice(),
+                0,
+                leaf_kinds,
+            );
+            v2_retain(&(*old_ptr).header);
+            v2_retain(&(*new_ptr).header);
+            assert_eq!(v2_get_refcount(&(*old_ptr).header), 2);
+            assert_eq!(v2_get_refcount(&(*new_ptr).header), 2);
+
+            let outer_kinds: Arc<[NativeKind]> =
+                Arc::from(vec![NativeKind::Ptr(HeapKind::TypedObject)]);
+            let outer_ptr = TypedObjectStorage::_new_with_miri_field_provenance(
+                2403,
+                vec![ValueSlot::from_typed_object_raw(old_ptr)].into_boxed_slice(),
+                0b1,
+                outer_kinds,
+                vec![MiriSlotProvenance::TypedObject(old_ptr)].into_boxed_slice(),
+            );
+            assert_eq!(
+                (&(*outer_ptr).field_kinds)[0],
+                NativeKind::Ptr(HeapKind::TypedObject)
+            );
+            assert_eq!((*outer_ptr).heap_mask, 0b1);
+
+            let prior = TypedObjectStorage::write_slot_in_place_with_miri_provenance(
+                outer_ptr,
+                0,
+                new_ptr as u64,
+                MiriSlotProvenance::TypedObject(new_ptr),
+            );
+            assert_eq!(prior, old_ptr as u64);
+            assert_eq!(
+                (&(*outer_ptr).field_kinds)[0],
+                NativeKind::Ptr(HeapKind::TypedObject),
+                "field kind remains schema-stamped across in-place mutation"
+            );
+            assert_eq!(
+                (*outer_ptr).heap_mask,
+                0b1,
+                "heap mask remains set for the heap-backed field"
+            );
+
+            TypedObjectStorage::release_elem(old_ptr);
+            assert_eq!(
+                v2_get_refcount(&(*old_ptr).header),
+                1,
+                "caller releases the overwritten field share"
+            );
+
+            let cloned = (*outer_ptr)
+                .clone_field_kinded(0)
+                .expect("mutated typed-object field should clone");
+            assert_eq!(
+                cloned
+                    .as_typed_object_storage()
+                    .expect("clone keeps new typed-object provenance")
+                    .schema_id,
+                2402
+            );
+            assert_eq!(
+                v2_get_refcount(&(*new_ptr).header),
+                3,
+                "clone_field_kinded retained the newly installed share"
+            );
+            drop(cloned);
+            assert_eq!(v2_get_refcount(&(*new_ptr).header), 2);
+
+            TypedObjectStorage::release_elem(outer_ptr);
+            assert_eq!(
+                v2_get_refcount(&(*new_ptr).header),
+                1,
+                "dropping outer storage releases the new field share"
+            );
+
+            TypedObjectStorage::release_elem(old_ptr);
+            TypedObjectStorage::release_elem(new_ptr);
+        }
+    }
+
+    /// Miri-only TypedArray carrier probe.
+    ///
+    /// This covers the `Ptr(HeapKind::TypedArray)` field carrier through the
+    /// same sidecar path used by TypedObject fields:
+    /// `_new_with_miri_field_provenance` -> `clone_field_kinded` ->
+    /// `KindedSlot::Clone` / `Drop`, plus outer `drop_fields` releasing the
+    /// original field share. It intentionally uses a scalar `TypedArray<i64>`
+    /// so the probe is about the array carrier refcount, not per-element heap
+    /// children.
+    #[cfg(miri)]
+    #[test]
+    fn miri_typed_array_field_clone_and_drop() {
+        use crate::v2::refcount::{v2_get_refcount, v2_retain};
+        use crate::v2::typed_array::{
+            ELEM_TYPE_I64, TypedArray, release_v2_typed_array, stamp_elem_type,
+        };
+
+        unsafe {
+            let arr = TypedArray::<i64>::from_slice(&[10, 20, 30]);
+            stamp_elem_type(arr as *mut u8, ELEM_TYPE_I64);
+            v2_retain(&(*arr).header);
+            assert_eq!(
+                v2_get_refcount(&(*arr).header),
+                2,
+                "array has one field-owned share plus one witness share"
+            );
+
+            let outer_kinds: Arc<[NativeKind]> =
+                Arc::from(vec![NativeKind::Ptr(HeapKind::TypedArray)]);
+            let outer_ptr = TypedObjectStorage::_new_with_miri_field_provenance(
+                301,
+                vec![ValueSlot::from_raw(arr as u64)].into_boxed_slice(),
+                0b1,
+                outer_kinds,
+                vec![MiriSlotProvenance::TypedArray(arr as *mut u8)].into_boxed_slice(),
+            );
+
+            let cloned = {
+                let outer_ref = &*outer_ptr;
+                outer_ref
+                    .clone_field_kinded(0)
+                    .expect("typed-array field should clone")
+            };
+            assert_eq!(cloned.kind(), NativeKind::Ptr(HeapKind::TypedArray));
+            assert_eq!(
+                v2_get_refcount(&(*arr).header),
+                3,
+                "clone_field_kinded retained the typed-array share"
+            );
+            assert_eq!(TypedArray::<i64>::as_slice(arr), &[10, 20, 30]);
+
+            drop(cloned);
+            assert_eq!(
+                v2_get_refcount(&(*arr).header),
+                2,
+                "dropping the cloned slot releases its retained array share"
+            );
+
+            use crate::v2::heap_element::HeapElement;
+            TypedObjectStorage::release_elem(outer_ptr);
+            assert_eq!(
+                v2_get_refcount(&(*arr).header),
+                1,
+                "dropping outer storage releases the original field share"
+            );
+
+            release_v2_typed_array(arr as *mut u8);
+        }
+    }
+
+    /// Miri-only TraitObject raw-carrier probe.
+    ///
+    /// The raw `TraitObjectStorage` carrier owns an inner `TypedObjectStorage`
+    /// share and an `Arc<VTable>` share. This test covers
+    /// `KindedSlot::from_trait_object_raw` -> `KindedSlot::Clone` / `Drop`,
+    /// and verifies the final carrier release retires the inner typed-object
+    /// and vtable shares.
+    #[cfg(miri)]
+    #[test]
+    fn miri_trait_object_raw_carrier_clone_and_drop() {
+        use crate::kinded_slot::KindedSlot;
+        use crate::v2::heap_element::HeapElement;
+        use crate::v2::refcount::{v2_get_refcount, v2_retain};
+        use crate::value::{VTable, VTableEntry};
+        use std::collections::HashMap;
+
+        unsafe {
+            let inner_kinds: Arc<[NativeKind]> = Arc::from(vec![NativeKind::Int64]);
+            let inner_ptr = TypedObjectStorage::_new(
+                302,
+                vec![ValueSlot::from_int(44)].into_boxed_slice(),
+                0,
+                inner_kinds,
+            );
+            v2_retain(&(*inner_ptr).header);
+            assert_eq!(
+                v2_get_refcount(&(*inner_ptr).header),
+                2,
+                "inner has one trait-object-owned share plus one witness share"
+            );
+
+            let mut methods = HashMap::new();
+            methods.insert("id".to_string(), VTableEntry::Direct { function_id: 7 });
+            let vtable = Arc::new(VTable {
+                trait_names: vec!["ProbeTrait".to_string()],
+                concrete_type_id: 302,
+                methods,
+            });
+            let vtable_weak = Arc::downgrade(&vtable);
+            let trait_ptr = TraitObjectStorage::_new(inner_ptr, vtable);
+            assert_eq!(
+                v2_get_refcount(&(*trait_ptr).header),
+                1,
+                "slot will own the raw trait-object carrier share"
+            );
+            assert_eq!(vtable_weak.strong_count(), 1);
+
+            let slot = KindedSlot::from_trait_object_raw(trait_ptr);
+            let cloned = slot.clone();
+            assert_eq!(
+                v2_get_refcount(&(*trait_ptr).header),
+                2,
+                "KindedSlot::clone retained the raw trait-object carrier"
+            );
+            assert_eq!((*trait_ptr).value, inner_ptr);
+            assert!((*trait_ptr).method("id").is_some());
+
+            drop(cloned);
+            assert_eq!(
+                v2_get_refcount(&(*trait_ptr).header),
+                1,
+                "dropping the cloned slot releases only the clone share"
+            );
+            assert_eq!(
+                v2_get_refcount(&(*inner_ptr).header),
+                2,
+                "inner share is not released until the outer carrier reaches zero"
+            );
+
+            drop(slot);
+            assert_eq!(
+                v2_get_refcount(&(*inner_ptr).header),
+                1,
+                "final trait-object drop released the inner typed-object share"
+            );
+            assert_eq!(
+                vtable_weak.strong_count(),
+                0,
+                "final trait-object drop released the vtable share"
             );
 
             TypedObjectStorage::release_elem(inner_ptr);

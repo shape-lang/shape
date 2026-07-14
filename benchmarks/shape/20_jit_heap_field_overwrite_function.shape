@@ -1,0 +1,31 @@
+// JIT GC barrier probe: function-local heap field overwrite.
+//
+// Each call allocates a typed holder, overwrites its heap field once, and
+// returns a scalar. This keeps the heap mutation in a small function so the
+// current loop-level move-then-read JIT deopt does not mask the barrier path.
+type FunctionLeaf {
+    value: int
+}
+
+type FunctionHolder {
+    child: FunctionLeaf,
+    payload: int
+}
+
+function overwrite_child(value: int) -> int {
+    let mut holder = FunctionHolder {
+        child: FunctionLeaf { value: 0 },
+        payload: 1
+    }
+    holder.child = FunctionLeaf { value: value }
+    return value
+}
+
+var checksum = 0
+var i = 0
+while i < 5000000 {
+    checksum = checksum + overwrite_child(i)
+    i = i + 1
+}
+
+print(checksum)

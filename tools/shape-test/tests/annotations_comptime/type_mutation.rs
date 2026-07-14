@@ -260,6 +260,83 @@ print(answer())
 }
 
 #[test]
+fn target_params_and_return_expose_type_refs() {
+    ShapeTest::new(
+        r#"
+annotation assert_signature_refs() {
+  targets: [function]
+  comptime post(target, ctx) {
+    if target.params[0].type_ref.kind != "String" {
+      error(f"expected string param TypeRef, got {target.params[0].type_ref.kind}")
+    }
+    if target.return_type_ref.source != "string" {
+      error(f"expected string return TypeRef, got {target.return_type_ref.source}")
+    }
+  }
+}
+
+@assert_signature_refs()
+fn echo(value: string) -> string {
+  value
+}
+
+print(echo("ok"))
+"#,
+    )
+    .expect_run_ok()
+    .expect_output("ok");
+}
+
+#[test]
+fn set_return_accepts_type_ref_expression() {
+    ShapeTest::new(
+        r#"
+annotation return_like_first_param() {
+  targets: [function]
+  comptime post(target, ctx) {
+    set return (target.params[0].type_ref)
+  }
+}
+
+@return_like_first_param()
+fn echo(value: string) {
+  value
+}
+
+print(echo("typed"))
+"#,
+    )
+    .expect_run_ok()
+    .expect_output("typed");
+}
+
+#[test]
+fn set_param_type_accepts_type_ref_expression() {
+    ShapeTest::new(
+        r#"
+annotation first_param_like_second() {
+  targets: [function]
+  comptime post(target, ctx) {
+    if target.params[1].type != "string" {
+      error(f"legacy param type string changed: {target.params[1].type}")
+    }
+    set param left: (target.params[1].type_ref)
+  }
+}
+
+@first_param_like_second()
+fn join(left, right: string) -> string {
+  left + right
+}
+
+print(join("type", "ref"))
+"#,
+    )
+    .expect_run_ok()
+    .expect_output("typeref");
+}
+
+#[test]
 fn duplicate_annotation_application_is_compile_error() {
     // Q47 / §4.1.1: applying the same annotation twice to one target is a v1
     // compile error naming both application sites.

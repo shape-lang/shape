@@ -213,7 +213,10 @@ impl JITCompiler {
 
             // TypedObject allocation + field store
             typed_object_alloc: r!("jit_typed_object_alloc"),
+            typed_object_get_field: r!("jit_typed_object_get_field"),
             typed_object_set_field: r!("jit_typed_object_set_field"),
+            schema_option_some: r!("jit_schema_option_some"),
+            schema_option_none: r!("jit_schema_option_none"),
 
             // Wave-7 Phase C — GC write-barrier (inline typed-field store).
             #[cfg(feature = "gc")]
@@ -296,14 +299,13 @@ impl JITCompiler {
 
             // W88A: Result/Option producer refs remain as fail-closed
             // backstops only; MIR EnumStore deopts before emitting them until
-            // a schema-backed `__Result` / `__Option` TypedObject ABI exists.
+            // a schema-backed `__Result` TypedObject ABI exists. Option uses
+            // `jit_schema_option_*`.
             // The match-codegen consumers below still read legacy carriers
             // for compatibility. The legacy `make_ok` / `make_err` /
             // `make_some` NaN-box family is not imported into `FFIFuncRefs`.
             v2_make_result_ok: r!("jit_v2_make_result_ok"),
             v2_make_result_err: r!("jit_v2_make_result_err"),
-            v2_make_option_some: r!("jit_v2_make_option_some"),
-            v2_make_option_none: r!("jit_v2_make_option_none"),
             arc_result_is_ok: r!("jit_arc_result_is_ok"),
             arc_result_is_err: r!("jit_arc_result_is_err"),
             arc_result_payload: r!("jit_arc_result_payload"),

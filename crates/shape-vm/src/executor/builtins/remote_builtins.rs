@@ -55,20 +55,28 @@
 use shape_runtime::json_value::JsonValue;
 use shape_runtime::marshal::{register_typed_fn_1, register_typed_fn_2, register_typed_fn_3_raw};
 use shape_runtime::module_exports::{ModuleExports, RemoteDispatcher};
-use shape_runtime::snapshot::{SerializableVMValue, SnapshotStore, slot_to_serializable};
+use shape_runtime::snapshot::{slot_to_serializable, SerializableVMValue, SnapshotStore};
 use shape_runtime::typed_module_exports::{ConcreteReturn, ConcreteType, TypedReturn};
 use shape_value::heap_value::HeapValue;
 use shape_value::v2::closure_raw::typed_closure_function_id;
 use shape_value::{HeapKind, KindedSlot, NativeKind};
-use shape_wire::WireValue;
-use shape_wire::transport::Transport;
 use shape_wire::transport::factory::TransportKind;
-use std::sync::Arc;
+use shape_wire::transport::framing::{decode_framed, encode_framed};
+use shape_wire::transport::tcp::MAX_PAYLOAD_SIZE;
+use shape_wire::transport::Transport;
+use shape_wire::WireValue;
+use std::io::{Read, Write};
+use std::net::{TcpStream, ToSocketAddrs};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use tokio::net::TcpStream as TokioTcpStream;
 
 use crate::remote::{
-    RemoteCallError, RemoteCallRequest, RemoteCallResponse, RemoteErrorKind, WireMessage,
-    build_call_request_by_id, build_closure_call_request, call_with_resupply,
+    build_call_request_by_id, build_closure_call_request, call_with_resupply, RemoteCallError,
+    RemoteCallId, RemoteCallRequest, RemoteCallResponse, RemoteCancelRequest, RemoteErrorKind,
+    WireMessage,
 };
 
 use super::transport_provider;
@@ -79,6 +87,19 @@ use super::transport_provider;
 
 /// Unique-suffix counter for the ephemeral (de)serialization stores.
 static REMOTE_STORE_SEQ: AtomicU64 = AtomicU64::new(0);
+static REMOTE_CALL_ASYNC_SEQ: AtomicU64 = AtomicU64::new(1);
+
+fn next_remote_call_id() -> RemoteCallId {
+    let seq = REMOTE_CALL_ASYNC_SEQ.fetch_add(1, Ordering::Relaxed);
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0);
+    RemoteCallId {
+        high: now ^ ((std::process::id() as u64) << 32),
+        low: seq,
+    }
+}
 
 /// A fresh, process-local snapshot store used only to (de)serialize the
 /// arguments / captures of a single remote call. Heap-free scalar args never
@@ -109,9 +130,7 @@ pub struct ProgramRemoteDispatcher<'a, 'vm> {
 }
 
 impl<'a, 'vm> ProgramRemoteDispatcher<'a, 'vm> {
-    pub fn new(
-        vm_cell: &'a std::cell::RefCell<&'vm mut crate::executor::VirtualMachine>,
-    ) -> Self {
+    pub fn new(vm_cell: &'a std::cell::RefCell<&'vm mut crate::executor::VirtualMachine>) -> Self {
         Self { vm_cell }
     }
 }
@@ -149,18 +168,14 @@ fn serialize_arg_pack(
             NativeKind::Ptr(HeapKind::TypedObject) => {
                 let sv = slot_to_serializable(pack.raw(), pack.kind(), store)
                     .map_err(|e| format!("remote::call: failed to serialize arguments: {e}"))?;
-                return match sv {
-                    SerializableVMValue::TypedObject { slot_data, .. } => Ok(slot_data),
-                    other => Ok(vec![other]),
-                };
+                return Ok(flatten_typed_object_arg_pack(sv));
             }
             // A lone non-aggregate carrier is one positional argument.
             _ => {
-                return Ok(vec![
-                    slot_to_serializable(pack.raw(), pack.kind(), store).map_err(|e| {
-                        format!("remote::call: failed to serialize arguments: {e}")
-                    })?,
-                ]);
+                return Ok(vec![slot_to_serializable(pack.raw(), pack.kind(), store)
+                    .map_err(|e| {
+                    format!("remote::call: failed to serialize arguments: {e}")
+                })?]);
             }
         }
     }
@@ -174,18 +189,36 @@ fn serialize_arg_pack(
         .collect()
 }
 
+fn flatten_typed_object_arg_pack(sv: SerializableVMValue) -> Vec<SerializableVMValue> {
+    match sv {
+        SerializableVMValue::TypedObject { slot_data, .. } => slot_data,
+        SerializableVMValue::HeapNode { handle, body } => match *body {
+            SerializableVMValue::TypedObject { slot_data, .. } => slot_data,
+            other => vec![SerializableVMValue::HeapNode {
+                handle,
+                body: Box::new(other),
+            }],
+        },
+        other => vec![other],
+    }
+}
+
 /// Flatten the outer positional-argument `TypedArray` into per-element
 /// `SerializableVMValue`s. Scalar-element arrays round-trip through the shared
 /// wholesale codec; heap-element arrays (e.g. `Array<string>`) are read
 /// element-by-element so each element is projected through its own per-kind
-/// arm (the wholesale codec's heap-element walk is a separate follow-up).
-/// Element kinds are the array's stamped element type — never fabricated.
+/// arm. Nested arrays use the same element-wise projection solely because this
+/// outer carrier is the annotation's positional argument pack, not general
+/// nested-array wire support. Element kinds are the array's stamped element
+/// type — never fabricated.
 fn serialize_typed_array_pack(
     bits: u64,
     store: &SnapshotStore,
 ) -> Result<Vec<SerializableVMValue>, String> {
     use shape_value::v2::string_obj::StringObj;
-    use shape_value::v2::typed_array::{ELEM_TYPE_STRING, TypedArray, read_elem_type};
+    use shape_value::v2::typed_array::{
+        read_elem_type, TypedArray, TypedArrayElem, ELEM_TYPE_STRING, ELEM_TYPE_TYPED_ARRAY,
+    };
 
     let ptr = bits as *const u8;
     // SAFETY: a `Ptr(HeapKind::TypedArray)` slot's bits are a live,
@@ -209,6 +242,25 @@ fn serialize_typed_array_pack(
                 .map(|p| {
                     slot_to_serializable(*p as u64, NativeKind::StringV2, store)
                         .map_err(|e| format!("remote::call: failed to serialize argument: {e}"))
+                })
+                .collect()
+        }
+        // The annotation before-hook lowers `f([1, 2, 3])` to one outer
+        // TypedArray<*const TypedArrayElem> positional pack. Its inner array
+        // pointer is one argument, so serialize it with its own array kind;
+        // do not serialize the outer carrier wholesale or flatten inner items.
+        ELEM_TYPE_TYPED_ARRAY => {
+            let arr = ptr as *const TypedArray<*const TypedArrayElem>;
+            // SAFETY: element type is TYPED_ARRAY, so elements are
+            // `*const TypedArrayElem` views of live inner TypedArrays.
+            let slice = unsafe { TypedArray::<*const TypedArrayElem>::as_slice(arr) };
+            slice
+                .iter()
+                .map(|p| {
+                    slot_to_serializable(*p as u64, NativeKind::Ptr(HeapKind::TypedArray), store)
+                        .map_err(|e| {
+                            format!("remote::call: failed to serialize argument: {e}")
+                        })
                 })
                 .collect()
         }
@@ -431,9 +483,7 @@ fn reply_to_typed_return(
             let schema = registry
                 .get_by_id(schema_id_u32)
                 .cloned()
-                .or_else(|| {
-                    shape_runtime::type_schema::lookup_schema_by_id_public(schema_id_u32)
-                })
+                .or_else(|| shape_runtime::type_schema::lookup_schema_by_id_public(schema_id_u32))
                 .ok_or_else(|| {
                     format!(
                         "remote::call: the remote returned an object whose \
@@ -518,9 +568,7 @@ fn build_remote_error_arc(
             vec![string_slot(String::new()), string_slot(msg)],
         ),
         RemoteErrorKind::AuthRequired => ("AuthRequired", vec![string_slot(msg)]),
-        RemoteErrorKind::ResourceLimitExceeded => {
-            ("ResourceLimitExceeded", vec![string_slot(msg)])
-        }
+        RemoteErrorKind::ResourceLimitExceeded => ("ResourceLimitExceeded", vec![string_slot(msg)]),
     };
 
     let variant_id = enum_info
@@ -546,7 +594,7 @@ fn string_slot(s: String) -> KindedSlot {
 /// `ConcreteReturn::ArrayString` producer.
 fn array_string_slot(items: Vec<String>) -> KindedSlot {
     use shape_value::v2::string_obj::StringObj;
-    use shape_value::v2::typed_array::{ELEM_TYPE_STRING, TypedArray, stamp_elem_type};
+    use shape_value::v2::typed_array::{stamp_elem_type, TypedArray, ELEM_TYPE_STRING};
     use shape_value::ValueSlot;
     let arr = TypedArray::<*const StringObj>::with_capacity(items.len() as u32);
     unsafe {
@@ -654,6 +702,179 @@ fn send_call(addr: &str, req: &RemoteCallRequest) -> RemoteCallResponse {
     }
 }
 
+fn build_remote_call_request_for_fn_ref(
+    program: &crate::bytecode::BytecodeProgram,
+    fn_ref: &KindedSlot,
+    arguments: Vec<SerializableVMValue>,
+    store: &SnapshotStore,
+) -> Result<RemoteCallRequest, String> {
+    match fn_ref.kind() {
+        NativeKind::UInt64 => {
+            let function_id = fn_ref.raw() as u16;
+            build_call_request_by_id(program, function_id, arguments)
+                .map_err(|e| format!("remote::call: could not resolve the target function: {e}"))
+        }
+        NativeKind::Ptr(HeapKind::Closure) => {
+            let (function_id, upvalues, upvalue_kinds) = extract_closure_captures(fn_ref, store)?;
+            Ok(build_closure_call_request(
+                program,
+                function_id,
+                arguments,
+                upvalues,
+                upvalue_kinds,
+            ))
+        }
+        other => Err(format!(
+            "remote::call: the callee must be a function or closure \
+             reference, but has kind {other:?}",
+        )),
+    }
+}
+
+fn remote_call_result_for_request(
+    program: &crate::bytecode::BytecodeProgram,
+    addr: &str,
+    request: RemoteCallRequest,
+) -> Result<TypedReturn, String> {
+    remote_call_result_for_request_with_sender(program, request, |req| {
+        send_call_classifying_transport(addr, req)
+    })
+}
+
+async fn remote_call_result_for_request_async(
+    program: crate::bytecode::BytecodeProgram,
+    addr: String,
+    mut request: RemoteCallRequest,
+) -> Result<TypedReturn, String> {
+    let first = send_call_classifying_transport_async(&addr, request.clone()).await;
+
+    let missing = match &first.result {
+        Err(e) if matches!(e.kind, RemoteErrorKind::MissingModuleFunction) => {
+            match &e.missing_blobs {
+                Some(m) if !m.is_empty() => m.clone(),
+                _ => return remote_call_response_to_typed_return(&program, first),
+            }
+        }
+        _ => return remote_call_response_to_typed_return(&program, first),
+    };
+
+    let store = match program.content_addressed.as_ref() {
+        Some(ca) => &ca.function_store,
+        None => {
+            let response = RemoteCallResponse {
+                result: Err(RemoteCallError::missing_module_function(
+                    "receiver reported missing blobs but the sender has no \
+                     content-addressed store to resupply from"
+                        .to_string(),
+                    missing,
+                )),
+            };
+            return remote_call_response_to_typed_return(&program, response);
+        }
+    };
+
+    let mut resupply = Vec::with_capacity(missing.len());
+    for h in &missing {
+        match store.get(h) {
+            Some(blob) => resupply.push((*h, blob.clone())),
+            None => {
+                let response = RemoteCallResponse {
+                    result: Err(RemoteCallError::missing_module_function(
+                        format!(
+                            "receiver is missing blob {} and the sender cannot resupply it",
+                            short_function_hash(h),
+                        ),
+                        vec![*h],
+                    )),
+                };
+                return remote_call_response_to_typed_return(&program, response);
+            }
+        }
+    }
+
+    match request.function_blobs.as_mut() {
+        Some(existing) => {
+            let have: std::collections::HashSet<_> =
+                existing.iter().map(|(h, _)| *h).collect();
+            for (h, b) in resupply {
+                if !have.contains(&h) {
+                    existing.push((h, b));
+                }
+            }
+        }
+        None => request.function_blobs = Some(resupply),
+    }
+
+    let second = send_call_classifying_transport_async(&addr, request).await;
+    if let Err(e) = &second.result
+        && matches!(e.kind, RemoteErrorKind::MissingModuleFunction)
+    {
+        let still = e
+            .missing_blobs
+            .as_ref()
+            .map(|m| m.len())
+            .unwrap_or_default();
+        let response = RemoteCallResponse {
+            result: Err(RemoteCallError::missing_module_function(
+                format!("receiver still missing {still} blob(s) after resupply"),
+                e.missing_blobs.clone().unwrap_or_default(),
+            )),
+        };
+        return remote_call_response_to_typed_return(&program, response);
+    }
+
+    remote_call_response_to_typed_return(&program, second)
+}
+
+fn remote_call_result_for_request_with_sender<F>(
+    program: &crate::bytecode::BytecodeProgram,
+    request: RemoteCallRequest,
+    mut send: F,
+) -> Result<TypedReturn, String>
+where
+    F: FnMut(&RemoteCallRequest) -> RemoteCallResponse,
+{
+    // Wire round-trip with the bounded retry-once missing-blob resupply.
+    // The result-path send closure classifies a sender-local transport
+    // failure as `RemoteErrorKind::Transport` (never `RuntimeError`) so the
+    // §4.9 mapping below can distinguish it from a callee's own runtime
+    // error — the two are otherwise indistinguishable at `response.result`.
+    let response = call_with_resupply(program, request, |req| send(req));
+
+    remote_call_response_to_typed_return(program, response)
+}
+
+fn remote_call_response_to_typed_return(
+    program: &crate::bytecode::BytecodeProgram,
+    response: RemoteCallResponse,
+) -> Result<TypedReturn, String> {
+    match response.result {
+        // Success: wrap the callee's value `R` in the `Ok` arm of a
+        // real `Result<R, RemoteError>` (project_typed_return's
+        // Ok/OkObjectPairs arms build the canonical `__Result` carrier).
+        Ok(value) => {
+            let reply = reply_to_typed_return(value, &program.type_schema_registry)?;
+            wrap_reply_in_ok(reply)
+        }
+        // Failure: map the structured `RemoteCallError` onto the matching
+        // `RemoteError` enum variant (§4.9) and return it as the `Err` arm.
+        Err(e) => {
+            let remote_error = build_remote_error_arc(&program.type_schema_registry, &e)?;
+            Ok(TypedReturn::Err(ConcreteReturn::OpaqueTypedObject(
+                remote_error,
+            )))
+        }
+    }
+}
+
+fn short_function_hash(hash: &crate::bytecode::FunctionHash) -> String {
+    let b = &hash.0;
+    format!(
+        "{:02x}{:02x}{:02x}{:02x}...",
+        b[0], b[1], b[2], b[3]
+    )
+}
+
 impl RemoteDispatcher for ProgramRemoteDispatcher<'_, '_> {
     fn call_remote(
         &self,
@@ -674,31 +895,7 @@ impl RemoteDispatcher for ProgramRemoteDispatcher<'_, '_> {
         // Resolve the callee to a RemoteCallRequest. A named-function value is
         // a `NativeKind::UInt64` inline id (PushConst(Constant::Function)); a
         // closure value is a `Ptr(HeapKind::Closure)` block carrying captures.
-        let request = match fn_ref.kind() {
-            NativeKind::UInt64 => {
-                let function_id = fn_ref.raw() as u16;
-                build_call_request_by_id(program, function_id, arguments).map_err(|e| {
-                    format!("remote::call: could not resolve the target function: {e}")
-                })?
-            }
-            NativeKind::Ptr(HeapKind::Closure) => {
-                let (function_id, upvalues, upvalue_kinds) =
-                    extract_closure_captures(fn_ref, &store)?;
-                build_closure_call_request(
-                    program,
-                    function_id,
-                    arguments,
-                    upvalues,
-                    upvalue_kinds,
-                )
-            }
-            other => {
-                return Err(format!(
-                    "remote::call: the callee must be a function or closure \
-                     reference, but has kind {other:?}",
-                ));
-            }
-        };
+        let request = build_remote_call_request_for_fn_ref(program, fn_ref, arguments, &store)?;
 
         // Wire round-trip with the bounded retry-once missing-blob resupply.
         let response = call_with_resupply(program, request, |req| send_call(addr, req));
@@ -708,10 +905,7 @@ impl RemoteDispatcher for ProgramRemoteDispatcher<'_, '_> {
             // Q26: transport / protocol / remote failures raise as an ordinary
             // runtime error (the `_raising` sibling's contract). The recoverable
             // structured surface is the public `remote::call` primitive.
-            Err(e) => Err(format!(
-                "remote call to {addr} failed: {}",
-                e.message,
-            )),
+            Err(e) => Err(format!("remote call to {addr} failed: {}", e.message,)),
         }
     }
 
@@ -730,58 +924,55 @@ impl RemoteDispatcher for ProgramRemoteDispatcher<'_, '_> {
         // Resolve the callee to a RemoteCallRequest — identical to
         // `call_remote`; a named-function value is a `NativeKind::UInt64`
         // inline id, a closure value is a `Ptr(HeapKind::Closure)` block.
-        let request = match fn_ref.kind() {
-            NativeKind::UInt64 => {
-                let function_id = fn_ref.raw() as u16;
-                build_call_request_by_id(program, function_id, arguments).map_err(|e| {
-                    format!("remote::call: could not resolve the target function: {e}")
-                })?
-            }
-            NativeKind::Ptr(HeapKind::Closure) => {
-                let (function_id, upvalues, upvalue_kinds) =
-                    extract_closure_captures(fn_ref, &store)?;
-                build_closure_call_request(
-                    program,
-                    function_id,
-                    arguments,
-                    upvalues,
-                    upvalue_kinds,
-                )
-            }
-            other => {
-                return Err(format!(
-                    "remote::call: the callee must be a function or closure \
-                     reference, but has kind {other:?}",
-                ));
-            }
+        let request = build_remote_call_request_for_fn_ref(program, fn_ref, arguments, &store)?;
+        remote_call_result_for_request(program, addr, request)
+    }
+
+    fn call_remote_result_async(
+        &self,
+        addr: &str,
+        fn_ref: &KindedSlot,
+        args: &[KindedSlot],
+    ) -> Result<u64, String> {
+        // Build the call request on the interpreter thread while the function
+        // and argument carriers are still live. The socket/RPC work starts
+        // below on the shared async runtime.
+        let program = {
+            let vm = self.vm_cell.borrow();
+            vm.program.clone()
         };
+        let store = ephemeral_store()?;
+        let arguments = serialize_arg_pack(args, &store)?;
+        let call_id = next_remote_call_id();
+        let mut request =
+            build_remote_call_request_for_fn_ref(&program, fn_ref, arguments, &store)?;
+        request.call_id = Some(call_id);
 
-        // Wire round-trip with the bounded retry-once missing-blob resupply.
-        // The result-path send closure classifies a sender-local transport
-        // failure as `RemoteErrorKind::Transport` (never `RuntimeError`) so the
-        // §4.9 mapping below can distinguish it from a callee's own runtime
-        // error — the two are otherwise indistinguishable at `response.result`.
-        let response =
-            call_with_resupply(program, request, |req| send_call_classifying_transport(addr, req));
+        let (tx, rx) = std::sync::mpsc::channel();
+        let addr = addr.to_string();
+        let cancel_addr = addr.clone();
+        parse_remote_destination(&addr)?;
+        let handle = crate::executor::async_runtime::shared_runtime().spawn(async move {
+            let result = remote_call_result_for_request_async(program, addr, request).await;
+            let _ = tx.send(result);
+        });
+        let abort = Some(handle.abort_handle());
 
-        match response.result {
-            // Success: wrap the callee's value `R` in the `Ok` arm of a
-            // real `Result<R, RemoteError>` (project_typed_return's
-            // Ok/OkObjectPairs arms build the canonical `__Result` carrier).
-            Ok(value) => {
-                let reply = reply_to_typed_return(value, &program.type_schema_registry)?;
-                wrap_reply_in_ok(reply)
-            }
-            // Failure: map the structured `RemoteCallError` onto the matching
-            // `RemoteError` enum variant (§4.9) and return it as the `Err` arm.
-            Err(e) => {
-                let remote_error =
-                    build_remote_error_arc(&program.type_schema_registry, &e)?;
-                Ok(TypedReturn::Err(ConcreteReturn::OpaqueTypedObject(
-                    remote_error,
-                )))
-            }
-        }
+        let mut vm = self.vm_cell.borrow_mut();
+        let task_id = vm.next_future_id();
+        vm.task_scheduler.store_pending_async(
+            task_id,
+            crate::executor::task_scheduler::PendingAsyncTask {
+                completion: rx,
+                abort,
+            },
+        );
+        vm.task_scheduler.set_pending_async_cancellation_hook(
+            task_id,
+            remote_cancel_hook(cancel_addr, call_id),
+        );
+        vm.track_future_in_active_async_scope(task_id);
+        Ok(task_id)
     }
 }
 
@@ -826,30 +1017,467 @@ fn send_call_classifying_transport(addr: &str, req: &RemoteCallRequest) -> Remot
     }
 }
 
+async fn send_call_classifying_transport_async(
+    addr: &str,
+    req: RemoteCallRequest,
+) -> RemoteCallResponse {
+    let msg = WireMessage::Call(req);
+    match wire_roundtrip_async(addr, msg).await {
+        Ok(WireMessage::CallResponse(r)) => r,
+        Ok(other) => RemoteCallResponse {
+            result: Err(RemoteCallError::new(
+                RemoteErrorKind::Transport,
+                format!(
+                    "remote server returned an unexpected reply ({:?})",
+                    std::mem::discriminant(&other),
+                ),
+            )),
+        },
+        Err(e) => RemoteCallResponse {
+            result: Err(RemoteCallError::new(RemoteErrorKind::Transport, e)),
+        },
+    }
+}
+
+async fn send_cancel_best_effort_async(addr: String, call_id: RemoteCallId) {
+    let msg = WireMessage::CancelCall(RemoteCancelRequest { call_id });
+    let _ = wire_send_best_effort_async(&addr, msg).await;
+}
+
+fn remote_cancel_hook(
+    addr: String,
+    call_id: RemoteCallId,
+) -> Box<dyn FnOnce() + Send + 'static> {
+    Box::new(move || {
+        crate::executor::async_runtime::shared_runtime()
+            .spawn(send_cancel_best_effort_async(addr, call_id));
+    })
+}
+
 // ---------------------------------------------------------------------------
 // Wire protocol helpers
 // ---------------------------------------------------------------------------
 
+#[derive(Debug)]
+enum RemoteDestination<'a> {
+    Tcp(&'a str),
+    Tls(TlsDestination),
+}
+
+#[derive(Debug)]
+struct TlsDestination {
+    addr: String,
+    server_name: String,
+    ca_path: String,
+}
+
+type TlsClientConfig = (
+    Arc<rustls::ClientConfig>,
+    rustls::pki_types::ServerName<'static>,
+);
+
+/// Parse the remote address string. Bare `host:port` is the longstanding
+/// plaintext TCP path. `shape+tls://host:port?ca=/path/cert.pem` opts into
+/// TLS with an explicit trust root; `server_name=...` may override the name
+/// used for certificate verification/SNI when connecting to an IP literal.
+fn parse_remote_destination(addr: &str) -> Result<RemoteDestination<'_>, String> {
+    let Some(rest) = addr.strip_prefix("shape+tls://") else {
+        return Ok(RemoteDestination::Tcp(addr));
+    };
+
+    let (authority, query) = rest.split_once('?').ok_or_else(|| {
+        "remote: TLS address must include an explicit trust root, e.g. \
+         shape+tls://host:port?ca=/path/to/cert.pem"
+            .to_string()
+    })?;
+    if authority.is_empty() || authority.contains('/') {
+        return Err(format!(
+            "remote: TLS address must be shape+tls://host:port?... got {addr:?}"
+        ));
+    }
+
+    let mut ca_path = None;
+    let mut server_name = None;
+    for pair in query.split('&').filter(|pair| !pair.is_empty()) {
+        let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
+        if value.is_empty() {
+            return Err(format!(
+                "remote: TLS address query parameter '{key}' must have a value"
+            ));
+        }
+        match key {
+            "ca" | "ca_pem" => ca_path = Some(value.to_string()),
+            "server_name" => server_name = Some(value.to_string()),
+            other => {
+                return Err(format!(
+                    "remote: unsupported TLS address query parameter '{other}'"
+                ));
+            }
+        }
+    }
+
+    let ca_path = ca_path.ok_or_else(|| {
+        "remote: TLS address requires ca=/path/to/cert.pem; no insecure TLS \
+         mode is available"
+            .to_string()
+    })?;
+    let server_name = server_name.unwrap_or(infer_tls_server_name(authority)?);
+
+    Ok(RemoteDestination::Tls(TlsDestination {
+        addr: authority.to_string(),
+        server_name,
+        ca_path,
+    }))
+}
+
+fn infer_tls_server_name(authority: &str) -> Result<String, String> {
+    if let Some(rest) = authority.strip_prefix('[') {
+        let (host, suffix) = rest.split_once(']').ok_or_else(|| {
+            format!("remote: bracketed IPv6 TLS address is missing ']': {authority:?}")
+        })?;
+        if host.is_empty() || !suffix.starts_with(':') || suffix.len() == 1 {
+            return Err(format!(
+                "remote: TLS address must include host and port, got {authority:?}"
+            ));
+        }
+        return Ok(host.to_string());
+    }
+
+    let (host, port) = authority.rsplit_once(':').ok_or_else(|| {
+        format!("remote: TLS address must include host and port, got {authority:?}")
+    })?;
+    if host.is_empty() || port.is_empty() {
+        return Err(format!(
+            "remote: TLS address must include host and port, got {authority:?}"
+        ));
+    }
+    Ok(host.to_string())
+}
+
 /// Send a `WireMessage` to a remote server and receive the response.
 ///
-/// One-shot send via a fresh TCP transport. The transport handles
-/// length-prefix framing internally; this helper only encodes/decodes
-/// MessagePack at the message boundary.
+/// One-shot send via a fresh transport. Bare addresses use the legacy TCP
+/// transport provider; `shape+tls://...` addresses terminate a verified rustls
+/// client session before using the same length-prefixed frame codec.
 fn wire_roundtrip(
     addr: &str,
     msg: &crate::remote::WireMessage,
 ) -> Result<crate::remote::WireMessage, String> {
-    let transport: Arc<dyn Transport> = transport_provider::transport_provider()
-        .create_transport(TransportKind::Tcp)
-        .map_err(|e| format!("remote: failed to create transport: {}", e))?;
-
     let mp = shape_wire::encode_message(msg).map_err(|e| format!("remote: encode error: {}", e))?;
 
-    let response_bytes = transport
-        .send(addr, &mp)
-        .map_err(|e| format!("remote: transport error: {}", e))?;
+    let response_bytes = match parse_remote_destination(addr)? {
+        RemoteDestination::Tcp(destination) => {
+            let transport: Arc<dyn Transport> = transport_provider::transport_provider()
+                .create_transport(TransportKind::Tcp)
+                .map_err(|e| format!("remote: failed to create transport: {}", e))?;
+            transport
+                .send(destination, &mp)
+                .map_err(|e| format!("remote: transport error: {}", e))?
+        }
+        RemoteDestination::Tls(destination) => tls_roundtrip(&destination, &mp)?,
+    };
 
     shape_wire::decode_message(&response_bytes).map_err(|e| format!("remote: decode error: {}", e))
+}
+
+async fn wire_roundtrip_async(
+    addr: &str,
+    msg: crate::remote::WireMessage,
+) -> Result<crate::remote::WireMessage, String> {
+    let mp =
+        shape_wire::encode_message(&msg).map_err(|e| format!("remote: encode error: {}", e))?;
+    let response_bytes = match parse_remote_destination(addr)? {
+        RemoteDestination::Tcp(destination) => tcp_roundtrip_async(destination, &mp).await?,
+        RemoteDestination::Tls(destination) => tls_roundtrip_async(&destination, &mp).await?,
+    };
+    shape_wire::decode_message(&response_bytes)
+        .map_err(|e| format!("remote: decode error: {}", e))
+}
+
+async fn wire_send_best_effort_async(
+    addr: &str,
+    msg: crate::remote::WireMessage,
+) -> Result<(), String> {
+    let mp =
+        shape_wire::encode_message(&msg).map_err(|e| format!("remote: encode error: {}", e))?;
+    match parse_remote_destination(addr)? {
+        RemoteDestination::Tcp(destination) => tcp_send_oneway_async(destination, &mp).await,
+        RemoteDestination::Tls(destination) => tls_roundtrip_async(&destination, &mp)
+            .await
+            .map(|_| ()),
+    }
+}
+
+async fn tcp_send_oneway_async(destination: &str, payload: &[u8]) -> Result<(), String> {
+    if payload.len() > MAX_PAYLOAD_SIZE {
+        return Err(format!(
+            "remote: TCP payload too large: {} bytes (max {})",
+            payload.len(),
+            MAX_PAYLOAD_SIZE
+        ));
+    }
+
+    let mut tcp = tokio::time::timeout(
+        Duration::from_secs(10),
+        TokioTcpStream::connect(destination),
+    )
+    .await
+    .map_err(|_| format!("remote: TCP connect to '{}': timed out", destination))?
+    .map_err(|e| format!("remote: TCP connect to '{}': {}", destination, e))?;
+
+    let framed = encode_framed(payload);
+    let len = framed.len() as u32;
+    tcp.write_all(&len.to_be_bytes())
+        .await
+        .map_err(|e| format!("remote: TCP write frame length: {}", e))?;
+    tcp.write_all(&framed)
+        .await
+        .map_err(|e| format!("remote: TCP write frame payload: {}", e))?;
+    tcp.flush()
+        .await
+        .map_err(|e| format!("remote: TCP flush: {}", e))
+}
+
+async fn tcp_roundtrip_async(destination: &str, payload: &[u8]) -> Result<Vec<u8>, String> {
+    if payload.len() > MAX_PAYLOAD_SIZE {
+        return Err(format!(
+            "remote: TCP payload too large: {} bytes (max {})",
+            payload.len(),
+            MAX_PAYLOAD_SIZE
+        ));
+    }
+
+    let mut tcp = tokio::time::timeout(
+        Duration::from_secs(10),
+        TokioTcpStream::connect(destination),
+    )
+    .await
+    .map_err(|_| format!("remote: TCP connect to '{}': timed out", destination))?
+    .map_err(|e| format!("remote: TCP connect to '{}': {}", destination, e))?;
+
+    let framed = encode_framed(payload);
+    let len = framed.len() as u32;
+    tcp.write_all(&len.to_be_bytes())
+        .await
+        .map_err(|e| format!("remote: TCP write frame length: {}", e))?;
+    tcp.write_all(&framed)
+        .await
+        .map_err(|e| format!("remote: TCP write frame payload: {}", e))?;
+    tcp.flush()
+        .await
+        .map_err(|e| format!("remote: TCP flush: {}", e))?;
+
+    let mut len_buf = [0u8; 4];
+    tcp.read_exact(&mut len_buf)
+        .await
+        .map_err(|e| format!("remote: TCP read frame length: {}", e))?;
+    let len = u32::from_be_bytes(len_buf) as usize;
+    if len > MAX_PAYLOAD_SIZE {
+        return Err(format!(
+            "remote: TCP frame too large: {} bytes (max {})",
+            len, MAX_PAYLOAD_SIZE
+        ));
+    }
+    let mut buf = vec![0u8; len];
+    tcp.read_exact(&mut buf)
+        .await
+        .map_err(|e| format!("remote: TCP read frame payload: {}", e))?;
+    decode_framed(&buf).map_err(|e| format!("remote: TCP frame decode: {}", e))
+}
+
+fn tls_roundtrip(destination: &TlsDestination, payload: &[u8]) -> Result<Vec<u8>, String> {
+    if payload.len() > MAX_PAYLOAD_SIZE {
+        return Err(format!(
+            "remote: TLS payload too large: {} bytes (max {})",
+            payload.len(),
+            MAX_PAYLOAD_SIZE
+        ));
+    }
+
+    let (config, server_name) = build_tls_client_config(destination)?;
+    let socket_addr = destination
+        .addr
+        .to_socket_addrs()
+        .map_err(|e| format!("remote: cannot resolve '{}': {}", destination.addr, e))?
+        .next()
+        .ok_or_else(|| format!("remote: no addresses resolved for '{}'", destination.addr))?;
+    let tcp = TcpStream::connect_timeout(&socket_addr, Duration::from_secs(10))
+        .map_err(|e| format!("remote: TLS connect to '{}': {}", destination.addr, e))?;
+    tcp.set_read_timeout(Some(Duration::from_secs(30))).ok();
+    tcp.set_write_timeout(Some(Duration::from_secs(10))).ok();
+
+    let conn = rustls::ClientConnection::new(config, server_name)
+        .map_err(|e| format!("remote: TLS client config: {}", e))?;
+    let mut stream = rustls::StreamOwned::new(conn, tcp);
+    write_framed_stream(&mut stream, payload)?;
+    read_framed_stream(&mut stream)
+}
+
+async fn tls_roundtrip_async(
+    destination: &TlsDestination,
+    payload: &[u8],
+) -> Result<Vec<u8>, String> {
+    if payload.len() > MAX_PAYLOAD_SIZE {
+        return Err(format!(
+            "remote: TLS payload too large: {} bytes (max {})",
+            payload.len(),
+            MAX_PAYLOAD_SIZE
+        ));
+    }
+
+    let (config, server_name) = build_tls_client_config(destination)?;
+    let tcp = tokio::time::timeout(
+        Duration::from_secs(10),
+        TokioTcpStream::connect(&destination.addr),
+    )
+    .await
+    .map_err(|_| format!("remote: TLS connect to '{}': timed out", destination.addr))?
+    .map_err(|e| format!("remote: TLS connect to '{}': {}", destination.addr, e))?;
+
+    let connector = tokio_rustls::TlsConnector::from(config);
+    let mut stream = tokio::time::timeout(
+        Duration::from_secs(30),
+        connector.connect(server_name, tcp),
+    )
+    .await
+    .map_err(|_| {
+        format!(
+            "remote: TLS handshake with '{}': timed out",
+            destination.addr
+        )
+    })?
+    .map_err(|e| format!("remote: TLS handshake with '{}': {}", destination.addr, e))?;
+
+    write_framed_async_stream(&mut stream, payload).await?;
+    read_framed_async_stream(&mut stream).await
+}
+
+fn build_tls_client_config(destination: &TlsDestination) -> Result<TlsClientConfig, String> {
+    let cert_bytes = std::fs::read(&destination.ca_path).map_err(|e| {
+        format!(
+            "remote: failed to read TLS trust root '{}': {}",
+            destination.ca_path, e
+        )
+    })?;
+    let certs: Vec<rustls::pki_types::CertificateDer<'static>> =
+        rustls_pemfile::certs(&mut &cert_bytes[..])
+            .collect::<Result<_, _>>()
+            .map_err(|e| {
+                format!(
+                    "remote: failed to parse TLS trust root '{}': {}",
+                    destination.ca_path, e
+                )
+            })?;
+    if certs.is_empty() {
+        return Err(format!(
+            "remote: TLS trust root '{}' contained no certificates",
+            destination.ca_path
+        ));
+    }
+
+    let mut roots = rustls::RootCertStore::empty();
+    for cert in certs {
+        roots.add(cert).map_err(|e| {
+            format!(
+                "remote: failed to add TLS trust root '{}': {}",
+                destination.ca_path, e
+            )
+        })?;
+    }
+
+    let provider = Arc::new(rustls::crypto::ring::default_provider());
+    let config = rustls::ClientConfig::builder_with_provider(provider)
+        .with_safe_default_protocol_versions()
+        .map_err(|e| format!("remote: TLS protocol versions: {}", e))?
+        .with_root_certificates(roots)
+        .with_no_client_auth();
+    let server_name = rustls::pki_types::ServerName::try_from(destination.server_name.clone())
+        .map_err(|e| {
+            format!(
+                "remote: invalid TLS server_name '{}': {}",
+                destination.server_name, e
+            )
+        })?;
+    Ok((Arc::new(config), server_name))
+}
+
+fn write_framed_stream<W: Write>(stream: &mut W, data: &[u8]) -> Result<(), String> {
+    let framed = encode_framed(data);
+    let len = framed.len() as u32;
+    stream
+        .write_all(&len.to_be_bytes())
+        .map_err(|e| format!("remote: TLS write frame length: {}", e))?;
+    stream
+        .write_all(&framed)
+        .map_err(|e| format!("remote: TLS write frame payload: {}", e))?;
+    stream
+        .flush()
+        .map_err(|e| format!("remote: TLS flush: {}", e))
+}
+
+fn read_framed_stream<R: Read>(stream: &mut R) -> Result<Vec<u8>, String> {
+    let mut len_buf = [0u8; 4];
+    stream
+        .read_exact(&mut len_buf)
+        .map_err(|e| format!("remote: TLS read frame length: {}", e))?;
+    let len = u32::from_be_bytes(len_buf) as usize;
+    if len > MAX_PAYLOAD_SIZE {
+        return Err(format!(
+            "remote: TLS frame too large: {} bytes (max {})",
+            len, MAX_PAYLOAD_SIZE
+        ));
+    }
+
+    let mut buf = vec![0u8; len];
+    stream
+        .read_exact(&mut buf)
+        .map_err(|e| format!("remote: TLS read frame payload: {}", e))?;
+    decode_framed(&buf).map_err(|e| format!("remote: TLS frame decode: {}", e))
+}
+
+async fn write_framed_async_stream<W>(stream: &mut W, data: &[u8]) -> Result<(), String>
+where
+    W: AsyncWrite + Unpin,
+{
+    let framed = encode_framed(data);
+    let len = framed.len() as u32;
+    stream
+        .write_all(&len.to_be_bytes())
+        .await
+        .map_err(|e| format!("remote: TLS write frame length: {}", e))?;
+    stream
+        .write_all(&framed)
+        .await
+        .map_err(|e| format!("remote: TLS write frame payload: {}", e))?;
+    stream
+        .flush()
+        .await
+        .map_err(|e| format!("remote: TLS flush: {}", e))
+}
+
+async fn read_framed_async_stream<R>(stream: &mut R) -> Result<Vec<u8>, String>
+where
+    R: AsyncRead + Unpin,
+{
+    let mut len_buf = [0u8; 4];
+    stream
+        .read_exact(&mut len_buf)
+        .await
+        .map_err(|e| format!("remote: TLS read frame length: {}", e))?;
+    let len = u32::from_be_bytes(len_buf) as usize;
+    if len > MAX_PAYLOAD_SIZE {
+        return Err(format!(
+            "remote: TLS frame too large: {} bytes (max {})",
+            len, MAX_PAYLOAD_SIZE
+        ));
+    }
+
+    let mut buf = vec![0u8; len];
+    stream
+        .read_exact(&mut buf)
+        .await
+        .map_err(|e| format!("remote: TLS read frame payload: {}", e))?;
+    decode_framed(&buf).map_err(|e| format!("remote: TLS frame decode: {}", e))
 }
 
 /// Project a `WireValue` into the strict-typed `JsonValue` tree.
@@ -1057,11 +1685,7 @@ pub fn create_remote_module() -> ModuleExports {
         &mut module,
         "__call_raising",
         "Call a function on a remote Shape server (internal `remote::call` sibling)",
-        [
-            ("addr", "string"),
-            ("fn_ref", "_"),
-            ("args", "Array<_>"),
-        ],
+        [("addr", "string"), ("fn_ref", "_"), ("args", "Array<_>")],
         // Declared per-arity kinds. `fn_ref` is a callee reference — a
         // `NativeKind::UInt64` inline function id (named function) or a
         // `Ptr(HeapKind::Closure)` block; the body dispatches on the slot's
@@ -1089,11 +1713,7 @@ pub fn create_remote_module() -> ModuleExports {
         &mut module,
         "__call_result",
         "Call a function on a remote Shape server, returning Result<R, RemoteError> (`remote::call`)",
-        [
-            ("addr", "string"),
-            ("fn_ref", "_"),
-            ("args", "Array<_>"),
-        ],
+        [("addr", "string"), ("fn_ref", "_"), ("args", "Array<_>")],
         [
             NativeKind::String,
             NativeKind::UInt64,
@@ -1101,6 +1721,26 @@ pub fn create_remote_module() -> ModuleExports {
         ],
         ConcreteType::Named("_".to_string()),
         remote_call_result_body,
+    );
+
+    // remote.__call_async_result(addr, fn_ref, args) -> Future<Result<R, RemoteError>>
+    //
+    // Public `remote::call_async` lowers to this internal sibling. It shares
+    // `remote::call`'s request construction and §4.9 Result mapping, but
+    // returns a `Future(id)` immediately after registering a background
+    // completion task; the transport/RPC round-trip runs on the shared runtime.
+    register_typed_fn_3_raw(
+        &mut module,
+        "__call_async_result",
+        "Start a remote Shape function call in the background, returning Future<Result<R, RemoteError>>",
+        [("addr", "string"), ("fn_ref", "_"), ("args", "Array<_>")],
+        [
+            NativeKind::String,
+            NativeKind::UInt64,
+            NativeKind::Ptr(HeapKind::TypedArray),
+        ],
+        ConcreteType::Named("Future<Result<_, RemoteError>>".to_string()),
+        remote_call_async_result_body,
     );
 
     module
@@ -1169,6 +1809,37 @@ fn remote_call_result_body(
     dispatcher.call_remote_result(&addr, &slots[1], &slots[2..])
 }
 
+/// Native body for `remote::__call_async_result`. It performs the same
+/// sender-side permission/address/dispatcher checks as `__call_result`, then
+/// asks the VM-backed dispatcher to register an externally-completed future.
+fn remote_call_async_result_body(
+    slots: &[KindedSlot],
+    ctx: &shape_runtime::module_exports::ModuleContext,
+) -> Result<TypedReturn, String> {
+    shape_runtime::module_exports::check_permission(ctx, shape_abi_v1::Permission::NetConnect)?;
+
+    let addr_sv = slot_to_serializable(slots[0].raw(), slots[0].kind(), &ephemeral_store()?)
+        .map_err(|e| format!("remote::call_async: invalid address argument: {e}"))?;
+    let addr = match addr_sv {
+        SerializableVMValue::String(s) => s,
+        other => {
+            return Err(format!(
+                "remote::call_async: address must be a string, got {:?}",
+                std::mem::discriminant(&other),
+            ));
+        }
+    };
+
+    let dispatcher = ctx.remote_dispatch.ok_or_else(|| {
+        "remote::call_async: the runtime did not install a distributed-transfer \
+         dispatcher (internal error) — the call was not attempted"
+            .to_string()
+    })?;
+
+    let task_id = dispatcher.call_remote_result_async(&addr, &slots[1], &slots[2..])?;
+    Ok(TypedReturn::Future(task_id))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1184,7 +1855,14 @@ mod tests {
             module.has_export("__call_result"),
             "__call_result backs the recoverable remote::call primitive (FIX C)"
         );
-        assert!(!module.has_export("__call"), "__call retired from surface (Q35/OQ-11)");
+        assert!(
+            module.has_export("__call_async_result"),
+            "__call_async_result backs the recoverable remote::call_async primitive"
+        );
+        assert!(
+            !module.has_export("__call"),
+            "__call retired from surface (Q35/OQ-11)"
+        );
     }
 
     #[test]
@@ -1239,6 +1917,80 @@ mod tests {
             }
             other => panic!("expected JsonValue::Object(Ok), got {:?}", other),
         }
+    }
+
+    #[test]
+    fn serialize_arg_pack_flattens_gc_wrapped_typed_object_pack() {
+        use shape_value::heap_value::TypedObjectStorage;
+        use shape_value::ValueSlot;
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let store = SnapshotStore::new(tmp.path()).expect("snapshot store");
+        let ptr = TypedObjectStorage::_new(
+            42,
+            vec![ValueSlot::from_int(6), ValueSlot::from_int(7)].into_boxed_slice(),
+            0,
+            std::sync::Arc::from(vec![NativeKind::Int64, NativeKind::Int64].into_boxed_slice()),
+        );
+        let pack = KindedSlot::from_typed_object_raw(ptr);
+
+        let raw_sv =
+            slot_to_serializable(pack.raw(), pack.kind(), &store).expect("serialize raw pack");
+        assert!(matches!(
+            &raw_sv,
+            SerializableVMValue::HeapNode { body, .. }
+                if matches!(&**body, SerializableVMValue::TypedObject { .. })
+        ));
+
+        let args = serialize_arg_pack(std::slice::from_ref(&pack), &store).expect("serialize args");
+        assert!(matches!(
+            args.as_slice(),
+            [SerializableVMValue::Int(6), SerializableVMValue::Int(7)]
+        ));
+    }
+
+    #[test]
+    fn serialize_typed_array_pack_preserves_nested_array_argument_arity() {
+        use shape_value::v2::typed_array::{
+            stamp_elem_type, TypedArray, TypedArrayElem, ELEM_TYPE_I64, ELEM_TYPE_TYPED_ARRAY,
+        };
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let store = SnapshotStore::new(tmp.path()).expect("snapshot store");
+
+        let inner = TypedArray::<i64>::with_capacity(3);
+        unsafe {
+            stamp_elem_type(inner as *mut u8, ELEM_TYPE_I64);
+            TypedArray::<i64>::push(inner, 1);
+            TypedArray::<i64>::push(inner, 2);
+            TypedArray::<i64>::push(inner, 3);
+        }
+
+        let outer = TypedArray::<*const TypedArrayElem>::with_capacity(1);
+        unsafe {
+            stamp_elem_type(outer as *mut u8, ELEM_TYPE_TYPED_ARRAY);
+            // The fresh inner array's single ownership share transfers to the
+            // outer heap-element array, which releases it through TypedArrayElem.
+            TypedArray::<*const TypedArrayElem>::push(
+                outer,
+                inner as *const TypedArrayElem,
+            );
+        }
+        let pack = KindedSlot::from_typed_array_raw(outer as *mut u8);
+
+        let args = serialize_typed_array_pack(pack.raw(), &store).expect("serialize args");
+        assert!(matches!(
+            args.as_slice(),
+            [SerializableVMValue::Array(items)]
+                if matches!(
+                    items.as_slice(),
+                    [
+                        SerializableVMValue::Int(1),
+                        SerializableVMValue::Int(2),
+                        SerializableVMValue::Int(3),
+                    ]
+                )
+        ));
     }
 
     // Track A.4 cross-node closure decode tests

@@ -36,6 +36,12 @@ pub(super) enum SemanticFreezePredeclarePass {
     Impls,
 }
 
+#[derive(Debug, Clone, Copy, Default)]
+struct ModuleDirectiveOutcome {
+    removed: bool,
+    replaced: bool,
+}
+
 impl BytecodeCompiler {
     fn comptime_field_slot_from_literal(
         struct_name: &str,
@@ -649,6 +655,22 @@ impl BytecodeCompiler {
         )
     }
 
+    fn emit_comptime_set_param_type_expr_directive(
+        &mut self,
+        param_name: &str,
+        expression: &Expr,
+        span: Span,
+    ) -> Result<()> {
+        self.emit_comptime_internal_call(
+            "__emit_set_param_type",
+            vec![
+                Expr::Literal(Literal::String(param_name.to_string()), span),
+                expression.clone(),
+            ],
+            span,
+        )
+    }
+
     fn emit_comptime_set_return_type_directive(
         &mut self,
         type_annotation: &TypeAnnotation,
@@ -700,9 +722,9 @@ impl BytecodeCompiler {
     }
 
     /// §4.5.7: `extend (expr)` computed-generation directive. The payload
-    /// expression evaluates in the comptime VM to a `string` of top-level Shape
-    /// source; the parsed items are ADDED (not replaced) at the annotated
-    /// item's module scope.
+    /// expression evaluates in the comptime VM to either a `string` of
+    /// top-level Shape source or a typed ItemFragment; the resulting items are
+    /// ADDED (not replaced) at the annotated item's module scope.
     fn emit_comptime_extend_items_expr_directive(
         &mut self,
         expression: &Expr,
@@ -1443,6 +1465,91 @@ impl BytecodeCompiler {
                 self.type_tracker
                     .register_function_return_concrete_type(&func_def.name, ct);
             }
+        }
+
+        Ok(())
+    }
+
+    /// Refresh the public call metadata for a function after comptime
+    /// directives have mutated its effective signature.
+    pub(super) fn refresh_function_signature_metadata(
+        &mut self,
+        func_def: &FunctionDef,
+    ) -> Result<()> {
+        self.function_defs
+            .insert(func_def.name.clone(), func_def.clone());
+
+        let total_params = func_def.params.len();
+        let mut required_params = total_params;
+        let mut saw_default = false;
+        let mut const_params = Vec::new();
+        for (idx, param) in func_def.params.iter().enumerate() {
+            if param.is_const {
+                const_params.push(idx);
+            }
+            if param.default_value.is_some() {
+                if !saw_default {
+                    required_params = idx;
+                    saw_default = true;
+                }
+            } else if saw_default {
+                return Err(ShapeError::SemanticError {
+                    message: "Required parameter cannot follow a parameter with a default value"
+                        .to_string(),
+                    location: Some(self.span_to_source_location(param.span())),
+                });
+            }
+        }
+
+        self.function_arity_bounds
+            .insert(func_def.name.clone(), (required_params, total_params));
+        self.function_const_params
+            .insert(func_def.name.clone(), const_params);
+
+        let effective_pass_modes = self.effective_function_like_pass_modes(
+            Some(&func_def.name),
+            &func_def.params,
+            Some(&func_def.body),
+        );
+        let mut ref_params = Vec::with_capacity(func_def.params.len());
+        let mut ref_mutates = Vec::with_capacity(func_def.params.len());
+        for (idx, param) in func_def.params.iter().enumerate() {
+            let fallback = if param.is_reference {
+                ParamPassMode::ByRefShared
+            } else {
+                ParamPassMode::ByValue
+            };
+            let mode = effective_pass_modes.get(idx).copied().unwrap_or(fallback);
+            ref_params.push(mode.is_reference());
+            ref_mutates.push(mode.is_exclusive());
+        }
+
+        if let Some(func) = self
+            .program
+            .functions
+            .iter_mut()
+            .find(|func| func.name == func_def.name)
+        {
+            func.arity = total_params as u16;
+            func.param_names = func_def
+                .params
+                .iter()
+                .flat_map(|p| p.get_identifiers())
+                .collect();
+            func.is_async = func_def.is_async;
+            func.ref_params = ref_params;
+            func.ref_mutates = ref_mutates;
+        }
+
+        if let Some(return_type) = func_def.return_type.as_ref()
+            && let Some(ct) =
+                crate::compiler::monomorphization::type_resolution::declared_annotation_concrete_type(
+                    self,
+                    return_type,
+                )
+        {
+            self.type_tracker
+                .register_function_return_concrete_type(&func_def.name, ct);
         }
 
         Ok(())
@@ -4876,6 +4983,9 @@ impl BytecodeCompiler {
             | Statement::SetParamValue {
                 expression: expr, ..
             }
+            | Statement::SetParamTypeExpr {
+                expression: expr, ..
+            }
             | Statement::SetReturnExpr {
                 expression: expr, ..
             }
@@ -5689,8 +5799,8 @@ impl BytecodeCompiler {
         module_name: &str,
         module_items: &mut Vec<Item>,
         site: &super::comptime_builtins::expansion_provenance::ExpansionSite,
-    ) -> Result<bool> {
-        let mut removed = false;
+    ) -> Result<ModuleDirectiveOutcome> {
+        let mut outcome = ModuleDirectiveOutcome::default();
         for directive in directives {
             match directive {
                 super::comptime_builtins::ComptimeDirective::Extend(extend) => {
@@ -5700,11 +5810,12 @@ impl BytecodeCompiler {
                     self.apply_comptime_extend_items(items, module_name, site)?;
                 }
                 super::comptime_builtins::ComptimeDirective::RemoveTarget => {
-                    removed = true;
+                    outcome.removed = true;
                     break;
                 }
                 super::comptime_builtins::ComptimeDirective::ReplaceModule { items } => {
                     *module_items = items;
+                    outcome.replaced = true;
                 }
                 super::comptime_builtins::ComptimeDirective::SetParamType { .. }
                 | super::comptime_builtins::ComptimeDirective::SetParamValue { .. } => {
@@ -5724,7 +5835,7 @@ impl BytecodeCompiler {
                 }
             }
         }
-        Ok(removed)
+        Ok(outcome)
     }
 
     fn execute_module_comptime_handlers(
@@ -5732,8 +5843,8 @@ impl BytecodeCompiler {
         module_def: &ModuleDecl,
         module_path: &str,
         module_items: &mut Vec<Item>,
-    ) -> Result<bool> {
-        let mut removed = false;
+    ) -> Result<ModuleDirectiveOutcome> {
+        let mut outcome = ModuleDirectiveOutcome::default();
         for ann in &module_def.annotations {
             if let Some((_, compiled)) = self.lookup_compiled_annotation(ann) {
                 let handlers = [
@@ -5762,7 +5873,7 @@ impl BytecodeCompiler {
                         // Module target: no representation authority (Dec 56).
                         None,
                     )?;
-                    if self
+                    let directive_outcome = self
                         .process_comptime_directives_for_module(
                             execution.directives,
                             module_path,
@@ -5778,18 +5889,19 @@ impl BytecodeCompiler {
                                 &format!("Comptime handler '{}'", ann.name),
                                 handler_span,
                             )
-                        })?
-                    {
-                        removed = true;
+                        })?;
+                    outcome.replaced |= directive_outcome.replaced;
+                    if directive_outcome.removed {
+                        outcome.removed = true;
                         break;
                     }
                 }
             }
-            if removed {
+            if outcome.removed {
                 break;
             }
         }
-        Ok(removed)
+        Ok(outcome)
     }
 
     fn inject_module_local_comptime_helper_aliases(
@@ -5821,7 +5933,8 @@ impl BytecodeCompiler {
         &mut self,
         module_path: &str,
         module_items: &mut Vec<Item>,
-    ) -> Result<bool> {
+    ) -> Result<ModuleDirectiveOutcome> {
+        let mut outcome = ModuleDirectiveOutcome::default();
         loop {
             let Some(idx) = module_items
                 .iter()
@@ -5880,7 +5993,7 @@ impl BytecodeCompiler {
             // ADR-009 D1 (S2): the module-scoped block is its own expansion
             // site.
             let expansion_site = self.comptime_block_expansion_site(span, module_path);
-            if self
+            let directive_outcome = self
                 .process_comptime_directives_for_module(
                     execution.directives,
                     module_path,
@@ -5891,9 +6004,11 @@ impl BytecodeCompiler {
                     // ADR-009 D1 (S4): provenance-carrying generated-decl
                     // failures pass through with their location notes.
                     self.preserve_or_wrap_directive_failure(e, "Comptime block", span)
-                })?
-            {
-                return Ok(true);
+                })?;
+            outcome.replaced |= directive_outcome.replaced;
+            if directive_outcome.removed {
+                outcome.removed = true;
+                return Ok(outcome);
             }
 
             if idx < module_items.len() && matches!(module_items[idx], Item::Comptime(_, _)) {
@@ -5901,7 +6016,95 @@ impl BytecodeCompiler {
             }
         }
 
-        Ok(false)
+        Ok(outcome)
+    }
+
+    fn recheck_replaced_module_items(
+        &self,
+        module_path: &str,
+        module_items: &[Item],
+        span: Span,
+    ) -> Result<()> {
+        if !matches!(
+            self.type_diagnostic_mode,
+            crate::compiler::TypeDiagnosticMode::Strict
+        ) {
+            return Ok(());
+        }
+        let Some(mut program) = self.directive_reanalysis_program.clone() else {
+            return Ok(());
+        };
+        let path: Vec<&str> = module_path.split("::").collect();
+        if !Self::patch_reanalysis_module_items(&mut program.items, &path, module_items) {
+            return Ok(());
+        }
+        let local_functions = Self::module_local_function_names(module_items);
+        let mut qualified_items = Vec::with_capacity(module_items.len());
+        for item in module_items {
+            qualified_items.push(self.qualify_module_item_with_local_function_calls(
+                item,
+                module_path,
+                &local_functions,
+            )?);
+        }
+        program.items.extend(qualified_items);
+
+        let known_bindings = self.directive_reanalysis_known_bindings.clone();
+        let module_scalar_returns = self.build_module_qualified_scalar_returns();
+        let result = shape_runtime::type_system::analyze_program_full(
+            &program,
+            self.source_text.as_deref(),
+            None,
+            Some(&known_bindings),
+            shape_runtime::type_system::TypeAnalysisMode::FailFast,
+            self.comptime_mode,
+            Some(module_scalar_returns),
+        );
+        if let Err(errors) = result {
+            return Err(self.replaced_module_type_error(module_path, span, errors));
+        }
+        Ok(())
+    }
+
+    fn patch_reanalysis_module_items(
+        items: &mut [Item],
+        module_path: &[&str],
+        replacement: &[Item],
+    ) -> bool {
+        let Some((segment, rest)) = module_path.split_first() else {
+            return false;
+        };
+        for item in items {
+            if let Item::Module(module, _) = item
+                && module.name == *segment
+            {
+                if rest.is_empty() {
+                    module.items = replacement.to_vec();
+                    return true;
+                }
+                return Self::patch_reanalysis_module_items(&mut module.items, rest, replacement);
+            }
+        }
+        false
+    }
+
+    fn replaced_module_type_error(
+        &self,
+        module_path: &str,
+        span: Span,
+        errors: Vec<shape_runtime::type_system::TypeErrorWithLocation>,
+    ) -> ShapeError {
+        let (detail, location) = match Self::type_errors_to_shape(errors) {
+            ShapeError::SemanticError { message, location } => (message, location),
+            other => (format!("{}", other), None),
+        };
+        ShapeError::SemanticError {
+            message: format!(
+                "a comptime directive replaced module '{}' with source that failed type analysis: {}",
+                module_path, detail
+            ),
+            location: location.or_else(|| Some(self.span_to_source_location(span))),
+        }
     }
 
     pub(super) fn register_missing_module_items(&mut self, item: &Item) -> Result<()> {
@@ -6145,15 +6348,28 @@ impl BytecodeCompiler {
         self.push_module_reference_scope();
 
         let mut module_items = module_def.items.clone();
-        if self.execute_module_comptime_handlers(module_def, &module_path, &mut module_items)? {
+        let handler_outcome =
+            self.execute_module_comptime_handlers(module_def, &module_path, &mut module_items)?;
+        if handler_outcome.removed {
             self.pop_module_reference_scope();
             self.module_scope_stack.pop();
             return Ok(());
         }
-        if self.execute_module_inline_comptime_blocks(&module_path, &mut module_items)? {
+        let inline_outcome =
+            self.execute_module_inline_comptime_blocks(&module_path, &mut module_items)?;
+        if inline_outcome.removed {
             self.pop_module_reference_scope();
             self.module_scope_stack.pop();
             return Ok(());
+        }
+        if handler_outcome.replaced || inline_outcome.replaced {
+            if let Err(err) =
+                self.recheck_replaced_module_items(&module_path, &module_items, span)
+            {
+                self.pop_module_reference_scope();
+                self.module_scope_stack.pop();
+                return Err(err);
+            }
         }
 
         let mut qualified_items = Vec::with_capacity(module_items.len());
@@ -8060,6 +8276,14 @@ impl BytecodeCompiler {
             } => {
                 self.require_comptime_mode("set param", *span)?;
                 self.emit_comptime_set_param_type_directive(param_name, type_annotation, *span)?;
+            }
+            Statement::SetParamTypeExpr {
+                param_name,
+                expression,
+                span,
+            } => {
+                self.require_comptime_mode("set param", *span)?;
+                self.emit_comptime_set_param_type_expr_directive(param_name, expression, *span)?;
             }
             Statement::SetParamValue {
                 param_name,

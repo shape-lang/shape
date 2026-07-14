@@ -42,7 +42,9 @@ use super::super::ffi::object::{
     jit_write_shared_cell_u8, jit_write_shared_cell_u16, jit_write_shared_cell_u32,
     jit_write_shared_cell_u64,
 };
-use super::super::ffi::typed_object::jit_typed_object_alloc;
+use super::super::ffi::typed_object::{
+    jit_schema_option_none, jit_schema_option_some, jit_typed_object_alloc,
+};
 use super::helpers::jit_format_error;
 
 /// Register object FFI symbols with the JIT builder
@@ -58,11 +60,13 @@ pub fn register_object_symbols(builder: &mut JITBuilder) {
     builder.symbol("jit_to_number", jit_to_number as *const u8);
     // F5.a/F5.b: string `+` for `"a" + "b"` and `f"..."`-desugared concat chains.
     builder.symbol("jit_string_concat", jit_string_concat as *const u8);
-    // W88A containment: these four producer symbols stay registered only as
+    // W88A containment: these Result producer symbols stay registered only as
     // fail-closed backstops for stale FFIFuncRefs. Normal MIR EnumStore
     // lowering deopts before emitting them because the old bodies would
-    // allocate `Arc<ResultData>` / `Arc<OptionData>` instead of schema-backed
-    // `__Result` / `__Option` TypedObjectStorage.
+    // allocate `Arc<ResultData>` instead of schema-backed `__Result`
+    // TypedObjectStorage. Option now uses the schema-backed
+    // `jit_schema_option_*` ABI below, so the retired
+    // `jit_v2_make_option_*` producers are not imported.
     // The legacy `jit_make_ok` / `_err` / `_some` UnifiedValue<u64> producer
     // family is intentionally NOT registered with Cranelift. Keeping those
     // symbols importable would allow new native code to produce retired
@@ -74,14 +78,6 @@ pub fn register_object_symbols(builder: &mut JITBuilder) {
     builder.symbol(
         "jit_v2_make_result_err",
         super::super::ffi::result::jit_v2_make_result_err as *const u8,
-    );
-    builder.symbol(
-        "jit_v2_make_option_some",
-        super::super::ffi::result::jit_v2_make_option_some as *const u8,
-    );
-    builder.symbol(
-        "jit_v2_make_option_none",
-        super::super::ffi::result::jit_v2_make_option_none as *const u8,
     );
     builder.symbol(
         "jit_arc_result_is_ok",
@@ -493,6 +489,14 @@ pub fn register_object_symbols(builder: &mut JITBuilder) {
         "jit_typed_object_set_field",
         super::super::ffi::typed_object::jit_typed_object_set_field as *const u8,
     );
+    builder.symbol(
+        "jit_schema_option_some",
+        jit_schema_option_some as *const u8,
+    );
+    builder.symbol(
+        "jit_schema_option_none",
+        jit_schema_option_none as *const u8,
+    );
     // Wave-7 Phase C — GC write-barrier FFI, called from the inline
     // typed-object-field store path (`mir_compiler::places::inline_typed_field_set`)
     // under the `gc` feature. Feature-off the barrier body is a compile-away
@@ -627,17 +631,13 @@ pub fn declare_object_functions(module: &mut JITModule, ffi_funcs: &mut HashMap<
         ffi_funcs.insert("jit_string_concat".to_string(), func_id);
     }
 
-    // W88A fail-closed Result/Option producer ABI backstops. Signature:
+    // W88A fail-closed Result producer ABI backstops. Signature:
     // `(payload_bits: u64, payload_kind_code: i8) -> u64`.
     // These imports intentionally no longer allocate; `ffi/result.rs` panics
-    // before constructing old `Arc<ResultData>` / `Arc<OptionData>` carriers.
-    // Normal JIT lowering should not call them: `EnumStore` deopts until a
-    // schema-backed `__Result` / `__Option` TypedObject ABI exists.
-    for name in [
-        "jit_v2_make_result_ok",
-        "jit_v2_make_result_err",
-        "jit_v2_make_option_some",
-    ] {
+    // before constructing old `Arc<ResultData>` carriers. Normal JIT lowering
+    // should not call them: `EnumStore` deopts until a schema-backed
+    // `__Result` TypedObject ABI exists. Option uses `jit_schema_option_*`.
+    for name in ["jit_v2_make_result_ok", "jit_v2_make_result_err"] {
         let mut sig = module.make_signature();
         sig.params.push(AbiParam::new(types::I64)); // payload_bits
         sig.params.push(AbiParam::new(types::I8)); // payload_kind_code
@@ -646,16 +646,6 @@ pub fn declare_object_functions(module: &mut JITModule, ffi_funcs: &mut HashMap<
             .declare_function(name, Linkage::Import, &sig)
             .unwrap_or_else(|e| panic!("Failed to declare {}: {:?}", name, e));
         ffi_funcs.insert(name.to_string(), func_id);
-    }
-    // jit_v2_make_option_none takes no payload and is the same fail-closed
-    // backstop as the payload-bearing producer imports above.
-    {
-        let mut sig = module.make_signature();
-        sig.returns.push(AbiParam::new(types::I64));
-        let func_id = module
-            .declare_function("jit_v2_make_option_none", Linkage::Import, &sig)
-            .expect("Failed to declare jit_v2_make_option_none");
-        ffi_funcs.insert("jit_v2_make_option_none".to_string(), func_id);
     }
     // ADR-006 §2.7.17 — Arc-shape predicates: read is_ok / is_err / is_some /
     // is_none from `*const ResultData` / `*const OptionData` directly.
@@ -1347,6 +1337,28 @@ pub fn declare_object_functions(module: &mut JITModule, ffi_funcs: &mut HashMap<
             .declare_function("jit_typed_object_set_field", Linkage::Import, &sig)
             .expect("Failed to declare jit_typed_object_set_field");
         ffi_funcs.insert("jit_typed_object_set_field".to_string(), func_id);
+    }
+
+    // jit_schema_option_some(payload_bits, payload_kind_code) -> u64
+    {
+        let mut sig = module.make_signature();
+        sig.params.push(AbiParam::new(types::I64)); // payload_bits
+        sig.params.push(AbiParam::new(types::I8)); // payload_kind_code
+        sig.returns.push(AbiParam::new(types::I64)); // __Option TypedObject
+        let func_id = module
+            .declare_function("jit_schema_option_some", Linkage::Import, &sig)
+            .expect("Failed to declare jit_schema_option_some");
+        ffi_funcs.insert("jit_schema_option_some".to_string(), func_id);
+    }
+
+    // jit_schema_option_none() -> u64
+    {
+        let mut sig = module.make_signature();
+        sig.returns.push(AbiParam::new(types::I64)); // __Option TypedObject
+        let func_id = module
+            .declare_function("jit_schema_option_none", Linkage::Import, &sig)
+            .expect("Failed to declare jit_schema_option_none");
+        ffi_funcs.insert("jit_schema_option_none".to_string(), func_id);
     }
 
     // jit_write_barrier(old_bits, new_bits, old_kind_tag) -> void

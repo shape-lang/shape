@@ -282,8 +282,9 @@ unsafe fn receiver_type_name(
 }
 
 /// Search the JITContext's function_names table for a function with the given
-/// UFCS name (e.g. "Point::distance") and return its index.
-unsafe fn find_function_by_name(ctx_ref: &JITContext, ufcs_name: &str) -> Option<usize> {
+/// method function name (e.g. "Point::distance" or "Point.distance") and return
+/// its index.
+unsafe fn find_function_by_name(ctx_ref: &JITContext, function_name: &str) -> Option<usize> {
     if ctx_ref.function_names_ptr.is_null() || ctx_ref.function_names_len == 0 {
         return None;
     }
@@ -293,23 +294,24 @@ unsafe fn find_function_by_name(ctx_ref: &JITContext, ufcs_name: &str) -> Option
         std::slice::from_raw_parts(ctx_ref.function_names_ptr, ctx_ref.function_names_len)
     };
     for (idx, name) in names.iter().enumerate() {
-        if name == ufcs_name {
+        if name == function_name {
             return Some(idx);
         }
     }
     None
 }
 
-/// Try to call a user-defined method from impl blocks via UFCS dispatch.
+/// Try to call a user-defined method from impl / extend blocks.
 ///
-/// User-defined methods (from `extend` / `impl` blocks) are compiled as functions
-/// named `"TypeName::method_name"`. This function:
+/// User-defined methods are compiled as functions named either
+/// `"TypeName::method_name"` (impl-style) or `"TypeName.method_name"`
+/// (extend-style). This function:
 /// 1. Determines the receiver type name from the receiver's `NativeKind`
 ///    (kind-from-parallel-track per §2.7.7 / Q9) and, for typed-object /
 ///    UInt64 carriers, the schema id / heap-prefix `kind: u16` field at
 ///    offset 0 of the JIT allocation (§2.7.5 "*not* tag-bit dispatch —
 ///    field-load from a heap-resident struct").
-/// 2. Constructs the UFCS name `"TypeName::method_name"`
+/// 2. Constructs impl-style and extend-style method function names
 /// 3. Looks up the function index in function_names
 /// 4. Calls the function via function_table, passing (receiver, ...args)
 /// 5. Returns the result as raw u64 bits
@@ -344,19 +346,79 @@ unsafe fn try_call_user_method(
     // Determine the receiver's type name
     // SAFETY: `receiver_bits` and `receiver_kind` are the pair popped from the
     // JIT stack's lockstep kind track by `jit_call_method`.
-    let type_name = unsafe { receiver_type_name(receiver_bits, receiver_kind, exec_ctx) }?;
+    let type_name = match unsafe { receiver_type_name(receiver_bits, receiver_kind, exec_ctx) } {
+        Some(type_name) => type_name,
+        None => {
+            if std::env::var_os("SHAPE_DEBUG_FIELD_STAMPS").is_some()
+                && method_name == "summary"
+            {
+                eprintln!(
+                    "[method-debug] no receiver type for method={} bits={} kind={:?}",
+                    method_name, receiver_bits, receiver_kind
+                );
+            }
+            return None;
+        }
+    };
 
-    // Construct UFCS function name: "TypeName::method_name"
-    let ufcs_name = format!("{}::{}", type_name, method_name);
+    // Construct both method function name forms. `impl` methods use
+    // `Type::method`; `extend Type { method ... }` desugars to `Type.method`.
+    // Try the historical impl-style form first to preserve existing dispatch
+    // precedence, then the extend-style form used by generated extension
+    // methods such as `User.to_json`.
+    let impl_name = format!("{}::{}", type_name, method_name);
+    let extend_name = format!("{}.{}", type_name, method_name);
+    let candidates = [impl_name, extend_name];
 
-    // Look up the function index in the JIT function table
+    // Look up the function index in the JIT function table.
     // SAFETY: `ctx_ref` is the live context borrowed above; the helper
     // validates the raw names table before reading it.
-    let func_idx = unsafe { find_function_by_name(ctx_ref, &ufcs_name) }?;
+    let (func_idx, resolved_name) = match candidates.iter().find_map(|candidate| {
+        unsafe { find_function_by_name(ctx_ref, candidate) }.map(|idx| (idx, candidate.as_str()))
+    }) {
+        Some(found) => found,
+        None => {
+            if std::env::var_os("SHAPE_DEBUG_FIELD_STAMPS").is_some()
+                && method_name == "summary"
+            {
+                eprintln!(
+                    "[method-debug] method={} type={} candidates={:?} names_len={}",
+                    method_name, type_name, candidates, ctx_ref.function_names_len
+                );
+                if !ctx_ref.function_names_ptr.is_null() {
+                    let names = unsafe {
+                        std::slice::from_raw_parts(
+                            ctx_ref.function_names_ptr,
+                            ctx_ref.function_names_len,
+                        )
+                    };
+                    eprintln!("[method-debug] function names={:?}", names);
+                }
+            }
+            return None;
+        }
+    };
 
     // Check that we have a valid function table entry
     if ctx_ref.function_table.is_null() || func_idx >= ctx_ref.function_table_len {
-        return None;
+        tracing::debug!(
+            target: "shape_jit",
+            method_name = %method_name,
+            resolved_name = %resolved_name,
+            func_idx,
+            function_table_len = ctx_ref.function_table_len,
+            "jit-call-method resolved a user method but no native function-table \
+             entry is addressable; raising pending_call_error instead of \
+             returning TAG_NULL as a value",
+        );
+        super::control::set_jit_runtime_error(format!(
+            "JIT method dispatch for `{}` resolved `{}` but no native \
+             function-table entry was available",
+            method_name, resolved_name,
+        ));
+        let ctx_mut = unsafe { &mut *(ctx as *mut JITContext) };
+        ctx_mut.pending_call_error = 1;
+        return Some(TAG_NULL);
     }
 
     // Read the raw pointer from the function table. A null entry means the
@@ -365,7 +427,33 @@ unsafe fn try_call_user_method(
     // by the guard above.
     let raw_fn_ptr = unsafe { *(ctx_ref.function_table as *const *const u8).add(func_idx) };
     if raw_fn_ptr.is_null() {
-        return None;
+        tracing::debug!(
+            target: "shape_jit",
+            method_name = %method_name,
+            resolved_name = %resolved_name,
+            func_idx,
+            "jit-call-method resolved a user method whose native function-table \
+             entry is null; raising pending_call_error instead of returning \
+             TAG_NULL as a value",
+        );
+        super::control::set_jit_runtime_error(format!(
+            "JIT method dispatch for `{}` resolved `{}` but that method was \
+             not JIT-compiled",
+            method_name, resolved_name,
+        ));
+        let ctx_mut = unsafe { &mut *(ctx as *mut JITContext) };
+        ctx_mut.pending_call_error = 1;
+        return Some(TAG_NULL);
+    }
+    if std::env::var_os("SHAPE_DEBUG_FIELD_STAMPS").is_some() && method_name == "summary" {
+        eprintln!(
+            "[method-debug] resolved method={} resolved={} func_idx={} table_len={} raw_null={}",
+            method_name,
+            resolved_name,
+            func_idx,
+            ctx_ref.function_table_len,
+            raw_fn_ptr.is_null()
+        );
     }
 
     // W14.2-E-followup-jit-trait-method-arity-soundness fix (2026-05-19,
@@ -417,13 +505,12 @@ unsafe fn try_call_user_method(
     ctx_mut.stack_ptr = 0;
 
     // Build the native-arg slice: receiver as the first user param
-    // (`self`), followed by each user arg. Trait-impl bodies in Shape
-    // are compiled as functions named `"TypeName::method_name"` with
-    // `self` as their first formal parameter (when present); for
-    // n=0-arg methods the receiver is still the first param. Matches
-    // the JIT-compiled callee's `effective_arity = captures_count +
-    // arity` per `compile_function_with_user_funcs` (captures_count = 0
-    // for non-closure trait-impl bodies).
+    // (`self`), followed by each user arg. Impl and extend method bodies
+    // both compile with `self` as their first formal parameter (when
+    // present); for n=0-arg methods the receiver is still the first param.
+    // Matches the JIT-compiled callee's `effective_arity = captures_count +
+    // arity` per `compile_function_with_user_funcs` (captures_count = 0 for
+    // non-closure method bodies).
     let mut native_args: Vec<u64> = Vec::with_capacity(arg_pairs.len() + 1);
     native_args.push(receiver_bits);
     for &(bits, _kind) in arg_pairs {
@@ -438,6 +525,17 @@ unsafe fn try_call_user_method(
     // above, and `native_args` matches the UFCS receiver-plus-args ABI.
     let _result_code =
         unsafe { crate::ffi::control::call_jit_fn_with_args(raw_fn_ptr, ctx_mut, &native_args) };
+    if std::env::var_os("SHAPE_DEBUG_FIELD_STAMPS").is_some() && method_name == "summary" {
+        let result0 = if ctx_mut.stack_ptr > 0 {
+            Some(ctx_mut.stack[0])
+        } else {
+            None
+        };
+        eprintln!(
+            "[method-debug] after call method={} stack_ptr={} return_tag={} result0={:?}",
+            method_name, ctx_mut.stack_ptr, ctx_mut.return_type_tag, result0
+        );
+    }
 
     // Pop result from stack. The callee stored the return value at
     // `ctx.stack[0]` and set `stack_ptr = 1` per the §2.7.5 typed-return
@@ -1194,6 +1292,18 @@ pub extern "C" fn jit_call_method(ctx: *mut JITContext, stack_count: usize) -> u
         // the §2.7.7 / Q9 parallel-kind track flows into
         // `receiver_type_name` so dispatch classifies on the producing
         // call's stamp, not on tag-bit decode.
+        if std::env::var_os("SHAPE_DEBUG_FIELD_STAMPS").is_some()
+            && method_name == "summary"
+        {
+            eprintln!(
+                "[method-debug] before ufcs method={} receiver_kind={:?} builtin_result={} tag_null={} will_try={}",
+                method_name,
+                receiver_kind,
+                builtin_result,
+                TAG_NULL,
+                builtin_result == TAG_NULL
+            );
+        }
         if builtin_result == TAG_NULL {
             if let Some(user_result) =
                 try_call_user_method(ctx, receiver_bits, receiver_kind, &method_name, &arg_pairs)

@@ -26,9 +26,7 @@ use std::collections::HashMap;
 ///   `{x:int, y:int}` share one id anywhere).
 /// - Fields are hashed in DECLARATION order (Shape's TypedStruct has
 ///   C-compatible fixed field offsets; declaration order == layout).
-#[derive(
-    Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize,
-)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct SchemaContentId(pub [u8; 32]);
 
 /// Hash-scheme version tag (ADR-006 §2.7.31 / design §M4). Prefixed onto the

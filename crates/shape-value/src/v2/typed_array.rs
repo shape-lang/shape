@@ -499,6 +499,11 @@ pub const ELEM_TYPE_TRAIT_OBJECT: u8 = 17;
 /// `Arc<HeapValue>` share, named functions carry an inline `UInt64` function id,
 /// and module functions carry an inline `Ptr(HeapKind::ModuleFn)` id.
 pub const ELEM_TYPE_CALLABLE: u8 = 18;
+/// `_pad`-byte discriminant for `TypedArray<*const ContentNode>` — the backing
+/// carrier for `Array<content>`. Elements are `Arc::into_raw(Arc<ContentNode>)`
+/// pointers, not v2 `HeapHeader` elements, so their retain/release discipline is
+/// a small content-specific peer of the callable carrier.
+pub const ELEM_TYPE_CONTENT: u8 = 19;
 
 /// Read the element-type discriminant stamped in the `_pad` byte (offset 7).
 ///
@@ -702,6 +707,34 @@ impl TypedArray<CallableArrayElem> {
     }
 }
 
+impl TypedArray<*const crate::content::ContentNode> {
+    /// Deallocate a content array, releasing each stored `Arc<ContentNode>`
+    /// share exactly once and freeing the element buffer + typed-array header.
+    ///
+    /// # Safety
+    /// `ptr` must point to a live `TypedArray<*const ContentNode>` allocated by
+    /// this module. Each non-null element must own one `Arc<ContentNode>` share.
+    pub unsafe fn drop_array_content(ptr: *mut Self) {
+        unsafe {
+            let arr = &*ptr;
+            if arr.cap > 0 && !arr.data.is_null() {
+                for i in 0..arr.len {
+                    let elem = *arr.data.add(i as usize);
+                    if !elem.is_null() {
+                        std::sync::Arc::decrement_strong_count(elem);
+                    }
+                }
+                let data_layout =
+                    Layout::array::<*const crate::content::ContentNode>(arr.cap as usize)
+                        .expect("invalid array layout");
+                dealloc(arr.data as *mut u8, data_layout);
+            }
+            let layout = Layout::new::<Self>();
+            dealloc(ptr as *mut u8, layout);
+        }
+    }
+}
+
 /// Retain (bump the refcount of) a v2-raw `*mut TypedArray<T>` carrier.
 ///
 /// This is the retain half of the `NativeKind::Ptr(HeapKind::TypedArray)`
@@ -791,6 +824,11 @@ pub unsafe fn release_v2_typed_array(ptr: *mut u8) {
             ELEM_TYPE_CALLABLE => TypedArray::<CallableArrayElem>::drop_array_callable(
                 ptr as *mut TypedArray<CallableArrayElem>,
             ),
+            ELEM_TYPE_CONTENT => {
+                TypedArray::<*const crate::content::ContentNode>::drop_array_content(
+                    ptr as *mut TypedArray<*const crate::content::ContentNode>,
+                )
+            }
             // An unstamped (`ELEM_TYPE_UNKNOWN`) or unrecognised discriminant
             // at refcount-0 means the producer-side stamp contract was
             // violated. The element-buffer monomorphization is unknown so a

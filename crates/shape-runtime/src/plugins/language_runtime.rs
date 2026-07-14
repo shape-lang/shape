@@ -24,6 +24,7 @@ unsafe impl Sync for CompiledForeignFunction {}
 struct LanguageRuntimeState {
     vtable: &'static LanguageRuntimeVTable,
     instance: *mut c_void,
+    config_bytes: Arc<[u8]>,
 }
 
 // SAFETY: Language runtime extensions must be thread-safe.
@@ -64,7 +65,13 @@ impl PluginLanguageRuntime {
             message: format!("Failed to serialize language runtime config: {}", e),
             location: None,
         })?;
+        Self::from_config_bytes(vtable, Arc::<[u8]>::from(config_bytes))
+    }
 
+    fn from_config_bytes(
+        vtable: &'static LanguageRuntimeVTable,
+        config_bytes: Arc<[u8]>,
+    ) -> Result<Self> {
         let init_fn = vtable.init.ok_or_else(|| ShapeError::RuntimeError {
             message: "Language runtime vtable has no init function".to_string(),
             location: None,
@@ -96,13 +103,26 @@ impl PluginLanguageRuntime {
         };
 
         let error_model = vtable.error_model;
-        let state = Arc::new(LanguageRuntimeState { vtable, instance });
+        let state = Arc::new(LanguageRuntimeState {
+            vtable,
+            instance,
+            config_bytes,
+        });
 
         Ok(Self {
             language_id,
             state,
             error_model,
         })
+    }
+
+    /// Create a new runtime instance using the same vtable and init config.
+    ///
+    /// Some embedded runtimes are thread-affine (notably V8/deno_core). Serve
+    /// workers use this to instantiate the runtime on the blocking worker that
+    /// will compile and invoke foreign functions.
+    pub fn fresh_instance(&self) -> Result<Self> {
+        Self::from_config_bytes(self.state.vtable, Arc::clone(&self.state.config_bytes))
     }
 
     /// The language identifier this runtime handles (e.g., "python").

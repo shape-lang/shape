@@ -576,14 +576,8 @@ pub const FEATURE_TESTS: &[FeatureTest] = &[
         category: FeatureCategory::Domain,
         requires_data: false,
     },
-    FeatureTest {
-        name: "temporal_nav",
-        covers: &["temporal_nav", "back_nav", "forward_nav", "nav_amount"],
-        code: "function test() { return back(5); }",
-        function: "test",
-        category: FeatureCategory::Domain,
-        requires_data: false,
-    },
+    // `temporal_nav` FeatureTest deleted with the back(n)/forward(n) grammar rules:
+    // they hijacked user-defined functions named `back`/`forward` into Durations.
     FeatureTest {
         name: "pattern_name",
         covers: &["pattern_name"],

@@ -146,6 +146,19 @@ pub trait RemoteDispatcher {
         fn_ref: &KindedSlot,
         args: &[KindedSlot],
     ) -> Result<crate::typed_module_exports::TypedReturn, String>;
+
+    /// Start the recoverable remote call on the VM's external-completion
+    /// path and return the scheduler future id immediately.
+    ///
+    /// The returned id is surfaced to Shape as `Future<Result<R,
+    /// RemoteError>>`; the background task eventually sends the same
+    /// `TypedReturn` shape as [`call_remote_result`](Self::call_remote_result).
+    fn call_remote_result_async(
+        &self,
+        addr: &str,
+        fn_ref: &KindedSlot,
+        args: &[KindedSlot],
+    ) -> Result<u64, String>;
 }
 
 /// Execution context available to module functions during a VM call.

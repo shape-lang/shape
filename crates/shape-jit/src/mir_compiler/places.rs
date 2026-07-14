@@ -2,7 +2,7 @@
 //!
 //! A Place represents something that can be read from or written to:
 //! - `Place::Local(slot)` → Cranelift variable
-//! - `Place::Field(base, idx)` → **inline** typed struct access when byte offset is known, FFI fallback otherwise
+//! - `Place::Field(base, idx)` → **inline** typed struct read when byte offset is known; unresolved reads surface-and-stop
 //! - `Place::Index(base, operand)` → **inline** array access (no FFI call)
 
 use cranelift::codegen::ir::FuncRef;
@@ -869,11 +869,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
     /// rejects closure-capture / return of a borrow), and the borrowed
     /// object is a live local for the whole body, so the field address
     /// stays valid for every deref reachable from this borrow.
-    pub(crate) fn emit_typed_field_address(
-        &mut self,
-        storage_bits: Value,
-        byte_off: u16,
-    ) -> Value {
+    pub(crate) fn emit_typed_field_address(&mut self, storage_bits: Value, byte_off: u16) -> Value {
         let slot_data = self.emit_typed_object_ptr(storage_bits);
         self.builder.ins().iadd_imm(slot_data, byte_off as i64)
     }
@@ -1073,8 +1069,8 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                 // `mir/lowering/expr.rs:31`, NOT a method call). The JIT
                 // `Place::Field` arms below model ONLY TypedObject /
                 // typed-struct field reads: `try_resolve_field_byte_offset`
-                // has no entry for "length" on a string, so the read falls
-                // through to the schema-less `get_prop` FFI, which
+                // has no entry for "length" on a string, so the read previously
+                // fell through to the schema-less `get_prop` FFI, which
                 // reinterprets the `Arc<String>` heap pointer as a
                 // TypedObject property map and returns garbage bits
                 // (`s.length` → VM 5, JIT 4816285147948504576). There is no
@@ -1100,8 +1096,8 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                         "MirToIR: property read `.{}` on a proven `string` \
                          receiver has no sound JIT codegen — the `Place::Field` \
                          arms model TypedObject/typed-struct field reads only, \
-                         and a string base falls through to the schema-less \
-                         `get_prop` FFI which reinterprets the `Arc<String>` \
+                         and a string base previously fell through to the \
+                         schema-less `get_prop` FFI which reinterprets the `Arc<String>` \
                          pointer as a property map and returns garbage \
                          (`s.length` → VM 5, JIT garbage, rc=0 silent-wrong). \
                          No JIT string-property producer is wired at this \
@@ -1131,24 +1127,48 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                     }
                 }
 
-                // R4.2C: FFI signatures accept plain u64 bit-patterns — no
-                // box wrap needed at call site. `get_prop` / `inline_typed_field_get`
-                // take the heap pointer as an already-ValueWord-encoded I64.
+                // R4.2C: field reads require both a statically resolved
+                // typed-object byte offset and a projected NativeKind. The
+                // offset proves which slot to read; the kind proof is the same
+                // producer-side stamp used by ownership/arithmetic consumers
+                // after the read. Unresolved fields must surface-and-stop
+                // below instead of reaching the legacy schema-less `get_prop`
+                // fallback.
                 let base_val = self.read_place(base)?;
-                if let Some(byte_off) = self.try_resolve_field_byte_offset(field_idx) {
-                    // Inline typed field read — 2 loads, no FFI call.
-                    Ok(self.inline_typed_field_get(base_val, byte_off))
-                } else if let Some(boxed_key) = self.field_idx_to_boxed_key(field_idx) {
-                    let key = self.builder.ins().iconst(types::I64, boxed_key as i64);
-                    let inst = self.builder.ins().call(self.ffi.get_prop, &[base_val, key]);
-                    Ok(self.builder.inst_results(inst)[0])
-                } else {
-                    let field = self.builder.ins().iconst(types::I64, field_idx.0 as i64);
+                if let (Some(byte_off), Some(_field_kind)) = (
+                    self.try_resolve_field_byte_offset(field_idx),
+                    self.try_resolve_field_native_kind(field_idx),
+                ) {
+                    // Schema-aware typed-object field read. This is the safe
+                    // FFI twin of `inline_typed_field_get`: it reads through
+                    // `TypedObjectStorage::slots()` instead of the legacy
+                    // schema-less property getter and rejects null-like
+                    // carriers without dereferencing them.
+                    let offset_val = self.builder.ins().iconst(types::I64, byte_off as i64);
                     let inst = self
                         .builder
                         .ins()
-                        .call(self.ffi.get_prop, &[base_val, field]);
+                        .call(self.ffi.typed_object_get_field, &[base_val, offset_val]);
                     Ok(self.builder.inst_results(inst)[0])
+                } else {
+                    let field_name = self
+                        .mir
+                        .field_name_table
+                        .get(field_idx)
+                        .map(|name| name.as_str())
+                        .unwrap_or("<unknown>");
+                    Err(format!(
+                        "MirToIR: unresolved direct field read `.{field_name}` \
+                         (field idx {}) lacks a statically proven typed-object \
+                         byte offset and/or projected NativeKind. The JIT no \
+                         longer falls through to the legacy `get_prop` property \
+                         getter for `Place::Field` reads because that path \
+                         reinterprets raw v2 typed-object carriers and can crash \
+                         or diverge for object/trait snippets. Surface-and-stop: \
+                         deopt to the bytecode interpreter until the field layout \
+                         and field kind are proven at compile time.",
+                        field_idx.0,
+                    ))
                 }
             }
             Place::Index(base, operand) => {
@@ -1346,12 +1366,28 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                 // as already-ValueWord-encoded I64 slots.
                 let base_val = self.read_place(base)?;
                 if let Some(byte_off) = self.try_resolve_field_byte_offset(field_idx) {
-                    // Inline typed field write — 2 loads + 1 store, no FFI call
-                    // (gc-off / scalar). Under `gc`, a cycle-capable heap field
-                    // additionally fires the compile-time-kind write-barrier
-                    // (3c object-field sink) — see `inline_typed_field_set`.
                     let field_kind = self.try_resolve_field_native_kind(field_idx);
-                    self.inline_typed_field_set(base_val, byte_off, val, field_kind);
+                    if field_kind.is_some() {
+                        // Inline typed field write — 2 loads + 1 store, no FFI call
+                        // (gc-off / scalar). Under `gc`, a cycle-capable heap field
+                        // additionally fires the compile-time-kind write-barrier
+                        // (3c object-field sink) — see `inline_typed_field_set`.
+                        self.inline_typed_field_set(base_val, byte_off, val, field_kind);
+                    } else {
+                        // Dynamic field kind (Option<T>, object/array schema fields,
+                        // or another unprojected field type): use the FFI setter.
+                        // Under `gc` it reads `field_kinds[idx]` from the live
+                        // `TypedObjectStorage`, maps that to a barrier tag, writes
+                        // the slot, and calls `jit_write_barrier` with the dynamic
+                        // nonzero tag for heap carriers. This avoids the unsound
+                        // inline `field_kind = None` path that would store with
+                        // barrier tag 0.
+                        let offset_val = self.builder.ins().iconst(types::I64, byte_off as i64);
+                        self.builder.ins().call(
+                            self.ffi.typed_object_set_field,
+                            &[base_val, offset_val, val],
+                        );
+                    }
                 } else if let Some(boxed_key) = self.field_idx_to_boxed_key(field_idx) {
                     let key = self.builder.ins().iconst(types::I64, boxed_key as i64);
                     self.builder
@@ -1557,8 +1593,9 @@ mod tests {
     /// pointer bits — exactly what `jit_typed_object_alloc` now produces and
     /// what `inline_typed_field_get` / `_set` consume. Caller frees via
     /// `TypedObjectStorage::_drop`.
-    unsafe fn make_test_typed_object(field_count: usize) -> (u64, *mut shape_value::heap_value::TypedObjectStorage)
-    {
+    unsafe fn make_test_typed_object(
+        field_count: usize,
+    ) -> (u64, *mut shape_value::heap_value::TypedObjectStorage) {
         use shape_value::heap_value::TypedObjectStorage;
         use shape_value::native_kind::NativeKind;
         use shape_value::slot::ValueSlot;

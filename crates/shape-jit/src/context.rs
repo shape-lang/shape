@@ -61,6 +61,9 @@ pub const RETURN_TAG_BOOL: u8 = 4;
 /// produces no value (e.g. `print(x)` at top level). Executor maps
 /// this to `WireValue::Null`.
 pub const RETURN_TAG_UNIT: u8 = 5;
+/// Raw `Arc<String>` pointer carrier (`NativeKind::String`).
+/// Executor adopts the returned share and maps it to `WireValue::String`.
+pub const RETURN_TAG_STRING: u8 = 6;
 
 // ============================================================================
 // JIT Runtime-Error Signal Codes

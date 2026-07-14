@@ -280,21 +280,13 @@ impl BytecodeCompiler {
             }
         }
 
-        // W15.2-LANG-8 jit-toplevel-render fix (Phase 4b Round 3 Surface-1c, ADR-006 §2.7.5
-        // producer-side stamp): the MakeRef + MakeFieldRef fast path requires the field's
-        // operand-encoded `field_type_tag` to be statically sourceable by the VM consumer
-        // (`field_tag_to_native_kind` returns `Some(NativeKind)`). When the schema declares
-        // the field as `FieldType::Any` (e.g. nested object literals where the parent's
-        // inferred FieldType is `Any` because `infer_field_type_from_expr` only handles
-        // literals), `field_type_to_tag` returns `FIELD_TAG_ANY` (8) and the MakeFieldRef
-        // executor SURFACEs per ADR-006 §2.7.13 / Q14 — "no statically-sourceable
-        // NativeKind, producing emitter must stamp a concrete tag". Skip the fast path here
-        // so we fall through to the `compile_expr(object) + GetFieldTyped` path below,
-        // which handles `FIELD_TAG_ANY` operands by sourcing the kind from the storage's
-        // parallel `field_kinds` track (W17-comptime-vm-dispatch, ADR-006 §2.7.26).
+        // The MakeRef + MakeFieldRef fast path requires a field whose native
+        // carrier kind is fixed by its declared FieldType. Dynamic Any and
+        // Option<T> fields must read through GetFieldTyped so the VM sources
+        // the live kind from TypedObjectStorage::field_kinds.
         let typed_field_place = if !optional {
             self.try_resolve_typed_field_place(object, property)
-                .filter(|place| !matches!(place.field_type_info, FieldType::Any))
+                .filter(Self::typed_field_place_has_fixed_field_ref_kind)
         } else {
             None
         };

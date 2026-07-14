@@ -6,7 +6,7 @@ use super::{CheckMode, TypeInferenceEngine};
 use crate::type_system::checking::MethodTable;
 use crate::type_system::exhaustiveness;
 use crate::type_system::*;
-use shape_ast::ast::{BinaryOp, Expr, Literal, Span, TypeAnnotation};
+use shape_ast::ast::{BinaryOp, Expr, JoinKind, Literal, Span, TypeAnnotation};
 use shape_ast::interpolation::{InterpolationPart, parse_interpolation_with_mode};
 
 impl TypeInferenceEngine {
@@ -1083,22 +1083,16 @@ impl TypeInferenceEngine {
                                                     )
                                             ) =>
                                     {
-                                        match self
-                                            .solver
-                                            .unifier()
-                                            .apply_substitutions(&args[0])
-                                        {
-                                            Type::Variable(var) => TypeAnnotation::Array(
+                                        match self.solver.unifier().apply_substitutions(&args[0]) {
+                                            Type::Variable(var) => TypeAnnotation::Array(Box::new(
+                                                tyvar_to_annotation(&var),
+                                            )),
+                                            Type::Constrained { var, .. } => TypeAnnotation::Array(
                                                 Box::new(tyvar_to_annotation(&var)),
                                             ),
-                                            Type::Constrained { var, .. } => {
-                                                TypeAnnotation::Array(Box::new(
-                                                    tyvar_to_annotation(&var),
-                                                ))
-                                            }
-                                            _ => resolved.to_annotation().unwrap_or_else(
-                                                || TypeAnnotation::Basic("unknown".to_string()),
-                                            ),
+                                            _ => resolved.to_annotation().unwrap_or_else(|| {
+                                                TypeAnnotation::Basic("unknown".to_string())
+                                            }),
                                         }
                                     }
                                     _ => resolved.to_annotation().unwrap_or_else(|| {
@@ -2602,7 +2596,6 @@ impl TypeInferenceEngine {
 
             // Assignment expression
             Expr::Assign(assign_expr, _) => {
-                let value_type = self.infer_expr(&assign_expr.value)?;
                 let target_type = if let Expr::PropertyAccess {
                     object, property, ..
                 } = assign_expr.target.as_ref()
@@ -2623,6 +2616,13 @@ impl TypeInferenceEngine {
                     }
                 } else {
                     self.infer_expr(&assign_expr.target)?
+                };
+                let value_type = if self
+                    .assignment_value_uses_option_context(&assign_expr.value, &target_type)
+                {
+                    self.check_against(&assign_expr.value, &target_type)?
+                } else {
+                    self.infer_expr(&assign_expr.value)?
                 };
 
                 // Assignment must be type-compatible with the target field/variable.
@@ -3022,13 +3022,36 @@ impl TypeInferenceEngine {
                 type_name, fields, ..
             } => self.infer_struct_literal_type(type_name, fields),
 
-            // Await expression - infer the type of the inner expression
-            Expr::Await(inner, _) => self.infer_expr(inner),
+            // Await expression - a proven Future<T> yields T. Other async
+            // surfaces still keep their pre-existing type until their own
+            // signature lanes grow a Future<T> contract.
+            Expr::Await(inner, _) => {
+                let inner_type = self.infer_expr(inner)?;
+                Ok(self.awaited_type_for(inner_type))
+            }
 
-            // Join expression - infer types of all branches
+            // Join expression - infer types of all branches. `join all`
+            // materializes ordered values as `Array<T>` when every branch has
+            // the same already-proven awaited payload type; mixed/unproven
+            // joins keep the existing fresh type so runtime can surface the
+            // unsupported-carrier diagnostic.
             Expr::Join(join_expr, _) => {
+                let mut payload_types = Vec::with_capacity(join_expr.branches.len());
                 for branch in &join_expr.branches {
-                    self.infer_expr(&branch.expr)?;
+                    let branch_type = self.infer_expr(&branch.expr)?;
+                    payload_types.push(self.awaited_type_for(branch_type));
+                }
+                if join_expr.kind == JoinKind::All {
+                    if let Some(first) = payload_types.first() {
+                        let first = self.solver.unifier().apply_substitutions(first);
+                        if payload_types
+                            .iter()
+                            .skip(1)
+                            .all(|ty| self.solver.unifier().apply_substitutions(ty) == first)
+                        {
+                            return Ok(BuiltinTypes::array(first));
+                        }
+                    }
                 }
                 Ok(self.fresh_type_var())
             }
@@ -3036,20 +3059,12 @@ impl TypeInferenceEngine {
             // Annotated expression - infer the type of the target
             Expr::Annotated { target, .. } => self.infer_expr(target),
 
-            // Async let - spawns a task and binds a future handle. Without a
-            // surface `Future<T>` type in the inference lattice, the binding's
-            // type unifies with the inner expression's type — `await x` then
-            // re-uses the same `infer_expr(inner)` shape and returns the
-            // inner kind cleanly. The sync-resolution + op_spawn_task
-            // non-callable path (async_ops/mod.rs::op_spawn_task) preserves
-            // the inner value's kind end-to-end at runtime, so the inference
-            // shape matches the runtime behavior. Without this, multi-binding
-            // patterns like `let va = await a; let vb = await b; print(va + vb)`
-            // surface "Cannot infer types for binary operation Add: operand
-            // types are unknown and unknown" because both va and vb were
-            // typed as fresh type vars.
+            // Async let - spawns a task and binds a Future<T> handle, where T
+            // is the RHS awaited payload type. If the RHS is already a
+            // Future<T>, keep that handle shape instead of nesting futures.
             Expr::AsyncLet(async_let, _) => {
                 let inner_type = self.infer_expr(&async_let.expr)?;
+                let future_type = self.future_type_for_async_let_inner(inner_type);
                 // Register the binding into the CURRENT scope (no new scope —
                 // `async let x = expr` is statement-positioned, so `x` must
                 // remain visible to the sibling statements that follow,
@@ -3059,8 +3074,8 @@ impl TypeInferenceEngine {
                 // subsequent `await x` is wrongly rejected as an undefined
                 // variable, even though the compiler + VM bind it correctly.
                 self.env
-                    .define(&async_let.name, TypeScheme::mono(inner_type.clone()));
-                Ok(inner_type)
+                    .define(&async_let.name, TypeScheme::mono(future_type.clone()));
+                Ok(future_type)
             }
 
             // Async scope - cancellation boundary, type is the body's type
@@ -3309,6 +3324,43 @@ impl TypeInferenceEngine {
                 Some(args.remove(0))
             }
             _ => None,
+        }
+    }
+
+    fn future_payload_type(&self, ty: &Type) -> Option<Type> {
+        let canon = ty.canonicalize();
+        match canon {
+            Type::Generic { base, mut args }
+                if args.len() == 1
+                    && matches!(
+                        base.as_ref(),
+                        Type::Concrete(ann) if ann.as_type_name_str() == Some("Future")
+                    ) =>
+            {
+                Some(args.remove(0))
+            }
+            _ => None,
+        }
+    }
+
+    fn awaited_type_for(&self, ty: Type) -> Type {
+        let resolved = self.solver.unifier().apply_substitutions(&ty);
+        self.future_payload_type(&resolved).unwrap_or(resolved)
+    }
+
+    fn future_type_for_async_let_inner(&self, inner_type: Type) -> Type {
+        let payload_type = self.awaited_type_for(inner_type);
+        BuiltinTypes::future(payload_type)
+    }
+
+    fn assignment_value_uses_option_context(&self, value: &Expr, target_type: &Type) -> bool {
+        if !self.is_option_type(&target_type.canonicalize()) {
+            return false;
+        }
+        match value {
+            Expr::Literal(Literal::None, _) => true,
+            Expr::FunctionCall { name, args, .. } => name == "Some" && args.len() == 1,
+            _ => false,
         }
     }
 
@@ -4252,8 +4304,12 @@ mod tests {
         // Not a reinterpret pair.
         assert!(!TypeInferenceEngine::is_ptr_int_reinterpret("ptr", "ptr"));
         assert!(!TypeInferenceEngine::is_ptr_int_reinterpret("int", "int"));
-        assert!(!TypeInferenceEngine::is_ptr_int_reinterpret("ptr", "number"));
-        assert!(!TypeInferenceEngine::is_ptr_int_reinterpret("string", "ptr"));
+        assert!(!TypeInferenceEngine::is_ptr_int_reinterpret(
+            "ptr", "number"
+        ));
+        assert!(!TypeInferenceEngine::is_ptr_int_reinterpret(
+            "string", "ptr"
+        ));
         assert!(!TypeInferenceEngine::is_ptr_int_reinterpret("usize", "ptr"));
     }
 
@@ -4271,7 +4327,11 @@ mod tests {
             .expect("int as ptr must be a valid reinterpretation");
         // A non-ptr, non-numeric source still fails.
         let string = BuiltinTypes::string();
-        assert!(engine.validate_infallible_conversion(&string, &ptr).is_err());
+        assert!(
+            engine
+                .validate_infallible_conversion(&string, &ptr)
+                .is_err()
+        );
     }
 
     #[test]

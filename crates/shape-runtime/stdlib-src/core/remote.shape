@@ -4,6 +4,12 @@
 /// High-level API for executing Shape code on remote `shape serve` instances.
 /// Handles wire protocol encoding, transport, and response decoding automatically.
 ///
+/// Address strings keep the existing bare TCP form (`"host:port"`). To require
+/// TLS, use `shape+tls://host:port?ca=/path/to/cert.pem`; pass
+/// `server_name=name` when connecting to an IP address whose certificate is
+/// issued for a DNS name. TLS calls always verify the certificate against the
+/// supplied trust root; there is no insecure/skip-verify mode.
+///
 /// # Example
 ///
 /// ```shape
@@ -100,6 +106,13 @@ builtin fn __call_raising(addr: string, fn_ref: _, args: Array<_>) -> _;
 /// `remote::call(addr, fn, args…)`, which the compiler lowers to this builtin
 /// and types at `Result<R, RemoteError>`.
 builtin fn __call_result(addr: string, fn_ref: _, args: Array<_>) -> _;
+
+/// Internal compiler-elaborated sibling backing the public
+/// `remote::call_async` primitive. It starts the same recoverable remote call
+/// as `__call_result` on the VM's external-completion scheduler and returns a
+/// `Future<Result<R, RemoteError>>` handle immediately. User code never names
+/// this dunder directly; it writes `remote::call_async(addr, fn, args…)`.
+builtin fn __call_async_result(addr: string, fn_ref: _, args: Array<_>) -> _;
 
 /// Structured error returned by the recoverable `remote::call` primitive
 /// (Q26 / distributed §4.2). Every transport, protocol, permission, and remote

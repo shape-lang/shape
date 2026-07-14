@@ -71,8 +71,9 @@
 //!   the future id as `Ptr(HeapKind::Future)`.
 //! - `op_join_await` walks the carried `task_ids` and dispatches per-id
 //!   to `resolve_spawned_task` per the join strategy (All / Race / Any
-//!   / AllSettled), aggregating into an `Arc<TaskGroupData>` `Ptr(HeapKind::TaskGroup)`
-//!   carrier (Race/Any return the per-task result directly).
+//!   / AllSettled). All materializes ordered homogeneous values into a typed
+//!   array; Race/Any return the per-task result directly; AllSettled keeps the
+//!   `Arc<TaskGroupData>` `Ptr(HeapKind::TaskGroup)` carrier.
 //!
 //! ### §2.7.4 Phase-2c boundary
 //!
@@ -85,11 +86,15 @@
 use crate::{
     bytecode::{Instruction, OpCode, Operand},
     executor::VirtualMachine,
+    executor::v2_handlers::v2_array_detect::{
+        ELEM_TYPE_BOOL, ELEM_TYPE_F64, ELEM_TYPE_I64, ELEM_TYPE_TYPED_OBJECT, stamp_elem_type,
+    },
     executor::vm_impl::stack::drop_with_kind,
 };
 use shape_value::{
     KindedSlot, NativeKind, VMError,
-    heap_value::{HeapKind, TaskGroupData},
+    heap_value::{HeapKind, TaskGroupData, TypedObjectStorage},
+    v2::typed_array::TypedArray,
 };
 use std::sync::Arc;
 
@@ -471,7 +476,7 @@ impl VirtualMachine {
                     task_id,
                     crate::executor::task_scheduler::PendingAsyncTask {
                         completion: rx,
-                        abort: handle.abort_handle(),
+                        abort: Some(handle.abort_handle()),
                     },
                 );
                 // Track the in-flight task for structured-scope cancellation,
@@ -637,25 +642,19 @@ impl VirtualMachine {
                 // of in-flight join groups stays out of scope per
                 // §2.7.11 out-of-scope clause.
                 match join_kind {
-                    // All: block on every task and drop each per-task share.
+                    // All: block on every task and materialize ordered values.
                     // WF-2D: async module tasks in the group are already
                     // running concurrently on the shared runtime (each was
                     // spawned when its branch expression was evaluated), so
                     // blocking on them in sequence costs ~max(branch), not
-                    // sum(branch). The aggregate carrier is a `TaskGroupData`
-                    // of ids only. Push a fresh `Ptr(HeapKind::TaskGroup)`.
+                    // sum(branch). This lane supports homogeneous scalar
+                    // payloads and typed-object carriers; unsupported or mixed
+                    // child carriers surface loudly instead of falling back to
+                    // the historical TaskGroup placeholder.
                     0 => {
-                        for &id in &task_ids {
-                            let result = self.resolve_join_task_blocking(id)?;
-                            drop_with_kind(result.raw(), result.kind());
-                            std::mem::forget(result);
-                        }
-                        let aggregate: Arc<TaskGroupData> = Arc::new(TaskGroupData {
-                            kind: 0,
-                            task_ids: task_ids.clone(),
-                        });
-                        let result_bits = Arc::into_raw(aggregate) as u64;
-                        self.push_kinded(result_bits, NativeKind::Ptr(HeapKind::TaskGroup))?;
+                        let (result_bits, result_kind) =
+                            self.materialize_join_all_results(&task_ids)?;
+                        self.push_kinded(result_bits, result_kind)?;
                     }
                     // Race: return the FIRST branch to settle (success or
                     // error); genuinely cancel the losers (WF-2D). Empty
@@ -756,6 +755,125 @@ impl VirtualMachine {
         } else {
             self.resolve_spawned_task(id)
         }
+    }
+
+    /// `join all`: resolve every child in source order and return one
+    /// homogeneous typed array carrier. This deliberately does not cover
+    /// `join settle`; settle still preserves the old TaskGroup placeholder in
+    /// this lane.
+    fn materialize_join_all_results(
+        &mut self,
+        task_ids: &[u64],
+    ) -> Result<(u64, NativeKind), VMError> {
+        if task_ids.is_empty() {
+            return Err(VMError::RuntimeError(
+                "join all cannot materialize an empty task list".to_string(),
+            ));
+        }
+
+        let mut results = Vec::with_capacity(task_ids.len());
+        for &id in task_ids {
+            results.push(self.resolve_join_task_blocking(id)?);
+        }
+        Self::materialize_join_all_slots(results)
+    }
+
+    fn materialize_join_all_slots(
+        results: Vec<KindedSlot>,
+    ) -> Result<(u64, NativeKind), VMError> {
+        let Some(first) = results.first() else {
+            return Err(VMError::RuntimeError(
+                "join all cannot materialize an empty task list".to_string(),
+            ));
+        };
+        let first_kind = first.kind();
+
+        for (idx, result) in results.iter().enumerate().skip(1) {
+            if result.kind() != first_kind {
+                return Err(VMError::RuntimeError(format!(
+                    "join all cannot materialize mixed result carriers: branch 0 returned {:?}, \
+                     branch {} returned {:?}",
+                    first_kind,
+                    idx,
+                    result.kind()
+                )));
+            }
+        }
+
+        match first_kind {
+            NativeKind::Int64 => Self::materialize_join_all_i64(results),
+            NativeKind::Float64 => Self::materialize_join_all_f64(results),
+            NativeKind::Bool => Self::materialize_join_all_bool(results),
+            NativeKind::Ptr(HeapKind::TypedObject) => {
+                Self::materialize_join_all_typed_object(results)
+            }
+            other => Err(VMError::RuntimeError(format!(
+                "join all cannot materialize result carrier {:?}; supported homogeneous \
+                 carriers are int, number, bool, and typed object",
+                other
+            ))),
+        }
+    }
+
+    fn materialize_join_all_i64(
+        results: Vec<KindedSlot>,
+    ) -> Result<(u64, NativeKind), VMError> {
+        let arr = TypedArray::<i64>::with_capacity(results.len() as u32);
+        unsafe { stamp_elem_type(arr as *mut u8, ELEM_TYPE_I64) };
+        for result in results {
+            unsafe { TypedArray::push(arr, result.raw() as i64) };
+            std::mem::forget(result);
+        }
+        Ok((
+            arr as usize as u64,
+            NativeKind::Ptr(HeapKind::TypedArray),
+        ))
+    }
+
+    fn materialize_join_all_f64(
+        results: Vec<KindedSlot>,
+    ) -> Result<(u64, NativeKind), VMError> {
+        let arr = TypedArray::<f64>::with_capacity(results.len() as u32);
+        unsafe { stamp_elem_type(arr as *mut u8, ELEM_TYPE_F64) };
+        for result in results {
+            unsafe { TypedArray::push(arr, f64::from_bits(result.raw())) };
+            std::mem::forget(result);
+        }
+        Ok((
+            arr as usize as u64,
+            NativeKind::Ptr(HeapKind::TypedArray),
+        ))
+    }
+
+    fn materialize_join_all_bool(
+        results: Vec<KindedSlot>,
+    ) -> Result<(u64, NativeKind), VMError> {
+        let arr = TypedArray::<u8>::with_capacity(results.len() as u32);
+        unsafe { stamp_elem_type(arr as *mut u8, ELEM_TYPE_BOOL) };
+        for result in results {
+            unsafe { TypedArray::push(arr, if result.raw() != 0 { 1 } else { 0 }) };
+            std::mem::forget(result);
+        }
+        Ok((
+            arr as usize as u64,
+            NativeKind::Ptr(HeapKind::TypedArray),
+        ))
+    }
+
+    fn materialize_join_all_typed_object(
+        results: Vec<KindedSlot>,
+    ) -> Result<(u64, NativeKind), VMError> {
+        let arr = TypedArray::<*const TypedObjectStorage>::with_capacity(results.len() as u32);
+        unsafe { stamp_elem_type(arr as *mut u8, ELEM_TYPE_TYPED_OBJECT) };
+        for result in results {
+            let ptr = result.raw() as *const TypedObjectStorage;
+            unsafe { TypedArray::push(arr, ptr) };
+            std::mem::forget(result);
+        }
+        Ok((
+            arr as usize as u64,
+            NativeKind::Ptr(HeapKind::TypedArray),
+        ))
     }
 
     /// `join race`: return the id + result of the first branch to SETTLE

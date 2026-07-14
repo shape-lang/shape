@@ -1247,7 +1247,10 @@ mod tests {
         );
         // Range check directly.
         assert!(TypeInferenceEngine::int_value_fits_numeric(0, "ptr"));
-        assert!(TypeInferenceEngine::int_value_fits_numeric(u64::MAX as i128, "ptr"));
+        assert!(TypeInferenceEngine::int_value_fits_numeric(
+            u64::MAX as i128,
+            "ptr"
+        ));
         assert!(!TypeInferenceEngine::int_value_fits_numeric(-1, "ptr"));
     }
 

@@ -875,6 +875,26 @@ define_opcodes! {
     /// pushes nothing. Releases prior closure share, transfers the new share.
     TypedArraySetCallable = 0x1C7, Object, pops: 3, pushes: 0;
 
+    // ── W18A content-array element carrier (2026-07-09) ──
+    //
+    // Compile-time-proven `Array<content>` literals use a dedicated
+    // `TypedArray<*const ContentNode>` carrier. Elements are
+    // `Arc::into_raw(Arc<ContentNode>)` pointers labeled
+    // `Ptr(HeapKind::Content)`, not v2 HeapHeader rows.
+
+    /// Create a new TypedArray<*const ContentNode> with given capacity.
+    /// Operand: Count(capacity). Pushes ptr.
+    NewTypedArrayContent = 0x1CA, Object, pops: 0, pushes: 1;
+    /// Get element from TypedArray<*const ContentNode>: pops (arr_ptr, index),
+    /// pushes (*const ContentNode) bits with Ptr(HeapKind::Content).
+    TypedArrayGetContent = 0x1CB, Object, pops: 2, pushes: 1;
+    /// Push content element to TypedArray<*const ContentNode>: pops (arr_ptr, value),
+    /// pushes nothing. Caller transfers its Arc share to the array.
+    TypedArrayPushContent = 0x1CC, Object, pops: 2, pushes: 0;
+    /// Set content element in TypedArray<*const ContentNode>: pops (arr_ptr, index, value),
+    /// pushes nothing. Releases prior Arc share, transfers the new share.
+    TypedArraySetContent = 0x1CD, Object, pops: 3, pushes: 0;
+
     // U3 (SB-9 deletion): the v2 `TypedMap<K,V>` opcode family (0xCD-0xFB
     // ranges) was deleted along with the dual-HashMap-carrier split-brain.
     // ALL HashMap operations now use the single honest `HashMapData` carrier
@@ -2127,6 +2147,11 @@ impl OpCode {
             | OpCode::TypedArrayGetCallable
             | OpCode::TypedArrayPushCallable
             | OpCode::TypedArraySetCallable
+            // W18A content-array element carrier.
+            | OpCode::NewTypedArrayContent
+            | OpCode::TypedArrayGetContent
+            | OpCode::TypedArrayPushContent
+            | OpCode::TypedArraySetContent
             // Local-slot-based typed array element access
             | OpCode::GetElemI64
             | OpCode::GetElemF64

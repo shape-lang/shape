@@ -294,21 +294,24 @@ impl ShapeEngine {
     /// refuses `snapshot()` with the `NoStore` barrier rather than trapping.
     pub fn snapshot_install_context(
         &self,
-    ) -> Result<Option<(std::sync::Arc<SnapshotStore>, crate::snapshot::SnapshotEnvelopeSeed)>>
-    {
+    ) -> Result<
+        Option<(
+            std::sync::Arc<SnapshotStore>,
+            crate::snapshot::SnapshotEnvelopeSeed,
+        )>,
+    > {
         let Some(store) = self.snapshot_store.as_ref() else {
             return Ok(None);
         };
         let semantic = SemanticSnapshot {
             exported_symbols: self.exported_symbols.clone(),
         };
-        let semantic_hash =
-            store
-                .put_struct(&semantic)
-                .map_err(|e| ShapeError::RuntimeError {
-                    message: format!("failed to persist SemanticSnapshot for snapshot seed: {e}"),
-                    location: None,
-                })?;
+        let semantic_hash = store
+            .put_struct(&semantic)
+            .map_err(|e| ShapeError::RuntimeError {
+                message: format!("failed to persist SemanticSnapshot for snapshot seed: {e}"),
+                location: None,
+            })?;
         let seed = crate::snapshot::SnapshotEnvelopeSeed {
             semantic_hash,
             script_path: self.script_path.clone(),

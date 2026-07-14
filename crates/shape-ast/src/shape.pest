@@ -547,7 +547,10 @@ statement = {
 
 remove_target_stmt = { "remove" ~ "target" }
 set_param_value_stmt = { "set" ~ "param" ~ ident ~ "=" ~ expression }
-set_param_type_stmt = { "set" ~ "param" ~ ident ~ ":" ~ type_annotation }
+set_param_type_stmt = {
+    "set" ~ "param" ~ ident ~ ":" ~ (type_annotation | set_param_type_expr_payload)
+}
+set_param_type_expr_payload = { "(" ~ expression ~ ")" }
 set_return_stmt = { "set" ~ "return" ~ (set_return_expr_payload | type_annotation) }
 set_return_expr_payload = { "(" ~ expression ~ ")" }
 replace_body_stmt = { "replace" ~ "body" ~ (replace_body_expr_payload | ("{" ~ statement* ~ "}")) }
@@ -1205,7 +1208,6 @@ primary_expr = {
     | unit_literal     // Must come before "(" ~ expression ~ ")"
     | "(" ~ expression ~ ")"
     | some_expr  // Some(value) constructor for Option type
-    | temporal_nav
     | type_ref_call   // type_ref(TYPE) checked type-argument position (ADR-009 A2) — before ident
     | struct_literal  // Struct literal: TypeName { field: value, ... } — before ident
     | hash_member_selector // #name hygienic-selection token — parsed ONLY to name-reject (ADR-009 B5/B6)
@@ -1552,18 +1554,20 @@ quoted_time = { string }
 named_time = { "today" | "yesterday" | "now" }
 relative_time = { string } // Will be parsed semantically
 
-// ===== Temporal Navigation =====
-temporal_nav = {
-    back_nav
-    | forward_nav
-}
-
-back_nav = { "back" ~ "(" ~ nav_amount ~ ")" }
-forward_nav = { "forward" ~ "(" ~ nav_amount ~ ")" }
-
-nav_amount = {
-    number ~ time_unit?
-}
+// ===== Temporal Navigation (DELETED) =====
+// The `back(n)` / `forward(n)` temporal-navigation rules were a vestige of the
+// trading DSL Shape grew out of. They sat in the `primary` alternation ahead of
+// `ident`, so any call to a USER-DEFINED function named `back` or `forward` with
+// a literal numeric argument was silently captured and rewritten into a Duration:
+//
+//     fn back(x: int) -> int { return x * 2 }
+//     print(back(3))   // printed -PT3S (a Duration!) instead of 6 — no diagnostic
+//
+// Nothing in the language, stdlib, tests, or book consumed them. Deleted so that
+// `back` and `forward` are ordinary identifiers. Duration LITERALS (`5m`, `1.5d`)
+// are a separate, working feature and are unaffected.
+//
+// `time_unit` is retained below: it is still referenced by `last_window`.
 
 time_unit = { "samples" | "sample" | "records" | "record" | "minutes" | "hours" | "days" | "weeks" | "months" | "minute" | "hour" | "day" | "week" | "month" }
 

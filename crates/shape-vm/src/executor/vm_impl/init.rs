@@ -391,6 +391,16 @@ impl VirtualMachine {
         self.future_id_counter
     }
 
+    /// Track a Future created by a native async builtin in the active
+    /// structured-concurrency scope, if there is one.
+    pub(crate) fn track_future_in_active_async_scope(&mut self, task_id: u64) {
+        if let Some(scope) = self.async_scope_stack.last_mut()
+            && !scope.contains(&task_id)
+        {
+            scope.push(task_id);
+        }
+    }
+
     /// Get function ID for fast repeated calls (avoids name lookup in hot loops)
     pub fn get_function_id(&self, name: &str) -> Option<u16> {
         self.program

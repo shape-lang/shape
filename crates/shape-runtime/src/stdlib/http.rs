@@ -46,12 +46,12 @@
 //! the csv_module migration (commit `9f6b1d3`). New typed-marshal test
 //! harness arrives with the shape-vm cleanup workstream.
 
+use crate::json_value::JsonValue;
 use crate::marshal::register_typed_async_fn_2_full;
 use crate::marshal::register_typed_async_fn_3_full;
 use crate::marshal::register_typed_fn_3_full;
 use crate::module_exports::{ModuleExports, ModuleParam};
 use crate::typed_module_exports::{ConcreteReturn, ConcreteType, TypedReturn};
-use crate::json_value::JsonValue;
 use std::sync::Arc;
 
 /// Build the schemaful HttpResponse pair-list returned by every http.*
@@ -280,13 +280,7 @@ pub fn create_http_module() -> ModuleExports {
         ConcreteType::Result(Box::new(ConcreteType::Named("HttpResponse".to_string())));
 
     // http.post_text(url: string, body: string, options?: HashMap) -> Result<HttpResponse>
-    register_typed_async_fn_3_full::<
-        _,
-        _,
-        Arc<String>,
-        Arc<String>,
-        JsonValue,
-    >(
+    register_typed_async_fn_3_full::<_, _, Arc<String>, Arc<String>, JsonValue>(
         &mut module,
         "post_text",
         "Perform an HTTP POST request with a text body",
@@ -384,13 +378,7 @@ pub fn create_http_module() -> ModuleExports {
     );
 
     // http.put_text(url: string, body: string, options?: HashMap) -> Result<HttpResponse>
-    register_typed_async_fn_3_full::<
-        _,
-        _,
-        Arc<String>,
-        Arc<String>,
-        JsonValue,
-    >(
+    register_typed_async_fn_3_full::<_, _, Arc<String>, Arc<String>, JsonValue>(
         &mut module,
         "put_text",
         "Perform an HTTP PUT request with a text body",
@@ -520,12 +508,7 @@ pub fn create_http_module() -> ModuleExports {
         ConcreteType::Result(Box::new(ConcreteType::Named("HttpResponse".to_string())));
 
     // http.post_json(url: string, body: object, options?: HashMap) -> Result<HttpResponse>
-    register_typed_fn_3_full::<
-        _,
-        Arc<String>,
-        shape_value::heap_value::TypedObjectPtr,
-        JsonValue,
-    >(
+    register_typed_fn_3_full::<_, Arc<String>, shape_value::heap_value::TypedObjectPtr, JsonValue>(
         &mut module,
         "post_json",
         "Perform an HTTP POST request with a JSON body",
@@ -592,12 +575,7 @@ pub fn create_http_module() -> ModuleExports {
         description: "Request body as an object (sent as JSON)".to_string(),
         ..Default::default()
     };
-    register_typed_fn_3_full::<
-        _,
-        Arc<String>,
-        shape_value::heap_value::TypedObjectPtr,
-        JsonValue,
-    >(
+    register_typed_fn_3_full::<_, Arc<String>, shape_value::heap_value::TypedObjectPtr, JsonValue>(
         &mut module,
         "put_json",
         "Perform an HTTP PUT request with a JSON body",

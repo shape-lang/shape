@@ -54,6 +54,14 @@ use crate::bytecode::{BytecodeProgram, FunctionBlob, FunctionHash, Program};
 /// and optional closure captures.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RemoteCallRequest {
+    /// Sender-assigned identity for best-effort cancellation of this call.
+    ///
+    /// This is not a durable remote future handle and is not exposed to Shape
+    /// code. It only lets a caller-side cancelled `remote::call_async` ask the
+    /// receiver to drop work that has not entered an executing VM frame yet.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub call_id: Option<RemoteCallId>,
+
     /// The full compiled program. After the first transfer, the remote
     /// side caches by `program_hash` and subsequent calls only need args.
     pub program: BytecodeProgram,
@@ -112,6 +120,46 @@ pub struct RemoteCallRequest {
 pub struct RemoteCallResponse {
     /// The function's return value, or an error message.
     pub result: Result<SerializableVMValue, RemoteCallError>,
+}
+
+/// Internal identity for one `remote::call_async` wire call.
+///
+/// It is intentionally just a transport correlation token. It does not grant a
+/// polling API, does not survive snapshots, and does not identify a remotely
+/// awaitable future.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct RemoteCallId {
+    pub high: u64,
+    pub low: u64,
+}
+
+/// Best-effort request to cancel a previously sent remote call.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RemoteCancelRequest {
+    pub call_id: RemoteCallId,
+}
+
+/// Receiver's honest cancellation outcome.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RemoteCancelOutcome {
+    /// The call was queued or had not arrived yet; the receiver will not run it.
+    AcceptedQueued,
+    /// The call is already executing inside a receiver VM frame.
+    AlreadyRunning,
+    /// The receiver has already completed or retired the call.
+    AlreadyFinished,
+    /// The receiver has no state for this call id.
+    UnknownCall,
+    /// The cancel request was refused by the same auth gate as calls.
+    AuthRequired,
+}
+
+/// Response to a best-effort remote cancellation request.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RemoteCancelResponse {
+    pub call_id: RemoteCallId,
+    pub outcome: RemoteCancelOutcome,
+    pub message: String,
 }
 
 /// Error from remote execution (the wire-level error carried in
@@ -288,6 +336,10 @@ pub enum WireMessage {
     Call(RemoteCallRequest),
     /// Response to a remote function call.
     CallResponse(RemoteCallResponse),
+    /// Best-effort cancellation for a `Call` that carried `call_id`.
+    CancelCall(RemoteCancelRequest),
+    /// Receiver's cancellation outcome.
+    CancelCallResponse(RemoteCancelResponse),
     /// A large blob sent as a separate message before the call (Phase 3).
     Sidecar(BlobSidecar),
 
@@ -805,6 +857,26 @@ pub fn execute_remote_call(
     }
 }
 
+/// Execute a remote call without dynamic language runtimes, while preserving
+/// the receiver's scope constraints.
+///
+/// This is the serve path for receivers that may still need strict
+/// `ffi_languages` enforcement even when no runtime registry is installed.
+/// Dynamic calls then either fail the receiver opt-in gate or continue to the
+/// normal "no extension provides language" error; `extern C` remains governed
+/// by `Ffi` plus native library/symbol scope, not by `ffi_languages`.
+pub fn execute_remote_call_with_scope(
+    request: RemoteCallRequest,
+    store: &SnapshotStore,
+    granted: &shape_abi_v1::PermissionSet,
+    scope: &shape_abi_v1::ScopeConstraints,
+) -> RemoteCallResponse {
+    match execute_inner(request, store, granted, scope) {
+        Ok(value) => RemoteCallResponse { result: Ok(value) },
+        Err(err) => RemoteCallResponse { result: Err(err) },
+    }
+}
+
 /// Execute a remote call with pre-loaded language runtime extensions.
 ///
 /// `language_runtimes` maps language IDs (e.g. "python") to pre-loaded
@@ -895,9 +967,10 @@ fn missing_dependency_blobs(ca: &Program) -> Vec<FunctionHash> {
 ///    and the return ABI kind from `frame_descriptor.abi_return_kind()`.
 /// 5. Materialize each `SerializableVMValue` arg into a `KindedSlot` via
 ///    `serializable_to_slot(arg, expected_kind, store)`.
-/// 6. Invoke the callee through the kinded ABI (`execute_function_by_id`).
-/// 7. Project the returned `KindedSlot` to `SerializableVMValue` via
-///    `slot_to_serializable(bits, kind, store)`.
+/// 6. Invoke the callee through the kinded ABI at a host boundary.
+/// 7. If the callee declared and returned a local `Future<T>`, resolve that
+///    receiver-local future first; then project the payload `KindedSlot` to
+///    `SerializableVMValue` via `slot_to_serializable(bits, kind, store)`.
 ///
 /// Closure upvalue marshal (`request.upvalues` and `execute_closure`) is
 /// NOT covered by T1: the per-capture kind track lives on the closure
@@ -917,7 +990,8 @@ fn run_remote_call(
     scope: &shape_abi_v1::ScopeConstraints,
 ) -> Result<SerializableVMValue, RemoteCallError> {
     use crate::executor::{VMConfig, VirtualMachine};
-    use shape_runtime::snapshot::{serializable_to_slot, slot_to_serializable};
+    use shape_runtime::context::ExecutionContext;
+    use shape_runtime::snapshot::serializable_to_slot;
     use shape_value::{KindedSlot, ValueSlot};
 
     // Step 1: reconstruct the program. If function_blobs are supplied,
@@ -1160,8 +1234,18 @@ fn run_remote_call(
     // counts them and the actual arguments start after the captures. Closures
     // therefore take a dedicated marshal + `OwnedClosureBlock` materialization
     // path (distributed §4.4). The capture track was already validated above.
+    // The receiver has a snapshot store seed but still needs a live runtime
+    // context for snapshot envelope persistence, matching the non-REPL run path.
+    let mut ctx = ExecutionContext::new_empty();
     if let Some(upvalues) = request.upvalues.as_ref() {
-        return finish_remote_closure_call(&mut vm, func_id, upvalues, &request.arguments, store);
+        return finish_remote_closure_call(
+            &mut vm,
+            func_id,
+            upvalues,
+            &request.arguments,
+            store,
+            &mut ctx,
+        );
     }
 
     // Step 4: pick per-arg expected kinds from the callee's frame
@@ -1243,45 +1327,99 @@ fn run_remote_call(
     }
 
     // Step 6: dispatch.
-    let result = vm.execute_function_by_id(func_id, args, None).map_err(|e| {
-        RemoteCallError::new(
-            RemoteErrorKind::RuntimeError,
-            format!(
-                "remote execution of '{}' failed: {:?}",
-                function_name_owned, e,
-            ),
-        )
-    })?;
+    let result = vm
+        .execute_function_by_id_at_host_boundary(func_id, args, Some(&mut ctx))
+        .map_err(|e| {
+            RemoteCallError::new(
+                RemoteErrorKind::RuntimeError,
+                format!(
+                    "remote execution of '{}' failed: {:?}",
+                    function_name_owned, e,
+                ),
+            )
+        })?;
 
     // Step 7: project the returned KindedSlot → SerializableVMValue.
-    // The slot owns one strong-count share that we must release after
-    // serialization (slot_to_serializable does NOT consume the share —
-    // it borrows). `KindedSlot::Drop` retires it at scope exit.
-    let (bits, kind) = (result.slot.raw(), result.kind);
-    // Cross-check: if the callee declared an ABI return kind, the returned
-    // slot's kind must agree. Wrapper semantics live in
-    // FrameDescriptor.return_wrapper and are intentionally not consulted
-    // by the marshal boundary.
-    if let Some(declared) = return_kind {
-        if kind != declared {
-            return Err(RemoteCallError::new(
-                RemoteErrorKind::ArgumentError,
-                format!(
-                    "function '{}' returned kind {:?} but frame_descriptor \
-                     declared return_kind {:?}",
-                    function_name_owned, kind, declared,
-                ),
-            ));
+    serialize_remote_return_slot(
+        &mut vm,
+        result,
+        return_kind,
+        store,
+        &format!("function '{}'", function_name_owned),
+    )
+}
+
+fn serialize_remote_return_slot(
+    vm: &mut crate::executor::VirtualMachine,
+    result: shape_value::KindedSlot,
+    return_kind: Option<shape_value::NativeKind>,
+    store: &SnapshotStore,
+    callee_subject: &str,
+) -> Result<SerializableVMValue, RemoteCallError> {
+    use shape_runtime::snapshot::slot_to_serializable;
+    use shape_value::{HeapKind, NativeKind};
+
+    let bits = result.raw();
+    let kind = result.kind();
+    let future_kind = NativeKind::Ptr(HeapKind::Future);
+
+    let result = if kind == future_kind {
+        match return_kind {
+            Some(declared) if declared == future_kind => {}
+            Some(declared) => {
+                return Err(RemoteCallError::new(
+                    RemoteErrorKind::ArgumentError,
+                    format!(
+                        "{callee_subject} returned kind {:?} but frame_descriptor \
+                         declared return_kind {:?}",
+                        kind, declared,
+                    ),
+                ));
+            }
+            None => {
+                return Err(RemoteCallError::new(
+                    RemoteErrorKind::ArgumentError,
+                    format!(
+                        "{callee_subject} returned a Future handle but has no declared \
+                         Future return kind in its frame_descriptor"
+                    ),
+                ));
+            }
         }
-    }
-    let serialized = slot_to_serializable(bits, kind, store).map_err(|e| {
+        // The `Future` carrier is an inline scheduler id, not a heap share.
+        drop(result);
+        vm.resolve_future_handle_blocking(bits).map_err(|e| {
+            RemoteCallError::new(
+                RemoteErrorKind::RuntimeError,
+                format!("{callee_subject} future materialization failed: {:?}", e),
+            )
+        })?
+    } else {
+        if let Some(declared) = return_kind {
+            if kind != declared {
+                return Err(RemoteCallError::new(
+                    RemoteErrorKind::ArgumentError,
+                    format!(
+                        "{callee_subject} returned kind {:?} but frame_descriptor \
+                         declared return_kind {:?}",
+                        kind, declared,
+                    ),
+                ));
+            }
+        }
+        result
+    };
+
+    // The returned slot owns one strong-count share that we must release after
+    // serialization. `slot_to_serializable` borrows; `KindedSlot::Drop` retires
+    // the share at scope exit. For `Future`, the original inline handle was
+    // dropped before resolving, and this slot is the materialized payload.
+    let serialized = slot_to_serializable(result.raw(), result.kind(), store).map_err(|e| {
         RemoteCallError::new(
             RemoteErrorKind::RuntimeError,
             format!("return-value marshal failure: {}", e),
         )
     })?;
-    // `result` drops here, retiring the strong-count share via
-    // `KindedSlot::Drop` (ADR-006 §2.7.6 / Q8).
     drop(result);
     Ok(serialized)
 }
@@ -1525,8 +1663,9 @@ fn finish_remote_closure_call(
     upvalues: &[SerializableVMValue],
     arguments: &[SerializableVMValue],
     store: &SnapshotStore,
+    ctx: &mut shape_runtime::context::ExecutionContext,
 ) -> Result<SerializableVMValue, RemoteCallError> {
-    use shape_runtime::snapshot::{serializable_to_slot, slot_to_serializable};
+    use shape_runtime::snapshot::serializable_to_slot;
     use shape_value::v2::closure_layout::CaptureKind;
     use shape_value::v2::closure_raw::{
         OwnedClosureBlock, alloc_typed_closure, write_capture_raw_u64,
@@ -1711,34 +1850,27 @@ fn finish_remote_closure_call(
     // Dispatch through the value-call ABI. `execute_closure` borrows the block
     // (share-neutral: it clones each capture into the frame), so `block` keeps
     // owning its shares and drops them at scope exit.
-    let result = vm.execute_closure(&block, args, None).map_err(|e| {
-        RemoteCallError::new(
-            RemoteErrorKind::RuntimeError,
-            format!("remote closure execution of '{}' failed: {:?}", callee_name, e),
-        )
-    })?;
-
-    let (bits, kind) = (result.slot.raw(), result.kind);
-    if let Some(declared) = return_kind {
-        if kind != declared {
-            return Err(RemoteCallError::new(
-                RemoteErrorKind::ArgumentError,
+    let result = vm
+        .execute_closure_at_host_boundary(&block, args, Some(ctx))
+        .map_err(|e| {
+            RemoteCallError::new(
+                RemoteErrorKind::RuntimeError,
                 format!(
-                    "closure '{}' returned kind {:?} but frame_descriptor declared {:?}",
-                    callee_name, kind, declared,
+                    "remote closure execution of '{}' failed: {:?}",
+                    callee_name, e
                 ),
-            ));
-        }
-    }
-    let serialized = slot_to_serializable(bits, kind, store).map_err(|e| {
-        RemoteCallError::new(
-            RemoteErrorKind::RuntimeError,
-            format!("closure return-value marshal failure: {e}"),
-        )
-    })?;
+            )
+        })?;
+
     // `result` drops first (retiring its return share), then `block` (retiring
     // the capture shares via the layout's capture-mask walk).
-    drop(result);
+    let serialized = serialize_remote_return_slot(
+        vm,
+        result,
+        return_kind,
+        store,
+        &format!("closure '{}'", callee_name),
+    )?;
     drop(block);
     Ok(serialized)
 }
@@ -1920,6 +2052,7 @@ pub fn build_call_request(
     };
 
     RemoteCallRequest {
+        call_id: None,
         program: request_program,
         function_name: function_name.to_string(),
         function_id,
@@ -1963,6 +2096,7 @@ pub fn build_call_request_by_id(
         program.clone()
     };
     Ok(RemoteCallRequest {
+        call_id: None,
         program: request_program,
         function_name,
         function_id: Some(function_id),
@@ -2004,6 +2138,7 @@ pub fn build_closure_call_request(
     let blobs = function_hash.and_then(|h| build_minimal_blobs_by_hash(program, h));
 
     RemoteCallRequest {
+        call_id: None,
         program: if blobs.is_some() {
             create_stub_program(program)
         } else {
@@ -2234,6 +2369,24 @@ pub fn handle_wire_message(
                 print_output: None,
             })
         }
+        WireMessage::CancelCall(req) => WireMessage::CancelCallResponse(RemoteCancelResponse {
+            call_id: req.call_id,
+            outcome: RemoteCancelOutcome::UnknownCall,
+            message: "This in-process wire handler has no serve-side call queue registry"
+                .to_string(),
+        }),
+        WireMessage::CancelCallResponse(_) => WireMessage::ExecuteResponse(ExecuteResponse {
+            request_id: 0,
+            success: false,
+            value: WireValue::Null,
+            stdout: None,
+            error: Some("Unexpected CancelCallResponse on server side".to_string()),
+            content_terminal: None,
+            content_html: None,
+            diagnostics: vec![],
+            metrics: None,
+            print_output: None,
+        }),
         WireMessage::Sidecar(_sidecar) => {
             // Sidecars are buffered by the transport layer and reassembled
             // before the Call message is dispatched. If we receive one here,
@@ -2372,6 +2525,7 @@ pub fn handle_wire_message(
             wire_protocol: shape_wire::WIRE_PROTOCOL_V2,
             capabilities: vec![
                 "call".to_string(),
+                "call-cancel".to_string(),
                 "blob-negotiation".to_string(),
                 "sidecar".to_string(),
             ],
@@ -3650,6 +3804,7 @@ mod tests {
     /// as the content-addressed payload.
     fn mk_ca_request(program: BytecodeProgram, entry: FunctionHash, name: &str) -> RemoteCallRequest {
         RemoteCallRequest {
+            call_id: None,
             program,
             function_name: name.to_string(),
             function_id: None,

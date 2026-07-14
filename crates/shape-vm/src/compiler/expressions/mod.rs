@@ -1111,6 +1111,7 @@ impl BytecodeCompiler {
                     OpCode::LoadLocal,
                     Some(Operand::Local(result_local)),
                 ));
+                self.stamp_awaited_future_payload_type(target);
                 self.pop_scope();
                 return Ok(());
             }
@@ -1313,6 +1314,7 @@ impl BytecodeCompiler {
                     OpCode::LoadLocal,
                     Some(Operand::Local(result_local)),
                 ));
+                self.stamp_awaited_future_payload_type(target);
                 self.pop_scope();
                 return Ok(());
             }
@@ -1329,6 +1331,7 @@ impl BytecodeCompiler {
             self.compile_expr(target)?;
         }
         self.emit(Instruction::simple(OpCode::Await));
+        self.stamp_awaited_future_payload_type(target);
         Ok(())
     }
 
@@ -1868,6 +1871,7 @@ impl BytecodeCompiler {
                 } else {
                     self.compile_expr(inner)?;
                     self.emit(Instruction::simple(OpCode::Await));
+                    self.stamp_awaited_future_payload_type(inner);
                 }
                 Ok(())
             }

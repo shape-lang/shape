@@ -218,6 +218,7 @@ fn rewrite_in_statement(stmt: &Statement, bound: &HashSet<String>, shadow: &str)
         Statement::Extend(_, _)
         | Statement::RemoveTarget(_)
         | Statement::SetParamType { .. }
+        | Statement::SetParamTypeExpr { .. }
         | Statement::SetParamValue { .. }
         | Statement::SetReturnType { .. }
         | Statement::SetReturnExpr { .. }

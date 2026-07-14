@@ -62,9 +62,31 @@ Miri provenance gate coverage:
       default Miri / Stacked Borrows
       MIRIFLAGS=-Zmiri-tree-borrows
       MIRIFLAGS=-Zmiri-strict-provenance
+  - shape-value --lib miri_write_slot_in_place_replaces_typed_object_field_and_preserves_metadata
+      TypedObject field overwrite through write_slot_in_place plus sidecar,
+      field-kind, and heap-mask invariants
+      default Miri / Stacked Borrows
+      MIRIFLAGS=-Zmiri-tree-borrows
+      MIRIFLAGS=-Zmiri-strict-provenance
+  - shape-value --lib miri_typed_array_field_clone_and_drop
+      TypedArray field carrier sidecar clone/drop probe
+      default Miri / Stacked Borrows
+      MIRIFLAGS=-Zmiri-tree-borrows
+      MIRIFLAGS=-Zmiri-strict-provenance
+  - shape-value --lib miri_trait_object_raw_carrier_clone_and_drop
+      TraitObject raw carrier clone/drop plus inner TypedObject/vtable release
+      default Miri / Stacked Borrows
+      MIRIFLAGS=-Zmiri-tree-borrows
+      MIRIFLAGS=-Zmiri-strict-provenance
   - shape-vm --lib result_option_carrier
       schema-backed Result/Option scalar/string payload tests plus
       cfg(miri) typed-object payload clone/drop provenance probe
+      default Miri / Stacked Borrows
+      MIRIFLAGS=-Zmiri-tree-borrows
+      MIRIFLAGS=-Zmiri-strict-provenance
+  - shape-vm --lib set_field_typed_option_overwrite_preserves_canonical_carrier_metadata
+      SetFieldTyped canonical Option carrier overwrite with stack/field
+      provenance sidecars and heap-mask metadata
       default Miri / Stacked Borrows
       MIRIFLAGS=-Zmiri-tree-borrows
       MIRIFLAGS=-Zmiri-strict-provenance
@@ -75,7 +97,15 @@ Miri provenance gate coverage:
       default Miri / Stacked Borrows
       MIRIFLAGS=-Zmiri-tree-borrows
   - shape-vm --lib miri_stack_provenance
-      stack sidecar read/pop/truncate/overwrite probes
+      stack sidecar read/pop/truncate/overwrite probes, including
+      TypedArray carrier read/pop/drop
+      default Miri / Stacked Borrows
+      MIRIFLAGS=-Zmiri-tree-borrows
+      MIRIFLAGS=-Zmiri-strict-provenance
+  - shape-runtime --lib miri_snapshot_wire_restore_provenance
+      snapshot/wire restore probes for HeapNode/HeapRef TypedObject identity,
+      Array<TypedObject> elements, HashMap<string, TypedObject> shared values,
+      and legacy Result/Option normalization into schema-backed TypedObjects
       default Miri / Stacked Borrows
       MIRIFLAGS=-Zmiri-tree-borrows
       MIRIFLAGS=-Zmiri-strict-provenance
@@ -83,7 +113,9 @@ Miri provenance gate coverage:
 Boundary: passing this gate is evidence for the probes above only. It is not a
 full UB proof for the VM, runtime, JIT, FFI, snapshots, or arbitrary Shape
 program execution, all stack overwrite sites, all typed-object field kinds or
-field producers, and it does not classify or execute ignored tests.
+field producers, heap-element arrays beyond the listed restore probes,
+arbitrary trait dispatch, snapshot/wire restore beyond the listed probes, and
+it does not classify or execute ignored tests.
 EOF
   echo
   echo "Resource settings:"
@@ -130,10 +162,35 @@ run_miri "shape-value nested TypedObject field sidecar, Tree Borrows" "-Zmiri-tr
 run_miri "shape-value nested TypedObject field sidecar, Strict Provenance" "-Zmiri-strict-provenance" \
   shape-value miri_typed_object_nested_field_clone_and_drop
 
+run_miri "shape-value TypedObject field overwrite sidecar, Stacked Borrows" "" \
+  shape-value miri_write_slot_in_place_replaces_typed_object_field_and_preserves_metadata
+run_miri "shape-value TypedObject field overwrite sidecar, Tree Borrows" "-Zmiri-tree-borrows" \
+  shape-value miri_write_slot_in_place_replaces_typed_object_field_and_preserves_metadata
+run_miri "shape-value TypedObject field overwrite sidecar, Strict Provenance" "-Zmiri-strict-provenance" \
+  shape-value miri_write_slot_in_place_replaces_typed_object_field_and_preserves_metadata
+
+run_miri "shape-value TypedArray field carrier sidecar, Stacked Borrows" "" \
+  shape-value miri_typed_array_field_clone_and_drop
+run_miri "shape-value TypedArray field carrier sidecar, Tree Borrows" "-Zmiri-tree-borrows" \
+  shape-value miri_typed_array_field_clone_and_drop
+run_miri "shape-value TypedArray field carrier sidecar, Strict Provenance" "-Zmiri-strict-provenance" \
+  shape-value miri_typed_array_field_clone_and_drop
+
+run_miri "shape-value TraitObject raw carrier sidecar, Stacked Borrows" "" \
+  shape-value miri_trait_object_raw_carrier_clone_and_drop
+run_miri "shape-value TraitObject raw carrier sidecar, Tree Borrows" "-Zmiri-tree-borrows" \
+  shape-value miri_trait_object_raw_carrier_clone_and_drop
+run_miri "shape-value TraitObject raw carrier sidecar, Strict Provenance" "-Zmiri-strict-provenance" \
+  shape-value miri_trait_object_raw_carrier_clone_and_drop
+
 run_miri "shape-vm Result/Option carrier incl. typed-object payload, Stacked Borrows" "" \
   shape-vm result_option_carrier
 run_miri "shape-vm Result/Option carrier incl. typed-object payload, Tree Borrows" "-Zmiri-tree-borrows" \
   shape-vm result_option_carrier
+run_miri "shape-vm SetFieldTyped Option overwrite metadata, Stacked Borrows" "" \
+  shape-vm set_field_typed_option_overwrite_preserves_canonical_carrier_metadata
+run_miri "shape-vm SetFieldTyped Option overwrite metadata, Tree Borrows" "-Zmiri-tree-borrows" \
+  shape-vm set_field_typed_option_overwrite_preserves_canonical_carrier_metadata
 
 run_miri "shape-vm typed-object get_prop raw read, Stacked Borrows" "" \
   shape-vm get_prop_typed_object_int_field_reads_via_raw
@@ -154,6 +211,15 @@ run_miri "shape-vm stack Miri provenance sidecar read/pop/truncate/overwrite, St
 
 run_miri "shape-vm Result/Option carrier incl. typed-object payload, Strict Provenance" "-Zmiri-strict-provenance" \
   shape-vm result_option_carrier
+run_miri "shape-vm SetFieldTyped Option overwrite metadata, Strict Provenance" "-Zmiri-strict-provenance" \
+  shape-vm set_field_typed_option_overwrite_preserves_canonical_carrier_metadata
+
+run_miri "shape-runtime snapshot/wire restore heap provenance, Stacked Borrows" "" \
+  shape-runtime miri_snapshot_wire_restore_provenance
+run_miri "shape-runtime snapshot/wire restore heap provenance, Tree Borrows" "-Zmiri-tree-borrows" \
+  shape-runtime miri_snapshot_wire_restore_provenance
+run_miri "shape-runtime snapshot/wire restore heap provenance, Strict Provenance" "-Zmiri-strict-provenance" \
+  shape-runtime miri_snapshot_wire_restore_provenance
 
 echo
 echo "Miri provenance gate complete for the targeted probes listed above."

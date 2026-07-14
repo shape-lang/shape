@@ -666,7 +666,7 @@ impl JITCompiler {
         let mut jit_compatible: Vec<bool> = Vec::with_capacity(program.functions.len());
 
         for (_idx, func) in program.functions.iter().enumerate() {
-            if func.body_length == 0 {
+            if func.body_length == 0 && func.mir_data.is_none() {
                 jit_compatible.push(false);
                 continue;
             }
@@ -719,8 +719,7 @@ impl JITCompiler {
             //     `LoadSharedModuleBinding`,
             //     `StoreSharedModuleBinding`) — per-module side-table,
             //     separate lowering (A.1C.3 follow-up).
-            let _ = mir_ok;
-            jit_compatible.push(bytecode_ok);
+            jit_compatible.push(bytecode_ok || mir_ok);
         }
 
         // Phase 1b: Preflight main code (non-stdlib, non-function-body instructions).

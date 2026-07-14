@@ -34,6 +34,7 @@
 #![allow(clippy::approx_constant)] // arbitrary test floats; not math constants
 use shape_value::HeapKind;
 use shape_value::NativeKind;
+use shape_value::content::ContentNode;
 use shape_value::heap_value::{TraitObjectStorage, TypedObjectStorage};
 use shape_value::v2::decimal_obj::DecimalObj;
 use shape_value::v2::heap_element::HeapElement;
@@ -60,10 +61,10 @@ use crate::executor::vm_impl::stack::drop_with_kind;
 // reopen — Array<u64> excluded pending the §2.7.7/Q9 native-kind
 // discriminator).
 pub use shape_value::v2::typed_array::{
-    ELEM_TYPE_BOOL, ELEM_TYPE_CALLABLE, ELEM_TYPE_CHAR, ELEM_TYPE_DECIMAL, ELEM_TYPE_F32,
-    ELEM_TYPE_F64, ELEM_TYPE_I8, ELEM_TYPE_I16, ELEM_TYPE_I32, ELEM_TYPE_I64, ELEM_TYPE_STRING,
-    ELEM_TYPE_TRAIT_OBJECT, ELEM_TYPE_TYPED_ARRAY, ELEM_TYPE_TYPED_OBJECT, ELEM_TYPE_U8,
-    ELEM_TYPE_U16, ELEM_TYPE_U32, ELEM_TYPE_UNKNOWN,
+    ELEM_TYPE_BOOL, ELEM_TYPE_CALLABLE, ELEM_TYPE_CHAR, ELEM_TYPE_CONTENT, ELEM_TYPE_DECIMAL,
+    ELEM_TYPE_F32, ELEM_TYPE_F64, ELEM_TYPE_I8, ELEM_TYPE_I16, ELEM_TYPE_I32, ELEM_TYPE_I64,
+    ELEM_TYPE_STRING, ELEM_TYPE_TRAIT_OBJECT, ELEM_TYPE_TYPED_ARRAY, ELEM_TYPE_TYPED_OBJECT,
+    ELEM_TYPE_U8, ELEM_TYPE_U16, ELEM_TYPE_U32, ELEM_TYPE_UNKNOWN,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -114,6 +115,9 @@ pub enum V2ElemType {
     // exact callable bits + shape; closures retain/release `Arc<HeapValue>`
     // shares, while named/module functions are inline ids.
     Callable,
+    // W18A content-array parity. Elements are `Arc::into_raw(Arc<ContentNode>)`
+    // pointers with `Ptr(HeapKind::Content)` carrier kind.
+    Content,
 }
 
 impl V2ElemType {
@@ -142,6 +146,7 @@ impl V2ElemType {
             // Construction strict-typing close (2026-06-05) — nested array.
             ELEM_TYPE_TYPED_ARRAY => Some(V2ElemType::TypedArray),
             ELEM_TYPE_CALLABLE => Some(V2ElemType::Callable),
+            ELEM_TYPE_CONTENT => Some(V2ElemType::Content),
             _ => None,
         }
     }
@@ -175,8 +180,116 @@ impl V2ElemType {
             // array's own carrier kind (a v2-raw `*mut TypedArray<U>`).
             V2ElemType::TypedArray => Some(NativeKind::Ptr(shape_value::HeapKind::TypedArray)),
             V2ElemType::Callable => None,
+            V2ElemType::Content => Some(NativeKind::Ptr(shape_value::HeapKind::Content)),
         }
     }
+}
+
+#[inline]
+unsafe fn retain_content_ptr(ptr: *const ContentNode) {
+    if !ptr.is_null() {
+        unsafe { std::sync::Arc::increment_strong_count(ptr) };
+    }
+}
+
+#[inline]
+unsafe fn release_content_ptr(ptr: *const ContentNode) {
+    if !ptr.is_null() {
+        unsafe { std::sync::Arc::decrement_strong_count(ptr) };
+    }
+}
+
+#[inline]
+unsafe fn copy_content_linear(
+    src_data: *const *const ContentNode,
+    dst_data: *mut *const ContentNode,
+    len: usize,
+) {
+    if len == 0 || src_data.is_null() || dst_data.is_null() {
+        return;
+    }
+    for i in 0..len {
+        let elem = unsafe { *src_data.add(i) };
+        unsafe { retain_content_ptr(elem) };
+        unsafe { *dst_data.add(i) = elem };
+    }
+}
+
+#[inline]
+unsafe fn copy_content_reverse(
+    src_data: *const *const ContentNode,
+    dst_data: *mut *const ContentNode,
+    len: usize,
+) {
+    if len == 0 || src_data.is_null() || dst_data.is_null() {
+        return;
+    }
+    for i in 0..len {
+        let elem = unsafe { *src_data.add(len - 1 - i) };
+        unsafe { retain_content_ptr(elem) };
+        unsafe { *dst_data.add(i) = elem };
+    }
+}
+
+#[inline]
+unsafe fn copy_content_range(
+    src_data: *const *const ContentNode,
+    dst_data: *mut *const ContentNode,
+    start: usize,
+    len: usize,
+) {
+    if len == 0 || src_data.is_null() || dst_data.is_null() {
+        return;
+    }
+    for i in 0..len {
+        let elem = unsafe { *src_data.add(start + i) };
+        unsafe { retain_content_ptr(elem) };
+        unsafe { *dst_data.add(i) = elem };
+    }
+}
+
+#[inline]
+unsafe fn copy_content_concat(
+    a_data: *const *const ContentNode,
+    a_len: usize,
+    b_data: *const *const ContentNode,
+    b_len: usize,
+    dst_data: *mut *const ContentNode,
+) {
+    if dst_data.is_null() {
+        return;
+    }
+    unsafe { copy_content_linear(a_data, dst_data, a_len) };
+    if b_len > 0 && !b_data.is_null() {
+        for i in 0..b_len {
+            let elem = unsafe { *b_data.add(i) };
+            unsafe { retain_content_ptr(elem) };
+            unsafe { *dst_data.add(a_len + i) = elem };
+        }
+    }
+}
+
+#[inline]
+unsafe fn permute_content(
+    src_data: *const *const ContentNode,
+    dst_data: *mut *const ContentNode,
+    src_len: u32,
+    indices: &[u32],
+) -> u32 {
+    if src_data.is_null() || dst_data.is_null() {
+        return 0;
+    }
+    let mut w: u32 = 0;
+    for &idx in indices {
+        if idx >= src_len {
+            continue;
+        }
+        let elem = unsafe { *src_data.add(idx as usize) };
+        unsafe { retain_content_ptr(elem) };
+        unsafe { *dst_data.add(w as usize) = elem };
+        w += 1;
+    }
+    w
 }
 
 // ── Detection ───────────────────────────────────────────────────────────────
@@ -478,6 +591,12 @@ pub fn read_element(view: &V2TypedArrayView, index: u32) -> Option<(u64, NativeK
             elem.retain();
             (elem.bits, elem.native_kind())
         },
+        V2ElemType::Content => unsafe {
+            let arr = view.ptr as *const TypedArray<*const ContentNode>;
+            let elem_ptr = TypedArray::<*const ContentNode>::get_unchecked(arr, index);
+            retain_content_ptr(elem_ptr);
+            (elem_ptr as u64, NativeKind::Ptr(HeapKind::Content))
+        },
     };
     Some(pair)
 }
@@ -761,6 +880,18 @@ pub fn write_element(
                 TypedArray::<CallableArrayElem>::set(arr, index, elem);
             }
         }
+        V2ElemType::Content => {
+            if kind != NativeKind::Ptr(HeapKind::Content) {
+                return Err("expected NativeKind::Ptr(HeapKind::Content) for Array<content> write");
+            }
+            let new_ptr = bits as usize as *const ContentNode;
+            unsafe {
+                let arr = view.ptr as *mut TypedArray<*const ContentNode>;
+                let old_ptr = TypedArray::<*const ContentNode>::get_unchecked(arr, index);
+                release_content_ptr(old_ptr);
+                TypedArray::<*const ContentNode>::set(arr, index, new_ptr);
+            }
+        }
     }
     Ok(())
 }
@@ -946,6 +1077,16 @@ pub fn push_element(
                 TypedArray::<CallableArrayElem>::push(arr, elem);
             }
         }
+        V2ElemType::Content => {
+            if kind != NativeKind::Ptr(HeapKind::Content) {
+                return Err("expected NativeKind::Ptr(HeapKind::Content) for Array<content> push");
+            }
+            let new_ptr = bits as usize as *const ContentNode;
+            unsafe {
+                let arr = view.ptr as *mut TypedArray<*const ContentNode>;
+                TypedArray::<*const ContentNode>::push(arr, new_ptr);
+            }
+        }
     }
     Ok(())
 }
@@ -1036,6 +1177,11 @@ pub fn pop_element(view: &V2TypedArrayView) -> Option<(u64, NativeKind)> {
             let arr = view.ptr as *mut TypedArray<CallableArrayElem>;
             TypedArray::<CallableArrayElem>::pop(arr).map(|v| (v.bits, v.native_kind()))
         },
+        V2ElemType::Content => unsafe {
+            let arr = view.ptr as *mut TypedArray<*const ContentNode>;
+            TypedArray::<*const ContentNode>::pop(arr)
+                .map(|v| (v as u64, NativeKind::Ptr(HeapKind::Content)))
+        },
     }
 }
 
@@ -1110,6 +1256,7 @@ pub fn sum_elements(view: &V2TypedArrayView) -> Option<(u64, NativeKind)> {
         | V2ElemType::TypedObject
         | V2ElemType::TraitObject
         | V2ElemType::TypedArray
+        | V2ElemType::Content
         | V2ElemType::Callable => None,
     }
 }
@@ -1344,6 +1491,7 @@ pub fn avg_elements(view: &V2TypedArrayView) -> Option<(u64, NativeKind)> {
             | V2ElemType::TypedObject
             | V2ElemType::TraitObject
             | V2ElemType::TypedArray
+            | V2ElemType::Content
             | V2ElemType::Callable => None,
         };
     }
@@ -1396,6 +1544,7 @@ pub fn avg_elements(view: &V2TypedArrayView) -> Option<(u64, NativeKind)> {
         | V2ElemType::TypedObject
         | V2ElemType::TraitObject
         | V2ElemType::TypedArray
+        | V2ElemType::Content
         | V2ElemType::Callable => None,
     }
 }
@@ -1427,6 +1576,7 @@ pub fn min_elements(view: &V2TypedArrayView) -> Option<(u64, NativeKind)> {
             | V2ElemType::TypedObject
             | V2ElemType::TraitObject
             | V2ElemType::TypedArray
+            | V2ElemType::Content
             | V2ElemType::Callable => None,
         };
     }
@@ -1483,6 +1633,7 @@ pub fn min_elements(view: &V2TypedArrayView) -> Option<(u64, NativeKind)> {
         | V2ElemType::TypedObject
         | V2ElemType::TraitObject
         | V2ElemType::TypedArray
+        | V2ElemType::Content
         | V2ElemType::Callable => None,
     }
 }
@@ -1509,6 +1660,7 @@ pub fn max_elements(view: &V2TypedArrayView) -> Option<(u64, NativeKind)> {
             | V2ElemType::TypedObject
             | V2ElemType::TraitObject
             | V2ElemType::TypedArray
+            | V2ElemType::Content
             | V2ElemType::Callable => None,
         };
     }
@@ -1565,6 +1717,7 @@ pub fn max_elements(view: &V2TypedArrayView) -> Option<(u64, NativeKind)> {
         | V2ElemType::TypedObject
         | V2ElemType::TraitObject
         | V2ElemType::TypedArray
+        | V2ElemType::Content
         | V2ElemType::Callable => None,
     }
 }
@@ -2009,6 +2162,17 @@ pub fn clone_array(view: &V2TypedArrayView) -> *mut u8 {
                 (*new_arr).len = view.len;
                 let p = new_arr as *mut u8;
                 stamp_elem_type(p, ELEM_TYPE_CALLABLE);
+                p
+            }
+        }
+        V2ElemType::Content => {
+            let new_arr = TypedArray::<*const ContentNode>::with_capacity(view.len);
+            unsafe {
+                let src = view.ptr as *const TypedArray<*const ContentNode>;
+                copy_content_linear((*src).data, (*new_arr).data, view.len as usize);
+                (*new_arr).len = view.len;
+                let p = new_arr as *mut u8;
+                stamp_elem_type(p, ELEM_TYPE_CONTENT);
                 p
             }
         }
@@ -2457,6 +2621,17 @@ pub fn reverse_array(view: &V2TypedArrayView) -> *mut u8 {
                 p
             }
         }
+        V2ElemType::Content => {
+            let new_arr = TypedArray::<*const ContentNode>::with_capacity(view.len);
+            unsafe {
+                let src = view.ptr as *const TypedArray<*const ContentNode>;
+                copy_content_reverse((*src).data, (*new_arr).data, view.len as usize);
+                (*new_arr).len = view.len;
+                let p = new_arr as *mut u8;
+                stamp_elem_type(p, ELEM_TYPE_CONTENT);
+                p
+            }
+        }
     }
 }
 
@@ -2850,6 +3025,22 @@ pub fn concat_arrays(a: &V2TypedArrayView, b: &V2TypedArrayView) -> Result<*mut 
             stamp_elem_type(p, ELEM_TYPE_CALLABLE);
             p
         },
+        V2ElemType::Content => unsafe {
+            let new_arr = TypedArray::<*const ContentNode>::with_capacity(total_len);
+            let a_arr = a.ptr as *const TypedArray<*const ContentNode>;
+            let b_arr = b.ptr as *const TypedArray<*const ContentNode>;
+            copy_content_concat(
+                (*a_arr).data,
+                a.len as usize,
+                (*b_arr).data,
+                b.len as usize,
+                (*new_arr).data,
+            );
+            (*new_arr).len = total_len;
+            let p = new_arr as *mut u8;
+            stamp_elem_type(p, ELEM_TYPE_CONTENT);
+            p
+        },
     };
     Ok(result)
 }
@@ -3089,6 +3280,15 @@ fn copy_range_to_new_array(view: &V2TypedArrayView, start: u32, end: u32) -> *mu
             stamp_elem_type(p, ELEM_TYPE_CALLABLE);
             p
         },
+        V2ElemType::Content => unsafe {
+            let new_arr = TypedArray::<*const ContentNode>::with_capacity(out_len);
+            let src = view.ptr as *const TypedArray<*const ContentNode>;
+            copy_content_range((*src).data, (*new_arr).data, s, n);
+            (*new_arr).len = out_len;
+            let p = new_arr as *mut u8;
+            stamp_elem_type(p, ELEM_TYPE_CONTENT);
+            p
+        },
     }
 }
 
@@ -3175,6 +3375,7 @@ pub fn native_kind_to_v2_elem_type(kind: NativeKind) -> Option<V2ElemType> {
         // heap rows + drop dispatch already exist.
         NativeKind::Ptr(HeapKind::TraitObject) => Some(V2ElemType::TraitObject),
         NativeKind::Ptr(HeapKind::TypedArray) => Some(V2ElemType::TypedArray),
+        NativeKind::Ptr(HeapKind::Content) => Some(V2ElemType::Content),
         _ => None,
     }
 }
@@ -3223,6 +3424,9 @@ pub fn allocate_empty_typed_array(elem_type: V2ElemType, capacity: u32) -> *mut 
             V2ElemType::Callable => {
                 TypedArray::<CallableArrayElem>::with_capacity(capacity) as *mut u8
             }
+            V2ElemType::Content => {
+                TypedArray::<*const ContentNode>::with_capacity(capacity) as *mut u8
+            }
         };
         let stamp_byte: u8 = match elem_type {
             V2ElemType::F64 => ELEM_TYPE_F64,
@@ -3243,6 +3447,7 @@ pub fn allocate_empty_typed_array(elem_type: V2ElemType, capacity: u32) -> *mut 
             V2ElemType::TraitObject => ELEM_TYPE_TRAIT_OBJECT,
             V2ElemType::TypedArray => ELEM_TYPE_TYPED_ARRAY,
             V2ElemType::Callable => ELEM_TYPE_CALLABLE,
+            V2ElemType::Content => ELEM_TYPE_CONTENT,
         };
         stamp_elem_type(p, stamp_byte);
         p
@@ -3399,6 +3604,17 @@ pub fn eq_element(a_bits: u64, b_bits: u64, elem_type: V2ElemType) -> bool {
         // query helpers do not currently thread the needle's callable shape, so
         // `position_of` refuses callable arrays before calling this arm.
         V2ElemType::Callable => a_bits == b_bits,
+        V2ElemType::Content => {
+            if a_bits == 0 || b_bits == 0 {
+                return a_bits == b_bits;
+            }
+            let a_ptr = a_bits as usize as *const ContentNode;
+            let b_ptr = b_bits as usize as *const ContentNode;
+            if a_ptr == b_ptr {
+                return true;
+            }
+            unsafe { &*a_ptr == &*b_ptr }
+        }
     }
 }
 
@@ -3467,6 +3683,7 @@ unsafe fn typed_object_deep_eq(a: &TypedObjectStorage, b: &TypedObjectStorage) -
             NativeKind::StringV2 => Some(V2ElemType::String),
             NativeKind::DecimalV2 => Some(V2ElemType::Decimal),
             NativeKind::Ptr(HeapKind::TypedObject) => Some(V2ElemType::TypedObject),
+            NativeKind::Ptr(HeapKind::Content) => Some(V2ElemType::Content),
             // Null-as-sentinel field: equal iff both slots agree on the
             // null tag. The §2.7.5 stamp guarantees the per-slot
             // discriminator already filtered non-null bits before reach.
@@ -3614,6 +3831,16 @@ pub fn position_of(view: &V2TypedArrayView, needle_bits: u64) -> Option<u32> {
             for i in 0..n {
                 let elem_ptr = TypedArray::<*const TypedArrayElem>::get_unchecked(arr, i);
                 if eq_element(elem_ptr as u64, needle_bits, V2ElemType::TypedArray) {
+                    return Some(i);
+                }
+            }
+            None
+        },
+        V2ElemType::Content => unsafe {
+            let arr = view.ptr as *const TypedArray<*const ContentNode>;
+            for i in 0..n {
+                let elem_ptr = TypedArray::<*const ContentNode>::get_unchecked(arr, i);
+                if eq_element(elem_ptr as u64, needle_bits, V2ElemType::Content) {
                     return Some(i);
                 }
             }
@@ -4020,6 +4247,15 @@ pub fn permute_array(view: &V2TypedArrayView, indices: &[u32]) -> *mut u8 {
             (*new_arr).len = w;
             let p = new_arr as *mut u8;
             stamp_elem_type(p, ELEM_TYPE_CALLABLE);
+            p
+        },
+        V2ElemType::Content => unsafe {
+            let new_arr = TypedArray::<*const ContentNode>::with_capacity(out_len);
+            let src = view.ptr as *const TypedArray<*const ContentNode>;
+            let written = permute_content((*src).data, (*new_arr).data, view.len, indices);
+            (*new_arr).len = written;
+            let p = new_arr as *mut u8;
+            stamp_elem_type(p, ELEM_TYPE_CONTENT);
             p
         },
     }

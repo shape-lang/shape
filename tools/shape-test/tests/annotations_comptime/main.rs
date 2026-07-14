@@ -1,8 +1,10 @@
 mod code_gen;
+mod directives;
 mod executed_extend_authority;
 mod frozen_reflection;
 mod generated_capture;
 mod generated_method_runtime;
 mod on_define;
+mod runtime_hooks;
 mod showcases;
 mod type_mutation;

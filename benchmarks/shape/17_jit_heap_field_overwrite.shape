@@ -1,0 +1,29 @@
+// JIT GC barrier probe: hot overwrite of a cycle-capable heap field.
+//
+// This fixture is intentionally not wired into run_all.sh. It exists for
+// default JIT+GC vs JIT-barrier-off artifact comparisons.
+type BarrierNode {
+    peer: Option<BarrierNode>,
+    payload: int
+}
+
+let mut a = BarrierNode { peer: None, payload: 1 }
+let mut b = BarrierNode { peer: None, payload: 2 }
+let mut c = BarrierNode { peer: None, payload: 3 }
+b.peer = Some(b)
+c.peer = Some(c)
+
+var checksum = 0
+var i = 0
+while i < 5000000 {
+    if i % 2 == 0 {
+        a.peer = Some(b)
+        checksum = checksum + 1
+    } else {
+        a.peer = Some(c)
+        checksum = checksum + 2
+    }
+    i = i + 1
+}
+
+print(checksum)

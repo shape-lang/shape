@@ -8,10 +8,8 @@
 /// A content-addressed function reference.
 /// The hash uniquely identifies the function's bytecode, constants, and dependencies.
 pub type FunctionRef {
-    hash: string,
     name: string,
-    param_types: Vec<string>,
-    return_type: string,
+    hash: string,
 }
 
 /// A single stack frame — portable, content-addressed.
@@ -24,22 +22,23 @@ pub type Frame<T> {
     upvalues: Vec<T>?,
 }
 
-/// Full execution state — a chain of frames.
-/// Captures the entire call stack plus module-level bindings.
-/// Can be serialized, transferred, and resumed on any node that
-/// has the referenced function blobs.
-pub type VmState<T> {
-    frames: Vec<Frame<T>>,
-    module_bindings: HashMap<string, T>,
-    timestamp: string,
+/// Current function frame metadata only (lightweight capture).
+pub type FrameState {
+    function_name: string,
+    blob_hash: string,
+    ip: int,
+    arg_count: int,
+    local_count: int,
+    upvalue_count: int,
 }
 
-/// Current function frame only (lightweight capture).
-pub type FrameState<T> {
-    function: FunctionRef,
-    args: Vec<T>,
-    locals: Vec<T>,
-    upvalues: Vec<T>?,
+/// Full execution state metadata — a chain of captured frame records plus
+/// module-level bindings whose runtime carrier preserves the captured value
+/// kind when it is currently projectable.
+pub type VmState {
+    frames: Vec<FrameState>,
+    module_bindings: HashMap<string, _>,
+    instruction_count: int,
 }
 
 /// Module-level state capture.
@@ -49,11 +48,10 @@ pub type ModuleState<T> {
 }
 
 /// Ready-to-call payload.
-/// Bundles a function reference with arguments for remote invocation.
+/// Bundles a function hash with bounded homogeneous arguments for remote invocation.
 pub type CallPayload<T> {
-    function: FunctionRef,
+    hash: string,
     args: Vec<T>,
-    upvalues: Vec<T>?,
 }
 
 /// Delta between two values/states.
@@ -77,7 +75,7 @@ builtin fn capture_all() -> VmState;
 builtin fn capture_module() -> ModuleState;
 
 /// Build a ready-to-call payload without executing.
-builtin fn capture_call<F>(f: F, args: Vec<F>) -> CallPayload;
+builtin fn capture_call<F, T>(f: F, args: Vec<T>) -> CallPayload<T>;
 
 // ---------------------------------------------------------------------------
 // Resume primitives
@@ -135,4 +133,3 @@ builtin fn args<T>() -> Vec<T>;
 
 /// Get the current scope's local variables as a map.
 builtin fn locals<T>() -> HashMap<string, T>;
-

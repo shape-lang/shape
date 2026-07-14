@@ -1096,6 +1096,11 @@ impl VirtualMachine {
             | TypedArrayGetCallable
             | TypedArrayPushCallable
             | TypedArraySetCallable
+            // W18A content-array element carrier.
+            | NewTypedArrayContent
+            | TypedArrayGetContent
+            | TypedArrayPushContent
+            | TypedArraySetContent
             // Wave 3 Stabilize Round 1 V3-A2-followup-producer-cascade (2026-05-15) —
             // v2-raw String/Decimal literal constructors (closes the literal-element
             // kind mismatch surfaced at Round 3a' gate-flip: `let xs: Array<string>

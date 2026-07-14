@@ -239,7 +239,10 @@ pub struct FFIFuncRefs {
 
     // TypedObject allocation + field store (used by struct lowering).
     pub(crate) typed_object_alloc: FuncRef,
+    pub(crate) typed_object_get_field: FuncRef,
     pub(crate) typed_object_set_field: FuncRef,
+    pub(crate) schema_option_some: FuncRef,
+    pub(crate) schema_option_none: FuncRef,
 
     // Wave-7 Phase C — GC write-barrier for the inline typed-object-field
     // store path (`inline_typed_field_set`). Only emitted (and only present)
@@ -372,16 +375,14 @@ pub struct FFIFuncRefs {
     pub(crate) exp_f64: FuncRef,
     pub(crate) ln_f64: FuncRef,
 
-    // W88A fail-closed Result/Option producer ABI backstops. These FuncRefs
+    // W88A fail-closed Result producer ABI backstops. These FuncRefs
     // are retained so stale imports resolve to the explicit `ffi/result.rs`
     // surface, but normal MIR EnumStore lowering must deopt before emitting
-    // them. They no longer allocate old `Arc<ResultData>` / `Arc<OptionData>`
-    // carriers; the replacement must be a schema-backed `__Result` /
-    // `__Option` TypedObject ABI with statically known schema ids.
+    // them. They no longer allocate old `Arc<ResultData>` carriers; the
+    // replacement must be a schema-backed `__Result` TypedObject ABI with
+    // statically known schema ids. Option uses `jit_schema_option_*`.
     pub(crate) v2_make_result_ok: FuncRef,
     pub(crate) v2_make_result_err: FuncRef,
-    pub(crate) v2_make_option_some: FuncRef,
-    pub(crate) v2_make_option_none: FuncRef,
 
     // ADR-006 §2.7.17 — Arc-shape Result/Option predicates + payload
     // extractors. Read `is_ok` / `is_some` from the `*const ResultData` /

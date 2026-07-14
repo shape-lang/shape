@@ -145,11 +145,28 @@ fn drop_with_kind_and_miri_provenance(bits: u64, kind: NativeKind, provenance: M
             use shape_value::v2::heap_element::HeapElement;
             unsafe { TypedObjectStorage::release_elem(ptr) };
         }
+        (NativeKind::Ptr(HeapKind::TypedArray), MiriSlotProvenance::TypedArray(ptr))
+            if !ptr.is_null() =>
+        {
+            unsafe { shape_value::v2::typed_array::release_v2_typed_array(ptr) };
+        }
+        (NativeKind::Ptr(HeapKind::TraitObject), MiriSlotProvenance::TraitObject(ptr))
+            if !ptr.is_null() =>
+        {
+            use shape_value::v2::heap_element::HeapElement;
+            unsafe { TraitObjectStorage::release_elem(ptr) };
+        }
         (NativeKind::String | NativeKind::Ptr(HeapKind::String), _) => {
             panic!("drop_with_kind: missing Miri provenance for String carrier");
         }
         (NativeKind::Ptr(HeapKind::TypedObject), _) => {
             panic!("drop_with_kind: missing Miri provenance for TypedObject carrier");
+        }
+        (NativeKind::Ptr(HeapKind::TypedArray), _) => {
+            panic!("drop_with_kind: missing Miri provenance for TypedArray carrier");
+        }
+        (NativeKind::Ptr(HeapKind::TraitObject), _) => {
+            panic!("drop_with_kind: missing Miri provenance for TraitObject carrier");
         }
         _ => drop_with_kind(bits, kind),
     }
@@ -178,11 +195,27 @@ fn clone_with_kind_and_miri_provenance(
         {
             unsafe { shape_value::v2::refcount::v2_retain(&(*ptr).header) };
         }
+        (NativeKind::Ptr(HeapKind::TypedArray), MiriSlotProvenance::TypedArray(ptr))
+            if !ptr.is_null() =>
+        {
+            unsafe { shape_value::v2::typed_array::retain_v2_typed_array(ptr) };
+        }
+        (NativeKind::Ptr(HeapKind::TraitObject), MiriSlotProvenance::TraitObject(ptr))
+            if !ptr.is_null() =>
+        {
+            unsafe { shape_value::v2::refcount::v2_retain(&(*ptr).header) };
+        }
         (NativeKind::String | NativeKind::Ptr(HeapKind::String), _) => {
             panic!("clone_with_kind: missing Miri provenance for String carrier");
         }
         (NativeKind::Ptr(HeapKind::TypedObject), _) => {
             panic!("clone_with_kind: missing Miri provenance for TypedObject carrier");
+        }
+        (NativeKind::Ptr(HeapKind::TypedArray), _) => {
+            panic!("clone_with_kind: missing Miri provenance for TypedArray carrier");
+        }
+        (NativeKind::Ptr(HeapKind::TraitObject), _) => {
+            panic!("clone_with_kind: missing Miri provenance for TraitObject carrier");
         }
         _ => clone_with_kind(bits, kind),
     }
@@ -1706,6 +1739,64 @@ mod kinded_stack_tests {
         );
 
         unsafe { TypedObjectStorage::release_elem(ptr) };
+    }
+
+    /// Targeted Miri proof-boundary probe: the VM stack's Miri-only
+    /// provenance sidecar must carry v2-raw `TypedArray<T>` carrier
+    /// provenance through owning reads and pop/drop. This covers the stack
+    /// retain/release table for the array header; element-level heap arrays
+    /// remain a separate proof surface.
+    #[cfg(miri)]
+    #[test]
+    fn miri_stack_provenance_typed_array_read_and_pop() {
+        use shape_value::v2::refcount::{v2_get_refcount, v2_retain};
+        use shape_value::v2::typed_array::{
+            ELEM_TYPE_I64, TypedArray, release_v2_typed_array, stamp_elem_type,
+        };
+
+        let mut vm = make_vm();
+        let arr = TypedArray::<i64>::from_slice(&[4, 5, 6]);
+        unsafe { stamp_elem_type(arr as *mut u8, ELEM_TYPE_I64) };
+        unsafe { v2_retain(&(*arr).header) };
+        assert_eq!(
+            unsafe { v2_get_refcount(&(*arr).header) },
+            2,
+            "test guard plus stack-owned array share"
+        );
+
+        vm.push_kinded_with_miri_provenance(
+            arr as u64,
+            NativeKind::Ptr(HeapKind::TypedArray),
+            MiriSlotProvenance::TypedArray(arr as *mut u8),
+        )
+        .unwrap();
+
+        let owned = vm.read_owned_kinded(vm.sp - 1);
+        assert_eq!(
+            unsafe { v2_get_refcount(&(*arr).header) },
+            3,
+            "read_owned retained the typed array via sidecar"
+        );
+        assert_eq!(owned.kind(), NativeKind::Ptr(HeapKind::TypedArray));
+        assert_eq!(unsafe { TypedArray::<i64>::as_slice(arr) }, &[4, 5, 6]);
+        drop(owned);
+        assert_eq!(
+            unsafe { v2_get_refcount(&(*arr).header) },
+            2,
+            "owned typed-array drop released its retained share"
+        );
+
+        let (bits, kind, provenance) = vm.pop_kinded_with_miri_provenance().unwrap();
+        assert_eq!(bits, arr as u64);
+        assert_eq!(kind, NativeKind::Ptr(HeapKind::TypedArray));
+        drop_with_kind_and_miri_provenance(bits, kind, provenance);
+        assert_eq!(
+            unsafe { v2_get_refcount(&(*arr).header) },
+            1,
+            "pop + drop retired only the stack array share"
+        );
+
+        unsafe { release_v2_typed_array(arr as *mut u8) };
     }
 
     /// Inline scalars: clone/drop are no-ops on the bits.

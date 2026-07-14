@@ -77,6 +77,7 @@
 
 use crate::bytecode::{Instruction, OpCode, Operand};
 use crate::executor::vm_impl::stack::drop_with_kind;
+use shape_value::content::ContentNode;
 use shape_value::heap_value::{TraitObjectStorage, TypedObjectStorage};
 use shape_value::v2::decimal_obj::DecimalObj;
 use shape_value::v2::heap_element::HeapElement;
@@ -87,10 +88,10 @@ use shape_value::{HeapKind, NativeKind, VMError};
 
 use super::super::VirtualMachine;
 use super::v2_array_detect::{
-    ELEM_TYPE_BOOL, ELEM_TYPE_CALLABLE, ELEM_TYPE_CHAR, ELEM_TYPE_DECIMAL, ELEM_TYPE_F32,
-    ELEM_TYPE_F64, ELEM_TYPE_I8, ELEM_TYPE_I16, ELEM_TYPE_I32, ELEM_TYPE_I64, ELEM_TYPE_STRING,
-    ELEM_TYPE_TRAIT_OBJECT, ELEM_TYPE_TYPED_ARRAY, ELEM_TYPE_TYPED_OBJECT, ELEM_TYPE_U8,
-    ELEM_TYPE_U16, ELEM_TYPE_U32, stamp_elem_type,
+    ELEM_TYPE_BOOL, ELEM_TYPE_CALLABLE, ELEM_TYPE_CHAR, ELEM_TYPE_CONTENT, ELEM_TYPE_DECIMAL,
+    ELEM_TYPE_F32, ELEM_TYPE_F64, ELEM_TYPE_I8, ELEM_TYPE_I16, ELEM_TYPE_I32, ELEM_TYPE_I64,
+    ELEM_TYPE_STRING, ELEM_TYPE_TRAIT_OBJECT, ELEM_TYPE_TYPED_ARRAY, ELEM_TYPE_TYPED_OBJECT,
+    ELEM_TYPE_U8, ELEM_TYPE_U16, ELEM_TYPE_U32, stamp_elem_type,
 };
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -737,6 +738,99 @@ macro_rules! define_exec_v2_typed_array {
                             let old = TypedArray::<CallableArrayElem>::get_unchecked(arr, index);
                             old.release();
                             TypedArray::set(arr, index, elem);
+                        }
+                        drop_with_kind(arr_bits, arr_kind);
+                        Ok(())
+                    }
+
+                    // ── W18A content-array element carrier ────────────
+                    //
+                    // `Array<content>` stores raw `Arc<ContentNode>` pointers.
+                    // These are not v2 `HeapHeader` elements, so retain/release
+                    // uses the Arc strong-count API directly.
+                    OpCode::NewTypedArrayContent => {
+                        let cap = match instruction.operand {
+                            Some(Operand::Count(n)) => n as u32,
+                            _ => 0,
+                        };
+                        let ptr = TypedArray::<*const ContentNode>::with_capacity(cap);
+                        unsafe { stamp_elem_type(ptr as *mut u8, ELEM_TYPE_CONTENT) };
+                        self.push_kinded(
+                            ptr as usize as u64,
+                            NativeKind::Ptr(HeapKind::TypedArray),
+                        )?;
+                        Ok(())
+                    }
+                    OpCode::TypedArrayGetContent => {
+                        let (idx_bits, _idx_kind) = self.pop_kinded()?;
+                        let index = idx_bits as i64 as u32;
+                        let (arr_bits, arr_kind) = self.pop_kinded()?;
+                        let arr = arr_bits as usize as *const TypedArray<*const ContentNode>;
+                        let len = unsafe { TypedArray::len(arr) };
+                        let elem_ptr = unsafe {
+                            TypedArray::<*const ContentNode>::get(arr, index).ok_or(
+                                VMError::IndexOutOfBounds {
+                                    index: index as i32,
+                                    length: len as usize,
+                                },
+                            )?
+                        };
+                        if !elem_ptr.is_null() {
+                            unsafe { std::sync::Arc::increment_strong_count(elem_ptr) };
+                        }
+                        drop_with_kind(arr_bits, arr_kind);
+                        self.push_kinded(elem_ptr as u64, NativeKind::Ptr(HeapKind::Content))?;
+                        Ok(())
+                    }
+                    OpCode::TypedArrayPushContent => {
+                        let (val_bits, val_kind) = self.pop_kinded()?;
+                        let (arr_bits, arr_kind) = self.pop_kinded()?;
+                        if val_kind != NativeKind::Ptr(HeapKind::Content) {
+                            drop_with_kind(val_bits, val_kind);
+                            drop_with_kind(arr_bits, arr_kind);
+                            return Err(VMError::RuntimeError(format!(
+                                "TypedArrayPushContent: expected Ptr(Content), got {:?}",
+                                val_kind
+                            )));
+                        }
+                        let val = val_bits as usize as *const ContentNode;
+                        let arr = arr_bits as usize as *mut TypedArray<*const ContentNode>;
+                        unsafe { TypedArray::push(arr, val); }
+                        drop_with_kind(arr_bits, arr_kind);
+                        Ok(())
+                    }
+                    OpCode::TypedArraySetContent => {
+                        let (val_bits, val_kind) = self.pop_kinded()?;
+                        let (idx_bits, _idx_kind) = self.pop_kinded()?;
+                        let index = idx_bits as i64 as u32;
+                        let (arr_bits, arr_kind) = self.pop_kinded()?;
+                        if val_kind != NativeKind::Ptr(HeapKind::Content) {
+                            drop_with_kind(val_bits, val_kind);
+                            drop_with_kind(arr_bits, arr_kind);
+                            return Err(VMError::RuntimeError(format!(
+                                "TypedArraySetContent: expected Ptr(Content), got {:?}",
+                                val_kind
+                            )));
+                        }
+                        let val = val_bits as usize as *const ContentNode;
+                        let arr = arr_bits as usize as *mut TypedArray<*const ContentNode>;
+                        let len = unsafe { TypedArray::len(arr) };
+                        if index >= len {
+                            if !val.is_null() {
+                                unsafe { std::sync::Arc::decrement_strong_count(val) };
+                            }
+                            drop_with_kind(arr_bits, arr_kind);
+                            return Err(VMError::IndexOutOfBounds {
+                                index: index as i32,
+                                length: len as usize,
+                            });
+                        }
+                        unsafe {
+                            let old = TypedArray::<*const ContentNode>::get_unchecked(arr, index);
+                            if !old.is_null() {
+                                std::sync::Arc::decrement_strong_count(old);
+                            }
+                            TypedArray::<*const ContentNode>::set(arr, index, val);
                         }
                         drop_with_kind(arr_bits, arr_kind);
                         Ok(())

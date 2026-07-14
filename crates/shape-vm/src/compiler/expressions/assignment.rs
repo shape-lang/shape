@@ -549,16 +549,14 @@ impl BytecodeCompiler {
                 object, property, ..
             } => {
                 const OBJECT_REF_STORAGE_ERROR: &str = "cannot store a reference in an object or struct literal — references are scoped borrows that cannot escape into aggregate values. Use owned values instead";
-                // W15.2-LANG-8 jit-toplevel-render fix (Phase 4b Round 3 Surface-1c,
-                // ADR-006 §2.7.5 producer-side stamp): skip the MakeRef + MakeFieldRef +
-                // DerefStore fast path when the resolved field's type is `FieldType::Any`
-                // (operand tag would be `FIELD_TAG_ANY`, which the MakeFieldRef executor
-                // SURFACEs per ADR-006 §2.7.13 / Q14). Falls through to the
-                // SetFieldTyped + GetProp-style path below which handles `FIELD_TAG_ANY`
-                // via the storage's parallel `field_kinds` track.
+                // The MakeRef + MakeFieldRef + DerefStore path is only valid
+                // for fields whose declared type maps to one fixed carrier
+                // kind. Dynamic Any and Option<T> fields route through
+                // SetFieldTyped so the runtime can source/update
+                // TypedObjectStorage::field_kinds in lockstep with the slot.
                 let typed_field_place = self
                     .try_resolve_typed_field_place(object, property)
-                    .filter(|place| !matches!(place.field_type_info, FieldType::Any));
+                    .filter(Self::typed_field_place_has_fixed_field_ref_kind);
                 if let Some(place) = typed_field_place {
                     let label = format!("{}.{}", place.root_name, property);
                     let source_loc = self.span_to_source_location(assign_expr.target.span());
@@ -853,18 +851,21 @@ impl BytecodeCompiler {
                     });
                 };
 
-                let typed_operand = self
+                let (typed_operand, field_type_info) = self
                     .type_tracker
                     .schema_registry()
                     .get_by_id(schema_id)
                     .and_then(|schema| {
                         schema.get_field(property).and_then(|field| {
                             if schema_id <= u16::MAX as u32 {
-                                Some(Operand::TypedField {
-                                    type_id: schema_id as u16,
-                                    field_idx: field.index as u16,
-                                    field_type_tag: field_type_to_tag(&field.field_type),
-                                })
+                                Some((
+                                    Operand::TypedField {
+                                        type_id: schema_id as u16,
+                                        field_idx: field.index as u16,
+                                        field_type_tag: field_type_to_tag(&field.field_type),
+                                    },
+                                    field.field_type.clone(),
+                                ))
                             } else {
                                 None
                             }
@@ -883,7 +884,16 @@ impl BytecodeCompiler {
                     })?;
 
                 self.reject_direct_reference_storage(&assign_expr.value, OBJECT_REF_STORAGE_ERROR)?;
-                self.compile_expr(&assign_expr.value)?;
+                self.check_option_field_assignment_value(
+                    &field_type_info,
+                    property,
+                    &assign_expr.value,
+                )?;
+                if Self::field_type_accepts_none_literal(&field_type_info, &assign_expr.value) {
+                    self.compile_canonical_option_none_carrier()?;
+                } else {
+                    self.compile_expr(&assign_expr.value)?;
+                }
                 let value_local = self.declare_temp_local("__assign_value_")?;
                 self.emit(Instruction::simple(OpCode::Dup));
                 self.emit(Instruction::new(
@@ -1373,6 +1383,94 @@ impl BytecodeCompiler {
             "timestamp" => FieldType::Timestamp,
             _ => return None,
         })
+    }
+
+    fn check_option_field_assignment_value(
+        &mut self,
+        field_type: &FieldType,
+        field_name: &str,
+        value: &Expr,
+    ) -> Result<()> {
+        if !matches!(field_type, FieldType::Option(_)) {
+            return Ok(());
+        }
+        if Self::field_type_accepts_none_literal(field_type, value) {
+            return Ok(());
+        }
+
+        let Some(value_type) = self.field_type_for_assignment_value(value) else {
+            return Err(ShapeError::SemanticError {
+                message: format!(
+                    "cannot prove value assigned to field '{}' has type '{}'",
+                    field_name, field_type
+                ),
+                location: Some(self.span_to_source_location(value.span())),
+            });
+        };
+        if &value_type != field_type || !Self::field_type_is_strictly_proven(&value_type) {
+            return Err(ShapeError::SemanticError {
+                message: format!(
+                    "cannot assign value of type '{}' to field '{}' of type '{}'",
+                    value_type, field_name, field_type
+                ),
+                location: Some(self.span_to_source_location(value.span())),
+            });
+        }
+        Ok(())
+    }
+
+    fn field_type_for_assignment_value(&mut self, value: &Expr) -> Option<FieldType> {
+        if let Some(field_type) = super::collections::infer_field_type_from_expr(value) {
+            return Some(field_type);
+        }
+        if let Expr::FunctionCall { name, args, .. } = value
+            && name == "Some"
+            && args.len() == 1
+        {
+            let inner_ty = self.infer_expr_type(&args[0]).ok()?;
+            let inner_field_type = Self::inferred_type_to_field_type(&inner_ty)?;
+            return Some(FieldType::Option(Box::new(inner_field_type)));
+        }
+        let inferred = self.infer_expr_type(value).ok()?;
+        Self::inferred_type_to_field_type(&inferred)
+    }
+
+    fn inferred_type_to_field_type(ty: &shape_runtime::type_system::Type) -> Option<FieldType> {
+        use shape_runtime::type_system::Type;
+        let Type::Concrete(annotation) = ty else {
+            return None;
+        };
+        if annotation.as_type_name_str() == Some("unknown") {
+            return None;
+        }
+        Some(Self::type_annotation_to_field_type(annotation))
+    }
+
+    fn field_type_is_strictly_proven(field_type: &FieldType) -> bool {
+        match field_type {
+            FieldType::Any => false,
+            FieldType::Object(name) => name != "unknown",
+            FieldType::Array(inner) | FieldType::Option(inner) | FieldType::Set(inner) => {
+                Self::field_type_is_strictly_proven(inner)
+            }
+            FieldType::HashMap { key, value } => {
+                Self::field_type_is_strictly_proven(key)
+                    && Self::field_type_is_strictly_proven(value)
+            }
+            FieldType::F64
+            | FieldType::I64
+            | FieldType::Bool
+            | FieldType::String
+            | FieldType::Timestamp
+            | FieldType::Decimal
+            | FieldType::I8
+            | FieldType::U8
+            | FieldType::I16
+            | FieldType::U16
+            | FieldType::I32
+            | FieldType::U32
+            | FieldType::U64 => true,
+        }
     }
 }
 

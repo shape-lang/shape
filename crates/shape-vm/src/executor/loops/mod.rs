@@ -611,6 +611,16 @@ impl VirtualMachine {
                     unsafe { elem.retain() };
                     self.push_kinded(elem.bits, elem.native_kind())
                 }
+                V2ElemType::Content => {
+                    use shape_value::content::ContentNode;
+                    let arr = view.ptr as *const TypedArray<*const ContentNode>;
+                    let elem_ptr =
+                        unsafe { TypedArray::<*const ContentNode>::get_unchecked(arr, i) };
+                    if !elem_ptr.is_null() {
+                        unsafe { std::sync::Arc::increment_strong_count(elem_ptr) };
+                    }
+                    self.push_kinded(elem_ptr as u64, NativeKind::Ptr(HeapKind::Content))
+                }
             };
             drop_with_kind(idx_bits, idx_kind);
             drop_with_kind(iter_bits, iter_kind);

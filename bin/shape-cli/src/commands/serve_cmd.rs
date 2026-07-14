@@ -1,8 +1,8 @@
 use anyhow::{Result, bail};
 use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::sync::Arc;
 use std::sync::atomic::AtomicU8;
+use std::sync::{Arc, Mutex};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::sync::Semaphore;
@@ -19,12 +19,25 @@ use shape_wire::WireValue;
 use shape_wire::transport::framing::{decode_framed, encode_framed};
 
 use crate::cli_args::ExecutionModeArg;
-use crate::commands::ProviderOptions;
+use crate::commands::{ProviderOptions, snapshot_cmd};
 use crate::extension_loading;
 
 /// Pre-loaded language runtimes for polyglot remote execution.
 type LanguageRuntimes =
     HashMap<String, Arc<shape_runtime::plugins::language_runtime::PluginLanguageRuntime>>;
+
+fn fresh_worker_language_runtimes(
+    runtimes: &LanguageRuntimes,
+) -> std::result::Result<LanguageRuntimes, String> {
+    let mut fresh = LanguageRuntimes::new();
+    for (language, runtime) in runtimes {
+        let instance = runtime
+            .fresh_instance()
+            .map_err(|e| format!("failed to initialize '{language}' runtime for worker: {e}"))?;
+        fresh.insert(language.clone(), Arc::new(instance));
+    }
+    Ok(fresh)
+}
 
 /// Server configuration derived from CLI flags.
 struct ServeConfig {
@@ -37,6 +50,7 @@ struct ServeConfig {
     _mode: ExecutionModeArg,
     extensions: Vec<std::path::PathBuf>,
     provider_opts: ProviderOptions,
+    snapshot_store_root: std::path::PathBuf,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -189,6 +203,91 @@ impl ConnectionState {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RemoteCallState {
+    Queued,
+    CancelRequested,
+    Running,
+    Finished,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RegisterQueuedOutcome {
+    Queued,
+    AlreadyCancelled,
+}
+
+struct RemoteCallRegistry {
+    calls: Mutex<HashMap<shape_vm::remote::RemoteCallId, RemoteCallState>>,
+}
+
+impl RemoteCallRegistry {
+    fn new() -> Self {
+        Self {
+            calls: Mutex::new(HashMap::new()),
+        }
+    }
+
+    fn register_queued(&self, call_id: shape_vm::remote::RemoteCallId) -> RegisterQueuedOutcome {
+        let mut calls = self.calls.lock().expect("remote call registry poisoned");
+        match calls.get(&call_id).copied() {
+            Some(RemoteCallState::CancelRequested) => {
+                calls.remove(&call_id);
+                RegisterQueuedOutcome::AlreadyCancelled
+            }
+            _ => {
+                calls.insert(call_id, RemoteCallState::Queued);
+                RegisterQueuedOutcome::Queued
+            }
+        }
+    }
+
+    fn mark_running(&self, call_id: shape_vm::remote::RemoteCallId) -> bool {
+        let mut calls = self.calls.lock().expect("remote call registry poisoned");
+        match calls.get(&call_id).copied() {
+            Some(RemoteCallState::CancelRequested) => {
+                calls.remove(&call_id);
+                false
+            }
+            _ => {
+                calls.insert(call_id, RemoteCallState::Running);
+                true
+            }
+        }
+    }
+
+    fn finish(&self, call_id: shape_vm::remote::RemoteCallId) {
+        let mut calls = self.calls.lock().expect("remote call registry poisoned");
+        calls.insert(call_id, RemoteCallState::Finished);
+    }
+
+    fn cancel(
+        &self,
+        call_id: shape_vm::remote::RemoteCallId,
+    ) -> shape_vm::remote::RemoteCancelOutcome {
+        use shape_vm::remote::RemoteCancelOutcome;
+
+        let mut calls = self.calls.lock().expect("remote call registry poisoned");
+        if calls.len() > 4096 {
+            calls.retain(|_, state| {
+                matches!(state, RemoteCallState::Queued | RemoteCallState::Running)
+            });
+        }
+        match calls.get(&call_id).copied() {
+            Some(RemoteCallState::Queued) | Some(RemoteCallState::CancelRequested) => {
+                calls.insert(call_id, RemoteCallState::CancelRequested);
+                RemoteCancelOutcome::AcceptedQueued
+            }
+            Some(RemoteCallState::Running) => RemoteCancelOutcome::AlreadyRunning,
+            Some(RemoteCallState::Finished) => RemoteCancelOutcome::AlreadyFinished,
+            None => {
+                calls.insert(call_id, RemoteCallState::CancelRequested);
+                RemoteCancelOutcome::AcceptedQueued
+            }
+        }
+    }
+}
+
 /// Entry point for `shape serve`.
 pub async fn run_serve(
     address: String,
@@ -201,8 +300,10 @@ pub async fn run_serve(
     sandbox: String,
     max_concurrent: usize,
     ffi_languages: Vec<String>,
+    snapshot_store_root: Option<std::path::PathBuf>,
 ) -> Result<()> {
     let addr: SocketAddr = address.parse()?;
+    let snapshot_store_root = snapshot_cmd::snapshot_store_root(snapshot_store_root);
 
     // Non-loopback bind gate (distributed §4.7 / Q29 / OQ-4). Loopback stays
     // plain for dev; a non-loopback bind must present BOTH TLS material AND an
@@ -310,9 +411,11 @@ pub async fn run_serve(
         _mode: mode,
         extensions,
         provider_opts: provider_opts.clone(),
+        snapshot_store_root,
     });
 
     let semaphore = Arc::new(Semaphore::new(config.max_concurrent));
+    let call_registry = Arc::new(RemoteCallRegistry::new());
 
     let listener = TcpListener::bind(addr).await?;
     eprintln!("Shape serve listening on {}", addr);
@@ -362,6 +465,7 @@ pub async fn run_serve(
 
         let config = config.clone();
         let semaphore = semaphore.clone();
+        let call_registry = call_registry.clone();
         let language_runtimes = language_runtimes.clone();
         let tls_acceptor = tls_acceptor.clone();
 
@@ -371,9 +475,14 @@ pub async fn run_serve(
                 // framing protocol over the encrypted `TlsStream`.
                 Some(acceptor) => match acceptor.accept(socket).await {
                     Ok(tls_stream) => {
-                        if let Err(e) =
-                            handle_connection(tls_stream, &config, &semaphore, &language_runtimes)
-                                .await
+                        if let Err(e) = handle_connection(
+                            tls_stream,
+                            &config,
+                            &semaphore,
+                            &call_registry,
+                            &language_runtimes,
+                        )
+                        .await
                         {
                             eprintln!("Connection error from {}: {}", peer, e);
                         }
@@ -388,8 +497,14 @@ pub async fn run_serve(
                 },
                 // Plain path (loopback dev, no cert): unencrypted framing.
                 None => {
-                    if let Err(e) =
-                        handle_connection(socket, &config, &semaphore, &language_runtimes).await
+                    if let Err(e) = handle_connection(
+                        socket,
+                        &config,
+                        &semaphore,
+                        &call_registry,
+                        &language_runtimes,
+                    )
+                    .await
                     {
                         eprintln!("Connection error from {}: {}", peer, e);
                     }
@@ -450,6 +565,7 @@ async fn handle_connection<S>(
     mut socket: S,
     config: &ServeConfig,
     semaphore: &Semaphore,
+    call_registry: &RemoteCallRegistry,
     language_runtimes: &LanguageRuntimes,
 ) -> Result<()>
 where
@@ -527,7 +643,7 @@ where
                     Some(handle_validate(req))
                 }
             }
-            WireMessage::Call(req) => {
+            WireMessage::Call(mut req) => {
                 if requires_auth(config) && !state.authenticated {
                     Some(WireMessage::CallResponse(
                         shape_vm::remote::RemoteCallResponse {
@@ -538,17 +654,77 @@ where
                         },
                     ))
                 } else {
-                    let _permit = semaphore
-                        .acquire()
-                        .await
-                        .map_err(|_| anyhow::anyhow!("semaphore closed"))?;
-                    Some(handle_call(
-                        req,
-                        &mut state,
-                        language_runtimes,
-                        &config.security.granted,
-                        &config.security.scope,
+                    cache_and_hydrate_call_blobs(&mut req, &mut state.blob_cache);
+
+                    if let Some(call_id) = req.call_id {
+                        if matches!(
+                            call_registry.register_queued(call_id),
+                            RegisterQueuedOutcome::AlreadyCancelled
+                        ) {
+                            Some(cancelled_call_response(call_id))
+                        } else {
+                            let _permit = semaphore
+                                .acquire()
+                                .await
+                                .map_err(|_| anyhow::anyhow!("semaphore closed"))?;
+                            if !call_registry.mark_running(call_id) {
+                                Some(cancelled_call_response(call_id))
+                            } else {
+                                let language_runtimes = language_runtimes.clone();
+                                let granted = config.security.granted.clone();
+                                let scope = config.security.scope.clone();
+                                let snapshot_store_root = config.snapshot_store_root.clone();
+                                let response = tokio::task::spawn_blocking(move || {
+                                    handle_call(
+                                        req,
+                                        &language_runtimes,
+                                        &granted,
+                                        &scope,
+                                        &snapshot_store_root,
+                                    )
+                                })
+                                .await
+                                .map_err(|e| anyhow::anyhow!("remote call worker failed: {e}"))?;
+                                call_registry.finish(call_id);
+                                Some(response)
+                            }
+                        }
+                    } else {
+                        let _permit = semaphore
+                            .acquire()
+                            .await
+                            .map_err(|_| anyhow::anyhow!("semaphore closed"))?;
+                        let language_runtimes = language_runtimes.clone();
+                        let granted = config.security.granted.clone();
+                        let scope = config.security.scope.clone();
+                        let snapshot_store_root = config.snapshot_store_root.clone();
+                        Some(
+                            tokio::task::spawn_blocking(move || {
+                                handle_call(
+                                    req,
+                                    &language_runtimes,
+                                    &granted,
+                                    &scope,
+                                    &snapshot_store_root,
+                                )
+                            })
+                            .await
+                            .map_err(|e| anyhow::anyhow!("remote call worker failed: {e}"))?,
+                        )
+                    }
+                }
+            }
+            WireMessage::CancelCall(req) => {
+                if requires_auth(config) && !state.authenticated {
+                    Some(WireMessage::CancelCallResponse(
+                        shape_vm::remote::RemoteCancelResponse {
+                            call_id: req.call_id,
+                            outcome: shape_vm::remote::RemoteCancelOutcome::AuthRequired,
+                            message: "Authentication required.".to_string(),
+                        },
                     ))
+                } else {
+                    Some(handle_cancel_call(req, call_registry))
                 }
             }
             WireMessage::ExecuteFile(req) => {
@@ -622,6 +798,7 @@ where
             }
             // Ignore response-type messages from clients
             WireMessage::CallResponse(_)
+            | WireMessage::CancelCallResponse(_)
             | WireMessage::BlobNegotiationReply(_)
             | WireMessage::ExecuteResponse(_)
             | WireMessage::ValidateResponse(_)
@@ -682,6 +859,7 @@ fn handle_ping() -> WireMessage {
             "validate".to_string(),
             "validate-path".to_string(),
             "call".to_string(),
+            "call-cancel".to_string(),
             "blob-negotiation".to_string(),
         ],
     })
@@ -1003,36 +1181,90 @@ fn handle_validate_path(req: ValidatePathRequest) -> WireMessage {
     })
 }
 
+/// Retain verified content-addressed blobs and restore omitted dependencies from
+/// this connection's cache before executing a negotiated call.
+fn cache_and_hydrate_call_blobs(
+    request: &mut shape_vm::remote::RemoteCallRequest,
+    cache: &mut shape_vm::remote::RemoteBlobCache,
+) {
+    let Some(blobs) = request.function_blobs.as_mut() else {
+        return;
+    };
+
+    // Keep malformed wire input on the normal execution path, where it returns
+    // the established HashMismatch response. Never cache it.
+    if blobs
+        .iter()
+        .any(|(declared_hash, blob)| blob.compute_hash() != *declared_hash)
+    {
+        return;
+    }
+
+    cache.insert_blobs(blobs);
+
+    let Some(entry_hash) = request.function_hash else {
+        return;
+    };
+
+    let mut pending = vec![entry_hash];
+    let mut visited = std::collections::HashSet::new();
+    while let Some(hash) = pending.pop() {
+        if !visited.insert(hash) {
+            continue;
+        }
+
+        let dependencies = if let Some((_, blob)) = blobs.iter().find(|(known, _)| *known == hash) {
+            blob.dependencies.clone()
+        } else if let Some(blob) = cache.get(&hash) {
+            let blob = blob.clone();
+            let dependencies = blob.dependencies.clone();
+            blobs.push((hash, blob));
+            dependencies
+        } else {
+            continue;
+        };
+        pending.extend(dependencies);
+    }
+}
+
 fn handle_call(
     req: shape_vm::remote::RemoteCallRequest,
-    _state: &mut ConnectionState,
     language_runtimes: &LanguageRuntimes,
     granted: &shape_abi_v1::PermissionSet,
     scope: &shape_abi_v1::ScopeConstraints,
+    snapshot_store_root: &std::path::Path,
 ) -> WireMessage {
     // WF-2F acceptance genuineness log: prove a real inbound content-addressed
     // Call landed on this node (blob count + foreign-entry count), so a passing
     // matrix cell cannot be a sender-side local fallback.
     eprintln!(
-        "[serve] inbound Call fn={:?} blobs={} foreign_entries={}",
+        "[serve] inbound Call id={:?} fn={:?} blobs={} foreign_entries={}",
+        req.call_id,
         req.function_name,
         req.function_blobs.as_ref().map(|b| b.len()).unwrap_or(0),
         req.program.foreign_functions.len(),
     );
-    let tmp_dir = std::env::temp_dir().join("shape-serve-snapshots");
-    match shape_runtime::snapshot::SnapshotStore::new(&tmp_dir) {
+    match shape_runtime::snapshot::SnapshotStore::new(snapshot_store_root.to_path_buf()) {
         Ok(store) => {
             // WF-1D: gate the remote Call path with the server's derived grant.
             let response = if language_runtimes.is_empty() {
-                shape_vm::remote::execute_remote_call(req, &store, granted)
+                shape_vm::remote::execute_remote_call_with_scope(req, &store, granted, scope)
             } else {
-                shape_vm::remote::execute_remote_call_with_runtimes(
-                    req,
-                    &store,
-                    language_runtimes,
-                    granted,
-                    scope,
-                )
+                match fresh_worker_language_runtimes(language_runtimes) {
+                    Ok(worker_runtimes) => shape_vm::remote::execute_remote_call_with_runtimes(
+                        req,
+                        &store,
+                        &worker_runtimes,
+                        granted,
+                        scope,
+                    ),
+                    Err(e) => shape_vm::remote::RemoteCallResponse {
+                        result: Err(shape_vm::remote::RemoteCallError::new(
+                            shape_vm::remote::RemoteErrorKind::RuntimeError,
+                            e,
+                        )),
+                    },
+                }
             };
             WireMessage::CallResponse(response)
         }
@@ -1043,6 +1275,48 @@ fn handle_call(
             )),
         }),
     }
+}
+
+fn cancelled_call_response(call_id: shape_vm::remote::RemoteCallId) -> WireMessage {
+    eprintln!("[serve] inbound Call id={call_id:?} cancelled before execution");
+    WireMessage::CallResponse(shape_vm::remote::RemoteCallResponse {
+        result: Err(shape_vm::remote::RemoteCallError::new(
+            shape_vm::remote::RemoteErrorKind::RuntimeError,
+            format!(
+                "remote call {:?} was cancelled before receiver execution",
+                call_id
+            ),
+        )),
+    })
+}
+
+fn handle_cancel_call(
+    req: shape_vm::remote::RemoteCancelRequest,
+    call_registry: &RemoteCallRegistry,
+) -> WireMessage {
+    use shape_vm::remote::RemoteCancelOutcome;
+
+    let outcome = call_registry.cancel(req.call_id);
+    let message = match outcome {
+        RemoteCancelOutcome::AcceptedQueued => {
+            "remote call cancellation accepted before receiver execution"
+        }
+        RemoteCancelOutcome::AlreadyRunning => {
+            "remote call is already running in a receiver VM frame and is not preemptible"
+        }
+        RemoteCancelOutcome::AlreadyFinished => "remote call already finished",
+        RemoteCancelOutcome::UnknownCall => "remote call id is unknown to this receiver",
+        RemoteCancelOutcome::AuthRequired => "authentication required",
+    };
+    eprintln!(
+        "[serve] inbound CancelCall id={:?} outcome={:?} message={}",
+        req.call_id, outcome, message
+    );
+    WireMessage::CancelCallResponse(shape_vm::remote::RemoteCancelResponse {
+        call_id: req.call_id,
+        outcome,
+        message: message.to_string(),
+    })
 }
 
 fn handle_negotiation(
@@ -1339,6 +1613,10 @@ mod tests {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::{TcpListener, TcpStream};
 
+    fn test_snapshot_store_root() -> std::path::PathBuf {
+        std::env::temp_dir().join(format!("shape-serve-unit-snapshots-{}", std::process::id()))
+    }
+
     /// Start a real server on a random port, return the bound address.
     async fn start_test_server() -> SocketAddr {
         start_test_server_with_sandbox(SandboxLevel::None).await
@@ -1359,8 +1637,10 @@ mod tests {
             _mode: ExecutionModeArg::Vm,
             extensions: vec![],
             provider_opts: ProviderOptions::default(),
+            snapshot_store_root: test_snapshot_store_root(),
         });
         let semaphore = Arc::new(Semaphore::new(4));
+        let call_registry = Arc::new(RemoteCallRegistry::new());
         let language_runtimes: Arc<LanguageRuntimes> = Arc::new(HashMap::new());
 
         tokio::spawn(async move {
@@ -1368,10 +1648,17 @@ mod tests {
                 let (socket, _) = listener.accept().await.unwrap();
                 let config = config.clone();
                 let semaphore = semaphore.clone();
+                let call_registry = call_registry.clone();
                 let language_runtimes = language_runtimes.clone();
                 tokio::spawn(async move {
-                    let _ =
-                        handle_connection(socket, &config, &semaphore, &language_runtimes).await;
+                    let _ = handle_connection(
+                        socket,
+                        &config,
+                        &semaphore,
+                        &call_registry,
+                        &language_runtimes,
+                    )
+                    .await;
                 });
             }
         });
@@ -1442,8 +1729,10 @@ mod tests {
             _mode: ExecutionModeArg::Vm,
             extensions: vec![],
             provider_opts: ProviderOptions::default(),
+            snapshot_store_root: test_snapshot_store_root(),
         });
         let semaphore = Arc::new(Semaphore::new(4));
+        let call_registry = Arc::new(RemoteCallRegistry::new());
         let language_runtimes: Arc<LanguageRuntimes> = Arc::new(HashMap::new());
 
         tokio::spawn(async move {
@@ -1451,6 +1740,7 @@ mod tests {
                 let (socket, _) = listener.accept().await.unwrap();
                 let config = config.clone();
                 let semaphore = semaphore.clone();
+                let call_registry = call_registry.clone();
                 let language_runtimes = language_runtimes.clone();
                 let acceptor = acceptor.clone();
                 tokio::spawn(async move {
@@ -1463,6 +1753,7 @@ mod tests {
                                 tls_stream,
                                 &config,
                                 &semaphore,
+                                &call_registry,
                                 &language_runtimes,
                             )
                             .await;
@@ -1900,7 +2191,9 @@ print(r)
             "refusal should print an Err(RemoteError::...Capture...) value, got stdout: {stdout:?}"
         );
         assert!(
-            stdout.contains("capture") || stdout.contains("immutable") || stdout.contains("mutable"),
+            stdout.contains("capture")
+                || stdout.contains("immutable")
+                || stdout.contains("mutable"),
             "refusal should name the capture problem in user-legible words, got stdout: {stdout:?}"
         );
     }
@@ -2026,8 +2319,10 @@ print(r)
             _mode: ExecutionModeArg::Vm,
             extensions: vec![],
             provider_opts: ProviderOptions::default(),
+            snapshot_store_root: test_snapshot_store_root(),
         });
         let semaphore = Arc::new(Semaphore::new(4));
+        let call_registry = Arc::new(RemoteCallRegistry::new());
         let language_runtimes: Arc<LanguageRuntimes> = Arc::new(HashMap::new());
 
         tokio::spawn(async move {
@@ -2035,10 +2330,17 @@ print(r)
                 let (socket, _) = listener.accept().await.unwrap();
                 let config = config.clone();
                 let semaphore = semaphore.clone();
+                let call_registry = call_registry.clone();
                 let language_runtimes = language_runtimes.clone();
                 tokio::spawn(async move {
-                    let _ =
-                        handle_connection(socket, &config, &semaphore, &language_runtimes).await;
+                    let _ = handle_connection(
+                        socket,
+                        &config,
+                        &semaphore,
+                        &call_registry,
+                        &language_runtimes,
+                    )
+                    .await;
                 });
             }
         });
@@ -2329,7 +2631,9 @@ match r {{
             dirs.push(ws.join("target").join("debug"));
             dirs.push(ws.join("target").join("release"));
         }
-        dirs.into_iter().map(|d| d.join(&file)).find(|p| p.is_file())
+        dirs.into_iter()
+            .map(|d| d.join(&file))
+            .find(|p| p.is_file())
     }
 
     /// A `shape serve` subprocess bound to a random loopback port, killed on drop.
@@ -2363,7 +2667,8 @@ match r {{
         let cfg = tempfile::tempdir().expect("serve cfg tempdir");
         let extdir = tempfile::tempdir().expect("serve ext tempdir");
         let filename = so.file_name().expect("extension .so filename");
-        std::os::unix::fs::symlink(so, extdir.path().join(filename)).expect("symlink extension .so");
+        std::os::unix::fs::symlink(so, extdir.path().join(filename))
+            .expect("symlink extension .so");
 
         // Free ephemeral port (bind-then-drop). The small race window before the
         // child re-binds is acceptable in a test harness.
@@ -2414,7 +2719,11 @@ match r {{
     /// extension (the foreign body runs server-side; loading CPython/V8 client
     /// side would only re-introduce the teardown crash). Returns the completed
     /// `Output`.
-    fn run_remote_client(shape_bin: &std::path::Path, program: &str, mode: &str) -> std::process::Output {
+    fn run_remote_client(
+        shape_bin: &std::path::Path,
+        program: &str,
+        mode: &str,
+    ) -> std::process::Output {
         let dir = tempfile::tempdir().expect("client script tempdir");
         let script = dir.path().join("remote.shape");
         std::fs::write(&script, program).expect("write client script");
@@ -2438,7 +2747,9 @@ match r {{
     /// never yields `105`. Skips cleanly when `libshape_ext_python.so` is absent.
     #[test]
     fn test_remote_foreign_python_transfer_over_tcp() {
-        let _guard = polyglot_process_lock().lock().expect("polyglot process lock");
+        let _guard = polyglot_process_lock()
+            .lock()
+            .expect("polyglot process lock");
         let Some(so) = language_ext_so("python") else {
             println!(
                 "SKIP test_remote_foreign_python_transfer_over_tcp: libshape_ext_python.so \
@@ -2551,7 +2862,9 @@ print(remote_py(100))
     /// `libshape_ext_typescript.so` is absent.
     #[test]
     fn test_remote_foreign_typescript_transfer_over_tcp() {
-        let _guard = polyglot_process_lock().lock().expect("polyglot process lock");
+        let _guard = polyglot_process_lock()
+            .lock()
+            .expect("polyglot process lock");
         let Some(so) = language_ext_so("typescript") else {
             println!(
                 "SKIP test_remote_foreign_typescript_transfer_over_tcp: \

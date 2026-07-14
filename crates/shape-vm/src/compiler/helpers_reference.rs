@@ -1,12 +1,15 @@
 //! Reference tracking, borrow key management, and callable pass mode utilities
 
 use super::{BorrowMode, BorrowPlace};
-use crate::bytecode::{Instruction, OpCode, Operand};
+use crate::bytecode::{Constant, Instruction, OpCode, Operand};
 use crate::executor::typed_object_ops::field_type_to_tag;
 use crate::type_tracking::{BindingStorageClass, VariableKind, VariableTypeInfo};
 use shape_ast::ast::{BlockItem, Expr, Item, Statement};
 use shape_ast::error::{Result, ShapeError, SourceLocation};
 use shape_runtime::type_schema::FieldType;
+use shape_runtime::type_schema::builtin_schemas::{
+    OPTION_PAYLOAD, OPTION_VARIANT, OPTION_VARIANT_NONE,
+};
 use std::collections::HashSet;
 
 use super::{BytecodeCompiler, ClosureBodyPeek, FunctionReturnReferenceSummary, ParamPassMode};
@@ -194,6 +197,80 @@ impl BytecodeCompiler {
             borrow_key,
             field_type_info: field.field_type.clone(),
         })
+    }
+
+    pub(super) fn field_type_has_fixed_field_ref_kind(field_type: &FieldType) -> bool {
+        match field_type {
+            FieldType::Any | FieldType::Option(_) => false,
+            FieldType::F64
+            | FieldType::I64
+            | FieldType::Bool
+            | FieldType::String
+            | FieldType::Timestamp
+            | FieldType::Array(_)
+            | FieldType::Object(_)
+            | FieldType::Decimal
+            | FieldType::I8
+            | FieldType::U8
+            | FieldType::I16
+            | FieldType::U16
+            | FieldType::I32
+            | FieldType::U32
+            | FieldType::U64
+            | FieldType::HashMap { .. }
+            | FieldType::Set(_) => true,
+        }
+    }
+
+    pub(super) fn typed_field_place_has_fixed_field_ref_kind(place: &TypedFieldPlace) -> bool {
+        Self::field_type_has_fixed_field_ref_kind(&place.field_type_info)
+    }
+
+    pub(super) fn field_type_accepts_none_literal(field_type: &FieldType, expr: &Expr) -> bool {
+        matches!(field_type, FieldType::Option(_))
+            && matches!(expr, Expr::Literal(shape_ast::ast::Literal::None, _))
+    }
+
+    pub(super) fn compile_canonical_option_none_carrier(&mut self) -> Result<()> {
+        let schema_id = self
+            .type_tracker
+            .schema_registry()
+            .get("__Option")
+            .map(|schema| schema.id)
+            .ok_or_else(|| ShapeError::SemanticError {
+                message: "Cannot resolve builtin `__Option` schema for `None` carrier".to_string(),
+                location: None,
+            })?;
+        if schema_id > u16::MAX as u32 {
+            return Err(ShapeError::SemanticError {
+                message: format!(
+                    "Builtin `__Option` schema id {} exceeds typed-object operand range",
+                    schema_id
+                ),
+                location: None,
+            });
+        }
+
+        debug_assert_eq!(OPTION_VARIANT, 0);
+        debug_assert_eq!(OPTION_PAYLOAD, 1);
+        let variant_const = self
+            .program
+            .add_constant(Constant::Int(OPTION_VARIANT_NONE));
+        self.emit(Instruction::new(
+            OpCode::PushConst,
+            Some(Operand::Const(variant_const)),
+        ));
+        self.emit(Instruction::simple(OpCode::PushNull));
+        self.emit(Instruction::new(
+            OpCode::NewTypedObject,
+            Some(Operand::TypedObjectAlloc {
+                schema_id: schema_id as u16,
+                field_count: 2,
+            }),
+        ));
+        self.last_expr_schema = Some(schema_id);
+        self.last_expr_type_info = Some(VariableTypeInfo::known(schema_id, "__Option".to_string()));
+        Ok(())
     }
 
     pub(super) fn compile_reference_expr(
@@ -1350,6 +1427,7 @@ impl BytecodeCompiler {
                 }
             }
             Statement::SetParamValue { expression, .. }
+            | Statement::SetParamTypeExpr { expression, .. }
             | Statement::SetReturnExpr { expression, .. }
             | Statement::ReplaceBodyExpr { expression, .. }
             | Statement::ReplaceModuleExpr { expression, .. }

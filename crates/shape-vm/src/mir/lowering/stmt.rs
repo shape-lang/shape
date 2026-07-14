@@ -82,6 +82,9 @@ pub(super) fn lower_statement(
         Statement::SetParamValue {
             expression, span, ..
         }
+        | Statement::SetParamTypeExpr {
+            expression, span, ..
+        }
         | Statement::SetReturnExpr { expression, span }
         | Statement::ReplaceBodyExpr { expression, span }
         | Statement::ReplaceModuleExpr { expression, span }

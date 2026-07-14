@@ -788,7 +788,10 @@ impl BytecodeCompiler {
         for branch in &join_expr.branches {
             if let Some((func_id, _)) = self.deferrable_async_call_target(&branch.expr) {
                 let const_idx = self.program.add_constant(Constant::Function(func_id));
-                self.emit(Instruction::new(OpCode::PushConst, Some(Operand::Const(const_idx))));
+                self.emit(Instruction::new(
+                    OpCode::PushConst,
+                    Some(Operand::Const(const_idx)),
+                ));
             } else {
                 self.plan_flexible_binding_escape_from_expr(&branch.expr);
                 self.compile_expr(&branch.expr)?;

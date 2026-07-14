@@ -1118,6 +1118,23 @@ mod ffi_permission_tests {
     }
 
     #[test]
+    fn extern_c_bytecode_bincode_roundtrips() {
+        let bytecode = compile(
+            r#"
+            extern "C" fn labs(x: int) -> int from "c"
+            print(labs(0 - 42))
+            "#,
+        );
+        let bytes = bincode::serialize(&bytecode).expect("serialize extern C bytecode");
+        let restored: crate::bytecode::BytecodeProgram =
+            bincode::deserialize(&bytes).expect("deserialize extern C bytecode");
+        assert_eq!(
+            restored.foreign_functions.len(),
+            bytecode.foreign_functions.len()
+        );
+    }
+
+    #[test]
     fn python_declaration_derives_ffi_permission() {
         let bytecode = compile(
             r#"

@@ -443,7 +443,7 @@ impl ExecutionContext {
     /// Create a serializable snapshot of the dynamic execution state
     /// (WF-2B snapshot-resume, design §4.3.4 context-envelope half).
     ///
-    /// Uses the kind-threaded `slot_to_serializable(bits, kind, store)` API
+    /// Uses the provenance-bearing `kinded_slot_to_serializable(slot, store)` API
     /// (the working §2.7.7 carrier — the stub's "deleted `nanboxed_to_serializable`"
     /// claim was stale, the same false claim as the resume stubs). Each
     /// variable-scope / type-alias-override value round-trips through it with
@@ -452,12 +452,11 @@ impl ExecutionContext {
     pub fn snapshot(&self, store: &SnapshotStore) -> Result<ContextSnapshot> {
         use crate::snapshot::SerializableVMValue;
 
-        // Serialize a KindedSlot value via the kind-threaded API — the sole
-        // runtime kind source is the slot's own `NativeKind`, never a guess.
+        // Serialize the owning carrier so Miri retains its pointer provenance;
+        // the runtime kind source remains the slot's own `NativeKind`.
         let ser = |slot: &KindedSlot| -> Result<SerializableVMValue> {
-            crate::snapshot::slot_to_serializable(slot.raw(), slot.kind(), store).map_err(|msg| {
-                anyhow!("ExecutionContext::snapshot: cannot serialize value: {msg}")
-            })
+            crate::snapshot::kinded_slot_to_serializable(slot, store)
+                .map_err(|msg| anyhow!("ExecutionContext::snapshot: cannot serialize value: {msg}"))
         };
         let ser_overrides =
             |m: &Option<HashMap<String, KindedSlot>>| -> Result<Option<HashMap<String, SerializableVMValue>>> {
@@ -565,19 +564,16 @@ impl ExecutionContext {
         store: &SnapshotStore,
     ) -> Result<()> {
         use crate::snapshot::{
-            SerializableVMValue, expected_kind_from_serializable, serializable_to_slot,
+            SerializableVMValue, expected_kind_from_serializable, serializable_to_kinded_slot,
         };
-        use shape_value::ValueSlot;
 
-        // Project one SV → owned KindedSlot. `serializable_to_slot`
-        // materializes a fresh (bits, kind) whose heap kinds own one strong
-        // share; `KindedSlot::new` takes ownership of that share.
+        // Project one SV directly into an owning carrier so a Miri sidecar is
+        // retained through this runtime-only restore boundary.
         let de = |sv: &SerializableVMValue| -> Result<KindedSlot> {
             let expected = expected_kind_from_serializable(sv);
-            let (bits, kind) = serializable_to_slot(sv, expected, store).map_err(|msg| {
+            serializable_to_kinded_slot(sv, expected, store).map_err(|msg| {
                 anyhow!("ExecutionContext::restore_from_snapshot: cannot deserialize value: {msg}")
-            })?;
-            Ok(KindedSlot::new(ValueSlot::from_raw(bits), kind))
+            })
         };
         let de_overrides =
             |m: &Option<HashMap<String, SerializableVMValue>>| -> Result<Option<HashMap<String, KindedSlot>>> {

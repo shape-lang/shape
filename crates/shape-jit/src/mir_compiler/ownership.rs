@@ -30,8 +30,11 @@
 //! on sight per §2.7.7 #9 / W10 jit-playbook §5.
 
 use cranelift::prelude::*;
+use std::collections::{HashMap, HashSet};
 
 use super::MirToIR;
+use shape_vm::mir::ControlFlowGraph;
+use shape_vm::mir::analysis::OwnershipDecision;
 use shape_vm::mir::types::*;
 use shape_vm::type_tracking::NativeKind;
 
@@ -57,6 +60,398 @@ enum RefcountDisposition {
 }
 
 impl<'a, 'b> MirToIR<'a, 'b> {
+    pub(crate) fn mir_move_then_read_divergence_reason(&self) -> Option<String> {
+        let cfg = ControlFlowGraph::build(&self.mir_data.mir);
+        let block_by_id: HashMap<BasicBlockId, usize> = self
+            .mir
+            .blocks
+            .iter()
+            .enumerate()
+            .map(|(idx, block)| (block.id, idx))
+            .collect();
+        let mut in_sets: HashMap<BasicBlockId, HashSet<SlotId>> = HashMap::new();
+        let mut out_sets: HashMap<BasicBlockId, HashSet<SlotId>> = HashMap::new();
+        let rpo = cfg.reverse_postorder();
+
+        let mut changed = true;
+        while changed {
+            changed = false;
+            for block_id in &rpo {
+                let Some(&block_idx) = block_by_id.get(block_id) else {
+                    continue;
+                };
+                let block = &self.mir.blocks[block_idx];
+                let mut state = HashSet::new();
+                for pred in cfg.predecessors(*block_id) {
+                    if let Some(pred_out) = out_sets.get(pred) {
+                        state.extend(pred_out.iter().copied());
+                    }
+                }
+                if in_sets.get(block_id) != Some(&state) {
+                    in_sets.insert(*block_id, state.clone());
+                    changed = true;
+                }
+
+                for (stmt_idx, stmt) in block.statements.iter().enumerate() {
+                    if let Some(reason) =
+                        self.apply_move_read_statement_effects(block.id, stmt_idx, stmt, &mut state)
+                    {
+                        return Some(reason);
+                    }
+                }
+
+                if let Some(reason) =
+                    self.apply_move_read_terminator_effects(block.id, &block.terminator, &mut state)
+                {
+                    return Some(reason);
+                }
+
+                if out_sets.get(block_id) != Some(&state) {
+                    out_sets.insert(*block_id, state);
+                    changed = true;
+                }
+            }
+        }
+
+        None
+    }
+
+    fn apply_move_read_statement_effects(
+        &self,
+        block: BasicBlockId,
+        stmt_idx: usize,
+        stmt: &MirStatement,
+        moved: &mut HashSet<SlotId>,
+    ) -> Option<String> {
+        match &stmt.kind {
+            StatementKind::Assign(dest, rvalue) => {
+                // Mirror `compile_statement`: typed-object literals lower as a
+                // dead scratch `Assign(Aggregate(...))` followed by the real
+                // `ObjectStore` / `EnumStore`. The JIT skips this aggregate
+                // entirely, so its operands are not read or destructively moved
+                // at this program point. Counting them here falsely marks the
+                // field payload temp as moved, then the following real store
+                // looks like a read-after-move.
+                if matches!(rvalue, Rvalue::Aggregate(_)) && self.is_typed_object_slot(dest) {
+                    return None;
+                }
+                let ownership_src = match rvalue {
+                    Rvalue::Use(
+                        Operand::Move(Place::Local(src)) | Operand::Copy(Place::Local(src)),
+                    ) => Some((*src, self.mir_data.borrow_analysis.ownership_at(stmt.point))),
+                    _ => None,
+                };
+                if let Some(reason) = self.apply_move_read_rvalue_effects(
+                    block,
+                    stmt_idx,
+                    Some(stmt.point),
+                    ownership_src,
+                    rvalue,
+                    moved,
+                ) {
+                    return Some(reason);
+                }
+                if let Place::Local(slot) = dest {
+                    moved.remove(slot);
+                }
+                None
+            }
+            StatementKind::ArrayStore {
+                container_slot,
+                operands,
+            } => {
+                if let Some(reason) = self.apply_move_read_operands_effects(
+                    block,
+                    stmt_idx,
+                    Some(stmt.point),
+                    None,
+                    operands,
+                    moved,
+                ) {
+                    return Some(reason);
+                }
+                moved.remove(container_slot);
+                None
+            }
+            StatementKind::ObjectStore {
+                container_slot,
+                operands,
+                ..
+            }
+            | StatementKind::EnumStore {
+                container_slot,
+                operands,
+                ..
+            } => {
+                if let Some(reason) = self.apply_move_read_operands_effects(
+                    block,
+                    stmt_idx,
+                    Some(stmt.point),
+                    None,
+                    operands,
+                    moved,
+                ) {
+                    return Some(reason);
+                }
+                moved.remove(container_slot);
+                None
+            }
+            StatementKind::ClosureCapture {
+                closure_slot,
+                operands,
+                ..
+            } => {
+                if let Some(reason) = self.apply_move_read_operands_effects(
+                    block,
+                    stmt_idx,
+                    Some(stmt.point),
+                    None,
+                    operands,
+                    moved,
+                ) {
+                    return Some(reason);
+                }
+                moved.remove(closure_slot);
+                None
+            }
+            StatementKind::ModuleBindingStore { operands, .. }
+            | StatementKind::TaskBoundary(operands, _) => {
+                self.apply_move_read_operands_effects(block, stmt_idx, Some(stmt.point), None, operands, moved)
+            }
+            StatementKind::Drop(_) | StatementKind::Nop => None,
+        }
+    }
+
+    fn apply_move_read_terminator_effects(
+        &self,
+        block: BasicBlockId,
+        terminator: &Terminator,
+        moved: &mut HashSet<SlotId>,
+    ) -> Option<String> {
+        match &terminator.kind {
+            TerminatorKind::Call {
+                func,
+                args,
+                destination,
+                ..
+            } => {
+                if let Some(reason) = self.apply_move_read_operand_effect(
+                    block,
+                    usize::MAX,
+                    None,
+                    None,
+                    func,
+                    moved,
+                ) {
+                    return Some(reason);
+                }
+                if let Some(reason) =
+                    self.apply_move_read_operands_effects(block, usize::MAX, None, None, args, moved)
+                {
+                    return Some(reason);
+                }
+                if let Place::Local(slot) = destination {
+                    moved.remove(slot);
+                }
+                None
+            }
+            TerminatorKind::SwitchBool { operand, .. } => self.apply_move_read_operand_effect(
+                block,
+                usize::MAX,
+                None,
+                None,
+                operand,
+                moved,
+            ),
+            TerminatorKind::Goto(_) | TerminatorKind::Return | TerminatorKind::Unreachable => None,
+        }
+    }
+
+    fn apply_move_read_rvalue_effects(
+        &self,
+        block: BasicBlockId,
+        stmt_idx: usize,
+        point: Option<Point>,
+        ownership_src: Option<(SlotId, OwnershipDecision)>,
+        rvalue: &Rvalue,
+        moved: &mut HashSet<SlotId>,
+    ) -> Option<String> {
+        match rvalue {
+            Rvalue::Use(op) | Rvalue::Clone(op) | Rvalue::UnaryOp(_, op) => {
+                self.apply_move_read_operand_effect(block, stmt_idx, point, ownership_src, op, moved)
+            }
+            Rvalue::BinaryOp(_, lhs, rhs) | Rvalue::FuzzyComparison { lhs, rhs, .. } => {
+                if let Some(reason) =
+                    self.apply_move_read_operand_effect(block, stmt_idx, point, ownership_src, lhs, moved)
+                {
+                    return Some(reason);
+                }
+                self.apply_move_read_operand_effect(block, stmt_idx, point, ownership_src, rhs, moved)
+            }
+            Rvalue::Aggregate(operands) => self.apply_move_read_operands_effects(
+                block,
+                stmt_idx,
+                point,
+                ownership_src,
+                operands,
+                moved,
+            ),
+            Rvalue::Borrow(_, place) => {
+                let root = place.root_local();
+                if moved.contains(&root) {
+                    Some(self.move_read_reason(block, stmt_idx, root, "borrow"))
+                } else {
+                    None
+                }
+            }
+            Rvalue::EnumTest { operand, .. }
+            | Rvalue::EnumPayload { operand, .. }
+            | Rvalue::TypePatternTest { operand, .. }
+            | Rvalue::EnumDiscriminantTest { operand, .. }
+            | Rvalue::PrimitiveCast { operand, .. } => self.apply_move_read_operand_effect(
+                block,
+                stmt_idx,
+                point,
+                ownership_src,
+                operand,
+                moved,
+            ),
+        }
+    }
+
+    fn apply_move_read_operands_effects(
+        &self,
+        block: BasicBlockId,
+        stmt_idx: usize,
+        point: Option<Point>,
+        ownership_src: Option<(SlotId, OwnershipDecision)>,
+        operands: &[Operand],
+        moved: &mut HashSet<SlotId>,
+    ) -> Option<String> {
+        for operand in operands {
+            if let Some(reason) = self.apply_move_read_operand_effect(
+                block,
+                stmt_idx,
+                point,
+                ownership_src,
+                operand,
+                moved,
+            ) {
+                return Some(reason);
+            }
+        }
+        None
+    }
+
+    fn apply_move_read_operand_effect(
+        &self,
+        block: BasicBlockId,
+        stmt_idx: usize,
+        _point: Option<Point>,
+        ownership_src: Option<(SlotId, OwnershipDecision)>,
+        operand: &Operand,
+        moved: &mut HashSet<SlotId>,
+    ) -> Option<String> {
+        let (place, destructive) = match operand {
+            Operand::Copy(place) => {
+                let destructive = matches!(
+                    (place, ownership_src),
+                    (Place::Local(slot), Some((src, OwnershipDecision::Move))) if *slot == src
+                );
+                (place, destructive)
+            }
+            Operand::Move(place) => {
+                let destructive = !self.place_is_known_copy_value(place)
+                    && !matches!(
+                        (place, ownership_src),
+                        (
+                            Place::Local(slot),
+                            Some((src, OwnershipDecision::Copy | OwnershipDecision::Clone))
+                        ) if *slot == src
+                    );
+                (place, destructive)
+            }
+            Operand::MoveExplicit(place) => {
+                let destructive = !self.place_is_known_copy_value(place);
+                (place, destructive)
+            }
+            Operand::Constant(_) => return None,
+        };
+
+        let root = place.root_local();
+        if moved.contains(&root) {
+            return Some(self.move_read_reason(block, stmt_idx, root, "operand read"));
+        }
+        if destructive {
+            if let Place::Local(slot) = place {
+                moved.insert(*slot);
+            }
+        }
+        None
+    }
+
+    fn move_read_reason(
+        &self,
+        block: BasicBlockId,
+        stmt_idx: usize,
+        slot: SlotId,
+        site: &str,
+    ) -> String {
+        let stmt = if stmt_idx == usize::MAX {
+            "terminator".to_string()
+        } else {
+            format!("statement {stmt_idx}")
+        };
+        format!(
+            "slot {} was read after a destructive MIR move at block {} {stmt} ({site}); \
+             JIT operand lowering would read a nulled source slot.",
+            slot.0, block.0
+        )
+    }
+
+    pub(crate) fn place_is_known_copy_value(&self, place: &Place) -> bool {
+        if matches!(place, Place::Local(_)) {
+            if let Some(kind) = self.place_native_kind(place) {
+                return !kind.is_refcounted();
+            }
+        }
+        matches!(
+            self.local_types.get(place.root_local().0 as usize),
+            Some(LocalTypeInfo::Copy)
+        )
+    }
+
+    fn compile_read_by_ownership_decision(
+        &mut self,
+        place: &Place,
+        decision: OwnershipDecision,
+    ) -> Result<Value, String> {
+        match decision {
+            OwnershipDecision::Move => {
+                let val = self.read_place(place)?;
+                self.null_place(place)?;
+                Ok(val)
+            }
+            OwnershipDecision::Copy | OwnershipDecision::Clone => {
+                let val = self.read_place(place)?;
+                if matches!(
+                    self.refcount_disposition(place)?,
+                    RefcountDisposition::Refcounted
+                ) {
+                    let retain_func = self.retain_func_for_place(place);
+                    self.builder.ins().call(retain_func, &[val]);
+                }
+                Ok(val)
+            }
+            OwnershipDecision::DeepClone => Err("MirToIR ownership: SURFACE — statement-local \
+                 OwnershipDecision::DeepClone is not yet lowered by the JIT \
+                 MIR path. Whole-program/function deopt to the bytecode \
+                 interpreter preserves VM == JIT until the kinded deep-clone \
+                 helpers are threaded into MirToIR."
+                .to_string()),
+        }
+    }
+
     /// Compute the refcount disposition for a place's root local.
     ///
     /// Returns the disposition or a surface-and-stop error when the slot's
@@ -223,12 +618,31 @@ impl<'a, 'b> MirToIR<'a, 'b> {
     pub(crate) fn compile_operand(&mut self, operand: &Operand) -> Result<Value, String> {
         match operand {
             Operand::Move(place) | Operand::MoveExplicit(place) => {
+                if self.place_is_known_copy_value(place) {
+                    return self.read_place(place);
+                }
+                if matches!(operand, Operand::Move(_)) {
+                    if let (Place::Local(slot), Some((_point, src, decision))) =
+                        (place, self.current_stmt_local_ownership)
+                    {
+                        if *slot == src {
+                            return self.compile_read_by_ownership_decision(place, decision);
+                        }
+                    }
+                }
                 // Move: read the value, then null the source to prevent double-drop.
                 let val = self.read_place(place)?;
                 self.null_place(place)?;
                 Ok(val)
             }
             Operand::Copy(place) => {
+                if let (Place::Local(slot), Some((_point, src, decision))) =
+                    (place, self.current_stmt_local_ownership)
+                {
+                    if *slot == src {
+                        return self.compile_read_by_ownership_decision(place, decision);
+                    }
+                }
                 // Copy: read the value. For heap-kind slots, increment the refcount.
                 let val = self.read_place(place)?;
                 if matches!(

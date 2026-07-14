@@ -583,10 +583,38 @@ const ALL_BUILTINS: &[BuiltinFunction] = &[
     BuiltinFunction::KeyValueBuilderNew,
 ];
 
+const VM_ONLY_ASYNC_REASON: &str = "book-truth-100 async contract: async/event opcodes remain VM-only until \
+     JIT async lowering is kinded end-to-end. Current JIT handlers include \
+     no-op async lowering plus strict-typing surfaces (`jit_join_init` returns \
+     TAG_NULL and `jit_cancel_task` is an extern-C todo), so preflight must \
+     deopt instead of claiming support.";
+
+fn is_vm_only_async_opcode(opcode: OpCode) -> bool {
+    matches!(
+        opcode,
+        OpCode::Yield
+            | OpCode::Suspend
+            | OpCode::Resume
+            | OpCode::Poll
+            | OpCode::AwaitBar
+            | OpCode::AwaitTick
+            | OpCode::Await
+            | OpCode::SpawnTask
+            | OpCode::EmitAlert
+            | OpCode::EmitEvent
+            | OpCode::JoinInit
+            | OpCode::JoinAwait
+            | OpCode::CancelTask
+            | OpCode::AsyncScopeEnter
+            | OpCode::AsyncScopeExit
+    )
+}
+
 fn vm_only_opcode_reason(opcode: OpCode) -> Option<&'static str> {
-    // All opcodes are now compiled by the JIT translator — either natively
-    // or via FFI trampoline calls to the VM runtime.  No interpreter
-    // fallback is required.
+    // Most opcodes are compiled by the JIT translator — either natively or
+    // via FFI trampoline calls to the VM runtime. Opcodes whose JIT path would
+    // be semantic no-op / wrong-carrier / extern-C todo are listed below and
+    // routed to the interpreter before compilation.
     //
     // Track A.1D.2: `LoadOwnedMutableCapture` / `StoreOwnedMutableCapture`
     // are now compiled by MirToIR via the A.1D.2 side-table (see
@@ -648,6 +676,10 @@ fn vm_only_opcode_reason(opcode: OpCode) -> Option<&'static str> {
     // documented `[jit-fallback]` path (NOT silent-wrong-output). This
     // is surface-and-stop, not a dynamic-fallback shim — the JIT simply
     // does not implement these opcodes yet.
+    if is_vm_only_async_opcode(opcode) {
+        return Some(VM_ONLY_ASYNC_REASON);
+    }
+
     match opcode {
         OpCode::AllocSharedModuleBinding
         | OpCode::LoadSharedModuleBinding
@@ -953,10 +985,16 @@ pub fn get_unsupported_opcodes(program: &BytecodeProgram) -> Vec<OpCode> {
     unsupported
 }
 
-/// Get a list of opcodes that have placeholder (incomplete) implementations
-pub fn get_incomplete_opcodes(_program: &BytecodeProgram) -> Vec<OpCode> {
-    // All opcodes now have full implementations (native or FFI).
-    Vec::new()
+/// Get a list of opcodes that have placeholder/incomplete JIT implementations.
+pub fn get_incomplete_opcodes(program: &BytecodeProgram) -> Vec<OpCode> {
+    let mut incomplete = Vec::new();
+    for instr in &program.instructions {
+        if is_vm_only_async_opcode(instr.opcode) {
+            push_unique_opcode(&mut incomplete, instr.opcode);
+        }
+    }
+    sort_opcodes(&mut incomplete);
+    incomplete
 }
 
 #[cfg(test)]
@@ -983,14 +1021,30 @@ mod tests {
     }
 
     #[test]
-    fn preflight_accepts_all_opcodes() {
-        // All opcodes are now supported — no VM-only gates remain.
+    fn preflight_accepts_supported_opcode() {
+        // Non-async opcodes without explicit VM-only reasons still pass
+        // preflight.
         let program = BytecodeProgram {
-            instructions: vec![Instruction::simple(OpCode::Await)],
+            instructions: vec![Instruction::simple(OpCode::PushConst)],
             ..Default::default()
         };
         let report = preflight_jit_compatibility(&program);
         assert!(report.can_jit());
+    }
+
+    #[test]
+    fn incomplete_opcode_report_names_async_blockers() {
+        let program = BytecodeProgram {
+            instructions: vec![
+                Instruction::simple(OpCode::Await),
+                Instruction::simple(OpCode::JoinInit),
+                Instruction::simple(OpCode::Await),
+                Instruction::simple(OpCode::ReturnValue),
+            ],
+            ..Default::default()
+        };
+        let incomplete = get_incomplete_opcodes(&program);
+        assert_eq!(incomplete, vec![OpCode::Await, OpCode::JoinInit]);
     }
 
     #[test]
@@ -1032,11 +1086,11 @@ mod tests {
     }
 
     #[test]
-    fn preflight_instructions_all_opcodes_pass() {
-        // Even async opcodes now pass preflight.
+    fn preflight_instructions_supported_slice_passes() {
+        // A supported instruction slice should pass preflight.
         let instructions = vec![
             Instruction::simple(OpCode::PushConst),
-            Instruction::simple(OpCode::Await),
+            Instruction::simple(OpCode::AddInt),
             Instruction::simple(OpCode::ReturnValue),
         ];
         let report = preflight_instructions(&instructions);
@@ -1044,7 +1098,7 @@ mod tests {
     }
 
     #[test]
-    fn preflight_blob_passes_with_spawn_task() {
+    fn preflight_blob_rejects_spawn_task() {
         use shape_vm::bytecode::FunctionBlob;
 
         let blob = FunctionBlob {
@@ -1078,16 +1132,31 @@ mod tests {
         };
 
         let report = preflight_blob_jit_compatibility(&blob);
-        assert!(report.can_jit());
+        assert!(
+            !report.can_jit(),
+            "async SpawnTask must force VM fallback until JIT async lowering is kinded"
+        );
+        assert!(
+            report.vm_only_opcodes.contains(&OpCode::SpawnTask),
+            "preflight report must name SpawnTask as the async VM-only blocker"
+        );
     }
 
     #[test]
-    fn all_opcodes_pass_preflight() {
-        // Exhaustive check: every opcode in ALL_OPCODES must pass preflight.
+    fn full_opcode_matrix_marks_every_opcode() {
+        // Exhaustive check: every opcode in ALL_OPCODES gets exactly one
+        // parity row; individual rows may be VM-only when preflight gates
+        // them deliberately.
+        let matrix = build_full_opcode_parity_matrix();
+        assert_eq!(matrix.len(), ALL_OPCODES.len());
         for &opcode in ALL_OPCODES {
-            assert!(
-                vm_only_opcode_reason(opcode).is_none(),
-                "Opcode {:?} should pass preflight",
+            let count = matrix
+                .iter()
+                .filter(|row| row.target == JitParityTarget::Opcode(opcode))
+                .count();
+            assert_eq!(
+                count, 1,
+                "Opcode {:?} should appear exactly once in the full parity matrix",
                 opcode
             );
         }
@@ -1119,6 +1188,69 @@ mod tests {
             vm_only_opcode_reason(OpCode::CallForeign).is_some(),
             "ffi-rebuild §4.9 J1: CallForeign must be VM-only so the JIT \
              refuses to compile foreign-bearing functions"
+        );
+    }
+
+    #[test]
+    fn async_opcodes_are_vm_only_until_jit_async_is_kinded() {
+        for op in [
+            OpCode::Yield,
+            OpCode::Suspend,
+            OpCode::Resume,
+            OpCode::Poll,
+            OpCode::AwaitBar,
+            OpCode::AwaitTick,
+            OpCode::Await,
+            OpCode::SpawnTask,
+            OpCode::EmitAlert,
+            OpCode::EmitEvent,
+            OpCode::JoinInit,
+            OpCode::JoinAwait,
+            OpCode::CancelTask,
+            OpCode::AsyncScopeEnter,
+            OpCode::AsyncScopeExit,
+        ] {
+            let program = BytecodeProgram {
+                instructions: vec![
+                    Instruction::simple(op),
+                    Instruction::simple(OpCode::ReturnValue),
+                ],
+                ..Default::default()
+            };
+            let report = preflight_jit_compatibility(&program);
+            assert!(
+                !report.can_jit(),
+                "async opcode {:?} must be VM-only until the JIT async path \
+                 has kinded Future/TaskGroup lowering",
+                op
+            );
+            assert!(
+                report.vm_only_opcodes.contains(&op),
+                "async opcode {:?} must appear in vm_only_opcodes",
+                op
+            );
+        }
+    }
+
+    #[test]
+    fn async_parity_matrix_marks_await_unsupported() {
+        let program = BytecodeProgram {
+            instructions: vec![Instruction::simple(OpCode::Await)],
+            ..Default::default()
+        };
+        let matrix = build_program_parity_matrix(&program);
+        let row = matrix
+            .iter()
+            .find(|row| row.target == JitParityTarget::Opcode(OpCode::Await))
+            .expect("Await row must be present");
+        assert!(
+            !row.jit_supported,
+            "Await must be reported as unsupported by the JIT parity matrix"
+        );
+        assert!(
+            row.reason.contains("async contract"),
+            "Await VM-only reason should name the async contract; got {}",
+            row.reason
         );
     }
 

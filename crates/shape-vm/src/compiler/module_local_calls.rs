@@ -331,6 +331,7 @@ impl BytecodeCompiler {
                     Self::qualify_local_calls_in_extend(extend, module_path, local_functions);
                 }
                 Statement::SetParamValue { expression, .. }
+                | Statement::SetParamTypeExpr { expression, .. }
                 | Statement::SetReturnExpr { expression, .. }
                 | Statement::ReplaceBodyExpr { expression, .. }
                 | Statement::ReplaceModuleExpr { expression, .. }

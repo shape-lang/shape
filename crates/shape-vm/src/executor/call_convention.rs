@@ -157,6 +157,35 @@ impl VirtualMachine {
         Ok(KindedSlot::new(ValueSlot::from_raw(bits), kind))
     }
 
+    /// Execute a function from a host boundary rather than from another VM
+    /// instruction.
+    ///
+    /// `execute_function_by_id` preserves the current `ip` as the frame's
+    /// return continuation, which is correct for nested VM calls. Hosts such
+    /// as the remote receiver and isolated async runner enter a function
+    /// directly; for those calls the continuation is the host boundary. Stamp
+    /// the frame's return IP to the end of the program so a snapshot taken
+    /// inside this frame resumes, returns the function value, and stops
+    /// instead of falling through into bytecode at an arbitrary ambient IP.
+    pub fn execute_function_by_id_at_host_boundary(
+        &mut self,
+        func_id: u16,
+        args: Vec<KindedSlot>,
+        ctx: Option<&mut shape_runtime::context::ExecutionContext>,
+    ) -> Result<KindedSlot, VMError> {
+        let saved_call_depth = self.call_stack.len();
+        let saved_ip = self.ip;
+        self.ip = self.program.instructions.len();
+        if let Err(err) = self.call_function_with_nb_args(func_id, &args) {
+            self.ip = saved_ip;
+            return Err(err);
+        }
+        self.execute_until_call_depth(saved_call_depth, ctx)?;
+        let (bits, kind) = self.pop_kinded()?;
+        drop(args);
+        Ok(KindedSlot::new(ValueSlot::from_raw(bits), kind))
+    }
+
     /// Execute a closure with its captured upvalues and arguments.
     ///
     /// **W7-cv-method (Round 3 close).** The pre-§2.7.8 `_upvalue_bits:
@@ -200,6 +229,50 @@ impl VirtualMachine {
         let (bits, kind) = self.pop_kinded()?;
         drop(args);
         Ok(KindedSlot::new(ValueSlot::from_raw(bits), kind))
+    }
+
+    /// Host-boundary sibling of [`execute_closure`].
+    ///
+    /// See [`execute_function_by_id_at_host_boundary`] for the continuation
+    /// invariant. Closure frames use the same return-IP field, so synthetic
+    /// host dispatch needs the same end-of-program continuation stamp.
+    pub fn execute_closure_at_host_boundary(
+        &mut self,
+        closure_block: &OwnedClosureBlock,
+        args: Vec<KindedSlot>,
+        ctx: Option<&mut shape_runtime::context::ExecutionContext>,
+    ) -> Result<KindedSlot, VMError> {
+        let function_id = unsafe { typed_closure_function_id(closure_block.as_ptr()) };
+
+        let saved_call_depth = self.call_stack.len();
+        let saved_ip = self.ip;
+        self.ip = self.program.instructions.len();
+        if let Err(err) =
+            self.call_closure_with_nb_args_keepalive(function_id, closure_block, &args, None, None)
+        {
+            self.ip = saved_ip;
+            return Err(err);
+        }
+        self.execute_until_call_depth(saved_call_depth, ctx)?;
+        let (bits, kind) = self.pop_kinded()?;
+        drop(args);
+        Ok(KindedSlot::new(ValueSlot::from_raw(bits), kind))
+    }
+
+    /// Resolve a local `Future(id)` handle at a host boundary.
+    ///
+    /// This is the non-bytecode sibling of `op_await` for hosts that must
+    /// materialize a receiver-local future before handing a value to an
+    /// external protocol. It does not create a remotely awaitable future id.
+    pub(crate) fn resolve_future_handle_blocking(
+        &mut self,
+        task_id: u64,
+    ) -> Result<KindedSlot, VMError> {
+        if self.task_scheduler.has_pending_async(task_id) {
+            self.resolve_pending_async_task(task_id)
+        } else {
+            self.resolve_spawned_task(task_id)
+        }
     }
 
     /// Fast function execution for hot loops (backtesting).

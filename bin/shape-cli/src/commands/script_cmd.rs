@@ -1,11 +1,11 @@
-use super::{ExecutionMode, ExecutionModeArg, ProviderOptions};
+use super::{ExecutionMode, ExecutionModeArg, ProviderOptions, snapshot_cmd};
 use crate::extension_loading;
 use anyhow::{Context, Result, bail};
 use shape_runtime::engine::{ExecutionResult, ShapeEngine};
 use shape_runtime::project::ExternalLockMode;
 #[cfg(test)]
 use shape_runtime::project::{NativeDependencyProvider, NativeDependencySpec};
-use shape_runtime::snapshot::{SnapshotStore, VmSnapshot};
+use shape_runtime::snapshot::VmSnapshot;
 use shape_runtime::sync_bridge::initialize_shared_runtime;
 use shape_vm::BytecodeExecutor;
 use shape_wire::{WireValue, render_wire_terminal};
@@ -143,6 +143,7 @@ pub async fn run_script(
     extensions: Vec<PathBuf>,
     provider_opts: &ProviderOptions,
     resume: Option<String>,
+    snapshot_store_root: Option<PathBuf>,
     cli_limits: shape_vm::resource_limits::ResourceLimits,
     eager_link: bool,
 ) -> Result<()> {
@@ -239,11 +240,8 @@ pub async fn run_script(
     let execution_mode = downgrade_mode_for_limits(execution_mode, run_security.limits.is_some());
 
     // Enable snapshot store (required for checkpoints and resume)
-    let snapshot_root = dirs::data_local_dir()
-        .map(|dir| dir.join("shape").join("snapshots"))
-        .unwrap_or_else(|| PathBuf::from(".shape").join("snapshots"));
-    let snapshot_store =
-        SnapshotStore::new(snapshot_root).context("failed to create snapshot store")?;
+    let snapshot_store = snapshot_cmd::open_snapshot_store(snapshot_store_root)
+        .context("failed to create snapshot store")?;
     engine.enable_snapshot_store(snapshot_store.clone());
 
     let startup_specs = extension_loading::collect_startup_specs(

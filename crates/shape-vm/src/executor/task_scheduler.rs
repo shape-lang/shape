@@ -75,8 +75,10 @@ pub struct PendingAsyncTask {
     /// (it needs the VM's schema registry), so the channel carries the raw
     /// `TypedReturn` rather than a projected kinded pair.
     pub completion: Receiver<Result<TypedReturn, String>>,
-    /// Cancels the in-flight tokio task (real cancellation).
-    pub abort: AbortHandle,
+    /// Cancels an abortable in-flight tokio task. Detached remote socket
+    /// workers use `None`; their receiver-side cancellation is driven by the
+    /// companion hook.
+    pub abort: Option<AbortHandle>,
 }
 
 /// Completion status of a spawned task.
@@ -88,6 +90,37 @@ pub enum TaskStatus {
     Completed(Kinded),
     /// Task was cancelled before completion.
     Cancelled,
+}
+
+/// Snapshot-facing status of a `Future(id)` handle.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FutureSnapshotStatus {
+    /// No scheduler entry exists for this id.
+    Unknown,
+    /// A callable is registered and has not yet run.
+    PendingCallable,
+    /// An external completion receiver is still waiting.
+    PendingExternal,
+    /// A module/user/remote async body is in flight on the shared runtime.
+    PendingAsync,
+    /// The future's result has been cached, but the handle itself still needs
+    /// scheduler state to be meaningful after restore.
+    Completed,
+    /// The task was cancelled.
+    Cancelled,
+}
+
+impl std::fmt::Display for FutureSnapshotStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Unknown => write!(f, "unknown scheduler entry"),
+            Self::PendingCallable => write!(f, "pending callable"),
+            Self::PendingExternal => write!(f, "pending external completion"),
+            Self::PendingAsync => write!(f, "pending async task"),
+            Self::Completed => write!(f, "completed result handle"),
+            Self::Cancelled => write!(f, "cancelled task"),
+        }
+    }
 }
 
 /// Scheduler that tracks spawned async tasks by their future ID.
@@ -117,6 +150,11 @@ pub struct TaskScheduler {
     /// background runtime; the interpreter thread collects the result via the
     /// task's `completion` channel at `await`/`join` time.
     pending_async: HashMap<u64, PendingAsyncTask>,
+
+    /// Optional side effects to notify external owners that a pending async
+    /// task was cancelled. Used by `remote::call_async` to send a best-effort
+    /// receiver cancellation keyed by the internal wire call id.
+    pending_async_cancel_hooks: HashMap<u64, Box<dyn FnOnce() + Send + 'static>>,
 }
 
 impl TaskScheduler {
@@ -127,6 +165,7 @@ impl TaskScheduler {
             results: HashMap::new(),
             external_receivers: HashMap::new(),
             pending_async: HashMap::new(),
+            pending_async_cancel_hooks: HashMap::new(),
         }
     }
 
@@ -139,7 +178,23 @@ impl TaskScheduler {
     /// kinds, and stores the completion channel + abort handle.
     pub fn store_pending_async(&mut self, task_id: u64, task: PendingAsyncTask) {
         self.results.insert(task_id, TaskStatus::Pending);
+        self.pending_async_cancel_hooks.remove(&task_id);
         self.pending_async.insert(task_id, task);
+    }
+
+    /// Attach a cancellation hook to an already-registered pending async task.
+    ///
+    /// The hook is consumed at most once: on explicit cancellation or VM
+    /// teardown while the task is still pending. Normal await/join completion
+    /// drops the hook without running it.
+    pub fn set_pending_async_cancellation_hook(
+        &mut self,
+        task_id: u64,
+        hook: Box<dyn FnOnce() + Send + 'static>,
+    ) {
+        if self.pending_async.contains_key(&task_id) {
+            self.pending_async_cancel_hooks.insert(task_id, hook);
+        }
     }
 
     /// Whether `task_id` names an in-flight async module-function task.
@@ -147,10 +202,35 @@ impl TaskScheduler {
         self.pending_async.contains_key(&task_id)
     }
 
+    /// Snapshot-facing status for a `Future(id)` handle.
+    ///
+    /// VM snapshots do not persist scheduler state yet, so any live future
+    /// handle is non-restorable. This introspection keeps the capture-side
+    /// diagnostic precise without exposing scheduler internals to the
+    /// serializer.
+    pub fn future_snapshot_status(&self, task_id: u64) -> FutureSnapshotStatus {
+        if self.pending_async.contains_key(&task_id) {
+            return FutureSnapshotStatus::PendingAsync;
+        }
+        if self.external_receivers.contains_key(&task_id) {
+            return FutureSnapshotStatus::PendingExternal;
+        }
+        match self.results.get(&task_id) {
+            Some(TaskStatus::Pending) if self.callables.contains_key(&task_id) => {
+                FutureSnapshotStatus::PendingCallable
+            }
+            Some(TaskStatus::Pending) => FutureSnapshotStatus::Unknown,
+            Some(TaskStatus::Completed(_)) => FutureSnapshotStatus::Completed,
+            Some(TaskStatus::Cancelled) => FutureSnapshotStatus::Cancelled,
+            None => FutureSnapshotStatus::Unknown,
+        }
+    }
+
     /// Take (remove) the in-flight async task so the caller can drive its
     /// completion channel. Ownership of the receiver + abort handle transfers
     /// out.
     pub fn take_pending_async(&mut self, task_id: u64) -> Option<PendingAsyncTask> {
+        self.pending_async_cancel_hooks.remove(&task_id);
         self.pending_async.remove(&task_id)
     }
 
@@ -211,8 +291,13 @@ impl TaskScheduler {
         // In-flight async module task: abort the underlying tokio task so a
         // cancelled `time::sleep` really stops rather than run to completion
         // unobserved (WF-2D real cancellation).
-        if let Some(task) = self.pending_async.remove(&task_id) {
-            task.abort.abort();
+        if let Some(hook) = self.pending_async_cancel_hooks.remove(&task_id) {
+            hook();
+        }
+        if let Some(task) = self.pending_async.remove(&task_id)
+            && let Some(abort) = task.abort
+        {
+            abort.abort();
         }
         // Only cancel if still pending
         if let Some(TaskStatus::Pending) = self.results.get(&task_id) {
@@ -463,9 +548,15 @@ impl Drop for TaskScheduler {
         // background tokio tasks stop when the VM tears down (WF-2D). Dropping
         // the receiver also closes the completion channel; the aborted task's
         // send (if any) fails silently.
-        for (_, task) in self.pending_async.drain() {
-            task.abort.abort();
+        for (task_id, task) in self.pending_async.drain() {
+            if let Some(hook) = self.pending_async_cancel_hooks.remove(&task_id) {
+                hook();
+            }
+            if let Some(abort) = task.abort {
+                abort.abort();
+            }
         }
+        self.pending_async_cancel_hooks.clear();
         // external_receivers: Receivers do not own scheduler-side shares;
         // the share is in transit on the channel and the dropping receiver
         // releases it on the sender side.
@@ -647,5 +738,53 @@ mod tests {
         let rx = sched.take_external_receiver(400);
         assert!(rx.is_some());
         assert!(!sched.has_external(400));
+    }
+
+    #[test]
+    fn test_future_snapshot_status_classifies_scheduler_entries() {
+        let mut sched = TaskScheduler::new();
+
+        assert_eq!(
+            sched.future_snapshot_status(900),
+            FutureSnapshotStatus::Unknown
+        );
+
+        sched.register(10, 0, NativeKind::Int64);
+        assert_eq!(
+            sched.future_snapshot_status(10),
+            FutureSnapshotStatus::PendingCallable
+        );
+
+        let _external_tx = sched.register_external(11);
+        assert_eq!(
+            sched.future_snapshot_status(11),
+            FutureSnapshotStatus::PendingExternal
+        );
+
+        let (_tx, rx) = std::sync::mpsc::channel();
+        sched.store_pending_async(
+            12,
+            PendingAsyncTask {
+                completion: rx,
+                abort: None,
+            },
+        );
+        assert_eq!(
+            sched.future_snapshot_status(12),
+            FutureSnapshotStatus::PendingAsync
+        );
+
+        sched.complete(13, 99, NativeKind::Int64);
+        assert_eq!(
+            sched.future_snapshot_status(13),
+            FutureSnapshotStatus::Completed
+        );
+
+        sched.register(14, 0, NativeKind::Int64);
+        sched.cancel(14);
+        assert_eq!(
+            sched.future_snapshot_status(14),
+            FutureSnapshotStatus::Cancelled
+        );
     }
 }

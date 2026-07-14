@@ -291,6 +291,76 @@ fn type_annotation_to_compact_string(annotation: &TypeAnnotation) -> String {
 use super::super::BytecodeCompiler;
 
 impl BytecodeCompiler {
+    fn content_namespace_builder(namespace: &str, function: &str) -> bool {
+        matches!(
+            (namespace, function),
+            ("Content", "chart")
+                | ("Content", "text")
+                | ("Content", "table")
+                | ("Content", "code")
+                | ("Content", "kv")
+                | ("Content", "fragment")
+                | ("Table", "new")
+                | ("Code", "new")
+                | ("KeyValue", "new")
+        )
+    }
+
+    pub(crate) fn expr_is_direct_content_builder(expr: &Expr) -> bool {
+        match expr {
+            Expr::QualifiedFunctionCall {
+                namespace,
+                function,
+                ..
+            } => Self::content_namespace_builder(namespace, function),
+            Expr::MethodCall {
+                receiver, method, ..
+            } => match receiver.as_ref() {
+                Expr::Identifier(namespace, _) => {
+                    Self::content_namespace_builder(namespace, method)
+                }
+                _ => false,
+            },
+            _ => false,
+        }
+    }
+
+    pub(crate) fn type_info_is_content(type_info: &VariableTypeInfo) -> bool {
+        type_info.storage_hint
+            == Some(crate::type_tracking::NativeKind::Ptr(
+                shape_value::HeapKind::Content,
+            ))
+            || type_info.type_name.as_deref() == Some("content")
+    }
+
+    fn identifier_is_tracked_content(&self, name: &str) -> bool {
+        if let Some(local_idx) = self.resolve_local(name) {
+            return self
+                .type_tracker
+                .get_local_type(local_idx)
+                .is_some_and(Self::type_info_is_content);
+        }
+        let scoped_name = self
+            .resolve_scoped_module_binding_name(name)
+            .unwrap_or_else(|| name.to_string());
+        self.module_bindings
+            .get(&scoped_name)
+            .and_then(|binding_idx| self.type_tracker.get_binding_type(*binding_idx))
+            .is_some_and(Self::type_info_is_content)
+    }
+
+    fn expr_is_content_array_element(&self, expr: &Expr) -> bool {
+        Self::expr_is_direct_content_builder(expr)
+            || matches!(expr, Expr::Identifier(name, _) if self.identifier_is_tracked_content(name))
+    }
+
+    fn array_elements_all_content(&self, elements: &[Expr]) -> bool {
+        !elements.is_empty()
+            && elements
+                .iter()
+                .all(|elem| self.expr_is_content_array_element(elem))
+    }
+
     fn infer_nested_empty_array_kind_from_siblings(
         &mut self,
         elements: &[Expr],
@@ -466,6 +536,9 @@ impl BytecodeCompiler {
             // `TypedArray<*const TypedObjectStorage>` carrier fast path.
             self.pending_variable_typed_array_kind = Some(TypedArrayKind::TypedObject);
             Some(TypedArrayKind::TypedObject)
+        } else if self.array_elements_all_content(elements) {
+            self.pending_variable_typed_array_kind = Some(TypedArrayKind::Content);
+            Some(TypedArrayKind::Content)
         } else if let Some(kind) = self.infer_array_element_kind_from_concrete_types(elements) {
             // Construction strict-typing close (USER RULING 2026-06-05) —
             // non-literal homogeneous element case. Every element resolves
@@ -1468,6 +1541,10 @@ impl BytecodeCompiler {
                                         value_expr,
                                         &field_def.field_type,
                                     )
+                                    && !Self::field_type_accepts_none_literal(
+                                        &field_def.field_type,
+                                        value_expr,
+                                    )
                                 {
                                     let value_loc = self.span_to_source_location(value_expr.span());
                                     let mut loc = value_loc;
@@ -1555,8 +1632,7 @@ impl BytecodeCompiler {
                         // aliased struct literals dedup to one handle
                         // (EqTypedObject correctness) instead of each drawing a
                         // fresh counter id.
-                        let mut schema =
-                            TypeSchema::with_id(0, runtime_type_name.clone(), fields);
+                        let mut schema = TypeSchema::with_id(0, runtime_type_name.clone(), fields);
                         let schema_id = self
                             .type_tracker
                             .schema_registry()
@@ -1581,8 +1657,7 @@ impl BytecodeCompiler {
                         // aliased struct literals dedup to one handle
                         // (EqTypedObject correctness) instead of each drawing a
                         // fresh counter id.
-                        let mut schema =
-                            TypeSchema::with_id(0, runtime_type_name.clone(), fields);
+                        let mut schema = TypeSchema::with_id(0, runtime_type_name.clone(), fields);
                         let schema_id = self
                             .type_tracker
                             .schema_registry()
@@ -1638,8 +1713,7 @@ impl BytecodeCompiler {
                         .collect::<Vec<_>>();
                     // WF-3A: mint via the single content-intern table (nominal
                     // dedup for the aliased named schema).
-                    let mut schema =
-                        TypeSchema::with_id(0, runtime_type_name.clone(), fields);
+                    let mut schema = TypeSchema::with_id(0, runtime_type_name.clone(), fields);
                     let schema_id = self
                         .type_tracker
                         .schema_registry()
@@ -1675,6 +1749,12 @@ impl BytecodeCompiler {
                         .find(|(name, _)| name == expected_name)
                         .expect("field existence validated above");
                     self.plan_flexible_binding_escape_from_expr(value);
+                    let field_type = self
+                        .type_tracker
+                        .schema_registry()
+                        .get_by_id(schema_id)
+                        .and_then(|schema| schema.get_field(expected_name))
+                        .map(|field| field.field_type.clone());
                     let empty_array_field_annotation = match value {
                         Expr::Array(elements, _) if elements.is_empty() => self
                             .struct_generic_info
@@ -1690,7 +1770,14 @@ impl BytecodeCompiler {
                         self.pending_variable_typed_array_kind =
                             self.resolve_typed_array_kind_and_record_trait(annotation);
                     }
-                    let compile_result = self.compile_expr_as_value_or_placeholder(value);
+                    let compile_result = if field_type
+                        .as_ref()
+                        .is_some_and(|ft| Self::field_type_accepts_none_literal(ft, value))
+                    {
+                        self.compile_canonical_option_none_carrier()
+                    } else {
+                        self.compile_expr_as_value_or_placeholder(value)
+                    };
                     self.pending_variable_typed_array_kind = saved_pending_typed_array_kind;
                     self.pending_trait_object_array_trait = saved_pending_trait_object_array_trait;
                     compile_result?;
@@ -2052,6 +2139,7 @@ impl BytecodeCompiler {
                 TypedArrayKind::Decimal => Some(Family::Decimal),
                 TypedArrayKind::String => Some(Family::StringF),
                 TypedArrayKind::Char
+                | TypedArrayKind::Content
                 | TypedArrayKind::TypedObject
                 // Phase 4b W16.2-B op_new_array-trait-object-element (2026-06-05).
                 | TypedArrayKind::TraitObject

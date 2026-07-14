@@ -226,10 +226,106 @@ impl KindedSlot {
     /// §2.7.24 Q25.B SUPERSEDED.
     #[inline]
     pub fn from_hashmap(h: Arc<crate::heap_value::HashMapKindedRef>) -> Self {
-        Self::new(
-            ValueSlot::from_hashmap(h),
-            NativeKind::Ptr(HeapKind::HashMap),
-        )
+        #[cfg(miri)]
+        {
+            let ptr = Arc::into_raw(h);
+            Self::new_with_miri_provenance(
+                ValueSlot::from_raw(ptr as u64),
+                NativeKind::Ptr(HeapKind::HashMap),
+                MiriSlotProvenance::HashMap(ptr),
+            )
+        }
+        #[cfg(not(miri))]
+        {
+            Self::new(
+                ValueSlot::from_hashmap(h),
+                NativeKind::Ptr(HeapKind::HashMap),
+            )
+        }
+    }
+
+    /// Construct an owning raw TypedArray carrier without losing its Miri
+    /// pointer provenance. The caller transfers one existing array share.
+    #[inline]
+    pub fn from_typed_array_raw(ptr: *mut u8) -> Self {
+        #[cfg(miri)]
+        {
+            Self::new_with_miri_provenance(
+                ValueSlot::from_raw(ptr as u64),
+                NativeKind::Ptr(HeapKind::TypedArray),
+                MiriSlotProvenance::TypedArray(ptr),
+            )
+        }
+        #[cfg(not(miri))]
+        {
+            Self::new(
+                ValueSlot::from_raw(ptr as u64),
+                NativeKind::Ptr(HeapKind::TypedArray),
+            )
+        }
+    }
+
+    /// Construct an owning raw HashMap carrier without losing its Miri
+    /// pointer provenance. The caller transfers one existing Arc share.
+    #[inline]
+    pub fn from_hashmap_raw(ptr: *const crate::heap_value::HashMapKindedRef) -> Self {
+        #[cfg(miri)]
+        {
+            Self::new_with_miri_provenance(
+                ValueSlot::from_raw(ptr as u64),
+                NativeKind::Ptr(HeapKind::HashMap),
+                MiriSlotProvenance::HashMap(ptr),
+            )
+        }
+        #[cfg(not(miri))]
+        {
+            Self::new(
+                ValueSlot::from_raw(ptr as u64),
+                NativeKind::Ptr(HeapKind::HashMap),
+            )
+        }
+    }
+
+    /// Construct an owning SharedCell carrier without losing its Miri
+    /// pointer provenance. The caller transfers one existing Arc share.
+    #[inline]
+    pub fn from_shared_cell_raw(ptr: *const crate::v2::closure_layout::SharedCell) -> Self {
+        #[cfg(miri)]
+        {
+            Self::new_with_miri_provenance(
+                ValueSlot::from_raw(ptr as u64),
+                NativeKind::Ptr(HeapKind::SharedCell),
+                MiriSlotProvenance::SharedCell(ptr),
+            )
+        }
+        #[cfg(not(miri))]
+        {
+            Self::new(
+                ValueSlot::from_raw(ptr as u64),
+                NativeKind::Ptr(HeapKind::SharedCell),
+            )
+        }
+    }
+
+    /// Construct an owning Reference carrier without losing its Miri pointer
+    /// provenance. The caller transfers one existing Arc share.
+    #[inline]
+    pub fn from_reference_raw(ptr: *const RefTarget) -> Self {
+        #[cfg(miri)]
+        {
+            Self::new_with_miri_provenance(
+                ValueSlot::from_raw(ptr as u64),
+                NativeKind::Ptr(HeapKind::Reference),
+                MiriSlotProvenance::Reference(ptr),
+            )
+        }
+        #[cfg(not(miri))]
+        {
+            Self::new(
+                ValueSlot::from_raw(ptr as u64),
+                NativeKind::Ptr(HeapKind::Reference),
+            )
+        }
     }
 
     /// Convenience: a `Ptr(HeapKind::HashSet)`-kind slot. Mirror of
@@ -297,10 +393,21 @@ impl KindedSlot {
     /// for the full call-site migration pattern.
     #[inline]
     pub fn from_trait_object_raw(ptr: *const TraitObjectStorage) -> Self {
-        Self::new(
-            ValueSlot::from_trait_object_raw(ptr),
-            NativeKind::Ptr(HeapKind::TraitObject),
-        )
+        #[cfg(miri)]
+        {
+            Self::new_with_miri_provenance(
+                ValueSlot::from_trait_object_raw(ptr),
+                NativeKind::Ptr(HeapKind::TraitObject),
+                MiriSlotProvenance::TraitObject(ptr),
+            )
+        }
+        #[cfg(not(miri))]
+        {
+            Self::new(
+                ValueSlot::from_trait_object_raw(ptr),
+                NativeKind::Ptr(HeapKind::TraitObject),
+            )
+        }
     }
 
     /// Convenience: a `Ptr(HeapKind::Mutex)`-kind slot. Mirror of
@@ -904,7 +1011,21 @@ impl Drop for KindedSlot {
                     // Mirror of the `TypedObject` release arm below
                     // (4-table lockstep, ADR-006 §2.3 / §2.7.7).
                     HeapKind::TypedArray => {
-                        crate::v2::typed_array::release_v2_typed_array(bits as *mut u8);
+                        #[cfg(miri)]
+                        match self.provenance {
+                            MiriSlotProvenance::TypedArray(ptr) if !ptr.is_null() => {
+                                crate::v2::typed_array::release_v2_typed_array(ptr);
+                            }
+                            _ => {
+                                panic!(
+                                    "KindedSlot::drop: missing Miri provenance for TypedArray carrier"
+                                );
+                            }
+                        }
+                        #[cfg(not(miri))]
+                        {
+                            crate::v2::typed_array::release_v2_typed_array(bits as *mut u8);
+                        }
                     }
                     // Wave 2 Agent D4 ckpt-2 (ADR-006 §2.3 / §2.7.5
                     // amendment, 2026-05-14): TypedObject release via
@@ -939,9 +1060,21 @@ impl Drop for KindedSlot {
                         // bits are `Arc::into_raw(Arc<HashMapKindedRef>)`;
                         // release dispatches outer Arc decrement → enum
                         // Drop chains to per-V `Arc<HashMapData<V>>` release.
-                        Arc::decrement_strong_count(
-                            bits as *const crate::heap_value::HashMapKindedRef,
-                        );
+                        #[cfg(miri)]
+                        match self.provenance {
+                            MiriSlotProvenance::HashMap(ptr) if !ptr.is_null() => {
+                                Arc::decrement_strong_count(ptr);
+                            }
+                            _ => panic!(
+                                "KindedSlot::drop: missing Miri provenance for HashMap carrier"
+                            ),
+                        }
+                        #[cfg(not(miri))]
+                        {
+                            Arc::decrement_strong_count(
+                                bits as *const crate::heap_value::HashMapKindedRef,
+                            );
+                        }
                     }
                     // Wave 13 W13-hashset-rebuild (ADR-006 §2.7.15 / Q16,
                     // 2026-05-10): mirror of the HashMap arm. Retires
@@ -982,9 +1115,23 @@ impl Drop for KindedSlot {
                     // above.
                     HeapKind::TraitObject => {
                         use crate::v2::heap_element::HeapElement;
-                        TraitObjectStorage::release_elem(
-                            bits as *const TraitObjectStorage,
-                        );
+                        #[cfg(miri)]
+                        match self.provenance {
+                            MiriSlotProvenance::TraitObject(ptr) if !ptr.is_null() => {
+                                TraitObjectStorage::release_elem(ptr);
+                            }
+                            _ => {
+                                panic!(
+                                    "KindedSlot::drop: missing Miri provenance for TraitObject carrier"
+                                );
+                            }
+                        }
+                        #[cfg(not(miri))]
+                        {
+                            TraitObjectStorage::release_elem(
+                                bits as *const TraitObjectStorage,
+                            );
+                        }
                     }
                     // W17-concurrency (ADR-006 §2.7.25, 2026-05-11):
                     // Mutex / Atomic / Lazy mirror the Channel arm.
@@ -1056,7 +1203,19 @@ impl Drop for KindedSlot {
                     // variants — `Local` / `ModuleBinding` variants hold
                     // no Arc.
                     HeapKind::Reference => {
-                        Arc::decrement_strong_count(bits as *const RefTarget);
+                        #[cfg(miri)]
+                        match self.provenance {
+                            MiriSlotProvenance::Reference(ptr) if !ptr.is_null() => {
+                                Arc::decrement_strong_count(ptr);
+                            }
+                            _ => panic!(
+                                "KindedSlot::drop: missing Miri provenance for Reference carrier"
+                            ),
+                        }
+                        #[cfg(not(miri))]
+                        {
+                            Arc::decrement_strong_count(bits as *const RefTarget);
+                        }
                     }
                     // W13-iterator-state (ADR-006 §2.7.16 / Q17,
                     // 2026-05-10): mirror of `vm_impl/stack.rs::
@@ -1159,9 +1318,21 @@ impl Drop for KindedSlot {
                     // shape as the `HeapKind::FilterExpr` §2.7.9
                     // amendment.
                     HeapKind::SharedCell => {
-                        Arc::decrement_strong_count(
-                            bits as *const crate::v2::closure_layout::SharedCell,
-                        );
+                        #[cfg(miri)]
+                        match self.provenance {
+                            MiriSlotProvenance::SharedCell(ptr) if !ptr.is_null() => {
+                                Arc::decrement_strong_count(ptr);
+                            }
+                            _ => panic!(
+                                "KindedSlot::drop: missing Miri provenance for SharedCell carrier"
+                            ),
+                        }
+                        #[cfg(not(miri))]
+                        {
+                            Arc::decrement_strong_count(
+                                bits as *const crate::v2::closure_layout::SharedCell,
+                            );
+                        }
                     }
                     // ADR-006 §2.7.22 amendment (Round 18 S3, 2026-05-13):
                     // Matrix / MatrixSlice slots own one typed-Arc
@@ -1294,7 +1465,21 @@ impl Clone for KindedSlot {
                     // `TypedObject` retain arm below (4-table lockstep,
                     // ADR-006 §2.3 / §2.7.7).
                     HeapKind::TypedArray => {
-                        crate::v2::typed_array::retain_v2_typed_array(bits as *mut u8);
+                        #[cfg(miri)]
+                        match self.provenance {
+                            MiriSlotProvenance::TypedArray(ptr) if !ptr.is_null() => {
+                                crate::v2::typed_array::retain_v2_typed_array(ptr);
+                            }
+                            _ => {
+                                panic!(
+                                    "KindedSlot::clone: missing Miri provenance for TypedArray carrier"
+                                );
+                            }
+                        }
+                        #[cfg(not(miri))]
+                        {
+                            crate::v2::typed_array::retain_v2_typed_array(bits as *mut u8);
+                        }
                     }
                     // Wave 2 Agent D4 ckpt-2 (ADR-006 §2.3 / §2.7.5
                     // amendment, 2026-05-14): TypedObject retain via
@@ -1325,9 +1510,21 @@ impl Clone for KindedSlot {
                         // retain dispatches outer Arc increment (the per-V
                         // inner `Arc<HashMapData<V>>` is preserved by-share
                         // via the enum's structural sharing).
-                        Arc::increment_strong_count(
-                            bits as *const crate::heap_value::HashMapKindedRef,
-                        );
+                        #[cfg(miri)]
+                        match self.provenance {
+                            MiriSlotProvenance::HashMap(ptr) if !ptr.is_null() => {
+                                Arc::increment_strong_count(ptr);
+                            }
+                            _ => panic!(
+                                "KindedSlot::clone: missing Miri provenance for HashMap carrier"
+                            ),
+                        }
+                        #[cfg(not(miri))]
+                        {
+                            Arc::increment_strong_count(
+                                bits as *const crate::heap_value::HashMapKindedRef,
+                            );
+                        }
                     }
                     // Wave 13 W13-hashset-rebuild (ADR-006 §2.7.15 / Q16,
                     // 2026-05-10): mirror of the HashMap arm. Bumps one
@@ -1365,9 +1562,23 @@ impl Clone for KindedSlot {
                     // the v2-raw carrier. Mirror of the TypedObject arm
                     // above.
                     HeapKind::TraitObject => {
-                        let hdr =
-                            &(*(bits as *const TraitObjectStorage)).header;
-                        crate::v2::refcount::v2_retain(hdr);
+                        #[cfg(miri)]
+                        match self.provenance {
+                            MiriSlotProvenance::TraitObject(ptr) if !ptr.is_null() => {
+                                crate::v2::refcount::v2_retain(&(*ptr).header);
+                            }
+                            _ => {
+                                panic!(
+                                    "KindedSlot::clone: missing Miri provenance for TraitObject carrier"
+                                );
+                            }
+                        }
+                        #[cfg(not(miri))]
+                        {
+                            let hdr =
+                                &(*(bits as *const TraitObjectStorage)).header;
+                            crate::v2::refcount::v2_retain(hdr);
+                        }
                     }
                     // W17-concurrency (ADR-006 §2.7.25, 2026-05-11):
                     // Mutex / Atomic / Lazy mirror the Channel arm.
@@ -1432,7 +1643,19 @@ impl Clone for KindedSlot {
                     // `Arc::into_raw(Arc<RefTarget>)` directly per
                     // §2.7.13's pure-discriminator-style dispatch.
                     HeapKind::Reference => {
-                        Arc::increment_strong_count(bits as *const RefTarget);
+                        #[cfg(miri)]
+                        match self.provenance {
+                            MiriSlotProvenance::Reference(ptr) if !ptr.is_null() => {
+                                Arc::increment_strong_count(ptr);
+                            }
+                            _ => panic!(
+                                "KindedSlot::clone: missing Miri provenance for Reference carrier"
+                            ),
+                        }
+                        #[cfg(not(miri))]
+                        {
+                            Arc::increment_strong_count(bits as *const RefTarget);
+                        }
                     }
                     // W13-iterator-state (ADR-006 §2.7.16 / Q17,
                     // 2026-05-10): mirror of the Drop Iterator arm
@@ -1513,9 +1736,21 @@ impl Clone for KindedSlot {
                     // slot whose kind is SharedCell) owe one matching
                     // strong-count bump.
                     HeapKind::SharedCell => {
-                        Arc::increment_strong_count(
-                            bits as *const crate::v2::closure_layout::SharedCell,
-                        );
+                        #[cfg(miri)]
+                        match self.provenance {
+                            MiriSlotProvenance::SharedCell(ptr) if !ptr.is_null() => {
+                                Arc::increment_strong_count(ptr);
+                            }
+                            _ => panic!(
+                                "KindedSlot::clone: missing Miri provenance for SharedCell carrier"
+                            ),
+                        }
+                        #[cfg(not(miri))]
+                        {
+                            Arc::increment_strong_count(
+                                bits as *const crate::v2::closure_layout::SharedCell,
+                            );
+                        }
                     }
                     // ADR-006 §2.7.22 amendment (Round 18 S3, 2026-05-13):
                     // mirror of the Drop arm above. Bumps one

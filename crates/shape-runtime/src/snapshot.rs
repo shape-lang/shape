@@ -1196,13 +1196,13 @@ fn slice_as_bytes<T>(data: &[T]) -> &[u8] {
 // plus `enum_*`/`print_result_*` adapters) were deleted in Phase 2b
 // alongside the `ValueWord` imports. Their replacement is a kind-
 // threaded `slot_to_serializable(bits, kind, store)` /
-// `serializable_to_slot(sv, expected_kind, store)` pair (mirrors the
+// `serializable_to_kinded_slot(sv, expected_kind, store)` pair (mirrors the
 // wire_conversion shape). The new API lands in a follow-up commit when
 // stdlib mass migration (Phase 2c) and shape-vm cascade reveal the
 // concrete consumer needs.
 //
 // W17-snapshot-roundtrip (Phase 2d Wave 2.6, 2026-05-11): the
-// kind-threaded `slot_to_serializable` / `serializable_to_slot` pair
+// kind-threaded `slot_to_serializable` / `serializable_to_kinded_slot` pair
 // lands here per ADR-006 §2.7.5.1. The contract is:
 //
 // - `slot_to_serializable(bits, kind, store)`:
@@ -1213,11 +1213,12 @@ fn slice_as_bytes<T>(data: &[T]) -> &[u8] {
 //   `slot.as_heap_value()` + `HeapValue::*` match per the §2.7.6 / Q8
 //   carrier-API bound — no `Arc<HeapValue>` generic serializer.
 //
-// - `serializable_to_slot(sv, expected_kind, store)`:
+// - `serializable_to_kinded_slot(sv, expected_kind, store)`:
 //   inverse projection — discriminator must match `expected_kind` (or
 //   the function returns a structured kind-mismatch error). On success
-//   returns `(bits, NativeKind)` ready to push to a stack/local slot
-//   via `clone_with_kind` discipline.
+//   returns an owning `KindedSlot`. The legacy raw-pair function remains a
+//   Stage-2 compatibility boundary and rejects heap values under Miri until
+//   VM/closure/remote destinations carry sidecars.
 //
 // Both functions return `Result<_, String>` with structured error
 // messages; the §2.7.5.1 forbidden shapes (Bool-default fallback,
@@ -1265,14 +1266,12 @@ impl SerializeIdentityCtx {
 /// (ADR-006 §2.7.30.5 / §2.7.30.4).
 ///
 /// Pass 1 materializes each `SV::SharedCell` BODY into exactly one
-/// `Arc<SharedCell>` (recorded in `identity_map` as the raw ptr + a base
-/// share held by the map). Pass 2 resolves every back-edge
-/// (`SV::SharedCellRef` / `SV::Reference`) and every body-slot to that one
-/// cell via `Arc::increment_strong_count`.
+/// `Arc<SharedCell>` (recorded in `identity_map` as an owning `KindedSlot`
+/// base share). Pass 2 clones that carrier for every back-edge
+/// (`SV::SharedCellRef` / `SV::Reference`) and body slot.
 ///
-/// `retained` is the ABORT-LEDGER: every share handed out (base
-/// materialization + each link increment) is recorded. On `Err` the
-/// caller reverse-walks (LIFO) and releases each, so a mid-link failure
+/// `retained` is the ABORT-LEDGER of base-map handles. On `Err` the caller
+/// reverse-walks (LIFO), removes each owning map entry, and releases it, so a mid-link failure
 /// leaves NO leaked strong-count (which would break §2.7.30.4
 /// deferred-Drop) and NO double-free. Mirrors the W5 / cluster-1.5
 /// `clone_slot_kinded` retain-before-claim discipline
@@ -1282,33 +1281,31 @@ impl SerializeIdentityCtx {
 /// interior is itself a `Ptr(HeapKind::Reference)` back into a cell mid-
 /// materialization is detected here and cleanly surface-refused (NOT a
 /// depth bound), with the ledger balancing all retained shares.
+enum RestoreBase {
+    Identity(u64),
+    HeapNode(u64),
+}
+
 #[derive(Default)]
 pub struct RestoreLinkCtx {
-    /// handle → materialized `*const SharedCell` (one base share held).
-    identity_map: std::collections::HashMap<u64, u64>,
+    /// handle → materialized SharedCell carrier (one base share held).
+    identity_map: std::collections::HashMap<u64, KindedSlot>,
     /// GC Phase 5 (v7): handle → materialized cycle-capable heap NODE, as
-    /// `(allocation ptr as u64, node NativeKind)`. Populated by Pass-1
+    /// an owning `KindedSlot`. Populated by Pass-1
     /// `materialize_cell_bodies` for every `SV::HeapNode` (TypedObject /
     /// heap-element TypedArray / TypedObject-valued HashMap); resolved by
     /// forward children, `SV::HeapRef` back-references, and Pass-2 top-level
-    /// slots to the ONE allocation per handle. The kind is the identity-map
-    /// entry's canonical `NativeKind::Ptr(HeapKind::*)` — recorded at
-    /// materialization, never fabricated from bits (no parallel discriminator:
-    /// this is the same `(bits, kind)` pair the slot ABI uses, ADR-006
-    /// §2.7.7). Separate from `identity_map` so the `SharedCell`/`Reference`
-    /// path is untouched (handles are unique across the shared counter).
-    heap_node_map: std::collections::HashMap<u64, (u64, NativeKind)>,
+    /// slots to the ONE allocation per handle. The slot's canonical
+    /// `NativeKind::Ptr(HeapKind::*)` remains authoritative; under Miri its
+    /// sidecar retains the typed pointer. Separate from `identity_map` so the
+    /// `SharedCell`/`Reference` path is untouched (handles are unique across
+    /// the shared counter).
+    heap_node_map: std::collections::HashMap<u64, KindedSlot>,
     /// Pass-1 cycle guard: handles whose body is mid-materialization.
     in_progress: std::collections::HashSet<u64>,
-    /// Abort-ledger: every BASE materialization share handed out, as
-    /// `(allocation ptr, node NativeKind)`, in claim order. Reverse-walk
-    /// (LIFO) to release on abort OR restore-finish. Generalized (GC Phase 5,
-    /// v7) from `SharedCell`-only to every cycle-capable heap NODE carrier —
-    /// the per-`HeapKind` release primitive is selected by dispatching on the
-    /// recorded `NativeKind` (ADR-005 §1 single-discriminator: no parallel
-    /// ledger sum-type projecting 1:1 to `HeapKind`; the canonical slot-ABI
-    /// kind IS the discriminator).
-    retained: Vec<(u64, NativeKind)>,
+    /// Abort-ledger of map handles in claim order. Removing the matching map
+    /// entry drops its owning carrier on abort or restore-finish.
+    retained: Vec<RestoreBase>,
 }
 
 impl RestoreLinkCtx {
@@ -1338,10 +1335,6 @@ impl RestoreLinkCtx {
     ///
     /// Idempotent: `retained` is drained, so a second call is a no-op.
     pub fn release_base_shares(&mut self) {
-        use shape_value::heap_value::{HashMapKindedRef, TypedObjectStorage};
-        use shape_value::v2::closure_layout::SharedCell;
-        use shape_value::v2::heap_element::HeapElement;
-        use shape_value::v2::typed_array::release_v2_typed_array;
         // LIFO reverse-walk: children were materialized (and their bases
         // pushed) AFTER their parents, so releasing bottom-up means a
         // parent's memory-decrement never dereferences an already-freed
@@ -1350,31 +1343,84 @@ impl RestoreLinkCtx {
         // never an unconditional free — so a node still referenced by a real
         // (Pass-2-installed) slot survives; only the surplus scaffolding
         // share is retired. Balances on both abort and success (§2.7.30.5).
-        while let Some((ptr, kind)) = self.retained.pop() {
-            match kind {
-                NativeKind::Ptr(HeapKind::SharedCell) => unsafe {
-                    Arc::decrement_strong_count(ptr as *const SharedCell);
-                },
-                NativeKind::Ptr(HeapKind::TypedObject) => unsafe {
-                    TypedObjectStorage::release_elem(ptr as *const TypedObjectStorage);
-                },
-                NativeKind::Ptr(HeapKind::TypedArray) => unsafe {
-                    release_v2_typed_array(ptr as *mut u8);
-                },
-                NativeKind::Ptr(HeapKind::HashMap) => unsafe {
-                    Arc::decrement_strong_count(ptr as *const HashMapKindedRef);
-                },
-                other => debug_assert!(
-                    false,
-                    "release_base_shares: unexpected ledger kind {other:?} — only \
-                     SharedCell / TypedObject / TypedArray / HashMap base shares \
-                     are recorded"
-                ),
+        while let Some(base) = self.retained.pop() {
+            match base {
+                RestoreBase::Identity(handle) => drop(self.identity_map.remove(&handle)),
+                RestoreBase::HeapNode(handle) => drop(self.heap_node_map.remove(&handle)),
             }
         }
         self.identity_map.clear();
         self.heap_node_map.clear();
         self.in_progress.clear();
+    }
+}
+
+/// Project an owning [`KindedSlot`] into its `SerializableVMValue` arm.
+///
+/// This is the strict-provenance serializer entry point. Under Miri it keeps
+/// the slot's pointer sidecar attached to every outer heap-pointer read.
+pub fn kinded_slot_to_serializable_ctx(
+    slot: &KindedSlot,
+    store: &SnapshotStore,
+    ctx: &mut SerializeIdentityCtx,
+) -> std::result::Result<SerializableVMValue, String> {
+    kinded_slot_parts_to_serializable_ctx(
+        slot.raw(),
+        slot.kind(),
+        #[cfg(miri)]
+        slot.miri_provenance(),
+        store,
+        ctx,
+    )
+}
+
+/// Project an owning [`KindedSlot`] into its `SerializableVMValue` arm with a
+/// fresh identity context.
+pub fn kinded_slot_to_serializable(
+    slot: &KindedSlot,
+    store: &SnapshotStore,
+) -> std::result::Result<SerializableVMValue, String> {
+    let mut ctx = SerializeIdentityCtx::new();
+    kinded_slot_to_serializable_ctx(slot, store, &mut ctx)
+}
+
+/// Project a borrowed carrier's bits, kind, and (under Miri) provenance.
+///
+/// The provenance value is Copy and remains owned by the source carrier. It
+/// exists solely to select a typed pointer for the immediate borrow; this
+/// helper never reconstructs a pointer from integer bits under Miri.
+fn kinded_slot_parts_to_serializable_ctx(
+    bits: u64,
+    kind: NativeKind,
+    #[cfg(miri)] provenance: shape_value::heap_value::MiriSlotProvenance,
+    store: &SnapshotStore,
+    ctx: &mut SerializeIdentityCtx,
+) -> std::result::Result<SerializableVMValue, String> {
+    match kind {
+        NativeKind::String => serialize_string_slot(
+            bits,
+            #[cfg(miri)]
+            provenance,
+        ),
+        NativeKind::StringV2 | NativeKind::DecimalV2 => {
+            #[cfg(miri)]
+            {
+                return Err(format!(
+                    "kinded_slot_to_serializable: {kind:?} has no trustworthy Miri provenance sidecar"
+                ));
+            }
+            #[cfg(not(miri))]
+            slot_to_serializable(bits, kind, store)
+        }
+        NativeKind::Ptr(heap_kind) => slot_heap_to_serializable(
+            bits,
+            heap_kind,
+            #[cfg(miri)]
+            provenance,
+            store,
+            ctx,
+        ),
+        _ => slot_to_serializable(bits, kind, store),
     }
 }
 
@@ -1392,6 +1438,15 @@ pub fn slot_to_serializable_ctx(
     store: &SnapshotStore,
     ctx: &mut SerializeIdentityCtx,
 ) -> std::result::Result<SerializableVMValue, String> {
+    #[cfg(miri)]
+    {
+        // Compatibility callers have no sidecar. `slot_to_serializable`
+        // rejects pointer-bearing kinds before any pointer reconstruction.
+        let _ = ctx;
+        return slot_to_serializable(bits, kind, store);
+    }
+
+    #[cfg(not(miri))]
     match kind {
         NativeKind::Ptr(heap_kind) => slot_heap_to_serializable(bits, heap_kind, store, ctx),
         // Scalar + string + v2-raw kinds carry no promoted-cell identity;
@@ -1417,6 +1472,14 @@ pub fn slot_to_serializable(
     kind: NativeKind,
     _store: &SnapshotStore,
 ) -> std::result::Result<SerializableVMValue, String> {
+    #[cfg(miri)]
+    if raw_pair_requires_provenance(bits, kind) {
+        return Err(format!(
+            "slot_to_serializable: {kind:?} has pointer-bearing bits without Miri provenance; \
+             migrate this caller to kinded_slot_to_serializable"
+        ));
+    }
+
     use SerializableVMValue as SV;
     match kind {
         NativeKind::Int64 => Ok(SV::Int(bits as i64)),
@@ -1535,9 +1598,63 @@ pub fn slot_to_serializable(
             // Fresh per-slot identity ctx: single-slot dedupe only. The
             // whole-VM driver uses `slot_to_serializable_ctx` to share
             // one ctx across slots (ADR-006 §2.7.30.5).
-            let mut ctx = SerializeIdentityCtx::new();
-            slot_heap_to_serializable(bits, heap_kind, _store, &mut ctx)
+            #[cfg(miri)]
+            {
+                if kind_requires_miri_sidecar(NativeKind::Ptr(heap_kind)) {
+                    Err(
+                        "slot_to_serializable: raw pointer-bearing slots require Miri provenance"
+                            .into(),
+                    )
+                } else {
+                    let mut ctx = SerializeIdentityCtx::new();
+                    slot_heap_to_serializable(
+                        bits,
+                        heap_kind,
+                        shape_value::heap_value::MiriSlotProvenance::None,
+                        _store,
+                        &mut ctx,
+                    )
+                }
+            }
+            #[cfg(not(miri))]
+            {
+                let mut ctx = SerializeIdentityCtx::new();
+                slot_heap_to_serializable(bits, heap_kind, _store, &mut ctx)
+            }
         }
+    }
+}
+
+#[cfg(miri)]
+fn raw_pair_requires_provenance(bits: u64, kind: NativeKind) -> bool {
+    bits != 0 && kind_requires_miri_sidecar(kind)
+}
+
+fn serialize_string_slot(
+    bits: u64,
+    #[cfg(miri)] provenance: shape_value::heap_value::MiriSlotProvenance,
+) -> std::result::Result<SerializableVMValue, String> {
+    if bits == 0 {
+        return Err("slot_to_serializable: String slot with null bits".into());
+    }
+    #[cfg(miri)]
+    {
+        let ptr = match provenance {
+            shape_value::heap_value::MiriSlotProvenance::String(ptr) if !ptr.is_null() => ptr,
+            other => {
+                return Err(format!(
+                    "kinded_slot_to_serializable: String slot is missing matching Miri provenance ({other:?})"
+                ));
+            }
+        };
+        return Ok(SerializableVMValue::String(unsafe { (&*ptr).clone() }));
+    }
+    #[cfg(not(miri))]
+    unsafe {
+        let arc = Arc::<String>::from_raw(bits as *const String);
+        let cloned = (*arc).clone();
+        let _ = Arc::into_raw(arc);
+        Ok(SerializableVMValue::String(cloned))
     }
 }
 
@@ -1607,7 +1724,14 @@ fn typed_object_storage_to_serializable(
     for i in 0..n {
         let field_bits = slots[i].raw();
         let field_kind = storage.field_kinds[i];
-        let sv = slot_to_serializable_ctx(field_bits, field_kind, store, ctx)?;
+        let sv = kinded_slot_parts_to_serializable_ctx(
+            field_bits,
+            field_kind,
+            #[cfg(miri)]
+            storage.field_provenance[i],
+            store,
+            ctx,
+        )?;
         slot_data.push(sv);
     }
     Ok(SerializableVMValue::TypedObject {
@@ -1620,6 +1744,7 @@ fn typed_object_storage_to_serializable(
 fn slot_heap_to_serializable(
     bits: u64,
     expected_kind: HeapKind,
+    #[cfg(miri)] provenance: shape_value::heap_value::MiriSlotProvenance,
     store: &SnapshotStore,
     ctx: &mut SerializeIdentityCtx,
 ) -> std::result::Result<SerializableVMValue, String> {
@@ -1627,19 +1752,55 @@ fn slot_heap_to_serializable(
     use shape_value::heap_value::{
         AtomicData, HashSetData, LazyData, MutexData, OptionData, PriorityQueueData, ResultData,
     };
-    // WF-2G GAP A: `Ptr(HeapKind::ModuleFn)` bits are an inline-scalar
-    // module-fn id (NOT a pointer), and id 0 is the first-registered fn —
-    // a valid value, not a null pointer. Exempt it from the null-pointer
-    // guard so it reaches the ModuleFn projection arm below.
-    if bits == 0 && !matches!(expected_kind, HeapKind::ModuleFn) {
+    // These three `Ptr`-tagged carriers hold inline values rather than
+    // addresses. Zero is valid for a NUL char, the first future id, and the
+    // first registered module function, so they bypass the pointer null guard.
+    if bits == 0
+        && !matches!(
+            expected_kind,
+            HeapKind::Char | HeapKind::Future | HeapKind::ModuleFn
+        )
+    {
         return Err(format!(
             "slot_to_serializable: Ptr({expected_kind:?}) slot with null bits",
+        ));
+    }
+    #[cfg(miri)]
+    if !matches!(
+        expected_kind,
+        HeapKind::String
+            | HeapKind::TypedObject
+            | HeapKind::TypedArray
+            | HeapKind::HashMap
+            | HeapKind::Reference
+            | HeapKind::SharedCell
+            | HeapKind::Char
+            | HeapKind::Future
+            | HeapKind::ModuleFn
+    ) {
+        return Err(format!(
+            "kinded_slot_to_serializable: Ptr({expected_kind:?}) has no trustworthy Miri provenance sidecar"
         ));
     }
     match expected_kind {
         HeapKind::String => {
             // SAFETY: bits = `Arc::into_raw(Arc<String>)` per the
             // ValueSlot::from_string_arc construction contract.
+            #[cfg(miri)]
+            {
+                let ptr = match provenance {
+                    shape_value::heap_value::MiriSlotProvenance::String(ptr) if !ptr.is_null() => {
+                        ptr
+                    }
+                    other => {
+                        return Err(format!(
+                            "kinded_slot_to_serializable: Ptr(String) is missing matching Miri provenance ({other:?})"
+                        ));
+                    }
+                };
+                return Ok(SV::String(unsafe { (&*ptr).clone() }));
+            }
+            #[cfg(not(miri))]
             unsafe {
                 let arc = Arc::<String>::from_raw(bits as *const String);
                 let cloned = (*arc).clone();
@@ -1772,7 +1933,13 @@ fn slot_heap_to_serializable(
         // and serializes-through; `Local` / `ModuleBinding` / `TypedField`
         // have NO owning cell — reading their bits as `*const SharedCell`
         // would be a wild-free, so they keep the opaque clean-refuse.
-        HeapKind::Reference => serialize_reference(bits, store, ctx),
+        HeapKind::Reference => serialize_reference_with_provenance(
+            bits,
+            #[cfg(miri)]
+            provenance,
+            store,
+            ctx,
+        ),
         // CLEAN-REFUSE at snapshot() time (user-ruled disposition,
         // 2026-05-29) — same rationale as Channel/Deque above.
         HeapKind::FilterExpr => Err(
@@ -1781,15 +1948,31 @@ fn slot_heap_to_serializable(
              not snapshot-restorable — clean-refuse by design (ADR-006 §2.7.5.1)"
                 .to_string(),
         ),
-        HeapKind::SharedCell => serialize_shared_cell(bits, store, ctx),
+        HeapKind::SharedCell => serialize_shared_cell_with_provenance(
+            bits,
+            #[cfg(miri)]
+            provenance,
+            store,
+            ctx,
+        ),
         HeapKind::Iterator => Err(
             "snapshot cannot capture a live Iterator: an in-flight iterator \
              cursor is a live in-process resource, not snapshot-restorable — \
              clean-refuse by design (ADR-006 §2.7.5.1)"
                 .to_string(),
         ),
-        // Future is inline u64 per §2.7.4.
-        HeapKind::Future => Ok(SV::Future(bits)),
+        // Future is an inline scheduler id, not a restorable value. Whole-VM
+        // capture performs a scheduler-aware preflight for direct stack and
+        // module-binding handles; this generic codec is also reached from
+        // nested object/array/option/result fields where no scheduler context
+        // is available, so it refuses instead of writing a misleading
+        // SerializableVMValue::Future carrier.
+        HeapKind::Future => Err(format!(
+            "snapshot cannot capture Future({bits}): unresolved async work \
+             is scheduler-owned and this snapshot format does not persist \
+             pending-future state. Await or cancel the future before \
+             checkpointing; materialized future results serialize normally."
+        )),
 
         // ── W17-snapshot-roundtrip container arms (2026-06-02) ─────────
         // TypedObject / TypedArray / HashMap<string,string> / Range —
@@ -1837,12 +2020,25 @@ fn slot_heap_to_serializable(
             // TypedObject reached from ≥2 slots (or a `var`-field cycle back
             // into itself) emits ONE `HeapNode` body + `HeapRef` back-edges
             // instead of duplicating / infinite-recursing (§0 #4 / §6).
-            intern_or_backedge(bits as *const (), store, ctx, move |store, ctx| {
+            #[cfg(miri)]
+            let storage_ptr = match provenance {
+                shape_value::heap_value::MiriSlotProvenance::TypedObject(ptr) if !ptr.is_null() => {
+                    ptr
+                }
+                other => {
+                    return Err(format!(
+                        "kinded_slot_to_serializable: Ptr(TypedObject) is missing matching Miri provenance ({other:?})"
+                    ));
+                }
+            };
+            #[cfg(not(miri))]
+            let storage_ptr = bits as *const shape_value::heap_value::TypedObjectStorage;
+            intern_or_backedge(storage_ptr as *const (), store, ctx, move |store, ctx| {
                 // SAFETY: per the slot construction contract the bits point
                 // to a live `TypedObjectStorage`; the borrow is valid for the
                 // duration of the field reads (the slot keeps its share).
                 let storage: &shape_value::heap_value::TypedObjectStorage =
-                    unsafe { &*(bits as *const shape_value::heap_value::TypedObjectStorage) };
+                    unsafe { &*storage_ptr };
                 typed_object_storage_to_serializable(storage, store, ctx)
             })
         }
@@ -1862,6 +2058,18 @@ fn slot_heap_to_serializable(
                 ELEM_TYPE_TYPED_OBJECT, ELEM_TYPE_U8, ELEM_TYPE_U16, ELEM_TYPE_U32, TypedArray,
                 read_elem_type,
             };
+            #[cfg(miri)]
+            let ptr = match provenance {
+                shape_value::heap_value::MiriSlotProvenance::TypedArray(ptr) if !ptr.is_null() => {
+                    ptr as *const u8
+                }
+                other => {
+                    return Err(format!(
+                        "kinded_slot_to_serializable: Ptr(TypedArray) is missing matching Miri provenance ({other:?})"
+                    ));
+                }
+            };
+            #[cfg(not(miri))]
             let ptr = bits as *const u8;
             // SAFETY: the slot construction contract guarantees a live,
             // element-type-stamped TypedArray carrier at `bits`.
@@ -1889,17 +2097,13 @@ fn slot_heap_to_serializable(
                         // Intern each element TypedObject: a node shared with
                         // another element (or a containing object) dedupes to
                         // one handle; a self-referential element cycle-breaks.
-                        let sv = intern_or_backedge(
-                            p as *const (),
-                            store,
-                            ctx,
-                            move |store, ctx| {
+                        let sv =
+                            intern_or_backedge(p as *const (), store, ctx, move |store, ctx| {
                                 // SAFETY: `p` is a live element storage owned by
                                 // the array; borrow-read, take no share.
                                 let storage: &TypedObjectStorage = unsafe { &*p };
                                 typed_object_storage_to_serializable(storage, store, ctx)
-                            },
-                        )?;
+                            })?;
                         out.push(sv);
                     }
                     Ok(SV::Array(out))
@@ -2006,10 +2210,26 @@ fn slot_heap_to_serializable(
             // other value monomorphizations are K3 (heap-value track
             // amendment) and surface clean.
             use shape_value::heap_value::HashMapKindedRef;
-            // SAFETY: bits = `Arc::into_raw(Arc<HashMapKindedRef>)`.
-            let arc = unsafe { Arc::<HashMapKindedRef>::from_raw(bits as *const HashMapKindedRef) };
-            let kref: HashMapKindedRef = (*arc).clone();
-            let _ = Arc::into_raw(arc); // restore the slot's original share
+            #[cfg(miri)]
+            let map_ptr = match provenance {
+                shape_value::heap_value::MiriSlotProvenance::HashMap(ptr) if !ptr.is_null() => ptr,
+                other => {
+                    return Err(format!(
+                        "kinded_slot_to_serializable: Ptr(HashMap) is missing matching Miri provenance ({other:?})"
+                    ));
+                }
+            };
+            #[cfg(miri)]
+            let kref: HashMapKindedRef = unsafe { (&*map_ptr).clone() };
+            #[cfg(not(miri))]
+            let map_ptr = bits as *const HashMapKindedRef;
+            #[cfg(not(miri))]
+            let kref: HashMapKindedRef = {
+                let arc = unsafe { Arc::<HashMapKindedRef>::from_raw(map_ptr) };
+                let kref = (*arc).clone();
+                let _ = Arc::into_raw(arc);
+                kref
+            };
             match &kref {
                 HashMapKindedRef::String(map_arc) => {
                     let n = map_arc.len();
@@ -2047,7 +2267,7 @@ fn slot_heap_to_serializable(
                     use shape_value::heap_value::{TypedObjectPtr, TypedObjectStorage};
                     use shape_value::v2::string_obj::StringObj;
                     use shape_value::v2::typed_array::TypedArray;
-                    intern_or_backedge(bits as *const (), store, ctx, move |store, ctx| {
+                    intern_or_backedge(map_ptr as *const (), store, ctx, move |store, ctx| {
                         let n = map_arc.len();
                         let mut keys: Vec<SerializableVMValue> = Vec::with_capacity(n);
                         let mut values: Vec<SerializableVMValue> = Vec::with_capacity(n);
@@ -2163,7 +2383,40 @@ fn serialize_reference(
     // Arc<RefTarget>) per reference.rs:11-12. Recover, inspect, restore
     // the original share (we do NOT consume it).
     let arc = unsafe { Arc::<RefTarget>::from_raw(bits as *const RefTarget) };
-    let result = match &*arc {
+    let result = serialize_reference_target(&arc, store, ctx);
+    let _ = Arc::into_raw(arc); // restore the slot's original share
+    result
+}
+
+fn serialize_reference_with_provenance(
+    _bits: u64,
+    #[cfg(miri)] provenance: shape_value::heap_value::MiriSlotProvenance,
+    store: &SnapshotStore,
+    ctx: &mut SerializeIdentityCtx,
+) -> std::result::Result<SerializableVMValue, String> {
+    #[cfg(miri)]
+    {
+        let ptr = match provenance {
+            shape_value::heap_value::MiriSlotProvenance::Reference(ptr) if !ptr.is_null() => ptr,
+            other => {
+                return Err(format!(
+                    "kinded_slot_to_serializable: Ptr(Reference) is missing matching Miri provenance ({other:?})"
+                ));
+            }
+        };
+        return serialize_reference_target(unsafe { &*ptr }, store, ctx);
+    }
+    #[cfg(not(miri))]
+    serialize_reference(_bits, store, ctx)
+}
+
+fn serialize_reference_target(
+    target: &shape_value::reference::RefTarget,
+    store: &SnapshotStore,
+    ctx: &mut SerializeIdentityCtx,
+) -> std::result::Result<SerializableVMValue, String> {
+    use shape_value::reference::RefTarget;
+    match target {
         RefTarget::PromotedCell { cell, .. } => {
             // Recover the underlying Arc<SharedCell> allocation ptr as the
             // identity key. `Arc::as_ptr` does NOT touch the refcount.
@@ -2189,9 +2442,7 @@ fn serialize_reference(
              ADR-006 §2.7.30.7."
                 .to_string(),
         ),
-    };
-    let _ = Arc::into_raw(arc); // restore the slot's original share
-    result
+    }
 }
 
 /// STAGE-R5: serialize a `HeapKind::SharedCell` slot (ADR-006 §2.7.30.5).
@@ -2209,10 +2460,40 @@ fn serialize_shared_cell(
     // Arc<SharedCell>) per `op_alloc_shared_*` (stack.rs:376). Recover,
     // inspect, restore the original share.
     let arc = unsafe { Arc::<SharedCell>::from_raw(bits as *const SharedCell) };
-    let cell_ptr = Arc::as_ptr(&arc) as *const ();
-    let result = emit_or_backedge_cell(cell_ptr, &arc, store, ctx, RefArmKind::SharedCell);
+    let result = serialize_shared_cell_value(&arc, store, ctx);
     let _ = Arc::into_raw(arc); // restore the slot's original share
     result
+}
+
+fn serialize_shared_cell_with_provenance(
+    _bits: u64,
+    #[cfg(miri)] provenance: shape_value::heap_value::MiriSlotProvenance,
+    store: &SnapshotStore,
+    ctx: &mut SerializeIdentityCtx,
+) -> std::result::Result<SerializableVMValue, String> {
+    #[cfg(miri)]
+    {
+        let ptr = match provenance {
+            shape_value::heap_value::MiriSlotProvenance::SharedCell(ptr) if !ptr.is_null() => ptr,
+            other => {
+                return Err(format!(
+                    "kinded_slot_to_serializable: Ptr(SharedCell) is missing matching Miri provenance ({other:?})"
+                ));
+            }
+        };
+        return serialize_shared_cell_value(unsafe { &*ptr }, store, ctx);
+    }
+    #[cfg(not(miri))]
+    serialize_shared_cell(_bits, store, ctx)
+}
+
+fn serialize_shared_cell_value(
+    cell: &shape_value::v2::closure_layout::SharedCell,
+    store: &SnapshotStore,
+    ctx: &mut SerializeIdentityCtx,
+) -> std::result::Result<SerializableVMValue, String> {
+    let cell_ptr = cell as *const _ as *const ();
+    emit_or_backedge_cell(cell_ptr, cell, store, ctx, RefArmKind::SharedCell)
 }
 
 /// Which serialize arm reached the cell — selects the back-edge shape.
@@ -2233,10 +2514,12 @@ enum RefArmKind {
 /// the slot's share); we read its `value` + `kind()` through `lock()` and
 /// recurse via `slot_to_serializable_ctx` (so a cell whose interior
 /// contains another reference participates in the same dedupe + cycle
-/// guard).
+/// guard). The cell lock still exposes only raw `(bits, kind)` data, so a
+/// nested heap payload fails closed under Miri until the Stage-2 interior
+/// carrier can retain its matching provenance sidecar.
 fn emit_or_backedge_cell(
     cell_ptr: *const (),
-    cell: &Arc<shape_value::v2::closure_layout::SharedCell>,
+    cell: &shape_value::v2::closure_layout::SharedCell,
     store: &SnapshotStore,
     ctx: &mut SerializeIdentityCtx,
     arm: RefArmKind,
@@ -2363,14 +2646,15 @@ pub fn materialize_cell_bodies(
             // back-edge interior (Reference/SharedCellRef) Pass 1 has
             // already materialized the target body, so the link resolves.
             let expected = expected_kind_for_cell_inner(inner);
-            let (value_bits, value_kind) = serializable_to_slot_ctx(inner, expected, store, ctx)?;
+            let value = serializable_to_kinded_slot_ctx(inner, expected, store, ctx)?;
+            let (value_bits, value_kind) = into_shared_cell_raw_parts(value)?;
             // Build the one owning cell. `Arc::into_raw` hands the base
             // share to the identity-map; record it in the ledger.
             let cell = Arc::new(SharedCell::new(value_bits, value_kind));
-            let ptr = Arc::into_raw(cell) as u64;
-            ctx.identity_map.insert(*handle, ptr);
-            ctx.retained
-                .push((ptr, NativeKind::Ptr(HeapKind::SharedCell)));
+            let ptr = Arc::into_raw(cell);
+            ctx.identity_map
+                .insert(*handle, KindedSlot::from_shared_cell_raw(ptr));
+            ctx.retained.push(RestoreBase::Identity(*handle));
             ctx.in_progress.remove(handle);
             Ok(())
         }
@@ -2461,29 +2745,60 @@ fn materialize_typed_object_node(
     use shape_value::{NativeKind, ValueSlot};
     let n = slot_data.len();
     // Shell: placeholder slots + Null field_kinds + heap_mask 0 (drop-safe).
-    let placeholder_slots: Box<[ValueSlot]> =
-        (0..n).map(|_| ValueSlot::from_raw(0)).collect::<Vec<_>>().into_boxed_slice();
+    let placeholder_slots: Box<[ValueSlot]> = (0..n)
+        .map(|_| ValueSlot::from_raw(0))
+        .collect::<Vec<_>>()
+        .into_boxed_slice();
     let placeholder_kinds: Arc<[NativeKind]> =
         (0..n).map(|_| NativeKind::Null).collect::<Vec<_>>().into();
     let ptr = TypedObjectStorage::_new(schema_id, placeholder_slots, 0, placeholder_kinds);
     // Record identity + base BEFORE filling, so a self-referential field
     // resolves to this ptr (the cycle case).
     ctx.heap_node_map
-        .insert(handle, (ptr as u64, NativeKind::Ptr(HeapKind::TypedObject)));
-    ctx.retained
-        .push((ptr as u64, NativeKind::Ptr(HeapKind::TypedObject)));
+        .insert(handle, KindedSlot::from_typed_object_raw(ptr));
+    ctx.retained.push(RestoreBase::HeapNode(handle));
     // Fill fields, collecting the real per-field kinds.
     let mut real_kinds: Vec<NativeKind> = Vec::with_capacity(n);
     for (i, fsv) in slot_data.iter().enumerate() {
-        let (fbits, fkind) = resolve_child(fsv, store, ctx).map_err(|msg| {
-            format!("materialize_typed_object_node: field[{i}] (schema_id={schema_id}): {msg}")
-        })?;
+        let field = match resolve_child(fsv, store, ctx) {
+            Ok(field) => field,
+            Err(msg) => {
+                // The map still owns the shell's base share. Teach its Drop
+                // about every field already transferred before returning the
+                // error so `release_base_shares` balances the abort path.
+                let mut partial_kinds = real_kinds.clone();
+                partial_kinds.resize(n, NativeKind::Null);
+                let filled_mask = if i >= u64::BITS as usize {
+                    heap_mask
+                } else {
+                    heap_mask & ((1u64 << i).wrapping_sub(1))
+                };
+                unsafe {
+                    *std::ptr::addr_of_mut!((*ptr).field_kinds) = partial_kinds.into();
+                    *std::ptr::addr_of_mut!((*ptr).heap_mask) = filled_mask;
+                }
+                return Err(format!(
+                    "materialize_typed_object_node: field[{i}] (schema_id={schema_id}): {msg}"
+                ));
+            }
+        };
         // SAFETY: `ptr` is a live `_new`-allocated shell; `i` is in-bounds; the
         // single-word slot write goes through the raw interior-mutable cell
         // (no `&TypedObjectStorage` formed — see `write_slot_in_place`). The
         // prior placeholder bits (0) own no share, so we discard the return.
-        let _prior = unsafe { TypedObjectStorage::write_slot_in_place(ptr, i, fbits) };
-        real_kinds.push(fkind);
+        #[cfg(miri)]
+        let _prior = unsafe {
+            TypedObjectStorage::write_slot_in_place_with_miri_provenance(
+                ptr,
+                i,
+                field.slot().raw(),
+                field.miri_provenance(),
+            )
+        };
+        #[cfg(not(miri))]
+        let _prior = unsafe { TypedObjectStorage::write_slot_in_place(ptr, i, field.slot().raw()) };
+        real_kinds.push(field.kind());
+        let _ = std::mem::ManuallyDrop::new(field);
     }
     // Install the real field-kind track + heap_mask (from the wire, which was
     // read off the original storage). Raw place-writes: no `&mut Self` formed.
@@ -2516,25 +2831,40 @@ fn materialize_typed_object_array_node(
     // discriminant before any push / drop reads it.
     unsafe { stamp_elem_type(out as *mut u8, ELEM_TYPE_TYPED_OBJECT) };
     ctx.heap_node_map
-        .insert(handle, (out as u64, NativeKind::Ptr(HeapKind::TypedArray)));
-    ctx.retained
-        .push((out as u64, NativeKind::Ptr(HeapKind::TypedArray)));
+        .insert(handle, KindedSlot::from_typed_array_raw(out as *mut u8));
+    ctx.retained.push(RestoreBase::HeapNode(handle));
     for (i, esv) in elems.iter().enumerate() {
-        let (ebits, ekind) = resolve_child(esv, store, ctx)
+        let element = resolve_child(esv, store, ctx)
             .map_err(|msg| format!("materialize_typed_object_array_node: elem[{i}]: {msg}"))?;
-        if ekind != NativeKind::Ptr(HeapKind::TypedObject) {
+        if element.kind() != NativeKind::Ptr(HeapKind::TypedObject) {
             return Err(format!(
-                "materialize_typed_object_array_node: elem[{i}] resolved to {ekind:?}, \
+                "materialize_typed_object_array_node: elem[{i}] resolved to {:?}, \
                  expected Ptr(TypedObject) — a HeapNode-wrapped array is TypedObject-\
-                 element only. Malformed v7 wire shape. ADR-006 §2.7.5.1."
+                 element only. Malformed v7 wire shape. ADR-006 §2.7.5.1.",
+                element.kind(),
             ));
         }
         // SAFETY: `out` is a live TYPED_OBJECT-stamped carrier; `ebits` is a
         // `*const TypedObjectStorage` owning one share (from `resolve_child`),
         // transferred into the array by `push`.
         unsafe {
-            TypedArray::<*const TypedObjectStorage>::push(out, ebits as *const TypedObjectStorage);
+            #[cfg(miri)]
+            let ptr = match element.miri_provenance() {
+                shape_value::heap_value::MiriSlotProvenance::TypedObject(ptr) if !ptr.is_null() => {
+                    ptr
+                }
+                _ => {
+                    return Err(
+                        "materialize_typed_object_array_node: missing TypedObject provenance"
+                            .to_string(),
+                    );
+                }
+            };
+            #[cfg(not(miri))]
+            let ptr = element.slot().raw() as *const TypedObjectStorage;
+            TypedArray::<*const TypedObjectStorage>::push(out, ptr);
         }
+        let _ = std::mem::ManuallyDrop::new(element);
     }
     Ok(())
 }
@@ -2579,15 +2909,14 @@ fn materialize_typed_object_hashmap_node(
                 );
             }
         };
-        let (vbits, vkind) = resolve_child(v, store, ctx)
+        let value = resolve_child(v, store, ctx)
             .map_err(|msg| format!("materialize_typed_object_hashmap_node: value: {msg}"))?;
-        if vkind != NativeKind::Ptr(HeapKind::TypedObject) {
-            // Release the just-materialized value share before surfacing.
-            retain_release_one_node(vbits, vkind);
+        if value.kind() != NativeKind::Ptr(HeapKind::TypedObject) {
             return Err(format!(
-                "materialize_typed_object_hashmap_node: value resolved to {vkind:?}, \
+                "materialize_typed_object_hashmap_node: value resolved to {:?}, \
                  expected Ptr(TypedObject) — a HeapNode-wrapped map is TypedObject-\
-                 valued only. ADR-006 §2.7.5.1."
+                 valued only. ADR-006 §2.7.5.1.",
+                value.kind(),
             ));
         }
         // `insert` transfers the one value share into the map (the map's Drop
@@ -2595,15 +2924,31 @@ fn materialize_typed_object_hashmap_node(
         unsafe {
             data.insert(
                 key_str.as_str(),
-                TypedObjectPtr::new(vbits as *const _),
+                #[cfg(miri)]
+                match value.miri_provenance() {
+                    shape_value::heap_value::MiriSlotProvenance::TypedObject(ptr)
+                        if !ptr.is_null() =>
+                    {
+                        TypedObjectPtr::new(ptr)
+                    }
+                    _ => {
+                        return Err(
+                            "materialize_typed_object_hashmap_node: missing TypedObject provenance"
+                                .to_string(),
+                        );
+                    }
+                },
+                #[cfg(not(miri))]
+                TypedObjectPtr::new(value.slot().raw() as *const _),
             );
         }
+        let _ = std::mem::ManuallyDrop::new(value);
     }
     let kref = Arc::new(HashMapKindedRef::TypedObject(Arc::new(data)));
-    let ptr = Arc::into_raw(kref) as u64;
+    let ptr = Arc::into_raw(kref);
     ctx.heap_node_map
-        .insert(handle, (ptr, NativeKind::Ptr(HeapKind::HashMap)));
-    ctx.retained.push((ptr, NativeKind::Ptr(HeapKind::HashMap)));
+        .insert(handle, KindedSlot::from_hashmap_raw(ptr));
+    ctx.retained.push(RestoreBase::HeapNode(handle));
     Ok(())
 }
 
@@ -2624,85 +2969,36 @@ fn resolve_child(
     sv: &SerializableVMValue,
     store: &SnapshotStore,
     ctx: &mut RestoreLinkCtx,
-) -> std::result::Result<(u64, NativeKind), String> {
+) -> std::result::Result<KindedSlot, String> {
     use SerializableVMValue as SV;
     match sv {
         SV::HeapNode { handle, body } => {
             if !ctx.heap_node_map.contains_key(handle) {
                 materialize_node_base(*handle, body, store, ctx)?;
             }
-            let (ptr, kind) = *ctx.heap_node_map.get(handle).ok_or_else(|| {
-                format!("resolve_child: HeapNode handle {handle} not materialized")
-            })?;
-            retain_one_node(ptr, kind);
-            Ok((ptr, kind))
+            ctx.heap_node_map
+                .get(handle)
+                .cloned()
+                .ok_or_else(|| format!("resolve_child: HeapNode handle {handle} not materialized"))
         }
-        SV::HeapRef { handle } => {
-            let (ptr, kind) = *ctx.heap_node_map.get(handle).ok_or_else(|| {
-                format!(
-                    "resolve_child: GC-Phase-5 surface — HeapRef handle {handle} has no \
+        SV::HeapRef { handle } => ctx.heap_node_map.get(handle).cloned().ok_or_else(|| {
+            format!(
+                "resolve_child: GC-Phase-5 surface — HeapRef handle {handle} has no \
                      materialized node (Pass-1 body missing or a cycle routes back \
                      through a record-after container, out of round-trip scope). \
                      ADR-006 §2.7.30.5."
-                )
-            })?;
-            retain_one_node(ptr, kind);
-            Ok((ptr, kind))
-        }
+            )
+        }),
         leaf => {
             let expected = expected_heap_field_kind(leaf);
-            serializable_to_slot(leaf, expected, store)
+            serializable_to_kinded_slot(leaf, expected, store)
         }
-    }
-}
-
-/// GC Phase 5 (v7): bump ONE refcount share on a materialized heap node, via
-/// the per-`HeapKind` retain primitive. Identity-map dispatch on the recorded
-/// `NativeKind::Ptr(HeapKind::*)` — no `is_heap()` probe, no bits decode.
-fn retain_one_node(ptr: u64, kind: NativeKind) {
-    match kind {
-        NativeKind::Ptr(HeapKind::TypedObject) => unsafe {
-            shape_value::v2::refcount::v2_retain(ptr as *const shape_value::v2::heap_header::HeapHeader);
-        },
-        NativeKind::Ptr(HeapKind::TypedArray) => unsafe {
-            shape_value::v2::typed_array::retain_v2_typed_array(ptr as *mut u8);
-        },
-        NativeKind::Ptr(HeapKind::HashMap) => unsafe {
-            Arc::increment_strong_count(ptr as *const shape_value::heap_value::HashMapKindedRef);
-        },
-        _ => {
-            debug_assert!(
-                false,
-                "retain_one_node: non-node kind {kind:?} — heap_node_map only \
-                 records TypedObject / TypedArray / HashMap identities"
-            );
-        }
-    }
-}
-
-/// GC Phase 5 (v7): retire ONE share on a materialized heap node (the error-
-/// path inverse of [`retain_one_node`], decrement-and-maybe-free per kind).
-fn retain_release_one_node(ptr: u64, kind: NativeKind) {
-    use shape_value::heap_value::{HashMapKindedRef, TypedObjectStorage};
-    use shape_value::v2::heap_element::HeapElement;
-    use shape_value::v2::typed_array::release_v2_typed_array;
-    match kind {
-        NativeKind::Ptr(HeapKind::TypedObject) => unsafe {
-            TypedObjectStorage::release_elem(ptr as *const TypedObjectStorage);
-        },
-        NativeKind::Ptr(HeapKind::TypedArray) => unsafe {
-            release_v2_typed_array(ptr as *mut u8);
-        },
-        NativeKind::Ptr(HeapKind::HashMap) => unsafe {
-            Arc::decrement_strong_count(ptr as *const HashMapKindedRef);
-        },
-        _ => {}
     }
 }
 
 /// Pick the `expected_kind` for a cell BODY's interior slot from its
 /// serialized discriminator. The cell `value` is restored through
-/// `serializable_to_slot_ctx`; a Reference/SharedCellRef interior resolves
+/// `serializable_to_kinded_slot_ctx`; a Reference/SharedCellRef interior resolves
 /// to its `Ptr(HeapKind::*)` so the link path fires.
 fn expected_kind_for_cell_inner(sv: &SerializableVMValue) -> NativeKind {
     use SerializableVMValue as SV;
@@ -2725,44 +3021,60 @@ fn expected_kind_for_cell_inner(sv: &SerializableVMValue) -> NativeKind {
 /// `Reference` / `SharedCell` / `SharedCellRef` arms resolve their handle
 /// against `ctx.identity_map` (materialized in Pass 1); everything else
 /// delegates to the ctx-free [`serializable_to_slot`].
+fn serializable_to_slot_ctx_legacy(
+    sv: &SerializableVMValue,
+    expected_kind: NativeKind,
+    store: &SnapshotStore,
+    ctx: &mut RestoreLinkCtx,
+) -> std::result::Result<(u64, NativeKind), String> {
+    into_legacy_snapshot_pair(serializable_to_kinded_slot_ctx(
+        sv,
+        expected_kind,
+        store,
+        ctx,
+    )?)
+}
+
+/// Compatibility boundary for Stage 2 VM/closure/remote installation. It
+/// returns raw slot bits in normal builds, but intentionally refuses
+/// heap-bearing values under Miri because those destinations have no sidecar.
 pub fn serializable_to_slot_ctx(
     sv: &SerializableVMValue,
     expected_kind: NativeKind,
     store: &SnapshotStore,
     ctx: &mut RestoreLinkCtx,
 ) -> std::result::Result<(u64, NativeKind), String> {
+    serializable_to_slot_ctx_legacy(sv, expected_kind, store, ctx)
+}
+
+/// Owning, provenance-aware restore entry point for the runtime restore graph.
+/// Normal builds retain the existing `(ValueSlot, NativeKind)` ABI inside
+/// `KindedSlot`; Miri additionally retains the typed pointer sidecar.
+pub fn serializable_to_kinded_slot_ctx(
+    sv: &SerializableVMValue,
+    expected_kind: NativeKind,
+    store: &SnapshotStore,
+    ctx: &mut RestoreLinkCtx,
+) -> std::result::Result<KindedSlot, String> {
     use SerializableVMValue as SV;
     match (sv, expected_kind) {
-        // Body / back-edge into a Reference slot → an Arc<RefTarget::
-        // PromotedCell> owning one share on the resolved cell.
         (SV::SharedCell { handle, .. }, NativeKind::Ptr(HeapKind::Reference))
         | (SV::Reference { handle, .. }, NativeKind::Ptr(HeapKind::Reference)) => {
             link_promoted_reference(*handle, ctx)
         }
-        // Body / back-edge into a SharedCell slot → an Arc<SharedCell>
-        // owning one share on the resolved cell.
         (SV::SharedCell { handle, .. }, NativeKind::Ptr(HeapKind::SharedCell))
         | (SV::SharedCellRef { handle }, NativeKind::Ptr(HeapKind::SharedCell)) => {
             link_shared_cell(*handle, ctx)
         }
-        // GC Phase 5 (v7): a top-level slot holding a cycle-capable node (body
-        // or back-edge) resolves to the ONE Pass-1-materialized allocation and
-        // takes one owned share. `expected_kind` is ignored — the identity-map
-        // entry carries the authoritative recorded `NativeKind` (never
-        // fabricated from bits). Pass 1 (`materialize_cell_bodies`) already
-        // ran over every top-level slot, so the handle is present.
         (SV::HeapNode { handle, .. }, _) | (SV::HeapRef { handle }, _) => {
-            let (ptr, kind) = *ctx.heap_node_map.get(handle).ok_or_else(|| {
+            ctx.heap_node_map.get(handle).cloned().ok_or_else(|| {
                 format!(
-                    "serializable_to_slot_ctx: GC-Phase-5 surface — heap node handle \
-                     {handle} has no Pass-1 materialization. ADR-006 §2.7.30.5."
+                    "serializable_to_kinded_slot_ctx: heap node handle {handle} has no \
+                     Pass-1 materialization. ADR-006 §2.7.30.5."
                 )
-            })?;
-            retain_one_node(ptr, kind);
-            Ok((ptr, kind))
+            })
         }
-        // Everything else — ctx-free.
-        _ => serializable_to_slot(sv, expected_kind, store),
+        _ => serializable_to_kinded_slot(sv, expected_kind, store),
     }
 }
 
@@ -2771,14 +3083,12 @@ pub fn serializable_to_slot_ctx(
 ///
 /// Share accounting: the identity-map holds the base materialization
 /// share (recorded in the ledger, released at restore-finish). We
-/// `increment_strong_count` then `from_raw` + `into_raw` so the returned
-/// slot bits own exactly ONE share, transferred to the caller's slot — it
-/// is NOT in the abort-ledger (the slot's own Drop owns it once installed).
+/// cloning the sidecar-aware map carrier hands out one owned share. It is not
+/// in the abort ledger; the returned slot owns it once installed.
 fn link_shared_cell(
     handle: u64,
     ctx: &mut RestoreLinkCtx,
-) -> std::result::Result<(u64, NativeKind), String> {
-    use shape_value::v2::closure_layout::SharedCell;
+) -> std::result::Result<KindedSlot, String> {
     if ctx.in_progress.contains(&handle) {
         return Err(format!(
             "link_shared_cell: STAGE-R5 cycle surface — handle {handle} is \
@@ -2788,21 +3098,12 @@ fn link_shared_cell(
              ADR-006 §2.7.30.5."
         ));
     }
-    let ptr = *ctx.identity_map.get(&handle).ok_or_else(|| {
+    ctx.identity_map.get(&handle).cloned().ok_or_else(|| {
         format!(
             "link_shared_cell: STAGE-R5 surface — handle {handle} has no \
              materialized cell (Pass-1 body missing). ADR-006 §2.7.30.5."
         )
-    })?;
-    // SAFETY: ptr is a live Arc<SharedCell> (Pass 1 materialized it; the
-    // identity-map holds the base share). Bump one share, transfer it into
-    // the returned slot bits via into_raw.
-    unsafe {
-        Arc::increment_strong_count(ptr as *const SharedCell);
-        let cell = Arc::<SharedCell>::from_raw(ptr as *const SharedCell);
-        let raw = Arc::into_raw(cell) as u64;
-        Ok((raw, NativeKind::Ptr(HeapKind::SharedCell)))
-    }
+    })
 }
 
 /// Pass 2 — resolve a handle to its materialized `Arc<SharedCell>`, hand
@@ -2814,8 +3115,9 @@ fn link_shared_cell(
 fn link_promoted_reference(
     handle: u64,
     ctx: &mut RestoreLinkCtx,
-) -> std::result::Result<(u64, NativeKind), String> {
+) -> std::result::Result<KindedSlot, String> {
     use shape_value::reference::RefTarget;
+    #[cfg(not(miri))]
     use shape_value::v2::closure_layout::SharedCell;
     if ctx.in_progress.contains(&handle) {
         return Err(format!(
@@ -2825,7 +3127,7 @@ fn link_promoted_reference(
              Clean-refuse with abort-ledger balancing. ADR-006 §2.7.30.5."
         ));
     }
-    let ptr = *ctx.identity_map.get(&handle).ok_or_else(|| {
+    let cell_slot = ctx.identity_map.get(&handle).cloned().ok_or_else(|| {
         format!(
             "link_promoted_reference: STAGE-R5 surface — handle {handle} has \
              no materialized cell (Pass-1 body missing). ADR-006 §2.7.30.5."
@@ -2833,17 +3135,21 @@ fn link_promoted_reference(
     })?;
     // SAFETY: ptr is a live Arc<SharedCell>. Bump one share and reconstruct
     // the Arc so the RefTarget::PromotedCell owns exactly that share.
-    let (raw, _kind) = unsafe {
-        Arc::increment_strong_count(ptr as *const SharedCell);
-        let cell = Arc::<SharedCell>::from_raw(ptr as *const SharedCell);
-        let projected_kind = cell.kind();
-        let rt = Arc::new(RefTarget::PromotedCell {
-            cell,
-            kind: projected_kind,
-        });
-        (Arc::into_raw(rt) as u64, projected_kind)
+    #[cfg(miri)]
+    let cell_ptr = match cell_slot.miri_provenance() {
+        shape_value::heap_value::MiriSlotProvenance::SharedCell(ptr) if !ptr.is_null() => ptr,
+        _ => return Err("link_promoted_reference: missing SharedCell provenance".to_string()),
     };
-    Ok((raw, NativeKind::Ptr(HeapKind::Reference)))
+    #[cfg(not(miri))]
+    let cell_ptr = cell_slot.slot().raw() as *const SharedCell;
+    let cell = unsafe { Arc::from_raw(cell_ptr) };
+    let projected_kind = cell.kind();
+    let _transferred_cell_slot = std::mem::ManuallyDrop::new(cell_slot);
+    let rt = Arc::new(RefTarget::PromotedCell {
+        cell,
+        kind: projected_kind,
+    });
+    Ok(KindedSlot::from_reference_raw(Arc::into_raw(rt)))
 }
 
 /// Derive the `expected_kind` for [`serializable_to_slot`] from a
@@ -2891,7 +3197,7 @@ pub fn expected_kind_from_serializable(sv: &SerializableVMValue) -> NativeKind {
     }
 }
 
-pub fn serializable_to_slot(
+fn serializable_to_slot_legacy(
     sv: &SerializableVMValue,
     expected_kind: NativeKind,
     store: &SnapshotStore,
@@ -2911,7 +3217,7 @@ pub fn serializable_to_slot(
         let mut ctx = RestoreLinkCtx::new();
         let result = (|| {
             materialize_cell_bodies(sv, store, &mut ctx)?;
-            serializable_to_slot_ctx(sv, expected_kind, store, &mut ctx)
+            serializable_to_slot_ctx_legacy(sv, expected_kind, store, &mut ctx)
         })();
         // Base shares are scaffolding; the returned slot owns its own Pass-2
         // share. Release on both success and error (LIFO, balanced).
@@ -2956,6 +3262,204 @@ pub fn serializable_to_slot(
             serializable_arm_name(other_sv),
         )),
     }
+}
+
+/// Restore into an owning `KindedSlot`. This is the stage-1 runtime API:
+/// allocation identity and Miri provenance remain attached until a later
+/// installation boundary explicitly consumes the carrier.
+pub fn serializable_to_kinded_slot(
+    sv: &SerializableVMValue,
+    expected_kind: NativeKind,
+    store: &SnapshotStore,
+) -> std::result::Result<KindedSlot, String> {
+    use SerializableVMValue as SV;
+    match (sv, expected_kind) {
+        (SV::HeapNode { .. } | SV::HeapRef { .. }, _) => {
+            let mut ctx = RestoreLinkCtx::new();
+            let result = (|| {
+                materialize_cell_bodies(sv, store, &mut ctx)?;
+                serializable_to_kinded_slot_ctx(sv, expected_kind, store, &mut ctx)
+            })();
+            ctx.release_base_shares();
+            result
+        }
+        (SV::Int(i), NativeKind::Int64) => Ok(KindedSlot::from_int(*i)),
+        (SV::Number(f), NativeKind::Float64) => Ok(KindedSlot::from_number(*f)),
+        (SV::Bool(b), NativeKind::Bool) => Ok(KindedSlot::from_bool(*b)),
+        (SV::String(s), NativeKind::String) => Ok(KindedSlot::from_string_arc(Arc::new(s.clone()))),
+        (SV::None | SV::Unit, NativeKind::Null) => Ok(KindedSlot::none()),
+        (
+            SV::TypedObject {
+                schema_id,
+                slot_data,
+                heap_mask,
+            },
+            NativeKind::Ptr(HeapKind::TypedObject),
+        ) => sv_typed_object_to_kinded_slot(*schema_id, slot_data, *heap_mask, store),
+        (
+            SV::ResultData { is_ok, payload },
+            NativeKind::Ptr(HeapKind::Result | HeapKind::TypedObject),
+        ) => build_builtin_result_typed_object_kinded_slot(
+            *is_ok,
+            inner_kinded_from_serializable(payload)?,
+        ),
+        (
+            SV::OptionData { is_some, payload },
+            NativeKind::Ptr(HeapKind::Option | HeapKind::TypedObject),
+        ) => {
+            let payload = match payload {
+                Some(payload) => inner_kinded_from_serializable(payload)?,
+                None if *is_some => {
+                    return Err(
+                        "serializable_to_kinded_slot: OptionData is_some=true but payload=None — \
+                         malformed wire shape; expected Some(SerializableVMValue)."
+                            .to_string(),
+                    );
+                }
+                None => KindedSlot::none(),
+            };
+            build_builtin_option_typed_object_kinded_slot(*is_some, payload)
+        }
+        _ => legacy_snapshot_pair_to_kinded_slot(sv, expected_kind, store),
+    }
+}
+
+/// Stage-2 compatibility boundary. VM, closure, and remote raw destinations
+/// have not yet gained sidecar storage, so Miri rejects heap-bearing values
+/// here instead of silently discarding provenance.
+pub fn serializable_to_slot(
+    sv: &SerializableVMValue,
+    expected_kind: NativeKind,
+    store: &SnapshotStore,
+) -> std::result::Result<(u64, NativeKind), String> {
+    into_legacy_snapshot_pair(serializable_to_kinded_slot(sv, expected_kind, store)?)
+}
+
+fn legacy_snapshot_pair_to_kinded_slot(
+    sv: &SerializableVMValue,
+    expected_kind: NativeKind,
+    store: &SnapshotStore,
+) -> std::result::Result<KindedSlot, String> {
+    #[cfg(miri)]
+    if kind_requires_miri_sidecar(expected_kind) {
+        return Err(format!(
+            "serializable_to_kinded_slot: {expected_kind:?} still uses the Stage-2 raw-pair \
+             compatibility boundary and cannot retain Miri provenance"
+        ));
+    }
+    let (bits, kind) = serializable_to_slot_legacy(sv, expected_kind, store)?;
+    Ok(KindedSlot::new(ValueSlot::from_raw(bits), kind))
+}
+
+fn into_legacy_snapshot_pair(slot: KindedSlot) -> std::result::Result<(u64, NativeKind), String> {
+    #[cfg(miri)]
+    if kind_requires_miri_sidecar(slot.kind()) {
+        return Err(format!(
+            "snapshot restore raw-pair compatibility boundary cannot carry Miri provenance for {:?}; \
+             migrate the destination to serializable_to_kinded_slot",
+            slot.kind()
+        ));
+    }
+    let parts = (slot.slot().raw(), slot.kind());
+    let _compatibility_transfer = std::mem::ManuallyDrop::new(slot);
+    Ok(parts)
+}
+
+fn into_shared_cell_raw_parts(slot: KindedSlot) -> std::result::Result<(u64, NativeKind), String> {
+    #[cfg(miri)]
+    if kind_requires_miri_sidecar(slot.kind()) {
+        return Err(format!(
+            "SharedCell restore cannot install {:?} without a field provenance sidecar",
+            slot.kind()
+        ));
+    }
+    let parts = (slot.slot().raw(), slot.kind());
+    let _shared_cell_transfer = std::mem::ManuallyDrop::new(slot);
+    Ok(parts)
+}
+
+#[cfg(miri)]
+fn kind_requires_miri_sidecar(kind: NativeKind) -> bool {
+    !matches!(
+        kind,
+        NativeKind::Float64
+            | NativeKind::NullableFloat64
+            | NativeKind::Int8
+            | NativeKind::NullableInt8
+            | NativeKind::UInt8
+            | NativeKind::NullableUInt8
+            | NativeKind::Int16
+            | NativeKind::NullableInt16
+            | NativeKind::UInt16
+            | NativeKind::NullableUInt16
+            | NativeKind::Int32
+            | NativeKind::NullableInt32
+            | NativeKind::UInt32
+            | NativeKind::NullableUInt32
+            | NativeKind::Int64
+            | NativeKind::NullableInt64
+            | NativeKind::UInt64
+            | NativeKind::NullableUInt64
+            | NativeKind::IntSize
+            | NativeKind::NullableIntSize
+            | NativeKind::UIntSize
+            | NativeKind::NullableUIntSize
+            | NativeKind::Bool
+            | NativeKind::Float32
+            | NativeKind::Char
+            | NativeKind::Null
+            | NativeKind::Ptr(HeapKind::Char | HeapKind::Future | HeapKind::ModuleFn)
+    )
+}
+
+fn sv_typed_object_to_kinded_slot(
+    schema_id: u64,
+    slot_data: &[SerializableVMValue],
+    heap_mask: u64,
+    store: &SnapshotStore,
+) -> std::result::Result<KindedSlot, String> {
+    let mut fields = Vec::with_capacity(slot_data.len());
+    for (i, field) in slot_data.iter().enumerate() {
+        let slot = serializable_to_kinded_slot(field, expected_heap_field_kind(field), store)
+            .map_err(|msg| {
+                format!(
+                    "serializable_to_kinded_slot: TypedObject restore field[{i}] \
+                 (schema_id={schema_id}): {msg}"
+                )
+            })?;
+        fields.push(slot);
+    }
+    let slots = fields
+        .iter()
+        .map(KindedSlot::slot)
+        .collect::<Vec<_>>()
+        .into_boxed_slice();
+    let field_kinds: Arc<[NativeKind]> = fields
+        .iter()
+        .map(KindedSlot::kind)
+        .collect::<Vec<_>>()
+        .into();
+    #[cfg(miri)]
+    let field_provenance = fields
+        .iter()
+        .map(KindedSlot::miri_provenance)
+        .collect::<Vec<_>>()
+        .into_boxed_slice();
+    #[cfg(miri)]
+    let ptr = shape_value::heap_value::TypedObjectStorage::_new_with_miri_field_provenance(
+        schema_id,
+        slots,
+        heap_mask,
+        field_kinds,
+        field_provenance,
+    );
+    #[cfg(not(miri))]
+    let ptr =
+        shape_value::heap_value::TypedObjectStorage::_new(schema_id, slots, heap_mask, field_kinds);
+    for field in fields {
+        let _field_transfer = std::mem::ManuallyDrop::new(field);
+    }
+    Ok(KindedSlot::from_typed_object_raw(ptr))
 }
 
 /// Map a `SerializableVMValue` to the `NativeKind` its restored field
@@ -3586,6 +4090,82 @@ fn build_builtin_option_typed_object_slot(is_some: bool, payload: KindedSlot) ->
     )
 }
 
+fn build_builtin_result_typed_object_kinded_slot(
+    is_ok: bool,
+    payload: KindedSlot,
+) -> std::result::Result<KindedSlot, String> {
+    use crate::type_schema::builtin_schemas::{RESULT_VARIANT_ERR, RESULT_VARIANT_OK};
+    let (_registry, schemas) =
+        crate::type_schema::TypeSchemaRegistry::with_stdlib_types_and_builtin_ids();
+    build_builtin_variant_typed_object_kinded_slot(
+        schemas.result as u64,
+        if is_ok {
+            RESULT_VARIANT_OK
+        } else {
+            RESULT_VARIANT_ERR
+        },
+        payload,
+    )
+}
+
+fn build_builtin_option_typed_object_kinded_slot(
+    is_some: bool,
+    payload: KindedSlot,
+) -> std::result::Result<KindedSlot, String> {
+    use crate::type_schema::builtin_schemas::{OPTION_VARIANT_NONE, OPTION_VARIANT_SOME};
+    let (_registry, schemas) =
+        crate::type_schema::TypeSchemaRegistry::with_stdlib_types_and_builtin_ids();
+    build_builtin_variant_typed_object_kinded_slot(
+        schemas.option as u64,
+        if is_some {
+            OPTION_VARIANT_SOME
+        } else {
+            OPTION_VARIANT_NONE
+        },
+        payload,
+    )
+}
+
+fn build_builtin_variant_typed_object_kinded_slot(
+    schema_id: u64,
+    variant: i64,
+    payload: KindedSlot,
+) -> std::result::Result<KindedSlot, String> {
+    use crate::type_schema::builtin_schemas::OPTION_PAYLOAD;
+    use shape_value::TypedObjectStorage;
+
+    let payload_slot = payload.slot();
+    let payload_kind = payload.kind();
+    let heap_mask = if payload_slot.raw() != 0 && snapshot_field_is_heap_like(payload_kind) {
+        1u64 << OPTION_PAYLOAD
+    } else {
+        0
+    };
+    let field_kinds: Arc<[NativeKind]> =
+        Arc::from(vec![NativeKind::Int64, payload_kind].into_boxed_slice());
+    #[cfg(miri)]
+    let ptr = TypedObjectStorage::_new_with_miri_field_provenance(
+        schema_id,
+        vec![ValueSlot::from_int(variant), payload_slot].into_boxed_slice(),
+        heap_mask,
+        field_kinds,
+        vec![
+            shape_value::heap_value::MiriSlotProvenance::None,
+            payload.miri_provenance(),
+        ]
+        .into_boxed_slice(),
+    );
+    #[cfg(not(miri))]
+    let ptr = TypedObjectStorage::_new(
+        schema_id,
+        vec![ValueSlot::from_int(variant), payload_slot].into_boxed_slice(),
+        heap_mask,
+        field_kinds,
+    );
+    let _payload_transfer = std::mem::ManuallyDrop::new(payload);
+    Ok(KindedSlot::from_typed_object_raw(ptr))
+}
+
 fn build_builtin_variant_typed_object_slot(
     schema_id: u64,
     variant: i64,
@@ -3610,7 +4190,7 @@ fn build_builtin_variant_typed_object_slot(
         heap_mask,
         field_kinds,
     );
-    std::mem::forget(payload);
+    let _payload_transfer = std::mem::ManuallyDrop::new(payload);
     (ptr as u64, NativeKind::Ptr(HeapKind::TypedObject))
 }
 
@@ -3762,7 +4342,7 @@ mod l5_typed_object_result_option_snapshot_tests {
             heap_mask,
             field_kinds,
         );
-        std::mem::forget(payload);
+        let _payload_transfer = std::mem::ManuallyDrop::new(payload);
         KindedSlot::from_typed_object_raw(ptr)
     }
 
@@ -3859,7 +4439,10 @@ mod l5_typed_object_result_option_snapshot_tests {
             "std::core::math::sqrt".to_string(),
         ]);
 
-        for (id, name) in [(0u64, "std::core::json::stringify"), (1, "std::core::math::sqrt")] {
+        for (id, name) in [
+            (0u64, "std::core::json::stringify"),
+            (1, "std::core::math::sqrt"),
+        ] {
             // Project.
             let sv = slot_to_serializable(id, NativeKind::Ptr(HeapKind::ModuleFn), &store)
                 .expect("project module fn");
@@ -3970,7 +4553,7 @@ mod l5_typed_object_result_option_snapshot_tests {
         let inner_storage = storage(&inner_slot);
         assert_eq!(inner_storage.schema_id, schemas.result as u64);
         assert_eq!(inner_storage.slots()[0].as_i64(), RESULT_VARIANT_OK);
-        std::mem::forget(inner_slot);
+        let _borrowed_inner_slot = std::mem::ManuallyDrop::new(inner_slot);
     }
 
     #[test]
@@ -4322,13 +4905,12 @@ mod opaque_disposition_tests {
         // Arc share on Drop at scope end, so no leak / no double-free.
         let channel = KindedSlot::from_channel(Arc::new(ChannelData::new()));
         let deque = KindedSlot::from_deque(Arc::new(DequeData::new()));
-        let iterator = KindedSlot::from_iterator(Arc::new(IteratorState::new(
-            IteratorSource::Range {
+        let iterator =
+            KindedSlot::from_iterator(Arc::new(IteratorState::new(IteratorSource::Range {
                 start: 0,
                 end: 3,
                 step: 1,
-            },
-        )));
+            })));
         let filter_bits = Arc::into_raw(Arc::new(FilterNode::Compare {
             column: "x".to_string(),
             op: FilterOp::Eq,
@@ -4848,13 +5430,9 @@ mod gc_phase5_identity_tests {
         // RESTORE via the two-pass driver.
         let mut link = RestoreLinkCtx::new();
         materialize_cell_bodies(&sv, &st, &mut link).expect("pass 1");
-        let (rbits, rkind) = serializable_to_slot_ctx(
-            &sv,
-            NativeKind::Ptr(HeapKind::TypedObject),
-            &st,
-            &mut link,
-        )
-        .expect("pass 2");
+        let (rbits, rkind) =
+            serializable_to_slot_ctx(&sv, NativeKind::Ptr(HeapKind::TypedObject), &st, &mut link)
+                .expect("pass 2");
         assert_eq!(rkind, NativeKind::Ptr(HeapKind::TypedObject));
 
         // IDENTITY: the restored node's `next` slot points at the restored
@@ -4865,11 +5443,19 @@ mod gc_phase5_identity_tests {
             next_bits, rbits,
             "restored Node.next aliases the SAME restored node (identity preserved, no duplication)"
         );
-        assert_eq!(unsafe { (*ro).slots()[0].raw() }, 42, "scalar field survives");
+        assert_eq!(
+            unsafe { (*ro).slots()[0].raw() },
+            42,
+            "scalar field survives"
+        );
 
         // Refcount after base-share release = {Pass-2 external slot, self-edge}.
         link.release_base_shares();
-        assert_eq!(rc(rbits), 2, "external slot + one self-edge — no leaked/extra share");
+        assert_eq!(
+            rc(rbits),
+            2,
+            "external slot + one self-edge — no leaked/extra share"
+        );
 
         // Teardown (both restored + original cyclic graphs).
         unsafe {
@@ -4918,21 +5504,16 @@ mod gc_phase5_identity_tests {
         let mut link = RestoreLinkCtx::new();
         materialize_cell_bodies(&sv0, &st, &mut link).unwrap();
         materialize_cell_bodies(&sv1, &st, &mut link).unwrap();
-        let (r0, _) = serializable_to_slot_ctx(
-            &sv0,
-            NativeKind::Ptr(HeapKind::TypedObject),
-            &st,
-            &mut link,
-        )
-        .unwrap();
-        let (r1, _) = serializable_to_slot_ctx(
-            &sv1,
-            NativeKind::Ptr(HeapKind::TypedObject),
-            &st,
-            &mut link,
-        )
-        .unwrap();
-        assert_eq!(r0, r1, "two carriers of one shared object dedupe to ONE restored node");
+        let (r0, _) =
+            serializable_to_slot_ctx(&sv0, NativeKind::Ptr(HeapKind::TypedObject), &st, &mut link)
+                .unwrap();
+        let (r1, _) =
+            serializable_to_slot_ctx(&sv1, NativeKind::Ptr(HeapKind::TypedObject), &st, &mut link)
+                .unwrap();
+        assert_eq!(
+            r0, r1,
+            "two carriers of one shared object dedupe to ONE restored node"
+        );
         link.release_base_shares();
         assert_eq!(rc(r0), 2, "exactly two slot shares on the one deduped node");
 
@@ -4981,13 +5562,9 @@ mod gc_phase5_identity_tests {
 
         let mut link = RestoreLinkCtx::new();
         materialize_cell_bodies(&sv, &st, &mut link).unwrap();
-        let (rbits, rkind) = serializable_to_slot_ctx(
-            &sv,
-            NativeKind::Ptr(HeapKind::TypedArray),
-            &st,
-            &mut link,
-        )
-        .unwrap();
+        let (rbits, rkind) =
+            serializable_to_slot_ctx(&sv, NativeKind::Ptr(HeapKind::TypedArray), &st, &mut link)
+                .unwrap();
         assert_eq!(rkind, NativeKind::Ptr(HeapKind::TypedArray));
 
         // The restored array's element 0 is a node whose `next` aliases itself.
@@ -5039,13 +5616,9 @@ mod gc_phase5_identity_tests {
         let map_bits = Arc::into_raw(kref) as u64;
 
         let mut ictx = SerializeIdentityCtx::new();
-        let sv = slot_to_serializable_ctx(
-            map_bits,
-            NativeKind::Ptr(HeapKind::HashMap),
-            &st,
-            &mut ictx,
-        )
-        .expect("serialize map-of-shared-object");
+        let sv =
+            slot_to_serializable_ctx(map_bits, NativeKind::Ptr(HeapKind::HashMap), &st, &mut ictx)
+                .expect("serialize map-of-shared-object");
         // HeapNode{HashMap{keys:[x,y], values:[HeapNode, HeapRef]}}
         match &sv {
             SV::HeapNode { body, .. } => match &**body {
@@ -5061,17 +5634,14 @@ mod gc_phase5_identity_tests {
 
         let mut link = RestoreLinkCtx::new();
         materialize_cell_bodies(&sv, &st, &mut link).unwrap();
-        let (rbits, rkind) = serializable_to_slot_ctx(
-            &sv,
-            NativeKind::Ptr(HeapKind::HashMap),
-            &st,
-            &mut link,
-        )
-        .unwrap();
+        let (rbits, rkind) =
+            serializable_to_slot_ctx(&sv, NativeKind::Ptr(HeapKind::HashMap), &st, &mut link)
+                .unwrap();
         assert_eq!(rkind, NativeKind::Ptr(HeapKind::HashMap));
 
         // Both restored values alias ONE node (dedup).
-        let restored = unsafe { Arc::<HashMapKindedRef>::from_raw(rbits as *const HashMapKindedRef) };
+        let restored =
+            unsafe { Arc::<HashMapKindedRef>::from_raw(rbits as *const HashMapKindedRef) };
         match &*restored {
             HashMapKindedRef::TypedObject(map_arc) => {
                 assert_eq!(map_arc.len(), 2);
@@ -5081,7 +5651,11 @@ mod gc_phase5_identity_tests {
                     (v0.as_ptr(), v1.as_ptr())
                 };
                 assert_eq!(v0, v1, "both map values dedupe to ONE restored node");
-                assert_eq!(unsafe { (*v0).slots()[0].raw() }, 11, "shared node value survives");
+                assert_eq!(
+                    unsafe { (*v0).slots()[0].raw() },
+                    11,
+                    "shared node value survives"
+                );
             }
             _ => panic!("expected TypedObject-valued map"),
         }
@@ -5102,7 +5676,10 @@ mod gc_phase5_identity_tests {
         let (_tmp, st) = store();
         let mut ictx = SerializeIdentityCtx::new();
         let sv = slot_to_serializable_ctx(99u64, NativeKind::Int64, &st, &mut ictx).unwrap();
-        assert!(matches!(sv, SV::Int(99)), "scalars are never HeapNode-wrapped");
+        assert!(
+            matches!(sv, SV::Int(99)),
+            "scalars are never HeapNode-wrapped"
+        );
     }
 
     /// (e) A v6 snapshot is version-REFUSED cleanly at v7 — never misparsed,
@@ -5148,8 +5725,7 @@ mod gc_phase5_identity_tests {
     fn two_node_mutual_cycle_roundtrips_with_identity() {
         let (_tmp, st) = store();
         let mk = |seed: i64| -> *mut TypedObjectStorage {
-            let slots =
-                vec![ValueSlot::from_int(seed), ValueSlot::from_raw(0)].into_boxed_slice();
+            let slots = vec![ValueSlot::from_int(seed), ValueSlot::from_raw(0)].into_boxed_slice();
             let field_kinds: Arc<[NativeKind]> =
                 vec![NativeKind::Int64, NativeKind::Ptr(HeapKind::TypedObject)].into();
             TypedObjectStorage::_new(9, slots, 0, field_kinds)
@@ -5181,7 +5757,9 @@ mod gc_phase5_identity_tests {
                 SV::TypedObject { slot_data, .. } => {
                     match &slot_data[1] {
                         SV::HeapNode { body: bb, .. } => match &**bb {
-                            SV::TypedObject { slot_data: sd_b, .. } => match &sd_b[1] {
+                            SV::TypedObject {
+                                slot_data: sd_b, ..
+                            } => match &sd_b[1] {
                                 SV::HeapRef { handle: hb } => assert_eq!(
                                     hb, handle,
                                     "B.next back-edges to A's handle (mutual cycle broken)"
@@ -5203,13 +5781,9 @@ mod gc_phase5_identity_tests {
         // RESTORE via the two-pass driver.
         let mut link = RestoreLinkCtx::new();
         materialize_cell_bodies(&sv, &st, &mut link).expect("pass 1");
-        let (ra, rkind) = serializable_to_slot_ctx(
-            &sv,
-            NativeKind::Ptr(HeapKind::TypedObject),
-            &st,
-            &mut link,
-        )
-        .expect("pass 2");
+        let (ra, rkind) =
+            serializable_to_slot_ctx(&sv, NativeKind::Ptr(HeapKind::TypedObject), &st, &mut link)
+                .expect("pass 2");
         assert_eq!(rkind, NativeKind::Ptr(HeapKind::TypedObject));
 
         // IDENTITY: A'->B'->A', two distinct allocations, one cycle.
@@ -5222,8 +5796,16 @@ mod gc_phase5_identity_tests {
             rb_next, ra,
             "B'.next aliases A' — the mutual cycle's identity is preserved"
         );
-        assert_eq!(unsafe { (*ra_ptr).slots()[0].raw() }, 1, "A' scalar survives");
-        assert_eq!(unsafe { (*rb_ptr).slots()[0].raw() }, 2, "B' scalar survives");
+        assert_eq!(
+            unsafe { (*ra_ptr).slots()[0].raw() },
+            1,
+            "A' scalar survives"
+        );
+        assert_eq!(
+            unsafe { (*rb_ptr).slots()[0].raw() },
+            2,
+            "B' scalar survives"
+        );
 
         link.release_base_shares();
         // A' rc2 {external ra, B'->A' back-edge}; B' rc1 {A'->B' forward-edge}.
@@ -5253,5 +5835,299 @@ mod gc_phase5_identity_tests {
             TypedObjectStorage::release_elem(b);
             TypedObjectStorage::release_elem(b);
         }
+    }
+}
+
+#[cfg(test)]
+mod snapshot_wire_restore_miri_provenance_tests {
+    use super::{
+        RestoreLinkCtx, SerializableVMValue as SV, SerializeIdentityCtx, SnapshotStore,
+        kinded_slot_to_serializable_ctx, materialize_cell_bodies, serializable_to_kinded_slot,
+        serializable_to_kinded_slot_ctx,
+    };
+    use crate::type_schema::TypeSchemaRegistry;
+    use crate::type_schema::builtin_schemas::{
+        OPTION_PAYLOAD, OPTION_VARIANT_SOME, RESULT_PAYLOAD, RESULT_VARIANT_ERR,
+    };
+    use shape_value::heap_value::{
+        HashMapData, HashMapKindedRef, TypedObjectPtr, TypedObjectStorage,
+    };
+    use shape_value::v2::heap_element::HeapElement;
+    use shape_value::v2::heap_header::HeapHeader;
+    use shape_value::v2::refcount::v2_retain;
+    use shape_value::v2::typed_array::{
+        ELEM_TYPE_TYPED_OBJECT, TypedArray, read_elem_type, stamp_elem_type,
+    };
+    use shape_value::{HeapKind, KindedSlot, NativeKind, ValueSlot};
+    use std::sync::Arc;
+
+    fn store() -> SnapshotStore {
+        // These probes exercise only inline typed-object/container wire arms;
+        // they never persist blobs. Keep the root deliberately unusable so a
+        // future blob-backed value fails loudly rather than silently using a
+        // filesystem-dependent test store under Miri isolation.
+        SnapshotStore {
+            root: std::path::PathBuf::from("/dev/null/shape-miri-inline-probes"),
+        }
+    }
+
+    fn make_int_object(schema_id: u64, value: i64) -> *mut TypedObjectStorage {
+        let slots = vec![ValueSlot::from_int(value)].into_boxed_slice();
+        let field_kinds: Arc<[NativeKind]> = vec![NativeKind::Int64].into();
+        TypedObjectStorage::_new(schema_id, slots, 0, field_kinds)
+    }
+
+    fn wire_roundtrip(sv: &SV) -> SV {
+        let json = serde_json::to_string(sv).expect("serialize SerializableVMValue wire shape");
+        serde_json::from_str(&json).expect("deserialize SerializableVMValue wire shape")
+    }
+
+    fn wire_roundtrip_vec(svs: &[SV]) -> Vec<SV> {
+        let json = serde_json::to_string(svs).expect("serialize SerializableVMValue vec");
+        serde_json::from_str(&json).expect("deserialize SerializableVMValue vec")
+    }
+
+    fn typed_object_ptr(slot: &KindedSlot) -> *const TypedObjectStorage {
+        assert_eq!(slot.kind(), NativeKind::Ptr(HeapKind::TypedObject));
+        #[cfg(miri)]
+        match slot.miri_provenance() {
+            shape_value::heap_value::MiriSlotProvenance::TypedObject(ptr) => ptr,
+            other => panic!("missing TypedObject provenance: {other:?}"),
+        }
+        #[cfg(not(miri))]
+        {
+            slot.raw() as *const TypedObjectStorage
+        }
+    }
+
+    fn typed_array_ptr(slot: &KindedSlot) -> *const u8 {
+        assert_eq!(slot.kind(), NativeKind::Ptr(HeapKind::TypedArray));
+        #[cfg(miri)]
+        match slot.miri_provenance() {
+            shape_value::heap_value::MiriSlotProvenance::TypedArray(ptr) => ptr,
+            other => panic!("missing TypedArray provenance: {other:?}"),
+        }
+        #[cfg(not(miri))]
+        {
+            slot.raw() as *const u8
+        }
+    }
+
+    fn hashmap_ptr(slot: &KindedSlot) -> *const HashMapKindedRef {
+        assert_eq!(slot.kind(), NativeKind::Ptr(HeapKind::HashMap));
+        #[cfg(miri)]
+        match slot.miri_provenance() {
+            shape_value::heap_value::MiriSlotProvenance::HashMap(ptr) => ptr,
+            other => panic!("missing HashMap provenance: {other:?}"),
+        }
+        #[cfg(not(miri))]
+        {
+            slot.raw() as *const HashMapKindedRef
+        }
+    }
+
+    fn string_field_text(storage: &TypedObjectStorage, index: usize) -> String {
+        #[cfg(miri)]
+        let ptr = match storage.field_provenance[index] {
+            shape_value::heap_value::MiriSlotProvenance::String(ptr) => ptr,
+            other => panic!("missing String field provenance: {other:?}"),
+        };
+        #[cfg(not(miri))]
+        let ptr = storage.slots()[index].raw() as *const String;
+        unsafe { (&*ptr).clone() }
+    }
+
+    #[test]
+    fn miri_snapshot_wire_restore_provenance_heapnode_heapref_typed_object_identity() {
+        let st = store();
+        let original = make_int_object(10_001, 33);
+        let first_source = KindedSlot::from_typed_object_raw(original);
+        unsafe { v2_retain(original as *const HeapHeader) };
+        let second_source = KindedSlot::from_typed_object_raw(original);
+
+        let mut serialize = SerializeIdentityCtx::new();
+        let first = kinded_slot_to_serializable_ctx(&first_source, &st, &mut serialize)
+            .expect("serialize first shared object slot");
+        let second = kinded_slot_to_serializable_ctx(&second_source, &st, &mut serialize)
+            .expect("serialize second shared object slot");
+        let wire = wire_roundtrip_vec(&[first, second]);
+
+        match (&wire[0], &wire[1]) {
+            (SV::HeapNode { handle, body }, SV::HeapRef { handle: href }) => {
+                assert_eq!(handle, href, "second slot is a HeapRef to the first node");
+                assert!(matches!(&**body, SV::TypedObject { .. }));
+            }
+            other => panic!("expected HeapNode + HeapRef wire shape, got {other:?}"),
+        }
+
+        let mut restore = RestoreLinkCtx::new();
+        for sv in &wire {
+            materialize_cell_bodies(sv, &st, &mut restore).expect("pass 1 materialize node");
+        }
+        let r0 = serializable_to_kinded_slot_ctx(
+            &wire[0],
+            NativeKind::Ptr(HeapKind::TypedObject),
+            &st,
+            &mut restore,
+        )
+        .expect("restore first shared object slot");
+        let r1 = serializable_to_kinded_slot_ctx(
+            &wire[1],
+            NativeKind::Ptr(HeapKind::TypedObject),
+            &st,
+            &mut restore,
+        )
+        .expect("restore second shared object slot");
+        assert_eq!(r0.kind(), NativeKind::Ptr(HeapKind::TypedObject));
+        assert_eq!(r1.kind(), NativeKind::Ptr(HeapKind::TypedObject));
+        assert_eq!(
+            r0.raw(),
+            r1.raw(),
+            "HeapRef restores to the same allocation as HeapNode"
+        );
+        #[cfg(miri)]
+        assert_eq!(
+            r0.miri_provenance(),
+            r1.miri_provenance(),
+            "both owned links retain the same TypedObject provenance"
+        );
+        assert_eq!(unsafe { (*typed_object_ptr(&r0)).slots()[0].as_i64() }, 33);
+
+        restore.release_base_shares();
+        assert_eq!(restore.ledger_len(), 0, "base ownership is released once");
+    }
+
+    #[test]
+    fn miri_snapshot_wire_restore_provenance_typed_array_typed_object_elements() {
+        let st = store();
+        let arr = TypedArray::<*const TypedObjectStorage>::with_capacity(2);
+        unsafe {
+            stamp_elem_type(arr as *mut u8, ELEM_TYPE_TYPED_OBJECT);
+            TypedArray::<*const TypedObjectStorage>::push(arr, make_int_object(10_002, 10));
+            TypedArray::<*const TypedObjectStorage>::push(arr, make_int_object(10_002, 20));
+        }
+        let source = KindedSlot::from_typed_array_raw(arr as *mut u8);
+
+        let mut serialize = SerializeIdentityCtx::new();
+        let sv = kinded_slot_to_serializable_ctx(&source, &st, &mut serialize)
+            .expect("serialize Array<TypedObject>");
+        let wire = wire_roundtrip(&sv);
+        match &wire {
+            SV::HeapNode { body, .. } => match &**body {
+                SV::Array(elems) => {
+                    assert_eq!(elems.len(), 2);
+                    assert!(matches!(elems[0], SV::HeapNode { .. }));
+                    assert!(matches!(elems[1], SV::HeapNode { .. }));
+                }
+                other => panic!("expected HeapNode(Array), got {other:?}"),
+            },
+            other => panic!("expected HeapNode(Array), got {other:?}"),
+        }
+
+        let restored =
+            serializable_to_kinded_slot(&wire, NativeKind::Ptr(HeapKind::TypedArray), &st)
+                .expect("restore Array<TypedObject>");
+        unsafe {
+            let restored_ptr = typed_array_ptr(&restored);
+            assert_eq!(read_elem_type(restored_ptr), ELEM_TYPE_TYPED_OBJECT);
+            let slice = TypedArray::<*const TypedObjectStorage>::as_slice(
+                restored_ptr as *const TypedArray<*const TypedObjectStorage>,
+            );
+            let values: Vec<i64> = slice.iter().map(|&p| (*p).slots()[0].as_i64()).collect();
+            assert_eq!(values, vec![10, 20]);
+        }
+        drop(source);
+    }
+
+    #[test]
+    fn miri_snapshot_wire_restore_provenance_hashmap_typed_object_shared_values() {
+        let st = store();
+        let original = make_int_object(10_003, 44);
+        let mut data: HashMapData<TypedObjectPtr> = HashMapData::new();
+        unsafe {
+            v2_retain(original as *const HeapHeader);
+            data.insert("left", TypedObjectPtr::new(original));
+            v2_retain(original as *const HeapHeader);
+            data.insert("right", TypedObjectPtr::new(original));
+        }
+        let source =
+            KindedSlot::from_hashmap(Arc::new(HashMapKindedRef::TypedObject(Arc::new(data))));
+
+        let mut serialize = SerializeIdentityCtx::new();
+        let sv = kinded_slot_to_serializable_ctx(&source, &st, &mut serialize)
+            .expect("serialize HashMap<string, TypedObject>");
+        let wire = wire_roundtrip(&sv);
+        match &wire {
+            SV::HeapNode { body, .. } => match &**body {
+                SV::HashMap { keys, values } => {
+                    assert_eq!(keys.len(), 2);
+                    assert_eq!(values.len(), 2);
+                    assert!(values.iter().any(|v| matches!(v, SV::HeapNode { .. })));
+                    assert!(values.iter().any(|v| matches!(v, SV::HeapRef { .. })));
+                }
+                other => panic!("expected HeapNode(HashMap), got {other:?}"),
+            },
+            other => panic!("expected HeapNode(HashMap), got {other:?}"),
+        }
+
+        let restored_slot =
+            serializable_to_kinded_slot(&wire, NativeKind::Ptr(HeapKind::HashMap), &st)
+                .expect("restore HashMap<string, TypedObject>");
+        let restored = unsafe { &*hashmap_ptr(&restored_slot) };
+        match restored {
+            HashMapKindedRef::TypedObject(map) => {
+                let left = map.get_index("left").expect("left key restored");
+                let right = map.get_index("right").expect("right key restored");
+                let (left_ptr, right_ptr) = unsafe {
+                    let left_ref: &TypedObjectPtr = &*(*map.values).data.add(left);
+                    let right_ref: &TypedObjectPtr = &*(*map.values).data.add(right);
+                    (left_ref.as_ptr(), right_ref.as_ptr())
+                };
+                assert_eq!(left_ptr, right_ptr, "shared map values restore to one node");
+                assert_eq!(unsafe { (*left_ptr).slots()[0].as_i64() }, 44);
+            }
+            other => panic!("expected TypedObject-valued map, got {other:?}"),
+        }
+
+        drop(source);
+        unsafe { TypedObjectStorage::release_elem(original) }
+    }
+
+    #[test]
+    fn miri_snapshot_wire_restore_provenance_result_option_normalize_to_typed_objects() {
+        let (_registry, schemas) = TypeSchemaRegistry::with_stdlib_types_and_builtin_ids();
+        let st = store();
+        let result_wire = wire_roundtrip(&SV::ResultData {
+            is_ok: false,
+            payload: Box::new(SV::String("bad".to_string())),
+        });
+        let option_wire = wire_roundtrip(&SV::OptionData {
+            is_some: true,
+            payload: Some(Box::new(SV::String("value".to_string()))),
+        });
+
+        let result =
+            serializable_to_kinded_slot(&result_wire, NativeKind::Ptr(HeapKind::Result), &st)
+                .expect("restore legacy ResultData as typed object");
+        let result_storage = unsafe { &*typed_object_ptr(&result) };
+        assert_eq!(result_storage.schema_id, schemas.result as u64);
+        assert_eq!(result_storage.slots()[0].as_i64(), RESULT_VARIANT_ERR);
+        assert_eq!(
+            result_storage.field_kinds[RESULT_PAYLOAD],
+            NativeKind::String
+        );
+        assert_eq!(string_field_text(result_storage, RESULT_PAYLOAD), "bad");
+
+        let option =
+            serializable_to_kinded_slot(&option_wire, NativeKind::Ptr(HeapKind::Option), &st)
+                .expect("restore legacy OptionData as typed object");
+        let option_storage = unsafe { &*typed_object_ptr(&option) };
+        assert_eq!(option_storage.schema_id, schemas.option as u64);
+        assert_eq!(option_storage.slots()[0].as_i64(), OPTION_VARIANT_SOME);
+        assert_eq!(
+            option_storage.field_kinds[OPTION_PAYLOAD],
+            NativeKind::String
+        );
+        assert_eq!(string_field_text(option_storage, OPTION_PAYLOAD), "value");
     }
 }

@@ -119,6 +119,10 @@ pub enum TypedArrayKind {
     /// `HeapElement` impl + `_new`/`_drop` allocators are RESOLVED at HEAD
     /// (heap_value.rs:2948 `_new` / :3092 `impl HeapElement`).
     TraitObject,
+    /// `TypedArray<*const ContentNode>` — backing for `Array<content>`.
+    /// Content values use the existing `Ptr(HeapKind::Content)` slot carrier,
+    /// whose bits are `Arc::into_raw(Arc<ContentNode>)`.
+    Content,
     /// `TypedArray<*const TypedArrayElem>` — backing for a NESTED array
     /// (`[[1,2],[3,4]]`, Construction strict-typing close, USER RULING
     /// 2026-06-05). Each element is itself a v2-raw `*mut TypedArray<U>`
@@ -159,6 +163,7 @@ impl TypedArrayKind {
             TypedArrayKind::TypedObject => OpCode::NewTypedArrayTypedObject,
             // Phase 4b W16.2-B op_new_array-trait-object-element (2026-06-05).
             TypedArrayKind::TraitObject => OpCode::NewTypedArrayTraitObject,
+            TypedArrayKind::Content => OpCode::NewTypedArrayContent,
             // Construction strict-typing close (2026-06-05) — nested array.
             TypedArrayKind::TypedArray => OpCode::NewTypedArrayNested,
             TypedArrayKind::Callable => OpCode::NewTypedArrayCallable,
@@ -187,6 +192,7 @@ impl TypedArrayKind {
             TypedArrayKind::TypedObject => OpCode::TypedArrayGetTypedObject,
             // Phase 4b W16.2-B op_new_array-trait-object-element (2026-06-05).
             TypedArrayKind::TraitObject => OpCode::TypedArrayGetTraitObject,
+            TypedArrayKind::Content => OpCode::TypedArrayGetContent,
             // Construction strict-typing close (2026-06-05) — nested array.
             TypedArrayKind::TypedArray => OpCode::TypedArrayGetNested,
             TypedArrayKind::Callable => OpCode::TypedArrayGetCallable,
@@ -215,6 +221,7 @@ impl TypedArrayKind {
             TypedArrayKind::TypedObject => OpCode::TypedArrayPushTypedObject,
             // Phase 4b W16.2-B op_new_array-trait-object-element (2026-06-05).
             TypedArrayKind::TraitObject => OpCode::TypedArrayPushTraitObject,
+            TypedArrayKind::Content => OpCode::TypedArrayPushContent,
             // Construction strict-typing close (2026-06-05) — nested array.
             TypedArrayKind::TypedArray => OpCode::TypedArrayPushNested,
             TypedArrayKind::Callable => OpCode::TypedArrayPushCallable,
@@ -243,6 +250,7 @@ impl TypedArrayKind {
             TypedArrayKind::TypedObject => OpCode::TypedArraySetTypedObject,
             // Phase 4b W16.2-B op_new_array-trait-object-element (2026-06-05).
             TypedArrayKind::TraitObject => OpCode::TypedArraySetTraitObject,
+            TypedArrayKind::Content => OpCode::TypedArraySetContent,
             // Construction strict-typing close (2026-06-05) — nested array.
             TypedArrayKind::TypedArray => OpCode::TypedArraySetNested,
             TypedArrayKind::Callable => OpCode::TypedArraySetCallable,
@@ -382,6 +390,9 @@ pub fn concrete_type_for_typed_array_kind(kind: TypedArrayKind) -> ConcreteType 
         TypedArrayKind::TraitObject => {
             ConcreteType::placeholder_struct(shape_value::v2::concrete_type::StructLayoutId(0))
         }
+        TypedArrayKind::Content => {
+            ConcreteType::placeholder_struct(shape_value::v2::concrete_type::StructLayoutId(0))
+        }
         // Construction strict-typing close (2026-06-05) — nested array. The
         // kind→ConcreteType round-trip cannot recover the inner element type
         // (every nested-array monomorphization collapses to this one kind, the
@@ -476,6 +487,7 @@ pub fn should_use_typed_array_from_slot_kind(
         // statically proven at the producer site, never decoded from runtime
         // bits.
         NativeKind::Ptr(shape_value::HeapKind::TypedObject) => Some(TypedArrayKind::TypedObject),
+        NativeKind::Ptr(shape_value::HeapKind::Content) => Some(TypedArrayKind::Content),
         NativeKind::Ptr(shape_value::HeapKind::Closure) => Some(TypedArrayKind::Callable),
         _ => None,
     }
@@ -508,6 +520,7 @@ pub fn vec_type_name_for_typed_array_kind(kind: TypedArrayKind) -> &'static str 
         TypedArrayKind::TypedObject => "Vec<object>",
         // Phase 4b W16.2-B op_new_array-trait-object-element (2026-06-05).
         TypedArrayKind::TraitObject => "Vec<dyn>",
+        TypedArrayKind::Content => "Vec<content>",
         TypedArrayKind::TypedArray => "Vec<array>",
         TypedArrayKind::Callable => "Vec<function>",
     }
@@ -536,6 +549,7 @@ pub fn vec_element_type_name_for_typed_array_kind(kind: TypedArrayKind) -> &'sta
         TypedArrayKind::TypedObject => "object",
         // Phase 4b W16.2-B op_new_array-trait-object-element (2026-06-05).
         TypedArrayKind::TraitObject => "dyn",
+        TypedArrayKind::Content => "content",
         TypedArrayKind::TypedArray => "array",
         TypedArrayKind::Callable => "function",
     }
@@ -802,6 +816,21 @@ impl super::BytecodeCompiler {
             _ => None,
         };
         if let Some(inner) = dyn_inner {
+            // Annotation wrappers construct `Array<parameter>` for their
+            // runtime args. When the parameter is `Array<T>` / `T[]`, the
+            // wrapper therefore needs the existing nested-array carrier.
+            if matches!(inner, TypeAnnotation::Array(_))
+                || matches!(
+                    inner,
+                    TypeAnnotation::Generic { name, args }
+                        if name.as_str() == "Array" && args.len() == 1
+                )
+            {
+                return Some(TypedArrayKind::TypedArray);
+            }
+            if matches!(inner, TypeAnnotation::Basic(name) if name == "content") {
+                return Some(TypedArrayKind::Content);
+            }
             if matches!(inner, TypeAnnotation::Function { .. })
                 || matches!(inner, TypeAnnotation::Basic(name) if name == "function")
                 || matches!(inner, TypeAnnotation::Generic { name, .. } if name.as_str() == "Function")
@@ -1152,6 +1181,9 @@ impl super::BytecodeCompiler {
         arg: &shape_ast::ast::Expr,
     ) -> Option<TypedArrayKind> {
         use shape_ast::ast::{Expr, Literal};
+        if Self::expr_is_direct_content_builder(arg) {
+            return Some(TypedArrayKind::Content);
+        }
         if let Expr::Literal(lit, _) = arg {
             match lit {
                 Literal::Int(_) => return Some(TypedArrayKind::I64),
@@ -1184,6 +1216,9 @@ impl super::BytecodeCompiler {
         if let Some(info) = &self.last_expr_type_info {
             if info.storage_hint == Some(crate::type_tracking::NativeKind::Bool) {
                 return Some(TypedArrayKind::Bool);
+            }
+            if Self::type_info_is_content(info) {
+                return Some(TypedArrayKind::Content);
             }
         }
         None

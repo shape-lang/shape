@@ -73,9 +73,9 @@ pub fn create_yaml_module() -> ModuleExports {
                     .map_err(|e| format!("yaml.parse_all() failed: {}", e))?;
                 docs.push(crate::json_value::serde_json_to_json_value(parsed));
             }
-            Ok(TypedReturn::Ok(ConcreteReturn::JsonValue(JsonValue::Array(
-                docs,
-            ))))
+            Ok(TypedReturn::Ok(ConcreteReturn::JsonValue(
+                JsonValue::Array(docs),
+            )))
         },
     );
 
@@ -190,7 +190,10 @@ mod tests {
     #[test]
     fn test_yaml_stringify_object() {
         let value = JsonValue::Object(vec![
-            ("name".to_string(), JsonValue::String("my-project".to_string())),
+            (
+                "name".to_string(),
+                JsonValue::String("my-project".to_string()),
+            ),
             ("version".to_string(), JsonValue::Int(42)),
             ("active".to_string(), JsonValue::Bool(true)),
         ]);

@@ -720,6 +720,25 @@ impl VirtualMachine {
                     let r = super::super::builtins::math::builtin_median(&args)?;
                     self.push_kinded_slot(r)?;
                 }
+                BuiltinFunction::IntrinsicCorrelation => {
+                    let args = self.pop_builtin_args()?;
+                    let r = super::super::builtins::intrinsics::statistical::builtin_correlation(
+                        &args,
+                    )?;
+                    self.push_kinded_slot(r)?;
+                }
+                BuiltinFunction::IntrinsicCovariance => {
+                    let args = self.pop_builtin_args()?;
+                    let r =
+                        super::super::builtins::intrinsics::statistical::builtin_covariance(&args)?;
+                    self.push_kinded_slot(r)?;
+                }
+                BuiltinFunction::IntrinsicPercentile => {
+                    let args = self.pop_builtin_args()?;
+                    let r =
+                        super::super::builtins::intrinsics::statistical::builtin_percentile(&args)?;
+                    self.push_kinded_slot(r)?;
+                }
                 BuiltinFunction::IntrinsicRollingMean => {
                     let args = self.pop_builtin_args()?;
                     let r = vm_rolling_mean_intrinsic_slot(&args)?;
@@ -756,9 +775,6 @@ impl VirtualMachine {
                 | BuiltinFunction::IntrinsicCumsum
                 | BuiltinFunction::IntrinsicCumprod
                 | BuiltinFunction::IntrinsicClip
-                | BuiltinFunction::IntrinsicCorrelation
-                | BuiltinFunction::IntrinsicCovariance
-                | BuiltinFunction::IntrinsicPercentile
                 | BuiltinFunction::IntrinsicCharCode
                 | BuiltinFunction::IntrinsicFromCharCode
                 | BuiltinFunction::IntrinsicSeries => {
@@ -2026,7 +2042,8 @@ fn vm_linear_recurrence_intrinsic_slot(args: &[KindedSlot]) -> Result<KindedSlot
             args.len()
         )));
     }
-    let data = crate::executor::builtins::math::collect_number_series("linear_recurrence", &args[0])?;
+    let data =
+        crate::executor::builtins::math::collect_number_series("linear_recurrence", &args[0])?;
     let decay = crate::executor::builtins::kind_coerce::number_operand(&args[1]).map_err(|_| {
         VMError::RuntimeError(format!(
             "__intrinsic_linear_recurrence: decay must be a number (got kind {:?})",

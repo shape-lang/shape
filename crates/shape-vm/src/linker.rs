@@ -9,8 +9,9 @@ use std::collections::HashMap;
 use rayon::prelude::*;
 
 use crate::bytecode::{
-    BytecodeProgram, Constant, DebugInfo, Function, FunctionBlob, FunctionHash, Instruction,
-    LinkedFunction, LinkedProgram, Operand, Program, SourceMap,
+    remap_closure_function_layouts, BytecodeProgram, Constant, DebugInfo, Function, FunctionBlob,
+    FunctionHash, Instruction, LinkedFunction, LinkedProgram, Operand, Program, SourceMap,
+    TransferredClosureLayoutError,
 };
 use shape_abi_v1::PermissionSet;
 use shape_value::{FunctionId, StringId};
@@ -49,6 +50,12 @@ pub enum LinkError {
         blob: FunctionHash,
         ordinal: u16,
         table_len: usize,
+    },
+    #[error("blob {blob}: cannot reconstruct transferred closure layout: {source}")]
+    InvalidTransferredClosureLayout {
+        blob: FunctionHash,
+        #[source]
+        source: TransferredClosureLayoutError,
     },
 }
 
@@ -388,6 +395,14 @@ pub fn link(program: &Program) -> Result<LinkedProgram, LinkError> {
         return Err(LinkError::StringPoolOverflow(total_strings));
     }
 
+    let closure_function_layouts =
+        remap_closure_function_layouts(program, &blobs).map_err(|error| {
+            LinkError::InvalidTransferredClosureLayout {
+                blob: error.blob,
+                source: error.source,
+            }
+        })?;
+
     // Compute transitive union of all required permissions across all blobs.
     let total_required_permissions = blobs.iter().fold(PermissionSet::pure(), |acc, blob| {
         acc.union(&blob.required_permissions)
@@ -557,7 +572,7 @@ pub fn link(program: &Program) -> Result<LinkedProgram, LinkError> {
             foreign_functions: program.foreign_functions.clone(),
             native_struct_layouts: program.native_struct_layouts.clone(),
             total_required_permissions: total_required_permissions.clone(),
-            closure_function_layouts: remap_closure_function_layouts(program, &blobs),
+            closure_function_layouts,
             trait_vtables: program.trait_vtables.clone(),
             has_imported_const_inline: program.has_imported_const_inline,
             has_w17_marshal_residual: program.has_w17_marshal_residual,
@@ -685,7 +700,7 @@ pub fn link(program: &Program) -> Result<LinkedProgram, LinkError> {
         foreign_functions: program.foreign_functions.clone(),
         native_struct_layouts: program.native_struct_layouts.clone(),
         total_required_permissions,
-        closure_function_layouts: remap_closure_function_layouts(program, &blobs),
+        closure_function_layouts,
         trait_vtables: program.trait_vtables.clone(),
         has_imported_const_inline: program.has_imported_const_inline,
         has_w17_marshal_residual: program.has_w17_marshal_residual,
@@ -693,29 +708,6 @@ pub fn link(program: &Program) -> Result<LinkedProgram, LinkError> {
         has_reference_escape_promotion: program.has_reference_escape_promotion,
         has_null_coalesce_residual: program.has_null_coalesce_residual,
     })
-}
-
-/// Closure spec §14.6 (H6.5): remap the program's name-keyed
-/// `closure_function_layouts_by_name` into a post-link-id-indexed Vec.
-/// The result is a `Vec<Option<Arc<ClosureLayout>>>` whose position
-/// matches `LinkedProgram.functions`'s ordering (i.e. the same index
-/// the VM passes as `func_id` to `op_make_closure`).
-fn remap_closure_function_layouts(
-    program: &Program,
-    blobs: &[&FunctionBlob],
-) -> Vec<Option<std::sync::Arc<shape_value::v2::closure_layout::ClosureLayout>>> {
-    if program.closure_function_layouts_by_name.is_empty() {
-        return Vec::new();
-    }
-    blobs
-        .iter()
-        .map(|blob| {
-            program
-                .closure_function_layouts_by_name
-                .get(&blob.name)
-                .cloned()
-        })
-        .collect()
 }
 
 // ---------------------------------------------------------------------------

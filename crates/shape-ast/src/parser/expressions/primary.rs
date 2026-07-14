@@ -357,7 +357,6 @@ fn parse_primary_expr_inner(pair: Pair<Rule>) -> Result<Expr> {
             location: Some(pair_loc),
         }),
         Rule::expression => parse_expression(pair),
-        Rule::temporal_nav => super::temporal::parse_temporal_nav(pair),
         Rule::timeframe_expr => super::temporal::parse_timeframe_expr(pair),
         Rule::async_let_expr => super::control_flow::parse_async_let_expr(pair),
         Rule::async_scope_expr => super::control_flow::parse_async_scope_expr(pair),

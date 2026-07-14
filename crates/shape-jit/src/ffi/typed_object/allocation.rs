@@ -75,22 +75,29 @@ pub extern "C" fn jit_typed_object_alloc(schema_id: u32, _data_size: u64) -> u64
     let mut slots: Vec<ValueSlot> = Vec::with_capacity(field_count);
     let mut heap_mask: u64 = 0;
     for (i, field) in schema.fields.iter().enumerate() {
-        // `to_native_kind` refuses Any/Option/HashMap/Set (kinds whose slot
-        // kind is per-value, not schema-static). Those TypedObject shapes need
-        // the per-field kind threaded from the producing operand — the Wave-7
-        // Phase-B follow-up. Surface-and-stop rather than mislabel a slot.
-        let kind = match field.field_type.to_native_kind() {
-            Ok(k) => k,
-            Err(_) => {
-                tracing::debug!(
-                    target: "shape_jit",
-                    schema = schema_id,
-                    field = i,
-                    "jit_typed_object_alloc: SURFACE — field has no static \
-                     NativeKind projection (Any/Option/HashMap/Set)",
-                );
-                return TAG_NULL;
+        // `FieldType::Option` refuses schema-level projection in the shared
+        // type API because its payload kind is value-dependent. The JIT lane
+        // here is narrower: Option fields store canonical `__Option`
+        // TypedObject carriers, and the variant payload kind lives inside
+        // that carrier. The containing field therefore owns a
+        // `Ptr(TypedObject)` edge for drop/barrier/GC purposes.
+        let kind = match &field.field_type {
+            shape_runtime::type_schema::FieldType::Option(_) => {
+                NativeKind::Ptr(shape_value::heap_value::HeapKind::TypedObject)
             }
+            _ => match field.field_type.to_native_kind() {
+                Ok(k) => k,
+                Err(_) => {
+                    tracing::debug!(
+                        target: "shape_jit",
+                        schema = schema_id,
+                        field = i,
+                        "jit_typed_object_alloc: SURFACE — field has no static \
+                         NativeKind projection (Any/HashMap/Set)",
+                    );
+                    return TAG_NULL;
+                }
+            },
         };
         // Heap-kinded slots (String / Ptr(TypedArray) / Ptr(TypedObject)) set
         // the heap_mask bit; they start null and Drop skips bits == 0.

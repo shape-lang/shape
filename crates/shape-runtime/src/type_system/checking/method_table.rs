@@ -241,13 +241,7 @@ impl MethodTable {
         // is_null() -> bool
         self.register_method(json, "is_null", vec![], boolean(), false);
         // keys() -> Array<string>
-        self.register_method(
-            json,
-            "keys",
-            vec![],
-            BuiltinTypes::array(string()),
-            false,
-        );
+        self.register_method(json, "keys", vec![], BuiltinTypes::array(string()), false);
         // len() -> number
         self.register_method(json, "len", vec![], number(), false);
     }

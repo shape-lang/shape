@@ -32,7 +32,8 @@
 use crate::bytecode::{Instruction, Operand};
 use crate::executor::vm_impl::stack::{clone_with_kind, drop_with_kind};
 use shape_runtime::type_schema::FieldType;
-use shape_value::{HeapKind, NativeKind, VMError, ValueSlot};
+use shape_runtime::type_schema::builtin_schemas::BuiltinSchemaIds;
+use shape_value::{HeapKind, KindedSlot, NativeKind, VMError, ValueSlot};
 
 /// Compile-time field type tags for zero-cost field access.
 /// Stored in `Operand::TypedField::field_type_tag` so the executor
@@ -716,16 +717,18 @@ impl TypedObjectOps for super::VirtualMachine {
 
         // Pop value then receiver (LIFO; the compiler pushes receiver
         // first per `assignment.rs:566`).
-        let (value_bits, value_kind) = self.pop_kinded()?;
-        let (recv_bits, recv_kind) = self.pop_kinded()?;
+        let value = self.pop_kinded_slot_preserving_miri()?;
+        let receiver = self.pop_kinded_slot_preserving_miri()?;
+        let recv_bits = receiver.raw();
+        let recv_kind = receiver.kind();
 
         // Validate receiver kind. Non-TypedObject receivers: drain shares
         // and surface a TypeError. The Bool-sentinel fallback shape of
         // `op_get_field_typed` is read-side only — write-side type
         // confusion must error rather than silently no-op.
         if recv_kind != NativeKind::Ptr(HeapKind::TypedObject) {
-            drop_with_kind(value_bits, value_kind);
-            drop_with_kind(recv_bits, recv_kind);
+            drop(value);
+            drop(receiver);
             return Err(VMError::TypeError {
                 expected: "TypedObject receiver",
                 got: "non-TypedObject kind",
@@ -733,43 +736,37 @@ impl TypedObjectOps for super::VirtualMachine {
         }
 
         if recv_bits == 0 {
-            drop_with_kind(value_bits, value_kind);
+            drop(value);
+            drop(receiver);
             return Err(VMError::RuntimeError(
                 "op_set_field_typed: null TypedObject receiver".to_string(),
             ));
         }
 
-        // ReceiverGuard mirror per Phase 4 `op_get_field_typed:341-353`
-        // (cluster-1.5-v2-raw-empirical-isolation-and-fix follow-up
-        // 2026-05-17): `recv_bits` is `_new`-allocated v2-raw
-        // `*const TypedObjectStorage` (NOT `Arc::into_raw`) so
-        // `Arc::from_raw` here was wrong-type recovery causing tcache
-        // double-free (Phase 4 imprecision 84 op_set_field_typed:608
-        // residual). Borrow via raw-deref + `ReceiverGuard` RAII; on
-        // success use `mem::forget` to transfer the share onto the
-        // result stack slot via `push_kinded`; on error the guard's
-        // `Drop` dispatches through `drop_with_kind` which routes to
-        // the v2-raw `release_elem` retire path.
-        struct ReceiverGuard {
-            bits: u64,
-            kind: NativeKind,
-        }
-        impl Drop for ReceiverGuard {
-            #[inline]
-            fn drop(&mut self) {
-                crate::executor::vm_impl::stack::drop_with_kind(self.bits, self.kind);
-            }
-        }
-        let guard = ReceiverGuard {
-            bits: recv_bits,
-            kind: recv_kind,
-        };
         // R1 soundness (2026-06-23): hold the receiver as a RAW
         // `*mut TypedObjectStorage`. We must NOT form `&*(recv_bits as
         // *const TypedObjectStorage)` anywhere on the write path — forming
         // `&TypedObjectStorage` freezes the allocation (SharedReadOnly /
         // Frozen) and forbids the interior-mutable slot write that
         // `write_slot_in_place` performs, even through the `UnsafeCell`.
+        #[cfg(miri)]
+        let storage_ptr: *mut shape_value::heap_value::TypedObjectStorage =
+            match receiver.miri_provenance() {
+                shape_value::heap_value::MiriSlotProvenance::TypedObject(ptr)
+                    if !ptr.is_null() =>
+                {
+                    ptr as *mut shape_value::heap_value::TypedObjectStorage
+                }
+                other => {
+                    drop(value);
+                    drop(receiver);
+                    return Err(VMError::RuntimeError(format!(
+                        "op_set_field_typed: missing Miri TypedObject provenance \
+                         for receiver ({other:?})"
+                    )));
+                }
+            };
+        #[cfg(not(miri))]
         let storage_ptr: *mut shape_value::heap_value::TypedObjectStorage =
             recv_bits as *mut shape_value::heap_value::TypedObjectStorage;
 
@@ -778,21 +775,18 @@ impl TypedObjectOps for super::VirtualMachine {
             *type_id,
             *field_idx,
             *field_type_tag,
-            value_bits,
-            value_kind,
+            value,
         );
 
         match result {
             Ok(()) => {
-                // Transfer receiver share onto result stack slot; suppress
-                // ReceiverGuard's drop so the share isn't released here.
-                std::mem::forget(guard);
-                self.push_kinded(recv_bits, recv_kind)
+                // Transfer receiver share onto result stack slot.
+                self.push_kinded_slot_preserving_miri(receiver)
             }
             Err(e) => {
-                // ReceiverGuard's drop releases the receiver share on
-                // scope exit. Value was already dropped inside
-                // `write_typed_object_field` on the error path.
+                // Value was already dropped inside `write_typed_object_field`
+                // on the error path. Release the receiver share here.
+                drop(receiver);
                 Err(e)
             }
         }
@@ -800,12 +794,12 @@ impl TypedObjectOps for super::VirtualMachine {
 }
 
 impl super::VirtualMachine {
-    /// Write `value_bits`/`value_kind` into `storage`'s field at the
+    /// Write `value` into `storage`'s field at the
     /// operand-specified location. Mirrors the schema-match / IC /
     /// name-fallback chain in `op_get_field_typed`. On success the
-    /// `value_bits` share is transferred to the storage's slot and the
-    /// prior occupant's share is released via `drop_with_kind`. On error
-    /// the `value_bits` share is dropped before return.
+    /// value share is transferred to the storage's slot and the prior
+    /// occupant's share is released via `drop_with_kind`. On error the value
+    /// share is dropped before return.
     ///
     /// ADR-006 §2.7.13 / Q14 in-place write via
     /// `TypedObjectStorage::write_slot_in_place`.
@@ -815,15 +809,14 @@ impl super::VirtualMachine {
         type_id: u16,
         field_idx: u16,
         field_type_tag: u16,
-        value_bits: u64,
-        value_kind: NativeKind,
+        value: KindedSlot,
     ) -> Result<(), VMError> {
         // R1 soundness: read scalar header fields via RAW place projection —
         // no `&TypedObjectStorage` is formed (which would freeze the
         // allocation and forbid the downstream interior-mutable slot write).
         // SAFETY: `storage` is a valid, aligned `*mut TypedObjectStorage`
         // recovered from `recv_bits` (a live `_new`-allocated v2-raw
-        // pointer, kept alive by the ReceiverGuard share in the caller).
+        // pointer, kept alive by the receiver KindedSlot share in the caller).
         let schema_id = unsafe { (*storage).schema_id };
         let field_count = unsafe {
             let cells_ptr: *const [std::cell::UnsafeCell<shape_value::slot::ValueSlot>] =
@@ -836,14 +829,20 @@ impl super::VirtualMachine {
         if schema_id == type_id as u64 {
             let idx = field_idx as usize;
             if idx >= field_count {
-                drop_with_kind(value_bits, value_kind);
+                drop(value);
                 return Err(VMError::RuntimeError(format!(
                     "op_set_field_typed: field_idx {} out of bounds \
                      (slot count {})",
                     idx, field_count
                 )));
             }
-            return write_field_at_idx(storage, idx, field_type_tag, value_bits, value_kind);
+            return write_field_at_idx(
+                storage,
+                idx,
+                field_type_tag,
+                value,
+                &self.builtin_schemas,
+            );
         }
 
         // Schema-mismatch path: name-based lookup via IC + megamorphic
@@ -859,8 +858,8 @@ impl super::VirtualMachine {
                     storage,
                     src_idx,
                     hit.field_type_tag,
-                    value_bits,
-                    value_kind,
+                    value,
+                    &self.builtin_schemas,
                 );
             }
         }
@@ -904,8 +903,8 @@ impl super::VirtualMachine {
                         storage,
                         src_idx,
                         hit.field_type_tag,
-                        value_bits,
-                        value_kind,
+                        value,
+                        &self.builtin_schemas,
                     );
                 }
             }
@@ -931,13 +930,19 @@ impl super::VirtualMachine {
                     src_field_idx,
                     tag,
                 );
-                return write_field_at_idx(storage, src_idx, tag, value_bits, value_kind);
+                return write_field_at_idx(
+                    storage,
+                    src_idx,
+                    tag,
+                    value,
+                    &self.builtin_schemas,
+                );
             }
         }
 
         // Field not found on either side: drop the value share and
         // surface UndefinedProperty rather than silently no-op'ing.
-        drop_with_kind(value_bits, value_kind);
+        drop(value);
         Err(VMError::RuntimeError(format!(
             "op_set_field_typed: field index {} on schema {} not found \
              on receiver schema {}",
@@ -953,9 +958,14 @@ fn write_field_at_idx(
     storage: *mut shape_value::heap_value::TypedObjectStorage,
     idx: usize,
     field_type_tag: u16,
-    value_bits: u64,
-    value_kind: NativeKind,
+    value: KindedSlot,
+    builtin_schemas: &BuiltinSchemaIds,
 ) -> Result<(), VMError> {
+    let value_bits = value.raw();
+    let value_kind = value.kind();
+    #[cfg(miri)]
+    let value_provenance = value.miri_provenance();
+
     // R1 soundness: NO `&TypedObjectStorage` is formed anywhere in this
     // function — all field reads use raw place projection through the
     // `*mut Self`, and the slot write goes through
@@ -986,7 +996,12 @@ fn write_field_at_idx(
     // FIELD_TAG_ANY / UNKNOWN are the only operand tags that may
     // legitimately carry a kind not statically resolvable in the
     // operand — for those we accept the stored kind as canonical.
-    if value_kind != stored_kind
+    if field_type_tag == FIELD_TAG_OPTION {
+        if let Err(err) = validate_option_field_carrier(&value, builtin_schemas) {
+            drop(value);
+            return Err(err);
+        }
+    } else if value_kind != stored_kind
         && field_type_tag != FIELD_TAG_ANY
         && field_type_tag != FIELD_TAG_UNKNOWN
     {
@@ -1036,7 +1051,7 @@ fn write_field_at_idx(
             _ => value_kind == stored_kind,
         };
         if !kind_compatible_with_tag {
-            drop_with_kind(value_bits, value_kind);
+            drop(value);
             return Err(VMError::TypeError {
                 expected: "value kind matching field schema",
                 got: "mismatched kind",
@@ -1057,6 +1072,17 @@ fn write_field_at_idx(
         let slot_ptr = std::cell::UnsafeCell::raw_get(cell_ptr);
         (*slot_ptr).raw()
     };
+    #[cfg(miri)]
+    let prior_provenance = unsafe {
+        let provenance_ptr: *const [shape_value::heap_value::MiriSlotProvenance] =
+            &raw const *(*storage).field_provenance;
+        debug_assert!(idx < provenance_ptr.len());
+        if idx < provenance_ptr.len() {
+            *(provenance_ptr as *const shape_value::heap_value::MiriSlotProvenance).add(idx)
+        } else {
+            shape_value::heap_value::MiriSlotProvenance::None
+        }
+    };
     crate::memory::write_barrier_slot(prior_bits, value_bits);
 
     // SAFETY: per `TypedObjectStorage::write_slot_in_place` contract —
@@ -1067,19 +1093,113 @@ fn write_field_at_idx(
     // against the storage's `field_kinds` track. `value_bits` ownership
     // (one strong-count share for heap kinds) transfers to the slot; the
     // returned `_returned_prior` is the same bits we pre-read.
+    #[cfg(miri)]
+    let _returned_prior = unsafe {
+        shape_value::heap_value::TypedObjectStorage::write_slot_in_place_with_miri_provenance(
+            storage,
+            idx,
+            value_bits,
+            value_provenance,
+        )
+    };
+    #[cfg(not(miri))]
     let _returned_prior = unsafe {
         shape_value::heap_value::TypedObjectStorage::write_slot_in_place(storage, idx, value_bits)
     };
+    std::mem::forget(value);
     debug_assert_eq!(
         _returned_prior, prior_bits,
         "op_set_field_typed: write_slot_in_place prior_bits mismatch — \
          concurrent write detected? ADR-006 §2.7.13 / Q14",
     );
 
+    if field_type_tag == FIELD_TAG_OPTION {
+        // Option<T> is a coarse schema tag: the live carrier is always the
+        // canonical __Option typed object, and the per-slot NativeKind must
+        // follow the newly written value for readback, drop, and GC traversal.
+        unsafe {
+            update_option_field_kind_metadata(storage, idx, value_kind);
+        }
+    }
+
     // Release the prior occupant's share via the kind-aware dispatch
     // table (§2.7.7 WB2.4). For inline scalar fields this is a no-op.
+    #[cfg(miri)]
+    drop(KindedSlot::new_with_miri_provenance(
+        ValueSlot::from_raw(prior_bits),
+        stored_kind,
+        prior_provenance,
+    ));
+    #[cfg(not(miri))]
     drop_with_kind(prior_bits, stored_kind);
     Ok(())
+}
+
+fn validate_option_field_carrier(
+    value: &KindedSlot,
+    builtin_schemas: &BuiltinSchemaIds,
+) -> Result<(), VMError> {
+    let value_bits = value.raw();
+    let value_kind = value.kind();
+    if value_kind != NativeKind::Ptr(HeapKind::TypedObject) {
+        return Err(VMError::TypeError {
+            expected: "canonical __Option.Some/None typed-object carrier",
+            got: "non-Option field value",
+        });
+    }
+    if value_bits == 0 {
+        return Err(VMError::RuntimeError(
+            "Option field assignment received null TypedObject carrier".to_string(),
+        ));
+    }
+
+    match super::result_option_carrier::read_option(builtin_schemas, value) {
+        Ok(Some(_)) => Ok(()),
+        Ok(None) => Err(VMError::TypeError {
+            expected: "canonical __Option.Some/None typed-object carrier",
+            got: "non-Option typed object",
+        }),
+        Err(err) => Err(err),
+    }
+}
+
+unsafe fn update_option_field_kind_metadata(
+    storage: *mut shape_value::heap_value::TypedObjectStorage,
+    idx: usize,
+    value_kind: NativeKind,
+) {
+    let updated_kinds = {
+        let kinds: &[NativeKind] = unsafe { &(*storage).field_kinds };
+        debug_assert!(idx < kinds.len());
+        if idx >= kinds.len() || kinds[idx] == value_kind {
+            None
+        } else {
+            Some(kinds.to_vec())
+        }
+    };
+
+    if let Some(mut updated) = updated_kinds {
+        updated[idx] = value_kind;
+        let field_kinds_ptr = unsafe { &raw mut (*storage).field_kinds };
+        let old = unsafe {
+            std::ptr::replace(
+                field_kinds_ptr,
+                std::sync::Arc::from(updated.into_boxed_slice()),
+            )
+        };
+        drop(old);
+    }
+
+    if idx < 64 {
+        let bit = 1u64 << idx;
+        unsafe {
+            if value_kind.is_refcounted() {
+                (*storage).heap_mask |= bit;
+            } else {
+                (*storage).heap_mask &= !bit;
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1087,6 +1207,7 @@ mod tests {
     use super::*;
     use crate::bytecode::{Instruction, OpCode};
     use crate::executor::{VMConfig, VirtualMachine};
+    use crate::executor::result_option_carrier::{build_none, build_some, read_option};
     use shape_runtime::type_schema::{FieldType, TypeSchema};
     use shape_value::heap_value::TypedObjectStorage;
     use std::sync::Arc;
@@ -1148,6 +1269,202 @@ mod tests {
         assert_eq!(storage_back.slots()[1].raw(), 99u64);
         // Retire the popped share through the v2-raw drop dispatch.
         crate::executor::vm_impl::stack::drop_with_kind(obj_bits_back, obj_kind_back);
+    }
+
+    #[test]
+    fn set_field_typed_scalar_overwrite_preserves_metadata() {
+        let mut vm = VirtualMachine::new(VMConfig::default());
+
+        let schema = TypeSchema::new(
+            "ScalarOverwriteProbe".to_string(),
+            vec![("value".to_string(), FieldType::I64)],
+        );
+        let schema_id = schema.id;
+        vm.program.type_schema_registry.register(schema);
+
+        let ptr = TypedObjectStorage::_new(
+            schema_id as u64,
+            vec![ValueSlot::from_int(1)].into_boxed_slice(),
+            0,
+            Arc::from(vec![NativeKind::Int64].into_boxed_slice()),
+        );
+
+        vm.push_kinded_slot_preserving_miri(KindedSlot::from_typed_object_raw(ptr))
+            .unwrap();
+        vm.push_kinded_slot_preserving_miri(KindedSlot::from_int(42))
+            .unwrap();
+
+        let operand = Operand::TypedField {
+            type_id: schema_id as u16,
+            field_idx: 0,
+            field_type_tag: FIELD_TAG_I64,
+        };
+        let instr = Instruction::new(OpCode::SetFieldTyped, Some(operand));
+        vm.op_set_field_typed(&instr)
+            .expect("scalar field overwrite should succeed");
+
+        let receiver_back = vm.pop_kinded_slot_preserving_miri().unwrap();
+        let storage_back = receiver_back
+            .as_typed_object_storage()
+            .expect("receiver remains a typed object");
+        assert_eq!(storage_back.slots()[0].as_i64(), 42);
+        assert_eq!(storage_back.field_kinds[0], NativeKind::Int64);
+        assert_eq!(
+            storage_back.heap_mask, 0,
+            "scalar overwrite must not mark the field as heap-backed"
+        );
+        drop(receiver_back);
+    }
+
+    #[test]
+    fn set_field_typed_option_overwrite_preserves_canonical_carrier_metadata() {
+        let mut vm = VirtualMachine::new(VMConfig::default());
+
+        let schema = TypeSchema::new(
+            "OptionOverwriteProbe".to_string(),
+            vec![(
+                "maybe".to_string(),
+                FieldType::Option(Box::new(FieldType::I64)),
+            )],
+        );
+        let schema_id = schema.id;
+        vm.program.type_schema_registry.register(schema);
+
+        let initial = build_none(&vm.builtin_schemas);
+        let initial_bits = initial.raw();
+        let initial_kind = initial.kind();
+        #[cfg(miri)]
+        let initial_provenance = initial.miri_provenance();
+        assert_eq!(initial_kind, NativeKind::Ptr(HeapKind::TypedObject));
+        #[cfg(miri)]
+        let ptr = TypedObjectStorage::_new_with_miri_field_provenance(
+            schema_id as u64,
+            vec![ValueSlot::from_raw(initial_bits)].into_boxed_slice(),
+            0b1,
+            Arc::from(vec![initial_kind].into_boxed_slice()),
+            vec![initial_provenance].into_boxed_slice(),
+        );
+        #[cfg(not(miri))]
+        let ptr = TypedObjectStorage::_new(
+            schema_id as u64,
+            vec![ValueSlot::from_raw(initial_bits)].into_boxed_slice(),
+            0b1,
+            Arc::from(vec![initial_kind].into_boxed_slice()),
+        );
+        std::mem::forget(initial);
+
+        vm.push_kinded_slot_preserving_miri(KindedSlot::from_typed_object_raw(ptr))
+            .unwrap();
+        vm.push_kinded_slot_preserving_miri(build_some(
+            &vm.builtin_schemas,
+            KindedSlot::from_int(7),
+        ))
+        .unwrap();
+
+        let operand = Operand::TypedField {
+            type_id: schema_id as u16,
+            field_idx: 0,
+            field_type_tag: FIELD_TAG_OPTION,
+        };
+        let instr = Instruction::new(OpCode::SetFieldTyped, Some(operand));
+        vm.op_set_field_typed(&instr)
+            .expect("canonical Option carrier should be accepted");
+
+        let receiver_back = vm.pop_kinded_slot_preserving_miri().unwrap();
+        let storage_back = receiver_back
+            .as_typed_object_storage()
+            .expect("receiver remains a typed object");
+        assert_eq!(
+            storage_back.field_kinds[0],
+            NativeKind::Ptr(HeapKind::TypedObject),
+            "Option fields store the canonical __Option typed-object carrier"
+        );
+        assert_eq!(
+            storage_back.heap_mask & 0b1,
+            0b1,
+            "Option carrier field remains heap-backed after overwrite"
+        );
+
+        let field = storage_back
+            .clone_field_kinded(0)
+            .expect("updated Option field should clone");
+        {
+            let option = read_option(&vm.builtin_schemas, &field)
+                .expect("updated field should read as Option")
+                .expect("updated field should be the builtin Option carrier");
+            assert!(option.is_some());
+            let payload = option.clone_payload().unwrap();
+            assert_eq!(payload.as_i64(), Some(7));
+            drop(payload);
+        }
+        drop(field);
+        drop(receiver_back);
+    }
+
+    #[test]
+    fn set_field_typed_option_rejects_non_option_typed_object_carrier() {
+        let mut vm = VirtualMachine::new(VMConfig::default());
+
+        let holder = TypeSchema::new(
+            "OptionRejectProbe".to_string(),
+            vec![(
+                "maybe".to_string(),
+                FieldType::Option(Box::new(FieldType::I64)),
+            )],
+        );
+        let holder_id = holder.id;
+        vm.program.type_schema_registry.register(holder);
+
+        let initial = build_none(&vm.builtin_schemas);
+        let initial_bits = initial.raw();
+        let initial_kind = initial.kind();
+        #[cfg(miri)]
+        let initial_provenance = initial.miri_provenance();
+        #[cfg(miri)]
+        let receiver_ptr = TypedObjectStorage::_new_with_miri_field_provenance(
+            holder_id as u64,
+            vec![ValueSlot::from_raw(initial_bits)].into_boxed_slice(),
+            0b1,
+            Arc::from(vec![initial_kind].into_boxed_slice()),
+            vec![initial_provenance].into_boxed_slice(),
+        );
+        #[cfg(not(miri))]
+        let receiver_ptr = TypedObjectStorage::_new(
+            holder_id as u64,
+            vec![ValueSlot::from_raw(initial_bits)].into_boxed_slice(),
+            0b1,
+            Arc::from(vec![initial_kind].into_boxed_slice()),
+        );
+        std::mem::forget(initial);
+
+        let wrong_schema = TypeSchema::new(
+            "NotAnOptionCarrier".to_string(),
+            vec![("value".to_string(), FieldType::I64)],
+        );
+        let wrong_schema_id = wrong_schema.id;
+        vm.program.type_schema_registry.register(wrong_schema);
+        let wrong_ptr = TypedObjectStorage::_new(
+            wrong_schema_id as u64,
+            vec![ValueSlot::from_int(9)].into_boxed_slice(),
+            0,
+            Arc::from(vec![NativeKind::Int64].into_boxed_slice()),
+        );
+
+        vm.push_kinded_slot_preserving_miri(KindedSlot::from_typed_object_raw(receiver_ptr))
+            .unwrap();
+        vm.push_kinded_slot_preserving_miri(KindedSlot::from_typed_object_raw(wrong_ptr))
+            .unwrap();
+
+        let operand = Operand::TypedField {
+            type_id: holder_id as u16,
+            field_idx: 0,
+            field_type_tag: FIELD_TAG_OPTION,
+        };
+        let instr = Instruction::new(OpCode::SetFieldTyped, Some(operand));
+        let err = vm
+            .op_set_field_typed(&instr)
+            .expect_err("non-Option typed object carrier must be rejected");
+        assert!(matches!(err, VMError::TypeError { .. }));
     }
 
     // =======================================================================

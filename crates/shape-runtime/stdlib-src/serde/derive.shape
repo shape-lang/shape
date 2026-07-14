@@ -40,13 +40,13 @@ pub annotation json_schema() {
         for field in target.fields {
             // Map the canonical Shape field type to a JSON Schema type.
             let mut jt = ""
-            if field.type == "int" {
+            if field.type_ref.kind == "Int" {
                 jt = "integer"
-            } else if field.type == "number" {
+            } else if field.type_ref.kind == "Number" {
                 jt = "number"
-            } else if field.type == "bool" {
+            } else if field.type_ref.kind == "Bool" {
                 jt = "boolean"
-            } else if field.type == "string" {
+            } else if field.type_ref.kind == "String" {
                 jt = "string"
             }
             if jt == "" {

@@ -99,63 +99,10 @@ pub fn parse_relative_time(s: &str) -> Result<RelativeTime> {
     })
 }
 
-/// Parse temporal navigation expression
-/// Handles back(n) and forward(n) expressions
-pub fn parse_temporal_nav(pair: Pair<Rule>) -> Result<Expr> {
-    let span = pair_span(&pair);
-    let inner = pair.into_inner().next().unwrap();
-
-    match inner.as_rule() {
-        Rule::back_nav | Rule::forward_nav => {
-            let is_back = inner.as_rule() == Rule::back_nav;
-            let nav_amount = inner.into_inner().next().unwrap();
-            let mut amount_inner = nav_amount.into_inner();
-
-            // Parse the number
-            let num_pair = amount_inner.next().unwrap();
-            let value: f64 = num_pair
-                .as_str()
-                .parse()
-                .map_err(|e| ShapeError::ParseError {
-                    message: format!("Invalid navigation amount: {}", e),
-                    location: None,
-                })?;
-
-            // Parse optional time unit (defaults to samples)
-            let unit = if let Some(unit_pair) = amount_inner.next() {
-                match unit_pair.as_str() {
-                    "sample" | "samples" | "record" | "records" => DurationUnit::Samples,
-                    "minute" | "minutes" => DurationUnit::Minutes,
-                    "hour" | "hours" => DurationUnit::Hours,
-                    "day" | "days" => DurationUnit::Days,
-                    "week" | "weeks" => DurationUnit::Weeks,
-                    "month" | "months" => DurationUnit::Months,
-                    _ => DurationUnit::Samples,
-                }
-            } else {
-                DurationUnit::Samples
-            };
-
-            // For back navigation, negate the value
-            let final_value = if is_back { -value } else { value };
-
-            Ok(Expr::Duration(
-                Duration {
-                    value: final_value,
-                    unit,
-                },
-                span,
-            ))
-        }
-        _ => Err(ShapeError::ParseError {
-            message: format!(
-                "Expected back_nav or forward_nav, got {:?}",
-                inner.as_rule()
-            ),
-            location: None,
-        }),
-    }
-}
+// `parse_temporal_nav` (back(n) / forward(n)) was deleted along with the
+// temporal-navigation grammar rules: the rules preceded `ident` in the `primary`
+// alternation, so they silently captured calls to user-defined functions named
+// `back` or `forward` and rewrote them into Durations. See shape.pest.
 
 /// Parse timeframe expression
 pub fn parse_timeframe_expr(pair: Pair<Rule>) -> Result<Expr> {

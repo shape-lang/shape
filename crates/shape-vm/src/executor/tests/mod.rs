@@ -26,6 +26,7 @@ pub(crate) mod test_utils;
 // Phase 1.1 & 1.2: Critical execution tests for recently merged features
 mod auto_drop;
 mod channel_ops;
+mod content_array_parity;
 mod decimal_ops;
 mod deque_ops;
 mod intrinsic_kinded_migration;

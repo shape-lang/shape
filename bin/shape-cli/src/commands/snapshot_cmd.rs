@@ -3,17 +3,28 @@ use shape_runtime::hashing::HashDigest;
 use shape_runtime::snapshot::SnapshotStore;
 use std::path::PathBuf;
 
-/// Get the default snapshot store path
-fn snapshot_store() -> Result<SnapshotStore> {
-    let root = dirs::data_local_dir()
-        .map(|dir| dir.join("shape").join("snapshots"))
-        .unwrap_or_else(|| PathBuf::from(".shape").join("snapshots"));
+const SNAPSHOT_STORE_ENV: &str = "SHAPE_SNAPSHOT_STORE";
+
+/// Resolve the snapshot store root shared by `run`, `snapshot`, and `serve`.
+pub(crate) fn snapshot_store_root(explicit_root: Option<PathBuf>) -> PathBuf {
+    explicit_root
+        .or_else(|| std::env::var_os(SNAPSHOT_STORE_ENV).map(PathBuf::from))
+        .unwrap_or_else(|| {
+            dirs::data_local_dir()
+                .map(|dir| dir.join("shape").join("snapshots"))
+                .unwrap_or_else(|| PathBuf::from(".shape").join("snapshots"))
+        })
+}
+
+/// Open the selected snapshot store.
+pub(crate) fn open_snapshot_store(explicit_root: Option<PathBuf>) -> Result<SnapshotStore> {
+    let root = snapshot_store_root(explicit_root);
     SnapshotStore::new(root).context("failed to open snapshot store")
 }
 
-/// List all saved snapshots
-pub async fn run_snapshot_list() -> Result<()> {
-    let store = snapshot_store()?;
+/// List all saved snapshots.
+pub async fn run_snapshot_list(snapshot_store_root: Option<PathBuf>) -> Result<()> {
+    let store = open_snapshot_store(snapshot_store_root)?;
     let snapshots = store.list_snapshots()?;
 
     if snapshots.is_empty() {
@@ -35,9 +46,12 @@ pub async fn run_snapshot_list() -> Result<()> {
     Ok(())
 }
 
-/// Show detailed info about a snapshot
-pub async fn run_snapshot_info(hash_str: String) -> Result<()> {
-    let store = snapshot_store()?;
+/// Show detailed info about a snapshot.
+pub async fn run_snapshot_info(
+    hash_str: String,
+    snapshot_store_root: Option<PathBuf>,
+) -> Result<()> {
+    let store = open_snapshot_store(snapshot_store_root)?;
     let hash = resolve_hash(&store, &hash_str)?;
     let snap = store.get_snapshot(&hash)?;
 
@@ -64,9 +78,12 @@ pub async fn run_snapshot_info(hash_str: String) -> Result<()> {
     Ok(())
 }
 
-/// Delete a snapshot
-pub async fn run_snapshot_delete(hash_str: String) -> Result<()> {
-    let store = snapshot_store()?;
+/// Delete a snapshot.
+pub async fn run_snapshot_delete(
+    hash_str: String,
+    snapshot_store_root: Option<PathBuf>,
+) -> Result<()> {
+    let store = open_snapshot_store(snapshot_store_root)?;
     let hash = resolve_hash(&store, &hash_str)?;
     store.delete_snapshot(&hash)?;
     println!("Deleted snapshot {}", hash.hex());

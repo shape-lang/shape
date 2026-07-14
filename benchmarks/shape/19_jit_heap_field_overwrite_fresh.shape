@@ -1,0 +1,28 @@
+// JIT GC barrier probe: hot overwrite of a heap field with fresh objects.
+//
+// This avoids the current move-then-read JIT deopt that is triggered by
+// repeatedly reusing the same heap source object. It still exercises
+// jit_typed_object_set_field and the heap-field write barrier.
+type FreshLeaf {
+    value: int
+}
+
+type FreshHolder {
+    child: FreshLeaf,
+    payload: int
+}
+
+let mut holder = FreshHolder {
+    child: FreshLeaf { value: 0 },
+    payload: 1
+}
+
+var checksum = 0
+var i = 0
+while i < 5000000 {
+    holder.child = FreshLeaf { value: i }
+    checksum = checksum + holder.child.value
+    i = i + 1
+}
+
+print(checksum)

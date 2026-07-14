@@ -628,12 +628,9 @@ print(c.add(5))
     ShapeTest::new(code).expect_run_err_contains("found identifier");
 }
 
-/// BUG: `set param` directive with annotation arguments not supported.
-/// The `set param b = val` directive in a comptime post block causes
-/// a runtime error: "too many annotation arguments".
-/// When fixed, `set param` should allow an annotation to set default parameter values.
+/// `set param` with an annotation argument installs a default value that is
+/// used when the call omits that parameter.
 #[test]
-
 fn ct_45_annotation_set_param() {
     let code = r#"
 annotation default_b(val) {
@@ -648,20 +645,14 @@ fn add(a: int, b: int) -> int {
   a + b
 }
 
-print(add(5, 3))
+print(add(5))
 "#;
-    ShapeTest::new(code)
-        .expect_run_ok()
-        .expect_output_contains("8");
+    ShapeTest::new(code).expect_run_ok().expect_output("105");
 }
 
-/// BUG: `set` keyword not recognized in comptime context.
-/// Using `set param b = 100` (with a literal value, no annotation args)
-/// causes "Undefined variable: set" because the comptime evaluator does
-/// not implement the `set` directive.
-/// When fixed, `set param` should modify the target function's parameter defaults.
+/// `set param` with a literal value also installs a default value that is used
+/// when the call omits that parameter.
 #[test]
-
 fn ct_45b_set_param_noarg() {
     let code = r#"
 annotation default_b() {
@@ -676,11 +667,9 @@ fn add(a: int, b: int) -> int {
   a + b
 }
 
-print(add(5, 3))
+print(add(5))
 "#;
-    ShapeTest::new(code)
-        .expect_run_ok()
-        .expect_output_contains("8");
+    ShapeTest::new(code).expect_run_ok().expect_output("105");
 }
 
 /// SURFACE: `set param extra: int` does not add a new parameter during semantic

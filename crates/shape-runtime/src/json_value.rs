@@ -406,9 +406,7 @@ fn typed_object_ptr_to_json_value_with_registry_opt(
 /// task/thread/default registry when the caller passes `None`. The by-name
 /// `"Json"` lookup is reliable even when the registry's by-id index has a
 /// collision, so it is the correct discriminator for Json-enum nodes.
-fn resolve_json_schema_id(
-    schemas: Option<&crate::type_schema::TypeSchemaRegistry>,
-) -> Option<u64> {
+fn resolve_json_schema_id(schemas: Option<&crate::type_schema::TypeSchemaRegistry>) -> Option<u64> {
     if let Some(registry) = schemas {
         if let Some(schema) = registry.get("Json") {
             return Some(schema.id as u64);
@@ -968,12 +966,12 @@ fn typed_array_to_json_value(
                 .iter()
                 .map(|&c| JsonValue::String(c.to_string()))
                 .collect(),
-            ELEM_TYPE_STRING => {
-                TypedArray::<*const StringObj>::as_slice(base as *const TypedArray<*const StringObj>)
-                    .iter()
-                    .map(|&p| JsonValue::String(StringObj::as_str(p).to_owned()))
-                    .collect()
-            }
+            ELEM_TYPE_STRING => TypedArray::<*const StringObj>::as_slice(
+                base as *const TypedArray<*const StringObj>,
+            )
+            .iter()
+            .map(|&p| JsonValue::String(StringObj::as_str(p).to_owned()))
+            .collect(),
             ELEM_TYPE_TYPED_OBJECT => {
                 let slice = TypedArray::<*const TypedObjectStorage>::as_slice(
                     base as *const TypedArray<*const TypedObjectStorage>,
@@ -1227,7 +1225,9 @@ pub fn json_value_to_msgpack_bytes(jv: &JsonValue) -> Result<Vec<u8>, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{JsonValue, json_value_to_serde_json, slot_to_json_value, typed_object_ptr_to_json_value};
+    use super::{
+        JsonValue, json_value_to_serde_json, slot_to_json_value, typed_object_ptr_to_json_value,
+    };
     use crate::type_schema::{SyncRegistryScope, TypeSchemaBuilder, TypeSchemaRegistry};
     use shape_value::heap_value::{TypedObjectPtr, TypedObjectStorage};
     use shape_value::{KindedSlot, NativeKind, ValueSlot};
@@ -1294,8 +1294,11 @@ mod tests {
             JsonValue::Null
         );
         assert_eq!(
-            slot_to_json_value(&KindedSlot::from_string_arc(Arc::new("hi".to_string())), None)
-                .unwrap(),
+            slot_to_json_value(
+                &KindedSlot::from_string_arc(Arc::new("hi".to_string())),
+                None
+            )
+            .unwrap(),
             JsonValue::String("hi".to_string())
         );
     }

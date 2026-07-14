@@ -196,6 +196,13 @@ pub enum ConcreteReturn {
 pub enum TypedReturn {
     /// Direct leaf-typed return.
     Concrete(ConcreteReturn),
+    /// Inline `Future(id)` handle returned by a native function that has
+    /// already registered external completion with the VM scheduler.
+    ///
+    /// This is intentionally not a general raw-slot escape hatch: the payload
+    /// is the scheduler id for `Ptr(HeapKind::Future)`, whose runtime
+    /// representation is an inline scalar with no heap refcount share.
+    Future(u64),
     /// Object built from string→leaf pairs, materialized as a
     /// `HashMap`-shaped TypedObject. Insertion order preserved.
     ObjectPairs(Vec<(String, ConcreteReturn)>),

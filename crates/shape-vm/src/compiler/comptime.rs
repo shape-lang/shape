@@ -1255,6 +1255,7 @@ fn rewrite_comptime_type_symbol_args_scoped(
             }
         }
         Statement::SetParamValue { expression, .. }
+        | Statement::SetParamTypeExpr { expression, .. }
         | Statement::SetReturnExpr { expression, .. }
         | Statement::ReplaceBodyExpr { expression, .. }
         | Statement::ReplaceModuleExpr { expression, .. }

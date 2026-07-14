@@ -12,6 +12,28 @@
 
 use shape_test::shape_test::ShapeTest;
 
+fn unawaited_scope_child_ms(sleep_ms: &str) -> u128 {
+    let code = format!(
+        r#"
+use std::core::time
+
+async fn scoped() {{
+    let result = async scope {{
+        async let sleeper = time::sleep({sleep_ms})
+        7
+    }}
+    print(result)
+}}
+
+await scoped()
+"#
+    );
+
+    let start = std::time::Instant::now();
+    ShapeTest::new(&code).with_stdlib().expect_output("7");
+    start.elapsed().as_millis()
+}
+
 // =========================================================================
 // Basic async scope
 // =========================================================================
@@ -98,6 +120,26 @@ await scoped_tasks()
 "#;
 
     ShapeTest::new(code).expect_run_ok().expect_output("99");
+}
+
+#[test]
+fn async_scope_exit_cancels_unawaited_child_without_waiting() {
+    let _ = unawaited_scope_child_ms("0.0");
+
+    let baseline = unawaited_scope_child_ms("0.0");
+    let with_sleep = unawaited_scope_child_ms("1000.0");
+    let cancellation_contribution = with_sleep.saturating_sub(baseline);
+    eprintln!(
+        "async_scope cancellation timing: baseline={baseline}ms with_sleep={with_sleep}ms \
+         cancellation_contribution={cancellation_contribution}ms"
+    );
+
+    assert!(
+        cancellation_contribution < 500,
+        "async scope exit waited for an unawaited child: pending 1s child added \
+         {cancellation_contribution}ms over the {baseline}ms zero-sleep baseline \
+         (with_sleep={with_sleep}ms). Expected < 500ms; waiting for the child adds ~1000ms."
+    );
 }
 
 // =========================================================================

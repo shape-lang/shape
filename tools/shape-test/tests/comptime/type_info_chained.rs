@@ -68,6 +68,27 @@ print(TAG)
         .expect_output("name-accessed");
 }
 
+#[test]
+fn type_info_fields_expose_type_ref_and_preserve_type_string() {
+    let code = r#"
+type Profile {
+  id: int,
+  nickname: string?,
+}
+
+let REFLECTED: string = comptime {
+  let ti = type_info(Profile)
+  let id_field = ti.fields[0]
+  let nick_field = ti.fields[1]
+  f"{ti.type_ref.kind}|{id_field.name}:{id_field.type}:{id_field.type_ref.kind}|{nick_field.name}:{nick_field.type}:{nick_field.type_ref.kind}:{nick_field.optional}"
+}
+print(REFLECTED)
+"#;
+    ShapeTest::new(code)
+        .expect_run_ok()
+        .expect_output("TypedObject|id:int:Int|nickname:string:String:true");
+}
+
 /// W14.2-C1 (1c) chained: inline property access without intermediate
 /// let — `type_info("Point").kind` as the expression value. Verifies
 /// the inline-form of chained access compiles cleanly (the audit-doc

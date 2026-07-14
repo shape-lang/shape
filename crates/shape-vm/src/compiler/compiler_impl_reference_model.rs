@@ -410,6 +410,17 @@ impl BytecodeCompiler {
                     edges,
                 );
             }
+            Statement::SetParamTypeExpr { expression, .. } => {
+                Self::analyze_expr_for_ref_mutation(
+                    expression,
+                    caller_name,
+                    param_index_by_name,
+                    caller_ref_params,
+                    callee_ref_params,
+                    direct_mutates,
+                    edges,
+                );
+            }
             Statement::ReplaceBodyExpr { expression, .. } => {
                 Self::analyze_expr_for_ref_mutation(
                     expression,
@@ -2918,11 +2929,15 @@ impl BytecodeCompiler {
                             Some(ref ann) => {
                                 // Annotated param: the declared type IS the
                                 // proof source for the slot's ConcreteType.
-                                if let Some(ct) =
+                                let ct = crate::compiler::monomorphization::type_resolution::declared_annotation_concrete_type(
+                                    &self, ann,
+                                )
+                                .or_else(|| {
                                     crate::compiler::v2_map_emission::concrete_type_from_annotation(
                                         ann,
                                     )
-                                {
+                                });
+                                if let Some(ct) = ct {
                                     concrete_types[idx] = ct;
                                 }
                             }

@@ -37,6 +37,13 @@ pub enum Statement {
         type_annotation: TypeAnnotation,
         span: Span,
     },
+    /// Comptime-only directive to set a function parameter type from an
+    /// expression evaluated in comptime context.
+    SetParamTypeExpr {
+        param_name: String,
+        expression: Expr,
+        span: Span,
+    },
     /// Comptime-only directive to set a function parameter default value.
     SetParamValue {
         param_name: String,
@@ -62,8 +69,9 @@ pub enum Statement {
     /// Comptime-only directive to ADD generated module items from an expression
     /// evaluated in comptime context (the `extend (expr)` computed-generation
     /// surface, design §4.5.7). The expression must evaluate to a `string` of
-    /// top-level Shape source; the parsed items are inserted additively at the
-    /// annotated item's module scope and compiled by the strict pipeline.
+    /// top-level Shape source or a typed ItemFragment; the resulting items are
+    /// inserted additively at the annotated item's module scope and compiled by
+    /// the strict pipeline.
     ExtendItemsExpr { expression: Expr, span: Span },
 }
 

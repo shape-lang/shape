@@ -1,10 +1,49 @@
 //! JIT executor implementing the ProgramExecutor trait
 
 use shape_ast::Program;
+use shape_vm::bytecode::{BytecodeProgram, OpCode, Operand};
 use shape_runtime::engine::{ExecutionType, ProgramExecutor, ShapeEngine};
 use shape_runtime::error::Result;
 use shape_wire::WireValue;
 use std::time::Instant;
+
+fn scalar_move_lift_exposed_jit_surface(bytecode: &BytecodeProgram) -> Option<String> {
+    if !bytecode.operator_trait_dispatch_sites.is_empty() {
+        return Some(format!(
+            "user-operator trait dispatch side-table has {} site(s)",
+            bytecode.operator_trait_dispatch_sites.len()
+        ));
+    }
+
+    for instr in &bytecode.instructions {
+        if instr.opcode == OpCode::NewObject {
+            return Some("legacy `NewObject` / object-destructure bytecode".to_string());
+        }
+
+        if instr.opcode == OpCode::CallMethod {
+            let Some(Operand::TypedMethodCall { string_id, .. }) = instr.operand.as_ref() else {
+                continue;
+            };
+            let Some(method) = bytecode.strings.get(*string_id as usize) else {
+                continue;
+            };
+            if matches!(method.as_str(), "clone" | "diff") {
+                return Some(format!("typed method `{method}`"));
+            }
+        }
+    }
+
+    None
+}
+
+fn program_declares_user_trait_or_impl(program: &Program) -> bool {
+    program.items.iter().any(|item| {
+        matches!(
+            item,
+            shape_ast::ast::Item::Trait(_, _) | shape_ast::ast::Item::Impl(_, _)
+        )
+    })
+}
 
 /// JIT executor with selective per-function compilation.
 ///
@@ -167,6 +206,32 @@ impl ProgramExecutor for JITExecutor {
                 }
             })?;
         let bytecode_compile_ms = bytecode_compile_start.elapsed().as_millis();
+
+        if program_declares_user_trait_or_impl(program) {
+            let reason = "Wave-20A user-trait-method JIT SURFACE \
+                          (ADR-006 §2.7.14): the source program declares a \
+                          trait or impl block. Current native JIT trait-method \
+                          dispatch can silently diverge from the bytecode VM \
+                          for ordinary trait calls (observed fundamentals/traits \
+                          book snippets returning `None` instead of the impl \
+                          method result). Whole-program deopting to the \
+                          bytecode interpreter preserves VM == JIT until \
+                          trait-method dispatch and return-kind recovery are \
+                          proven on the JIT path.";
+            eprintln!(
+                "[jit-fallback] function main failed JIT compile: {reason}; \
+                 running under interpreter"
+            );
+            tracing::info!(
+                target: "shape_jit::fallback",
+                function = "main",
+                reason = reason,
+                "jit-fallback: source trait/impl surface, running under interpreter",
+            );
+            return self
+                .bytecode_executor
+                .execute_compiled(engine, bytecode, program);
+        }
 
         // W12-jit-mode-semantics-and-fallthrough (Phase 3d, 2026-05-18):
         // attempt JIT compile+execute; if either step fails for any reason,
@@ -525,6 +590,21 @@ impl JITExecutor {
                           the bytecode interpreter via this `[jit-fallback]` path \
                           preserves VM == JIT semantics."
                     .to_string(),
+                location: None,
+            });
+        }
+
+        if let Some(surface) = scalar_move_lift_exposed_jit_surface(bytecode) {
+            return Err(shape_runtime::error::ShapeError::RuntimeError {
+                message: format!(
+                    "Wave-17 scalar-move-lift JIT SURFACE (ADR-006 §2.7.14): \
+                     `{surface}` still depends on a JIT lowering path that was \
+                     previously masked by the conservative move-then-read \
+                     fallback. Whole-program deopting to the bytecode \
+                     interpreter via this `[jit-fallback]` path preserves VM == \
+                     JIT semantics until the method/operator/object lowering is \
+                     proven independently."
+                ),
                 location: None,
             });
         }
@@ -969,6 +1049,17 @@ impl JITExecutor {
             crate::context::RETURN_TAG_I64 => WireValue::Integer(raw_result as i64),
             crate::context::RETURN_TAG_I32 => WireValue::Integer((raw_result as i32) as i64),
             crate::context::RETURN_TAG_BOOL => WireValue::Bool(raw_result != 0),
+            crate::context::RETURN_TAG_STRING => {
+                if raw_result == 0 {
+                    WireValue::String(String::new())
+                } else {
+                    let arc =
+                        unsafe { std::sync::Arc::<String>::from_raw(raw_result as *const String) };
+                    let value = (*arc).clone();
+                    drop(arc);
+                    WireValue::String(value)
+                }
+            }
             crate::context::RETURN_TAG_UNIT => {
                 // W11-jit-new-array: `()`-typed return — the program's
                 // terminal expression produced no value. Map to Null

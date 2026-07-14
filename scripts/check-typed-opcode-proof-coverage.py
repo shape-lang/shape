@@ -28,8 +28,8 @@ COMPILER_ROOT = ROOT / "crates/shape-vm/src/compiler"
 
 EXPECTED_COUNTS = {
     "covered_by_prove_native_kind": 22,
-    "covered_by_equivalent_static_proof_helper": 530,
-    "metadata_only_non_executing": 145,
+    "covered_by_equivalent_static_proof_helper": 519,
+    "metadata_only_non_executing": 138,
     "unproven_gap": 0,
 }
 

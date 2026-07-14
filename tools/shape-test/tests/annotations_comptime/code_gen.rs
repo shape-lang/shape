@@ -55,7 +55,8 @@ print(c.get_value())
 
 #[test]
 fn annotation_replace_body_generates_constant_function() {
-    // TDD: comptime post handlers with annotation params error "too many annotation arguments"
+    // Annotation arguments are accepted even when this handler emits a fixed
+    // replacement body.
     ShapeTest::new(
         r#"
 annotation stub_return(val) {
@@ -165,6 +166,30 @@ print(c.to_str())
     )
     .expect_run_ok()
     .expect_output("timeout:30");
+}
+
+#[test]
+fn annotation_generated_extend_method_runs_under_jit() {
+    ShapeTest::new(
+        r#"
+annotation summary() {
+  targets: [type]
+  comptime post(target, ctx) {
+    extend target {
+      method summary() -> string { f"{self.name}:{self.id}" }
+    }
+  }
+}
+
+@summary()
+type User { id: int, name: string }
+
+let u = User { id: 7, name: "Ada" }
+u.summary()
+"#,
+    )
+    .with_jit()
+    .expect_string("Ada:7");
 }
 
 #[test]

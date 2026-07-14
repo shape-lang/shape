@@ -116,15 +116,43 @@ pub fn parse_statement(pair: Pair<Rule>) -> Result<Statement> {
                 location: Some(pair_loc.clone()),
             })?;
             let type_pair = inner_parts.next().ok_or_else(|| ShapeError::ParseError {
-                message: "expected type annotation in `set param` directive".to_string(),
+                message: "expected type annotation or expression in `set param` directive"
+                    .to_string(),
                 location: Some(pair_loc.clone()),
             })?;
-            let type_annotation = crate::parser::types::parse_type_annotation(type_pair)?;
-            Ok(Statement::SetParamType {
-                param_name: param_pair.as_str().to_string(),
-                type_annotation,
-                span: inner_span,
-            })
+            match type_pair.as_rule() {
+                Rule::type_annotation => {
+                    let type_annotation = crate::parser::types::parse_type_annotation(type_pair)?;
+                    Ok(Statement::SetParamType {
+                        param_name: param_pair.as_str().to_string(),
+                        type_annotation,
+                        span: inner_span,
+                    })
+                }
+                Rule::set_param_type_expr_payload => {
+                    let expr_pair =
+                        type_pair
+                            .into_inner()
+                            .next()
+                            .ok_or_else(|| ShapeError::ParseError {
+                                message:
+                                    "expected expression in parenthesized `set param` directive"
+                                        .to_string(),
+                                location: Some(pair_loc.clone()),
+                            })?;
+                    let expression = expressions::parse_expression(expr_pair)?;
+                    Ok(Statement::SetParamTypeExpr {
+                        param_name: param_pair.as_str().to_string(),
+                        expression,
+                        span: inner_span,
+                    })
+                }
+                _ => Err(ShapeError::ParseError {
+                    message: "expected type annotation or expression in `set param` directive"
+                        .to_string(),
+                    location: Some(pair_loc),
+                }),
+            }
         }
         Rule::set_return_stmt => {
             let inner_span = pair_span(&inner);

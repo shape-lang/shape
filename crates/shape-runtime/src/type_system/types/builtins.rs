@@ -70,6 +70,13 @@ impl BuiltinTypes {
         }
     }
 
+    pub fn future(payload_type: Type) -> Type {
+        Type::Generic {
+            base: Box::new(Type::Concrete(TypeAnnotation::Reference("Future".into()))),
+            args: vec![payload_type],
+        }
+    }
+
     /// Canonical runtime numeric type for aliases and width-aware native names.
     ///
     /// This preserves scripting ergonomics (`int`, `number`) while making
