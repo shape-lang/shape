@@ -114,8 +114,8 @@ impl GeneratedNodeIssuer {
         anchor_file_id: u16,
         anchor_span: Span,
         owner_display: String,
-    ) -> Self {
-        Self {
+    ) -> GeneratedNodeOrigin {
+        GeneratedNodeOrigin {
             expansion_high: expansion_fingerprint.0,
             expansion_low: expansion_fingerprint.1,
             node_path,
