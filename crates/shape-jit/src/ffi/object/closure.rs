@@ -457,9 +457,9 @@ pub unsafe extern "C" fn jit_shared_unlock_contended(ptr: u64) {
 // Relationship to the A.1E Shared-capture FFIs:
 //
 //   * `jit_alloc_shared_cell`   — outer-scope allocation. Creates a
-//                                  fresh `Arc<SharedCell>` with the
-//                                  initial `ValueWord` bits and hands
-//                                  out one strong share to the caller.
+//                                  fresh typed `Arc<SharedCell>` from raw
+//                                  payload bits plus their NativeKind and
+//                                  hands one cell share to the caller.
 //                                  Mirrors `op_alloc_shared_local`.
 //   * `jit_arc_shared_retain`   — closure-capture retain (A.1E). Bumps
 //                                  the strong count by 1 for a closure
@@ -473,29 +473,32 @@ pub unsafe extern "C" fn jit_shared_unlock_contended(ptr: u64) {
 // exactly one `Retain`, which is balanced by the
 // `release_typed_closure` walk when the closure drops.
 
-/// Allocate a fresh `Arc<SharedCell>` from `initial_bits` and return
-/// the raw pointer bits of the strong share.
+/// Allocate a fresh typed `Arc<SharedCell>` from `(initial_bits, kind_code)`
+/// and return the raw pointer bits of its first strong share.
 ///
 /// The returned pointer is owned by the caller's slot; it MUST be
 /// released via `jit_arc_shared_release` exactly once when the slot
-/// exits scope. `initial_bits` seeds the cell's raw payload and `kind_code`
-/// supplies its independently proven `NativeKind`; subsequent reads/writes
-/// go through the lock-gated pointer-deref lowering in
-/// `mir_compiler/places.rs`.
+/// exits scope. A reserved, sentinel, or otherwise undecodable `kind_code`
+/// returns `0` without allocating a cell or taking ownership of
+/// `initial_bits`; this explicit failure sentinel keeps malformed FFI input
+/// from unwinding across the C ABI.
 ///
 /// # Safety
 ///
-/// - `initial_bits` is a raw `ValueWord` bit pattern. If the bits
-///   encode a heap-refcounted pointer, the caller must ensure the
-///   appropriate refcount share was already taken — this FFI does not
-///   retain or release heap refs on the payload.
-/// - The returned pointer is 8-byte aligned (Arc + repr(C) SharedCell)
-///   and non-null (Arc::new never returns null).
-/// - The returned pointer is the sole strong share owned by the
-///   caller's slot; `jit_arc_shared_release` is the sole releaser.
-///   Additional shares (one per capturing closure) are minted via
-///   `jit_arc_shared_retain` and balanced by `release_typed_closure`
-///   on closure drop.
+/// - On a decodable `kind_code`, `(initial_bits, NativeKind)` must be a valid
+///   typed carrier pair. Inline kinds carry their canonical scalar bits. For
+///   a refcounted kind and nonzero bits, `initial_bits` must be the matching
+///   live raw pointer produced by the carrier's ownership-transfer operation;
+///   the caller transfers exactly one payload share into the new cell. This
+///   function does not add another payload retain, and `SharedCell::drop`
+///   retires that transferred share according to the supplied kind.
+/// - On an undecodable `kind_code`, ownership of `initial_bits` remains with
+///   the caller. The function returns `0` and does not inspect, retain, or
+///   release the payload bits.
+/// - A nonzero return is 8-byte aligned and owns exactly one strong
+///   `Arc<SharedCell>` share. The caller must retire it exactly once through
+///   `jit_arc_shared_release`. Each `jit_arc_shared_retain` result creates one
+///   additional cell share that `release_typed_closure` must balance.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn jit_alloc_shared_cell(initial_bits: u64, kind_code: u8) -> u64 {
     // ADR-006 §2.7.8 / Q10 (cell-storage parallel-kind track).
@@ -506,9 +509,9 @@ pub unsafe extern "C" fn jit_alloc_shared_cell(initial_bits: u64, kind_code: u8)
     // not a type-checking nicety. The kind is threaded from the
     // JIT-emitted `AllocSharedLocal` call site
     // (`MirToIR::initialize_shared_local_slots`), which sources it from
-    // the PRODUCER at compile time — the `ClosureLayout`'s
-    // `capture_types` (authoritative; the same source the closure BODY's
-    // `shared_capture_slots` uses, so both ends of the cell agree), checked
+    // the PRODUCER at compile time — the `ClosureLayout`'s total
+    // `capture_native_kind(i)` track (authoritative; the same source the
+    // closure BODY's `shared_capture_slots` uses, so both ends agree), checked
     // unconditionally against the slot's inferred `slot_kinds` entry when
     // both are present. This mirrors the interpreter,
     // which takes the kind off the §2.7.7 parallel-kind stack track in
@@ -516,15 +519,10 @@ pub unsafe extern "C" fn jit_alloc_shared_cell(initial_bits: u64, kind_code: u8)
     // (`shape-vm/src/executor/variables/mod.rs`) — same producer, same
     // kind. It is never fabricated from `initial_bits`.
     //
-    // The two cases where the honest kind cannot be honoured — no
-    // derivable NativeKind, and a refcounted payload kind (the JIT's cell
-    // store path takes no share, so a heap kind would arm `Drop` to
-    // retire a share the cell never owned) — surface-and-stop at CODEGEN
-    // as a whole-function JIT bail. They must never reach here: this fn
-    // is `extern "C"` and therefore nounwind, so a refusal in this body
-    // aborts the process instead of deopting. That was the pre-fix
-    // behaviour (an unconditional `todo!()`), and it is why the refusal
-    // now lives in `initialize_shared_local_slots`.
+    // Kind-source gaps and currently unsupported refcounted JIT stores are
+    // rejected at codegen. The FFI still validates its byte because this is a
+    // nounwind boundary: malformed input must return an explicit null sentinel
+    // without allocating or taking payload ownership, never panic.
     use crate::ffi::stack_kind_code;
     use shape_value::v2::closure_layout::SharedCell;
     use std::sync::Arc;
@@ -532,17 +530,12 @@ pub unsafe extern "C" fn jit_alloc_shared_cell(initial_bits: u64, kind_code: u8)
     let kind = match stack_kind_code::decode(kind_code) {
         Some(kind) => kind,
         None => {
-            // Unreachable via the JIT emitter (the codegen gate proves a
-            // concrete kind before emitting the call). Reached only if a
-            // future caller passes SENTINEL/reserved. Bool-defaulting here
-            // is forbidden by §2.7.8 #4; abort is the honest outcome for a
-            // nounwind boundary that has lost its kind source.
-            panic!(
-                "jit_alloc_shared_cell: undecodable NativeKind code {kind_code} \
-                 (ADR-006 §2.7.8 / Q10). The cell's kind companion must come from \
-                 the producing site via `stack_kind_code::encode`; it is never \
-                 defaulted and never derived from the payload bits."
+            tracing::error!(
+                target: "shape_jit",
+                kind_code,
+                "jit_alloc_shared_cell rejected undecodable NativeKind code; payload ownership unchanged",
             );
+            return 0;
         }
     };
     // The sole strong share is handed to the caller's slot; it is retired

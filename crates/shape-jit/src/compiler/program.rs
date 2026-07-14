@@ -3,127 +3,16 @@
 use cranelift::codegen::ir::FuncRef;
 use cranelift::prelude::*;
 use cranelift_module::{Linkage, Module};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 
+use super::function_abi::prove_user_function_abi;
+use super::program_finalize::finalize_program_definitions;
+use super::program_metrics::maybe_emit_numeric_metrics;
 use super::setup::JITCompiler;
 use crate::context::{JittedFn, JittedStrategyFn};
 use crate::mixed_table::{FunctionEntry, MixedFunctionTable};
 use crate::numeric_compiler::compile_numeric_program;
-use shape_vm::bytecode::{BytecodeProgram, OpCode};
-
-#[derive(Default)]
-struct NumericOpcodeStats {
-    typed: usize,
-    generic: usize,
-    typed_breakdown: BTreeMap<String, usize>,
-    generic_breakdown: BTreeMap<String, usize>,
-}
-
-fn bump_breakdown(map: &mut BTreeMap<String, usize>, opcode: OpCode) {
-    let key = format!("{:?}", opcode);
-    *map.entry(key).or_insert(0) += 1;
-}
-
-fn collect_numeric_opcode_stats(program: &BytecodeProgram) -> NumericOpcodeStats {
-    let mut stats = NumericOpcodeStats::default();
-    for instr in &program.instructions {
-        match instr.opcode {
-            // Typed arithmetic opcodes
-            OpCode::AddInt
-            | OpCode::SubInt
-            | OpCode::MulInt
-            | OpCode::DivInt
-            | OpCode::ModInt
-            | OpCode::PowInt
-            | OpCode::AddNumber
-            | OpCode::SubNumber
-            | OpCode::MulNumber
-            | OpCode::DivNumber
-            | OpCode::ModNumber
-            | OpCode::PowNumber
-            // Typed comparisons
-            | OpCode::GtInt
-            | OpCode::LtInt
-            | OpCode::GteInt
-            | OpCode::LteInt
-            | OpCode::GtNumber
-            | OpCode::LtNumber
-            | OpCode::GteNumber
-            | OpCode::LteNumber
-            | OpCode::EqInt
-            | OpCode::EqNumber
-            | OpCode::NeqInt
-            | OpCode::NeqNumber
-            | OpCode::EqString
-            | OpCode::GtString
-            | OpCode::LtString
-            | OpCode::GteString
-            | OpCode::LteString
-            | OpCode::EqDecimal
-            | OpCode::IsNull
-            | OpCode::NegInt
-            | OpCode::NegNumber => {
-                stats.typed += 1;
-                bump_breakdown(&mut stats.typed_breakdown, instr.opcode);
-            }
-            // Generic arithmetic/comparison opcodes (DELETED in Phase 2 — left
-            // here as a no-op arm for future-proofing if a generic class is
-            // re-introduced).
-            _ => {}
-        }
-    }
-    stats
-}
-
-fn maybe_emit_numeric_metrics(program: &BytecodeProgram) {
-    // Cluster-2 closure-wave-F tracing-crate migration (2026-05-16):
-    // `tracing::enabled!` collapses to `false` under feature-OFF builds
-    // (`release_max_level_off`), so the early return executes and the
-    // stat-collection work is skipped exactly as before. Replaces the
-    // legacy `SHAPE_JIT_METRICS` / `SHAPE_JIT_METRICS_DETAIL` env-var
-    // gating; CLI selector is `--trace-jit=shape_jit::metrics=info` (the
-    // `_DETAIL` suffix maps to trace level on the same target).
-    if !tracing::enabled!(target: "shape_jit::metrics", tracing::Level::INFO) {
-        return;
-    }
-    let static_stats = collect_numeric_opcode_stats(program);
-    let static_total = static_stats.typed + static_stats.generic;
-    let static_coverage_pct = if static_total == 0 {
-        100.0
-    } else {
-        (static_stats.typed as f64 * 100.0) / (static_total as f64)
-    };
-    // Report effective coverage conservatively: generic opcodes remain generic
-    // unless the frontend/runtime has concretely emitted typed variants.
-    let effective_typed = static_stats.typed;
-    let effective_generic = static_stats.generic;
-    let effective_coverage_pct = static_coverage_pct;
-    tracing::info!(
-        target: "shape_jit::metrics",
-        typed_numeric_ops = effective_typed,
-        generic_numeric_ops = effective_generic,
-        typed_numeric_coverage_pct = effective_coverage_pct,
-        static_typed_numeric_ops = static_stats.typed,
-        static_generic_numeric_ops = static_stats.generic,
-        static_typed_numeric_coverage_pct = static_coverage_pct,
-        "shape-jit-metrics numeric coverage",
-    );
-    if tracing::enabled!(target: "shape_jit::metrics", tracing::Level::TRACE) {
-        let fmt_breakdown = |breakdown: &BTreeMap<String, usize>| -> String {
-            breakdown
-                .iter()
-                .map(|(name, count)| format!("{}:{}", name, count))
-                .collect::<Vec<_>>()
-                .join(",")
-        };
-        tracing::trace!(
-            target: "shape_jit::metrics",
-            typed_breakdown = %fmt_breakdown(&static_stats.typed_breakdown),
-            generic_breakdown = %fmt_breakdown(&static_stats.generic_breakdown),
-            "shape-jit-metrics-detail breakdown",
-        );
-    }
-}
+use shape_vm::bytecode::BytecodeProgram;
 
 impl JITCompiler {
     #[inline(always)]
@@ -192,18 +81,13 @@ impl JITCompiler {
                 user_func_return_kinds.insert(idx as u16, return_kind);
             }
             let func_name = format!("{}_{}", name, func.name.replace("::", "__"));
-            let mut user_sig = self.module.make_signature();
-            user_sig.params.push(AbiParam::new(types::I64)); // ctx_ptr
-            for _ in 0..func.arity {
-                user_sig.params.push(AbiParam::new(types::I64));
-            }
-            user_sig.returns.push(AbiParam::new(types::I32));
+            let abi = prove_user_function_abi(self.module.make_signature(), func)?;
             let func_id = self
                 .module
-                .declare_function(&func_name, Linkage::Local, &user_sig)
+                .declare_function(&func_name, Linkage::Local, &abi.signature)
                 .map_err(|e| format!("Failed to pre-declare function {}: {}", func.name, e))?;
             user_func_ids.insert(idx as u16, func_id);
-            user_func_arities.insert(idx as u16, func.arity);
+            user_func_arities.insert(idx as u16, abi.native_arity);
         }
 
         let main_func_id = self.compile_strategy_with_user_funcs(
@@ -264,55 +148,10 @@ impl JITCompiler {
             .get(&(func_idx as u16))
             .ok_or_else(|| format!("Function {} not pre-declared", name))?;
 
-        // PROOF GUARD (surface-and-stop, ADR-006 §2.7.5 pattern).
-        //
-        // The native callee signature below is `fn(ctx, param_0 ..
-        // param_{arity-1})`, which is sound ONLY because the producer
-        // guarantees `mir.param_slots == captures ++ user_params` and
-        // `Function.arity == param_slots.len()`. The body-binding loop and the
-        // stack-closure call site both rely on that 1:1 alignment. Rather than
-        // trust the invariant silently, check it: if a future producer-side
-        // change (e.g. a pass that stops prepending captures to the param list)
-        // breaks the alignment, we emit a signature that CANNOT match the call
-        // site — which surfaces as an opaque Cranelift verifier error inside
-        // some unrelated caller, exactly the failure mode this lane was created
-        // to fix. Bail the whole function to the interpreter instead, loudly.
-        if let Some(mir_data) = func.mir_data.as_ref() {
-            let param_slots = mir_data.mir.param_slots.len();
-            if param_slots != func.arity as usize {
-                return Err(format!(
-                    "SURFACE (ADR-006 §2.7.5): closure/function calling-convention \
-                     invariant broken for '{}': mir.param_slots.len()={} but \
-                     Function.arity={} (captures_count={}). The native callee ABI is \
-                     `fn(ctx, param_0..param_{{arity-1}})` where params \
-                     [0..captures_count) are the closure's leading captures, so \
-                     `arity` MUST equal `param_slots.len()` (= captures + user \
-                     params). Emitting a signature at the wrong arity would be \
-                     rejected by the Cranelift verifier inside the CALLER, so this \
-                     function whole-function-bails to the bytecode interpreter \
-                     instead. Do not paper over this by padding the call site with a \
-                     filler arg — that fabricates a capture value.",
-                    func.name, param_slots, func.arity, func.captures_count,
-                ));
-            }
-        }
-
-        let mut sig = self.module.make_signature();
-        // ctx_ptr
-        sig.params.push(AbiParam::new(types::I64));
-        // Native callee ABI: `fn(ctx_ptr, param_0 .. param_{arity-1}) -> i32`.
-        // For closures, params [0 .. captures_count) ARE the captures —
-        // `Function.arity` already includes them (see the matching comment on
-        // the Phase-2 pre-declaration in `compile_program_selective`; the two
-        // signatures MUST stay in lockstep or `define_function` rejects every
-        // closure body).
-        for _ in 0..func.arity {
-            sig.params.push(AbiParam::new(types::I64));
-        }
-        sig.returns.push(AbiParam::new(types::I32));
+        let abi = prove_user_function_abi(self.module.make_signature(), func)?;
 
         let mut ctx = self.module.make_context();
-        ctx.func.signature = sig;
+        ctx.func.signature = abi.signature;
 
         let mut func_builder_ctx = FunctionBuilderContext::new();
         {
@@ -831,49 +670,13 @@ impl JITCompiler {
             // closures with the same auto-generated name but different arities
             // (e.g., multiple __closure_0 from different stdlib modules).
             let func_name = format!("{}_f{}_{}", name, idx, func.name.replace("::", "__"));
-            let mut user_sig = self.module.make_signature();
-            // ctx_ptr
-            user_sig.params.push(AbiParam::new(types::I64));
-            // Native callee ABI: `fn(ctx_ptr, param_0 .. param_{arity-1}) -> i32`.
-            //
-            // For a CLOSURE, params [0 .. captures_count) ARE the captures:
-            // the bytecode compiler builds the closure's param list as
-            // `captures ++ user_params` (`crates/shape-vm/src/compiler/
-            // expressions/closures.rs:3267`) and then stores
-            // `arity = closure_def.params.len()` (`:3491`). So `Function.arity`
-            // ALREADY INCLUDES the leading capture params, and
-            // `Function.captures_count` (`:3501`) is a redundant SUB-COUNT of
-            // arity — not an addend. MIR agrees: `param_slots` is lowered from
-            // the same param list, so `mir.param_slots.len() == func.arity`
-            // (`crates/shape-vm/src/mir/lowering/mod.rs:826`), and the VM's
-            // closure calling convention places captures at the leading local
-            // slots with user args at `[bp + capture_count ..]`
-            // (`crates/shape-vm/src/executor/call_convention.rs:757`).
-            //
-            // Adding `captures_count` here counted the captures TWICE
-            // (`1 + 2*captures + params`), while the stack-closure
-            // direct-dispatch call site correctly pushes `ctx + captures +
-            // user args` = `1 + arity` (`mir_compiler/terminators.rs:1676`).
-            // Cranelift's verifier then rejected the ENCLOSING function
-            // ("mismatched argument count ... got 2, expected 3"), demoting it;
-            // `main` still held a relocation to it, so `finalize_definitions`
-            // could not resolve the symbol and the WHOLE PROGRAM deopted. Since
-            // only closures have `captures_count > 0`, that is precisely why no
-            // capturing closure of any kind reached native JIT. Keep this in
-            // lockstep with the definition-side signature in
-            // `compile_function_with_user_funcs`.
-            for _ in 0..func.arity {
-                user_sig.params.push(AbiParam::new(types::I64));
-            }
-            user_sig.returns.push(AbiParam::new(types::I32));
+            let abi = prove_user_function_abi(self.module.make_signature(), func)?;
             let func_id = self
                 .module
-                .declare_function(&func_name, Linkage::Local, &user_sig)
+                .declare_function(&func_name, Linkage::Local, &abi.signature)
                 .map_err(|e| format!("Failed to pre-declare function {}: {}", func.name, e))?;
             user_func_ids.insert(idx as u16, func_id);
-            // Native callee arity (captures INCLUDED for closures — see above).
-            // The user-visible arg count of a closure is `arity - captures_count`.
-            user_func_arities.insert(idx as u16, func.arity);
+            user_func_arities.insert(idx as u16, abi.native_arity);
         }
 
         // Phase 3: Compile main strategy body.
@@ -887,6 +690,7 @@ impl JITCompiler {
 
         // Phase 4: Compile only JIT-compatible function bodies.
         // Functions that fail to compile are demoted to interpreted fallback.
+        let mut compile_failures = Vec::<(String, String)>::new();
         for (idx, func) in program.functions.iter().enumerate() {
             if jit_compatible[idx] || func.mir_data.is_some() {
                 tracing::debug!(
@@ -924,84 +728,18 @@ impl JITCompiler {
                     error = %e,
                     "jit-mir compile failed",
                 );
-                // WF-1A signal-reexec fix (audit 2026-07-04 §4(a)): a function
-                // that fails Phase-4 JIT compile is demoted to the interpreter.
-                // We DO NOT define a runtime `-1` stub body for it.
-                //
-                // The old code defined a stub returning signal `-1`. Because the
-                // top-level frame (and any other body) was compiled BEFORE this
-                // failure was known — believing this function JIT-compatible per
-                // the Phase-1 preflight — it emitted a DIRECT Cranelift call to
-                // this function's pre-declared `FuncId`. At runtime the native
-                // frame ran its side effects (e.g. `print`) and THEN called the
-                // `-1` stub. `-1` is not a carved-out recoverable signal, so the
-                // executor took the outer-`Err` path (executor.rs:886) and
-                // re-ran the WHOLE program under the interpreter
-                // (executor.rs:201), DUPLICATING every already-executed side
-                // effect (the double-execution bug). A partially-executed native
-                // frame is not resumable, so a runtime `-1` arriving after side
-                // effects cannot be recovered by re-running — the only sound
-                // recovery is to fail the JIT compile up front, before `jit_fn`
-                // runs anything.
-                //
-                // By leaving the failed function undefined, cranelift's
-                // `finalize_definitions` (below) reports it as an unresolved
-                // symbol IFF a natively-compiled body actually references it via
-                // a relocation — i.e. exactly the set of Phase-4 failures that
-                // would otherwise have reached the `-1` stub at runtime. That is
-                // caught below and turned into a COMPILE-STAGE deopt (before any
-                // side effect). An UNREFERENCED failure (e.g. an unused stdlib
-                // prelude function such as `std::core::math::mean`, of which a
-                // typical program carries 100+) leaves no relocation, so finalize
-                // succeeds and the rest of the program still JIT-runs — this must
-                // NOT deopt, or `--mode jit` would fall back for essentially
-                // every prelude-using program.
+                // Leave the failed body undefined. Finalization distinguishes an
+                // unreferenced demotion from a reachable compile-stage refusal;
+                // see `program_finalize` for the exactly-once rationale.
+                compile_failures.push((func_name, e));
                 jit_compatible[idx] = false;
             }
         }
 
-        // WF-1A signal-reexec fix (continued): finalize the module, converting a
-        // cranelift "can't resolve symbol" panic — raised when a natively-
-        // compiled body references a Phase-4-failed (now undefined) function —
-        // into a clean COMPILE-STAGE `Err`. Returning `Err` here aborts the JIT
-        // compile before `jit_fn` executes; `JITExecutor::execute_with_jit` maps
-        // it to the `[jit-fallback]` interpreter path, which runs the whole
-        // program ONCE (== `--mode vm` semantics) with no duplicated side
-        // effects. The panic is ALREADY caught one level up (the `catch_unwind`
-        // around `compile_program_selective` in executor.rs) — we catch it here
-        // only to (a) produce a structured error instead of the raw panic text
-        // and (b) silence the internal cranelift panic message on stderr for a
-        // program that then runs correctly under the fallback. The panic hook is
-        // suppressed ONLY across this single finalize call (compile stage is
-        // single-threaded). Do NOT reintroduce the runtime `-1` stub or carve
-        // `-1` out as "recoverable".
-        let prev_panic_hook = std::panic::take_hook();
-        std::panic::set_hook(Box::new(|_| {}));
-        let finalize_outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            self.module.finalize_definitions()
-        }));
-        std::panic::set_hook(prev_panic_hook);
-        match finalize_outcome {
-            Ok(Ok(())) => {}
-            Ok(Err(e)) => return Err(format!("Failed to finalize definitions: {:?}", e)),
-            Err(panic_payload) => {
-                let panic_msg = panic_payload
-                    .downcast_ref::<String>()
-                    .cloned()
-                    .or_else(|| panic_payload.downcast_ref::<&str>().map(|s| s.to_string()))
-                    .unwrap_or_else(|| "unknown finalize panic".to_string());
-                return Err(format!(
-                    "WF-1A signal-reexec (audit 2026-07-04 §4(a)): JIT finalize could \
-                     not resolve a native reference to a function that failed Phase-4 \
-                     JIT compile ({}). Whole-program deopt to the bytecode interpreter \
-                     at COMPILE stage (before any native side effect); the demoted \
-                     function has no runtime `-1` stub, so the executor's outer-Err \
-                     interpreter re-run can no longer double already-executed side \
-                     effects.",
-                    panic_msg
-                ));
-            }
-        }
+        // Undefined failed bodies are harmless when unreferenced. If a native
+        // relocation reaches one, finalization returns the originating refusal
+        // before any native side effect can run.
+        finalize_program_definitions(&mut self.module, &compile_failures)?;
 
         let main_code_ptr = self.module.get_finalized_function(main_func_id);
         self.compiled_functions

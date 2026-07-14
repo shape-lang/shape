@@ -60,3 +60,26 @@ fn typed_allocator_preserves_payload_kind_and_balances_cell_shares() {
         "typed cell drop must retire the String payload share"
     );
 }
+
+#[test]
+fn invalid_kind_code_returns_null_without_consuming_payload_share() {
+    let payload = Arc::new(String::from("still-owned"));
+    let raw_share = Arc::into_raw(Arc::clone(&payload));
+    assert_eq!(Arc::strong_count(&payload), 2);
+
+    let cell_ptr = unsafe { jit_alloc_shared_cell(raw_share as u64, stack_kind_code::SENTINEL) };
+    assert_eq!(
+        cell_ptr, 0,
+        "invalid kind evidence must not allocate a cell"
+    );
+    assert_eq!(
+        Arc::strong_count(&payload),
+        2,
+        "a rejected (bits, kind) pair must leave payload ownership with the caller"
+    );
+
+    unsafe {
+        drop(Arc::from_raw(raw_share));
+    }
+    assert_eq!(Arc::strong_count(&payload), 1);
+}

@@ -31,66 +31,10 @@
 //! fabricate kind-decode at the test layer. The test triggers are
 //! producer-side AST patterns that produce known JIT-Err classes.
 
-use assert_cmd::Command;
-use std::path::PathBuf;
-use std::sync::{Mutex, OnceLock};
-
-// The matrix is run under low TasksMax cgroups; each child CLI creates a Tokio
-// runtime, so serialize only subprocess launches to keep diagnostics meaningful.
-fn cli_process_lock() -> &'static Mutex<()> {
-    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    LOCK.get_or_init(|| Mutex::new(()))
-}
-
-fn shape_cmd() -> Command {
-    Command::new(assert_cmd::cargo::cargo_bin!("shape"))
-}
-
-/// Locate the workspace-root `tests/smokes-fallback/` directory. The
-/// binary tests run with CWD = `bin/shape-cli/`, so we walk up.
-fn fallback_fixture_path(name: &str) -> PathBuf {
-    let manifest_dir = env!("CARGO_MANIFEST_DIR");
-    // manifest_dir = .../shape/bin/shape-cli ; workspace root is two levels up.
-    PathBuf::from(manifest_dir)
-        .parent()
-        .expect("bin parent")
-        .parent()
-        .expect("workspace root")
-        .join("tests")
-        .join("smokes-fallback")
-        .join(name)
-}
-
-/// Combined captured run: exit code + stdout + stderr.
-struct CapturedRun {
-    exit_code: Option<i32>,
-    stdout: String,
-    stderr: String,
-}
+use super::jit_test_support::{CapturedRun, count_fallback_lines, run_workspace_fixture};
 
 fn run_shape(mode: &str, fixture: &str) -> CapturedRun {
-    let path = fallback_fixture_path(fixture);
-    let _guard = cli_process_lock()
-        .lock()
-        .expect("JIT fallback diagnostic matrix process lock poisoned");
-    let assertion = shape_cmd()
-        .args(["run", "--mode", mode])
-        .arg(&path)
-        .timeout(std::time::Duration::from_secs(60))
-        .assert();
-    let output = assertion.get_output();
-    CapturedRun {
-        exit_code: output.status.code(),
-        stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
-        stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
-    }
-}
-
-fn count_fallback_lines(stderr: &str) -> usize {
-    stderr
-        .lines()
-        .filter(|l| l.starts_with("[jit-fallback]"))
-        .count()
+    run_workspace_fixture(mode, "smokes-fallback", fixture)
 }
 
 // =========================================================================
@@ -355,42 +299,23 @@ fn fallback_diagnostic_prefix_invariant_across_fixtures() {
 /// would defeat the diagnostic's purpose).
 #[test]
 fn fallback_negative_pin_clean_jit_does_not_emit_diagnostic() {
-    let manifest_dir = env!("CARGO_MANIFEST_DIR");
-    let s1_path = PathBuf::from(manifest_dir)
-        .parent()
-        .expect("bin parent")
-        .parent()
-        .expect("workspace root")
-        .join("tests")
-        .join("smokes")
-        .join("s1.shape");
-    let _guard = cli_process_lock()
-        .lock()
-        .expect("JIT fallback diagnostic matrix process lock poisoned");
-    let assertion = shape_cmd()
-        .args(["run", "--mode", "jit"])
-        .arg(&s1_path)
-        .timeout(std::time::Duration::from_secs(60))
-        .assert();
-    let output = assertion.get_output();
-    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
-    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+    let run = run_workspace_fixture("jit", "smokes", "s1.shape");
     assert_eq!(
-        output.status.code(),
+        run.exit_code,
         Some(0),
         "s1 JIT clean-path should exit 0; stderr={}",
-        stderr
+        run.stderr
     );
     assert!(
-        stdout.contains("4950"),
+        run.stdout.contains("4950"),
         "s1 JIT clean-path should print 4950; stdout={}",
-        stdout
+        run.stdout
     );
     assert_eq!(
-        count_fallback_lines(&stderr),
+        count_fallback_lines(&run.stderr),
         0,
         "clean JIT path must NOT emit [jit-fallback] diagnostic; stderr={}",
-        stderr
+        run.stderr
     );
 }
 

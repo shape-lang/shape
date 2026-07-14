@@ -501,10 +501,10 @@ pub struct MirToIR<'a, 'b> {
     ///   store.
     /// - `emit_drop(Local(s))` calls `jit_arc_shared_release` to
     ///   consume the slot's strong share.
-    /// - `compile_operand_for_shared_capture` (new) emits a raw
-    ///   pointer read — bypassing the lock — so `ClosureCapture`
-    ///   operands install the outer cell pointer into the closure's
-    ///   Shared capture slot without locking.
+    /// - `compile_operand_for_shared_capture` emits a raw pointer read —
+    ///   bypassing the lock — for both declaring-frame locals and inherited
+    ///   Shared capture params, so nested `ClosureCapture` operands retain the
+    ///   cell carrier rather than its payload.
     ///
     /// Disjoint from `owned_mutable_capture_slots` and
     /// `shared_capture_slots` — those are leading-capture param slots
@@ -520,8 +520,9 @@ pub struct MirToIR<'a, 'b> {
     /// `Drop for SharedCell` to retire the payload's refcount share. The
     /// interpreter obtains the same kind from the §2.7.7 parallel-kind
     /// stack track at `op_alloc_shared_local`; the JIT obtains it from the
-    /// same producer, statically — the `ClosureLayout`'s `capture_types`
-    /// (authoritative) or the slot's inferred `slot_kinds` entry.
+    /// same producer, statically — the `ClosureLayout`'s total
+    /// `capture_native_kind(i)` track (authoritative) or the slot's inferred
+    /// `slot_kinds` entry.
     ///
     /// Candidate producer evidence is retained until the pre-emission proof
     /// validates one authoritative kind. Allocation and declaring-frame

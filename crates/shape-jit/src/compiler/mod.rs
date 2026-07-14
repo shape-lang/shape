@@ -9,8 +9,11 @@
 
 mod accessors;
 mod ffi_builder;
+mod function_abi;
 mod kernel_ir;
 mod program;
+mod program_finalize;
+mod program_metrics;
 mod setup;
 mod strategy;
 

@@ -43,61 +43,7 @@
 //!   function-body SURFACE (module bindings are not MIR places). This is the
 //!   class `f1`/`f2`/`f3` in the fallback matrix already pin.
 
-use assert_cmd::Command;
-use std::path::PathBuf;
-use std::sync::{Mutex, OnceLock};
-
-fn cli_process_lock() -> &'static Mutex<()> {
-    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    LOCK.get_or_init(|| Mutex::new(()))
-}
-
-fn shape_cmd() -> Command {
-    Command::new(assert_cmd::cargo::cargo_bin!("shape"))
-}
-
-fn closure_fixture_path(name: &str) -> PathBuf {
-    let manifest_dir = env!("CARGO_MANIFEST_DIR");
-    PathBuf::from(manifest_dir)
-        .parent()
-        .expect("bin parent")
-        .parent()
-        .expect("workspace root")
-        .join("tests")
-        .join("smokes-jit-closure")
-        .join(name)
-}
-
-struct CapturedRun {
-    exit_code: Option<i32>,
-    stdout: String,
-    stderr: String,
-}
-
-fn run_shape(mode: &str, fixture: &str) -> CapturedRun {
-    let path = closure_fixture_path(fixture);
-    let _guard = cli_process_lock()
-        .lock()
-        .expect("JIT closure-capture matrix process lock poisoned");
-    let assertion = shape_cmd()
-        .args(["run", "--mode", mode])
-        .arg(&path)
-        .timeout(std::time::Duration::from_secs(60))
-        .assert();
-    let output = assertion.get_output();
-    CapturedRun {
-        exit_code: output.status.code(),
-        stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
-        stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
-    }
-}
-
-fn count_fallback_lines(stderr: &str) -> usize {
-    stderr
-        .lines()
-        .filter(|l| l.starts_with("[jit-fallback]"))
-        .count()
-}
+use super::jit_test_support::{count_fallback_lines, run_workspace_fixture};
 
 /// The whole contract for one capturing-closure lowering:
 ///
@@ -110,8 +56,8 @@ fn count_fallback_lines(stderr: &str) -> usize {
 ///    than whole-program-deopting to the interpreter (which would make (3)
 ///    vacuous).
 fn assert_reaches_native_jit(fixture: &str, expected_stdout_contains: &str) {
-    let vm = run_shape("vm", fixture);
-    let jit = run_shape("jit", fixture);
+    let vm = run_workspace_fixture("vm", "smokes-jit-closure", fixture);
+    let jit = run_workspace_fixture("jit", "smokes-jit-closure", fixture);
 
     assert_eq!(
         vm.exit_code,
@@ -159,9 +105,13 @@ fn assert_reaches_native_jit(fixture: &str, expected_stdout_contains: &str) {
 ///
 /// The exit-code assertion is load-bearing: before the typed allocator fix,
 /// this class reached a `todo!()` behind `extern "C"` and aborted with 134.
-fn assert_shared_payload_falls_back_cleanly(fixture: &str, expected_stdout_contains: &str) {
-    let vm = run_shape("vm", fixture);
-    let jit = run_shape("jit", fixture);
+fn assert_shared_payload_falls_back_cleanly(
+    fixture: &str,
+    expected_stdout_contains: &str,
+    expected_refusal: &str,
+) {
+    let vm = run_workspace_fixture("vm", "smokes-jit-closure", fixture);
+    let jit = run_workspace_fixture("jit", "smokes-jit-closure", fixture);
 
     assert_eq!(
         vm.exit_code,
@@ -204,8 +154,8 @@ fn assert_shared_payload_falls_back_cleanly(fixture: &str, expected_stdout_conta
         .find(|line| line.starts_with("[jit-fallback]"))
         .unwrap_or("");
     assert!(
-        fallback.contains("ADR-006 §2.7.8 / Q10") && fallback.contains("SharedCell"),
-        "{fixture}: fallback must name the typed SharedCell proof boundary; got={fallback}"
+        fallback.contains(expected_refusal),
+        "{fixture}: fallback must contain the exact SharedCell refusal; got={fallback}"
     );
 }
 
@@ -284,5 +234,17 @@ fn jit_fallback_absent_for_shared_float_capture() {
 /// nounwind-abort regression that motivated the typed allocator boundary.
 #[test]
 fn jit_refcounted_shared_string_capture_falls_back_cleanly() {
-    assert_shared_payload_falls_back_cleanly("n9-capture-shared-string.shape", "abb");
+    assert_shared_payload_falls_back_cleanly(
+        "n9-capture-shared-string.shape",
+        "abb",
+        "SURFACE (ADR-006 §2.7.8 / Q10): SharedCell for local slot _1 has a REFCOUNTED payload kind (String). The JIT shared-cell store lowering writes raw bits without retaining the new value or releasing the previous value. Whole-function JIT bail before cell allocation.",
+    );
+}
+
+/// N10 — an inner closure recaptures the outer closure's inherited Shared
+/// cell. The inner environment must retain the raw cell carrier, not a locked
+/// read of its current scalar payload.
+#[test]
+fn jit_fallback_absent_for_nested_shared_recapture() {
+    assert_reaches_native_jit("n10-nested-shared-recapture.shape", "42");
 }

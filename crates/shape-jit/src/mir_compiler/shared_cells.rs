@@ -27,7 +27,6 @@ pub(crate) struct SharedLocalKindEvidence {
     layout: Option<NativeKind>,
     inferred: Option<NativeKind>,
     layout_conflict: Option<(NativeKind, NativeKind)>,
-    layout_projection_missing: bool,
 }
 
 impl SharedLocalKindEvidence {
@@ -37,11 +36,7 @@ impl SharedLocalKindEvidence {
         }
     }
 
-    fn record_layout(&mut self, kind: Option<NativeKind>) {
-        let Some(kind) = kind else {
-            self.layout_projection_missing = true;
-            return;
-        };
+    fn record_layout(&mut self, kind: NativeKind) {
         match self.layout {
             Some(previous) if previous != kind => {
                 self.layout_conflict.get_or_insert((previous, kind));
@@ -59,14 +54,6 @@ impl SharedLocalKindEvidence {
                  conflicting closure-layout NativeKinds ({first:?} versus {second:?}). \
                  A declaring frame and its closure bodies must consume one compiler-issued \
                  payload discriminator. Whole-function JIT bail before cell allocation."
-            ));
-        }
-        if self.layout_projection_missing {
-            return Err(format!(
-                "SURFACE (ADR-006 §2.7.8 / Q10): SharedCell for local slot {slot} has a \
-                 ClosureLayout capture but that layout does not project to a NativeKind. \
-                 Inferred slot evidence cannot replace the discriminator consumed by the \
-                 closure body. Whole-function JIT bail before cell allocation."
             ));
         }
         match (self.layout, self.inferred) {
@@ -152,10 +139,7 @@ pub(crate) fn discover_shared_local_slots(
                 }
 
                 let inferred = slot_types::slot_kind_for_local(slot_kinds, slot.0);
-                let layout_kind = layout
-                    .capture_types
-                    .get(index)
-                    .and_then(slot_types::elem_slot_kind_for_concrete);
+                let layout_kind = layout.capture_native_kind(index);
                 let evidence = result.entry(slot).or_default();
                 evidence.record_inferred(inferred);
                 evidence.record_layout(layout_kind);
@@ -234,7 +218,6 @@ mod tests {
             layout: Some(NativeKind::Bool),
             inferred: Some(NativeKind::Float64),
             layout_conflict: None,
-            layout_projection_missing: false,
         };
 
         let error = evidence
@@ -245,27 +228,11 @@ mod tests {
     }
 
     #[test]
-    fn unprojectable_layout_does_not_fall_back_to_inference() {
-        let evidence = SharedLocalKindEvidence {
-            layout: None,
-            inferred: Some(NativeKind::Bool),
-            layout_conflict: None,
-            layout_projection_missing: true,
-        };
-
-        let error = evidence
-            .validated(SlotId(7))
-            .expect_err("inference must not replace a present layout's discriminator");
-        assert!(error.contains("does not project to a NativeKind"));
-    }
-
-    #[test]
     fn agreeing_sources_resolve_to_the_layout_kind() {
         let evidence = SharedLocalKindEvidence {
             layout: Some(NativeKind::Bool),
             inferred: Some(NativeKind::Bool),
             layout_conflict: None,
-            layout_projection_missing: false,
         };
 
         assert_eq!(evidence.validated(SlotId(7)), Ok(NativeKind::Bool));

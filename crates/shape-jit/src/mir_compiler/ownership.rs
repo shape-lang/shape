@@ -775,19 +775,17 @@ impl<'a, 'b> MirToIR<'a, 'b> {
     /// Session 1 Commit 3: compile an operand for a `ClosureCapture`
     /// slot whose capture kind is `Shared`.
     ///
-    /// Semantics: when the capture's source is an outer-scope `var`
-    /// local that has been promoted to `SharedCow` storage, the
-    /// closure capture needs the RAW `*const SharedCell` pointer bits
-    /// — not the locked payload. This matches the interpreter's
+    /// Semantics: whether the source is a declaring-frame `var` promoted to
+    /// SharedCow storage or an inherited Shared capture parameter, the next
+    /// closure needs the RAW `*const SharedCell` pointer bits — never the
+    /// locked payload. This matches the interpreter's
     /// `expressions/closures.rs` path, which emits
     /// `LoadLocal(outer_var_slot)` immediately after `AllocSharedLocal`
     /// to push the pointer bits that `op_make_closure` then feeds
     /// through `Arc::increment_strong_count`.
     ///
-    /// For all other operand shapes (Constant, Copy/Move of a slot
-    /// that isn't a SharedCow local), defer to the standard
-    /// `compile_operand`. This keeps the legacy Immutable /
-    /// OwnedMutable capture paths untouched.
+    /// For all other operand shapes, defer to the standard `compile_operand`.
+    /// This keeps the Immutable / OwnedMutable capture paths untouched.
     pub(crate) fn compile_operand_for_shared_capture(
         &mut self,
         operand: &Operand,
@@ -795,10 +793,12 @@ impl<'a, 'b> MirToIR<'a, 'b> {
         if let Operand::Move(place) | Operand::MoveExplicit(place) | Operand::Copy(place) = operand
         {
             if let Place::Local(slot) = place {
-                if self.shared_local_slots.contains_key(slot) {
+                if self.shared_local_slots.contains_key(slot)
+                    || self.shared_capture_slots.contains_key(slot)
+                {
                     // Bypass the lock-gated read in `read_place` and
-                    // produce the raw pointer bits held in the slot's
-                    // Cranelift variable.
+                    // produce the raw pointer bits held in either the
+                    // declaring-frame cell slot or inherited capture slot.
                     let var = *self
                         .locals
                         .get(slot)
