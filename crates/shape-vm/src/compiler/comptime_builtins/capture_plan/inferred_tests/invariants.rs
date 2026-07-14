@@ -172,3 +172,66 @@ run()
         .expect_err("cell-backed descriptor requires its exact opcode family");
     assert!(opcode_error.contains("requires opcode family"), "{opcode_error}");
 }
+
+/// A rejection reached while compiling the body of a Shared-capturing closure
+/// happens after its synthetic capture parameter has installed slot evidence.
+/// Reusing that compiler must not make an unrelated local at the same ordinal
+/// look like an inherited SharedCell.
+#[test]
+fn post_install_rejection_does_not_leak_shared_slot_into_compiler_reuse() {
+    let bad = shape_ast::parse_program(
+        r#"
+var total = 40
+let outer = || {
+  let invalid = |; share total| total
+  invalid()
+}
+outer()
+"#,
+    )
+    .expect("post-install rejection fixture parses");
+    let mut compiler = BytecodeCompiler::new();
+    let error = compiler
+        .compile_in_place(&bad)
+        .expect_err("ordinary explicit clause must reject inside the outer closure body");
+    assert!(error.to_string().contains("[C0903]"), "{error}");
+    assert!(
+        compiler.inherited_shared_capture_locals.is_empty(),
+        "the rejected closure body must restore inherited Shared slot evidence"
+    );
+
+    // Establish a clean ordinary binding environment on the SAME compiler,
+    // deliberately reusing the leaked ordinal. Other legacy body-error state
+    // is irrelevant to this focused invariant and is cleared explicitly; the
+    // inherited-Shared set above is not touched.
+    compiler.locals = vec![std::collections::HashMap::new()];
+    compiler.next_local = 0;
+    compiler.type_tracker.clear_locals();
+    compiler.shared_locals.clear();
+    compiler.boxed_locals.clear();
+    compiler.owned_mutable_locals.clear();
+    let slot = compiler.declare_local("plain").expect("declare slot-0 local");
+    assert_eq!(slot, 0, "the valid local must reuse the leaked ordinal");
+    compiler.type_tracker.set_local_binding_semantics(
+        slot,
+        BytecodeCompiler::owned_immutable_binding_semantics(),
+    );
+
+    let planned = compiler
+        .plan_captures(
+            &["plain".to_string()],
+            &std::collections::HashSet::new(),
+            None,
+            None,
+            None,
+            Span::DUMMY,
+        )
+        .expect("ordinary slot-0 capture plans");
+    assert_eq!(planned.len(), 1);
+    assert_eq!(planned[0].plan.kind(), CaptureKind::Immutable);
+    assert_eq!(
+        planned[0].plan.access(),
+        CaptureAccess::Param,
+        "stale inherited-Shared evidence would misclassify this local"
+    );
+}

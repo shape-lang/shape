@@ -805,7 +805,15 @@ impl BytecodeCompiler {
         if deferring_template {
             self.deferring_uninstantiated_template_body = true;
         }
+        // ADR-009 C1 slice 4 / #53: `compile_function_body` isolates this
+        // slot-keyed set for the nested function, but its many established
+        // diagnostic `?` exits predate that state and do not all run the
+        // body's success cleanup. Keep one outer all-exit restoration point so
+        // a rejected closure body can never leak inherited Shared evidence
+        // into a later compilation that reuses the same local ordinal.
+        let saved_inherited_shared_capture_locals = self.inherited_shared_capture_locals.clone();
         let result = self.compile_function_inner(func_def);
+        self.inherited_shared_capture_locals = saved_inherited_shared_capture_locals;
         self.deferring_uninstantiated_template_body = saved_deferring_template;
         result
     }
