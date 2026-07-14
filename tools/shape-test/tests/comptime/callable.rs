@@ -193,3 +193,66 @@ print(arity)
 "#;
     expect_vm_and_jit_output(source, "1");
 }
+
+// ─────────────────────────────────────────────────────────────────────────
+// DoD alternate-spelling residual (ADR009-B6, #9). The issue DoD names two
+// hygienic spellings on top of the CURRENT positional `param(I)`: the token
+// form `param(#name)` and the type-indexed turbofish `param<I>()`. Neither is
+// a spellable surface — the grammar carries no general `#ident` token and the
+// `MethodCall` AST carries no const-arg slot (B7 landed the payload catalog,
+// NOT this grammar). Rather than a cryptic raw parse error / silent comparison
+// misparse, each spelling is a NAMED compile-time rejection pointing back at
+// the CURRENT `param(i)` selection (the sanctioned tracer pattern). See
+// docs/defections.md (ADR009-B6 residual).
+// ─────────────────────────────────────────────────────────────────────────
+
+/// The DoD hygienic-token spelling `callable.param(#name)` resolves to the same
+/// positional identity as `param(i)` — but the general `#ident` selection token
+/// is grammar-pending. A `#name` selector is a NAMED grammar-pending rejection
+/// (not a raw parse error), pointing at the CURRENT positional accessor.
+#[test]
+fn hash_token_param_selection_is_the_named_grammar_pending_rejection() {
+    let source = r#"
+let bad = comptime {
+  match reflect(type_ref((int, string) -> bool)) {
+    FrozenType::Callable(c) => c.param(#first).optional
+    _ => false
+  }
+}
+
+print(bad)
+"#;
+    ShapeTest::new(source).expect_run_err_contains("not yet a spellable surface");
+}
+
+/// The DoD turbofish spelling `callable.param<I>()` has no `MethodCall`
+/// const-arg carrier in the AST. The bare `<I>` form is the universal
+/// comparison ambiguity; the only PARSEABLE turbofish form is the `::<I>`
+/// disambiguation, and it is a named parse rejection — never a silent misparse.
+#[test]
+fn turbofish_param_selection_is_a_named_parse_rejection() {
+    let source = r#"
+let bad = comptime {
+  match reflect(type_ref((int, string) -> bool)) {
+    FrozenType::Callable(c) => c.param::<0>().optional
+    _ => false
+  }
+}
+
+print(bad)
+"#;
+    ShapeTest::new(source)
+        .expect_run_err_contains("const generic arguments are only supported on function calls");
+}
+
+/// Regression: the named `#name` tracer must NOT capture a formatted string —
+/// the `f#"..."` prefix begins with `f`, never a bare `#`, so string
+/// interpolation is unaffected by the new selection-token production.
+#[test]
+fn hash_tracer_does_not_disturb_formatted_strings() {
+    let source = r#"
+let x = 7
+print(f"val {x}")
+"#;
+    expect_vm_and_jit_output(source, "val 7");
+}

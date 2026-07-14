@@ -68,8 +68,10 @@ pub(crate) const PARAM_ARITY_DIAGNOSTIC: &str =
 /// descriptor (`field.name`, R3). Source spelling and declaration position are
 /// not member identities. The typed member rows are read by iterating the
 /// descriptor's ordered `fields` / `variants`. The explicit `record.field(#name)`
-/// selection surface is grammar-pending (no `#ident` token; see
-/// docs/defections.md) — until it lands, iteration is the only member vehicle.
+/// selection surface is grammar-pending: the general `#ident` selection token is
+/// parsed ONLY to emit a NAMED grammar-pending rejection (the tracer in
+/// `parser/expressions/primary.rs`; see docs/defections.md), never resolved —
+/// until it lands, iteration is the only member vehicle.
 pub(crate) const DESCRIPTOR_MEMBER_SELECTION_DIAGNOSTIC: &str =
     "nominal member selection requires an owner-bound member identity (#name): a source-name \
      string, a declaration ordinal, or a descriptor-derived name is not a member identity — \

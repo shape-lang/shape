@@ -412,6 +412,17 @@ fn r2_ordinal_field_selection_is_the_named_rejection() {
         .expect_run_err_contains("a declaration ordinal");
 }
 
+/// The DoD-named `record.field(#name)` hygienic-token selection surface shares
+/// the grammar-pending `#ident` selection token with B6's `param(#name)`. Until
+/// the token lands, a `#name` selector is a NAMED grammar-pending rejection (the
+/// sanctioned tracer, not a raw parse error); iteration stays the CURRENT member
+/// vehicle. See docs/defections.md (ADR009-B6 residual).
+#[test]
+fn hash_token_field_selection_is_the_named_grammar_pending_rejection() {
+    ShapeTest::new(&descriptor_selection_program("{ s.field(#id) }"))
+        .expect_run_err_contains("not yet a spellable surface");
+}
+
 /// R4 (Dec 55): `record.kind` — nominal shape selection is a typed exhaustive
 /// `match`, never a `.kind` string read off the descriptor. Named rejection.
 #[test]
