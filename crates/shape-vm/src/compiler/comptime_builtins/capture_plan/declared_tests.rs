@@ -338,4 +338,5 @@ job.scale(2)
         assert!(error.contains("does not exactly match"), "{error}");
     }
 
+    #[path = "declared_tests/rejections.rs"]
     mod rejections;

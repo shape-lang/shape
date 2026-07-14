@@ -437,4 +437,5 @@ run()
         assert_eq!(keys.len(), sorted.len(), "func_idx keys must be distinct");
     }
 
+    #[path = "inferred_tests/invariants.rs"]
     mod invariants;
