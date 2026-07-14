@@ -13,13 +13,13 @@ use shape_runtime::type_schema::FieldType;
 use shape_value::KindedSlot;
 use std::collections::{HashMap, HashSet};
 
-use super::{BytecodeCompiler, HygienicRole};
 use super::comptime_builtins::FrozenTypeIdentity;
 use super::comptime_builtins::expansion_provenance::{
     ApplicationClaim, ApplicationId, CanonicalHash, ComptimeStage, DeclarationDiscoveryFixedPoint,
     ExpansionIdentity, ExpansionSite, GeneratedNodePath, GeneratedOrigin, GeneratedSymbolTable,
     GeneratorRef, SymbolReservation, TargetIdentity,
 };
+use super::{BytecodeCompiler, HygienicRole};
 
 /// ADR-009 E3 (slice S3, legacy class U11): the TYPED capability a `replace
 /// body` replacement reaches through `ctx.original`. It replaces the deleted
@@ -398,8 +398,10 @@ impl BytecodeCompiler {
                     else {
                         continue;
                     };
-                    param.default_value =
-                        Some(Self::scalar_default_expr_from_kinded_slot(&param_name, &value)?);
+                    param.default_value = Some(Self::scalar_default_expr_from_kinded_slot(
+                        &param_name,
+                        &value,
+                    )?);
                 }
                 super::comptime_builtins::ComptimeDirective::SetReturnType { .. } => {}
                 _ => {}
@@ -1827,7 +1829,7 @@ impl BytecodeCompiler {
             // or a `replace body` expansion.
             shape_ast::transform::stamp_generated_closures(
                 &mut func_def.body,
-                &origin.to_node_origin(&func_def.name),
+                &origin.to_node_origin(&self.generated_node_issuer, &func_def.name),
             );
             // §4.9.1 + D1 identity-keyed dedup: if the whole-program
             // pre-pass already reserved this identity and registered the
@@ -2262,10 +2264,7 @@ impl BytecodeCompiler {
                                     // `Item::Extend` and reserve one identity. The
                                     // deleted magic `TypeName == "target"` literal
                                     // substitution formerly lived here.
-                                    vec![Item::Extend(
-                                        extend,
-                                        expansion_site.application_span(),
-                                    )]
+                                    vec![Item::Extend(extend, expansion_site.application_span())]
                                 }
                                 _ => continue,
                             };
@@ -2310,7 +2309,10 @@ impl BytecodeCompiler {
                                         // reaches `compile_function` first.
                                         shape_ast::transform::stamp_generated_closures(
                                             &mut func_def.body,
-                                            &origin.to_node_origin(&func_def.name),
+                                            &origin.to_node_origin(
+                                                &self.generated_node_issuer,
+                                                &func_def.name,
+                                            ),
                                         );
                                         match self.generated_symbols.reserve_generated_decl(
                                             &func_def.name,
@@ -2437,13 +2439,14 @@ impl BytecodeCompiler {
                                             // form, and an implicit capture inside
                                             // `extend Job { method scale<T> }`
                                             // compiled clean.
-                                            let owner = format!(
-                                                "{extend_type_str}.{}",
-                                                method.name
-                                            );
+                                            let owner =
+                                                format!("{extend_type_str}.{}", method.name);
                                             shape_ast::transform::stamp_generated_closures(
                                                 &mut func_def.body,
-                                                &origin.to_node_origin(&owner),
+                                                &origin.to_node_origin(
+                                                    &self.generated_node_issuer,
+                                                    &owner,
+                                                ),
                                             );
                                             match self.generated_symbols.reserve_generated_decl(
                                                 &func_def.name,
@@ -2512,7 +2515,10 @@ impl BytecodeCompiler {
                                                     format!("{extend_type_str}.{}", method.name);
                                                 shape_ast::transform::stamp_generated_closures(
                                                     &mut method.body,
-                                                    &origin.to_node_origin(&owner),
+                                                    &origin.to_node_origin(
+                                                        &self.generated_node_issuer,
+                                                        &owner,
+                                                    ),
                                                 );
                                             }
                                             generated.push(Item::Extend(
@@ -2705,7 +2711,7 @@ impl BytecodeCompiler {
             // the generated free function (see `apply_comptime_extend`).
             shape_ast::transform::stamp_generated_closures(
                 &mut func_def.body,
-                &origin.to_node_origin(&func_def.name),
+                &origin.to_node_origin(&self.generated_node_issuer, &func_def.name),
             );
             match self.generated_symbols.reserve_generated_decl(
                 &func_def.name,
@@ -3249,8 +3255,7 @@ impl BytecodeCompiler {
                     // binding is injected into user scope, and no name-encoded
                     // alias resolves the call — the role is bound by the
                     // `.original` capability member, not a global spelling.
-                    let capability =
-                        self.build_original_capability(func_def, shadow_name)?;
+                    let capability = self.build_original_capability(func_def, shadow_name)?;
                     // Seed the receiver-scope with every identifier the target's
                     // parameters bind — including destructuring params (`fn f({x,
                     // y}: P)`), whose binders `simple_name()` would drop. Body-local
@@ -3290,7 +3295,7 @@ impl BytecodeCompiler {
                     let owner = func_def.name.clone();
                     shape_ast::transform::stamp_generated_closures(
                         &mut func_def.body,
-                        &origin.to_node_origin(&owner),
+                        &origin.to_node_origin(&self.generated_node_issuer, &owner),
                     );
                 }
                 super::comptime_builtins::ComptimeDirective::ReplaceModule { .. } => {
@@ -4862,11 +4867,7 @@ mod s4_target_owner_tests {
             "extend target { method m() -> int { 1 } }",
         )];
         let owner = TargetOwner::new("Alpha", NominalShape::Struct);
-        BytecodeCompiler::resolve_extend_owner_placeholder(
-            &mut directives,
-            &owner,
-            Some("target"),
-        );
+        BytecodeCompiler::resolve_extend_owner_placeholder(&mut directives, &owner, Some("target"));
         assert_eq!(
             extend_head(&directives[0]),
             "Alpha",
@@ -5154,7 +5155,8 @@ let out = work(2)
             .function_defs
             .iter()
             .find(|(name, wrapper)| {
-                name.starts_with('\u{1}') && resolved_line(&compiler, wrapper.name_span) == handler_line
+                name.starts_with('\u{1}')
+                    && resolved_line(&compiler, wrapper.name_span) == handler_line
             })
             .expect("before-handler wrapper is registered under a hygienic name");
         assert!(
@@ -5544,10 +5546,7 @@ mod e3_function_target_discovery_tests {
 
     /// The generated method names an executed-discovery `extend` block records
     /// for `type_name` (across all generated extend items).
-    fn discovered_extend_methods(
-        items: &[shape_ast::ast::Item],
-        type_name: &str,
-    ) -> Vec<String> {
+    fn discovered_extend_methods(items: &[shape_ast::ast::Item], type_name: &str) -> Vec<String> {
         let mut methods = Vec::new();
         for item in items {
             if let shape_ast::ast::Item::Extend(extend, _) = item {

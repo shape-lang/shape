@@ -511,11 +511,11 @@ impl Stamper<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ast::Span;
+    use crate::ast::{GeneratedNodeIssuer, Span};
     use crate::parse_program;
 
     fn origin() -> GeneratedNodeOrigin {
-        GeneratedNodeOrigin::new(
+        GeneratedNodeIssuer::new().issue(
             (0x1122_3344_5566_7788, 0x0102_0304_0506_0708),
             vec!["extend:Job".to_string(), "method:read".to_string()],
             7,
@@ -602,10 +602,11 @@ fn generated(n: int) -> int {
         );
     }
 
-    /// The stamp survives a serde round-trip (the `__emit_extend` payload path
-    /// serializes the generated AST to JSON and parses it back).
+    /// Provenance DATA survives a serde round-trip, while its compiler-instance
+    /// authority is deliberately erased (proved in `ast::provenance`). The
+    /// compiler must re-stamp generated payloads before trusting them.
     #[test]
-    fn stamp_survives_serde_round_trip() {
+    fn stamp_data_survives_serde_round_trip() {
         let mut body = body_of("fn generated() -> int { let w = || 1; w() }");
         stamp_generated_closures(&mut body, &origin());
         let json = serde_json::to_string(&body).unwrap();
@@ -616,7 +617,8 @@ fn generated(n: int) -> int {
 
     /// The `__emit_extend` comptime directive ships its payload as JSON of an
     /// `ExtendStatement` (`comptime_builtins.rs`'s `serde_json::from_str`), so
-    /// the stamp has to survive at THAT type, not just at `Vec<Statement>`.
+    /// the diagnostic data has to survive at THAT type, not just at
+    /// `Vec<Statement>`; authority is re-issued on compiler ingestion.
     #[test]
     fn stamp_survives_the_emit_extend_payload_type() {
         let program = parse_program(
@@ -659,7 +661,9 @@ fn generated(n: int) -> int {
 
     #[test]
     fn nested_closures_extend_the_parent_path_and_siblings_are_indexed() {
-        let mut body = body_of("fn generated() -> int { let a = || 1; let b = || { let c = || 2; c() }; a() + b() }");
+        let mut body = body_of(
+            "fn generated() -> int { let a = || 1; let b = || { let c = || 2; c() }; a() + b() }",
+        );
         stamp_generated_closures(&mut body, &origin());
         let mut paths = Vec::new();
         collect_paths(&body, &mut paths);
@@ -688,7 +692,9 @@ fn generated(n: int) -> int {
 
     #[test]
     fn stamping_is_idempotent() {
-        let mut once = body_of("fn generated() -> int { let a = || 1; let b = || { let c = || 2; c() }; a() + b() }");
+        let mut once = body_of(
+            "fn generated() -> int { let a = || 1; let b = || { let c = || 2; c() }; a() + b() }",
+        );
         stamp_generated_closures(&mut once, &origin());
         let mut twice = once.clone();
         stamp_generated_closures(&mut twice, &origin());

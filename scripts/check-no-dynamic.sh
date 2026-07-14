@@ -62,7 +62,9 @@ done < "$baseline"
 # script exists to prevent. One selector, or the build stops.
 capture_kind_offenders=$(
   rg --no-heading -l -P 'CaptureKind::(Immutable|OwnedMutable|Shared)\b' \
-    crates/shape-vm/src/compiler 2>/dev/null | grep -v 'capture_plan\.rs' || true
+    crates/shape-vm/src/compiler 2>/dev/null \
+    | grep -v 'capture_plan\.rs' \
+    | grep -v '/capture_plan/.*tests' || true
 )
 if [[ -n "$capture_kind_offenders" ]]; then
   echo "FAIL  ADR-009 C1 K1: a SECOND CaptureKind producer exists."
@@ -73,25 +75,25 @@ if [[ -n "$capture_kind_offenders" ]]; then
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
-# ADR-009 ticket C1 (slice 2) — K1b: ONE MINT FOR NODE-BORNE PROVENANCE.
+# ADR-009 ticket C1 — K1b: COMPILER-INSTANCE PROVENANCE AUTHORITY.
 #
 # `GeneratedNodeOrigin` is the Wave-46 capture gate's predicate: a closure node
-# carrying one IS generated code. Its constructor may be called in EXACTLY ONE
-# compiler file — comptime_builtins/expansion_provenance.rs — where it is
-# projected from a REGISTERED `GeneratedOrigin` (whose `SymbolId` derive is
-# private to that module, ProofGap-style). Anywhere else, emit code could
-# fabricate a stamp from a name or a span and re-open the identity hole that got
-# C1 rejected (a span-keyed pack table + `DeclaredCapture { name: String }`).
-# The AST-side `impl` block in shape-ast is the definition, not a producer.
+# carrying one is generated code ONLY when the current compiler instance's
+# `GeneratedNodeIssuer` recognizes its non-serialized token. The issuer itself
+# is allocated exactly once in `BytecodeCompiler::new`; expansion provenance
+# receives it by reference. A foreign issuer and a serde round-trip both fail
+# the live compiler check, so constructor visibility is not the trust boundary.
 node_origin_offenders=$(
-  rg --no-heading -l -P 'GeneratedNodeOrigin::new\b' \
+  rg --no-heading -l -P 'GeneratedNodeIssuer::new\b' \
     crates/shape-vm/src crates/shape-runtime/src tools 2>/dev/null \
-    | grep -v 'expansion_provenance\.rs' || true
+    | grep -v 'compiler_impl_initialization\.rs' \
+    | grep -v 'expansion_provenance\.rs' \
+    | grep -v '/capture_plan/.*tests' || true
 )
 if [[ -n "$node_origin_offenders" ]]; then
-  echo "FAIL  ADR-009 C1 K1b: a SECOND GeneratedNodeOrigin mint exists."
-  echo "      Only crates/shape-vm/src/compiler/comptime_builtins/expansion_provenance.rs"
-  echo "      may mint a node stamp (from a registered GeneratedOrigin). Offending files:"
+  echo "FAIL  ADR-009 C1 K1b: a SECOND compiler GeneratedNodeIssuer exists."
+  echo "      Only BytecodeCompiler initialization may allocate the live issuer;"
+  echo "      expansion_provenance.rs may allocate test-only issuers. Offending files:"
   while IFS= read -r f; do echo "        $f"; done <<< "$node_origin_offenders"
   fail=1
 fi

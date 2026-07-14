@@ -221,6 +221,7 @@ impl BytecodeCompiler {
                 crate::compiler::monomorphization::cache::MonomorphizationCache::new(),
             monomorphization_in_progress: std::collections::HashSet::new(),
             specialization_type_param_overlay: None,
+            generated_node_issuer: shape_ast::ast::GeneratedNodeIssuer::new(),
             generated_symbols:
                 crate::compiler::comptime_builtins::expansion_provenance::GeneratedSymbolTable::new(
                 ),

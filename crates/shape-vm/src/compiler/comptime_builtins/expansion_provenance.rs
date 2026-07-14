@@ -459,9 +459,7 @@ impl HygienicRole {
             Self::AnnotationBeforeResult => "role:annotation-before-result".to_string(),
             Self::ComptimeBlockWrapper => "role:comptime-block-wrapper".to_string(),
             Self::ComptimeHandlerWrapper => "role:comptime-handler-wrapper".to_string(),
-            Self::SpecializedAnnotationHandler => {
-                "role:specialized-annotation-handler".to_string()
-            }
+            Self::SpecializedAnnotationHandler => "role:specialized-annotation-handler".to_string(),
             Self::ForeignAnnotationWrapper => "role:foreign-annotation-wrapper".to_string(),
             Self::OriginalBodyShadow => "role:original-body-shadow".to_string(),
             Self::AnnotationHookImplBody => "role:annotation-hook-impl-body".to_string(),
@@ -494,7 +492,10 @@ impl HygienicSymbol {
         let nonce_descriptor = nonce.to_string();
         let hash = CanonicalHash::over_framed(
             HYGIENIC_SYMBOL_DOMAIN,
-            [role.canonical_descriptor().as_str(), nonce_descriptor.as_str()],
+            [
+                role.canonical_descriptor().as_str(),
+                nonce_descriptor.as_str(),
+            ],
         );
         Self {
             high: hash.high,
@@ -614,11 +615,16 @@ impl GeneratedOrigin {
     /// `owner_display` is diagnostic prose only (the "in generated function 'f'"
     /// tail of the Wave-46 message); it is never compared and never a key.
     ///
-    /// `scripts/check-no-dynamic.sh` pins `GeneratedNodeOrigin::new` to this
-    /// file, so no other compiler site can fabricate a stamp.
-    pub(crate) fn to_node_origin(&self, owner_display: &str) -> shape_ast::ast::GeneratedNodeOrigin {
+    /// `issuer` is the current compiler instance's non-serialized capability;
+    /// `compile_expr_closure` accepts only stamps recognized by that same
+    /// issuer. Constructor visibility is therefore not the trust boundary.
+    pub(crate) fn to_node_origin(
+        &self,
+        issuer: &shape_ast::ast::GeneratedNodeIssuer,
+        owner_display: &str,
+    ) -> shape_ast::ast::GeneratedNodeOrigin {
         let fingerprint = self.expansion.fingerprint();
-        shape_ast::ast::GeneratedNodeOrigin::new(
+        issuer.issue(
             (fingerprint.high, fingerprint.low),
             self.node_path.segments().to_vec(),
             self.source_anchor.file_id(),
@@ -636,7 +642,7 @@ impl GeneratedOrigin {
         node_path: &[&str],
         owner_display: &str,
     ) -> shape_ast::ast::GeneratedNodeOrigin {
-        shape_ast::ast::GeneratedNodeOrigin::new(
+        shape_ast::ast::GeneratedNodeIssuer::new().issue(
             (0x0BAD_F00D, 0x0DEF_ACED),
             node_path.iter().map(|s| (*s).to_string()).collect(),
             3,
@@ -1440,8 +1446,14 @@ mod tests {
         // former synthetic spelling is a plain identifier and can never equal
         // this rendering.
         let desc = a.unspellable_descriptor();
-        assert!(desc.starts_with('\u{1}'), "descriptor must be SOH-prefixed: {desc:?}");
-        assert_ne!(desc, "__ann_args", "unspellable descriptor never equals the former spelling");
+        assert!(
+            desc.starts_with('\u{1}'),
+            "descriptor must be SOH-prefixed: {desc:?}"
+        );
+        assert_ne!(
+            desc, "__ann_args",
+            "unspellable descriptor never equals the former spelling"
+        );
         assert!(
             !desc.chars().next().unwrap().is_alphabetic(),
             "descriptor cannot start like a Shape identifier"
@@ -1480,8 +1492,7 @@ mod tests {
 
         // Outer-registry wrappers are disambiguated by the compiler nonce so
         // before/after and every application register distinct slots.
-        let specialized_next =
-            HygienicSymbol::mint(HygienicRole::SpecializedAnnotationHandler, 1);
+        let specialized_next = HygienicSymbol::mint(HygienicRole::SpecializedAnnotationHandler, 1);
         assert_ne!(
             specialized, specialized_next,
             "distinct nonces mint distinct specialized-handler slots"
@@ -1497,8 +1508,14 @@ mod tests {
             (foreign, "work___ann_wrapper"),
         ] {
             let desc = id.unspellable_descriptor();
-            assert!(desc.starts_with('\u{1}'), "descriptor must be SOH-prefixed: {desc:?}");
-            assert_ne!(desc, former, "unspellable descriptor never equals the former spelling");
+            assert!(
+                desc.starts_with('\u{1}'),
+                "descriptor must be SOH-prefixed: {desc:?}"
+            );
+            assert_ne!(
+                desc, former,
+                "unspellable descriptor never equals the former spelling"
+            );
         }
     }
 

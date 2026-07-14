@@ -35,7 +35,7 @@ pub mod windows;
 pub use span::{Span, Spanned};
 
 // From provenance.rs (ADR-009 D2 / C1 slice 2)
-pub use provenance::GeneratedNodeOrigin;
+pub use provenance::{GeneratedNodeIssuer, GeneratedNodeOrigin};
 
 // From captures.rs (ADR-009 C1 slice 3) — the declared capture clause.
 pub use captures::{CaptureClause, CaptureEntry, CaptureMode};

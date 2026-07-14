@@ -3013,64 +3013,93 @@ impl BytecodeCompiler {
             use shape_value::v2::closure_layout::ClosureLayout;
             let total_fns = self.program.functions.len();
             let mut layouts: Vec<Option<std::sync::Arc<ClosureLayout>>> = vec![None; total_fns];
-            // Function index → the closure's capture pack (R3: keyed by
-            // `func_idx`, never a `Span`).
-            let packs_by_fn: std::collections::HashMap<u16, &CapturePack> = self
+            let internal_error = |message: String| shape_ast::error::ShapeError::SemanticError {
+                message: format!("internal compiler error (ADR-009 C1): {message}"),
+                location: None,
+            };
+
+            // Function index → the closure's ONE capture pack (R3: keyed by
+            // `func_idx`, never a `Span`). A HashMap collect used to silently
+            // overwrite duplicate plans; duplication is now a hard error.
+            let mut packs_by_fn: std::collections::HashMap<u16, &CapturePack> =
+                std::collections::HashMap::new();
+            for pack in &self.closure_capture_packs {
+                if packs_by_fn.insert(pack.closure, pack).is_some() {
+                    return Err(internal_error(format!(
+                        "closure {} has more than one capture pack",
+                        pack.closure
+                    )));
+                }
+            }
+            let mut consumed_packs = std::collections::HashSet::new();
+            let mut seen_closure_functions = std::collections::HashSet::new();
+            for (fn_idx, type_id) in self.closure_type_ids.iter().copied() {
+                if !seen_closure_functions.insert(fn_idx) {
+                    return Err(internal_error(format!(
+                        "closure {fn_idx} has more than one ClosureTypeId entry"
+                    )));
+                }
+                let function =
+                    self.program
+                        .functions
+                        .get(usize::from(fn_idx))
+                        .ok_or_else(|| {
+                            internal_error(format!("capture plan names missing function {fn_idx}"))
+                        })?;
+                let pack = packs_by_fn.get(&fn_idx).copied().ok_or_else(|| {
+                    internal_error(format!("closure {fn_idx} has no capture pack"))
+                })?;
+                consumed_packs.insert(fn_idx);
+                let registry_layout = self.closure_registry.get(type_id).ok_or_else(|| {
+                    internal_error(format!(
+                        "closure {fn_idx} names unregistered ClosureTypeId {type_id:?}"
+                    ))
+                })?;
+
+                // The pack drives the emitted layout. The registry is checked
+                // independently as an interned identity witness; it is not a
+                // fallback source of capture types or kinds.
+                let capture_types = pack
+                    .descriptors
+                    .iter()
+                    .map(|descriptor| descriptor.capture_type.clone())
+                    .collect::<Vec<_>>();
+                let kinds = pack.kinds();
+                if registry_layout.capture_types != capture_types
+                    || registry_layout.capture_kinds != kinds
+                {
+                    return Err(internal_error(format!(
+                        "closure {fn_idx}: interned registry layout disagrees with capture pack"
+                    )));
+                }
+                let rebuilt = ClosureLayout::from_capture_types(&capture_types, &kinds);
+
+                let end = function
+                    .entry_point
+                    .checked_add(function.body_length)
+                    .filter(|end| *end <= self.program.instructions.len())
+                    .ok_or_else(|| {
+                        internal_error(format!(
+                            "closure {fn_idx}: function instruction window is out of bounds"
+                        ))
+                    })?;
+                pack.validate_emitted_artifact(
+                    registry_layout,
+                    function,
+                    &self.program.instructions[function.entry_point..end],
+                )
+                .map_err(&internal_error)?;
+                layouts[usize::from(fn_idx)] = Some(std::sync::Arc::new(rebuilt));
+            }
+            if let Some(unconsumed) = self
                 .closure_capture_packs
                 .iter()
-                .map(|pack| (pack.closure, pack))
-                .collect();
-            for (fn_idx, type_id) in self.closure_type_ids.iter().copied() {
-                if let Some(registry_layout) = self.closure_registry.get(type_id) {
-                    if (fn_idx as usize) < total_fns {
-                        // Authoritative per-function kinds. Both shared AND
-                        // owned-mutable captures flip their corresponding mask
-                        // bits; `op_make_closure` allocates
-                        // `Box::into_raw(Box::new(initial))` for owned-mutable
-                        // slots and `Arc::into_raw(Arc::new(
-                        // parking_lot::Mutex<ValueWord>))` /
-                        // `Arc::increment_strong_count` for shared slots.
-                        // Module-binding `var` captures are shared too and
-                        // follow the same closure-side allocation discipline;
-                        // only the outer-scope promotion opcode differs
-                        // (`AllocSharedModuleBinding` vs `AllocSharedLocal`).
-                        let layout_arc = if let Some(pack) = packs_by_fn.get(&fn_idx)
-                            && pack.len() == registry_layout.capture_types.len()
-                        {
-                            let kinds = pack.kinds();
-                            // ADR-009 C1 (slice 3) — the ruling, enforced at the
-                            // artifact boundary: for every DECLARED capture, the
-                            // kind about to be stamped into the emitted layout
-                            // must be the kind the declared word names. This is
-                            // the live, release-active read of
-                            // `CaptureDescriptor.declared`, and it is the check
-                            // that makes "the declaration drives emission"
-                            // mechanical rather than aspirational — a second
-                            // producer overwriting the plan between
-                            // `lower_declared` and here (C1's rejection finding
-                            // (1), verbatim) fails the compile.
-                            pack.declared_kinds_agree_with_emission(&kinds).map_err(
-                                |message| shape_ast::error::ShapeError::SemanticError {
-                                    message: format!(
-                                        "internal compiler error (ADR-009 C1): {message}"
-                                    ),
-                                    location: None,
-                                },
-                            )?;
-                            let mut rebuilt = ClosureLayout::from_capture_types(
-                                &registry_layout.capture_types,
-                                &kinds,
-                            );
-                            // Preserve the authoritative per-capture kinds for
-                            // diagnostics and A.1D/E JIT lowering.
-                            rebuilt.capture_kinds = kinds;
-                            std::sync::Arc::new(rebuilt)
-                        } else {
-                            std::sync::Arc::new(registry_layout.clone())
-                        };
-                        layouts[fn_idx as usize] = Some(layout_arc);
-                    }
-                }
+                .find(|pack| !consumed_packs.contains(&pack.closure))
+            {
+                return Err(internal_error(format!(
+                    "closure {} has a capture pack but no ClosureTypeId",
+                    unconsumed.closure
+                )));
             }
             self.program.closure_function_layouts = layouts;
         }

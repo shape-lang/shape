@@ -65,6 +65,26 @@ pub enum CaptureMode {
 }
 
 impl CaptureMode {
+    /// Exhaustive C1 declaration axis. `SharedBorrow` and `ExclusiveBorrow`
+    /// are intentionally present but are named rejections until Shape has a
+    /// closure-region model; catalog membership does not imply lowering.
+    pub const ALL: [Self; 4] = [
+        Self::Move,
+        Self::Share,
+        Self::SharedBorrow,
+        Self::ExclusiveBorrow,
+    ];
+
+    /// Typed descriptor variant name used by the comptime schema/catalog.
+    pub const fn variant_name(self) -> &'static str {
+        match self {
+            CaptureMode::Move => "Move",
+            CaptureMode::Share => "Share",
+            CaptureMode::SharedBorrow => "SharedBorrow",
+            CaptureMode::ExclusiveBorrow => "ExclusiveBorrow",
+        }
+    }
+
     /// The source spelling, for diagnostics. Round-trips through the parser.
     pub fn spelling(self) -> &'static str {
         match self {

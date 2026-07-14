@@ -77,8 +77,7 @@ const REFINE_RETURN_MARKER: &str = "Option<\u{1}comptime:AppliedType>";
 /// named rejection, mirroring the "no string keys / name-selected access"
 /// invariant (spec §3.1; cf. the B4 index-not-string posture). Fires at
 /// comptime-prep time, before any index is formed — never a partial descriptor.
-pub(crate) const PARAM_STRING_SELECTOR_DIAGNOSTIC: &str =
-    "callable.param expects a signature POSITION index, not a string key: a callable's \
+pub(crate) const PARAM_STRING_SELECTOR_DIAGNOSTIC: &str = "callable.param expects a signature POSITION index, not a string key: a callable's \
      parameters are position-indexed descriptors — select with param(i) (or a hygienic \
      token resolving to a position), never param(\"name\")";
 
@@ -97,8 +96,7 @@ pub(crate) const PARAM_ARITY_DIAGNOSTIC: &str =
 /// parsed ONLY to emit a NAMED grammar-pending rejection (the tracer in
 /// `parser/expressions/primary.rs`; see docs/defections.md), never resolved —
 /// until it lands, iteration is the only member vehicle.
-pub(crate) const DESCRIPTOR_MEMBER_SELECTION_DIAGNOSTIC: &str =
-    "nominal member selection requires an owner-bound member identity (#name): a source-name \
+pub(crate) const DESCRIPTOR_MEMBER_SELECTION_DIAGNOSTIC: &str = "nominal member selection requires an owner-bound member identity (#name): a source-name \
      string, a declaration ordinal, or a descriptor-derived name is not a member identity — \
      iterate the descriptor's `fields` / `variants` to read the typed member rows (the explicit \
      `#name` selection surface is grammar-pending; see docs/defections.md)";
@@ -106,15 +104,13 @@ pub(crate) const DESCRIPTOR_MEMBER_SELECTION_DIAGNOSTIC: &str =
 /// ADR-009 B5 R4 (Dec 55): nominal shape selection is an exhaustive TYPED match
 /// over the sealed `NominalShape` sum (`Struct` / `Enum` / `Newtype` / `Opaque`)
 /// — never a `.kind` string compared against a literal.
-pub(crate) const NOMINAL_KIND_STRING_DIAGNOSTIC: &str =
-    "nominal shape selection is exhaustive and typed: match the NominalShape sum \
+pub(crate) const NOMINAL_KIND_STRING_DIAGNOSTIC: &str = "nominal shape selection is exhaustive and typed: match the NominalShape sum \
      (Struct / Enum / Newtype / Opaque), never read a `.kind` string off the descriptor";
 
 /// ADR-009 B5 R5 (Dec 55): a runtime representation class (native layout,
 /// builtin-ness) is NOT a reflection category, and a comptime-field disposition
 /// (`is_comptime`, Dec 58) is not exposed on a shape descriptor.
-pub(crate) const RUNTIME_REPR_CLASS_DIAGNOSTIC: &str =
-    "runtime representation classes (native layout, builtin-ness) and comptime-field \
+pub(crate) const RUNTIME_REPR_CLASS_DIAGNOSTIC: &str = "runtime representation classes (native layout, builtin-ness) and comptime-field \
      dispositions are not nominal reflection categories: a shape descriptor exposes semantic \
      identity + its public member interface, never a backend representation class";
 
@@ -669,19 +665,22 @@ fn frozen_type_category_enum_item() -> Item {
 ///   arrive with A2/B2, so the bound set is provably empty — the honest
 ///   structural form of "complete for reachable forms" (spec §3.1/§3.7).
 fn frozen_type_payload_model_items() -> Vec<Item> {
-    use shape_ast::ast::{EnumDef, EnumMember, EnumMemberKind, StructField, StructTypeDef};
-    use shape_runtime::comptime_reflection::{
-        FIELD_INITIALIZATION_SCHEMA_NAME, FLOAT_WIDTH_SCHEMA_NAME, FROZEN_PRIMITIVE_VARIANTS,
-        FROZEN_TYPE_ENABLED_PAYLOAD_CATEGORIES, FROZEN_TYPE_PAYLOAD_ENUM_NAME,
-        FieldInitialization, FloatWidth, INTEGER_WIDTH_SCHEMA_NAME, IntegerWidth,
-        NOMINAL_SHAPE_SCHEMA_NAME, NominalShape, PASSING_MODE_SCHEMA_NAME, PassingMode,
-        frozen_type_enabled_payload_type_name,
+    use shape_ast::ast::{
+        CaptureMode as DeclaredCaptureMode, EnumDef, EnumMember, EnumMemberKind, StructField,
+        StructTypeDef,
     };
     use shape_runtime::comptime_reflection::{
         ASSOCIATED_CONST_DESCRIPTOR_SCHEMA_NAME, ENUM_DESCRIPTOR_SCHEMA_NAME,
         FIELD_DESCRIPTOR_SCHEMA_NAME, NEWTYPE_DESCRIPTOR_SCHEMA_NAME,
         OPAQUE_TYPE_DESCRIPTOR_SCHEMA_NAME, STRUCT_DESCRIPTOR_SCHEMA_NAME,
         VARIANT_DESCRIPTOR_SCHEMA_NAME,
+    };
+    use shape_runtime::comptime_reflection::{
+        CAPTURE_DESCRIPTOR_SCHEMA_NAME, CAPTURE_MODE_SCHEMA_NAME, FIELD_INITIALIZATION_SCHEMA_NAME,
+        FLOAT_WIDTH_SCHEMA_NAME, FROZEN_PRIMITIVE_VARIANTS, FROZEN_TYPE_ENABLED_PAYLOAD_CATEGORIES,
+        FROZEN_TYPE_PAYLOAD_ENUM_NAME, FieldInitialization, FloatWidth, INTEGER_WIDTH_SCHEMA_NAME,
+        IntegerWidth, NOMINAL_SHAPE_SCHEMA_NAME, NominalShape, PASSING_MODE_SCHEMA_NAME,
+        PassingMode, frozen_type_enabled_payload_type_name,
     };
     // ADR-009 B7: the composite payloads' typed element-row model names.
     use shape_runtime::comptime_reflection::{
@@ -824,6 +823,30 @@ fn frozen_type_payload_model_items() -> Vec<Item> {
                 ),
                 field("returns_identity_high", int_ty()),
                 field("returns_identity_low", int_ty()),
+            ],
+        ),
+        // ADR-009 C1 / Decision 95: public typed capture identity. This is the
+        // exact C1 declaration axis, including the two borrow spellings that
+        // remain named lowering rejections until a region model exists.
+        enum_item(
+            CAPTURE_MODE_SCHEMA_NAME,
+            DeclaredCaptureMode::ALL
+                .into_iter()
+                .map(|mode| unit_member(mode.variant_name()))
+                .collect(),
+        ),
+        struct_item(
+            CAPTURE_DESCRIPTOR_SCHEMA_NAME,
+            vec![
+                field("signature_identity_high", int_ty()),
+                field("signature_identity_low", int_ty()),
+                field("index", int_ty()),
+                field("type_identity_high", int_ty()),
+                field("type_identity_low", int_ty()),
+                field(
+                    "mode",
+                    TypeAnnotation::Basic(CAPTURE_MODE_SCHEMA_NAME.to_string()),
+                ),
             ],
         ),
         // ADR-009 B5 (Dec 55-59): the nominal-shape descriptor payload model.
@@ -1476,7 +1499,10 @@ fn rewrite_comptime_type_symbol_args_expr_scoped(
             // R5 (runtime representation class) / R9 (comptime-field
             // disposition): neither is a reflection category on a shape
             // descriptor.
-            if matches!(property.as_str(), "is_builtin" | "is_comptime" | "native_layout") {
+            if matches!(
+                property.as_str(),
+                "is_builtin" | "is_comptime" | "native_layout"
+            ) {
                 return Err(ShapeError::SemanticError {
                     message: RUNTIME_REPR_CLASS_DIAGNOSTIC.to_string(),
                     location: None,
@@ -2562,10 +2588,7 @@ pub(crate) fn execute_comptime_with_annotation_handler(
             ctx_binding.clone(),
             "__comptime__".to_string(),
         ],
-        vec![
-            (target_binding, target_value),
-            (ctx_binding, ctx_nb),
-        ],
+        vec![(target_binding, target_value), (ctx_binding, ctx_nb)],
         extensions,
         known_type_symbols,
         comptime_builtins,
@@ -2685,8 +2708,7 @@ pub(crate) fn comptime_result_lift_rejection(
     value: &KindedSlot,
     schema_registry: &std::sync::Arc<shape_runtime::type_schema::TypeSchemaRegistry>,
 ) -> Option<&'static str> {
-    let _scope =
-        shape_runtime::type_schema::SyncRegistryScope::enter(schema_registry.clone());
+    let _scope = shape_runtime::type_schema::SyncRegistryScope::enter(schema_registry.clone());
     deep_descriptor_lift_rejection(value)
 }
 
@@ -3670,7 +3692,9 @@ annotation reflect() {
             "<module>",
             &[],
         ));
-        let identity = overlay.identity_of("Widget").expect("Widget frozen at barrier");
+        let identity = overlay
+            .identity_of("Widget")
+            .expect("Widget frozen at barrier");
 
         let mut statement = Statement::Return(
             Some(Expr::FunctionCall {
@@ -5224,9 +5248,7 @@ const X = comptime {
             .expect("wrapper fn present")
     }
 
-    fn run_comptime_body(
-        body: &str,
-    ) -> shape_ast::error::Result<super::ComptimeExecutionResult> {
+    fn run_comptime_body(body: &str) -> shape_ast::error::Result<super::ComptimeExecutionResult> {
         execute_comptime(
             &parse_comptime_body(body),
             &[],
@@ -5376,7 +5398,9 @@ match reflect(type_ref({spelling})) {{
 }}
 "#
             ))
-            .unwrap_or_else(|error| panic!("reflect(type_ref({spelling})) must succeed: {error:?}"));
+            .unwrap_or_else(|error| {
+                panic!("reflect(type_ref({spelling})) must succeed: {error:?}")
+            });
             assert_eq!(
                 result.value.as_i64(),
                 Some(expected),
@@ -5394,7 +5418,9 @@ match reflect(type_ref({spelling})) {{
 }}
 "#
             ))
-            .unwrap_or_else(|error| panic!("reflect(type_ref({spelling})) must succeed: {error:?}"));
+            .unwrap_or_else(|error| {
+                panic!("reflect(type_ref({spelling})) must succeed: {error:?}")
+            });
             assert_eq!(result.value.as_i64(), Some(expected));
         }
     }
@@ -5465,8 +5491,7 @@ match reflect(type_ref(int)) {
     /// comptime descriptors from source-level calls.
     #[test]
     fn reflect_is_comptime_only_at_runtime_position() {
-        let program =
-            shape_ast::parser::parse_program("let x = reflect(42)").expect("parse");
+        let program = shape_ast::parser::parse_program("let x = reflect(42)").expect("parse");
         let result = crate::compiler::BytecodeCompiler::new().compile(&program);
         assert!(result.is_err(), "runtime-position reflect must be rejected");
         let message = format!("{}", result.unwrap_err());

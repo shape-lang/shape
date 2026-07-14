@@ -1864,6 +1864,12 @@ pub struct BytecodeCompiler {
     /// specialized-body compile.
     pub(crate) specialization_type_param_overlay: Option<(String, Vec<String>)>,
 
+    /// ADR-009 C1: compilation-instance capability for generated AST nodes.
+    /// A provenance carrier is trusted only when this exact issuer recognizes
+    /// its non-serialized token. Foreign construction and serde round-trips
+    /// therefore cannot turn ordinary source into generated code.
+    pub(crate) generated_node_issuer: shape_ast::ast::GeneratedNodeIssuer,
+
     /// ADR-009 D1 (Decision 68) — compiler-owned registry of
     /// generated-symbol identities: the single source of truth for which
     /// declarations were generated, by which expansion, from which source

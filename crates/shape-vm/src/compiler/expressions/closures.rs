@@ -3127,6 +3127,24 @@ impl BytecodeCompiler {
             params.iter().flat_map(|p| p.get_identifiers()).collect();
         captured_vars.retain(|name| !param_names.contains(name));
 
+        // A public AST carrier is data, not authority. Trust only a stamp
+        // issued by THIS BytecodeCompiler instance. A caller can construct a
+        // foreign issuer, and serde preserves the diagnostic provenance
+        // fields, but neither can reproduce this non-serialized token.
+        let generated_origin = match generated_origin {
+            None => None,
+            Some(origin) if self.generated_node_issuer.recognizes(origin) => Some(origin),
+            Some(_) => {
+                return Err(ShapeError::SemanticError {
+                    message: "[C0909] generated-node provenance was not issued by this compiler \
+                              instance; serialized or externally fabricated provenance is \
+                              non-authoritative"
+                        .to_string(),
+                    location: Some(self.span_to_source_location(closure_span)),
+                });
+            }
+        };
+
         // ADR-009 C1 (slice 2) — the Wave-46 gate, now TOTAL.
         //
         // The predicate WAS `generated_symbols.contains_name(current_function)`
@@ -3140,8 +3158,9 @@ impl BytecodeCompiler {
         //       ungated entirely before this slice).
         // The predicate is now the node's own provenance, stamped where the
         // generated AST entered the program and forwarded, compile-enforced,
-        // through substitution / `original_body_rewrite` / the `__emit_extend`
-        // serde round-trip.
+        // through substitution / `original_body_rewrite`. The compiler
+        // re-stamps generated nodes after ingestion; serde deliberately
+        // preserves diagnostic data while erasing the authority token.
         //
         // Cross-check: on the one path where the old name view was known
         // correct (a closure compiled DIRECTLY in a registered generated decl

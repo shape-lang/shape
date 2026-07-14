@@ -38,7 +38,9 @@ use shape_value::v2::closure_raw::{
     alloc_owned_mutable_i64, alloc_owned_mutable_ptr, alloc_typed_closure, release_typed_closure,
     write_capture_raw_u64,
 };
-use shape_value::v2::typed_array::{retain_v2_typed_array, stamp_elem_type, TypedArray, ELEM_TYPE_F64};
+use shape_value::v2::typed_array::{
+    ELEM_TYPE_F64, TypedArray, retain_v2_typed_array, stamp_elem_type,
+};
 use shape_value::{HeapKind, NativeKind};
 
 use crate::compiler::BytecodeCompiler;
@@ -56,9 +58,7 @@ fn emitted_layout_for(src: &str, capture_name: &str) -> Arc<ClosureLayout> {
     let pack = compiler
         .closure_capture_packs
         .iter()
-        .find(|pack| {
-            pack.descriptors.len() == 1 && pack.descriptors[0].name == capture_name
-        })
+        .find(|pack| pack.descriptors.len() == 1 && pack.descriptors[0].name == capture_name)
         .unwrap_or_else(|| panic!("no closure captures exactly `{capture_name}`"));
     compiler.program.closure_function_layouts[pack.closure as usize]
         .as_ref()
@@ -442,7 +442,11 @@ fn assert_shared_retires_interior_and_cell(src: &str) {
         // The outer scope's cell share retires last: the cell frees, and its
         // interior share goes with it.
         drop(Arc::from_raw(cell));
-        assert_eq!(cell_weak.strong_count(), 0, "no leak: the cell is reclaimed");
+        assert_eq!(
+            cell_weak.strong_count(),
+            0,
+            "no leak: the cell is reclaimed"
+        );
         assert_eq!(
             array_rc(arr),
             1,
@@ -462,4 +466,18 @@ fn declared_share_of_a_var_balances_at_teardown() {
 #[test]
 fn declared_share_of_a_var_balances_at_teardown_monomorphized() {
     assert_shared_retires_interior_and_cell(SHARE_VAR_MONO);
+}
+
+/// Execute production `MakeClosure` installation, capture-cell access, frame
+/// teardown, and VM end-of-program teardown for every currently lowerable C1
+/// storage discipline. The focused refcount witnesses above isolate exact
+/// counts; this is the missing end-to-end proof that the real VM path can
+/// install and retire the compiler-emitted artifacts without a manual block.
+#[test]
+fn declared_capture_modes_run_through_actual_vm_install_and_teardown() {
+    use super::test_utils::eval;
+
+    assert_eq!(eval(MOVE_LET_INT).as_i64(), Some(7));
+    assert_eq!(eval(MOVE_LET_MUT_ARRAY).as_i64(), Some(2));
+    assert_eq!(eval(SHARE_VAR).as_i64(), Some(7));
 }

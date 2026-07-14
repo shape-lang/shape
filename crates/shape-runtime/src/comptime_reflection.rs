@@ -1,18 +1,19 @@
 use crate::builtin_metadata::{BuiltinMetadata, BuiltinParam};
 use crate::type_schema::builtin_schemas::{
     COMPTIME_APPLIED_TYPE_SCHEMA, COMPTIME_ASSOCIATED_CONST_DESCRIPTOR_SCHEMA,
-    COMPTIME_ENUM_DESCRIPTOR_SCHEMA, COMPTIME_FIELD_DESCRIPTOR_SCHEMA, COMPTIME_FROZEN_CALLABLE_SCHEMA,
+    COMPTIME_CAPTURE_DESCRIPTOR_SCHEMA, COMPTIME_ENUM_DESCRIPTOR_SCHEMA,
+    COMPTIME_FIELD_DESCRIPTOR_SCHEMA, COMPTIME_FROZEN_CALLABLE_SCHEMA,
     COMPTIME_FROZEN_ERASED_SCHEMA, COMPTIME_FROZEN_IMPL_REF_SCHEMA, COMPTIME_FROZEN_NEVER_SCHEMA,
-    COMPTIME_FROZEN_NOMINAL_SCHEMA, COMPTIME_FROZEN_PARAMETER_SCHEMA,
-    COMPTIME_FROZEN_PARAM_DESCRIPTOR_SCHEMA, COMPTIME_FROZEN_PRIMITIVE_SCHEMA,
-    COMPTIME_FROZEN_RECORD_SCHEMA,
-    COMPTIME_FROZEN_REFERENCE_SCHEMA, COMPTIME_FROZEN_TRAIT_REF_SCHEMA,
-    COMPTIME_FROZEN_TUPLE_SCHEMA, COMPTIME_FROZEN_TYPE_CONSTRUCTOR_REF_SCHEMA,
-    COMPTIME_FROZEN_TYPE_REF_SCHEMA, COMPTIME_FROZEN_TYPE_SCHEMA, COMPTIME_FROZEN_UNION_SCHEMA,
-    COMPTIME_NEWTYPE_DESCRIPTOR_SCHEMA, COMPTIME_OPAQUE_TYPE_DESCRIPTOR_SCHEMA,
-    COMPTIME_RECORD_FIELD_SCHEMA, COMPTIME_REPRESENTATION_ACCESS_SCHEMA,
-    COMPTIME_STRUCT_DESCRIPTOR_SCHEMA, COMPTIME_TUPLE_ELEMENT_SCHEMA,
-    COMPTIME_UNION_MEMBER_SCHEMA, COMPTIME_VARIANT_DESCRIPTOR_SCHEMA,
+    COMPTIME_FROZEN_NOMINAL_SCHEMA, COMPTIME_FROZEN_PARAM_DESCRIPTOR_SCHEMA,
+    COMPTIME_FROZEN_PARAMETER_SCHEMA, COMPTIME_FROZEN_PRIMITIVE_SCHEMA,
+    COMPTIME_FROZEN_RECORD_SCHEMA, COMPTIME_FROZEN_REFERENCE_SCHEMA,
+    COMPTIME_FROZEN_TRAIT_REF_SCHEMA, COMPTIME_FROZEN_TUPLE_SCHEMA,
+    COMPTIME_FROZEN_TYPE_CONSTRUCTOR_REF_SCHEMA, COMPTIME_FROZEN_TYPE_REF_SCHEMA,
+    COMPTIME_FROZEN_TYPE_SCHEMA, COMPTIME_FROZEN_UNION_SCHEMA, COMPTIME_NEWTYPE_DESCRIPTOR_SCHEMA,
+    COMPTIME_OPAQUE_TYPE_DESCRIPTOR_SCHEMA, COMPTIME_RECORD_FIELD_SCHEMA,
+    COMPTIME_REPRESENTATION_ACCESS_SCHEMA, COMPTIME_STRUCT_DESCRIPTOR_SCHEMA,
+    COMPTIME_TUPLE_ELEMENT_SCHEMA, COMPTIME_UNION_MEMBER_SCHEMA,
+    COMPTIME_VARIANT_DESCRIPTOR_SCHEMA,
 };
 use shape_value::heap_value::HeapKind;
 use shape_value::{KindedSlot, NativeKind};
@@ -25,8 +26,7 @@ use shape_value::{KindedSlot, NativeKind};
 /// Rejection-matrix row 6: `comptime for some<W...>` iterates a heterogeneous
 /// existential descriptor collection. An element type that is not an
 /// existential descriptor package is this named rejection.
-pub const NON_EXISTENTIAL_ITERABLE_DIAGNOSTIC: &str =
-    "comptime for some can only iterate a heterogeneous existential descriptor \
+pub const NON_EXISTENTIAL_ITERABLE_DIAGNOSTIC: &str = "comptime for some can only iterate a heterogeneous existential descriptor \
      collection: the element type is not an existential descriptor package \
      (exists<W...> Descriptor<W...>)";
 
@@ -34,16 +34,14 @@ pub const NON_EXISTENTIAL_ITERABLE_DIAGNOSTIC: &str =
 /// not escape its opening scope. Binding a witness-typed value to an
 /// enclosing-scope name (so it outlives the loop) is this named rejection —
 /// unless the value is explicitly repackaged as an existential.
-pub const WITNESS_ESCAPES_SCOPE_DIAGNOSTIC: &str =
-    "hidden witness cannot escape its `some` opening scope unless explicitly \
+pub const WITNESS_ESCAPES_SCOPE_DIAGNOSTIC: &str = "hidden witness cannot escape its `some` opening scope unless explicitly \
      repackaged in an existential value: a witness-typed binding may not be \
      assigned to an enclosing-scope variable";
 
 /// Rejection-matrix row 3: `comptime for some` is sugar over the same
 /// reflect()/payload_of surface (a rank-2 generic callback). Reaching for a
 /// second reflection/iterator protocol is refused on sight.
-pub const SECOND_REFLECTION_PROTOCOL_DIAGNOSTIC: &str =
-    "comptime for some is iteration sugar over the single reflect()/payload \
+pub const SECOND_REFLECTION_PROTOCOL_DIAGNOSTIC: &str = "comptime for some is iteration sugar over the single reflect()/payload \
      surface (Dec 51); a second reflection or iterator protocol is not \
      permitted";
 
@@ -109,7 +107,16 @@ macro_rules! frozen_type_category_catalog {
 }
 
 frozen_type_category_catalog!(
-    Primitive, Never, Parameter, Nominal, Tuple, Record, Callable, Reference, Union, Erased,
+    Primitive,
+    Never,
+    Parameter,
+    Nominal,
+    Tuple,
+    Record,
+    Callable,
+    Reference,
+    Union,
+    Erased,
     // ADR-009 B3 (Dec 51): existential descriptor packages
     // (`exists<W...> Descriptor<W...>`). Appended so existing catalog ordinals
     // stay ABI-stable (spec §3.3). Its `reflect()` payload is not enabled
@@ -285,6 +292,17 @@ impl PassingMode {
 /// Schema/type name for the [`PassingMode`] parameter-mode enum carrier
 /// (ADR-009 B6). Same discipline as [`PARAM_KIND_SCHEMA_NAME`].
 pub const PASSING_MODE_SCHEMA_NAME: &str = "PassingMode";
+
+/// Public comptime type name for the closed C1 generated-capture declaration
+/// axis. The canonical variants live in `shape_ast::CaptureMode`; runtime
+/// schema registration, mini-VM models, and completion all consume `ALL`.
+pub const CAPTURE_MODE_SCHEMA_NAME: &str = "CaptureMode";
+
+/// Public comptime model name for a signature- and index-typed closure
+/// capture. The unspellable runtime carrier uses
+/// [`crate::type_schema::COMPTIME_CAPTURE_DESCRIPTOR_SCHEMA`]; this name is
+/// the matching spellable mini-VM model and lift-wall surface.
+pub const CAPTURE_DESCRIPTOR_SCHEMA_NAME: &str = "CaptureDescriptor";
 
 /// ADR-009 B5 (Stage 2, Dec 55) — the sealed semantic declaration-shape axis
 /// of an applied nominal type: `Struct`, `Enum`, `Newtype`, or `Opaque`. This
@@ -655,7 +673,12 @@ pub fn reflection_enum_variant_names(enum_name: &str) -> Option<Vec<&'static str
     // generated from the same shared catalog the freeze's kind vector and
     // `.apply(...)` consume (`ParamKind::ALL`) — no second variant list.
     if enum_name == PARAM_KIND_SCHEMA_NAME {
-        return Some(ParamKind::ALL.into_iter().map(ParamKind::variant_name).collect());
+        return Some(
+            ParamKind::ALL
+                .into_iter()
+                .map(ParamKind::variant_name)
+                .collect(),
+        );
     }
     // ADR-009 B6 (Stage 2, Dec 63): the `PassingMode` parameter-mode
     // vocabulary, generated from the same shared catalog the freeze's
@@ -668,6 +691,14 @@ pub fn reflection_enum_variant_names(enum_name: &str) -> Option<Vec<&'static str
             PassingMode::ALL
                 .into_iter()
                 .map(PassingMode::variant_name)
+                .collect(),
+        );
+    }
+    if enum_name == CAPTURE_MODE_SCHEMA_NAME {
+        return Some(
+            shape_ast::ast::CaptureMode::ALL
+                .into_iter()
+                .map(shape_ast::ast::CaptureMode::variant_name)
                 .collect(),
         );
     }
@@ -957,6 +988,12 @@ pub fn runtime_lift_rejection(value: &KindedSlot) -> Option<&'static str> {
         }
         PASSING_MODE_SCHEMA_NAME => {
             Some("PassingMode is comptime-only reflection data and cannot enter runtime code")
+        }
+        COMPTIME_CAPTURE_DESCRIPTOR_SCHEMA | CAPTURE_DESCRIPTOR_SCHEMA_NAME => Some(
+            "CaptureDescriptor is comptime-only generated-code data and cannot enter runtime code",
+        ),
+        CAPTURE_MODE_SCHEMA_NAME => {
+            Some("CaptureMode is comptime-only generated-code data and cannot enter runtime code")
         }
         // ADR-009 B5 (Stage 2, Dec 55-59): the nominal-shape descriptor
         // carriers and the `NominalShape` / `FieldInitialization` vocabularies
@@ -1586,6 +1623,25 @@ mod tests {
         );
     }
 
+    #[test]
+    fn capture_mode_catalog_is_the_exact_c1_axis_without_unknown() {
+        let names = shape_ast::ast::CaptureMode::ALL
+            .into_iter()
+            .map(shape_ast::ast::CaptureMode::variant_name)
+            .collect::<Vec<_>>();
+        assert_eq!(names, ["Move", "Share", "SharedBorrow", "ExclusiveBorrow"]);
+        assert_eq!(names.iter().copied().collect::<HashSet<_>>().len(), 4);
+        assert!(!names.contains(&"Unknown"));
+        assert_eq!(
+            reflection_enum_variant_names(CAPTURE_MODE_SCHEMA_NAME),
+            Some(names)
+        );
+        assert_eq!(
+            reflection_enum_variant_names(CAPTURE_DESCRIPTOR_SCHEMA_NAME),
+            None
+        );
+    }
+
     /// ADR-009 B5: the `NominalShape` sealed sub-algebra is the whole Dec 55
     /// declaration-shape axis (`Struct | Enum | Newtype | Opaque`) — exhaustive,
     /// ordered, unique, no Unknown arm — `FieldInitialization` is the Dec 59
@@ -1750,7 +1806,8 @@ mod tests {
         #[test]
         fn callable_descriptor_schemas_have_their_own_named_lift_rejection() {
             use crate::type_schema::builtin_schemas::{
-                COMPTIME_FROZEN_CALLABLE_SCHEMA, COMPTIME_FROZEN_PARAM_DESCRIPTOR_SCHEMA,
+                COMPTIME_CAPTURE_DESCRIPTOR_SCHEMA, COMPTIME_FROZEN_CALLABLE_SCHEMA,
+                COMPTIME_FROZEN_PARAM_DESCRIPTOR_SCHEMA,
             };
             for (schema, expected) in [
                 (
@@ -1764,6 +1821,14 @@ mod tests {
                 (
                     PASSING_MODE_SCHEMA_NAME,
                     "PassingMode is comptime-only reflection data and cannot enter runtime code",
+                ),
+                (
+                    COMPTIME_CAPTURE_DESCRIPTOR_SCHEMA,
+                    "CaptureDescriptor is comptime-only generated-code data and cannot enter runtime code",
+                ),
+                (
+                    CAPTURE_MODE_SCHEMA_NAME,
+                    "CaptureMode is comptime-only generated-code data and cannot enter runtime code",
                 ),
             ] {
                 with_fabricated_descriptor_slot(schema, |slot| {
@@ -2065,8 +2130,14 @@ mod tests {
             Some(vec!["Required", "Defaulted"])
         );
         assert_eq!(reflection_enum_variant_names("FrozenNominal"), None);
-        assert_eq!(reflection_enum_variant_names(STRUCT_DESCRIPTOR_SCHEMA_NAME), None);
-        assert_eq!(reflection_enum_variant_names(FIELD_DESCRIPTOR_SCHEMA_NAME), None);
+        assert_eq!(
+            reflection_enum_variant_names(STRUCT_DESCRIPTOR_SCHEMA_NAME),
+            None
+        );
+        assert_eq!(
+            reflection_enum_variant_names(FIELD_DESCRIPTOR_SCHEMA_NAME),
+            None
+        );
         // ADR-009 B6: the PassingMode vocabulary completes from the shared
         // catalog; the FrozenCallable / ParamDescriptor payload STRUCTS have no
         // variants (like FrozenNever / FrozenErased).
@@ -2168,7 +2239,12 @@ mod tests {
                 "enabled payload struct {type_name} must have no variant arm"
             );
         }
-        for element_struct in ["TupleElement", "RecordField", "UnionMember", "TypeParamDescriptor"] {
+        for element_struct in [
+            "TupleElement",
+            "RecordField",
+            "UnionMember",
+            "TypeParamDescriptor",
+        ] {
             assert_eq!(
                 reflection_enum_variant_names(element_struct),
                 None,
