@@ -57,6 +57,7 @@ mod artifact;
 mod model;
 mod planner;
 mod query;
+mod surface;
 mod validation;
 
 pub(crate) use model::*;

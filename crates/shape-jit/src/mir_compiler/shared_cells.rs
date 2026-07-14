@@ -285,12 +285,12 @@ mod tests {
 
     /// Lower-level D1 proof for the inherited-carrier branch.
     ///
-    /// A public source proof is intentionally deferred to ADR-009 C1 slice 4:
-    /// today the VM compiler rewrites a synthetic Shared capture parameter as
-    /// OwnedMutable, so Shape source cannot honestly construct this layout.
-    /// Once `share` preserves the descriptor, the CLI matrix can cover the
-    /// same decision end to end. This unit keeps the JIT side honest meanwhile:
-    /// payload `42` is not a valid Arc carrier and must never reach retain.
+    /// ADR-009 C1 slice 4 now supplies the public source proof through the
+    /// generated and ordinary nested-share VM/JIT zero-fallback fixtures; they
+    /// mutate in the inner closure and observe through the outer holder. This
+    /// unit keeps the lower-level JIT carrier decision pinned: payload `42` is
+    /// not a valid Arc carrier and must never reach retain. Refcounted Shared
+    /// payloads and module-binding capture lowering remain separate W39 limits.
     #[test]
     fn inherited_shared_capture_retains_raw_cell_carrier_not_projected_payload() {
         use crate::ffi::object::{

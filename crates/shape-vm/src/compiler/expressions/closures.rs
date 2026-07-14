@@ -3130,95 +3130,12 @@ impl BytecodeCompiler {
             params.iter().flat_map(|p| p.get_identifiers()).collect();
         captured_vars.retain(|name| !param_names.contains(name));
 
-        // A public AST carrier is data, not authority. Trust only a stamp
-        // issued by THIS BytecodeCompiler instance. A caller can construct a
-        // foreign issuer, and serde preserves the diagnostic provenance
-        // fields, but neither can reproduce this non-serialized token.
-        let generated_origin = match generated_origin {
-            None => None,
-            Some(origin) if self.generated_node_issuer.recognizes(origin) => Some(origin),
-            Some(_) => {
-                return Err(ShapeError::SemanticError {
-                    message: "[C0909] generated-node provenance was not issued by this compiler \
-                              instance; serialized or externally fabricated provenance is \
-                              non-authoritative"
-                        .to_string(),
-                    location: Some(self.span_to_source_location(closure_span)),
-                });
-            }
-        };
-
-        // ADR-009 C1 (slice 2) — the Wave-46 gate, now TOTAL.
-        //
-        // The predicate WAS `generated_symbols.contains_name(current_function)`
-        // — a NAME view over the generated-symbol table. It fired only when the
-        // closure's immediately-enclosing compiled function was itself a
-        // registered generated DECL, and was therefore blind to:
-        //   (a) a closure nested inside a generated closure (the enclosing
-        //       function is `__closure_N`, which is not a decl name);
-        //   (b) a monomorphized generated body (mangled specialization name);
-        //   (c) a `replace body` expansion (compiles under the USER's name —
-        //       ungated entirely before this slice).
-        // The predicate is now the node's own provenance, stamped where the
-        // generated AST entered the program and forwarded, compile-enforced,
-        // through substitution / `original_body_rewrite`. The compiler
-        // re-stamps generated nodes after ingestion; serde deliberately
-        // preserves diagnostic data while erasing the authority token.
-        //
-        // Cross-check: on the one path where the old name view was known
-        // correct (a closure compiled DIRECTLY in a registered generated decl
-        // body), the node must be stamped. A dropped stamp is a bug, and it is
-        // loud rather than silent.
-        debug_assert!(
-            {
-                let enclosing_is_generated_decl = self
-                    .current_function
-                    .and_then(|idx| self.program.functions.get(idx))
-                    .is_some_and(|function| {
-                        self.generated_symbols.contains_name(function.name.as_str())
-                    });
-                !enclosing_is_generated_decl || generated_origin.is_some()
-            },
-            "generated decl body reached compile_expr_closure with an UNSTAMPED closure node — \
-             a generated-AST entry point is missing its stamp_generated_closures call"
-        );
-        // ADR-009 C1 (slice 3), gate step 3a — the clause is a
-        // GENERATED-CODE-ONLY surface (posted rider 1). An ordinary source
-        // closure keeps inference; a clause there is a named rejection, not a
-        // silently-honoured declaration. Checked BEFORE the capture set is
-        // consulted, so `|x; move y|` with an empty capture set still rejects.
-        //
-        // This is a NAMED DIAGNOSTIC rather than a by-construction
-        // impossibility, and that is an honest finding, not a shortcut: a
-        // builder-only capture field cannot exist on main, because generated
-        // closures come out of the SAME parser as source closures. Grammar
-        // cannot see the difference; provenance can.
-        if declared.is_some() && generated_origin.is_none() {
-            return Err(ShapeError::SemanticError {
-                message: "[C0903] a capture clause is only valid in comptime-generated code; \
-                          ordinary source closures infer their captures — remove the `;` clause"
-                    .to_string(),
-                location: Some(self.span_to_source_location(closure_span)),
-            });
-        }
-
-        // Gate step 3b — the Wave-46 implicit-capture rejection: generated
-        // code with captures and NO clause. The message comes from the one
-        // producer in `capture_plan.rs`, shared with the used-but-undeclared
-        // half of the declared-clause set diff, so the two can never drift.
-        if let Some(origin) = generated_origin
-            && declared.is_none()
-            && !captured_vars.is_empty()
-        {
-            let names: Vec<&str> = captured_vars.iter().map(|s| s.as_str()).collect();
-            return Err(ShapeError::SemanticError {
-                message: crate::compiler::comptime_builtins::capture_plan::implicit_capture_message(
-                    &names,
-                    Some(origin),
-                ),
-                location: Some(self.span_to_source_location(closure_span)),
-            });
-        }
+        let generated_origin = self.validate_capture_surface(
+            declared,
+            generated_origin,
+            &captured_vars,
+            closure_span,
+        )?;
 
         let captured_var_set: BTreeSet<String> = captured_vars.iter().cloned().collect();
         mutated_captures.extend(collect_static_mut_self_container_captures(
@@ -4442,6 +4359,10 @@ impl BytecodeCompiler {
         // flagship case — a `move` over a read-only `let mut` inside a generic
         // generated method.
         declared: Option<&shape_ast::ast::CaptureClause>,
+        // The exact node-borne provenance and source span used by real
+        // emission's generated-only capture-surface gate.
+        generated_origin: Option<&shape_ast::ast::GeneratedNodeOrigin>,
+        closure_span: Span,
     ) -> Option<ClosureTypeId> {
         // Run the same capture analysis as `compile_expr_closure`, but only
         // for the purpose of reading capture names off of the AST.
@@ -4463,11 +4384,24 @@ impl BytecodeCompiler {
         let outer_vars = self.collect_outer_scope_vars();
         let analysis = EnvironmentAnalyzer::analyze_function_captures(&proto_def, &outer_vars);
         let mut captured_vars = analysis.captured_vars().to_vec();
-        let mutated_captures = analysis.mutated_captures().clone();
+        let mut mutated_captures = analysis.mutated_captures().clone();
         captured_vars.sort();
         let param_names: BTreeSet<String> =
             params.iter().flat_map(|p| p.get_identifiers()).collect();
         captured_vars.retain(|name| !param_names.contains(name));
+
+        // Run the SAME provenance/generated-only gate as emission before any
+        // registry interning. A peek is not permission to mint a speculative
+        // ordinary explicit or generated implicit capture layout.
+        let generated_origin = self
+            .validate_capture_surface(declared, generated_origin, &captured_vars, closure_span)
+            .ok()?;
+        let captured_var_set: BTreeSet<String> = captured_vars.iter().cloned().collect();
+        mutated_captures.extend(collect_static_mut_self_container_captures(
+            self,
+            body,
+            &captured_var_set,
+        ));
 
         // Mirror `compile_expr_closure`'s callee-capture classification so
         // the peeked `ClosureTypeId` matches the real one (a callable
@@ -4487,8 +4421,8 @@ impl BytecodeCompiler {
             &mutated_captures,
             Some(&analysis),
             declared,
-            None,
-            Span::DUMMY,
+            generated_origin,
+            closure_span,
         ) {
             Ok(plan) => plan,
             Err(_) => {
@@ -4498,7 +4432,7 @@ impl BytecodeCompiler {
         };
         // `func_idx` is irrelevant to the id (the registry interns on types +
         // kinds), and this pack is never pushed — the peek does not emit.
-        let pack = self.build_capture_pack(u16::MAX, &plan, None);
+        let pack = self.build_capture_pack(u16::MAX, &plan, generated_origin);
         let id = self.intern_closure_type_id_for_pack(&pack);
         self.current_closure_callee_captures = saved_callee_captures;
         Some(id)

@@ -316,84 +316,8 @@ job.read()
         );
     }
 
-    /// A monomorphization peek is non-authoritative. If a declared plan is
-    /// invalid it must decline specialization without minting the inferred
-    /// stand-in that the old fallback produced. Ordinary emission will later
-    /// raise the real diagnostic at the source location.
-    #[test]
-    fn invalid_declared_peek_declines_without_minting_artifacts() {
-        fn closure_parts(
-            source: &str,
-        ) -> (
-            Vec<shape_ast::ast::FunctionParameter>,
-            Vec<shape_ast::ast::Statement>,
-            shape_ast::ast::CaptureClause,
-        ) {
-            let program = shape_ast::parse_program(source).expect("peek fixture parses");
-            let shape_ast::ast::Item::VariableDecl(decl, _) =
-                program.items.into_iter().next().expect("one declaration")
-            else {
-                panic!("fixture must be a variable declaration");
-            };
-            let Some(shape_ast::ast::Expr::FunctionExpr {
-                params,
-                body,
-                captures: Some(captures),
-                ..
-            }) = decl.value
-            else {
-                panic!("fixture initializer must be a closure with a capture clause");
-            };
-            (params, body, captures)
-        }
-
-        let mut compiler = compile("var total = 40\ntotal");
-        let baseline = (
-            compiler.closure_registry().len(),
-            compiler.closure_capture_packs.len(),
-            compiler.closure_type_ids().len(),
-            compiler.program.closure_function_layouts.len(),
-        );
-
-        let (invalid_params, invalid_body, invalid_clause) =
-            closure_parts("let worker = |; move total| total");
-        assert!(
-            compiler
-                .mint_closure_type_id_peek(
-                    &invalid_params,
-                    &invalid_body,
-                    Some(&invalid_clause),
-                )
-                .is_none(),
-            "invalid module-binding move must decline specialization"
-        );
-        assert_eq!(
-            (
-                compiler.closure_registry().len(),
-                compiler.closure_capture_packs.len(),
-                compiler.closure_type_ids().len(),
-                compiler.program.closure_function_layouts.len(),
-            ),
-            baseline,
-            "an invalid peek must not mint any closure artifact"
-        );
-
-        let (valid_params, valid_body, valid_clause) =
-            closure_parts("let worker = |; share total| total");
-        assert!(
-            compiler
-                .mint_closure_type_id_peek(&valid_params, &valid_body, Some(&valid_clause))
-                .is_some(),
-            "a valid declared plan must still supply a specialization key"
-        );
-        assert_eq!(compiler.closure_registry().len(), baseline.0 + 1);
-        assert_eq!(compiler.closure_capture_packs.len(), baseline.1);
-        assert_eq!(compiler.closure_type_ids().len(), baseline.2);
-        assert_eq!(
-            compiler.program.closure_function_layouts.len(),
-            baseline.3
-        );
-    }
+    #[path = "declared_tests/peek.rs"]
+    mod peek;
 
     /// `move` over a `let` — `Immutable`, and when the value is a heap type the
     /// `heap_capture_mask` bit follows the TYPE, not the mode.
