@@ -25,9 +25,26 @@ Current guard baseline:
 | Classification | Source hits | Disposition |
 |---|---:|---|
 | Covered by `prove_native_kind` | 22 | Typed return-value opcode mapping/walkback tied to the exact scalar return proof path. |
-| Covered by equivalent static proof helper | 530 | Compiler helpers that prove the kind through typed AST/schema/storage metadata before choosing a typed opcode. |
-| Metadata-only / non-executing | 145 | Test bodies, bytecode opcode definitions, verifier metadata, docs, and assertions. |
+| Covered by equivalent static proof helper | 519 | Compiler helpers that prove the kind through typed AST/schema/storage metadata before choosing a typed opcode. |
+| Metadata-only / non-executing | 138 | Test bodies, bytecode opcode definitions, verifier metadata, docs, and assertions. |
 | Unproven gap | 0 | RowView fallback typed column stamps were removed in the redrive. |
+
+Book-truth-100 source-only refresh lowered the classified mention counts after
+later cleanup removed or rewrote typed-opcode mentions. The enforced
+invariant remains unchanged: `unproven_gap` must stay zero, and new production
+typed-opcode stamp paths must be classified before the guard can pass.
+
+The same campaign added one `SetFieldTyped` emission site for typed-object
+`Option<T>` field mutation. That path is classified here because the compiler
+sources the `TypedField` operand from schema metadata and the runtime validates
+the canonical `__Option.Some/None` carrier before mutating storage metadata.
+
+Wave 18 added four content typed-array emission mentions for content-array
+construction, get, push, and set. Those paths stay in the equivalent static
+proof bucket because the compiler selects them from `TypedArrayKind::Content`,
+`ConcreteType::Content`, or tracked `Array<content>` receiver metadata before
+emitting the typed opcode; the VM handlers preserve content heap slots without
+falling back to tag probing.
 
 ## Inventory
 

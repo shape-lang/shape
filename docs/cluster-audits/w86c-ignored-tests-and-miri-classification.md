@@ -66,26 +66,34 @@ W96A/W96B follow-up: the final six `shape-vm` active gaps were unignored after
 module-local call qualification, module execution return-kind propagation,
 DateTime/Duration retargeting, Matrix add/sub carrier retargeting, and Vec
 numeric operator retargeting were statically proven by focused deep-test lanes.
-The source checker now accepts 99 `shape-vm` ignores and zero `shape-vm`
-active feature gaps.
+At W96A/W96B close, the source checker accepted 99 `shape-vm` ignores and
+zero `shape-vm` active feature gaps.
+
+Book-truth-100 source-only refresh: the read-only audit found the current
+source baseline at 96 `shape-vm` ignores and 21 `shape-jit` ignores, with
+zero active or stale accepted gaps and zero typed-opcode unproven gaps. The
+checker baselines were refreshed to those source counts without taking the
+cargo/build lane.
 
 The process-aborting `extern "C"` SURFACE tests stay ignored until their
 underlying todo bodies are replaced by non-aborting result paths.
 
 ## Count Baseline
 
-The supervisor-observed broad lib-test gates currently report:
+This source-only refresh did not take the cargo lane. The cargo-reported
+`--lib` projection below remains the last supervisor-observed value recorded
+in this audit, not a refreshed current measurement:
 
 | Crate | Reported ignored in `--lib` gate | Source `#[ignore]` attrs scanned here | Source-only gated attrs |
 |---|---:|---:|---:|
-| `shape-vm` | 56 | 99 | 47 behind `deep-tests` |
-| `shape-jit` | 23 | 24 | 1 behind `cfg(any())` |
+| `shape-vm` | 56 | 96 | 44 behind `deep-tests` |
+| `shape-jit` | 23 | 21 | 1 behind `cfg(any())` |
 
 This worker did not rerun cargo or nextest. The new checker is intentionally
 source-only and cheap; it guards the source ignore count and reason taxonomy
 without requiring a cargo test listing.
 
-For `shape-vm`, the 105 source attributes do not mechanically reduce to the
+For `shape-vm`, the 82 source attributes do not mechanically reduce to the
 reported 56 ignored lib tests from source-level module gates alone. Resolving
 that exact active-harness projection requires a cargo test listing, which this
 slice intentionally did not run. The enforceable invariant added here is the
@@ -95,9 +103,14 @@ baseline.
 W92 supervisor verification additionally ran the deep-test VM gate after the
 W92B/C/D closures: `shape-vm --lib --features deep-tests --no-fail-fast`
 passed 2794/0/113 ignored in `run-p39810-i196101.service`. W94B, W94A,
-W95A/W95B/W96C, and W96A/W96B then removed fourteen source ignores; the next
-deep-test inventory should report 99 VM source ignores if no other ignored
-tests change.
+W95A/W95B/W96C, and W96A/W96B then removed fourteen source ignores. The
+book-truth-100 source-only audit later lowered the VM source inventory to 96
+ignores, with 44 behind `deep-tests`. Wave-9B then made ten state builtin
+body placeholders live, lowering the VM source inventory to 86 ignores;
+Wave-16C made two more state introspection placeholders live, lowering the VM
+source inventory to 84 ignores. Wave-17A then made `state.args` and
+`state.locals` partially live, lowering the VM source inventory to 82 ignores.
+Refreshing the cargo-run projection is supervisor-lane work.
 
 ## Cause Taxonomy
 
@@ -106,19 +119,19 @@ source-level baseline:
 
 | Cause | `shape-vm` | `shape-jit` | Meaning |
 |---|---:|---:|---|
-| `phase_2c_surface` | 93 | 0 | Deferred strict-flip surfaces such as state snapshots, comptime host conversion, typed annotations, iterator materialization, and host-tier eval/marshal rebuilds. |
-| `deleted_v1_path` | 5 | 21 | Tests still describe removed carriers or paths such as BytecodeToIR, JitArray, deleted NaN-box roundtrips, deleted native-pointer helpers, deleted TypedArrayData enum paths, v1 VMArray aliasing, or retired Tier 1 whole-function JIT. |
-| `process_aborting_extern_c_todo` | 0 | 3 | `extern "C"` functions currently hit `todo!()`/SURFACE bodies; attempting `#[should_panic]` would abort the test process. |
+| `phase_2c_surface` | 76 | 0 | Deferred strict-flip surfaces such as state snapshots, comptime host conversion, typed annotations, iterator materialization, and host-tier eval/marshal rebuilds. |
+| `deleted_v1_path` | 5 | 19 | Tests still describe removed carriers or paths such as BytecodeToIR, JitArray, deleted NaN-box roundtrips, deleted native-pointer helpers, deleted TypedArrayData enum paths, v1 VMArray aliasing, or retired Tier 1 whole-function JIT. |
+| `process_aborting_extern_c_todo` | 0 | 2 | `extern "C"` functions currently hit `todo!()`/SURFACE bodies; attempting `#[should_panic]` would abort the test process. |
 | `stale_semantic_expectation` | 0 | 0 | No accepted stale expectations remain; future rows are new drift. |
 | `active_feature_gap` | 0 | 0 | No accepted active feature-gap ignores remain; future rows are new drift unless separately justified and tracked. |
 | `diagnostic_only` | 1 | 0 | A local debug-only opcode tracing test. |
-| Total | 99 | 24 | Source inventory, not a cargo-run proof. |
+| Total | 82 | 21 | Source inventory, not a cargo-run proof. |
 
 The source-only gated subset is also classified:
 
 | Crate | Gated category contribution |
 |---|---|
-| `shape-vm` | 45 `phase_2c_surface`, 2 `deleted_v1_path` behind `deep-tests`. |
+| `shape-vm` | 42 `phase_2c_surface`, 2 `deleted_v1_path` behind `deep-tests`. |
 | `shape-jit` | 1 `deleted_v1_path` behind `cfg(any())`. |
 
 ## Process-Aborting Ignores
@@ -129,8 +142,6 @@ These should not be casually unignored:
 |---|---|
 | `crates/shape-jit/src/ffi_symbols/simulation/mod.rs::test_simulation_with_function_handler` | Calls `jit_call_value`, an `extern "C"` value-call SURFACE/todo path. |
 | `crates/shape-jit/src/ffi/async_ops.rs::test_cancel_task_null_trampoline` | Calls `jit_cancel_task`, an `extern "C"` future-classification SURFACE/todo path. |
-| `crates/shape-jit/src/ffi/control/mod.rs::native_fixed_arity_helpers_surface_pending_kinded_abi` | Calls `jit_call_foreign_native_0`, an `extern "C"` foreign-call SURFACE/todo path. |
-
 Re-enable only after the underlying function bodies return structured results
 or errors instead of panicking across the non-unwinding ABI boundary.
 

@@ -55,17 +55,22 @@ The user gave the GO. Two changes landed on top of this VALIDATE:
    - `bin/shape-cli/Cargo.toml` → `default = ["jit", "gc"]` with a NEW
      `gc = ["shape-vm/gc", "shape-jit?/gc"]` feature, ORTHOGONAL to `jit`. The
      `shape-jit?/gc` weak-dep enables the JIT-tier barriers in the shipped
-     binary. `cargo tree` confirms: default build → `shape-jit ... default,gc`;
-     `--no-default-features --features jit` → `shape-jit ... default` (no gc, so
-     the jit-WITHOUT-gc barrier-cost build is preserved).
+     binary. Follow-up resolved metadata (2026-07-09) confirms: default build
+     → `shape-jit` features `default,gc`; `--no-default-features --features jit`
+     → `shape-jit` features `default` (JIT-tier barrier off). Caveat: because
+     `shape-cli` depends on `shape-vm` with dependency default features enabled,
+     that comparator still has `shape-vm/gc` and `shape-value/gc`; it is a
+     JIT-barrier-off comparator, not a full GC-off binary.
    JIT-tier proof: the `shape-jit --features gc` suite is green (496/0/20-ign)
    including `jit_set_field_overwrite_barrier_buffers_and_collects_object_cycle`,
    `jit_produced_typed_object_cycle_is_collected`, and
    `jit_write_barrier_buffers_surviving_typed_object`.
    `just check-clean` (full workspace + all targets, now with shape-jit/gc
    unified) and `just check-no-dynamic` are both EXIT 0; `cargo check -p shape-vm
-   --no-default-features --features jit` still builds (gc-off remains
-   expressible — all gc code stays `#[cfg(feature="gc")]`-gated).
+   --no-default-features --features jit` still builds (shape-vm gc-off remains
+   expressible at the crate level — all gc code stays `#[cfg(feature="gc")]`
+   gated). The shape-cli binary does not currently expose a true full-GC-off
+   `jit` build without changing its `shape-vm` dependency defaults.
    NOTE: the separate `../shape-app` workspace (playground/notebook server) is
    not covered by this repo's build graph; if it embeds the VM to run untrusted
    code, it needs its own gc enablement — verify separately.
@@ -88,6 +93,53 @@ Caveats 2–6 are unchanged (orthogonal: the bare-untyped-form runtime SURFACE,
 the JIT-fallback of the closure-push opcode, the not-gc-gated snapshot v7, the
 opt-in perf cost, and the Phase-6 cross-thread-cycle deferral all remain as
 documented).
+
+## UPDATE 2026-07-09 — JIT barrier perf follow-up measured
+
+Follow-up lane `jit-gc-barrier-perf` built two isolated release binaries in
+cgroup `run-p965351-i27301181.service` (`CARGO_BUILD_JOBS=2`,
+`MemoryMax=12G`, `MemorySwapMax=0`, `TasksMax=256`; 24m29s, peak 6.7G):
+
+| Artifact | Command | Resolved GC features |
+|---|---|---|
+| shipped default | `cargo build --release -p shape-cli --bin shape` | `shape-cli default,gc,jit`; `shape-jit default,gc`; `shape-vm default,gc,jit`; `shape-value default,gc` |
+| JIT-barrier-off comparator | `cargo build --release -p shape-cli --bin shape --no-default-features --features jit` | `shape-cli jit,shape-jit`; `shape-jit default`; `shape-vm default,gc,jit`; `shape-value default,gc` |
+
+So the direct JIT-barrier consequence can be compared (`shape-jit/gc` on/off),
+but the report's prior "gc-off binary" wording was too broad: `shape-vm/gc`
+still leaks in through dependency defaults.
+
+Full one-pass classification of `benchmarks/shape/*.shape` plus initial mutation
+probes (cgroup `run-p1034115-i27375392.service`, 6m05s, peak 47.5M) showed the
+current benchmark corpus is not a clean JIT perf suite: 17 corpus rows produced
+only one successful no-fallback native-JIT row (`bench_06_ackermann`), nine
+fallback rows, ten failing/timeout rows, and two 60s timeouts. Raw data:
+`/tmp/shape-jit-gc-perf/results/classification/summary.tsv`.
+
+Focused 5-run medians (cgroup `run-p1045110-i27387659.service`, 1m01s, peak
+31.6M; raw data `/tmp/shape-jit-gc-perf/results/summary.tsv`):
+
+| Workload | Classification | default `shape-jit/gc` | JIT barrier off | Delta |
+|---|---|---:|---:|---:|
+| `bench_06_ackermann` | native JIT | 0.27s | 0.28s | -3.6% |
+| `custom_numeric_float_loop_top` | native JIT | 0.19s | 0.19s | 0.0% |
+| `custom_numeric_int_loop_top` | native JIT | 0.21s | 0.21s | 0.0% |
+| native-JIT geomean | native JIT | 0.221s | 0.224s | -1.2% |
+| `custom_heap_field_existing_swap` | JIT fallback | 1.28s | 1.21s | +5.8% |
+| `custom_heap_field_new_object` | JIT fallback | 0.44s | 0.43s | +2.3% |
+| `custom_scalar_array_index_mutation` | JIT fallback | 0.85s | 0.83s | +2.4% |
+| `custom_object_alloc_read_loop` | JIT fallback | 0.57s | 0.56s | +1.8% |
+| `custom_scalar_field_overwrite_int` | JIT fallback | 1.25s | 1.32s | -5.3% |
+
+Verdict: compute-bound native-JIT code shows no measurable cost from enabling
+`shape-jit/gc` (within noise, geomean -1.2%). The requested JIT-hot
+allocation/mutation cost remains unmeasured because the current JIT deopts the
+field/array/object mutation probes before native execution (`v0.3.3
+move-semantics SURFACE`, or existing function-call finalize fallback). This is
+not evidence that the JIT write barrier is cheap on mutation-heavy code; it is a
+coverage caveat. Before using "cheap enough by default" as the release claim,
+either add a native-JIT mutation benchmark that stays in JIT under
+`shape-jit/gc`, or perform the barrier-fast-path review at the MIR/FFI level.
 
 ---
 

@@ -1,0 +1,28 @@
+export const meta = {
+  name: 'wf-list-comprehension-elem',
+  description: 'Book cluster C15 (user-greenlit): a list-comprehension result element type is not inferred from the yielded expression (objects-arrays.mdx:135) — the comprehension produces an array whose element type is lost/unresolved, causing a downstream type error or a generic-array failure. Propagate the element type from the comprehension\'s YIELDED expression into the result Array<T> (bidirectional with the existing empty-array/typed-array inference). Independent Opus verify vm+jit.',
+  phases: [
+    { title: 'Diagnose', detail: 'pin where the comprehension result element type is dropped/unresolved' },
+    { title: 'Fix', detail: 'infer Array<T> from the yielded expr type; emit the typed array' },
+    { title: 'Verify+Finish', detail: 'independent Opus: comprehension result is correctly element-typed vm+jit; the book fence green; gates + tests' },
+  ],
+}
+const WT = '/home/dev/dev/shape-lang/shape-w7-comprehension'
+const DX = 'direnv exec /home/dev/dev/shape-lang'
+const CTX = [
+  'Work IN ' + WT + ' (branch wave7/list-comprehension-elem, off main HEAD). Build/run via: ' + DX + ' <cmd>.',
+  'THE BUG: a list comprehension `[expr for x in iter]` (or the Shape comprehension syntax) does not infer its result element type from `expr` — objects-arrays.mdx:135 fails. The result should be `Array<T>` where T = the type of the yielded expression (evaluated with the loop var bound to the iterable element type). DIAGNOSE where the element type is dropped (comprehension inference in crates/shape-runtime/src/type_system/inference/expressions.rs + the compiler emission in crates/shape-vm/src/compiler/). FIX: thread the yielded-expr type as the result Array element type (consistent with the recently-added empty-array/typed-array element-type inference — reuse the fresh-tyvar + unify machinery). Emit the typed array opcode with the resolved T. A comprehension whose element type is genuinely unresolvable follows the same strict rule as empty arrays (resolve from context or compile-error; canonical-instantiate only at an unconstrained sink).',
+  'CONSTRAINTS (CLAUDE.md): NO forbidden patterns; strict typing (element-typed, no untyped/any array); NO Bool-default; int/number separate. Reuse the empty-array element-type inference machinery where applicable. ' + DX + ' just check-no-dynamic EXIT 0; ' + DX + ' just check-clean EXIT 0.',
+  'REGRESSION-TEST (user rule): a comprehension `[x*2 for x in [1,2,3]]` produces Array<int> == [2,4,6] with the element type usable downstream (e.g. `.map`/indexing), vm+jit; a comprehension yielding a different type (string/number/object) is correctly typed; the objects-arrays.mdx:135 fence runs green. No new #[ignore].',
+  'STRUCTURED-OUTPUT: ONE clean JSON object, 1-4 plain sentences per field, NO XML/code blocks.',
+].join('\n')
+phase('Diagnose')
+const D = { type:'object', additionalProperties:false, required:['root','fix_plan'], properties:{ root:{type:'string',description:'where the comprehension result element type is dropped/unresolved'}, fix_plan:{type:'string',description:'how to thread the yielded-expr type into Array<T>'} } }
+const d = await agent(CTX + '\n\nPHASE 1 — DIAGNOSE. Pin where the element type is lost. Do NOT commit.', { label:'diagnose', phase:'Diagnose', effort:'high', schema:D })
+phase('Fix')
+const F = { type:'object', additionalProperties:false, required:['status','files_changed','comp_typed','evidence'], properties:{ status:{type:'string',enum:['done','partial','blocked']}, files_changed:{type:'string',description:'the comprehension element-type inference + emission'}, comp_typed:{type:'boolean',description:'comprehension result is Array<T> from the yielded expr, usable downstream, vm+jit'}, evidence:{type:'string',description:'[x*2 for x in [1,2,3]]=[2,4,6]:Array<int>; check-no-dynamic EXIT 0'} } }
+const f = await agent(CTX + '\n\nDIAGNOSIS: ' + JSON.stringify(d) + '\n\nPHASE 2 — FIX (infer Array<T> from the yielded expr). ' + DX + ' just check-no-dynamic EXIT 0. Commit (git add -A && git commit --no-verify -m "Fix list-comprehension element-type inference: result Array<T> from yielded expr (book C15)").', { label:'fix', phase:'Fix', effort:'high', schema:F })
+phase('Verify+Finish')
+const V = { type:'object', additionalProperties:false, required:['verdict','comp_typed','no_regression','gates','merge_ready'], properties:{ verdict:{type:'string',enum:['CONFIRMED','REFUTED','PARTIAL']}, comp_typed:{type:'boolean',description:'from YOUR OWN run: comprehension is correctly element-typed + usable downstream, vm+jit'}, no_regression:{type:'boolean',description:'existing comprehension/array/inference tests unregressed; no untyped array'}, gates:{type:'string',description:'check-clean + check-no-dynamic + comprehension tests'}, merge_ready:{type:'boolean'} } }
+const v = await agent(CTX + '\n\nFIX: ' + JSON.stringify(f) + '\n\nYou are an INDEPENDENT adversarial reviewer, FRESH context. From scratch: is a comprehension correctly typed Array<T> from the yielded expr (int/string/number/object cases), usable downstream (map/index), identical vm+jit? Is the result element-typed (NOT an untyped/any array)? Existing comprehension + array + inference tests unregressed? Add regression tests; no new #[ignore]. Run ' + DX + ' just check-clean, ' + DX + ' just check-no-dynamic, ' + DX + ' cargo test -p shape-test --test list_comprehension + -p shape-runtime. Any type-erasure, untyped array, or regression = REFUTED. Commit tests (git commit --no-verify -m "List-comprehension elem-type finalize: regression tests").', { label:'verify-finish', phase:'Verify+Finish', effort:'high', schema:V })
+return { d, f, v }

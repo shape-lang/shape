@@ -358,8 +358,8 @@ now classifies them under `deleted_v1_path` instead of stale semantics.
 
 ## Process-Aborting Extern-C Tests
 
-No process-aborting tests were unignored or changed. The three
-`process_aborting_extern_c_todo` rows remain documented in
+No process-aborting tests were unignored or changed in this triage. The current
+two `process_aborting_extern_c_todo` rows remain documented in
 `docs/cluster-audits/w86c-ignored-tests-and-miri-classification.md` and should
 stay ignored until their `extern "C"` SURFACE functions return structured
 errors instead of unwinding across the ABI boundary.
