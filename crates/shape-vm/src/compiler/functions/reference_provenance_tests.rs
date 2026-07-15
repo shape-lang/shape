@@ -2,6 +2,7 @@ use super::*;
 
 use shape_ast::ast::{CaptureMode, DestructurePattern, Span};
 
+use crate::compiler::comptime_builtins::capture_plan::CaptureAccess;
 use crate::type_tracking::BindingStorageClass;
 
 fn parameter(is_reference: bool, is_mut_reference: bool) -> FunctionParameter {
@@ -234,8 +235,13 @@ fn assert_inferred_reference_is_not_true_reference(
     assert_eq!(descriptors[0].declared, Some(CaptureMode::Move));
     assert_eq!(
         descriptors[0].storage,
-        Some(BindingStorageClass::Direct),
-        "inferred pass mode must preserve exact direct-value storage evidence"
+        Some(BindingStorageClass::LocalMutablePtr),
+        "inferred pass mode must preserve exact stack-resident non-reference storage evidence"
+    );
+    assert_eq!(
+        descriptors[0].access,
+        CaptureAccess::Param,
+        "inferred pass mode must preserve exact by-value capture access"
     );
     assert_route_artifacts(&compiler, route);
 }
