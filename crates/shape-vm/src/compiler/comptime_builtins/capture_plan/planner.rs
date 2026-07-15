@@ -228,7 +228,7 @@ impl BytecodeCompiler {
                     },
                 )));
             }
-            entry_for_target.insert(target, (entry.mode, entry.span));
+            entry_for_target.insert(target, (entry.mode, entry.name_span));
         }
 
         // (iii) every DISCOVERED capture resolves to a slot — [C0905]. Slice 1

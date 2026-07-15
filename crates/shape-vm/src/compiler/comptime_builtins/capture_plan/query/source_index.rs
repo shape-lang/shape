@@ -228,7 +228,7 @@ fn closure_has_declaration(
             .filter(|entry| {
                 entry.name == descriptor.name
                     && Some(entry.mode) == descriptor.declared
-                    && entry.span == declaration_span
+                    && entry.name_span == declaration_span
             })
             .count()
             == 1

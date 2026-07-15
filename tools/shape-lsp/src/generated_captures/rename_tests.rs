@@ -71,11 +71,13 @@ fn rename_matches_the_complete_identity_joined_reference_graph() {
     let session =
         GeneratedQuerySession::new(&program, DIRECT_CAPTURE, CaptureQueryContext::unavailable());
     let binder = DIRECT_CAPTURE.find("var total").unwrap() + "var ".len();
-    let declaration = DIRECT_CAPTURE.find("share total").unwrap() + "share ".len();
+    let mode = DIRECT_CAPTURE.find("share total").unwrap();
+    let declaration = mode + "share ".len();
     let use_site = DIRECT_CAPTURE.find("total + 2").unwrap();
     let references = generated_capture_references(&program, DIRECT_CAPTURE, declaration, &uri)
         .found("compiler-issued capture references");
     let expected: Vec<_> = references.iter().map(|location| location.range).collect();
+    assert_eq!(expected.len(), 3, "binder + declaration + body use");
 
     for offset in [binder, declaration, use_site] {
         let edit =
@@ -92,6 +94,16 @@ fn rename_matches_the_complete_identity_joined_reference_graph() {
                 .all(|range| source_at(DIRECT_CAPTURE, *range) == "total")
         );
     }
+
+    assert!(
+        generated_capture_references(&program, DIRECT_CAPTURE, mode, &uri).is_not_capture(),
+        "the capture mode is not part of the identity-bearing declaration site"
+    );
+    assert!(
+        generated_capture_rename(&program, DIRECT_CAPTURE, mode, &uri, "amount", &session)
+            .is_not_capture(),
+        "the capture mode never authorizes an edit"
+    );
 }
 
 #[test]

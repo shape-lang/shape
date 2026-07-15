@@ -45,13 +45,29 @@ fn pipe_lambda_parses(literal: &str) -> bool {
 
 #[test]
 fn capture_clause_parses_move_and_share() {
-    let clause = sole_capture_clause(r#"let f = |acc, item; move cfg, share total| acc + item"#)
-        .expect("the clause is carried on the FunctionExpr");
+    let source = r#"let f = |acc, item; move cfg, share total| acc + item"#;
+    let clause = sole_capture_clause(source).expect("the clause is carried on the FunctionExpr");
     assert_eq!(clause.len(), 2);
     assert_eq!(clause.entries[0].mode, crate::ast::CaptureMode::Move);
     assert_eq!(clause.entries[0].name, "cfg");
+    assert_eq!(
+        &source[clause.entries[0].span.start..clause.entries[0].span.end],
+        "move cfg"
+    );
+    assert_eq!(
+        &source[clause.entries[0].name_span.start..clause.entries[0].name_span.end],
+        "cfg"
+    );
     assert_eq!(clause.entries[1].mode, crate::ast::CaptureMode::Share);
     assert_eq!(clause.entries[1].name, "total");
+    assert_eq!(
+        &source[clause.entries[1].span.start..clause.entries[1].span.end],
+        "share total"
+    );
+    assert_eq!(
+        &source[clause.entries[1].name_span.start..clause.entries[1].name_span.end],
+        "total"
+    );
 }
 
 #[test]

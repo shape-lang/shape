@@ -115,7 +115,11 @@ impl CaptureMode {
 pub struct CaptureEntry {
     pub mode: CaptureMode,
     pub name: String,
+    /// Whole authored `<mode> <name>` entry, retained for diagnostics.
     pub span: Span,
+    /// Exact authored identifier token. Tooling may present this span only
+    /// after compiler-issued capture identity has selected the entry.
+    pub name_span: Span,
 }
 
 /// The `; move a, share b` tail of a closure's parameter pipe.

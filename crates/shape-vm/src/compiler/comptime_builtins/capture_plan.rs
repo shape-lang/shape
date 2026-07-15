@@ -397,6 +397,7 @@ pub(crate) struct PlannedCapture {
     pub(crate) facts: CaptureBindingFacts,
     pub(crate) plan: CapturePlan,
     pub(crate) declared: Option<CaptureMode>,
+    /// Exact parser-authored capture-name token used only for source mapping.
     pub(crate) declaration_span: Option<Span>,
     pub(crate) use_spans: Vec<Span>,
 }

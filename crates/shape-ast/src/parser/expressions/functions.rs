@@ -32,7 +32,7 @@ fn parse_capture_clause(pair: Pair<Rule>) -> Result<CaptureClause> {
         }
         let entry_span = pair_span(&entry_pair);
         let mut mode: Option<CaptureMode> = None;
-        let mut name: Option<String> = None;
+        let mut name: Option<(String, Span)> = None;
         for part in entry_pair.into_inner() {
             match part.as_rule() {
                 Rule::capture_mode => {
@@ -57,20 +57,21 @@ fn parse_capture_clause(pair: Pair<Rule>) -> Result<CaptureClause> {
                     });
                 }
                 Rule::ident => {
-                    name = Some(part.as_str().to_string());
+                    name = Some((part.as_str().to_string(), pair_span(&part)));
                 }
                 _ => {}
             }
         }
         // The grammar (`capture_entry = capture_mode ~ ident`) makes both parts
         // mandatory, so a missing half is a parser bug, not a user error.
-        let (Some(mode), Some(name)) = (mode, name) else {
+        let (Some(mode), Some((name, name_span))) = (mode, name) else {
             continue;
         };
         entries.push(CaptureEntry {
             mode,
             name,
             span: entry_span,
+            name_span,
         });
     }
     Ok(CaptureClause { entries, span })

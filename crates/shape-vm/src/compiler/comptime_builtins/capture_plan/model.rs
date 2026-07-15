@@ -381,9 +381,9 @@ pub(crate) struct CaptureDescriptor {
     /// Exact authored declaration span for the captured binding, when one is
     /// available. This never participates in capture identity.
     pub(crate) binding_span: Option<Span>,
-    /// Exact capture-clause entry span. Generated strings whose offsets do not
-    /// round-trip to authored syntax deliberately retain an unavailable source
-    /// map rather than acquiring a guessed location.
+    /// Exact capture-clause identifier span. Generated strings whose offsets
+    /// do not round-trip to authored syntax deliberately retain an unavailable
+    /// source map rather than acquiring a guessed location.
     pub(crate) declaration_span: Option<Span>,
     /// Lexically resolved body-use spans from the canonical environment walk.
     /// Presentation evidence only; names and spans never select the target.

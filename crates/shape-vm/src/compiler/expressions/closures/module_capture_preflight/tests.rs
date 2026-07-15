@@ -295,10 +295,18 @@ fn generated_declared_share_plan_uses_the_same_structural_preflight() {
         .expect("generated declared-share plan is canonical");
     assert_eq!(plan.len(), 1);
     assert_eq!(plan[0].declared, Some(CaptureMode::Share));
+    let entry = captures.entries.first().expect("one declared capture");
     assert_eq!(
         plan[0].declaration_span,
-        captures.entries.first().map(|entry| entry.span)
+        Some(entry.name_span),
+        "the planner propagates the parser-issued identifier token"
     );
+    assert_ne!(
+        entry.span, entry.name_span,
+        "the whole entry remains distinct"
+    );
+    assert!(entry.span.start < entry.name_span.start);
+    assert_eq!(entry.span.end, entry.name_span.end);
     assert_eq!(
         plan[0].facts.target,
         Some(CaptureTarget::ModuleBinding(MODULE_SLOT))
