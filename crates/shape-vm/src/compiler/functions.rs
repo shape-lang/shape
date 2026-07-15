@@ -1,7 +1,7 @@
 //! Function and closure compilation
 
 use crate::bytecode::{Instruction, OpCode, Operand};
-use shape_ast::ast::{Expr, FunctionDef, Item, Span, Spanned, Statement};
+use shape_ast::ast::{Expr, FunctionDef, FunctionParameter, Item, Span, Spanned, Statement};
 use shape_ast::error::{ErrorNote, Result, ShapeError, SourceLocation};
 use std::collections::{HashMap, HashSet};
 
@@ -375,6 +375,25 @@ impl BytecodeCompiler {
                 } else {
                     ParamPassMode::ByValue
                 }
+            })
+            .collect()
+    }
+
+    fn inferred_reference_optimizations(
+        params: &[FunctionParameter],
+        effective_pass_modes: &[ParamPassMode],
+    ) -> Vec<Option<ParamPassMode>> {
+        assert_eq!(
+            params.len(),
+            effective_pass_modes.len(),
+            "parameter provenance must stay slot-aligned with effective pass modes"
+        );
+        params
+            .iter()
+            .zip(effective_pass_modes.iter().copied())
+            .map(|(param, mode)| {
+                (mode.is_reference() && !param.is_reference && !param.is_mut_reference)
+                    .then_some(mode)
             })
             .collect()
     }
@@ -834,6 +853,14 @@ impl BytecodeCompiler {
             &effective_def.params,
             Some(&effective_def.body),
         );
+        // Preserve the original declaration boundary before effective pass
+        // modes rewrite the cloned parameter flags. This slot-aligned value is
+        // the only authority for distinguishing an inferred reference
+        // optimization from an explicit shared/exclusive reference parameter.
+        let inferred_reference_optimizations = Self::inferred_reference_optimizations(
+            &func_def.params,
+            &effective_pass_modes,
+        );
         for (idx, param) in effective_def.params.iter_mut().enumerate() {
             let effective_mode = effective_pass_modes
                 .get(idx)
@@ -1129,7 +1156,10 @@ impl BytecodeCompiler {
         } else if annotations.len() > 1 {
             self.compile_chained_annotations(&effective_def, annotations)?;
         } else {
-            self.compile_function_body(&effective_def)?;
+            self.compile_function_body_with_inferred_reference_optimizations(
+                &effective_def,
+                &inferred_reference_optimizations,
+            )?;
         }
 
         // Restore previous flag (safe for nested compilation).
@@ -1764,6 +1794,31 @@ impl BytecodeCompiler {
 
     /// Core function body compilation (shared by normal functions and ___impl functions)
     pub(super) fn compile_function_body(&mut self, func_def: &FunctionDef) -> Result<()> {
+        let effective_pass_modes = self.effective_function_like_pass_modes(
+            Some(&func_def.name),
+            &func_def.params,
+            Some(&func_def.body),
+        );
+        let inferred_reference_optimizations = Self::inferred_reference_optimizations(
+            &func_def.params,
+            &effective_pass_modes,
+        );
+        self.compile_function_body_with_inferred_reference_optimizations(
+            func_def,
+            &inferred_reference_optimizations,
+        )
+    }
+
+    fn compile_function_body_with_inferred_reference_optimizations(
+        &mut self,
+        func_def: &FunctionDef,
+        inferred_reference_optimizations: &[Option<ParamPassMode>],
+    ) -> Result<()> {
+        assert_eq!(
+            func_def.params.len(),
+            inferred_reference_optimizations.len(),
+            "parameter provenance must stay slot-aligned through body compilation"
+        );
         // Find function index
         let func_idx = self
             .program
@@ -2264,22 +2319,16 @@ impl BytecodeCompiler {
         // Also track which ref_locals were INFERRED (not explicitly declared) so that
         // closure capture can distinguish true borrows from pass-by-ref optimizations.
         for (idx, param) in func_def.params.iter().enumerate() {
-            if param.is_reference {
+            if param.is_reference || param.is_mut_reference {
                 self.ref_locals.insert(idx as u16);
                 if param.is_mut_reference {
                     self.exclusive_ref_locals.insert(idx as u16);
                 }
-                // A param is "inferred ref" if it has no type annotation and no explicit
-                // mut reference — the compiler's pass-mode inference set is_reference.
-                let was_inferred = param.type_annotation.is_none()
-                    && !param.is_mut_reference
-                    && inferred_modes
-                        .as_ref()
-                        .and_then(|modes| modes.get(idx))
-                        .map_or(false, |mode| mode.is_reference());
-                if was_inferred {
-                    self.inferred_ref_locals.insert(idx as u16);
-                }
+            }
+            let was_inferred = inferred_reference_optimizations[idx]
+                .is_some_and(ParamPassMode::is_reference);
+            if was_inferred {
+                self.inferred_ref_locals.insert(idx as u16);
             }
         }
 
@@ -2712,6 +2761,10 @@ fn arg_root_slot(
 
     operand_root_slot(op, &alias_roots)
 }
+
+#[cfg(test)]
+#[path = "functions/reference_provenance_tests.rs"]
+mod reference_provenance_tests;
 
 #[cfg(test)]
 mod param_destructure_tests {

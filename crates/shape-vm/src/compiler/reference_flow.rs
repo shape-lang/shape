@@ -26,6 +26,66 @@ pub(crate) use model::{
 use model::{ReferenceFlowConflict, ReferenceFlowEvidence};
 
 impl BytecodeCompiler {
+    /// Return the exact reference class carried by the current binding slot.
+    ///
+    /// First-class reference values are authoritative over parameter ABI
+    /// markers because assignment can replace a parameter slot's current
+    /// value. Explicit reference parameters are true references only when the
+    /// slot was not introduced by the inferred pass-by-reference optimization.
+    /// Absence means the binding currently carries an owned value; callers
+    /// must not turn that absence into `ReferenceClass::Value` evidence.
+    pub(crate) fn current_true_reference_class(
+        &self,
+        key: BindingKey,
+    ) -> Option<ReferenceClass> {
+        match key {
+            BindingKey::Local(slot)
+                if self.reference_value_locals.contains(&slot)
+                    || self.exclusive_reference_value_locals.contains(&slot) =>
+            {
+                let referent = self
+                    .reference_value_local_referent_concrete_type
+                    .get(&slot)
+                    .cloned();
+                if self.exclusive_reference_value_locals.contains(&slot) {
+                    Some(ReferenceClass::ExclusiveReference { referent })
+                } else {
+                    Some(ReferenceClass::SharedReference { referent })
+                }
+            }
+            BindingKey::ModuleBinding(slot)
+                if self.reference_value_module_bindings.contains(&slot)
+                    || self
+                        .exclusive_reference_value_module_bindings
+                        .contains(&slot) =>
+            {
+                let referent = self
+                    .reference_value_module_binding_referent_concrete_type
+                    .get(&slot)
+                    .cloned();
+                if self
+                    .exclusive_reference_value_module_bindings
+                    .contains(&slot)
+                {
+                    Some(ReferenceClass::ExclusiveReference { referent })
+                } else {
+                    Some(ReferenceClass::SharedReference { referent })
+                }
+            }
+            BindingKey::Local(slot)
+                if self.ref_locals.contains(&slot)
+                    && !self.inferred_ref_locals.contains(&slot) =>
+            {
+                if self.exclusive_ref_locals.contains(&slot) {
+                    Some(ReferenceClass::ExclusiveReference { referent: None })
+                } else {
+                    Some(ReferenceClass::SharedReference { referent: None })
+                }
+            }
+            BindingKey::Local(_) | BindingKey::ModuleBinding(_) => None,
+        }
+    }
+
     pub(crate) fn reference_flow_snapshot(&self) -> ReferenceFlowState {
         let mut classes = BTreeMap::new();
 

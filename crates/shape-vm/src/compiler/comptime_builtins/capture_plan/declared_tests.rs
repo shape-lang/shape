@@ -434,3 +434,5 @@ job.scale(2)
 
     #[path = "declared_tests/rejections.rs"]
     mod rejections;
+    #[path = "declared_tests/reference_rejections.rs"]
+    mod reference_rejections;

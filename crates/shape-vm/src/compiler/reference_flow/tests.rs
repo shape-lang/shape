@@ -309,3 +309,5 @@ fn pop_scope_evicts_exact_local_reference_state() {
 mod core_fixes;
 #[path = "tests/transaction_tests.rs"]
 mod transaction_tests;
+#[path = "tests/true_reference_query.rs"]
+mod true_reference_query;

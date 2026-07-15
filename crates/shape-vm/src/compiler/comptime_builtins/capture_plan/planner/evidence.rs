@@ -1,7 +1,7 @@
 //! Structural inference and inherited-pack evidence for capture planning.
 
 use super::*;
-use crate::compiler::BytecodeCompiler;
+use crate::compiler::{reference_flow::BindingKey, BytecodeCompiler};
 
 impl BytecodeCompiler {
     pub(super) fn capture_binding_facts(
@@ -18,24 +18,30 @@ impl BytecodeCompiler {
             _ => None,
         };
         let storage = match (target, inherited_evidence) {
+            (Some(CaptureTarget::Local(idx)), _)
+                if self
+                    .current_true_reference_class(BindingKey::Local(idx))
+                    .is_some() =>
+            {
+                Some(BindingStorageClass::Reference)
+            }
             (Some(CaptureTarget::Local(_)), Some(evidence))
                 if evidence.access == CaptureAccess::SharedCell =>
             {
                 Some(BindingStorageClass::SharedCow)
             }
             (Some(CaptureTarget::Local(idx)), _) => self.mir_storage_class_for_slot(idx),
-            (Some(CaptureTarget::ModuleBinding(idx)), _) => {
-                // Declaration finalization may restore generic `Direct`
-                // semantics; the compiler-authenticated reference-slot marker
-                // remains authoritative for this exact module slot.
-                if self.reference_value_module_bindings.contains(&idx) {
-                    Some(BindingStorageClass::Reference)
-                } else {
-                    self.type_tracker
-                        .get_binding_semantics(idx)
-                        .map(|semantics| semantics.storage_class)
-                }
+            (Some(CaptureTarget::ModuleBinding(idx)), _)
+                if self
+                    .current_true_reference_class(BindingKey::ModuleBinding(idx))
+                    .is_some() =>
+            {
+                Some(BindingStorageClass::Reference)
             }
+            (Some(CaptureTarget::ModuleBinding(idx)), _) => self
+                .type_tracker
+                .get_binding_semantics(idx)
+                .map(|semantics| semantics.storage_class),
             _ => None,
         };
 
