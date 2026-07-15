@@ -268,7 +268,7 @@ fn generated_declared_share_plan_uses_the_same_structural_preflight() {
     // real ingress. This focused unit therefore runs the canonical planner
     // with a real parsed declared-share clause and compiler-issued generated
     // provenance, then feeds that exact plan to the provenance-free preflight.
-    let mut compiler = active_callable("Job::read", BindingStorageClass::Direct, false);
+    let compiler = active_callable("Job::read", BindingStorageClass::Direct, false);
     let (_params, _body, captures, span) =
         closure_parts("let worker = |; share hits| hits");
     let captures = captures.expect("generated fixture has a declared capture clause");

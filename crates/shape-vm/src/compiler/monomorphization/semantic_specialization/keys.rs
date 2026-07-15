@@ -3,7 +3,7 @@
 use shape_runtime::comptime_reflection::FrozenTypeCategory;
 
 use super::PreparedSemanticSpecialization;
-use crate::compiler::comptime_builtins::type_reflection::FrozenTypeIdentity;
+use crate::compiler::comptime_builtins::FrozenTypeIdentity;
 
 /// One ordered semantic argument in an exact specialization key.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

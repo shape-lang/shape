@@ -11,7 +11,7 @@
 
 use super::super::BytecodeCompiler;
 use super::super::comptime_builtins::expansion_provenance::{
-    ExpansionSite, GeneratedNodePath, GeneratedOrigin,
+    ExpansionSite, GeneratedNodePath, GeneratedOrigin, SourceAnchor,
 };
 use shape_ast::ast::{FunctionDef, Span, Statement};
 use shape_ast::error::Result;
@@ -53,7 +53,7 @@ impl BytecodeCompiler {
         &self,
         method: &mut shape_ast::ast::types::MethodDef,
         site: &ExpansionSite,
-        source_anchor: Span,
+        source_anchor: SourceAnchor,
         extend_type: &str,
     ) {
         let node_path = GeneratedNodePath::decl_root(format!("extend:{extend_type}"))

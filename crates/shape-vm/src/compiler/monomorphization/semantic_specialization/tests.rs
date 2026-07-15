@@ -7,6 +7,7 @@ use shape_runtime::type_system::{GeneratedNodeKey, SemanticCallSiteKey};
 
 use super::*;
 use crate::compiler::BytecodeCompiler;
+use crate::compiler::comptime_builtins::FrozenTypeIdentity;
 use crate::compiler::monomorphization::cache::MonomorphizationCache;
 
 fn frozen(category: FrozenTypeCategory, high: i64, low: i64) -> FrozenSemanticArgument {
@@ -407,7 +408,7 @@ fn declaration_only_lexical_inline_layers_names_but_blocks_exact_inheritance() {
         fn identity<T>(value: T) -> T { value }
         let answer = identity(42)
     "#;
-    let (mut compiler, exact) = inferred_exact_request(source, "identity");
+    let (compiler, exact) = inferred_exact_request(source, "identity");
     let outer_declared = exact.arguments()[0].declared().clone();
     let outer = compiler
         .prepare_semantic_specialization(

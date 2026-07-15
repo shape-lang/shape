@@ -302,5 +302,7 @@ fn pop_scope_evicts_exact_local_reference_state() {
         .contains_key(&scoped));
 }
 
+#[path = "tests/core_fixes.rs"]
 mod core_fixes;
+#[path = "tests/transaction_tests.rs"]
 mod transaction_tests;
