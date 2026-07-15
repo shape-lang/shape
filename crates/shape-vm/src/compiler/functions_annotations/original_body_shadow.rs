@@ -37,6 +37,14 @@ pub(super) fn canonical_original_callable(
                 function.name
             ));
         };
+        let type_annotation = if parameter.is_reference {
+            TypeAnnotation::Borrow {
+                mutable: parameter.is_mut_reference,
+                inner: Box::new(type_annotation),
+            }
+        } else {
+            type_annotation
+        };
         params.push(FunctionParam {
             name: parameter.simple_name().map(str::to_string),
             optional: parameter.default_value.is_some(),

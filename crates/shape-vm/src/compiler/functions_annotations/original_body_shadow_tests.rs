@@ -105,7 +105,13 @@ fn assert_exact_invariant(error: ShapeError, expected: &str) {
 
 #[test]
 fn authentic_capability_has_a_complete_callable_payload_and_publishes() {
-    let owner = source_function("fn probe(value: int) -> int { value }", "probe");
+    let owner = source_function("fn probe(value: &int) -> int { 1 }", "probe");
+    assert!(owner.params[0].is_reference);
+    assert!(!owner.params[0].is_mut_reference);
+    assert!(matches!(
+        owner.params[0].type_annotation.as_ref(),
+        Some(TypeAnnotation::Basic(name)) if name == "int"
+    ));
     let mut compiler = BytecodeCompiler::new();
     install_frozen_owners(&mut compiler, &[&owner]);
     let capability = authenticated_capability(&compiler, &owner);
@@ -113,8 +119,19 @@ fn authentic_capability_has_a_complete_callable_payload_and_publishes() {
     let freeze = compiler
         .comptime_freeze_overlay()
         .expect("installed semantic freeze");
+    let owner_callable = canonical_original_callable(freeze.as_ref(), &owner)
+        .expect("parser-authoritative shared-borrow signature canonicalizes");
+    assert_eq!(capability.callable(), owner_callable);
+    let mut exclusive_owner = owner.clone();
+    exclusive_owner.params[0].is_mut_reference = true;
+    let exclusive_callable = canonical_original_callable(freeze.as_ref(), &exclusive_owner)
+        .expect("mode-only exclusive-borrow signature canonicalizes");
+    assert_ne!(
+        owner_callable, exclusive_callable,
+        "shared and exclusive passing modes must have distinct callable identities"
+    );
     let payload = freeze
-        .payload_of(capability.callable())
+        .payload_of(owner_callable)
         .expect("stored callable has a complete payload");
     assert_eq!(payload.category(), FrozenTypeCategory::Callable);
 
@@ -122,7 +139,7 @@ fn authentic_capability_has_a_complete_callable_payload_and_publishes() {
         &owner,
         capability,
         &[None],
-        &[ParamPassMode::ByValue],
+        &[ParamPassMode::ByRefShared],
     )
     .expect("authenticated pending shadow");
     compiler
@@ -130,6 +147,33 @@ fn authentic_capability_has_a_complete_callable_payload_and_publishes() {
         .expect("authenticated shadow publishes");
     assert!(compiler.function_defs.contains_key(&shadow_name));
     assert!(compiler.find_function(&shadow_name).is_some());
+}
+
+#[test]
+fn staged_emission_passing_mode_tamper_refuses_before_publication() {
+    let owner = source_function("fn probe(value: &int) -> int { value }", "probe");
+    assert!(owner.params[0].is_reference);
+    assert!(!owner.params[0].is_mut_reference);
+    let mut compiler = BytecodeCompiler::new();
+    install_frozen_owners(&mut compiler, &[&owner]);
+    let capability = authenticated_capability(&compiler, &owner);
+    let shadow_name = capability.shadow_name().to_string();
+    let mut pending = PendingOriginalBodyShadow::new(
+        &owner,
+        capability,
+        &[None],
+        &[ParamPassMode::ByRefShared],
+    )
+    .expect("authenticated pending shadow");
+    pending.emission.params[0].is_mut_reference = true;
+    let before = artifact_counts(&compiler);
+
+    let error = compiler
+        .finalize_pending_original_body_shadow(pending)
+        .expect_err("mode-only signature tamper must refuse");
+
+    assert_exact_invariant(error, CALLABLE_IDENTITY_DIAGNOSTIC);
+    assert_prepublication_refusal(&compiler, &shadow_name, before);
 }
 
 #[test]
