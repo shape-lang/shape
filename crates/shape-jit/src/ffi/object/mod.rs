@@ -21,6 +21,8 @@ pub mod property_access;
 pub mod shared_cell_payload;
 
 #[cfg(test)]
+mod shared_cell_ownership_matrix;
+#[cfg(test)]
 mod shared_cell_tests;
 
 // Re-export all public functions for backward compatibility

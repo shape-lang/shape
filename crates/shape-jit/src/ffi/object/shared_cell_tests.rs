@@ -33,7 +33,11 @@ fn assert_zero_shared_payload_lifecycle(kind: NativeKind) {
     }
 }
 
-fn assert_arc_payload_lifecycle<T>(kind: NativeKind, initial: Arc<T>, replacement: Arc<T>) {
+pub(super) fn assert_arc_payload_lifecycle<T>(
+    kind: NativeKind,
+    initial: Arc<T>,
+    replacement: Arc<T>,
+) {
     let initial_weak = Arc::downgrade(&initial);
     let initial_bits = Arc::into_raw(initial) as u64;
     let cell_ptr = unsafe { jit_alloc_shared_cell(initial_bits, stack_kind_code::encode(kind)) };
@@ -186,7 +190,10 @@ fn nonzero_native_scalar_is_rejected_without_allocation_or_consumption() {
 }
 
 #[test]
-fn every_ptr_kind_is_either_supported_or_explicitly_rejected() {
+fn catalog_routes_every_ptr_kind_to_a_carrier_or_exact_refusal() {
+    // Zero payloads prove only compact-code routing and null-safe admission.
+    // `shared_cell_ownership_matrix` separately constructs every accepted
+    // nonzero carrier and proves retain/read/replace/final-drop ownership.
     let mut checked = Vec::new();
     let mut rejected = Vec::new();
     let scalar_refcounted = [

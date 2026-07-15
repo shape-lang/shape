@@ -119,9 +119,14 @@ lifecycle completeness:
 - `HeapKind::ALL` is the canonical, compile-time-checked 36-variant ordinal
   catalog. The compact JIT kind decoder round-trips every entry, including
   `Matrix` and `MatrixSlice`, before any Shared allocation can be emitted.
-- `shared_cell_tests.rs` exercises zero/read/write/drop for every refcounted
-  scalar and heap kind, with direct typed-Arc lifecycle proofs for String,
-  Matrix, and MatrixSlice and an exact nested-recapture ownership count.
+- `shared_cell_tests.rs` uses zero payloads to prove compact-code routing and
+  null-safe admission across the catalog, alongside focused String,
+  Matrix/MatrixSlice, and nested-recapture ownership proofs.
+- `shared_cell_ownership_matrix.rs` drives the generated `HeapKind::ALL`
+  catalog through an exhaustive match and constructs every accepted nonzero
+  scalar or heap carrier. It proves retained reads, read-share release,
+  replacement retirement, and final cell drop; `Ptr(NativeScalar)` remains the
+  sole typed pre-allocation refusal.
 
 These tests and routes are authored and committed but await the supervisor
 execution lane. They are not yet a verified capability claim. Module-binding

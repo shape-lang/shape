@@ -63,11 +63,13 @@ deopt. C1's separate `move` / `share` zero-fallback battery is authored in
 `jit_generated_capture_native.rs` over five `c1-generated-*` fixtures plus the
 ordinary inferred scalar and String nested-share #53 controls. Refcounted
 Shared is now an authored native path: N9 in `jit_closure_capture_native.rs`
-requires exact String output and zero fallback, while the canonical 36-entry
-`HeapKind::ALL` catalog and direct Matrix/MatrixSlice zero/read/write/drop tests
-prove the compact kind route and typed lifecycle are complete. These tests are
-committed on the C1 branch but have not run under the supervisor lane against
-the final head; they are not verified capability claims until that gate passes.
+requires exact String output and zero fallback. The generated 36-entry
+`HeapKind::ALL` catalog proves compact-route classification; the exhaustive
+nonzero matrix in `shared_cell_ownership_matrix.rs` constructs every accepted
+carrier, balances retained reads/replacements/final drops, and pins
+`Ptr(NativeScalar)` as the sole typed refusal. These tests are committed on the
+C1 branch but have not run under the supervisor lane against the final head;
+they are not verified capability claims until that gate passes.
 Module-binding capture inside a JIT-compiled function remains blocked by W39
 F1.
 
