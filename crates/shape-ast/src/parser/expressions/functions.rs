@@ -115,7 +115,7 @@ pub fn parse_pipe_lambda(pair: Pair<Rule>) -> Result<Expr> {
                 }
             }
             Rule::capture_clause => {
-                captures = Some(parse_capture_clause(part)?);
+                captures = Some(Box::new(parse_capture_clause(part)?));
             }
             Rule::expression => {
                 body_expr = Some(super::parse_expression(part)?);
@@ -248,7 +248,7 @@ pub fn parse_regular_function_expr(pair: Pair<Rule>) -> Result<Expr> {
                 }
             }
             Rule::capture_clause => {
-                captures = Some(parse_capture_clause(part)?);
+                captures = Some(Box::new(parse_capture_clause(part)?));
             }
             Rule::return_type => {
                 return_type = Some(crate::parser::parse_type_annotation(

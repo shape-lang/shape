@@ -120,10 +120,13 @@ impl TypeInferenceEngine {
         let Expr::FunctionExpr {
             params,
             return_type,
-            generated_origin: Some(origin),
+            generated_origin,
             ..
         } = expr
         else {
+            return;
+        };
+        let Some(origin) = generated_origin.as_deref() else {
             return;
         };
         let observation =

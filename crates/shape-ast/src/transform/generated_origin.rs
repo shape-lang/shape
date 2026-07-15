@@ -166,7 +166,7 @@ impl Stamper<'_> {
                 }
                 let closure_origin = self.origin.child(closure_path.segment());
                 debug_assert_eq!(closure_origin.path(), closure_path.path());
-                *generated_origin = Some(closure_origin.clone());
+                *generated_origin = Some(Box::new(closure_origin.clone()));
                 // Closures nested in this body hang off THIS closure's path.
                 let mut nested = Stamper {
                     origin: &closure_origin,

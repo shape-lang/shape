@@ -1,5 +1,6 @@
 use crate::ast::{
-    GeneratedExpansionFingerprint, GeneratedNodeIssuer, GeneratedNodePath, Item, Statement,
+    CaptureMode, GeneratedExpansionFingerprint, GeneratedNodeIssuer, GeneratedNodePath, Item,
+    Statement,
 };
 use crate::transform::{generated_closure_source_paths, stamp_generated_closures};
 
@@ -18,10 +19,31 @@ fn generated() {
 fn source_path_enumerator_matches_the_canonical_stamper() {
     let mut body = function_body(SOURCE);
     let root = vec!["extend:Job".to_string(), "method:read".to_string()];
-    let indexed: Vec<_> = generated_closure_source_paths(&body, &root)
-        .into_iter()
-        .map(|source| source.node_path)
+    let projected = generated_closure_source_paths(&body, &root);
+    let indexed: Vec<_> = projected
+        .iter()
+        .map(|source| source.node_path.clone())
         .collect();
+    let declared_captures: Vec<_> = projected
+        .iter()
+        .map(|source| {
+            source.captures.as_ref().map(|clause| {
+                clause
+                    .entries
+                    .iter()
+                    .map(|entry| (entry.mode, entry.name.as_str()))
+                    .collect::<Vec<_>>()
+            })
+        })
+        .collect();
+    assert_eq!(
+        declared_captures,
+        [
+            Some(vec![(CaptureMode::Move, "seed")]),
+            Some(vec![(CaptureMode::Share, "total")]),
+            Some(vec![(CaptureMode::Share, "total")]),
+        ],
+    );
 
     let issuer = GeneratedNodeIssuer::new();
     let origin = issuer.issue(

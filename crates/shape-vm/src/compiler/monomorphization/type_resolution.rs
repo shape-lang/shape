@@ -1008,8 +1008,8 @@ pub fn resolve_call_site_type_args_with_closures(
             } => (
                 params,
                 body,
-                captures.as_ref(),
-                generated_origin.as_ref(),
+                captures.as_deref(),
+                generated_origin.as_deref(),
                 *span,
             ),
             _ => continue,

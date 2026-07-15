@@ -205,7 +205,7 @@ fn closure_parts(
     else {
         panic!("fixture initializer must be a closure");
     };
-    (params, body, captures, span)
+    (params, body, captures.as_deref().cloned(), span)
 }
 
 #[test]

@@ -117,9 +117,9 @@ fn stamped_polymorphic_capture() -> (shape_ast::ast::Program, GeneratedNodeOrigi
         .find_map(|statement| match statement {
             Statement::VariableDecl(declaration, _) => match declaration.value.as_ref() {
                 Some(Expr::FunctionExpr {
-                    generated_origin: Some(origin),
+                    generated_origin,
                     ..
-                }) => Some(origin.clone()),
+                }) => generated_origin.as_deref().cloned(),
                 _ => None,
             },
             _ => None,

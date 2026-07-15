@@ -123,12 +123,16 @@ fn stamp_survives_the_emit_extend_payload_type() {
 }
 
 #[test]
-fn absent_field_deserializes_as_ordinary_source() {
+fn absent_fields_deserialize_as_ordinary_source() {
     let body = body_of("fn generated() -> int { let w = || 1; w() }");
     let json = serde_json::to_string(&body).unwrap();
-    let stripped = json.replace(",\"generated_origin\":null", "");
+    let stripped = json
+        .replace(",\"generated_origin\":null", "")
+        .replace(",\"captures\":null", "");
     assert!(!stripped.contains("generated_origin"));
+    assert!(!stripped.contains("captures"));
     let round_tripped: Vec<Statement> = serde_json::from_str(&stripped).unwrap();
+    assert_eq!(round_tripped, body);
     assert_eq!(first_closure_origin(&round_tripped), None);
 }
 

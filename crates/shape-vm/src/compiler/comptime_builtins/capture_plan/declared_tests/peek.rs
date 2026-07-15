@@ -26,7 +26,7 @@ fn closure_parts(source: &str) -> ClosureParts {
     else {
         panic!("fixture initializer must be a closure");
     };
-    (params, body, captures, span)
+    (params, body, captures.as_deref().cloned(), span)
 }
 
 fn artifact_counts(compiler: &BytecodeCompiler) -> (usize, usize, usize, usize) {

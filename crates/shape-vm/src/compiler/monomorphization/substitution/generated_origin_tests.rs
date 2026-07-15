@@ -52,12 +52,12 @@ fn stamped_closure() -> Expr {
             Some(Expr::Identifier("captured".into(), Span::default())),
             Span::default(),
         )],
-        generated_origin: Some(origin(&[
+        generated_origin: Some(Box::new(origin(&[
             "extend:Job",
             "method:read",
             "closure:0",
             "closure:0",
-        ])),
+        ]))),
         captures: None,
         span: Span::default(),
     };
@@ -71,7 +71,11 @@ fn stamped_closure() -> Expr {
                 Span::default(),
             ),
         ],
-        generated_origin: Some(origin(&["extend:Job", "method:read", "closure:0"])),
+        generated_origin: Some(Box::new(origin(&[
+            "extend:Job",
+            "method:read",
+            "closure:0",
+        ]))),
         captures: None,
         span: Span::default(),
     }
@@ -87,7 +91,7 @@ fn origins_of(expr: &Expr) -> Vec<Option<Vec<String>>> {
     {
         found.push(
             generated_origin
-                .as_ref()
+                .as_deref()
                 .map(|origin| origin.node_path().to_vec()),
         );
         for statement in body {

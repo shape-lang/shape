@@ -2624,7 +2624,7 @@ impl TypeInferenceEngine {
                 ..
             } => {
                 let generated_fact_scope = self.enter_generated_function_fact_scope(
-                    generated_origin.as_ref(),
+                    generated_origin.as_deref(),
                     params,
                     return_type.as_ref(),
                     body,

@@ -160,7 +160,7 @@ impl SourcePathWalker<'_> {
                     node_path: closure_path.rendered(),
                     params: params.clone(),
                     body: body.clone(),
-                    captures: captures.clone(),
+                    captures: captures.as_deref().cloned(),
                 });
 
                 // Defaults execute in the enclosing scope and therefore share

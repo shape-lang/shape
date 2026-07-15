@@ -518,6 +518,27 @@ mod tests {
     }
 
     #[test]
+    fn optimize_source_parses_on_two_megabyte_thread_stack() {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("stdlib-src/math/optimize.shape");
+        let source = std::fs::read_to_string(&path).expect("embedded optimize source must exist");
+        let worker = std::thread::Builder::new()
+            .name("optimize-parser-stack-budget".to_string())
+            .stack_size(2 * 1024 * 1024)
+            .spawn(move || {
+                parse_program(&source)
+                    .map(|program| program.items.len())
+                    .map_err(|error| error.to_string())
+            })
+            .expect("parser stack-budget worker must spawn");
+        let item_count = worker
+            .join()
+            .expect("optimize parser must stay within a 2 MiB stack")
+            .expect("embedded optimize source must parse");
+        assert!(item_count > 0, "embedded optimize source must contain items");
+    }
+
+    #[test]
     fn test_intrinsic_declarations_loaded_from_std_core() {
         let stdlib_path = default_stdlib_path();
         if !stdlib_path.exists() {

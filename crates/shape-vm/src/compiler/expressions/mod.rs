@@ -1784,8 +1784,8 @@ impl BytecodeCompiler {
             } => self.compile_expr_closure(
                 params,
                 body,
-                captures.as_ref(),
-                generated_origin.as_ref(),
+                captures.as_deref(),
+                generated_origin.as_deref(),
                 *span,
             ),
 
