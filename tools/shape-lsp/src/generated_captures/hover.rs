@@ -15,7 +15,7 @@ use crate::util::{parser_source, position_to_offset};
 /// Route hover through one fresh exact parse and one compiler query session.
 /// Parse failure is `NotCapture`; unavailable compiler evidence remains a
 /// terminal quarantine and must not fall through to name-based hover.
-pub(super) fn generated_capture_hover_from_source(
+pub(crate) fn generated_capture_hover_from_source(
     text: &str,
     position: Position,
     module_cache: Option<&ModuleCache>,
