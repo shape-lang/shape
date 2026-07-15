@@ -7,20 +7,24 @@
 //! strings therefore remain represented as typed descriptors in the compiler
 //! query but never gain invented source locations.
 
-use std::collections::HashMap;
-
 use crate::compiler::{BytecodeCompiler, SourceAnchor};
 use shape_ast::ast::{CaptureMode, Program};
+use shape_runtime::type_system::GeneratedNodeKey;
 
+mod aggregation;
 mod identity;
 mod source_index;
 mod specialization;
+use aggregation::CaptureAccumulator;
 pub use identity::{
     GeneratedCaptureBindingIdentity, GeneratedCaptureOccurrenceIdentity, GeneratedCaptureSlot,
 };
 use source_index::AuthoredCaptureIndex;
-use specialization::specialization_for;
-pub use specialization::{GeneratedCaptureSpecialization, GeneratedCaptureSpecializationIdentity};
+pub use specialization::{
+    GeneratedCaptureSemanticType, GeneratedCaptureSpecialization,
+    GeneratedCaptureSpecializationIdentity,
+};
+use specialization::{normalize_semantic_presentations, specialization_for};
 
 /// C1 query diagnostic: a validated capture exists, but its generated AST
 /// offsets do not have an exact structural mapping into the source program.
@@ -37,7 +41,7 @@ pub enum GeneratedCaptureStage {
 }
 
 /// Exact authored locations linked by one capture identity.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct GeneratedCaptureSourceMap {
     binding: SourceAnchor,
     declaration: SourceAnchor,
@@ -57,14 +61,20 @@ impl GeneratedCaptureSourceMap {
         &self.uses
     }
 
-    fn contains_declaration_or_use(&self, file_id: u16, offset: usize) -> Option<CaptureSiteRole> {
+    fn role_at(&self, file_id: u16, offset: usize) -> Option<CaptureSiteRole> {
         if self.declaration.contains(file_id, offset) {
             return Some(CaptureSiteRole::Declaration);
         }
-        self.uses
+        if self
+            .uses
             .iter()
             .any(|use_site| use_site.contains(file_id, offset))
-            .then_some(CaptureSiteRole::Use)
+        {
+            return Some(CaptureSiteRole::Use);
+        }
+        self.binding
+            .contains(file_id, offset)
+            .then_some(CaptureSiteRole::Binding)
     }
 }
 
@@ -111,9 +121,9 @@ impl GeneratedCaptureDescriptorView {
     }
 
     /// The exact type when every specialization agrees. Generic occurrences
-    /// with multiple concrete types return `None`; callers must display the
+    /// with multiple semantic types return `None`; callers must display the
     /// explicit specialization set rather than choosing one.
-    pub fn uniform_capture_type(&self) -> Option<&shape_value::v2::ConcreteType> {
+    pub fn uniform_capture_type(&self) -> Option<&GeneratedCaptureSemanticType> {
         let first = self.specializations.first()?.capture_type();
         self.specializations
             .iter()
@@ -158,10 +168,10 @@ impl GeneratedCaptureDescriptorView {
     ) -> Result<(), ()> {
         if let Some(existing) = self
             .specializations
-            .iter()
+            .iter_mut()
             .find(|existing| existing.identity() == specialization.identity())
         {
-            return (existing == &specialization).then_some(()).ok_or(());
+            return existing.merge_diagnostic_presentation(&specialization);
         }
         self.specializations.push(specialization);
         self.specializations.sort_by(|left, right| {
@@ -178,24 +188,38 @@ impl GeneratedCaptureDescriptorView {
 pub enum CaptureSiteRole {
     Declaration,
     Use,
+    Binding,
 }
 
 /// Identity-bearing position result. The descriptor remains owned by the
 /// query; consumers receive a borrow and cannot mutate compiler state.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct GeneratedCaptureSite<'query> {
-    capture: &'query GeneratedCaptureDescriptorView,
+    captures: Vec<&'query GeneratedCaptureDescriptorView>,
     role: CaptureSiteRole,
 }
 
 impl<'query> GeneratedCaptureSite<'query> {
-    pub fn capture(&self) -> &'query GeneratedCaptureDescriptorView {
-        self.capture
+    /// All exact generated occurrences mapped to this authored position.
+    /// One annotation template can legitimately be applied more than once,
+    /// so callers must aggregate this set rather than choose an arbitrary
+    /// compiler artifact.
+    pub fn captures(&self) -> &[&'query GeneratedCaptureDescriptorView] {
+        &self.captures
     }
 
     pub fn role(&self) -> CaptureSiteRole {
         self.role
     }
+}
+
+/// Position lookup distinguishes ordinary source from a poisoned generated
+/// capture site. Consumers may fall through only for `None`; `Unavailable`
+/// must suppress name-based answers that could expose a conflicting artifact.
+#[derive(Debug, Clone)]
+pub enum GeneratedCapturePosition<'query> {
+    Available(GeneratedCaptureSite<'query>),
+    Unavailable,
 }
 
 /// Stable query failure. A descriptor with an unavailable source map remains
@@ -205,7 +229,7 @@ impl<'query> GeneratedCaptureSite<'query> {
 pub struct GeneratedCaptureQueryIssue {
     code: &'static str,
     message: String,
-    application: Option<SourceAnchor>,
+    anchor: Option<SourceAnchor>,
 }
 
 impl GeneratedCaptureQueryIssue {
@@ -217,16 +241,23 @@ impl GeneratedCaptureQueryIssue {
         &self.message
     }
 
-    pub fn application(&self) -> Option<SourceAnchor> {
-        self.application
+    /// Best real authored anchor for this issue. C0911 may fall back from an
+    /// application to a verified declaration/binder site; `None` means no
+    /// real source authority exists at all.
+    pub fn anchor(&self) -> Option<SourceAnchor> {
+        self.anchor
     }
 }
 
-/// Complete immutable query result for one compilation.
+/// Complete immutable query result for one compilation. Binding identities
+/// exposed through this result are join keys only within this query/compiler
+/// session; only occurrence identity carries the stable generated-node
+/// provenance contract.
 #[derive(Debug, Clone, Default)]
 pub struct GeneratedCaptureQuery {
     captures: Vec<GeneratedCaptureDescriptorView>,
     issues: Vec<GeneratedCaptureQueryIssue>,
+    quarantined_source_maps: Vec<GeneratedCaptureSourceMap>,
 }
 
 impl GeneratedCaptureQuery {
@@ -238,7 +269,9 @@ impl GeneratedCaptureQuery {
         &self.issues
     }
 
-    /// Every authored capture occurrence of one compiler-issued binding.
+    /// Every authored capture occurrence of one compiler-issued binding in
+    /// this query's compiler session. `identity` must originate from this
+    /// query; it is not a persistent or cross-compilation key.
     /// Module bindings join by `(file, module slot)` across generated owners;
     /// locals retain their expansion and structural owner scope.
     pub fn captures_for_binding<'query>(
@@ -251,24 +284,46 @@ impl GeneratedCaptureQuery {
             .filter(move |capture| capture.identity == identity)
     }
 
-    /// Resolve only an explicit declaration or captured body use. The outer
-    /// binding itself deliberately falls through to ordinary source tooling.
-    pub fn capture_at(&self, file_id: u16, offset: usize) -> Option<GeneratedCaptureSite<'_>> {
-        let mut resolved_use = None;
+    /// Resolve every exact occurrence mapped to an authored capture site.
+    /// Declaration beats forwarding use, and use beats the originating
+    /// binder, but the returned set retains every matching application.
+    pub fn capture_at(&self, file_id: u16, offset: usize) -> Option<GeneratedCapturePosition<'_>> {
+        if self
+            .quarantined_source_maps
+            .iter()
+            .any(|source_map| source_map.role_at(file_id, offset).is_some())
+        {
+            return Some(GeneratedCapturePosition::Unavailable);
+        }
+
+        let mut captures = Vec::new();
+        let mut role = None;
         for capture in &self.captures {
-            let Some(role) = capture
+            let Some(candidate_role) = capture
                 .source_map()
-                .and_then(|source_map| source_map.contains_declaration_or_use(file_id, offset))
+                .and_then(|source_map| source_map.role_at(file_id, offset))
             else {
                 continue;
             };
-            let site = GeneratedCaptureSite { capture, role };
-            if role == CaptureSiteRole::Declaration {
-                return Some(site);
+            captures.push(capture);
+            if role.is_none_or(|current| candidate_role.precedence() > current.precedence()) {
+                role = Some(candidate_role);
             }
-            resolved_use.get_or_insert(site);
         }
-        resolved_use
+        Some(GeneratedCapturePosition::Available(GeneratedCaptureSite {
+            captures,
+            role: role?,
+        }))
+    }
+}
+
+impl CaptureSiteRole {
+    const fn precedence(self) -> u8 {
+        match self {
+            Self::Declaration => 3,
+            Self::Use => 2,
+            Self::Binding => 1,
+        }
     }
 }
 
@@ -286,10 +341,7 @@ impl BytecodeCompiler {
 impl GeneratedCaptureQuery {
     fn from_compiler(compiler: &BytecodeCompiler, source_program: &Program) -> Self {
         let source_index = AuthoredCaptureIndex::build(source_program);
-        let mut captures_by_occurrence: HashMap<
-            GeneratedCaptureOccurrenceIdentity,
-            GeneratedCaptureDescriptorView,
-        > = HashMap::new();
+        let mut accumulator = CaptureAccumulator::new();
         let mut issues = Vec::new();
 
         for pack in &compiler.closure_capture_packs {
@@ -298,63 +350,58 @@ impl GeneratedCaptureQuery {
             };
             let (file_id, application_span) = origin.anchor();
             let application = SourceAnchor::new(file_id, application_span).ok();
-            if application.is_none() {
-                issues.push(GeneratedCaptureQueryIssue {
-                    code: GENERATED_CAPTURE_ARTIFACT_CONFLICT_CODE,
-                    message: format!(
-                        "[C0911] generated capture node {} has no real application anchor",
-                        origin.render_path(),
-                    ),
-                    application: None,
-                });
-            }
-            let mut owner_path = origin.node_path().to_vec();
-            owner_path.pop();
 
             for (descriptor_ordinal, descriptor) in pack.descriptors.iter().enumerate() {
                 let Some(mode) = descriptor.declared else {
                     continue;
                 };
-                let Some(target) = descriptor.target else {
-                    issues.push(GeneratedCaptureQueryIssue {
-                        code: GENERATED_CAPTURE_ARTIFACT_CONFLICT_CODE,
-                        message: format!(
-                            "[C0911] generated capture '{}' in node {} has no resolved binding slot",
+                let occurrence_identity = GeneratedCaptureOccurrenceIdentity {
+                    node: GeneratedNodeKey::from_origin(origin),
+                    descriptor_ordinal,
+                };
+                let source_map = source_index.source_map_for(compiler, origin, descriptor);
+                if application.is_none() {
+                    accumulator.poison(
+                        occurrence_identity,
+                        source_map,
+                        None,
+                        format!(
+                            "generated capture '{}' in node {} has no real application anchor",
                             descriptor.name,
                             origin.render_path(),
                         ),
+                    );
+                    continue;
+                }
+                let Some(lineage) = descriptor.binding_lineage.as_ref() else {
+                    accumulator.poison(
+                        occurrence_identity,
+                        source_map,
                         application,
-                    });
+                        format!(
+                            "generated capture '{}' in node {} has no canonical binding lineage",
+                            descriptor.name,
+                            origin.render_path(),
+                        ),
+                    );
                     continue;
                 };
-                let identity = GeneratedCaptureBindingIdentity::from_capture_target(
-                    origin.expansion_fingerprint(),
-                    owner_path.clone(),
-                    file_id,
-                    target,
-                );
-                let occurrence_identity = GeneratedCaptureOccurrenceIdentity {
-                    expansion_fingerprint: origin.expansion_fingerprint(),
-                    file_id,
-                    capture_node_path: origin.node_path().to_vec(),
-                    descriptor_ordinal,
-                };
-                let specialization = match specialization_for(compiler, pack, descriptor_ordinal) {
+                let identity = GeneratedCaptureBindingIdentity::from_binding_lineage(lineage);
+                let specialization = match specialization_for(pack, descriptor_ordinal) {
                     Ok(specialization) => specialization,
                     Err(reason) => {
-                        issues.push(GeneratedCaptureQueryIssue {
-                            code: GENERATED_CAPTURE_ARTIFACT_CONFLICT_CODE,
-                            message: format!(
-                                "[C0911] generated capture '{}' in occurrence {} cannot establish a structural specialization identity: {reason}",
-                                descriptor.name,
-                                occurrence_identity.canonical_descriptor(),
-                            ),
+                        accumulator.poison(
+                            occurrence_identity,
+                            source_map,
                             application,
-                        });
+                            format!(
+                                "generated capture '{}' cannot establish a structural specialization identity: {reason}",
+                                descriptor.name,
+                            ),
+                        );
                         continue;
                     }
                 };
-                let source_map = source_map_for(descriptor, mode, file_id, &source_index);
                 if source_map.is_none() {
                     issues.push(GeneratedCaptureQueryIssue {
                         code: GENERATED_CAPTURE_SOURCE_UNAVAILABLE_CODE,
@@ -363,7 +410,7 @@ impl GeneratedCaptureQuery {
                             descriptor.name,
                             origin.render_path(),
                         ),
-                        application,
+                        anchor: application,
                     });
                 }
                 let view = GeneratedCaptureDescriptorView {
@@ -377,87 +424,34 @@ impl GeneratedCaptureQuery {
                     application,
                     source_map,
                 };
-                match captures_by_occurrence.entry(occurrence_identity) {
-                    std::collections::hash_map::Entry::Vacant(entry) => {
-                        entry.insert(view);
-                    }
-                    std::collections::hash_map::Entry::Occupied(mut entry) => {
-                        let same_contract = entry.get().same_occurrence_contract(&view);
-                        let specialization = view
-                            .specializations
-                            .into_iter()
-                            .next()
-                            .expect("candidate capture view has one specialization");
-                        if !same_contract
-                            || entry
-                                .get_mut()
-                                .merge_specialization(specialization)
-                                .is_err()
-                        {
-                            issues.push(GeneratedCaptureQueryIssue {
-                                code: GENERATED_CAPTURE_ARTIFACT_CONFLICT_CODE,
-                                message: format!(
-                                    "[C0911] generated capture artifacts disagree for occurrence {}",
-                                    entry.key().canonical_descriptor(),
-                                ),
-                                application,
-                            });
-                        }
-                    }
-                }
+                accumulator.insert(view);
             }
         }
 
-        let mut captures: Vec<_> = captures_by_occurrence.into_values().collect();
-        captures.sort_by(|left, right| {
-            left.occurrence_identity
-                .canonical_descriptor()
-                .cmp(&right.occurrence_identity.canonical_descriptor())
-        });
+        let mut aggregated = accumulator.finish();
+        normalize_semantic_presentations(&mut aggregated.captures);
+        issues.extend(aggregated.issues);
         issues.sort_by(|left, right| {
-            (left.code, left.message.as_str()).cmp(&(right.code, right.message.as_str()))
+            (
+                left.code,
+                left.message.as_str(),
+                left.anchor.map(source_anchor_key),
+            )
+                .cmp(&(
+                    right.code,
+                    right.message.as_str(),
+                    right.anchor.map(source_anchor_key),
+                ))
         });
         issues.dedup();
-        Self { captures, issues }
+        Self {
+            captures: aggregated.captures,
+            issues,
+            quarantined_source_maps: aggregated.quarantined_source_maps,
+        }
     }
 }
 
-fn source_map_for(
-    descriptor: &super::CaptureDescriptor,
-    mode: CaptureMode,
-    file_id: u16,
-    index: &AuthoredCaptureIndex,
-) -> Option<GeneratedCaptureSourceMap> {
-    let binding_span = descriptor.binding_span?;
-    let declaration_span = descriptor.declaration_span?;
-    // A successfully planned explicit descriptor always has a body use:
-    // `plan_captures` rejects stale declarations as [C0901] before building a
-    // CapturePack. Keep that compiler invariant explicit here; an empty list
-    // in a supposedly validated pack is an unavailable/inconsistent artifact,
-    // never a declaration-only source map invented by tooling.
-    if descriptor.use_spans.is_empty()
-        || !index.has_binding(&descriptor.name, binding_span)
-        || !index.has_declaration(&descriptor.name, mode, declaration_span)
-        || descriptor
-            .use_spans
-            .iter()
-            .any(|span| !index.has_use(&descriptor.name, *span))
-    {
-        return None;
-    }
-
-    let binding = SourceAnchor::new(file_id, binding_span).ok()?;
-    let declaration = SourceAnchor::new(file_id, declaration_span).ok()?;
-    let mut uses: Vec<_> = descriptor
-        .use_spans
-        .iter()
-        .filter_map(|span| SourceAnchor::new(file_id, *span).ok())
-        .collect();
-    uses.sort_by_key(|anchor| (anchor.span().start, anchor.span().end));
-    uses.dedup();
-    (uses.len() == descriptor.use_spans.len()).then_some(GeneratedCaptureSourceMap {
-        binding,
-        declaration,
-        uses,
-    })
+fn source_anchor_key(anchor: SourceAnchor) -> (u16, usize, usize) {
+    (anchor.file_id(), anchor.span().start, anchor.span().end)
 }

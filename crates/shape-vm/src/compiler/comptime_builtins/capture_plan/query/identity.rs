@@ -1,6 +1,7 @@
 //! Structural identities published by the generated-capture query.
 
-use super::super::CaptureTarget;
+use super::super::CaptureBindingLineage;
+use shape_runtime::type_system::GeneratedNodeKey;
 
 /// Slot namespace of the captured binding in its exact owner.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -26,8 +27,23 @@ enum GeneratedCaptureBindingScope {
     },
 }
 
-/// Opaque compiler-issued identity. Consumers can inspect and compare it but
-/// cannot construct one from source spelling or presentation spans.
+/// Opaque, compiler-session-scoped join identity. Consumers can inspect and
+/// compare it inside the [`super::GeneratedCaptureQuery`] that issued it, but
+/// must not cache it across compilations or treat it as a persistent semantic
+/// identity: `file_id` and binding slots are order-assigned session coordinates.
+/// Local identities additionally retain the compiler-issued declaration-path
+/// labels carried by structural provenance. Capture/binding spelling, source
+/// spans, and owner-display prose do not mint this identity.
+///
+/// Serialization is deliberately unsupported so this query-local carrier
+/// cannot silently become a cross-session cache key:
+///
+/// ```compile_fail
+/// use shape_vm::compiler::GeneratedCaptureBindingIdentity;
+///
+/// fn require_serializable<T: serde::Serialize>() {}
+/// require_serializable::<GeneratedCaptureBindingIdentity>();
+/// ```
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct GeneratedCaptureBindingIdentity {
     scope: GeneratedCaptureBindingScope,
@@ -35,24 +51,24 @@ pub struct GeneratedCaptureBindingIdentity {
 }
 
 impl GeneratedCaptureBindingIdentity {
-    pub(super) fn from_capture_target(
-        expansion_fingerprint: (i64, i64),
-        owner_path: Vec<String>,
-        file_id: u16,
-        target: CaptureTarget,
-    ) -> Self {
-        match target {
-            CaptureTarget::Local(slot) => Self {
+    pub(super) fn from_binding_lineage(lineage: &CaptureBindingLineage) -> Self {
+        match lineage {
+            CaptureBindingLineage::Local {
+                expansion_fingerprint,
+                binding_owner_path,
+                file_id,
+                slot,
+            } => Self {
                 scope: GeneratedCaptureBindingScope::Local {
-                    expansion_fingerprint,
-                    owner_path,
-                    slot,
+                    expansion_fingerprint: *expansion_fingerprint,
+                    owner_path: binding_owner_path.clone(),
+                    slot: *slot,
                 },
-                file_id,
+                file_id: *file_id,
             },
-            CaptureTarget::ModuleBinding(slot) => Self {
-                scope: GeneratedCaptureBindingScope::Module { slot },
-                file_id,
+            CaptureBindingLineage::ModuleBinding { file_id, slot } => Self {
+                scope: GeneratedCaptureBindingScope::Module { slot: *slot },
+                file_id: *file_id,
             },
         }
     }
@@ -87,7 +103,8 @@ impl GeneratedCaptureBindingIdentity {
         }
     }
 
-    /// Stable diagnostic/debug rendering. It is never parsed back as identity.
+    /// Deterministic diagnostic/debug rendering within one compiler session.
+    /// It is never parsed back or persisted as cross-session identity.
     pub fn canonical_descriptor(&self) -> String {
         match &self.scope {
             GeneratedCaptureBindingScope::Local {
@@ -112,21 +129,16 @@ impl GeneratedCaptureBindingIdentity {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use shape_ast::ast::GeneratedNodeOrigin;
 
     #[test]
     fn cross_owner_same_module_slot_has_one_reference_join_identity() {
-        let from_first_owner = GeneratedCaptureBindingIdentity::from_capture_target(
-            (1, 2),
-            vec!["method:first".to_string()],
-            7,
-            CaptureTarget::ModuleBinding(3),
-        );
-        let from_second_owner = GeneratedCaptureBindingIdentity::from_capture_target(
-            (8, 9),
-            vec!["method:second".to_string()],
-            7,
-            CaptureTarget::ModuleBinding(3),
-        );
+        let lineage = CaptureBindingLineage::ModuleBinding {
+            file_id: 7,
+            slot: 3,
+        };
+        let from_first_owner = GeneratedCaptureBindingIdentity::from_binding_lineage(&lineage);
+        let from_second_owner = GeneratedCaptureBindingIdentity::from_binding_lineage(&lineage);
         assert_eq!(from_first_owner, from_second_owner);
         assert_eq!(from_first_owner.expansion_fingerprint(), None);
         assert_eq!(from_first_owner.owner_path(), None);
@@ -138,19 +150,83 @@ mod tests {
 
     #[test]
     fn local_identity_retains_expansion_and_structural_owner() {
-        let first = GeneratedCaptureBindingIdentity::from_capture_target(
-            (1, 2),
-            vec!["method:first".to_string()],
-            0,
-            CaptureTarget::Local(3),
-        );
-        let second = GeneratedCaptureBindingIdentity::from_capture_target(
-            (1, 2),
-            vec!["method:second".to_string()],
-            0,
-            CaptureTarget::Local(3),
-        );
+        let first =
+            GeneratedCaptureBindingIdentity::from_binding_lineage(&CaptureBindingLineage::Local {
+                expansion_fingerprint: (1, 2),
+                binding_owner_path: vec!["method:first".to_string()],
+                file_id: 0,
+                slot: 3,
+            });
+        let second =
+            GeneratedCaptureBindingIdentity::from_binding_lineage(&CaptureBindingLineage::Local {
+                expansion_fingerprint: (1, 2),
+                binding_owner_path: vec!["method:second".to_string()],
+                file_id: 0,
+                slot: 3,
+            });
         assert_ne!(first, second);
+    }
+
+    #[test]
+    fn binding_identity_exposes_its_session_assigned_coordinate_boundary() {
+        let baseline = GeneratedCaptureBindingIdentity::from_binding_lineage(
+            &CaptureBindingLineage::ModuleBinding {
+                file_id: 7,
+                slot: 3,
+            },
+        );
+        let reordered_file = GeneratedCaptureBindingIdentity::from_binding_lineage(
+            &CaptureBindingLineage::ModuleBinding {
+                file_id: 8,
+                slot: 3,
+            },
+        );
+        let reordered_slot = GeneratedCaptureBindingIdentity::from_binding_lineage(
+            &CaptureBindingLineage::ModuleBinding {
+                file_id: 7,
+                slot: 4,
+            },
+        );
+
+        assert_ne!(baseline, reordered_file);
+        assert_ne!(baseline, reordered_slot);
+    }
+
+    #[test]
+    fn occurrence_identity_ignores_order_assigned_source_file_and_span() {
+        let first_origin = decoded_origin(7, 10, 20, "first presentation");
+        let second_origin = decoded_origin(99, 80, 90, "second presentation");
+        let first = GeneratedCaptureOccurrenceIdentity {
+            node: GeneratedNodeKey::from_origin(&first_origin),
+            descriptor_ordinal: 3,
+        };
+        let second = GeneratedCaptureOccurrenceIdentity {
+            node: GeneratedNodeKey::from_origin(&second_origin),
+            descriptor_ordinal: 3,
+        };
+
+        assert_eq!(first, second);
+        assert_eq!(
+            first.canonical_descriptor(),
+            "occurrence:000000000000000b000000000000001d:node:method:read/closure:0:descriptor:3",
+        );
+    }
+
+    fn decoded_origin(
+        anchor_file_id: u16,
+        start: usize,
+        end: usize,
+        owner_display: &str,
+    ) -> GeneratedNodeOrigin {
+        serde_json::from_value(serde_json::json!({
+            "expansion_high": 11,
+            "expansion_low": 29,
+            "node_path": ["method:read", "closure:0"],
+            "anchor_file_id": anchor_file_id,
+            "anchor_span": { "start": start, "end": end },
+            "owner_display": owner_display,
+        }))
+        .expect("serialized provenance data decodes without compiler authority")
     }
 }
 
@@ -158,26 +234,23 @@ mod tests {
 ///
 /// It deliberately excludes both binding and specialization. Sibling closures
 /// have distinct full node paths; monomorphized instances of one authored
-/// clause share this identity and are aggregated explicitly by the query.
+/// clause share this identity and are aggregated explicitly by the query. The
+/// node path can contain compiler-issued declaration labels such as
+/// `extend:Type` and `method:name`; capture/binding spelling, source spans,
+/// owner-display prose, and traversal/file order remain excluded.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct GeneratedCaptureOccurrenceIdentity {
-    pub(super) expansion_fingerprint: (i64, i64),
-    pub(super) file_id: u16,
-    pub(super) capture_node_path: Vec<String>,
+    pub(super) node: GeneratedNodeKey,
     pub(super) descriptor_ordinal: usize,
 }
 
 impl GeneratedCaptureOccurrenceIdentity {
     pub fn expansion_fingerprint(&self) -> (i64, i64) {
-        self.expansion_fingerprint
-    }
-
-    pub fn file_id(&self) -> u16 {
-        self.file_id
+        self.node.expansion_fingerprint()
     }
 
     pub fn capture_node_path(&self) -> &[String] {
-        &self.capture_node_path
+        self.node.node_path()
     }
 
     pub fn descriptor_ordinal(&self) -> usize {
@@ -186,13 +259,12 @@ impl GeneratedCaptureOccurrenceIdentity {
 
     /// Stable diagnostic/debug rendering. It is never parsed as identity.
     pub fn canonical_descriptor(&self) -> String {
-        let (high, low) = self.expansion_fingerprint;
+        let (high, low) = self.node.expansion_fingerprint();
         format!(
-            "occurrence:{:016x}{:016x}:file:{}:node:{}:descriptor:{}",
+            "occurrence:{:016x}{:016x}:node:{}:descriptor:{}",
             high as u64,
             low as u64,
-            self.file_id,
-            self.capture_node_path.join("/"),
+            self.node.node_path().join("/"),
             self.descriptor_ordinal,
         )
     }

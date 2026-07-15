@@ -51,11 +51,70 @@ pub(crate) fn compile_for_generated_symbol_queries(
     program: &Program,
     text: &str,
 ) -> shape_vm::BytecodeCompiler {
+    let mut compiler = generated_query_compiler(text);
+    let _ = compiler.compile_in_place(program);
+    compiler
+}
+
+/// Compile with the same imported-item registration used by semantic
+/// diagnostics. A document containing imports is explicitly gated when the
+/// request lacks module context; capture tooling must not silently execute a
+/// different annotation environment from diagnostics.
+pub(crate) fn compile_for_generated_capture_queries(
+    program: &Program,
+    text: &str,
+    file_path: Option<&std::path::Path>,
+    module_cache: Option<&crate::module_cache::ModuleCache>,
+    workspace_root: Option<&std::path::Path>,
+) -> Option<shape_vm::BytecodeCompiler> {
+    let has_imports = program
+        .items
+        .iter()
+        .any(|item| matches!(item, Item::Import(..)));
+    if has_imports && (file_path.is_none() || module_cache.is_none()) {
+        return None;
+    }
+
+    #[cfg(test)]
+    GENERATED_CAPTURE_COMPILE_COUNT.with(|count| count.set(count.get() + 1));
+
+    let mut compiler = generated_query_compiler(text);
+    if let (Some(file_path), Some(module_cache)) = (file_path, module_cache) {
+        let _ = crate::analysis::validate_imports_and_register_items(
+            program,
+            text,
+            file_path,
+            module_cache,
+            workspace_root,
+            &mut compiler,
+        );
+    }
+    let _ = compiler.compile_in_place(program);
+    Some(compiler)
+}
+
+#[cfg(test)]
+std::thread_local! {
+    static GENERATED_CAPTURE_COMPILE_COUNT: std::cell::Cell<usize> = const {
+        std::cell::Cell::new(0)
+    };
+}
+
+#[cfg(test)]
+pub(crate) fn reset_generated_capture_compile_count() {
+    GENERATED_CAPTURE_COMPILE_COUNT.with(|count| count.set(0));
+}
+
+#[cfg(test)]
+pub(crate) fn generated_capture_compile_count() -> usize {
+    GENERATED_CAPTURE_COMPILE_COUNT.with(std::cell::Cell::get)
+}
+
+fn generated_query_compiler(text: &str) -> shape_vm::BytecodeCompiler {
     let mut compiler = shape_vm::BytecodeCompiler::new();
     compiler.set_type_diagnostic_mode(shape_vm::compiler::TypeDiagnosticMode::RecoverAll);
     compiler.set_compile_diagnostic_mode(shape_vm::compiler::CompileDiagnosticMode::RecoverAll);
     compiler.set_source(text);
-    let _ = compiler.compile_in_place(program);
     compiler
 }
 
@@ -281,6 +340,33 @@ pub fn generated_definition(
     let sites = call_site_name_spans(program, text, word);
     let cursor_kind = call_site_kind_at(&sites, offset)?;
     let compiler = compile_for_generated_symbol_queries(program, text);
+    generated_definition_for_kind(program, text, word, uri, &compiler, cursor_kind)
+}
+
+pub(crate) fn generated_definition_from_compiler(
+    program: &Program,
+    text: &str,
+    word: &str,
+    offset: usize,
+    uri: &Uri,
+    compiler: &shape_vm::BytecodeCompiler,
+) -> Option<GotoDefinitionResponse> {
+    if !program_may_generate_symbols(program) {
+        return None;
+    }
+    let sites = call_site_name_spans(program, text, word);
+    let cursor_kind = call_site_kind_at(&sites, offset)?;
+    generated_definition_for_kind(program, text, word, uri, compiler, cursor_kind)
+}
+
+fn generated_definition_for_kind(
+    program: &Program,
+    text: &str,
+    word: &str,
+    uri: &Uri,
+    compiler: &shape_vm::BytecodeCompiler,
+    cursor_kind: CallableKind,
+) -> Option<GotoDefinitionResponse> {
     let matches: Vec<_> = compiler
         .generated_symbol_query()
         .symbols_named(word)
@@ -335,6 +421,34 @@ pub fn generated_references(
     let sites = call_site_name_spans(program, text, word);
     let cursor_kind = call_site_kind_at(&sites, offset)?;
     let compiler = compile_for_generated_symbol_queries(program, text);
+    generated_references_for_kind(program, text, word, uri, &compiler, &sites, cursor_kind)
+}
+
+pub(crate) fn generated_references_from_compiler(
+    program: &Program,
+    text: &str,
+    word: &str,
+    offset: usize,
+    uri: &Uri,
+    compiler: &shape_vm::BytecodeCompiler,
+) -> Option<Vec<Location>> {
+    if !program_may_generate_symbols(program) {
+        return None;
+    }
+    let sites = call_site_name_spans(program, text, word);
+    let cursor_kind = call_site_kind_at(&sites, offset)?;
+    generated_references_for_kind(program, text, word, uri, compiler, &sites, cursor_kind)
+}
+
+fn generated_references_for_kind(
+    program: &Program,
+    text: &str,
+    word: &str,
+    uri: &Uri,
+    compiler: &shape_vm::BytecodeCompiler,
+    sites: &[(Span, CallableKind)],
+    cursor_kind: CallableKind,
+) -> Option<Vec<Location>> {
     let matches: Vec<_> = compiler
         .generated_symbol_query()
         .symbols_named(word)
@@ -348,7 +462,7 @@ pub fn generated_references(
         return None;
     }
     let mut locations: Vec<Location> = Vec::new();
-    for (span, kind) in &sites {
+    for (span, kind) in sites {
         if *kind == cursor_kind {
             push_unique(&mut locations, location_from_span(uri, text, *span));
         }

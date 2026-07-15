@@ -22,18 +22,31 @@ pub(super) fn capture_query_diagnostics(
 }
 
 fn issue_to_diagnostic(issue: &GeneratedCaptureQueryIssue, text: &str) -> Option<Diagnostic> {
-    let anchor = issue.application()?;
-    if anchor.file_id() != 0 {
-        return None;
-    }
+    let range = issue_range(issue.anchor(), text)?;
     Some(Diagnostic {
-        range: range_from_anchor(anchor, text),
-        severity: Some(DiagnosticSeverity::INFORMATION),
+        range,
+        severity: Some(issue_severity(issue.code())),
         code: Some(NumberOrString::String(issue.code().to_string())),
         source: Some("shape-capture-query".to_string()),
         message: issue.message().to_string(),
         ..Default::default()
     })
+}
+
+fn issue_severity(code: &str) -> DiagnosticSeverity {
+    if code == shape_vm::compiler::GENERATED_CAPTURE_ARTIFACT_CONFLICT_CODE {
+        DiagnosticSeverity::ERROR
+    } else {
+        DiagnosticSeverity::INFORMATION
+    }
+}
+
+fn issue_range(anchor: Option<shape_vm::compiler::SourceAnchor>, text: &str) -> Option<Range> {
+    match anchor {
+        Some(anchor) if anchor.file_id() == 0 => Some(range_from_anchor(anchor, text)),
+        Some(_) => None,
+        None => None,
+    }
 }
 
 pub(super) fn push_anchor(
@@ -67,5 +80,28 @@ fn range_from_anchor(anchor: shape_vm::compiler::SourceAnchor, text: &str) -> Ra
             line: end_line,
             character: end_col,
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn artifact_conflict_is_an_error() {
+        assert_eq!(
+            issue_severity(shape_vm::compiler::GENERATED_CAPTURE_ARTIFACT_CONFLICT_CODE),
+            DiagnosticSeverity::ERROR,
+        );
+    }
+
+    #[test]
+    fn anchorless_conflict_does_not_invent_a_document_range() {
+        assert_eq!(issue_range(None, "let value = 1",), None,);
+    }
+
+    #[test]
+    fn anchorless_source_unavailable_issue_has_no_invented_range() {
+        assert_eq!(issue_range(None, "let value = 1",), None,);
     }
 }

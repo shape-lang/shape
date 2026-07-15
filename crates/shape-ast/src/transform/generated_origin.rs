@@ -1,37 +1,13 @@
-//! ADR-009 D2 / C1 (slice 2) — stamp [`GeneratedNodeOrigin`] onto every closure
-//! node of a generated body.
+//! ADR-009 generated-closure provenance stamping.
 //!
-//! # The predicate this replaces
-//!
-//! The Wave-46 generated-closure capture gate asked
-//! `generated_symbols.contains_name(current_function.name)` — a NAME predicate.
-//! It is holed four ways (monomorphized specializations compile under a mangled
-//! name; `replace body` expansions compile under the USER's name; a closure
-//! nested inside a generated closure compiles under `__closure_N`; a hygienic
-//! body name is not a decl name). This module moves the answer onto the node,
-//! where no rename can lose it.
-//!
-//! # Totality
-//!
-//! [`stamp_generated_closures`] walks the body EXHAUSTIVELY — every `Expr` and
-//! `Statement` variant is matched by name, with no `_` arm, so a new AST variant
-//! is a compile error here (CLAUDE.md §Exhaustive Match Rule) rather than a
-//! silent hole in the gate.
-//!
-//! Exhaustive MATCHING is not the same as exhaustive RECURSION, so the walk's
-//! recursion is proved independently: `stamp_is_total_over_every_syntactic_
-//! closure_position` stamps a body carrying closures in ~25 syntactic positions,
-//! serializes it with serde, and asserts the serialized tree contains ZERO
-//! `"generated_origin":null` nodes. serde's derived traversal is total by
-//! construction and shares no code with this walk, so an un-recursed carrier is
-//! a red test, not a silent miss.
-//!
-//! # Node paths
-//!
-//! Each closure is stamped with `owner_path/closure:N`, where `N` is the
-//! deterministic traversal index within its parent, and a closure nested inside
-//! a stamped closure extends its parent's path (`closure:0/closure:1`). The path
-//! is STRUCTURAL — never a span, never a source name (R3).
+//! The capture gate reads compiler-issued provenance on each closure node,
+//! replacing the former generated-function name predicate that failed across
+//! monomorphization, replacement bodies, and nested closures. The exhaustive
+//! walk makes new AST variants compile failures and stamps deterministic
+//! structural paths (`extend:Type/method:name/closure:N`). Those compiler-issued
+//! declaration-path labels are structural provenance; capture/binding spelling,
+//! source spans, owner-display prose, and traversal/file order are not identity.
+//! Independent serde tests prove recursive coverage over every carrier.
 
 use crate::ast::expr_helpers::{BlockItem, ComprehensionClause, QueryClause};
 use crate::ast::patterns::DestructurePattern;
@@ -39,6 +15,9 @@ use crate::ast::provenance::GeneratedNodeOrigin;
 use crate::ast::statements::ForInit;
 use crate::ast::windows::{WindowExpr, WindowFunction, WindowSpec};
 use crate::ast::{Expr, ObjectEntry, Statement};
+
+mod source_paths;
+pub use source_paths::{GeneratedClosureSourcePath, generated_closure_source_paths};
 
 /// Stamp every closure literal in a generated body (and every closure nested
 /// inside those) with its provenance.
@@ -48,20 +27,21 @@ use crate::ast::{Expr, ObjectEntry, Statement};
 /// counter that advances across calls).
 pub fn stamp_generated_closures(body: &mut [Statement], origin: &GeneratedNodeOrigin) {
     let mut walker = Stamper {
-        origin,
+        origin: Some(origin),
+        node_path: origin.node_path().to_vec(),
+        source_paths: None,
         next_index: 0,
     };
     walker.statements(body);
 }
 
-struct Stamper<'a> {
-    /// The path a closure discovered at THIS level is stamped under.
-    origin: &'a GeneratedNodeOrigin,
-    /// Deterministic sibling index of the next closure discovered at this level.
+struct Stamper<'origin, 'paths> {
+    origin: Option<&'origin GeneratedNodeOrigin>,
+    node_path: Vec<String>,
+    source_paths: Option<&'paths mut Vec<GeneratedClosureSourcePath>>,
     next_index: u32,
 }
-
-impl Stamper<'_> {
+impl Stamper<'_, '_> {
     fn statements(&mut self, stmts: &mut [Statement]) {
         for stmt in stmts {
             self.statement(stmt);
@@ -140,10 +120,7 @@ impl Stamper<'_> {
         }
     }
 
-    /// Binding patterns carry no expressions today (`ObjectPatternField` is
-    /// `{key, pattern}` — no default-value leg), so this is a structural walk
-    /// kept for the day one grows: the match is exhaustive, so adding an
-    /// expression-bearing pattern variant is a compile error here.
+    /// Exhaustive even though binding patterns carry no expressions today.
     fn destructure_pattern(&mut self, pattern: &mut DestructurePattern) {
         match pattern {
             DestructurePattern::Identifier(_, _) | DestructurePattern::Decomposition(_) => {}
@@ -181,16 +158,24 @@ impl Stamper<'_> {
                 return_type: _,
                 body,
                 generated_origin,
-                // ADR-009 C1 (slice 3): the declared capture clause is written
-                // by the generator's source text and parsed like any other
-                // closure syntax. The stamper only attaches PROVENANCE — it
-                // never authors or rewrites a declaration.
-                captures: _,
+                // Capture clauses are authored by the generator; stamping only
+                // attaches provenance and never rewrites the declaration.
+                captures,
                 span: _,
             } => {
                 let index = self.next_index;
                 self.next_index += 1;
-                let closure_origin = self.origin.child(format!("closure:{index}"));
+                let segment = format!("closure:{index}");
+                let mut closure_path = self.node_path.clone();
+                closure_path.push(segment.clone());
+                if let Some(source_paths) = self.source_paths.as_deref_mut() {
+                    source_paths.push(GeneratedClosureSourcePath {
+                        node_path: closure_path.clone(),
+                        params: params.clone(),
+                        body: body.clone(),
+                        captures: captures.clone(),
+                    });
+                }
                 // Parameter defaults are evaluated in the ENCLOSING scope, so
                 // they belong to the enclosing level's sibling numbering.
                 for param in params.iter_mut() {
@@ -198,10 +183,16 @@ impl Stamper<'_> {
                         self.expr(default);
                     }
                 }
-                *generated_origin = Some(closure_origin.clone());
+                let closure_origin = self.origin.map(|origin| origin.child(segment));
+                if let Some(closure_origin) = closure_origin.as_ref() {
+                    debug_assert_eq!(closure_origin.node_path(), closure_path);
+                    *generated_origin = Some(closure_origin.clone());
+                }
                 // Closures nested in this body hang off THIS closure's path.
                 let mut nested = Stamper {
-                    origin: &closure_origin,
+                    origin: closure_origin.as_ref(),
+                    node_path: closure_path,
+                    source_paths: self.source_paths.as_deref_mut(),
                     next_index: 0,
                 };
                 nested.statements(body);

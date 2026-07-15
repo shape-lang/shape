@@ -94,11 +94,22 @@ fn get_hover_inner(
     // resilient AST can carry stale offsets, so it must never fabricate a
     // source map while the user is mid-edit.
     let parse_src = parser_source(text);
-    if let Ok(program) = parse_program(parse_src.as_ref())
-        && let Some(hover) =
-            crate::generated_captures::generated_capture_hover(&program, text, position)
-    {
-        return Some(hover);
+    if let Ok(program) = parse_program(parse_src.as_ref()) {
+        let context = crate::generated_captures::CaptureQueryContext {
+            file_path: current_file,
+            module_cache,
+            workspace_root: None,
+        };
+        let session =
+            crate::generated_captures::GeneratedQuerySession::new(&program, text, context);
+        match crate::generated_captures::generated_capture_hover(&program, text, position, &session)
+        {
+            crate::generated_captures::GeneratedCaptureLookup::Found(hover) => {
+                return Some(hover);
+            }
+            crate::generated_captures::GeneratedCaptureLookup::Unavailable => return None,
+            crate::generated_captures::GeneratedCaptureLookup::NotCapture => {}
+        }
     }
 
     // First, check if we're hovering on a property access (e.g., instr.symbol)

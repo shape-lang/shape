@@ -1,70 +1,120 @@
-//! LSP projection of ADR-009 C1 generated capture descriptors.
-//!
-//! Every answer comes from `BytecodeCompiler::generated_capture_query`.
-//! Source names and spans only select a presentation site already attached to
-//! a compiler-issued binding identity; they never reconstruct that identity.
+//! LSP projection of compiler-issued ADR-009 generated capture descriptors.
+//! Names and spans select verified presentation sites; they never mint identity.
 
 use shape_ast::ast::Program;
+#[cfg(test)]
 use shape_vm::compiler::GeneratedCaptureQuery;
+use shape_vm::compiler::{CaptureSiteRole, GeneratedCapturePosition};
 use tower_lsp_server::ls_types::{Diagnostic, GotoDefinitionResponse, Location, Uri};
 
-use crate::generated_symbols::compile_for_generated_symbol_queries;
-
+#[cfg(test)]
+mod adversarial_tests;
 mod hover;
 mod presentation;
+mod routing;
+#[cfg(test)]
+mod semantic_tests;
+mod session;
 pub(crate) use hover::generated_capture_hover;
 use presentation::push_anchor;
+pub(crate) use routing::GeneratedCaptureLookup;
+use routing::{CaptureAnalysis, analyze, analyze_session};
+pub(crate) use session::{CaptureQueryContext, GeneratedQuerySession};
 
+#[cfg(test)]
 fn query(program: &Program, text: &str) -> GeneratedCaptureQuery {
-    compile_for_generated_symbol_queries(program, text).generated_capture_query(program)
+    match analyze(program, text, CaptureQueryContext::unavailable()) {
+        CaptureAnalysis::Ready(query) => query,
+        CaptureAnalysis::NotNeeded => GeneratedCaptureQuery::default(),
+        CaptureAnalysis::Unavailable => panic!("fixture unexpectedly requires import context"),
+    }
 }
 
-/// Go-to-definition over the identity-bearing capture graph. The declaration
-/// and originating binder are both returned; neither is found by spelling.
 pub(crate) fn generated_capture_definition(
     program: &Program,
     text: &str,
     offset: usize,
     uri: &Uri,
-) -> Option<GotoDefinitionResponse> {
-    let captures = query(program, text);
-    let capture = captures.capture_at(0, offset)?.capture();
-    let source = capture.source_map()?;
+    session: &GeneratedQuerySession,
+) -> GeneratedCaptureLookup<GotoDefinitionResponse> {
+    let captures = match analyze_session(session, program) {
+        CaptureAnalysis::NotNeeded => return GeneratedCaptureLookup::NotCapture,
+        CaptureAnalysis::Unavailable => return GeneratedCaptureLookup::Unavailable,
+        CaptureAnalysis::Ready(captures) => captures,
+    };
+    let site = match captures.capture_at(0, offset) {
+        None => return GeneratedCaptureLookup::NotCapture,
+        Some(GeneratedCapturePosition::Unavailable) => {
+            return GeneratedCaptureLookup::Unavailable;
+        }
+        Some(GeneratedCapturePosition::Available(site)) => site,
+    };
+    if site.role() == CaptureSiteRole::Binding {
+        return GeneratedCaptureLookup::NotCapture;
+    }
     let mut locations = Vec::new();
-    push_anchor(&mut locations, source.declaration(), text, uri);
-    push_anchor(&mut locations, source.binding(), text, uri);
-    Some(GotoDefinitionResponse::Array(locations))
+    for capture in site.captures() {
+        let Some(source) = capture.source_map() else {
+            continue;
+        };
+        push_anchor(&mut locations, source.declaration(), text, uri);
+        push_anchor(&mut locations, source.binding(), text, uri);
+    }
+    GeneratedCaptureLookup::Found(GotoDefinitionResponse::Array(locations))
 }
 
-/// Find references over the same identity-bearing capture graph: originating
-/// binder, explicit capture declaration, and every analyzer-resolved use.
 pub(crate) fn generated_capture_references(
     program: &Program,
     text: &str,
     offset: usize,
     uri: &Uri,
-) -> Option<Vec<Location>> {
-    let captures = query(program, text);
-    let capture = captures.capture_at(0, offset)?.capture();
-    let identity = capture.identity().clone();
-    let mut locations = Vec::new();
-    for occurrence in captures.captures_for_binding(&identity) {
-        let Some(source) = occurrence.source_map() else {
-            continue;
-        };
-        push_anchor(&mut locations, source.binding(), text, uri);
-        push_anchor(&mut locations, source.declaration(), text, uri);
-        for use_site in source.uses() {
-            push_anchor(&mut locations, *use_site, text, uri);
-        }
-    }
-    (!locations.is_empty()).then_some(locations)
+) -> GeneratedCaptureLookup<Vec<Location>> {
+    let session = GeneratedQuerySession::new(program, text, CaptureQueryContext::unavailable());
+    generated_capture_references_with_session(program, text, offset, uri, &session)
 }
 
-/// Stable informational diagnostics for typed capture descriptors whose
-/// generated offsets have no exact authored-source map. The application
-/// anchor is compiler-issued; an issue without one is omitted rather than
-/// assigned an invented range.
+pub(crate) fn generated_capture_references_with_session(
+    program: &Program,
+    text: &str,
+    offset: usize,
+    uri: &Uri,
+    session: &GeneratedQuerySession,
+) -> GeneratedCaptureLookup<Vec<Location>> {
+    let captures = match analyze_session(session, program) {
+        CaptureAnalysis::NotNeeded => return GeneratedCaptureLookup::NotCapture,
+        CaptureAnalysis::Unavailable => return GeneratedCaptureLookup::Unavailable,
+        CaptureAnalysis::Ready(captures) => captures,
+    };
+    let site = match captures.capture_at(0, offset) {
+        None => return GeneratedCaptureLookup::NotCapture,
+        Some(GeneratedCapturePosition::Unavailable) => {
+            return GeneratedCaptureLookup::Unavailable;
+        }
+        Some(GeneratedCapturePosition::Available(site)) => site,
+    };
+    let mut identities: Vec<_> = site
+        .captures()
+        .iter()
+        .map(|capture| capture.identity().clone())
+        .collect();
+    identities.sort_by_key(|identity| identity.canonical_descriptor());
+    identities.dedup();
+    let mut locations = Vec::new();
+    for identity in identities {
+        for occurrence in captures.captures_for_binding(&identity) {
+            let Some(source) = occurrence.source_map() else {
+                continue;
+            };
+            push_anchor(&mut locations, source.binding(), text, uri);
+            push_anchor(&mut locations, source.declaration(), text, uri);
+            for use_site in source.uses() {
+                push_anchor(&mut locations, *use_site, text, uri);
+            }
+        }
+    }
+    GeneratedCaptureLookup::Found(locations)
+}
+
 pub(crate) fn capture_query_diagnostics(
     compiler: &shape_vm::BytecodeCompiler,
     program: &Program,
@@ -82,9 +132,6 @@ mod tests {
 
     use crate::util::offset_to_line_col;
 
-    /// Real authored annotation IR: the compiler materializes/stamps this
-    /// `extend target` method, while the original AST remains the exact source
-    /// map for the capture declaration and use.
     const GENERATED_CAPTURE: &str = r#"
 annotation add_reader() {
   targets: [type]
@@ -238,8 +285,9 @@ type Job { id: int }
             &program,
             GENERATED_CAPTURE,
             offset_position(GENERATED_CAPTURE, declaration),
+            &test_session(&program, GENERATED_CAPTURE),
         )
-        .expect("source-mapped generated capture has hover");
+        .found("source-mapped generated capture has hover");
         let HoverContents::Markup(markup) = hover.contents else {
             panic!("capture hover is markdown")
         };
@@ -250,7 +298,7 @@ type Job { id: int }
         let uri: Uri = "file:///generated-capture.shape".parse().unwrap();
         let references =
             generated_capture_references(&program, GENERATED_CAPTURE, declaration, &uri)
-                .expect("capture references");
+                .found("capture references");
         assert_eq!(references.len(), 3, "binder + declaration + one use");
     }
 
@@ -263,8 +311,9 @@ type Job { id: int }
                 &program,
                 GENERATED_CALLABLE_CAPTURE,
                 offset_position(GENERATED_CALLABLE_CAPTURE, argument),
+                &test_session(&program, GENERATED_CALLABLE_CAPTURE),
             )
-            .is_none(),
+            .is_not_capture(),
             "the call argument must not inherit the captured callee's use span",
         );
     }
@@ -306,7 +355,7 @@ type Job { id: int }
             first_declaration,
             &uri,
         )
-        .expect("joined sibling references");
+        .found("joined sibling references");
         assert_eq!(
             references.len(),
             5,
@@ -365,8 +414,9 @@ type Job { id: int }
             &program,
             GENERIC_GENERATED_CAPTURE,
             offset_position(GENERIC_GENERATED_CAPTURE, declaration),
+            &test_session(&program, GENERIC_GENERATED_CAPTURE),
         )
-        .expect("aggregated generic hover");
+        .found("aggregated generic hover");
         let HoverContents::Markup(markup) = hover.contents else {
             panic!("capture hover is markdown")
         };
@@ -381,9 +431,12 @@ type Job { id: int }
         let captures = query(&program, NESTED_GENERATED_CAPTURE);
         let nested_declaration =
             NESTED_GENERATED_CAPTURE.rfind("share total").unwrap() + "share ".len();
-        let site = captures
+        let position = captures
             .capture_at(0, nested_declaration)
             .expect("nested entry is source mapped");
+        let GeneratedCapturePosition::Available(site) = position else {
+            panic!("valid nested entry is not quarantined")
+        };
 
         assert_eq!(site.role(), CaptureSiteRole::Declaration);
         assert!(
@@ -407,13 +460,18 @@ type Job { id: int }
                 &program,
                 INVALID_IMPLICIT_GENERATED_CAPTURE,
                 offset_position(INVALID_IMPLICIT_GENERATED_CAPTURE, captured_use),
+                &test_session(&program, INVALID_IMPLICIT_GENERATED_CAPTURE),
             )
-            .is_none(),
+            .is_not_capture(),
         );
     }
 
     fn offset_position(text: &str, offset: usize) -> Position {
         let (line, character) = offset_to_line_col(text, offset);
         Position { line, character }
+    }
+
+    fn test_session(program: &Program, text: &str) -> GeneratedQuerySession {
+        GeneratedQuerySession::new(program, text, CaptureQueryContext::unavailable())
     }
 }
