@@ -41,10 +41,10 @@ mod matrix_ops;
 // passed to an array HOF) must dispatch correctly and NEVER SIGSEGV.
 mod named_fn_value;
 mod no_dynamic;
+mod declared_capture_teardown;
 // GC Phase 4 — end-of-program teardown sweep (Finding #82). Reclaims
 // module-scope closure-capture cycles at VM teardown; memory-only.
 #[cfg(feature = "gc")]
-mod declared_capture_teardown;
 mod gc_teardown;
 // WF-3B: resource-limit enforcement regression tests (output cap surfaces +
 // truncates; memory cap surfaces a clean error, never a panic; serve worker
