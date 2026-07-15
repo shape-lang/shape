@@ -64,6 +64,14 @@ enum AnnotationRoute {
 }
 
 impl AnnotationRoute {
+    fn annotation_names(self) -> &'static [&'static str] {
+        match self {
+            Self::SingleRuntime => &["first"],
+            Self::ChainedRuntime => &["first", "second"],
+            Self::ReplaceBody => &["replace_with_original"],
+        }
+    }
+
     fn source(self, parameter: &str) -> String {
         let source = match self {
             Self::SingleRuntime => {
@@ -78,6 +86,7 @@ fn probe($PARAM) -> int {
   let worker = |x: int; move value| x + value
   worker(1)
 }
+probe(2)
 "#
             }
             Self::ChainedRuntime => {
@@ -138,6 +147,12 @@ fn compile_stamped_probe(
                 .expect("annotation definition compiles through the real registration path");
         }
     }
+    for name in route.annotation_names() {
+        assert!(
+            compiler.program.compiled_annotations.contains_key(*name),
+            "fixture annotation '{name}' must be registered before probe compilation"
+        );
+    }
 
     let root = compiler.generated_node_issuer.issue(
         shape_ast::ast::GeneratedExpansionFingerprint::from_components(17, 29),
@@ -185,9 +200,10 @@ fn compile_stamped_probe(
 
 fn assert_inferred_reference_is_not_true_reference(
     route: AnnotationRoute,
+    parameter: &str,
     mode: ParamPassMode,
 ) {
-    let (compiler, outcome) = compile_stamped_probe(route, "value: int", mode);
+    let (compiler, outcome) = compile_stamped_probe(route, parameter, mode);
     outcome.expect("an inferred reference optimization is not a true reference capture");
 
     let descriptors: Vec<_> = compiler
@@ -198,11 +214,162 @@ fn assert_inferred_reference_is_not_true_reference(
         .collect();
     assert_eq!(descriptors.len(), 1, "fixture has one value capture");
     assert_eq!(descriptors[0].declared, Some(CaptureMode::Move));
-    assert_ne!(
+    assert_eq!(
         descriptors[0].storage,
-        Some(BindingStorageClass::Reference),
-        "inferred pass mode must not become true-reference evidence"
+        Some(BindingStorageClass::Direct),
+        "inferred pass mode must preserve exact direct-value storage evidence"
     );
+    assert_route_artifacts(&compiler, route);
+}
+
+fn stamped_capture_body(function: &FunctionDef) -> bool {
+    function.body.iter().any(|statement| {
+        matches!(
+            statement,
+            Statement::VariableDecl(
+                shape_ast::ast::VariableDecl {
+                    value: Some(Expr::FunctionExpr {
+                        generated_origin: Some(_),
+                        ..
+                    }),
+                    ..
+                },
+                _
+            )
+        )
+    })
+}
+
+fn registered_calls(compiler: &BytecodeCompiler, function_name: &str) -> Vec<String> {
+    let function = compiler
+        .program
+        .functions
+        .iter()
+        .find(|function| function.name == function_name)
+        .unwrap_or_else(|| panic!("registered function '{function_name}' is missing"));
+    let end =
+        (function.entry_point + function.body_length).min(compiler.program.instructions.len());
+    compiler.program.instructions[function.entry_point..end]
+        .iter()
+        .filter_map(|instruction| match instruction.operand {
+            Some(Operand::Function(id)) if instruction.opcode == OpCode::Call => compiler
+                .program
+                .functions
+                .get(id.index())
+                .map(|called| called.name.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+fn generated_body_function(compiler: &BytecodeCompiler) -> String {
+    let candidates: Vec<_> = compiler
+        .function_defs
+        .iter()
+        .filter(|(name, function)| name.starts_with('\u{1}') && stamped_capture_body(function))
+        .map(|(name, _)| name.clone())
+        .collect();
+    assert_eq!(
+        candidates.len(),
+        1,
+        "exactly one registered hygienic function must own the stamped capture body"
+    );
+    let name = candidates[0].clone();
+    assert!(
+        compiler
+            .program
+            .functions
+            .iter()
+            .any(|function| function.name == name),
+        "stamped hygienic body must exist in the bytecode function registry"
+    );
+    name
+}
+
+fn assert_route_artifacts(compiler: &BytecodeCompiler, route: AnnotationRoute) {
+    assert!(
+        compiler.function_defs.contains_key("probe")
+            && compiler
+                .program
+                .functions
+                .iter()
+                .any(|function| function.name == "probe"),
+        "the public probe function must remain registered"
+    );
+    let generated_body = generated_body_function(compiler);
+    match route {
+        AnnotationRoute::SingleRuntime => {
+            assert_eq!(
+                registered_calls(compiler, "probe")
+                    .iter()
+                    .filter(|name| *name == &generated_body)
+                    .count(),
+                1,
+                "the public single-annotation wrapper must call its hygienic impl body exactly once"
+            );
+        }
+        AnnotationRoute::ChainedRuntime => {
+            let intermediates: Vec<_> = registered_calls(compiler, "probe")
+                .into_iter()
+                .filter(|name| {
+                    name.starts_with('\u{1}')
+                        && registered_calls(compiler, name).contains(&generated_body)
+                })
+                .collect();
+            assert_eq!(
+                intermediates.len(),
+                1,
+                "the public chained wrapper must call one registered hygienic wrapper that calls the impl body"
+            );
+            assert!(
+                compiler
+                    .function_defs
+                    .get(&intermediates[0])
+                    .is_some_and(|function| function.body.is_empty()),
+                "the intermediate chain node must be the compiler's empty-body wrapper placeholder"
+            );
+            assert_eq!(
+                registered_calls(compiler, &intermediates[0])
+                    .iter()
+                    .filter(|name| *name == &generated_body)
+                    .count(),
+                1,
+                "the intermediate wrapper must call the hygienic impl body exactly once"
+            );
+        }
+        AnnotationRoute::ReplaceBody => {
+            let refreshed = compiler
+                .function_defs
+                .get("probe")
+                .expect("replace body refreshes the registered probe definition");
+            let shadow = match refreshed.body.as_slice() {
+                [Statement::Return(Some(Expr::FunctionCall { name, .. }), _)] => name,
+                body => panic!(
+                    "refreshed probe must directly call its original-body shadow, got {body:?}"
+                ),
+            };
+            assert!(shadow.starts_with('\u{1}'), "shadow identity must be hygienic");
+            assert_ne!(shadow, "worker", "replacement must not call the local closure");
+            assert_eq!(shadow, &generated_body);
+            assert!(compiler.function_defs.contains_key(shadow));
+            assert!(
+                compiler
+                    .program
+                    .functions
+                    .iter()
+                    .any(|function| &function.name == shadow),
+                "original-body shadow must be registered in bytecode"
+            );
+            assert_eq!(
+                registered_calls(compiler, "probe")
+                    .iter()
+                    .filter(|name| *name == shadow)
+                    .count(),
+                1,
+                "replacement bytecode must directly call the same registered original-body shadow"
+            );
+        }
+    }
 }
 
 fn assert_explicit_reference_is_c0902(
@@ -224,6 +391,7 @@ fn assert_explicit_reference_is_c0902(
 fn single_runtime_annotation_preserves_shared_reference_provenance() {
     assert_inferred_reference_is_not_true_reference(
         AnnotationRoute::SingleRuntime,
+        "value",
         ParamPassMode::ByRefShared,
     );
     assert_explicit_reference_is_c0902(
@@ -237,6 +405,7 @@ fn single_runtime_annotation_preserves_shared_reference_provenance() {
 fn chained_runtime_annotations_preserve_exclusive_reference_provenance() {
     assert_inferred_reference_is_not_true_reference(
         AnnotationRoute::ChainedRuntime,
+        "value: int",
         ParamPassMode::ByRefExclusive,
     );
     assert_explicit_reference_is_c0902(
@@ -250,6 +419,12 @@ fn chained_runtime_annotations_preserve_exclusive_reference_provenance() {
 fn replace_body_ctx_original_preserves_inferred_reference_provenance() {
     assert_inferred_reference_is_not_true_reference(
         AnnotationRoute::ReplaceBody,
-        ParamPassMode::ByRefShared,
+        "value: int",
+        ParamPassMode::ByRefExclusive,
+    );
+    assert_explicit_reference_is_c0902(
+        AnnotationRoute::ReplaceBody,
+        "&mut value: int",
+        ParamPassMode::ByRefExclusive,
     );
 }
