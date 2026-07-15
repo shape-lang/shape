@@ -898,7 +898,16 @@ impl BytecodeCompiler {
     /// When an annotation has a `comptime pre/post(...) { ... }` handler, self builds
     /// a ComptimeTarget from the function definition and executes the handler body
     /// at compile time with the target object bound to the handler parameter.
-    pub(super) fn execute_comptime_handlers(&mut self, func_def: &mut FunctionDef) -> Result<bool> {
+    pub(super) fn execute_comptime_handlers(
+        &mut self,
+        func_def: &mut FunctionDef,
+        inferred_reference_optimizations: &[Option<ParamPassMode>],
+    ) -> Result<bool> {
+        assert_eq!(
+            func_def.params.len(),
+            inferred_reference_optimizations.len(),
+            "comptime annotation provenance must stay slot-aligned"
+        );
         let mut removed = false;
         let annotations = func_def.annotations.clone();
 
@@ -911,6 +920,7 @@ impl BytecodeCompiler {
                         &handler,
                         &compiled.param_names,
                         func_def,
+                        inferred_reference_optimizations,
                     )? {
                         removed = true;
                         break;
@@ -929,6 +939,7 @@ impl BytecodeCompiler {
                             &handler,
                             &compiled.param_names,
                             func_def,
+                            inferred_reference_optimizations,
                         )? {
                             removed = true;
                             break;
@@ -947,6 +958,7 @@ impl BytecodeCompiler {
         handler: &shape_ast::ast::AnnotationHandler,
         annotation_def_param_names: &[String],
         func_def: &mut FunctionDef,
+        inferred_reference_optimizations: &[Option<ParamPassMode>],
     ) -> Result<bool> {
         // Build the target object from the function definition
         let target = super::comptime_target::ComptimeTarget::from_function(func_def);
@@ -993,6 +1005,7 @@ impl BytecodeCompiler {
             &target_name,
             func_def,
             &expansion_site,
+            inferred_reference_optimizations,
         )
         .map_err(|e| {
             // ADR-009 D1 (S4): provenance-carrying generated-decl failures
@@ -3038,6 +3051,7 @@ impl BytecodeCompiler {
         target_name: &str,
         func_def: &mut FunctionDef,
         site: &ExpansionSite,
+        inferred_reference_optimizations: &[Option<ParamPassMode>],
     ) -> Result<bool> {
         let mut removed = false;
         for directive in directives {
@@ -3132,7 +3146,10 @@ impl BytecodeCompiler {
                         is_comptime: func_def.is_comptime,
                     };
                     self.register_function(&shadow_def)?;
-                    self.compile_function_body(&shadow_def)?;
+                    self.compile_function_body_with_inferred_reference_optimizations(
+                        &shadow_def,
+                        inferred_reference_optimizations,
+                    )?;
 
                     // Phase 3e: copy the original's inferred return type onto
                     // the shadow so the pre-annotation call sees the same

@@ -891,7 +891,10 @@ impl BytecodeCompiler {
             // against the body through the ordinary type-analysis path.
             let sig_params_before = effective_def.params.clone();
             let sig_return_before = effective_def.return_type.clone();
-            if self.execute_comptime_handlers(&mut effective_def)? {
+            if self.execute_comptime_handlers(
+                &mut effective_def,
+                &inferred_reference_optimizations,
+            )? {
                 // Track removed functions so call sites produce a clear error
                 // instead of jumping to an invalid entry point (stack overflow).
                 self.removed_functions.insert(effective_def.name.clone());
