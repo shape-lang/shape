@@ -316,6 +316,11 @@ fn same_spelled_outer_and_callee_parameters_fall_back_without_losing_identity() 
         outer_high, 0,
         "outer identity must distinguish the false-guard sentinel"
     );
+    assert_ne!(
+        (outer_high, outer_low),
+        (callee_high, callee_low),
+        "distinct lexical owners must retain distinct identities"
+    );
     let source = r#"
         extend Vec<E> {
             method scoped_map<T>(marker: T, f: (E) => int) -> int {
