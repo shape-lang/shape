@@ -21,6 +21,9 @@ use super::comptime_builtins::expansion_provenance::{
 };
 use super::{BytecodeCompiler, HygienicRole};
 
+mod generated_closure_provenance;
+use generated_closure_provenance::anchor_generated_function_decl;
+
 /// ADR-009 E3 (slice S3, legacy class U11): the TYPED capability a `replace
 /// body` replacement reaches through `ctx.original`. It replaces the deleted
 /// name-encoded `__original__` alias: the pre-annotation body is compiled into
@@ -132,37 +135,6 @@ fn generated_extend_method_content(
 /// Canonical structural content encoding of a generated free function.
 fn generated_free_fn_content(func_def: &FunctionDef) -> CanonicalHash {
     CanonicalHash::from_canonical_decl_encoding(&format!("fn:{func_def:?}"))
-}
-
-/// ADR-009 D1 (S3): re-base a generated declaration's DECL-LEVEL spans to
-/// the expansion's application anchor (Decision 68: no `Span::DUMMY`, no
-/// spans indexing text that is not the compiling file). Handler-emitted
-/// declarations are parsed from synthetic snippet text (`mod
-/// __module_probe__ { … }`), built from typed `__ComptimeItemFragment`s
-/// (whose scaffolding spans are `Span::default()`), or desugared from
-/// handler-body AST — none of those spans resolve inside the file being
-/// compiled, so the registered declaration anchors at the real application
-/// site instead.
-///
-/// Scope line (recorded for the wave46 D1 addendum): decl-level anchors
-/// only — the name span and synthesized type-param spans. Body-node spans
-/// keep their handler-emitted offsets until ticket D2's virtual expansion
-/// documents give generated bodies a real per-node mapping; those nodes are
-/// covered by the decl's `GeneratedOrigin.node_path` in the meantime.
-///
-/// MUST be called AFTER the row-3 content fingerprint is taken: both phases
-/// fingerprint the RAW handler-emitted AST, so anchoring before hashing in
-/// one phase only would fabricate a row-3 "conflicting output" error.
-fn anchor_generated_function_decl(func_def: &mut FunctionDef, anchor: Span) {
-    func_def.name_span = anchor;
-    if let Some(type_params) = func_def.type_params.as_mut() {
-        for type_param in type_params {
-            match type_param {
-                shape_ast::ast::TypeParam::Type { span, .. }
-                | shape_ast::ast::TypeParam::Const { span, .. } => *span = anchor,
-            }
-        }
-    }
 }
 
 impl BytecodeCompiler {
@@ -1820,17 +1792,7 @@ impl BytecodeCompiler {
                 node_path: node_path.clone(),
                 source_anchor,
             };
-            // ADR-009 C1 (slice 2) — THE FLAGSHIP generated body. Stamp every
-            // closure node in it (and every closure nested inside those) with
-            // node-borne provenance BEFORE registration/compilation. The
-            // Wave-46 capture gate reads the stamp off the node instead of
-            // asking `generated_symbols.contains_name(current_function)`, which
-            // could not see a `__closure_N` frame, a mangled monomorphization,
-            // or a `replace body` expansion.
-            shape_ast::transform::stamp_generated_closures(
-                &mut func_def.body,
-                &origin.to_node_origin(&self.generated_node_issuer, &func_def.name),
-            );
+            self.stamp_generated_closure_provenance(&mut func_def.body, &origin, &func_def.name);
             // §4.9.1 + D1 identity-keyed dedup: if the whole-program
             // pre-pass already reserved this identity and registered the
             // method's SIGNATURE (so it is visible to the analyzer, method
@@ -2300,19 +2262,10 @@ impl BytecodeCompiler {
                                             node_path: node_path.clone(),
                                             source_anchor,
                                         };
-                                        // ADR-009 C1 (slice 2): the pre-pass
-                                        // COPY of the generated free function
-                                        // becomes an ordinary program item, so
-                                        // it must carry the same node-borne
-                                        // provenance as the pass-2 copy — the
-                                        // gate must not depend on which copy
-                                        // reaches `compile_function` first.
-                                        shape_ast::transform::stamp_generated_closures(
+                                        self.stamp_generated_closure_provenance(
                                             &mut func_def.body,
-                                            &origin.to_node_origin(
-                                                &self.generated_node_issuer,
-                                                &func_def.name,
-                                            ),
+                                            &origin,
+                                            &func_def.name,
                                         );
                                         match self.generated_symbols.reserve_generated_decl(
                                             &func_def.name,
@@ -2415,38 +2368,12 @@ impl BytecodeCompiler {
                                                 node_path: node_path.clone(),
                                                 source_anchor,
                                             };
-                                            // ADR-009 C1 (slice 3) — THE
-                                            // MONOMORPHIZATION HOLE.
-                                            //
-                                            // THIS is the copy that reaches
-                                            // `function_defs`, and `function_defs`
-                                            // is what the monomorphizer
-                                            // substitutes to build a GENERIC
-                                            // generated method's specialization.
-                                            // Slice 2 stamped `apply_comptime_extend`'s
-                                            // local copy, which is enough for a
-                                            // NON-generic method (that copy is
-                                            // handed straight to `compile_function`)
-                                            // but not for a generic one:
-                                            // `compile_function` returns early on a
-                                            // template, and the specialization is
-                                            // rebuilt from the unstamped registry
-                                            // entry. The reservation here is
-                                            // `Fresh`, so `apply_comptime_extend`
-                                            // gets `Reissued` and never re-registers
-                                            // its stamped copy — the stamp was lost
-                                            // exactly on the flagship's generic
-                                            // form, and an implicit capture inside
-                                            // `extend Job { method scale<T> }`
-                                            // compiled clean.
                                             let owner =
                                                 format!("{extend_type_str}.{}", method.name);
-                                            shape_ast::transform::stamp_generated_closures(
+                                            self.stamp_generated_closure_provenance(
                                                 &mut func_def.body,
-                                                &origin.to_node_origin(
-                                                    &self.generated_node_issuer,
-                                                    &owner,
-                                                ),
+                                                &origin,
+                                                &owner,
                                             );
                                             match self.generated_symbols.reserve_generated_decl(
                                                 &func_def.name,
@@ -2498,27 +2425,11 @@ impl BytecodeCompiler {
                                             // `anchor_generated_function_decl`).
                                             for method in &mut extend.methods {
                                                 method.span = expansion_site.application_span();
-                                                // ADR-009 C1 (slice 2): stamp the
-                                                // ANALYSIS copy of the generated
-                                                // method body as well — same
-                                                // reason as the free-fn arm above.
-                                                let node_path = GeneratedNodePath::decl_root(
-                                                    format!("extend:{extend_type_str}"),
-                                                )
-                                                .child(format!("method:{}", method.name));
-                                                let origin = GeneratedOrigin {
-                                                    expansion: expansion_site.identity().clone(),
-                                                    node_path,
+                                                self.stamp_generated_analysis_method(
+                                                    method,
+                                                    &expansion_site,
                                                     source_anchor,
-                                                };
-                                                let owner =
-                                                    format!("{extend_type_str}.{}", method.name);
-                                                shape_ast::transform::stamp_generated_closures(
-                                                    &mut method.body,
-                                                    &origin.to_node_origin(
-                                                        &self.generated_node_issuer,
-                                                        &owner,
-                                                    ),
+                                                    &extend_type_str,
                                                 );
                                             }
                                             generated.push(Item::Extend(
@@ -2707,12 +2618,7 @@ impl BytecodeCompiler {
                 node_path: node_path.clone(),
                 source_anchor,
             };
-            // ADR-009 C1 (slice 2): node-borne provenance on every closure of
-            // the generated free function (see `apply_comptime_extend`).
-            shape_ast::transform::stamp_generated_closures(
-                &mut func_def.body,
-                &origin.to_node_origin(&self.generated_node_issuer, &func_def.name),
-            );
+            self.stamp_generated_closure_provenance(&mut func_def.body, &origin, &func_def.name);
             match self.generated_symbols.reserve_generated_decl(
                 &func_def.name,
                 origin,
@@ -3273,30 +3179,7 @@ impl BytecodeCompiler {
                             &capability.shadow_name,
                         );
 
-                    // ADR-009 C1 (slice 2) — the `replace body` hole. This body
-                    // is comptime-GENERATED, but it compiles under the USER's
-                    // function name, so the old name predicate
-                    // (`generated_symbols.contains_name(current_function)`)
-                    // never fired here: a generated closure could implicitly
-                    // capture with no diagnostic at all. Node-borne provenance
-                    // closes it — the stamp is on the replacement's closures, so
-                    // the gate fires regardless of the name the body compiles
-                    // under. The hygienic SHADOW registered above keeps the
-                    // USER's original body and is deliberately NOT stamped.
-                    let source_anchor = site
-                        .source_anchor()
-                        .map_err(|message| self.expansion_rejection(message, site))?;
-                    let origin = GeneratedOrigin {
-                        expansion: site.identity().clone(),
-                        node_path: GeneratedNodePath::decl_root(format!("fn:{}", func_def.name))
-                            .child("replace_body"),
-                        source_anchor,
-                    };
-                    let owner = func_def.name.clone();
-                    shape_ast::transform::stamp_generated_closures(
-                        &mut func_def.body,
-                        &origin.to_node_origin(&self.generated_node_issuer, &owner),
-                    );
+                    self.stamp_generated_replacement_body(func_def, site)?;
                 }
                 super::comptime_builtins::ComptimeDirective::ReplaceModule { .. } => {
                     return Err(Self::directive_error(
