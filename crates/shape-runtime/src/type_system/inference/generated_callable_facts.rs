@@ -20,27 +20,27 @@ mod model;
 mod semantic_candidate;
 mod state;
 mod substitution;
-pub(super) use callsite::{
+use callsite::{
     DeclaredMethodTypeParameters, InferenceMethodDeclarationToken, SemanticCallSiteCandidate,
 };
 pub use callsite::{
     ExactSemanticCallSiteFact, SemanticCallSiteFact, SemanticCallSiteKey,
     SemanticCalleeDeclaration, SemanticDeclaredParameter, SemanticTypeArgument,
 };
-pub(super) use model::{
+use model::{
     GeneratedCallableCandidate, InferenceCallableDeclarationToken, SemanticCandidateObservation,
 };
 pub use model::{
     GeneratedCallableFact, GeneratedCaptureFact, GeneratedCaptureKey, GeneratedNodeKey,
     GeneratedSemanticFactIssue,
 };
-pub(super) use semantic_candidate::type_is_semantically_resolved;
+use semantic_candidate::type_is_semantically_resolved;
 pub use semantic_candidate::{
     RecursiveCallableShape, SemanticCallableNodeShape, SemanticCallableParameterShape,
     SemanticPassingMode, SemanticTypeCandidate, SemanticTypePathSegment,
 };
 pub(super) use state::GeneratedInferenceState;
-pub(super) use substitution::{SemanticProjectionIssue, project_declared_argument_candidates};
+use substitution::{SemanticProjectionIssue, project_declared_argument_candidates};
 
 impl TypeInferenceEngine {
     /// Resolve an identifier initializer before its new binding is published.
@@ -307,7 +307,7 @@ impl TypeInferenceEngine {
         for observation in observations {
             let candidate = match observation {
                 SemanticCandidateObservation::Unavailable(issue) => {
-                    unavailable.push(issue.detail);
+                    unavailable.push(issue.detail().to_string());
                     continue;
                 }
                 SemanticCandidateObservation::Conflict(issue) => {

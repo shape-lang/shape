@@ -12,7 +12,7 @@ use super::{
 };
 
 #[derive(Default)]
-pub(super) struct GeneratedInferenceState {
+pub(in crate::type_system::inference) struct GeneratedInferenceState {
     pub(super) callable_candidates: HashMap<GeneratedNodeKey, Vec<GeneratedCallableCandidate>>,
     pub(super) callable_facts: HashMap<GeneratedNodeKey, GeneratedCallableFact>,
     pub(super) capture_candidates: HashMap<GeneratedCaptureKey, Vec<SemanticCandidateObservation>>,

@@ -285,7 +285,7 @@ impl TypeInferenceEngine {
         }
     }
 
-    pub(super) fn finalize_semantic_callsite_facts(&mut self) {
+    pub(in crate::type_system::inference) fn finalize_semantic_callsite_facts(&mut self) {
         let candidates = std::mem::take(&mut self.generated_inference.callsite_candidates);
         self.generated_inference.callsite_facts = candidates
             .into_iter()
@@ -453,7 +453,7 @@ impl TypeInferenceEngine {
         }
     }
 
-    pub(super) fn take_semantic_callsite_facts(
+    pub(in crate::type_system::inference) fn take_semantic_callsite_facts(
         &mut self,
     ) -> HashMap<SemanticCallSiteKey, SemanticCallSiteFact> {
         std::mem::take(&mut self.generated_inference.callsite_facts)

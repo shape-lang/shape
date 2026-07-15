@@ -10,7 +10,7 @@ use crate::type_system::{
 /// Compiler-qualified method declaration capability retained across the
 /// registration and expression-inference passes.
 #[derive(Debug, Clone)]
-pub(super) struct DeclaredMethodTypeParameters {
+pub(in crate::type_system::inference::generated_callable_facts) struct DeclaredMethodTypeParameters {
     pub(super) source_names: Vec<String>,
     pub(super) receiver: Vec<TypeVar>,
     pub(super) method: Vec<TypeVar>,
@@ -18,7 +18,7 @@ pub(super) struct DeclaredMethodTypeParameters {
 
 /// Opaque identity of one immutable method declaration for one inference run.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
-pub(super) struct InferenceMethodDeclarationToken(usize);
+pub(in crate::type_system::inference::generated_callable_facts) struct InferenceMethodDeclarationToken(usize);
 
 impl InferenceMethodDeclarationToken {
     fn of(method: &MethodDef) -> Self {
@@ -33,7 +33,7 @@ impl std::fmt::Debug for InferenceMethodDeclarationToken {
 }
 
 impl TypeInferenceEngine {
-    pub(super) fn declared_type_parameters_for_method(
+    pub(in crate::type_system::inference) fn declared_type_parameters_for_method(
         &self,
         method: &MethodDef,
     ) -> TypeResult<(Vec<TypeVar>, usize)> {
@@ -53,7 +53,7 @@ impl TypeInferenceEngine {
         Ok((declared, parameters.receiver.len()))
     }
 
-    pub(super) fn register_declared_method_type_parameters(
+    pub(in crate::type_system::inference) fn register_declared_method_type_parameters(
         &mut self,
         qualified_name: &str,
         method: &MethodDef,

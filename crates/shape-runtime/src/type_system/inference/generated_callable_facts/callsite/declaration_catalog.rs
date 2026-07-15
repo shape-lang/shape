@@ -112,7 +112,7 @@ impl TypeInferenceEngine {
     /// before transient inference maps are cleared. Same-named declarations
     /// publish only the active lexical declaration, matching compiler lookup;
     /// qualified method aliases may intentionally share one capability.
-    pub(super) fn finalize_semantic_callee_declarations(&mut self) {
+    pub(in crate::type_system::inference) fn finalize_semantic_callee_declarations(&mut self) {
         let mut declarations = HashMap::new();
         for (name, declaration) in &self.generated_inference.active_callable_declarations {
             if let Some(parameters) = self
@@ -144,7 +144,7 @@ impl TypeInferenceEngine {
         self.generated_inference.callee_declarations = declarations;
     }
 
-    pub(super) fn take_semantic_callee_declarations(
+    pub(in crate::type_system::inference) fn take_semantic_callee_declarations(
         &mut self,
     ) -> HashMap<String, SemanticCalleeDeclaration> {
         std::mem::take(&mut self.generated_inference.callee_declarations)

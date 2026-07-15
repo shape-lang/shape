@@ -2,7 +2,8 @@
 
 use super::super::TypeInferenceEngine;
 use crate::type_system::{Type, TypeError, TypeResult, TypeScheme, TypeVar};
-use shape_ast::ast::{FunctionDef, TypeParam, WherePredicate};
+use shape_ast::ast::types::WherePredicate;
+use shape_ast::ast::{FunctionDef, TypeParam};
 use std::collections::{HashMap, HashSet};
 
 impl TypeInferenceEngine {

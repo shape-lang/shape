@@ -4,7 +4,10 @@ use shape_ast::ast::TypeAnnotation;
 
 use crate::type_system::{Type, annotation_as_tyvar};
 
-pub(super) fn type_is_semantically_resolved(ty: &Type, allow_declared: bool) -> bool {
+pub(in crate::type_system::inference::generated_callable_facts) fn type_is_semantically_resolved(
+    ty: &Type,
+    allow_declared: bool,
+) -> bool {
     match ty {
         Type::Variable(variable) => allow_declared && variable.declared_provenance().is_some(),
         Type::Constrained { .. } => false,
