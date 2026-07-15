@@ -53,15 +53,20 @@ does **not** fire for an annotation-generated `extend` (which is `Item::Extend`,
 never `Item::Impl`), so the generated method and the closure inside it run as
 native JIT code.
 
-The companion finding, measured at the same time and **not** fixed here: a
-closure that CAPTURES anything still whole-program-deopts under `--mode jit`,
-in generated *and* ordinary source. `f3` above pins one instance of the class;
-the underlying defect is a Cranelift verifier arity mismatch when lowering the
-enclosing function of a capturing closure
-(`mismatched argument count for 'v13 = call fn81(v0, v12)': got 2, expected 3`),
-plus an outright `todo!()` abort for `var` (Shared) captures at
-`crates/shape-jit/src/ffi/object/closure.rs:519`. Both are pre-existing shape-jit
-gaps, independent of ADR-009.
+The companion finding from Slice 0 is now historical. The integrated native
+closure-lowering prerequisite removed the capture double-count and typed the
+Shared-cell allocator: ordinary-source immutable, owned-mutable, and scalar
+Shared captures now have exact VM/JIT stdout and ZERO-fallback coverage in
+`jit_closure_capture_native.rs`. `f3` remains a module-binding/W39 negative
+control; it must not be read as evidence that capturing closures generally
+deopt. C1's separate `move` / `share` zero-fallback battery is authored in
+`jit_generated_capture_native.rs` over four `c1-generated-*` fixtures plus the
+ordinary inferred `c1-inferred-nested-share.shape` #53 reproduction. That
+battery is committed on the C1 branch, but it has not run under the supervisor
+lane against the final C1 head; it is not a verified capability claim until
+that gate passes. Module-binding capture inside a JIT-compiled function is
+still blocked by W39 F1, and refcounted Shared payloads still surface-and-stop
+before native allocation (the N9 control in `jit_closure_capture_native.rs`).
 
 `f1` is the canonical baseline preserved verbatim from the W12 close
 (`docs/cluster-audits/v0.3-w12-jit-mode-semantics-close.md` §3.2) — its

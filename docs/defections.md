@@ -8367,3 +8367,152 @@ Slice: a comptime annotation handler's `extend <target> { … }` directive resol
 **4. Keeping the deterministic `{name}___impl` / `{name}___{annotation}` chain spellings "because they're internal / referenced by index anyway."** REFUSED (same reasoning as S3's `__original__` shadow). They entered the function table by a guessable string; a user function of that spelling would collide with (or resolve to) the generated chain slot. The names are now unspellable `HygienicSymbol` descriptors with a stable digest nonce (function name, plus the annotation name for the intermediate wrapper) so `register_function` dedups them idempotently across recompiles. Migrated anchor assertions (`test_annotated_function_generates_wrapper`, `test_annotation_chaining_generates_chain`) now assert row-2 (no user-spellable `___impl`/`___second` survives) + hygienic generation, mirroring the S2 `*_wrapper` migration.
 
 **Scope note:** the annotation-DEFINITION handler names `{ann_def.name}___{before|after}` (`statements.rs`, `compile_annotation_def`) are a distinct class (annotation-def handler registration, not per-application wrapper chains) and are OUTSIDE this slice's Files list (`functions_annotations.rs` + `annotation_context.rs` + docs); untouched here. S4 completes the U10+U11 stage-6 deletion for #19.
+
+## 2026-07-15 — ADR009-C1 rework: canonical declared-capture plan (rejected carrier and final rulings)
+
+Slice: replace the generated-closure implicit-capture-only gate with an explicit,
+typed declare-and-validate path without changing ordinary source inference.
+`captures: Option<CaptureClause>` on `Expr::FunctionExpr` is the canonical
+carrier. The parser is C1's producer; C2 `CheckedBody` staging will populate the
+same field. That is one carrier with two construction paths, not two capture
+mechanisms. All C1 implementation slices and their focused proof code are
+committed on the branch. The post-commit supervisor build/test battery and the
+whole-C1 fixed-point reviews are still pending, so this entry does not claim an
+overall green gate or merge ratification.
+
+**1. The first `capture(...)` head form, span-keyed side table, and name-keyed
+identity (`34c57f5c`).** REJECTED. That attempt stripped a leading
+`capture(...)` expression before checking and recorded the declaration in a
+side table keyed by `Span`. Generated snippets are independently parsed at byte
+offset zero (and may carry `Span::DUMMY`), so unrelated closures could collide
+and consume each other's declarations. Its live descriptor matched source
+names rather than compiler-issued scope slots, and it explicitly omitted the
+ruled `FunctionExpr` field. Worse, the declaration was validated and then
+discarded: the pre-existing inference selector still chose the emitted
+`CaptureKind`, so changing or deleting a declared mode could leave identical
+bytecode. The attempt therefore could not prove the ticket's central invariant
+and was not merged.
+
+**2. Keeping inference as a fallback or a second capture-kind producer.**
+REFUSED. The declared and discovered sets are compared through one structural
+slot resolver, and the declared plan is the only authority for generated
+closure layout and access opcodes. Binding analysis may provide ownership and
+storage facts to validate a declaration, but it cannot supply an undeclared
+capture, substitute another mode, or repair a missing/length/kind-mismatched
+artifact. Every such disagreement is a compile error. Ordinary source closures
+with no clause keep the existing inference path; the two paths are mutually
+exclusive at the one selector.
+
+**3. Making explicit capture clauses an ordinary closure feature.** REFUSED by
+Decision 95. The closure-pipe spelling (`|item: int; move scale, share total|`)
+is generated-code-only. An ordinary source closure carrying a clause receives
+the named `[C0903]` rejection, while an ordinary closure without a clause keeps
+capture inference. Generated code with a missing declaration retains the
+Wave-46 implicit-capture rejection; declared-but-unused and duplicate entries
+are also hard errors. Node-borne generated origin, not a function name or span,
+decides which rule applies.
+
+**4. Allowing a declared word to lower to a differently named ownership
+kind.** REFUSED by the final user rulings. The closed mapping is:
+
+- `move` over local `let` -> `Immutable`;
+- `move` over local `let mut` -> `OwnedMutable`;
+- `move` over a module binding -> `[C0906]` (never silently `Shared`);
+- `share` over `var`, an existing `SharedCell`, or a module binding -> `Shared`;
+- `share` over plain local `let` / `let mut` -> `[C0908]`;
+- `&` and `&mut` -> `[C0902] ReferenceEscapeIntoClosure` for every binding
+  until Shape has a region model.
+
+There is no `lowered != declared` escape hatch. Shared ownership has its own
+source word; `move` never means `Shared`.
+
+**5. Treating the integrated native-closure prerequisite as the C1 proof, or
+hiding residual JIT/runtime limits.** REFUSED. The prerequisite establishes
+that ordinary-source immutable, owned-mutable, and scalar-Shared captures can
+reach native JIT with exact VM/JIT output and zero fallback; it removes C1's
+global blocker but does not exercise a generated declaration. C1's generated
+`move` / `share` zero-fallback fixtures and its compiler-issued LSP query are
+committed Slice-4 evidence pending final gates. The runtime matrix is
+`jit_generated_capture_native` over
+`c1-generated-{move-let,move-let-mut,move-heap,nested-share}.shape`, paired with
+the ordinary inferred #53 fixture `c1-inferred-nested-share.shape`, ShapeTest
+deletion/change mutations, compiler proof
+`nested_declared_share_preserves_the_outer_cell_descriptor`, and VM teardown
+proofs `shared_scalar_capture_frame_local_has_one_balanced_carrier_share`,
+`shared_heap_capture_frame_local_retains_the_cell_not_its_payload`, and
+`nested_declared_share_runs_through_vm_install_and_teardown`. This is the
+proposed structural + public closure of #53, but it is not yet
+supervisor-test-verified. The committed shared tooling path keeps two
+authorities distinct: `EnvironmentAnalyzer::analyze_function_captures`
+returns `CaptureAnalysis`, whose exact spans are stamped into the validated
+packs; `BytecodeCompiler::generated_capture_query` returns
+`GeneratedCaptureQuery` projected from those packs plus a structurally verified
+source map. `GeneratedCaptureBindingIdentity` joins sibling occurrences of one
+captured slot; `GeneratedCaptureOccurrenceIdentity` keeps exact occurrences
+separate for hover and conflict detection. `GeneratedCaptureDescriptorView`
+and `GeneratedCaptureSourceMap` are read-only projections under
+`GeneratedCaptureStage::GeneratedOnly`. Unmapped or conflicting generated
+source fails as C0910/C0911, never a name/span guess. Hover,
+go-to-definition, and references now consume this one query and have committed
+multi-application, nested-lineage, frontmatter, import-context, and bounded
+session proofs. A module-binding capture inside a JIT-compiled function remains
+the named W39 F1 module-binding surface, so `share` over a module binding cannot
+honestly claim zero fallback yet.
+
+**6. Reusing an ABI monomorphization key, `ConcreteType`, source name, registry
+id, or rendered descriptor as exact semantic specialization authority.**
+REFUSED. ABI-equivalent nominal and callable types can be semantically distinct.
+Declared parameters are therefore opaque compiler-issued `TypeVar`
+capabilities whose identity is owner + ordinal; the transient annotation
+carrier is authenticated and fails closed. An exact call-site fact must match
+the active inference-issued `SemanticCalleeDeclaration` before every cache
+lookup. That independent check covers the opaque parameter token, ordinal, and
+current declaration spelling; spelling is a consistency check, never the
+identity. An asserted exact fact whose callee capability is missing, foreign,
+stale, renamed, or malformed is the named C0911 failure and cannot silently
+enter an ABI-only cache.
+
+Exact and legacy specializations use physically disjoint cache maps, progress
+keys, and symbol identities. Exact keys add ordered `SemanticFreeze`
+category/identity pairs and the frozen identities of active lexical parameter
+scopes. A call site whose inference fact is genuinely absent, unavailable, or
+conflicting may be routed to the legacy execution domain, but neither domain
+can borrow an entry from the other. This is a typed execution distinction, not
+a string suffix convention.
+
+**7. Inheriting the caller's generic scope into ordinary recursive compilation,
+or letting a same-spelled caller/callee `T` rebind during lexical closure
+inlining.** REFUSED. Ordinary recursive compilation installs an isolated
+callee scope. Only the explicit lexical-inline route composes ordered caller
+and callee parameter identities. The current syntax still indexes authored
+`type_ref(T)` by spelling, so when those two owners both spell a parameter `T`,
+the optimizer cannot prove which owner authored the reference. It refuses
+closure-aware inlining before cache, progress, symbol, counter, or function
+publication and uses the already-compiled ordinary closure plus exact type-only
+callee path. This `Ok(None)` is an explicit optimization limitation after hard
+callee-capability validation, not a downgrade of invalid exact evidence. Name
+coincidence is used only as a refusal signal.
+
+**8. Reconstructing a declared-parameter capability from names when an imported
+interface or persisted specialization is replayed.** REFUSED. Current imported
+module calls do not enter the local executable monomorphization path, and the
+interface-check replay helper does not publish facts to the VM, so C1 does not
+need a serialized capability format. A future cross-module, remote, or persisted
+specialization must persist or reissue the opaque callee capability and its
+ordered semantic arguments. Rebuilding owner/ordinal authority from public
+parameter names would reopen the cache-confusion defect and is not a valid
+extension point.
+
+**CURRENT vs TARGET.** CURRENT on the C1 branch: canonical `FunctionExpr`
+carrier, four-mode catalog, structural binding identity, generated-only gate,
+one declared plan driving emission, opaque declared-parameter authority,
+disjoint exact/legacy specialization, committed runtime/JIT proof code, and
+compiler-query LSP hover/definition/references. Focused static/refuter review of
+the exact-specialization boundary is PASS. TARGET before C1 ratification: the
+whole-C1 Standards/Spec fixed-point reviews and the supervisor cargo, ShapeTest,
+LSP, CLI, and broad gates must pass; the committed generated zero-fallback and
+#53 nested-Shared proofs are not capability claims until then. TARGET C2:
+`CheckedBody<Sig, Captures>` constructs this same carrier. TARGET W39 F1:
+module-binding function-body lowering permits a native module-`share` proof.
+TARGET for persisted/imported specializations: carry or reissue the opaque
+callee capability rather than reconstructing it from names.
