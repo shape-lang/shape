@@ -1,8 +1,20 @@
 use super::*;
 
 fn compile_outcome(src: &str) -> (BytecodeCompiler, std::result::Result<(), String>) {
+    compile_outcome_with_known_bindings(src, &[])
+}
+
+fn compile_outcome_with_known_bindings(
+    src: &str,
+    known_bindings: &[&str],
+) -> (BytecodeCompiler, std::result::Result<(), String>) {
     let program = shape_ast::parse_program(src).expect("fixture parses");
     let mut compiler = BytecodeCompiler::new();
+    let known_bindings = known_bindings
+        .iter()
+        .map(|name| (*name).to_owned())
+        .collect::<Vec<_>>();
+    compiler.register_known_bindings(&known_bindings);
     let outcome = compiler
         .compile_in_place(&program)
         .map_err(|error| error.to_string());
@@ -110,7 +122,7 @@ job.read(2)
 
 #[test]
 fn generated_free_function_module_reference_rejects_before_closure_publication() {
-    let (compiler, outcome) = compile_outcome(
+    let (compiler, outcome) = compile_outcome_with_known_bindings(
         r#"
 let module_value = 7
 let module_ref = &module_value
@@ -127,6 +139,7 @@ annotation add_reader() {
 type Job { id: int }
 generated_read(2)
 "#,
+        &["module_ref"],
     );
     assert_c0902(outcome, "share module_ref", "module_ref");
     assert_no_closure_artifacts(&compiler);
