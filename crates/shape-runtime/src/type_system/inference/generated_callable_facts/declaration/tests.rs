@@ -27,6 +27,16 @@ fn callable_scheme(quantified: Vec<TypeVar>, result: TypeVar) -> TypeScheme {
     )
 }
 
+fn assert_changed_declared_capability(error: TypeError) {
+    assert_eq!(
+        error,
+        TypeError::ConstraintViolation(
+            "internal inference error: callable re-publication changed its declared generic tokens"
+                .to_string()
+        )
+    );
+}
+
 #[test]
 fn raw_quantifiers_do_not_mint_declared_capabilities() {
     let mut engine = TypeInferenceEngine::new();
@@ -85,6 +95,39 @@ fn raw_quantifiers_may_change_while_republication_preserves_the_binding() {
 }
 
 #[test]
+fn mixed_republication_replaces_raw_quantifiers_but_preserves_declared_authority() {
+    let mut engine = TypeInferenceEngine::new();
+    let function = callable_declaration();
+    let declared = TypeVar::declared(engine.type_var_gen.fresh_declared_owner(), 0, "T");
+    let first_raw = engine.type_var_gen.fresh_var();
+    let first_scheme = callable_scheme(vec![first_raw.clone(), declared.clone()], first_raw);
+    let first_type = first_scheme.ty.clone();
+    engine
+        .predeclare_named_callable_scheme(&function, first_scheme, &first_type)
+        .unwrap();
+    let token = engine.env.lookup_binding_token("subject").unwrap();
+
+    let second_raw = engine.type_var_gen.fresh_var();
+    let third_raw = engine.type_var_gen.fresh_var();
+    let expected_quantifiers = vec![second_raw.clone(), declared.clone(), third_raw.clone()];
+    let second_scheme = callable_scheme(expected_quantifiers.clone(), third_raw);
+    let second_type = second_scheme.ty.clone();
+    engine
+        .republish_named_callable_scheme(&function, second_scheme, &second_type)
+        .unwrap();
+
+    assert_eq!(engine.env.lookup_binding_token("subject"), Some(token));
+    let installed = engine.env.lookup("subject").unwrap();
+    assert_eq!(installed.quantified, expected_quantifiers);
+    assert_eq!(installed.ty, second_type);
+    let declaration = InferenceCallableDeclarationToken::of(&function);
+    assert_eq!(
+        engine.generated_inference.callable_declared_parameters[&declaration],
+        vec![declared]
+    );
+}
+
+#[test]
 fn declared_source_rename_is_rejected_even_when_typed_identity_matches() {
     let mut engine = TypeInferenceEngine::new();
     let function = callable_declaration();
@@ -102,13 +145,36 @@ fn declared_source_rename_is_rejected_even_when_typed_identity_matches() {
     let error = engine
         .republish_named_callable_scheme(&function, renamed_scheme, &renamed_type)
         .unwrap_err();
-    assert_eq!(
-        error,
-        TypeError::ConstraintViolation(
-            "internal inference error: callable re-publication changed its declared generic tokens"
-                .to_string()
-        )
-    );
+    assert_changed_declared_capability(error);
+}
+
+#[test]
+fn foreign_or_missing_declared_capabilities_are_rejected_on_republication() {
+    let mut engine = TypeInferenceEngine::new();
+    let function = callable_declaration();
+    let owner = engine.type_var_gen.fresh_declared_owner();
+    let declared = TypeVar::declared(owner, 0, "T");
+    let original_scheme = callable_scheme(vec![declared.clone()], declared);
+    let original_type = original_scheme.ty.clone();
+    engine
+        .predeclare_named_callable_scheme(&function, original_scheme, &original_type)
+        .unwrap();
+
+    let foreign = TypeVar::declared(engine.type_var_gen.fresh_declared_owner(), 0, "T");
+    let foreign_scheme = callable_scheme(vec![foreign.clone()], foreign);
+    let foreign_type = foreign_scheme.ty.clone();
+    let error = engine
+        .republish_named_callable_scheme(&function, foreign_scheme, &foreign_type)
+        .unwrap_err();
+    assert_changed_declared_capability(error);
+
+    let raw = engine.type_var_gen.fresh_var();
+    let raw_scheme = callable_scheme(vec![raw.clone()], raw);
+    let raw_type = raw_scheme.ty.clone();
+    let error = engine
+        .republish_named_callable_scheme(&function, raw_scheme, &raw_type)
+        .unwrap_err();
+    assert_changed_declared_capability(error);
 }
 
 #[test]

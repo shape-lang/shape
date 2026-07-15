@@ -412,6 +412,7 @@ fn unannotated_callsites_still_widen_the_definition() {
     let Type::Concrete(TypeAnnotation::Union(members)) = &params[0] else {
         panic!("unannotated calls must retain callsite widening: {params:?}")
     };
+    assert_eq!(members.len(), 2, "widening must remain exactly int|string");
     assert!(members.contains(&TypeAnnotation::Basic("int".to_string())));
     assert!(members.contains(&TypeAnnotation::Basic("string".to_string())));
 }
