@@ -223,7 +223,10 @@ fn referent_evidence_conflict_is_rejected() {
         .expect_err("referent evidence must agree");
     let message = semantic_message(error);
 
-    assert!(message.contains("binding 'module_ref'"));
+    assert!(message.starts_with(
+        "[C0912] exact reference-flow conflict at match merge for ModuleBinding(7) \
+         (name 'module_ref')"
+    ));
     assert!(message.contains("SharedReference<I64>"));
     assert!(message.contains("SharedReference<String>"));
 }
