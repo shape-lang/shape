@@ -683,6 +683,17 @@ impl LocalTypesSnapshot {
     }
 }
 
+/// Snapshot of local binding semantics across a nested function compilation.
+///
+/// The flattened map and its scope stack are one state carrier: restoring only
+/// the map leaves inner-function slot ordinals in the scope stack, so a later
+/// `pop_scope` can evict an outer binding that happens to use the same slot.
+#[derive(Debug, Clone)]
+pub struct LocalBindingSemanticsSnapshot {
+    local_binding_semantics: HashMap<u16, BindingSemantics>,
+    local_binding_semantic_scopes: Vec<HashMap<u16, BindingSemantics>>,
+}
+
 /// Tracks type information for variables during compilation
 #[derive(Debug)]
 pub struct TypeTracker {
@@ -1015,22 +1026,25 @@ impl TypeTracker {
         self.local_binding_semantic_scopes.push(HashMap::new());
     }
 
-    /// Track A.1C.2: snapshot the outer function's local binding
-    /// semantics before entering a nested function compilation. Pairs
-    /// with [`restore_local_binding_semantics`] to preserve ownership
-    /// / storage classification across `compile_function`'s
-    /// `clear_locals` call so subsequent closures in the outer scope
-    /// still observe the binding's classification (e.g. `var` →
-    /// `Flexible`, `let mut` → `OwnedMutable`).
-    pub fn snapshot_local_binding_semantics(&self) -> HashMap<u16, BindingSemantics> {
-        self.local_binding_semantics.clone()
+    /// Track A.1C.2: snapshot the outer function's complete local binding
+    /// semantics state before entering a nested function compilation.
+    ///
+    /// Both the flattened lookup map and the scope stack must round-trip. A
+    /// nested function reuses local slot ordinals, so retaining its scope stack
+    /// while restoring only the outer map lets a later `pop_scope` erase an
+    /// unrelated outer binding with the same slot.
+    pub fn snapshot_local_binding_semantics(&self) -> LocalBindingSemanticsSnapshot {
+        LocalBindingSemanticsSnapshot {
+            local_binding_semantics: self.local_binding_semantics.clone(),
+            local_binding_semantic_scopes: self.local_binding_semantic_scopes.clone(),
+        }
     }
 
-    /// Track A.1C.2: restore a previously-snapshotted local binding
-    /// semantics map. Used by `compile_function` after a nested closure
-    /// body compilation wipes the outer function's semantics.
-    pub fn restore_local_binding_semantics(&mut self, snapshot: HashMap<u16, BindingSemantics>) {
-        self.local_binding_semantics = snapshot;
+    /// Restore a previously-snapshotted local binding semantics map and scope
+    /// stack after nested function compilation.
+    pub fn restore_local_binding_semantics(&mut self, snapshot: LocalBindingSemanticsSnapshot) {
+        self.local_binding_semantics = snapshot.local_binding_semantics;
+        self.local_binding_semantic_scopes = snapshot.local_binding_semantic_scopes;
     }
 
     /// Sweep phase 3c.1: snapshot the outer function's local type
@@ -1604,6 +1618,57 @@ mod tests {
         assert!(tracker.get_local_binding_semantics(1).is_none());
         assert!(tracker.get_local_binding_semantics(0).is_some());
         assert!(tracker.get_binding_semantics(5).is_some());
+    }
+
+    #[test]
+    fn binding_semantics_snapshot_discards_inner_same_slot_scope_evidence() {
+        let mut tracker = TypeTracker::empty();
+        let outer = BindingSemantics::deferred(BindingOwnershipClass::OwnedImmutable);
+        let inner = BindingSemantics::deferred(BindingOwnershipClass::OwnedMutable);
+
+        tracker.set_local_binding_semantics(0, outer);
+        tracker.push_scope();
+        let snapshot = tracker.snapshot_local_binding_semantics();
+
+        tracker.clear_locals();
+        tracker.push_scope();
+        tracker.set_local_binding_semantics(0, inner);
+        assert_eq!(tracker.get_local_binding_semantics(0), Some(&inner));
+
+        tracker.restore_local_binding_semantics(snapshot);
+        tracker.pop_scope();
+
+        assert_eq!(tracker.get_local_binding_semantics(0), Some(&outer));
+    }
+
+    #[test]
+    fn binding_semantics_snapshot_roundtrips_the_full_scope_stack() {
+        let mut tracker = TypeTracker::empty();
+        let outer = BindingSemantics::deferred(BindingOwnershipClass::OwnedImmutable);
+        let nested = BindingSemantics::deferred(BindingOwnershipClass::Flexible);
+
+        tracker.set_local_binding_semantics(2, outer);
+        tracker.push_scope();
+        tracker.set_local_binding_semantics(4, nested);
+        let snapshot = tracker.snapshot_local_binding_semantics();
+
+        tracker.clear_locals();
+        tracker.set_local_binding_semantics(
+            9,
+            BindingSemantics::deferred(BindingOwnershipClass::OwnedMutable),
+        );
+        tracker.restore_local_binding_semantics(snapshot);
+
+        assert_eq!(tracker.get_local_binding_semantics(2), Some(&outer));
+        assert_eq!(tracker.get_local_binding_semantics(4), Some(&nested));
+        assert!(tracker.get_local_binding_semantics(9).is_none());
+
+        tracker.pop_scope();
+        assert_eq!(tracker.get_local_binding_semantics(2), Some(&outer));
+        assert!(tracker.get_local_binding_semantics(4).is_none());
+
+        tracker.pop_scope();
+        assert!(tracker.get_local_binding_semantics(2).is_none());
     }
 
     #[test]
