@@ -3056,7 +3056,7 @@ impl BytecodeCompiler {
         })
     }
 
-    pub(super) fn process_comptime_directives_for_function(
+    fn process_comptime_directives_for_function(
         &mut self,
         directives: Vec<super::comptime_builtins::ComptimeDirective>,
         target_name: &str,
