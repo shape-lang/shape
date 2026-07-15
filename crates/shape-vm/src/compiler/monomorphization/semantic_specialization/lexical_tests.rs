@@ -147,7 +147,10 @@ fn exact_lexical_inline_inherits_closed_outer_evidence_and_parameter_scopes() {
 fn ordinary_nested_callee_cannot_reflect_undeclared_caller_parameter() {
     let source = r#"
         fn inner<U>(value: U) -> U {
-            let category = comptime { type_category(type_ref(T)) }
+            let ignored = comptime {
+                type_ref(T)
+                0
+            }
             value
         }
         fn outer<T>(value: T) -> T { inner(value) }
@@ -309,9 +312,13 @@ fn closure_cache_partitions_same_shape_by_frozen_outer_parameter_identity() {
 fn same_spelled_outer_and_callee_parameters_fall_back_without_losing_identity() {
     let (outer_high, outer_low) = canonical_identity_halves("parameter:outer:T");
     let (callee_high, callee_low) = canonical_identity_halves("parameter:Vec.scoped_map:T");
+    assert_ne!(
+        outer_high, 0,
+        "outer identity must distinguish the false-guard sentinel"
+    );
     let source = r#"
         extend Vec<E> {
-            method scoped_map<T>(marker: T, f: (E) => int) -> Vec<int> {
+            method scoped_map<T>(marker: T, f: (E) => int) -> int {
                 let callee_is_exact = comptime {
                     match reflect(type_ref(T)) {
                         FrozenType::Parameter(parameter) =>
@@ -320,11 +327,11 @@ fn same_spelled_outer_and_callee_parameters_fall_back_without_losing_identity() 
                         _ => false
                     }
                 }
-                if callee_is_exact { [f(self[0])] } else { [0] }
+                if callee_is_exact { f(self[0]) } else { 0 }
             }
         }
 
-        fn outer<T>(value: T) -> Vec<int> {
+        fn outer<T>(value: T) -> int {
             [value].scoped_map(value, |item: T| {
                 comptime {
                     match reflect(type_ref(T)) {
@@ -341,7 +348,7 @@ fn same_spelled_outer_and_callee_parameters_fall_back_without_losing_identity() 
         }
 
         let answer = outer(42)
-        answer[0]
+        answer
     "#
     .replace("__OUTER_LOW__", &outer_low.to_string())
     .replace("__CALLEE_HIGH__", &callee_high.to_string())
