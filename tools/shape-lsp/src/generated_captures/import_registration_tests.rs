@@ -33,7 +33,7 @@ fn poisoned_imported_annotation_maps_to_unavailable() {
         "pub annotation broken() { metadata(target) { missing_handler_value } }",
     )
     .expect("write dependency");
-    let source = "from support use { @broken }\n@broken()\ntype Probe { id: int }";
+    let source = "from ./support use { @broken }\n@broken()\ntype Probe { id: int }";
     let program = shape_ast::parse_program(source).expect("fixture parses");
     let cache = crate::module_cache::ModuleCache::new();
     let session = GeneratedQuerySession::new(

@@ -43,7 +43,7 @@ pub annotation broken() {
 "#,
     )
     .expect("write dependency");
-    let source = "from support use { @broken }\n@broken()\ntype Probe { id: int }";
+    let source = "from ./support use { @broken }\n@broken()\ntype Probe { id: int }";
     let program = parse(source);
     let mut compiler = shape_vm::BytecodeCompiler::new();
     let diagnostic = validate_imports_and_register_items(
@@ -75,7 +75,7 @@ pub annotation tagged() {
 "#,
     )
     .expect("write dependency");
-    let source = "from support use { @tagged }\n@tagged()\ntype Probe { id: int }";
+    let source = "from ./support use { @tagged }\n@tagged()\ntype Probe { id: int }";
     let program = parse(source);
     let mut compiler = shape_vm::BytecodeCompiler::new();
     let outcome = validate_imports_and_register_items(
