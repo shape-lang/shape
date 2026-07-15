@@ -91,7 +91,8 @@ pub fn analyze_program_semantics_for_document(
         ));
     }
 
-    if let Err(compile_error) = compiler.compile_with_source(program, text) {
+    compiler.set_source(text);
+    if let Err(compile_error) = compiler.compile_in_place(program) {
         // Carry the document URI so location-bearing notes map to
         // relatedInformation (file-less in-memory locations included).
         let mut compile_diagnostics =
