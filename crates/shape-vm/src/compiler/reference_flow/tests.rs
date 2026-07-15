@@ -303,3 +303,4 @@ fn pop_scope_evicts_exact_local_reference_state() {
 }
 
 mod core_fixes;
+mod transaction_tests;

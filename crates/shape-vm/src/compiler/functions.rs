@@ -813,7 +813,14 @@ impl BytecodeCompiler {
         // into a later compilation that reuses the same local ordinal.
         let saved_inherited_capture_parameter_evidence =
             self.inherited_capture_parameter_evidence.clone();
-        let result = self.compile_function_inner(func_def);
+        // Reference-flow state has the same all-exit requirement. The
+        // transaction also refuses successful module representation effects
+        // until callable effect summaries exist.
+        let result = self.with_callable_reference_flow_transaction(
+            &func_def.name,
+            func_def.name_span,
+            |compiler| compiler.compile_function_inner(func_def),
+        );
         self.inherited_capture_parameter_evidence =
             saved_inherited_capture_parameter_evidence;
         self.deferring_uninstantiated_template_body = saved_deferring_template;
@@ -1807,7 +1814,6 @@ impl BytecodeCompiler {
         // binding inside the nested function).
         let saved_local_callable_closure_bodies =
             std::mem::take(&mut self.local_callable_closure_bodies);
-        let saved_reference_flow = self.enter_function_reference_flow();
         let saved_comptime_mode = self.comptime_mode;
         let saved_drop_locals = std::mem::take(&mut self.drop_locals);
         // Phase V1.1C fix: the ownership-aware drop-local scope stack must be
@@ -2468,11 +2474,11 @@ impl BytecodeCompiler {
                             saved_closure_binding_capture_drop_locals;
                         self.closure_capture_drop_locals = saved_closure_capture_drop_locals;
                         self.captured_let_mut_moved = saved_captured_let_mut_moved;
+                        self.pop_scope();
                         self.type_tracker
                             .restore_local_binding_semantics(saved_local_binding_semantics);
                         self.param_locals = saved_param_locals;
                         self.current_function_params = saved_function_params;
-                        self.pop_scope();
                         // Sweep phase 3c.1: restore outer-function local
                         // types AFTER pop_scope. pop_scope reads from
                         // local_type_scopes to evict matching local_types
@@ -2498,7 +2504,6 @@ impl BytecodeCompiler {
                         // compile completes.
                         self.local_callable_closure_bodies =
                             saved_local_callable_closure_bodies.clone();
-                        self.restore_reference_flow_snapshot(&saved_reference_flow);
                         self.comptime_mode = saved_comptime_mode;
                         self.current_function_return_reference_summary =
                             saved_current_function_return_reference_summary;
@@ -2600,10 +2605,10 @@ impl BytecodeCompiler {
         self.closure_binding_capture_drop_locals = saved_closure_binding_capture_drop_locals;
         self.closure_capture_drop_locals = saved_closure_capture_drop_locals;
         self.captured_let_mut_moved = saved_captured_let_mut_moved;
+        self.pop_scope();
         self.type_tracker
             .restore_local_binding_semantics(saved_local_binding_semantics);
         self.current_function_params = saved_function_params;
-        self.pop_scope();
         // Sweep phase 3c.1: restore outer-function local types AFTER
         // pop_scope (see early-return path comment).
         self.type_tracker.restore_local_types(saved_local_types);
@@ -2621,7 +2626,6 @@ impl BytecodeCompiler {
             saved_local_callable_return_reference_summaries;
         // cluster-2-cw-IB-class-b: restore retained closure bodies.
         self.local_callable_closure_bodies = saved_local_callable_closure_bodies;
-        self.restore_reference_flow_snapshot(&saved_reference_flow);
         self.comptime_mode = saved_comptime_mode;
         self.current_function_return_reference_summary =
             saved_current_function_return_reference_summary;

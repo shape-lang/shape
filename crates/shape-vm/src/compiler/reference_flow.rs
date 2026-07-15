@@ -18,11 +18,12 @@ use super::BytecodeCompiler;
 
 mod diagnostic;
 mod model;
+mod transaction;
 
 pub(crate) use model::{
     BindingKey, ReferenceClass, ReferenceFlowPredecessor, ReferenceFlowState,
 };
-use model::ReferenceFlowConflict;
+use model::{ReferenceFlowConflict, ReferenceFlowEvidence};
 
 impl BytecodeCompiler {
     pub(crate) fn reference_flow_snapshot(&self) -> ReferenceFlowState {
@@ -112,9 +113,21 @@ impl BytecodeCompiler {
     /// that compilation finishes.
     pub(crate) fn enter_function_reference_flow(&mut self) -> ReferenceFlowState {
         let state = self.reference_flow_snapshot();
+        let local_reference_slots: Vec<_> = state
+            .classes
+            .keys()
+            .filter_map(|key| match key {
+                BindingKey::Local(slot) => Some(*slot),
+                BindingKey::ModuleBinding(_) => None,
+            })
+            .collect();
         self.reference_value_locals.clear();
         self.exclusive_reference_value_locals.clear();
         self.reference_value_local_referent_concrete_type.clear();
+        for slot in local_reference_slots {
+            let storage = self.default_binding_storage_class_for_slot(slot, true);
+            self.set_reference_flow_storage(BindingKey::Local(slot), storage);
+        }
         state
     }
 
