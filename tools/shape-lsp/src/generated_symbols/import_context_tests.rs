@@ -30,19 +30,6 @@ fn poisoned_contextless_compiler_publishes_no_generated_rows() {
 annotation broken() {
   metadata(target) { missing_handler_value }
 }
-
-#[test]
-fn ordinary_hard_compile_error_is_unavailable_even_without_annotation_poison() {
-    let source = r#"
-annotation derive() { targets: [type] }
-@derive()
-type Probe { id: int }
-__intrinsic_std([1, 2, 3])
-"#;
-    let program = shape_ast::parse_program(source).expect("fixture parses");
-    assert!(compile_for_generated_symbol_queries(&program, source).is_none());
-    assert!(generated_render_inputs_all(&program, source).is_empty());
-}
 @broken()
 type Probe { id: int }
 "#;
@@ -55,4 +42,17 @@ type Probe { id: int }
         "",
     )
     .is_empty());
+}
+
+#[test]
+fn ordinary_hard_compile_error_is_unavailable_even_without_annotation_poison() {
+    let source = r#"
+annotation derive() { targets: [type] }
+@derive()
+type Probe { id: int }
+__intrinsic_std([1, 2, 3])
+"#;
+    let program = shape_ast::parse_program(source).expect("fixture parses");
+    assert!(compile_for_generated_symbol_queries(&program, source).is_none());
+    assert!(generated_render_inputs_all(&program, source).is_empty());
 }
