@@ -308,12 +308,9 @@ fn emitted_layout_matches_plan_shared_module_binding() {
     let c = compile(
         r#"
 var hits = 0
-fn run() -> int {
-  let f = |x: int| { hits = hits + x
-    hits }
-  f(3)
-}
-run()
+let f = |x: int| { hits = hits + x
+  hits }
+f(3)
 "#,
     );
     assert_model_equals_emission(&c);
@@ -323,6 +320,14 @@ run()
         pack.descriptors[0].target,
         Some(CaptureTarget::ModuleBinding(_))
     ));
+    assert!(!c.shared_module_bindings.is_empty());
+    assert!(c
+        .program
+        .instructions
+        .iter()
+        .any(|instruction| {
+            instruction.opcode == crate::bytecode::OpCode::AllocSharedModuleBinding
+        }));
 }
 
 #[test]
@@ -427,3 +432,6 @@ fn rejected_closure_body_clears_pending_capture_evidence() {
 
 #[path = "inferred_tests/invariants.rs"]
 mod invariants;
+
+#[path = "inferred_tests/module_capture_preflight.rs"]
+mod module_capture_preflight;

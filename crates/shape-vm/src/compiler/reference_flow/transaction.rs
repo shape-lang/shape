@@ -4,7 +4,6 @@ use shape_ast::ast::Span;
 use shape_ast::error::Result;
 
 use crate::compiler::BytecodeCompiler;
-use crate::type_tracking::BindingStorageClass;
 
 use super::{
     BindingKey, ReferenceFlowConflict, ReferenceFlowEvidence, ReferenceFlowState,
@@ -13,12 +12,12 @@ use super::{
 impl BytecodeCompiler {
     /// Compile one callable under an exact reference-flow transaction.
     ///
-    /// Local reference evidence is function-scoped. Module reference
-    /// representation is visible to the callable but cannot change without an
-    /// interprocedural effect summary, which C1 does not provide. The complete
-    /// local binding-semantics scope stack and reference-flow state are restored
-    /// on both `Ok` and `Err`; an existing compile error always wins over the
-    /// success-only module transition check.
+    /// Local reference evidence is function-scoped. Module reference and
+    /// storage representation are visible to the callable but cannot change
+    /// without an interprocedural effect summary, which C1 does not provide.
+    /// The complete local binding-semantics scope stack and reference-flow
+    /// state are restored on both `Ok` and `Err`; an existing compile error
+    /// always wins over the success-only module transition check.
     pub(crate) fn with_callable_reference_flow_transaction<T>(
         &mut self,
         callable_name: &str,
@@ -89,29 +88,6 @@ impl BytecodeCompiler {
         before: &ReferenceFlowEvidence,
         after: &ReferenceFlowEvidence,
     ) -> bool {
-        if before.class != after.class {
-            return true;
-        }
-
-        let before_reference_storage =
-            before.storage == Some(BindingStorageClass::Reference);
-        let after_reference_storage = after.storage == Some(BindingStorageClass::Reference);
-        if before_reference_storage != after_reference_storage {
-            return true;
-        }
-
-        // Ordinary Value planning (for example Direct -> SharedCow) is not a
-        // representation effect. Only a change in consistency between the
-        // reference class and an explicitly known storage class is rejected.
-        Self::reference_storage_is_consistent(before)
-            != Self::reference_storage_is_consistent(after)
-    }
-
-    fn reference_storage_is_consistent(evidence: &ReferenceFlowEvidence) -> bool {
-        match evidence.storage {
-            None => true,
-            Some(BindingStorageClass::Reference) => evidence.class.is_reference(),
-            Some(_) => !evidence.class.is_reference(),
-        }
+        before != after
     }
 }

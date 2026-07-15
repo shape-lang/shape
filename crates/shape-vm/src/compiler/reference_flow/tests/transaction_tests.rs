@@ -144,7 +144,7 @@ fn successful_module_reference_transition_is_c0912_and_uses_callable_span() {
 }
 
 #[test]
-fn unchanged_module_and_value_storage_planning_both_pass() {
+fn unchanged_module_projection_passes() {
     let mut compiler = compiler_with_named_slots();
     let expected = compiler.reference_flow_snapshot();
 
@@ -155,9 +155,18 @@ fn unchanged_module_and_value_storage_planning_both_pass() {
             |_compiler| Ok(()),
         )
         .expect("an unchanged module projection passes");
-    compiler
+
+    assert_eq!(compiler.reference_flow_snapshot(), expected);
+}
+
+#[test]
+fn successful_module_value_storage_transition_is_c0912() {
+    let mut compiler = compiler_with_named_slots();
+    let expected = compiler.reference_flow_snapshot();
+
+    let error = compiler
         .with_callable_reference_flow_transaction(
-            "planning_only",
+            "storage_effect",
             Span::DUMMY,
             |compiler| {
                 compiler
@@ -166,8 +175,15 @@ fn unchanged_module_and_value_storage_planning_both_pass() {
                 Ok(())
             },
         )
-        .expect("Value Direct to SharedCow is planning, not representation");
+        .expect_err("Value Direct to SharedCow is a module representation effect");
 
+    let message = semantic_message(error);
+    assert!(message.starts_with(
+        "[C0912] exact reference-flow conflict at callable 'storage_effect' for \
+         ModuleBinding(7) (name 'module_ref')"
+    ));
+    assert!(message.contains("Value [storage=Direct]"));
+    assert!(message.contains("Value [storage=SharedCow]"));
     assert_eq!(compiler.reference_flow_snapshot(), expected);
 }
 

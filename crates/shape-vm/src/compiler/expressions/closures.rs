@@ -22,6 +22,7 @@ use super::super::BytecodeCompiler;
 use crate::compiler::ClosureCallsiteHint;
 
 mod capture_peek;
+mod module_capture_preflight;
 
 fn container_kind_from_concrete_type(
     ct: &ConcreteType,
@@ -3109,8 +3110,10 @@ impl BytecodeCompiler {
         generated_origin: Option<&shape_ast::ast::GeneratedNodeOrigin>,
         closure_span: Span,
     ) -> Result<()> {
+        // Peek the deterministic name, but do not consume its identity until
+        // canonical capture planning and the callable module-effect preflight
+        // have both succeeded. A refused closure leaves no counter gap.
         let closure_name = format!("__closure_{}", self.closure_counter);
-        self.closure_counter += 1;
 
         let proto_def = FunctionDef {
             name: closure_name.clone(),
@@ -3251,6 +3254,8 @@ impl BytecodeCompiler {
             generated_origin,
             closure_span,
         )?;
+        self.preflight_callable_module_shared_captures(&capture_plan, closure_span)?;
+        self.closure_counter += 1;
 
         // Build one leading synthetic parameter slot per capture so descriptor
         // ordinal, function metadata, and frame layout stay aligned. Immutable

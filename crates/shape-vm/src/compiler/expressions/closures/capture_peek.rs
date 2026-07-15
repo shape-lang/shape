@@ -83,6 +83,16 @@ impl BytecodeCompiler {
                 return None;
             }
         };
+        // Speculative specialization is not permission to pre-publish the
+        // layout for a module-cell effect that real callable emission will
+        // reject. Decline the peek; the ordinary compile path reports C0912.
+        if self
+            .preflight_callable_module_shared_captures(&plan, closure_span)
+            .is_err()
+        {
+            self.current_closure_callee_captures = saved_callee_captures;
+            return None;
+        }
 
         let user_pass_modes = self.effective_function_like_pass_modes(None, params, Some(body));
         let callable_semantic_evidence =
