@@ -373,8 +373,8 @@ mod tests {
 
     #[test]
     fn empty_rows_own_nothing_at_any_target_position() {
-        let program = program(8, &[(2, 4), (2, 0), (4, 0), (6, 0), (8, 0)]);
-        assert_eq!(direct_offsets(&program, 0), vec![2, 3, 4, 5]);
+        let non_empty_target = program(8, &[(2, 4), (2, 0), (4, 0), (6, 0), (8, 0)]);
+        assert_eq!(direct_offsets(&non_empty_target, 0), vec![2, 3, 4, 5]);
 
         let empty_target = program(8, &[(4, 0), (4, 0)]);
         assert!(direct_offsets(&empty_target, 0).is_empty());
