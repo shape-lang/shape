@@ -379,13 +379,21 @@ fn assert_route_artifacts(compiler: &BytecodeCompiler, route: AnnotationRoute) {
             assert_ne!(shadow, "worker", "replacement must not call the local closure");
             assert_eq!(shadow, &generated_body);
             assert!(compiler.function_defs.contains_key(shadow));
+            let registered_shadow = compiler
+                .program
+                .functions
+                .iter()
+                .find(|function| &function.name == shadow)
+                .expect("original-body shadow must be registered in bytecode");
+            assert_eq!(registered_shadow.ref_params, vec![true]);
+            assert_eq!(
+                registered_shadow.ref_mutates,
+                vec![true],
+                "exclusive inferred ABI must be projected onto the shadow emission"
+            );
             assert!(
-                compiler
-                    .program
-                    .functions
-                    .iter()
-                    .any(|function| &function.name == shadow),
-                "original-body shadow must be registered in bytecode"
+                !compiler.mir_storage_plans.contains_key(shadow),
+                "shadow emission must consume source-keyed analysis authority without a hygienic-name alias"
             );
             assert_eq!(
                 registered_calls(compiler, "probe")

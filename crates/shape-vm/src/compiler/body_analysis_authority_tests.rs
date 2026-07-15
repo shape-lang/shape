@@ -195,7 +195,7 @@ fn exclusive_impl_metadata_and_return_projection_are_explicit() {
         .register_function_return_concrete_type(&source.name, ConcreteType::I64);
 
     compiler
-        .refresh_runtime_annotation_impl_metadata(
+        .refresh_authoritative_emission_metadata(
             emission_id,
             &emission,
             &source.name,

@@ -23,6 +23,8 @@ use super::{BytecodeCompiler, HygienicRole, ParamPassMode};
 
 mod generated_closure_provenance;
 use generated_closure_provenance::anchor_generated_function_decl;
+mod original_body_shadow;
+use original_body_shadow::PendingOriginalBodyShadow;
 
 /// ADR-009 E3 (slice S3, legacy class U11): the TYPED capability a `replace
 /// body` replacement reaches through `ctx.original`. It replaces the deleted
@@ -909,6 +911,7 @@ impl BytecodeCompiler {
             "comptime annotation provenance must stay slot-aligned"
         );
         let mut removed = false;
+        let mut pending_original_body_shadow = None;
         let annotations = func_def.annotations.clone();
 
         // Phase 1: comptime pre
@@ -921,6 +924,7 @@ impl BytecodeCompiler {
                         &compiled.param_names,
                         func_def,
                         inferred_reference_optimizations,
+                        &mut pending_original_body_shadow,
                     )? {
                         removed = true;
                         break;
@@ -940,6 +944,7 @@ impl BytecodeCompiler {
                             &compiled.param_names,
                             func_def,
                             inferred_reference_optimizations,
+                            &mut pending_original_body_shadow,
                         )? {
                             removed = true;
                             break;
@@ -947,6 +952,10 @@ impl BytecodeCompiler {
                     }
                 }
             }
+        }
+
+        if !removed && let Some(pending) = pending_original_body_shadow.take() {
+            self.finalize_pending_original_body_shadow(pending)?;
         }
 
         Ok(removed)
@@ -959,6 +968,7 @@ impl BytecodeCompiler {
         annotation_def_param_names: &[String],
         func_def: &mut FunctionDef,
         inferred_reference_optimizations: &[Option<ParamPassMode>],
+        pending_original_body_shadow: &mut Option<PendingOriginalBodyShadow>,
     ) -> Result<bool> {
         // Build the target object from the function definition
         let target = super::comptime_target::ComptimeTarget::from_function(func_def);
@@ -1006,6 +1016,7 @@ impl BytecodeCompiler {
             func_def,
             &expansion_site,
             inferred_reference_optimizations,
+            pending_original_body_shadow,
         )
         .map_err(|e| {
             // ADR-009 D1 (S4): provenance-carrying generated-decl failures
@@ -3052,6 +3063,7 @@ impl BytecodeCompiler {
         func_def: &mut FunctionDef,
         site: &ExpansionSite,
         inferred_reference_optimizations: &[Option<ParamPassMode>],
+        pending_original_body_shadow: &mut Option<PendingOriginalBodyShadow>,
     ) -> Result<bool> {
         let mut removed = false;
         for directive in directives {
@@ -3063,6 +3075,7 @@ impl BytecodeCompiler {
                     self.apply_comptime_extend_items(items, target_name, site)?;
                 }
                 super::comptime_builtins::ComptimeDirective::RemoveTarget => {
+                    *pending_original_body_shadow = None;
                     removed = true;
                     break;
                 }
@@ -3122,49 +3135,29 @@ impl BytecodeCompiler {
                     }
                 }
                 super::comptime_builtins::ComptimeDirective::ReplaceBody { body } => {
-                    // ADR-009 E3 (S3, U11): the pre-annotation body becomes a
-                    // compiler-issued HYGIENIC shadow function, reachable ONLY
-                    // through the typed `ctx.original` capability. The shadow's
-                    // registry name is the unspellable `HygienicSymbol`
-                    // descriptor (no magic `__original__{fn}` spelling enters
-                    // the function table, rejection-matrix row 2); the nonce is
-                    // derived from the annotated function's name so the shadow
-                    // re-registers idempotently across recompiles.
-                    let shadow_name = self.original_body_shadow_name(&func_def.name);
-                    let shadow_def = FunctionDef {
-                        name: shadow_name.clone(),
-                        name_span: func_def.name_span,
-                        declaring_module_path: func_def.declaring_module_path.clone(),
-                        doc_comment: None,
-                        params: func_def.params.clone(),
-                        return_type: func_def.return_type.clone(),
-                        body: func_def.body.clone(),
-                        type_params: func_def.type_params.clone(),
-                        annotations: Vec::new(),
-                        where_clause: None,
-                        is_async: func_def.is_async,
-                        is_comptime: func_def.is_comptime,
-                    };
-                    self.register_function(&shadow_def)?;
-                    self.compile_function_body_with_inferred_reference_optimizations(
-                        &shadow_def,
-                        inferred_reference_optimizations,
-                    )?;
-
-                    // Phase 3e: copy the original's inferred return type onto
-                    // the shadow so the pre-annotation call sees the same
-                    // return-type info. Without this, the numeric-typed call
-                    // path treats the shadow's return as Unknown and
-                    // `ctx.original() + 1` falls into trait dispatch. U4-5b:
-                    // copied STRUCTURALLY as a `ConcreteType`.
-                    if let Some(rt) = self
-                        .type_tracker
-                        .get_function_return_concrete_type(&func_def.name)
-                        .cloned()
-                    {
-                        self.type_tracker
-                            .register_function_return_concrete_type(&shadow_name, rt);
+                    if pending_original_body_shadow.is_some() {
+                        return Err(Self::directive_error(format!(
+                            "multiple `replace body` directives for function '{}' are ambiguous",
+                            func_def.name
+                        )));
                     }
+                    // ADR-009 E3 (S3, U11): the pre-annotation body becomes a
+                    // staged compiler-issued HYGIENIC shadow, reachable ONLY
+                    // through the typed `ctx.original` capability. Staging
+                    // preserves the untouched body and its exact parameter
+                    // provenance until every handler outcome is known.
+                    let shadow_name = self.original_body_shadow_name(&func_def.name);
+                    let effective_pass_modes = self.effective_function_like_pass_modes(
+                        Some(&func_def.name),
+                        &func_def.params,
+                        Some(&func_def.body),
+                    );
+                    let pending = PendingOriginalBodyShadow::new(
+                        func_def,
+                        shadow_name.clone(),
+                        inferred_reference_optimizations,
+                        &effective_pass_modes,
+                    )?;
 
                     // Build the typed `ctx.original` capability (B6
                     // FrozenCallable via the single freeze handle — row 3
@@ -3189,14 +3182,17 @@ impl BytecodeCompiler {
                         .flat_map(|p| p.get_identifiers())
                         .collect();
                     bound_receivers.insert("self".to_string());
-                    func_def.body =
+                    let mut replacement = func_def.clone();
+                    replacement.body =
                         super::original_body_rewrite::rewrite_original_calls_in_statements(
                             &body,
                             &bound_receivers,
                             &capability.shadow_name,
                         );
 
-                    self.stamp_generated_replacement_body(func_def, site)?;
+                    self.stamp_generated_replacement_body(&mut replacement, site)?;
+                    *func_def = replacement;
+                    *pending_original_body_shadow = Some(pending);
                 }
                 super::comptime_builtins::ComptimeDirective::ReplaceModule { .. } => {
                     return Err(Self::directive_error(
@@ -3374,7 +3370,7 @@ impl BytecodeCompiler {
                 message: format!("Impl function '{}' not found after registration", impl_name),
                 location: None,
             })?;
-        self.refresh_runtime_annotation_impl_metadata(
+        self.refresh_authoritative_emission_metadata(
             impl_idx,
             &impl_def,
             &func_def.name,
@@ -3508,7 +3504,7 @@ impl BytecodeCompiler {
                 message: format!("Impl function '{}' not found after registration", impl_name),
                 location: None,
             })?;
-        self.refresh_runtime_annotation_impl_metadata(
+        self.refresh_authoritative_emission_metadata(
             impl_idx,
             &impl_def,
             &func_def.name,

@@ -149,10 +149,10 @@ impl BytecodeCompiler {
             .map(|function| function.name.as_str())
     }
 
-    /// Apply the exact pass-mode vector to a just-registered runtime-annotation
-    /// impl. This updates only the emitted function's typed call metadata; it
-    /// does not create a hygienic-name alias in inference maps.
-    pub(super) fn refresh_runtime_annotation_impl_metadata(
+    /// Apply the exact pass-mode vector to a just-registered hygienic emission.
+    /// This updates only the emitted function's typed call metadata; it does
+    /// not create a hygienic-name alias in inference maps.
+    pub(super) fn refresh_authoritative_emission_metadata(
         &mut self,
         emission_function_id: usize,
         emission: &FunctionDef,
