@@ -1,6 +1,6 @@
 use super::*;
 
-use shape_ast::ast::{CaptureMode, DestructurePattern, Span};
+use shape_ast::ast::{CaptureMode, DestructurePattern, Span, TypeAnnotation};
 
 use crate::type_tracking::BindingStorageClass;
 
@@ -86,7 +86,7 @@ fn probe($PARAM) -> int {
   let worker = |x: int; move value| x + value
   worker(1)
 }
-probe(2)
+let observed: int = probe(2)
 "#
             }
             Self::ChainedRuntime => {
@@ -161,6 +161,8 @@ fn compile_stamped_probe(
         Span::DUMMY,
         "probe".to_string(),
     );
+    let is_untyped_single =
+        matches!(route, AnnotationRoute::SingleRuntime) && parameter == "value";
     let probe = program
         .items
         .iter_mut()
@@ -169,9 +171,37 @@ fn compile_stamped_probe(
             _ => None,
         })
         .expect("fixture has probe");
+    if is_untyped_single {
+        let original_param = probe.params.first().expect("probe has one parameter");
+        assert!(
+            original_param.type_annotation.is_none(),
+            "single-runtime source parameter must remain untyped"
+        );
+        assert_eq!(
+            (
+                original_param.is_reference,
+                original_param.is_mut_reference
+            ),
+            (false, false),
+            "single-runtime source parameter must not declare reference provenance"
+        );
+    }
     shape_ast::transform::stamp_generated_closures(&mut probe.body, &root);
 
     let facts = BytecodeCompiler::infer_reference_model(&program).3;
+    if is_untyped_single {
+        let shape_runtime::type_system::Type::Function { params, .. } = facts
+            .function_signature("probe")
+            .expect("inference records the probe signature")
+        else {
+            unreachable!("function_signature only returns function types")
+        };
+        assert_eq!(
+            params.first().and_then(|param| param.to_annotation()),
+            Some(TypeAnnotation::Basic("int".to_string())),
+            "the variable-declaration callsite must prove the untyped parameter is int"
+        );
+    }
     compiler.resolved_expr_types = facts.expression_types().clone();
     compiler.inference_facts = facts;
     compiler
