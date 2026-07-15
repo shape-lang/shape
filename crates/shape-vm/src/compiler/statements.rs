@@ -2180,11 +2180,12 @@ impl BytecodeCompiler {
             ImportItems::Named(specs) => {
                 for spec in specs {
                     if spec.is_annotation {
-                        self.register_annotation_import_bindings(std::iter::once((
-                            spec.alias.clone().unwrap_or_else(|| spec.name.clone()),
-                            spec.name.clone(),
-                            import_stmt.from.clone(),
-                        )))?;
+                        let local_name = spec.alias.clone().unwrap_or_else(|| spec.name.clone());
+                        self.consume_staged_annotation_import_binding(
+                            &local_name,
+                            &spec.name,
+                            &import_stmt.from,
+                        )?;
                         continue;
                     }
                     let local_name = spec.alias.as_ref().unwrap_or(&spec.name);
@@ -2237,13 +2238,12 @@ impl BytecodeCompiler {
     ///
     /// For named imports (`from std::core::file use { read_text }`), checks each function
     /// individually. For namespace imports (`use std::core::http`), checks the whole module.
-    fn authorize_import_permissions(
+    pub(super) fn authorize_import_permissions(
         &self,
         import_stmt: &shape_ast::ast::ImportStmt,
         pset: &shape_abi_v1::PermissionSet,
     ) -> Result<()> {
         use shape_ast::ast::ImportItems;
-        use shape_runtime::stdlib::capability_tags;
 
         // Pass the full canonical path (e.g. "std::core::file") to capability tags.
         let module_name = &import_stmt.from as &str;
@@ -2251,45 +2251,64 @@ impl BytecodeCompiler {
         match &import_stmt.items {
             ImportItems::Named(specs) => {
                 for spec in specs {
-                    let required = capability_tags::required_permissions(module_name, &spec.name);
-                    if !required.is_empty() && !required.is_subset(pset) {
-                        let missing = required.difference(pset);
-                        let missing_names: Vec<&str> = missing.iter().map(|p| p.name()).collect();
-                        return Err(ShapeError::SemanticError {
-                            message: format!(
-                                "Permission denied: {module_name}::{} requires {} capability, \
-                                 but the active permission set does not include it. \
-                                 Add the permission to [permissions] in shape.toml or use a less \
-                                 restrictive preset.",
-                                spec.name,
-                                missing_names.join(", "),
-                            ),
-                            location: None,
-                        });
-                    }
+                    self.authorize_import_symbol_permissions(module_name, &spec.name, pset)?;
                 }
             }
             ImportItems::Namespace { .. } => {
-                // For namespace imports, check the entire module's permission envelope.
-                // If the module requires any permissions not granted, deny the import.
-                let required = capability_tags::module_permissions(module_name);
-                if !required.is_empty() && !required.is_subset(pset) {
-                    let missing = required.difference(pset);
-                    let missing_names: Vec<&str> = missing.iter().map(|p| p.name()).collect();
-                    return Err(ShapeError::SemanticError {
-                        message: format!(
-                            "Permission denied: module '{module_name}' requires {} capabilities, \
-                             but the active permission set does not include them. \
-                             Add the permissions to [permissions] in shape.toml or use a less \
-                             restrictive preset.",
-                            missing_names.join(", "),
-                        ),
-                        location: None,
-                    });
-                }
+                self.authorize_import_module_permissions(module_name, pset)?;
             }
         }
         Ok(())
+    }
+
+    pub(super) fn authorize_import_symbol_permissions(
+        &self,
+        module_name: &str,
+        symbol_name: &str,
+        pset: &shape_abi_v1::PermissionSet,
+    ) -> Result<()> {
+        let required =
+            shape_runtime::stdlib::capability_tags::required_permissions(module_name, symbol_name);
+        if required.is_empty() || required.is_subset(pset) {
+            return Ok(());
+        }
+
+        let missing = required.difference(pset);
+        let missing_names: Vec<&str> = missing.iter().map(|permission| permission.name()).collect();
+        Err(ShapeError::SemanticError {
+            message: format!(
+                "Permission denied: {module_name}::{symbol_name} requires {} capability, \
+                 but the active permission set does not include it. \
+                 Add the permission to [permissions] in shape.toml or use a less \
+                 restrictive preset.",
+                missing_names.join(", "),
+            ),
+            location: None,
+        })
+    }
+
+    pub(super) fn authorize_import_module_permissions(
+        &self,
+        module_name: &str,
+        pset: &shape_abi_v1::PermissionSet,
+    ) -> Result<()> {
+        let required = shape_runtime::stdlib::capability_tags::module_permissions(module_name);
+        if required.is_empty() || required.is_subset(pset) {
+            return Ok(());
+        }
+
+        let missing = required.difference(pset);
+        let missing_names: Vec<&str> = missing.iter().map(|permission| permission.name()).collect();
+        Err(ShapeError::SemanticError {
+            message: format!(
+                "Permission denied: module '{module_name}' requires {} capabilities, \
+                 but the active permission set does not include them. \
+                 Add the permissions to [permissions] in shape.toml or use a less \
+                 restrictive preset.",
+                missing_names.join(", "),
+            ),
+            location: None,
+        })
     }
 
     /// Record already-authorized import capabilities on the current blob.
@@ -2330,6 +2349,54 @@ impl BytecodeCompiler {
 
         let node = graph.node(module_id);
         let resolved_imports = node.resolved_imports.clone();
+
+        // Graph imports bypass the source import items in pass 2. Preflight
+        // every resolved row before publishing runtime bindings, then record
+        // the already-authorized capability set once on the active blob.
+        if let Some(pset) = self.permission_set.clone() {
+            for resolved in &resolved_imports {
+                match resolved {
+                    ResolvedImport::Namespace { canonical_path, .. } => {
+                        self.authorize_import_module_permissions(canonical_path, &pset)?;
+                    }
+                    ResolvedImport::Named {
+                        canonical_path,
+                        symbols,
+                        ..
+                    } => {
+                        for symbol in symbols {
+                            self.authorize_import_symbol_permissions(
+                                canonical_path,
+                                &symbol.original_name,
+                                &pset,
+                            )?;
+                        }
+                    }
+                }
+            }
+            for resolved in &resolved_imports {
+                match resolved {
+                    ResolvedImport::Namespace { canonical_path, .. } => {
+                        if let Some(ref mut blob) = self.current_blob_builder {
+                            let required =
+                                shape_runtime::stdlib::capability_tags::module_permissions(
+                                    canonical_path,
+                                );
+                            blob.record_permissions(&required);
+                        }
+                    }
+                    ResolvedImport::Named {
+                        canonical_path,
+                        symbols,
+                        ..
+                    } => {
+                        for symbol in symbols {
+                            self.record_blob_permissions(canonical_path, &symbol.original_name);
+                        }
+                    }
+                }
+            }
+        }
 
         for ri in &resolved_imports {
             match ri {
@@ -2397,8 +2464,14 @@ impl BytecodeCompiler {
 
                     // 3. Register namespace
                     self.module_namespace_bindings.insert(local_name.clone());
+                    // The scoped early snapshot is the semantic authority.
+                    // A displaced synthetic/prelude row may still occur later
+                    // in the resolved vector, but it cannot overwrite the
+                    // explicit source decision or borrow another module's
+                    // dependency-phase namespace.
                     self.graph_namespace_map
-                        .insert(local_name.clone(), canonical_path.clone());
+                        .entry(local_name.clone())
+                        .or_insert_with(|| canonical_path.clone());
 
                     // Namespace imports grant qualified annotation access
                     // (`@local::ann`) through `graph_namespace_map`; they do
@@ -2424,7 +2497,9 @@ impl BytecodeCompiler {
                             self.module_scope_sources
                                 .entry(canonical_path.clone())
                                 .or_insert_with(|| canonical_path.clone());
-                            // Vacant-only: explicit imports win over prelude
+                            // Vacant-only consumes the scoped early snapshot:
+                            // explicit/local decisions win over any later
+                            // synthetic row, independent of vector order.
                             self.imported_annotations
                                 .entry(sym.local_name.clone())
                                 .or_insert_with(|| ImportedAnnotationSymbol {

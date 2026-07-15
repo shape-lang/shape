@@ -3055,10 +3055,11 @@ impl BytecodeCompiler {
 
         // Root graph imports are stripped before the standard compiler driver,
         // but imported annotation handlers must resolve before declaration
-        // discovery. Install only the graph's semantic annotation bindings
-        // here; the full graph registrar still runs later inside `__main__`,
-        // where namespace alias bytecode belongs.
-        self.pre_register_root_graph_annotation_imports(root_program, &graph)?;
+        // discovery. Validate the root's complete semantic view now without
+        // publishing it: dependency compilation below gets its own scoped view,
+        // and this root snapshot is restored immediately before root discovery.
+        let root_annotation_semantics =
+            self.stage_graph_annotation_imports_for_module(root_program, graph.root_id(), &graph)?;
 
         // ADR-009 §4.1 (A1 review round 1, findings 1+2): the semantic-freeze
         // barrier is per COMPILATION UNIT — and on this pipeline the unit is
@@ -3139,7 +3140,10 @@ impl BytecodeCompiler {
             let dep_node = graph.node(dep_id);
             match dep_node.source_kind {
                 ModuleSourceKind::NativeModule => {
-                    self.register_graph_imports_for_module(dep_id, &graph)?;
+                    let saved_semantics = self.annotation_import_semantic_snapshot();
+                    let registration = self.register_graph_imports_for_module(dep_id, &graph);
+                    self.restore_annotation_import_semantics(saved_semantics);
+                    registration?;
                 }
                 ModuleSourceKind::ShapeSource | ModuleSourceKind::Hybrid => {
                     self.compile_module_from_graph(dep_id, &graph)?;
@@ -3174,6 +3178,7 @@ impl BytecodeCompiler {
             .retain(|item| !matches!(item, shape_ast::ast::Item::Import(..)));
 
         // Compile the stripped root program using the standard two-pass pipeline
+        self.restore_annotation_import_semantics(root_annotation_semantics);
         self.compile(&stripped_program)
     }
 
@@ -3203,6 +3208,11 @@ impl BytecodeCompiler {
         }
 
         self.module_scope_stack.push(module_path.clone());
+
+        let saved_annotation_semantics = self.annotation_import_semantic_snapshot();
+        let module_annotation_semantics =
+            self.stage_graph_annotation_imports_for_module(&ast, module_id, graph)?;
+        self.restore_annotation_import_semantics(module_annotation_semantics);
 
         // U4-1: per-module span-table for the engine-served field-read consult.
         //
@@ -3305,6 +3315,7 @@ impl BytecodeCompiler {
 
         self.module_scope_stack.pop();
         self.allow_internal_builtins = prev_allow;
+        self.restore_annotation_import_semantics(saved_annotation_semantics);
         Ok(())
     }
 
