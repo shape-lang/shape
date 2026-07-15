@@ -154,6 +154,12 @@ pub struct ModuleGraph {
     topo_order: Vec<ModuleId>,
     /// The root module (entry point / user script).
     root_id: ModuleId,
+    /// Modules whose source was supplied by the embedded-stdlib resolver.
+    ///
+    /// This is construction provenance, not a canonical-path convention:
+    /// public/manual graph construction leaves the set empty, so spelling a
+    /// user module `std::...` never grants bootstrap authority.
+    stdlib_bootstrap_modules: HashSet<ModuleId>,
 }
 
 impl ModuleGraph {
@@ -172,6 +178,7 @@ impl ModuleGraph {
             path_to_id,
             topo_order,
             root_id,
+            stdlib_bootstrap_modules: HashSet::new(),
         }
     }
 
@@ -199,6 +206,13 @@ impl ModuleGraph {
     /// The root module id.
     pub fn root_id(&self) -> ModuleId {
         self.root_id
+    }
+
+    /// Whether graph construction proved this module came from the embedded
+    /// stdlib resolver. Compilation uses this narrow typed fact to suppress
+    /// bootstrap-only capability restamping without trusting path spelling.
+    pub(crate) fn is_stdlib_bootstrap(&self, id: ModuleId) -> bool {
+        self.stdlib_bootstrap_modules.contains(&id)
     }
 
     /// All nodes in the graph.
@@ -326,6 +340,8 @@ pub struct GraphBuilder {
     visiting: HashSet<String>,
     /// Tracks modules that have been fully processed.
     visited: HashSet<String>,
+    /// Module identities supplied by the embedded-stdlib resolver.
+    stdlib_bootstrap_modules: HashSet<ModuleId>,
 }
 
 impl GraphBuilder {
@@ -336,6 +352,7 @@ impl GraphBuilder {
             path_to_id: HashMap::new(),
             visiting: HashSet::new(),
             visited: HashSet::new(),
+            stdlib_bootstrap_modules: HashSet::new(),
         }
     }
 
@@ -424,7 +441,13 @@ impl GraphBuilder {
     /// Finalize into a `ModuleGraph`.
     pub fn build(self, root_id: ModuleId) -> ModuleGraph {
         let topo_order = self.compute_topo_order(root_id);
-        ModuleGraph::new(self.nodes, self.path_to_id, topo_order, root_id)
+        ModuleGraph {
+            nodes: self.nodes,
+            path_to_id: self.path_to_id,
+            topo_order,
+            root_id,
+            stdlib_bootstrap_modules: self.stdlib_bootstrap_modules,
+        }
     }
 }
 
@@ -601,11 +624,18 @@ fn build_module_graph_with_prelude_structure(
     structured_prelude: &[PreludeImport],
 ) -> Result<ModuleGraph, GraphBuildError> {
     let mut builder = GraphBuilder::new();
+    let embedded_stdlib_paths = loader
+        .embedded_stdlib_module_paths()
+        .into_iter()
+        .collect::<HashSet<_>>();
 
     // Step 1: Pre-register native extension modules.
     // These have no source artifact in the loader; they are Rust-backed.
     for ext in extensions {
         let ext_id = builder.get_or_create_node(&ext.name);
+        if embedded_stdlib_paths.contains(&ext.name) {
+            builder.stdlib_bootstrap_modules.insert(ext_id);
+        }
         let node = &mut builder.nodes[ext_id.0 as usize];
         node.source_kind = ModuleSourceKind::NativeModule;
         node.interface = build_native_interface(ext);
@@ -870,6 +900,9 @@ fn visit_module(
                     })?;
 
                 let dep_id = builder.get_or_create_node(dep_path);
+                if kind_hint == ModuleSourceKindHint::EmbeddedStdlib {
+                    builder.stdlib_bootstrap_modules.insert(dep_id);
+                }
                 let node = &mut builder.nodes[dep_id.0 as usize];
 
                 // Check if this is also a native extension (Hybrid)

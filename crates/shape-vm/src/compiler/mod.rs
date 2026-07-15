@@ -88,6 +88,7 @@ mod functions_foreign;
 mod helpers;
 mod helpers_binding;
 mod helpers_reference;
+mod import_permissions;
 pub(crate) mod literal_widen;
 mod literals;
 mod loops;
@@ -1728,6 +1729,8 @@ pub struct BytecodeCompiler {
     ///
     /// `None` means no checking (backwards-compatible default).
     pub(crate) permission_set: Option<shape_abi_v1::PermissionSet>,
+    /// Typed ownership for graph-module import authorization and carriers.
+    graph_permission_state: import_permissions::GraphPermissionState,
 
     // -- Content-addressed blob tracking --
     /// Active blob builder (set while compiling a function body).

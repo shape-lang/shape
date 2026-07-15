@@ -26,52 +26,9 @@ impl BytecodeCompiler {
         let node = graph.node(module_id);
         let resolved_imports = node.resolved_imports.clone();
 
-        // Preserve the existing graph permission behavior: pure authorization
-        // precedes publication, and metadata records only when a blob is active.
-        if let Some(pset) = self.permission_set.clone() {
-            for resolved in &resolved_imports {
-                match resolved {
-                    ResolvedImport::Namespace { canonical_path, .. } => {
-                        self.authorize_import_module_permissions(canonical_path, &pset)?;
-                    }
-                    ResolvedImport::Named {
-                        canonical_path,
-                        symbols,
-                        ..
-                    } => {
-                        for symbol in symbols {
-                            self.authorize_import_symbol_permissions(
-                                canonical_path,
-                                &symbol.original_name,
-                                &pset,
-                            )?;
-                        }
-                    }
-                }
-            }
-            for resolved in &resolved_imports {
-                match resolved {
-                    ResolvedImport::Namespace { canonical_path, .. } => {
-                        if let Some(blob) = self.current_blob_builder.as_mut() {
-                            let required =
-                                shape_runtime::stdlib::capability_tags::module_permissions(
-                                    canonical_path,
-                                );
-                            blob.record_permissions(&required);
-                        }
-                    }
-                    ResolvedImport::Named {
-                        canonical_path,
-                        symbols,
-                        ..
-                    } => {
-                        for symbol in symbols {
-                            self.record_blob_permissions(canonical_path, &symbol.original_name);
-                        }
-                    }
-                }
-            }
-        }
+        // The complete import set is authorized before any imported symbol,
+        // annotation, module binding, instruction, or carrier is published.
+        self.authorize_and_stage_graph_import_permissions(module_id, graph, &resolved_imports)?;
 
         for resolved in &resolved_imports {
             match resolved {

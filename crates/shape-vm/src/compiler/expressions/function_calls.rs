@@ -5910,17 +5910,11 @@ impl BytecodeCompiler {
         // sets). Only the real capability modules (`std::core::file` -> FsWrite,
         // `std::core::http` -> NetConnect, `std::core::env` -> Env, …) contribute.
         //
-        // Restricted to user-space main compilation (`module_scope_stack`
-        // empty) — the SAME restriction the w17 flag above carries for the SAME
-        // reason (see its comment): re-stamping permissions on stdlib
-        // dep-module-internal blobs during bootstrap changes their content
-        // hashes and desyncs the precomputed content-addressed blob graph
-        // (missing-dependency-blob link panic). @remote-transferred functions
-        // are user-space, so the writer blob (which calls `file::write_text`)
-        // is still stamped; only stdlib-internal blobs are left untouched.
-        if self.module_scope_stack.is_empty() {
-            self.record_blob_permissions(&canonical_module, method);
-        }
+        // Graph dependencies stamp the function that actually issues the call.
+        // Only a module whose graph identity carries embedded-stdlib resolver
+        // provenance receives the tightly scoped bootstrap exception; neither
+        // module nesting nor a user-chosen `std::...` path grants authority.
+        self.record_owned_capability_call_permissions(&canonical_module, method);
 
         // For native module exports, use a hidden binding so that the native
         // module object is not clobbered when a Shape artifact module with the

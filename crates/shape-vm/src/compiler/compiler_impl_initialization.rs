@@ -194,6 +194,7 @@ impl BytecodeCompiler {
             shared_module_bindings: HashSet::new(),
             shared_drop_locals: Vec::new(),
             permission_set: None,
+            graph_permission_state: Default::default(),
             current_blob_builder: None,
             completed_blobs: Vec::new(),
             blob_name_to_hash: HashMap::new(),
