@@ -4,12 +4,10 @@ use super::*;
 fn inherited_parameter_without_lineage_is_never_reminted_from_immediate_slot() {
     let mut compiler = BytecodeCompiler::new();
     let origin = compiler.generated_node_issuer.issue(
-        (3, 5),
-        vec![
-            "extend:Job".to_string(),
-            "method:read".to_string(),
-            "closure:1".to_string(),
-        ],
+        shape_ast::ast::GeneratedExpansionFingerprint::from_components(3, 5),
+        shape_ast::ast::GeneratedNodePath::decl_root("extend:Job")
+            .child("method:read")
+            .child("closure:1"),
         9,
         Span { start: 4, end: 8 },
         "Job.read".to_string(),

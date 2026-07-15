@@ -68,8 +68,8 @@ fn peek_applies_canonical_capture_surface_before_minting_artifacts() {
     );
 
     let origin = compiler.generated_node_issuer.issue(
-        (7, 9),
-        vec!["method:peek".to_string(), "closure:0".to_string()],
+        shape_ast::ast::GeneratedExpansionFingerprint::from_components(7, 9),
+        shape_ast::ast::GeneratedNodePath::decl_root("method:peek").child("closure:0"),
         0,
         shape_ast::ast::Span::DUMMY,
         "worker".to_string(),

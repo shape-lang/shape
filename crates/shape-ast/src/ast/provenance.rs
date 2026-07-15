@@ -1,91 +1,324 @@
-//! ADR-009 D2 / C1 (slice 2) — node-borne generated-code provenance.
+//! ADR-009 D2 / C1 — node-borne generated-code provenance.
 //!
-//! # Why the AST carries this at all
-//!
-//! The Wave-46 generated-closure gate (`compile_expr_closure`, shape-vm) has
-//! to answer ONE question: *was this closure node produced by a comptime
-//! expansion?* Until slice 2 it answered by a NAME predicate —
-//! `generated_symbols.contains_name(current_function.name)` — which is holed
-//! four ways: a monomorphized specialization compiles under a mangled name; a
-//! `replace body` expansion compiles under the USER's function name; a closure
-//! nested inside a generated closure compiles under `__closure_N`; and a
-//! hygienic body name is not the decl name. A name predicate cannot see any of
-//! those.
-//!
-//! [`GeneratedNodeOrigin`] moves the answer ONTO THE NODE. It is stamped by the
-//! compiler at the four points where comptime-produced AST enters the program
-//! (`extend`, `extend (items)`, the declaration-discovery pre-pass, and
-//! `replace body`), and from there it travels with the node through every
-//! transform: monomorphization substitution, `original_body_rewrite`, and the
-//! compiler-owned AST transforms. Substitution and the rewrite rebuild
-//! `Expr::FunctionExpr` field-by-field with no `..`, so dropping the stamp is a
-//! COMPILE ERROR, not a silent loss. Serde preserves the diagnostic fields but
-//! deliberately erases compiler-instance authority; an ingestion path must
-//! re-stamp a generated payload before it becomes trusted generated code.
-//!
-//! # What it is NOT
-//!
-//! It is not an identity of its own. The identity of a generated declaration
-//! lives in the compiler's `GeneratedSymbolTable` (`SymbolId`, content-derived
-//! from the `ExpansionIdentity`, private constructor). This struct is the
-//! stamped VIEW of that identity: [`GeneratedNodeOrigin::expansion_high`] /
-//! `expansion_low` are the 128 bits of the owning `ExpansionIdentity`
-//! fingerprint, and [`GeneratedNodeOrigin::node_path`] is the structured
-//! `GeneratedNodePath` rendering. shape-ast cannot depend on shape-vm, so the
-//! carrier lives here and the MINTING stays in
-//! `compiler/comptime_builtins/expansion_provenance.rs` — the one file allowed
-//! to construct it (`scripts/check-no-dynamic.sh`).
-//!
-//! [`GeneratedNodeOrigin::owner_display`] is PROSE — the owning declaration's
-//! name, used only to render the "in generated function 'f'" tail of a
-//! diagnostic. It is never compared, never a key, and never an identity
-//! (R1: no name identity on the live path).
+//! Generated closures carry a compiler-issued semantic identity: the owning
+//! expansion fingerprint plus a structural path inside that expansion. Source
+//! anchors and owner names remain presentation data for diagnostics. They must
+//! never change equality, hashing, or cache identity.
 
+use std::cmp::Ordering;
+use std::fmt;
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use super::span::Span;
 
-/// Provenance stamped on a generated AST node (today: `Expr::FunctionExpr`).
+/// The 128-bit content fingerprint of the expansion that issued a node.
 ///
-/// Constructed ONLY by the compiler's expansion-provenance module from a
-/// registered `GeneratedOrigin`. A `None` field on a node means "this node
-/// came from ordinary user source" — the absence is meaningful and total;
-/// there is no unknown/partial state.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct GeneratedNodeOrigin {
-    /// High/low 64 bits of the owning `ExpansionIdentity` fingerprint
-    /// (content-derived SHA-256 — never a counter, never name text).
+/// This is a typed carrier, not the authority to trust a node. Trust remains
+/// compilation-scoped and is checked by [`GeneratedNodeIssuer::recognizes`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct GeneratedExpansionFingerprint {
     expansion_high: i64,
     expansion_low: i64,
-    /// Structured path from the generated declaration root to this node,
-    /// e.g. `["extend:Job", "method:read", "closure:0"]`. Structural — the
-    /// closure segment is the deterministic traversal index, NOT a span.
-    node_path: Vec<String>,
-    /// The real source anchor (SourceMap file id + span) of the OWNING
-    /// declaration's application site. Never `Span::DUMMY`: the compiler
-    /// validates it into a `SourceAnchor` before minting.
+}
+
+impl GeneratedExpansionFingerprint {
+    #[must_use]
+    pub fn from_components(high: i64, low: i64) -> Self {
+        Self {
+            expansion_high: high,
+            expansion_low: low,
+        }
+    }
+
+    #[must_use]
+    pub fn components(self) -> (i64, i64) {
+        (self.expansion_high, self.expansion_low)
+    }
+}
+
+/// One opaque structural component of a generated-node path.
+///
+/// The compiler may extend its segment vocabulary without changing this type.
+/// Validation only enforces the path encoding contract: a component is
+/// non-empty, contains no control characters, and cannot contain `/` (the
+/// diagnostic rendering separator). Thus malformed display fragments cannot
+/// silently become semantic path components.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct GeneratedNodePathSegment(String);
+
+impl GeneratedNodePathSegment {
+    pub fn new(segment: impl Into<String>) -> Result<Self, InvalidGeneratedNodePathSegment> {
+        let segment = segment.into();
+        if segment.is_empty() {
+            return Err(InvalidGeneratedNodePathSegment::new(
+                segment,
+                "a structural segment cannot be empty",
+            ));
+        }
+        if segment.contains('/') {
+            return Err(InvalidGeneratedNodePathSegment::new(
+                segment,
+                "a structural segment cannot contain the path separator '/'",
+            ));
+        }
+        if segment.chars().any(char::is_control) {
+            return Err(InvalidGeneratedNodePathSegment::new(
+                segment,
+                "a structural segment cannot contain control characters",
+            ));
+        }
+        Ok(Self(segment))
+    }
+
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for GeneratedNodePathSegment {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+impl Serialize for GeneratedNodePathSegment {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for GeneratedNodePathSegment {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let segment = String::deserialize(deserializer)?;
+        Self::new(segment).map_err(serde::de::Error::custom)
+    }
+}
+
+/// Why a rendered path component could not become structural identity.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InvalidGeneratedNodePathSegment {
+    segment: String,
+    reason: &'static str,
+}
+
+impl InvalidGeneratedNodePathSegment {
+    fn new(segment: String, reason: &'static str) -> Self {
+        Self { segment, reason }
+    }
+}
+
+impl fmt::Display for InvalidGeneratedNodePathSegment {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "invalid generated-node path segment {:?}: {}",
+            self.segment, self.reason
+        )
+    }
+}
+
+impl std::error::Error for InvalidGeneratedNodePathSegment {}
+
+/// Typed structural path from a generated declaration to one generated node.
+///
+/// Empty paths remain representable because the carrier historically allowed
+/// them; the compiler's declaration mint decides where a root is required.
+/// The derived string slice is presentation compatibility only. Equality,
+/// ordering, and hashing use the opaque structural segments.
+#[derive(Debug, Clone)]
+pub struct GeneratedNodePath {
+    segments: Vec<GeneratedNodePathSegment>,
+    rendered_segments: Vec<String>,
+}
+
+impl GeneratedNodePath {
+    #[must_use]
+    pub fn empty() -> Self {
+        Self {
+            segments: Vec::new(),
+            rendered_segments: Vec::new(),
+        }
+    }
+
+    pub fn try_from_rendered_segments(
+        segments: impl IntoIterator<Item = impl Into<String>>,
+    ) -> Result<Self, InvalidGeneratedNodePathSegment> {
+        let segments = segments
+            .into_iter()
+            .map(|segment| GeneratedNodePathSegment::new(segment.into()))
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(Self::from_typed_segments(segments))
+    }
+
+    /// Start at a compiler-issued declaration root.
+    ///
+    /// Compiler callers supply checked identifier/type renderings. An invalid
+    /// renderer is an internal invariant violation and is rejected before any
+    /// origin can be issued.
+    #[must_use]
+    pub fn decl_root(segment: impl Into<String>) -> Self {
+        Self::try_from_rendered_segments([segment]).unwrap_or_else(|error| {
+            panic!("compiler produced an invalid generated declaration path: {error}")
+        })
+    }
+
+    /// Extend the path with one compiler-issued structural component.
+    #[must_use]
+    pub fn child(&self, segment: impl Into<String>) -> Self {
+        self.try_child(segment).unwrap_or_else(|error| {
+            panic!("compiler produced an invalid generated child path: {error}")
+        })
+    }
+
+    pub fn try_child(
+        &self,
+        segment: impl Into<String>,
+    ) -> Result<Self, InvalidGeneratedNodePathSegment> {
+        let mut segments = self.segments.clone();
+        segments.push(GeneratedNodePathSegment::new(segment)?);
+        Ok(Self::from_typed_segments(segments))
+    }
+
+    #[must_use]
+    pub fn parent(&self) -> Option<Self> {
+        (!self.segments.is_empty())
+            .then(|| Self::from_typed_segments(self.segments[..self.segments.len() - 1].to_vec()))
+    }
+
+    #[must_use]
+    pub fn starts_with(&self, prefix: &Self) -> bool {
+        self.segments.starts_with(&prefix.segments)
+    }
+
+    /// Opaque structural components used by semantic consumers.
+    #[must_use]
+    pub fn typed_segments(&self) -> &[GeneratedNodePathSegment] {
+        &self.segments
+    }
+
+    /// Rendered components for diagnostics and compatibility consumers only.
+    #[must_use]
+    pub fn segments(&self) -> &[String] {
+        &self.rendered_segments
+    }
+
+    #[must_use]
+    pub fn render(&self) -> String {
+        self.rendered_segments.join("/")
+    }
+
+    fn from_typed_segments(segments: Vec<GeneratedNodePathSegment>) -> Self {
+        let rendered_segments = segments
+            .iter()
+            .map(|segment| segment.as_str().to_string())
+            .collect();
+        Self {
+            segments,
+            rendered_segments,
+        }
+    }
+}
+
+impl PartialEq for GeneratedNodePath {
+    fn eq(&self, other: &Self) -> bool {
+        self.segments == other.segments
+    }
+}
+
+impl Eq for GeneratedNodePath {}
+
+impl PartialOrd for GeneratedNodePath {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for GeneratedNodePath {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.segments.cmp(&other.segments)
+    }
+}
+
+impl Hash for GeneratedNodePath {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.segments.hash(state);
+    }
+}
+
+impl Serialize for GeneratedNodePath {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        self.segments.serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for GeneratedNodePath {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let segments = Vec::<GeneratedNodePathSegment>::deserialize(deserializer)?;
+        Ok(Self::from_typed_segments(segments))
+    }
+}
+
+/// Complete semantic identity of one generated AST node.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct GeneratedNodeIdentity {
+    #[serde(flatten)]
+    expansion: GeneratedExpansionFingerprint,
+    node_path: GeneratedNodePath,
+}
+
+impl GeneratedNodeIdentity {
+    fn new(expansion: GeneratedExpansionFingerprint, node_path: GeneratedNodePath) -> Self {
+        Self {
+            expansion,
+            node_path,
+        }
+    }
+
+    #[must_use]
+    pub fn expansion(&self) -> GeneratedExpansionFingerprint {
+        self.expansion
+    }
+
+    #[must_use]
+    pub fn node_path(&self) -> &GeneratedNodePath {
+        &self.node_path
+    }
+}
+
+/// Provenance stamped on a generated AST node (today: `Expr::FunctionExpr`).
+///
+/// Semantic equality and hashing are exactly [`GeneratedNodeIdentity`]. The
+/// source anchor and owner display below are intentionally excluded.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GeneratedNodeOrigin {
+    #[serde(flatten)]
+    identity: GeneratedNodeIdentity,
     anchor_file_id: u16,
     anchor_span: Span,
-    /// Diagnostic prose ONLY: the owning declaration's name. Never compared,
-    /// never a key, never an identity.
     owner_display: String,
-    /// Compilation-instance authority. Deliberately omitted from serde: a
-    /// serialized provenance record is useful diagnostic data, but it is not
-    /// evidence that the current compiler issued the node.
+    /// Compilation-instance authority. Serialized provenance is diagnostic
+    /// data, never evidence that the current compiler issued the node.
     #[serde(skip)]
     authority: Option<Arc<()>>,
 }
 
-/// Compilation-scoped capability that issues and verifies generated-node
-/// provenance.
-///
-/// The constructor is public because shape-ast cannot know which consumer is
-/// the compiler. Trust comes from compiler-instance equality, not constructor
-/// visibility: an origin issued by another token (or reconstructed by serde)
-/// is rejected by [`GeneratedNodeIssuer::recognizes`].
+/// Compilation-scoped capability that issues and verifies generated origins.
 #[derive(Debug, Clone)]
 pub struct GeneratedNodeIssuer {
     authority: Arc<()>,
@@ -109,16 +342,14 @@ impl GeneratedNodeIssuer {
     #[must_use]
     pub fn issue(
         &self,
-        expansion_fingerprint: (i64, i64),
-        node_path: Vec<String>,
+        expansion: GeneratedExpansionFingerprint,
+        node_path: GeneratedNodePath,
         anchor_file_id: u16,
         anchor_span: Span,
         owner_display: String,
     ) -> GeneratedNodeOrigin {
         GeneratedNodeOrigin {
-            expansion_high: expansion_fingerprint.0,
-            expansion_low: expansion_fingerprint.1,
-            node_path,
+            identity: GeneratedNodeIdentity::new(expansion, node_path),
             anchor_file_id,
             anchor_span,
             owner_display,
@@ -126,7 +357,6 @@ impl GeneratedNodeIssuer {
         }
     }
 
-    /// True only for a stamp issued by this exact compiler instance.
     #[must_use]
     pub fn recognizes(&self, origin: &GeneratedNodeOrigin) -> bool {
         origin
@@ -138,12 +368,7 @@ impl GeneratedNodeIssuer {
 
 impl PartialEq for GeneratedNodeOrigin {
     fn eq(&self, other: &Self) -> bool {
-        self.expansion_high == other.expansion_high
-            && self.expansion_low == other.expansion_low
-            && self.node_path == other.node_path
-            && self.anchor_file_id == other.anchor_file_id
-            && self.anchor_span == other.anchor_span
-            && self.owner_display == other.owner_display
+        self.identity == other.identity
     }
 }
 
@@ -151,38 +376,45 @@ impl Eq for GeneratedNodeOrigin {}
 
 impl Hash for GeneratedNodeOrigin {
     fn hash<H: Hasher>(&self, state: &mut H) {
-        self.expansion_high.hash(state);
-        self.expansion_low.hash(state);
-        self.node_path.hash(state);
-        self.anchor_file_id.hash(state);
-        self.anchor_span.hash(state);
-        self.owner_display.hash(state);
+        self.identity.hash(state);
     }
 }
 
 impl GeneratedNodeOrigin {
-    /// Extend the node path by one structural segment, keeping the same
-    /// expansion identity, anchor and owner. Used when descending into a
-    /// nested closure (`closure:0/closure:1`).
+    /// Descend to one generated child while retaining expansion and diagnostic
+    /// provenance.
     #[must_use]
     pub fn child(&self, segment: impl Into<String>) -> Self {
-        let mut node_path = self.node_path.clone();
-        node_path.push(segment.into());
         Self {
-            node_path,
+            identity: GeneratedNodeIdentity::new(
+                self.identity.expansion(),
+                self.identity.node_path().child(segment),
+            ),
             ..self.clone()
         }
     }
 
-    /// The 128-bit expansion fingerprint this node was generated under.
+    #[must_use]
+    pub fn identity(&self) -> &GeneratedNodeIdentity {
+        &self.identity
+    }
+
+    /// Compatibility projection for presentation/query consumers. Semantic
+    /// consumers should retain [`Self::identity`] or [`Self::path`].
     #[must_use]
     pub fn expansion_fingerprint(&self) -> (i64, i64) {
-        (self.expansion_high, self.expansion_low)
+        self.identity.expansion().components()
     }
 
     #[must_use]
+    pub fn path(&self) -> &GeneratedNodePath {
+        self.identity.node_path()
+    }
+
+    /// Rendered path components for diagnostics and source mapping only.
+    #[must_use]
     pub fn node_path(&self) -> &[String] {
-        &self.node_path
+        self.path().segments()
     }
 
     #[must_use]
@@ -190,54 +422,16 @@ impl GeneratedNodeOrigin {
         (self.anchor_file_id, self.anchor_span)
     }
 
-    /// Diagnostic prose only (see the struct docs).
     #[must_use]
     pub fn owner_display(&self) -> &str {
         &self.owner_display
     }
 
-    /// Canonical `root/child/…` rendering of the node path, for diagnostics.
     #[must_use]
     pub fn render_path(&self) -> String {
-        self.node_path.join("/")
+        self.path().render()
     }
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn issue(issuer: &GeneratedNodeIssuer) -> GeneratedNodeOrigin {
-        issuer.issue(
-            (1, 2),
-            vec!["extend:Job".to_string(), "closure:0".to_string()],
-            3,
-            Span { start: 5, end: 9 },
-            "Job.read".to_string(),
-        )
-    }
-
-    #[test]
-    fn authority_is_compiler_instance_scoped() {
-        let compiler = GeneratedNodeIssuer::new();
-        let foreign = GeneratedNodeIssuer::new();
-        let origin = issue(&foreign);
-        assert!(foreign.recognizes(&origin));
-        assert!(!compiler.recognizes(&origin));
-    }
-
-    #[test]
-    fn serde_round_trip_preserves_data_but_erases_authority() {
-        let compiler = GeneratedNodeIssuer::new();
-        let issued = issue(&compiler);
-        assert!(compiler.recognizes(&issued));
-
-        let json = serde_json::to_string(&issued).unwrap();
-        let decoded: GeneratedNodeOrigin = serde_json::from_str(&json).unwrap();
-        assert_eq!(decoded, issued, "diagnostic provenance must round-trip");
-        assert!(
-            !compiler.recognizes(&decoded),
-            "serde must not confer compiler-issued authority"
-        );
-    }
-}
+mod tests;

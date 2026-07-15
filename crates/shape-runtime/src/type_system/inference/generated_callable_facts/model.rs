@@ -1,41 +1,43 @@
 //! Typed structural identities and inference-fact lattice values.
 
 use crate::type_system::Type;
-use shape_ast::ast::{FunctionDef, GeneratedNodeOrigin};
+use shape_ast::ast::{FunctionDef, GeneratedNodeIdentity, GeneratedNodeOrigin, GeneratedNodePath};
 
 use super::SemanticTypeCandidate;
 
 /// Stable structural identity of one generated AST node.
 ///
-/// `node_path` contains compiler-issued declaration/structure labels such as
+/// The shared AST identity contains compiler-issued declaration/structure
+/// labels such as
 /// `extend:Job`, `method:run`, and `closure:0`. Capture or binding source names,
 /// source-map file ids/spans, owner prose, and standalone file/global traversal
 /// ordinals are deliberately absent; none of those may become semantic
 /// identity. A path-local `closure:N` segment is a compiler-issued structural
 /// label, not a source-order key by itself.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct GeneratedNodeKey {
-    expansion_fingerprint: (i64, i64),
-    node_path: Vec<String>,
-}
+pub struct GeneratedNodeKey(GeneratedNodeIdentity);
 
 impl GeneratedNodeKey {
     #[must_use]
     pub fn from_origin(origin: &GeneratedNodeOrigin) -> Self {
-        Self {
-            expansion_fingerprint: origin.expansion_fingerprint(),
-            node_path: origin.node_path().to_vec(),
-        }
+        Self(origin.identity().clone())
     }
 
     #[must_use]
     pub fn expansion_fingerprint(&self) -> (i64, i64) {
-        self.expansion_fingerprint
+        self.0.expansion().components()
     }
 
+    /// Typed structural path retained by semantic consumers.
+    #[must_use]
+    pub fn path(&self) -> &GeneratedNodePath {
+        self.0.node_path()
+    }
+
+    /// Rendered path components for diagnostics/query compatibility only.
     #[must_use]
     pub fn node_path(&self) -> &[String] {
-        &self.node_path
+        self.path().segments()
     }
 }
 

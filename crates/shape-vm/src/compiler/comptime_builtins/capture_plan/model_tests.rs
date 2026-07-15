@@ -1,18 +1,17 @@
 use super::*;
 use crate::compiler::BytecodeCompiler;
 use shape_ast::ast::{
-    FunctionParam, GeneratedNodeIssuer, ObjectTypeField, TypeAnnotation, TypePath,
+    FunctionParam, GeneratedExpansionFingerprint, GeneratedNodeIssuer, GeneratedNodePath,
+    ObjectTypeField, TypeAnnotation, TypePath,
 };
 use shape_runtime::type_system::{Type, TypeConstraint, TypeVar, tyvar_to_annotation};
 
 fn origin(issuer: &GeneratedNodeIssuer, closure: u32, anchor_file_id: u16) -> GeneratedNodeOrigin {
     issuer.issue(
-        (11, 13),
-        vec![
-            "extend:Job".to_string(),
-            "method:read".to_string(),
-            format!("closure:{closure}"),
-        ],
+        GeneratedExpansionFingerprint::from_components(11, 13),
+        GeneratedNodePath::decl_root("extend:Job")
+            .child("method:read")
+            .child(format!("closure:{closure}")),
         anchor_file_id,
         Span { start: 4, end: 8 },
         "Job.read".to_string(),
@@ -73,8 +72,8 @@ fn module_lineage_uses_binding_file_not_generated_application_file() {
 fn malformed_generated_capture_path_is_a_structured_refusal() {
     let issuer = GeneratedNodeIssuer::new();
     let malformed = issuer.issue(
-        (11, 13),
-        vec!["method:read".to_string()],
+        GeneratedExpansionFingerprint::from_components(11, 13),
+        GeneratedNodePath::decl_root("method:read"),
         0,
         Span { start: 4, end: 8 },
         "Job.read".to_string(),

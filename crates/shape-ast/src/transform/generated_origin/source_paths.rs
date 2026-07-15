@@ -29,3 +29,6 @@ pub fn generated_closure_source_paths(
     walker.statements(&mut cloned_body);
     source_paths
 }
+
+#[cfg(test)]
+mod tests;

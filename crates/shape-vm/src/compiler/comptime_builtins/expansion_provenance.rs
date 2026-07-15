@@ -19,7 +19,8 @@
 //! identity is the recurring schema-id collision root).
 
 use sha2::{Digest, Sha256};
-use shape_ast::ast::Span;
+pub use shape_ast::ast::GeneratedNodePath;
+use shape_ast::ast::{GeneratedExpansionFingerprint, Span};
 use std::collections::HashMap;
 
 /// Rejection-matrix row 1 (ticket D1): a generated node without a compiler
@@ -518,42 +519,6 @@ impl HygienicSymbol {
     }
 }
 
-/// Structured path from a generated declaration's root to one generated
-/// node. Non-empty by construction: a path always starts at a declaration
-/// root segment.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct GeneratedNodePath {
-    segments: Vec<String>,
-}
-
-impl GeneratedNodePath {
-    /// Start a path at the generated declaration's root segment.
-    pub(crate) fn decl_root(segment: impl Into<String>) -> Self {
-        Self {
-            segments: vec![segment.into()],
-        }
-    }
-
-    /// Extend the path with a child node segment.
-    pub(crate) fn child(&self, segment: impl Into<String>) -> Self {
-        let mut segments = self.segments.clone();
-        segments.push(segment.into());
-        Self { segments }
-    }
-
-    pub fn segments(&self) -> &[String] {
-        &self.segments
-    }
-
-    /// Canonical `root/child/…` rendering for diagnostics (S4 row 7: the
-    /// generated-node note names the node path so a body error inside a
-    /// generated declaration is attributable without virtual documents,
-    /// which are ticket D2).
-    pub fn render(&self) -> String {
-        self.segments.join("/")
-    }
-}
-
 /// A REAL source location: a `Span` paired with the `SourceMap` file
 /// identity (`bytecode/core_types.rs`, u16 file ids) it indexes into. Both
 /// components are required — an anchorless generated node is structurally
@@ -625,8 +590,8 @@ impl GeneratedOrigin {
     ) -> shape_ast::ast::GeneratedNodeOrigin {
         let fingerprint = self.expansion.fingerprint();
         issuer.issue(
-            (fingerprint.high, fingerprint.low),
-            self.node_path.segments().to_vec(),
+            GeneratedExpansionFingerprint::from_components(fingerprint.high, fingerprint.low),
+            self.node_path.clone(),
             self.source_anchor.file_id(),
             self.source_anchor.span(),
             owner_display.to_string(),
@@ -643,8 +608,9 @@ impl GeneratedOrigin {
         owner_display: &str,
     ) -> shape_ast::ast::GeneratedNodeOrigin {
         shape_ast::ast::GeneratedNodeIssuer::new().issue(
-            (0x0BAD_F00D, 0x0DEF_ACED),
-            node_path.iter().map(|s| (*s).to_string()).collect(),
+            GeneratedExpansionFingerprint::from_components(0x0BAD_F00D, 0x0DEF_ACED),
+            GeneratedNodePath::try_from_rendered_segments(node_path.iter().copied())
+                .expect("test origin path must contain valid structural segments"),
             3,
             Span { start: 5, end: 9 },
             owner_display.to_string(),

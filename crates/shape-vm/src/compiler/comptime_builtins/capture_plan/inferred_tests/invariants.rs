@@ -80,8 +80,8 @@ fn stamped_program(origin: &shape_ast::ast::GeneratedNodeOrigin) -> shape_ast::a
 fn foreign_issuer_cannot_fabricate_generated_code_authority() {
     let foreign = shape_ast::ast::GeneratedNodeIssuer::new();
     let origin = foreign.issue(
-        (7, 9),
-        vec!["foreign".to_string()],
+        shape_ast::ast::GeneratedExpansionFingerprint::from_components(7, 9),
+        shape_ast::ast::GeneratedNodePath::decl_root("foreign"),
         0,
         shape_ast::ast::Span::DUMMY,
         "run".to_string(),
@@ -97,8 +97,8 @@ fn foreign_issuer_cannot_fabricate_generated_code_authority() {
 fn serde_round_trip_erases_current_compiler_authority() {
     let mut compiler = BytecodeCompiler::new();
     let origin = compiler.generated_node_issuer.issue(
-        (7, 9),
-        vec!["roundtrip".to_string()],
+        shape_ast::ast::GeneratedExpansionFingerprint::from_components(7, 9),
+        shape_ast::ast::GeneratedNodePath::decl_root("roundtrip"),
         0,
         shape_ast::ast::Span::DUMMY,
         "run".to_string(),

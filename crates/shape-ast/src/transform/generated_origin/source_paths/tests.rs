@@ -1,5 +1,7 @@
-use shape_ast::ast::{GeneratedNodeIssuer, Item, Statement};
-use shape_ast::transform::{generated_closure_source_paths, stamp_generated_closures};
+use crate::ast::{
+    GeneratedExpansionFingerprint, GeneratedNodeIssuer, GeneratedNodePath, Item, Statement,
+};
+use crate::transform::{generated_closure_source_paths, stamp_generated_closures};
 
 const SOURCE: &str = r#"
 fn generated() {
@@ -23,10 +25,11 @@ fn source_path_enumerator_matches_the_canonical_stamper() {
 
     let issuer = GeneratedNodeIssuer::new();
     let origin = issuer.issue(
-        (11, 29),
-        root,
+        GeneratedExpansionFingerprint::from_components(11, 29),
+        GeneratedNodePath::try_from_rendered_segments(root)
+            .expect("fixture root is a valid structural path"),
         0,
-        shape_ast::ast::Span::new(1, 2),
+        crate::ast::Span::new(1, 2),
         "Job.read".to_string(),
     );
     stamp_generated_closures(&mut body, &origin);
@@ -45,7 +48,7 @@ fn source_path_enumerator_matches_the_canonical_stamper() {
 }
 
 fn function_body(source: &str) -> Vec<Statement> {
-    shape_ast::parse_program(source)
+    crate::parse_program(source)
         .expect("fixture parses")
         .items
         .into_iter()
