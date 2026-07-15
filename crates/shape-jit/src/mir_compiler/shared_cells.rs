@@ -11,7 +11,6 @@ use std::sync::Arc;
 use cranelift::prelude::*;
 use shape_value::NativeKind;
 use shape_value::v2::closure_layout::{CaptureKind, ClosureLayout};
-use shape_value::v2::struct_layout::FieldKind;
 use shape_vm::bytecode::MirFunctionData;
 use shape_vm::mir::types::{Operand, Place, SlotId, StatementKind};
 use shape_vm::type_tracking::{BindingStorageClass, EscapeStatus};
@@ -54,7 +53,7 @@ pub(crate) enum SharedCellCarrierOrigin {
 pub(crate) fn classify_shared_capture_operand(
     operand: &Operand,
     shared_local_slots: &HashMap<SlotId, SharedLocalKindEvidence>,
-    shared_capture_slots: &HashMap<SlotId, FieldKind>,
+    shared_capture_slots: &HashMap<SlotId, NativeKind>,
 ) -> SharedCaptureOperandLowering {
     let slot = match operand {
         Operand::Move(Place::Local(slot))
@@ -211,8 +210,73 @@ impl<'a, 'b> MirToIR<'a, 'b> {
             .validated(slot)
     }
 
-    /// Allocate every validated scalar SharedCell before compiling the body.
-    /// All refusal checks run before the first allocation is emitted.
+    /// Read one projected value while preserving the cell's payload share.
+    ///
+    /// Scalar payloads retain the existing inline lock/CAS hot path. A
+    /// refcounted payload must mint a new typed share while the cell is locked,
+    /// because the cell continues to own its original share. The Ptr FFI reads
+    /// the immutable `SharedCell::kind()` companion and clones through the
+    /// canonical GC-aware kinded dispatch; it never treats payload bits as the
+    /// cell pointer or reconstructs ownership from `FieldKind::Ptr`.
+    pub(crate) fn emit_shared_payload_read(
+        &mut self,
+        cell_pointer: Value,
+        kind: NativeKind,
+    ) -> Value {
+        if kind.is_refcounted() {
+            let call = self
+                .builder
+                .ins()
+                .call(self.ffi.read_shared_cell_ptr, &[cell_pointer]);
+            let payload = self.builder.inst_results(call)[0];
+            return self.ensure_kind(payload, kind);
+        }
+
+        use shape_value::v2::closure_layout::SHARED_CELL_VALUE_OFFSET;
+        self.emit_shared_lock(cell_pointer);
+        let payload = self.builder.ins().load(
+            types::I64,
+            MemFlags::trusted(),
+            cell_pointer,
+            SHARED_CELL_VALUE_OFFSET,
+        );
+        self.emit_shared_unlock(cell_pointer);
+        self.ensure_kind(payload, kind)
+    }
+
+    /// Replace one projected value, transferring the incoming share to the cell.
+    ///
+    /// The refcounted Ptr FFI swaps under the cell lock and retires the previous
+    /// `(bits, kind)` through the canonical GC-aware kinded drop dispatch.
+    /// Scalar payloads keep the inline lock/store/unlock sequence.
+    pub(crate) fn emit_shared_payload_write(
+        &mut self,
+        cell_pointer: Value,
+        value: Value,
+        kind: NativeKind,
+    ) {
+        let typed_value = self.ensure_kind(value, kind);
+        let bits = self.coerce_value_to_i64_bits(typed_value);
+        if kind.is_refcounted() {
+            self.builder
+                .ins()
+                .call(self.ffi.write_shared_cell_ptr, &[cell_pointer, bits]);
+            return;
+        }
+
+        use shape_value::v2::closure_layout::SHARED_CELL_VALUE_OFFSET;
+        self.emit_shared_lock(cell_pointer);
+        self.builder.ins().store(
+            MemFlags::trusted(),
+            bits,
+            cell_pointer,
+            SHARED_CELL_VALUE_OFFSET,
+        );
+        self.emit_shared_unlock(cell_pointer);
+    }
+
+    /// Allocate every validated SharedCell before compiling the body.
+    /// All kind-source checks run before the first allocation is emitted.
     pub(crate) fn initialize_shared_local_slots(&mut self) -> Result<(), String> {
         let mut slots = self
             .shared_local_slots
@@ -221,25 +285,19 @@ impl<'a, 'b> MirToIR<'a, 'b> {
             .collect::<Result<Vec<_>, _>>()?;
         slots.sort_by_key(|(slot, _)| slot.0);
 
-        for (slot, kind) in &slots {
-            if kind.is_refcounted() {
-                return Err(format!(
-                    "SURFACE (ADR-006 §2.7.8 / Q10): SharedCell for local slot {slot} has a \
-                     REFCOUNTED payload kind ({kind:?}). The JIT shared-cell store lowering \
-                     writes raw bits without retaining the new value or releasing the previous \
-                     value. Whole-function JIT bail before cell allocation."
-                ));
-            }
-        }
-
         for (slot, kind) in slots {
             let Some(&variable) = self.locals.get(&slot) else {
                 continue;
             };
-            let initial = self
-                .builder
-                .ins()
-                .iconst(types::I64, crate::ffi::value_ffi::TAG_NULL as i64);
+            // Zero is the canonical empty payload for every typed carrier:
+            // `SharedCell::Drop` and the canonical
+            // `clone_with_kind`/`drop_with_kind` helpers return before dispatch
+            // when bits == 0. In particular, this is a valid empty value for
+            // every `NativeKind::is_refcounted()` arm, unlike the old non-zero
+            // TAG_NULL bit pattern (which would be an invalid raw pointer under
+            // a refcounted kind). The first source assignment transfers the
+            // real payload share into the cell.
+            let initial = self.builder.ins().iconst(types::I64, 0);
             let kind_code = crate::ffi::stack_kind_code::encode(kind);
             let kind_value = self.builder.ins().iconst(types::I8, kind_code as i64);
             let call = self
@@ -300,7 +358,7 @@ mod tests {
         let slot = SlotId(9);
         let operand = Operand::Copy(Place::Local(slot));
         let shared_local_slots = HashMap::new();
-        let shared_capture_slots = HashMap::from([(slot, FieldKind::I64)]);
+        let shared_capture_slots = HashMap::from([(slot, NativeKind::Int64)]);
 
         let lowering =
             classify_shared_capture_operand(&operand, &shared_local_slots, &shared_capture_slots);

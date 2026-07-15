@@ -66,3 +66,13 @@ fn c1_generated_nested_share_is_native() {
 fn c1_ordinary_inferred_nested_share_is_native() {
     assert_closure_fixture_reaches_native_jit("c1-inferred-nested-share.shape", "42\n");
 }
+
+#[test]
+fn c1_generated_nested_refcounted_share_is_native() {
+    assert_closure_fixture_reaches_native_jit("c1-generated-nested-share-string.shape", "abb\n");
+}
+
+#[test]
+fn c1_ordinary_inferred_nested_refcounted_share_is_native() {
+    assert_closure_fixture_reaches_native_jit("c1-inferred-nested-share-string.shape", "abb\n");
+}

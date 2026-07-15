@@ -1,0 +1,15 @@
+// ADR-009 C1 / #53: ordinary inferred nested capture preserves one String cell.
+fn label() -> string {
+  var text = "a"
+  let outer = || {
+    let inner = |suffix: string| {
+      text = text + suffix
+      text
+    }
+    inner("bb")
+    text
+  }
+  outer()
+}
+
+print(label())

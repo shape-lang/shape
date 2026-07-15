@@ -1680,8 +1680,9 @@ pub unsafe fn drop_owned_mutable_capture(layout: &ClosureLayout, base: *mut u8, 
 /// `bits` must be a valid representation of `kind` per the construction-side
 /// contract (for heap kinds: result of `Arc::into_raw::<T>` for the matching
 /// `T`; for inline scalars: native bit pattern of the kind).
+#[doc(hidden)]
 #[inline]
-pub(crate) unsafe fn clone_with_kind(bits: u64, kind: NativeKind) {
+pub unsafe fn clone_with_kind(bits: u64, kind: NativeKind) {
     if bits == 0 {
         return;
     }
@@ -1719,8 +1720,9 @@ pub(crate) unsafe fn clone_with_kind(bits: u64, kind: NativeKind) {
 /// exactly one strong-count share that the caller is consuming with this
 /// release. Calling `drop_with_kind` twice on the same bits is a
 /// double-free for heap kinds.
+#[doc(hidden)]
 #[inline]
-pub(crate) unsafe fn drop_with_kind(bits: u64, kind: NativeKind) {
+pub unsafe fn drop_with_kind(bits: u64, kind: NativeKind) {
     if bits == 0 {
         return;
     }

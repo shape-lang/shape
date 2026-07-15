@@ -440,18 +440,12 @@ pub struct MirToIR<'a, 'b> {
     /// whose `capture_storage_kind(i) == Shared` is recorded here.
     ///
     /// Effects on the lowering pipeline:
-    /// - `read_place(Local(s))` emits the inline lock fast path (CAS
-    ///   state byte 0→1 with `Acquire` ordering; on failure, call
-    ///   `jit_shared_lock_contended`), then `load.i64 [cell_ptr,
-    ///   SHARED_CELL_VALUE_OFFSET]`, then inline unlock fast path
-    ///   (CAS 1→0 with `Release` ordering; on failure, call
-    ///   `jit_shared_unlock_contended`). Matches the interpreter's
-    ///   `op_load_shared_capture` handler semantics (take mutex, clone
-    ///   inner bits, drop guard).
-    /// - `write_place(Local(s), v)` emits the same lock fast path,
-    ///   then `store.i64 v, [cell_ptr, SHARED_CELL_VALUE_OFFSET]`,
-    ///   then the unlock fast path. Matches
-    ///   `op_store_shared_capture` (take mutex, write, drop guard).
+    /// - `read_place(Local(s))` uses the inline lock/load path for scalars.
+    ///   Refcounted payloads clone one typed share while the cell is locked,
+    ///   matching `op_load_shared_capture`.
+    /// - `write_place(Local(s), v)` uses the inline lock/store path for
+    ///   scalars. Refcounted replacements transfer the new typed share and
+    ///   retire the displaced one, matching `op_store_shared_capture`.
     /// - `null_place` / `release_old_value_if_heap` / `emit_drop` all
     ///   early-return for these slots: the Arc pointer bits must
     ///   survive for the entire frame so every read/write finds the
@@ -464,14 +458,14 @@ pub struct MirToIR<'a, 'b> {
     /// disjoint). Empty when the function being compiled is not a
     /// closure body, or has no Shared captures.
     ///
-    /// Wave C.2: like `owned_mutable_capture_slots`, the value carries
-    /// the inner `FieldKind` so the Cranelift load/store after the
-    /// inline `emit_shared_lock` dispatches to the correct native
-    /// width at `[cell_ptr + SHARED_CELL_VALUE_OFFSET]`. We keep the
-    /// inline lock/unlock — only the per-kind direct load/store is
-    /// per-FieldKind — to avoid double-locking through the
-    /// `read_shared_cell_<kind>` FFI on the JIT hot path.
-    pub(crate) shared_capture_slots: HashMap<SlotId, FieldKind>,
+    /// The value is the cell payload's exact `NativeKind`, copied from
+    /// `ClosureLayout::capture_native_kind`. `FieldKind::Ptr` alone cannot
+    /// distinguish `String`, v2 header carriers, or the typed-Arc families,
+    /// and that distinction is load-bearing for retain/release on a shared
+    /// payload read or replacement. Scalar payloads retain the inline CAS
+    /// path; refcounted payloads use the cell-owned kind through the typed
+    /// FFI path.
+    pub(crate) shared_capture_slots: HashMap<SlotId, NativeKind>,
 
     // ── Session 1 Commit 3: outer-scope Shared-cell slot side-table ─
     /// Local slots whose `BindingStorageClass` is `SharedCow` — i.e.
@@ -491,15 +485,13 @@ pub struct MirToIR<'a, 'b> {
     /// Effects on the lowering pipeline:
     /// - `initialize_shared_local_slots` (called once at the start of
     ///   `compile`) allocates a fresh `Arc<SharedCell>` per slot via
-    ///   `jit_alloc_shared_cell(NONE_BITS, kind_code)` and stores the pointer
+    ///   `jit_alloc_shared_cell(0, kind_code)` and stores the pointer
     ///   bits into the slot's Cranelift variable. The kind code comes from the
     ///   same validated evidence consumed by declaring-frame reads/writes.
-    /// - `read_place(Local(s))` emits the inline lock-gated
-    ///   `load.i64 [cell_ptr + SHARED_CELL_VALUE_OFFSET]` (same lowering
-    ///   as `shared_capture_slots` — see
-    ///   `emit_shared_lock`/`emit_shared_unlock`).
-    /// - `write_place(Local(s), v)` emits the matching lock-gated
-    ///   store.
+    /// - `read_place(Local(s))` uses the shared scalar fast path or clones a
+    ///   refcounted payload through its exact kind.
+    /// - `write_place(Local(s), v)` uses the scalar fast path or transfers a
+    ///   refcounted replacement while retiring the old typed share.
     /// - `emit_drop(Local(s))` calls `jit_arc_shared_release` to
     ///   consume the slot's strong share.
     /// - `compile_operand_for_shared_capture` emits a raw pointer read —
@@ -1903,10 +1895,10 @@ impl<'a, 'b> MirToIR<'a, 'b> {
             if !is_cell_capture {
                 continue;
             }
-            // Wave C.2: capture the cell's interior FieldKind alongside
-            // the slot id so `read_place`/`write_place` can pick the
-            // matching per-kind FFI helper instead of NaN-boxing through
-            // the legacy ValueWord-bits path.
+            // OwnedMutable cells dispatch by physical FieldKind. Shared cells
+            // additionally require the exact NativeKind: all refcounted
+            // payloads are physically Ptr, but their ownership operations are
+            // carrier-specific.
             let inner_kind = layout.capture_inner_kind(i);
             match capture_kind {
                 CaptureKind::OwnedMutable => {
@@ -1914,7 +1906,8 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                         .insert(param_slot, inner_kind);
                 }
                 CaptureKind::Shared => {
-                    self.shared_capture_slots.insert(param_slot, inner_kind);
+                    self.shared_capture_slots
+                        .insert(param_slot, layout.capture_native_kind(i));
                 }
                 CaptureKind::Immutable => unreachable!(),
             }

@@ -519,10 +519,11 @@ pub unsafe extern "C" fn jit_alloc_shared_cell(initial_bits: u64, kind_code: u8)
     // (`shape-vm/src/executor/variables/mod.rs`) — same producer, same
     // kind. It is never fabricated from `initial_bits`.
     //
-    // Kind-source gaps and currently unsupported refcounted JIT stores are
-    // rejected at codegen. The FFI still validates its byte because this is a
-    // nounwind boundary: malformed input must return an explicit null sentinel
-    // without allocating or taking payload ownership, never panic.
+    // Kind-source gaps are rejected at codegen. Refcounted reads and
+    // replacements consume this same cell-owned kind through the canonical
+    // KindedSlot ownership dispatch. The FFI still validates its byte because
+    // this is a nounwind boundary: malformed input must return an explicit null
+    // sentinel without allocating or taking payload ownership, never panic.
     use crate::ffi::stack_kind_code;
     use shape_value::v2::closure_layout::SharedCell;
     use std::sync::Arc;
@@ -943,22 +944,6 @@ pub unsafe extern "C" fn jit_write_shared_cell_bool(cell_ptr: i64, value: i32) {
     use shape_value::v2::closure_layout::SharedCell;
     unsafe {
         shape_value::v2::closure_raw::write_shared_bool(cell_ptr as *const SharedCell, value != 0)
-    };
-}
-
-// --- Shared: ptr (8-byte ValueWord-bits payload) -----------------------------
-
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn jit_read_shared_cell_ptr(cell_ptr: i64) -> i64 {
-    use shape_value::v2::closure_layout::SharedCell;
-    unsafe { shape_value::v2::closure_raw::read_shared_ptr(cell_ptr as *const SharedCell) as i64 }
-}
-
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn jit_write_shared_cell_ptr(cell_ptr: i64, value: i64) {
-    use shape_value::v2::closure_layout::SharedCell;
-    unsafe {
-        shape_value::v2::closure_raw::write_shared_ptr(cell_ptr as *const SharedCell, value as u64)
     };
 }
 

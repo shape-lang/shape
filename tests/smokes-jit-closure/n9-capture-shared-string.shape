@@ -1,6 +1,7 @@
 // N9 — Shared capture with a refcounted payload.
-// The current JIT cell-store path cannot retain the new value and release the
-// previous value, so codegen must cleanly refuse before allocating a cell.
+// The JIT must preserve the explicit SharedCell carrier, retain each projected
+// String share, release the displaced "a" share on replacement, and execute
+// both the declaring frame and closure body with zero interpreter fallback.
 fn answer() -> string {
   var text = "a"
   let append = || { text = text + "bb" }

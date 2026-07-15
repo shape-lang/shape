@@ -29,16 +29,12 @@
 //! one the closure body reads would produce a silent wrong answer with exit 0
 //! and no fallback line — see `crates/shape-jit/src/compiler/accessors.rs`).
 //!
-//! ## NOT covered here (measured, still deopting — separate gates)
+//! ## Coverage boundary
 //!
-//! - `var` (Shared) capture whose payload is a HEAP value (`var s = "a"`):
-//!   surfaces-and-stops at codegen (clean whole-function JIT bail, ADR-006
-//!   §2.7.8). The JIT's shared-cell store lowering writes raw bits with no
-//!   retain and no release-of-previous, so stamping a refcounted kind on the
-//!   cell would arm `SharedCell::drop` to retire a share the cell never owned.
-//!   The store path must be made refcount-correct first. N9 pins this as a
-//!   clean, exactly-once fallback rather than the pre-fix process abort.
-//!   Scalar `var` captures (N6-N8) ARE native — their `Drop` arm is a no-op.
+//! - Shared captures now cover scalar and refcounted payloads. The refcounted
+//!   path keeps the explicit `Arc<SharedCell>` carrier, clones projected values
+//!   through the cell-owned `NativeKind`, and retires displaced values on
+//!   replacement. N9 is the direct String proof.
 //! - Capture of a MODULE-level binding: rejected by the W39 F1 module-binding
 //!   function-body SURFACE (module bindings are not MIR places). This is the
 //!   class `f1`/`f2`/`f3` in the fallback matrix already pin.
@@ -103,65 +99,6 @@ fn assert_reaches_native_jit(fixture: &str, expected_stdout_contains: &str) {
         0,
         "{fixture}: VM mode must not emit [jit-fallback]; stderr={}",
         vm.stderr
-    );
-}
-
-/// Assert an intentionally unsupported Shared-cell payload surfaces at the
-/// JIT compilation boundary and executes once under the interpreter.
-///
-/// The exit-code assertion is load-bearing: before the typed allocator fix,
-/// this class reached a `todo!()` behind `extern "C"` and aborted with 134.
-fn assert_shared_payload_falls_back_cleanly(
-    fixture: &str,
-    expected_stdout_contains: &str,
-    expected_refusal: &str,
-) {
-    let vm = run_workspace_fixture("vm", "smokes-jit-closure", fixture);
-    let jit = run_workspace_fixture("jit", "smokes-jit-closure", fixture);
-
-    assert_eq!(
-        vm.exit_code,
-        Some(0),
-        "{fixture}: VM mode should exit 0; stderr={}",
-        vm.stderr
-    );
-    assert_eq!(
-        jit.exit_code,
-        Some(0),
-        "{fixture}: JIT mode must cleanly fall back (not abort); stderr={}",
-        jit.stderr
-    );
-    assert!(
-        vm.stdout.contains(expected_stdout_contains),
-        "{fixture}: VM stdout should contain `{expected_stdout_contains}`; stdout={}",
-        vm.stdout
-    );
-    assert_eq!(
-        jit.stdout, vm.stdout,
-        "{fixture}: JIT fall-through must preserve VM output; vm={:?} jit={:?} stderr={}",
-        vm.stdout, jit.stdout, jit.stderr
-    );
-    assert_eq!(
-        count_fallback_lines(&jit.stderr),
-        1,
-        "{fixture}: unsupported refcounted Shared payload must emit exactly one \
-         [jit-fallback] line; stderr={}",
-        jit.stderr
-    );
-    assert_eq!(
-        count_fallback_lines(&vm.stderr),
-        0,
-        "{fixture}: VM mode must not emit [jit-fallback]; stderr={}",
-        vm.stderr
-    );
-    let fallback = jit
-        .stderr
-        .lines()
-        .find(|line| line.starts_with("[jit-fallback]"))
-        .unwrap_or("");
-    assert!(
-        fallback.contains(expected_refusal),
-        "{fixture}: fallback must contain the exact SharedCell refusal; got={fallback}"
     );
 }
 
@@ -235,14 +172,10 @@ fn jit_fallback_absent_for_shared_float_capture() {
     assert_reaches_native_jit("n8-capture-shared-float.shape", "1.5");
 }
 
-/// N9 — a refcounted Shared payload is still unsupported, but it must refuse
-/// before emitting an allocation and fall through exactly once. This pins the
-/// nounwind-abort regression that motivated the typed allocator boundary.
+/// N9 — a refcounted Shared String payload executes natively. This proves
+/// read-retain, replacement-drop, outer observation through the same cell, and
+/// zero interpreter fallback as one direct-invocation surface.
 #[test]
-fn jit_refcounted_shared_string_capture_falls_back_cleanly() {
-    assert_shared_payload_falls_back_cleanly(
-        "n9-capture-shared-string.shape",
-        "abb",
-        "SURFACE (ADR-006 §2.7.8 / Q10): SharedCell for local slot _1 has a REFCOUNTED payload kind (String). The JIT shared-cell store lowering writes raw bits without retaining the new value or releasing the previous value. Whole-function JIT bail before cell allocation.",
-    );
+fn jit_fallback_absent_for_refcounted_shared_string_capture() {
+    assert_reaches_native_jit("n9-capture-shared-string.shape", "abb");
 }

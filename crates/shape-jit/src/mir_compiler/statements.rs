@@ -1127,9 +1127,10 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                     // declaring frame validates the ClosureLayout and inferred
                     // slot evidence before emitting any allocation, and every
                     // subsequent frame-side read/write consumes that same
-                    // NativeKind. Refcounted payload kinds refuse at codegen
-                    // until the cell store path retains the new value and
-                    // releases the previous one.
+                    // NativeKind. Refcounted payload reads clone through the
+                    // cell-owned kind and replacements transfer the new share
+                    // while retiring the old one; the closure slot itself
+                    // continues to own only an Arc<SharedCell> share.
                     //
                     // SAFETY: the operand produces a non-null
                     // `*const SharedCell` whose Arc strong count ≥ 1
