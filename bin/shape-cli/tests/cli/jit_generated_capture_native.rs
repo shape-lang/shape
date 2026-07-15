@@ -4,13 +4,34 @@
 //! executes the bytecode interpreter and can make VM/JIT values agree. These
 //! serialized subprocess proofs require exact stdout and zero fallback lines.
 
-use super::jit_test_support::{CapturedRun, count_fallback_lines, run_workspace_fixture};
+use super::jit_test_support::{
+    CapturedRun, count_fallback_lines, run_workspace_fixture, workspace_fixture_path,
+};
+
+fn assert_fixture_has_no_top_level_comptime(suite: &str, fixture: &str) {
+    let path = workspace_fixture_path(suite, fixture);
+    let source = std::fs::read_to_string(&path).unwrap_or_else(|error| {
+        panic!(
+            "{fixture}: failed to read native-JIT fixture {}: {error}",
+            path.display()
+        )
+    });
+    let program = shape_ast::parser::parse_program(&source)
+        .unwrap_or_else(|error| panic!("{fixture}: failed to parse native-JIT fixture: {error}"));
+
+    assert!(
+        !shape_vm::compiler::program_has_top_level_comptime(&program),
+        "{fixture}: top-level comptime silently excludes the fixture from native JIT"
+    );
+}
 
 fn run_shape(mode: &str, fixture: &str) -> CapturedRun {
     run_workspace_fixture(mode, "smokes-fallback", fixture)
 }
 
 fn assert_closure_fixture_reaches_native_jit(fixture: &str, expected_stdout: &str) {
+    assert_fixture_has_no_top_level_comptime("smokes-jit-closure", fixture);
+
     let vm = run_workspace_fixture("vm", "smokes-jit-closure", fixture);
     let jit = run_workspace_fixture("jit", "smokes-jit-closure", fixture);
 
@@ -110,6 +131,11 @@ fn c1_ordinary_inferred_nested_refcounted_share_is_native() {
 /// negative control, not a general capturing-closure result.
 #[test]
 fn adr009_c1_generated_extend_method_closure_jits_natively() {
+    assert_fixture_has_no_top_level_comptime(
+        "smokes-fallback",
+        "c1-generated-extend-capture-free.shape",
+    );
+
     let vm = run_shape("vm", "c1-generated-extend-capture-free.shape");
     let jit = run_shape("jit", "c1-generated-extend-capture-free.shape");
 
