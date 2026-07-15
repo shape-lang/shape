@@ -71,7 +71,7 @@ impl BytecodeCompiler {
     }
 
     /// Pass 2 consumes preparation evidence; it never installs or falls back.
-    pub(super) fn require_prepared_annotation(
+    pub(in crate::compiler::statements) fn require_prepared_annotation(
         &mut self,
         definition: &AnnotationDef,
     ) -> Result<()> {

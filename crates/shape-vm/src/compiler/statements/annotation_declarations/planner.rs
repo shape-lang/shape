@@ -3,7 +3,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use shape_ast::ast::{
-    AnnotationDef, AnnotationHandlerType, AnnotationTargetKind, FunctionParameter, Item, Spanned,
+    AnnotationDef, AnnotationHandlerType, AnnotationTargetKind, FunctionParameter, Item,
 };
 use shape_ast::error::{Result, ShapeError};
 

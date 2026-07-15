@@ -2,7 +2,6 @@ use shape_ast::ast::{AnnotationDef, ExportItem, Item, Program};
 use shape_ast::error::Result;
 
 use crate::compiler::BytecodeCompiler;
-use super::*;
 
 fn parse(source: &str) -> Program {
     shape_ast::parse_program(source).expect("annotation declaration fixture parses")

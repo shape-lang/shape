@@ -1,4 +1,4 @@
-use shape_ast::ast::Program;
+use shape_ast::ast::{Item, Program};
 
 use crate::compiler::BytecodeCompiler;
 
