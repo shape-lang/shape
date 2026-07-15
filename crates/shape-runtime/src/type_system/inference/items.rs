@@ -3862,14 +3862,30 @@ mod tests {
             .declared_type_parameters_for_callable(second)
             .unwrap();
         assert_ne!(first_vars, second_vars);
-        let (_, first_body_vars) = engine
+        let (first_type, first_body_vars) = engine
             .infer_function_with_declared_params(first, true)
             .unwrap();
-        let (_, second_body_vars) = engine
+        let first_scheme = engine
+            .make_function_scheme_with_params(first, first_type.clone(), &first_body_vars)
+            .unwrap();
+        engine
+            .republish_named_callable_scheme(first, first_scheme, &first_type)
+            .unwrap();
+        let (second_type, second_body_vars) = engine
             .infer_function_with_declared_params(second, true)
+            .unwrap();
+        let second_scheme = engine
+            .make_function_scheme_with_params(second, second_type.clone(), &second_body_vars)
+            .unwrap();
+        engine
+            .republish_named_callable_scheme(second, second_scheme, &second_type)
             .unwrap();
         assert_eq!(first_body_vars, first_vars);
         assert_eq!(second_body_vars, second_vars);
+        assert_eq!(
+            engine.env.lookup("duplicate").unwrap().quantified,
+            second_vars
+        );
     }
 
     #[test]
