@@ -359,9 +359,10 @@ pub annotation add_reader() {
   }
 }
 "#;
-    // This module is loaded after `support` and exports the same annotation
-    // spelling. A bare-name registration would replace the selected handler
-    // and make the `read` definition disappear.
+    // This module is loaded before `support` and exports the same annotation
+    // spelling. A bare-name, first-wins registration would retain this decoy
+    // even though root import resolution selects `support::add_reader`, making
+    // the `read` definition disappear.
     let decoy = r#"
 pub annotation add_reader() {
   targets: [type]
@@ -372,8 +373,8 @@ pub annotation add_reader() {
 pub fn helper() { 0 }
 "#;
     let source = r#"
-from ./support use { @add_reader }
 from ./decoy use { helper }
+from ./support use { @add_reader }
 @add_reader()
 type Job { id: int }
 let job = Job { id: 1 }
