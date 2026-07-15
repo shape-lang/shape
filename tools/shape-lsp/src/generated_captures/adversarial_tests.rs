@@ -277,6 +277,7 @@ fn capture_not_capture_reuses_the_session_for_generated_definition() {
 fn imported_annotation_registration_survives_capture_fallthrough() {
     let temp = tempfile::tempdir().expect("temporary module workspace");
     let support_path = temp.path().join("support.shape");
+    let decoy_path = temp.path().join("decoy.shape");
     let main_path = temp.path().join("main.shape");
     let support = r#"
 pub annotation add_reader() {
@@ -286,14 +287,28 @@ pub annotation add_reader() {
   }
 }
 "#;
+    // This module is loaded after `support` and exports the same annotation
+    // spelling. A bare-name registration would replace the selected handler
+    // and make the `read` definition disappear.
+    let decoy = r#"
+pub annotation add_reader() {
+  targets: [type]
+  comptime post(target, ctx) {
+    extend target { method decoy() -> int { 0 } }
+  }
+}
+pub fn helper() { 0 }
+"#;
     let source = r#"
 from ./support use { @add_reader }
+from ./decoy use { helper }
 @add_reader()
 type Job { id: int }
 let job = Job { id: 1 }
 job.read()
 "#;
     std::fs::write(&support_path, support).expect("write imported annotation module");
+    std::fs::write(&decoy_path, decoy).expect("write same-named decoy annotation module");
     std::fs::write(&main_path, source).expect("write importing source");
     let cache = crate::module_cache::ModuleCache::new();
     let uri = Uri::from_file_path(&main_path).expect("file URI");
@@ -311,7 +326,7 @@ job.read()
 
     assert!(
         definition.is_some(),
-        "imported generated method remains visible"
+        "the explicitly imported annotation generates its method without aliasing the same-named decoy"
     );
     assert_eq!(
         crate::generated_symbols::generated_capture_compile_count(),
@@ -324,6 +339,7 @@ job.read()
 fn import_gated_session_is_unavailable_not_an_ordinary_fallthrough() {
     let source = "from support use { helper }\n@derive()\ntype Job { id: int }";
     let program = parse_program(source).expect("fixture parses");
+    crate::generated_symbols::reset_generated_capture_compile_count();
     let session = GeneratedQuerySession::new(&program, source, CaptureQueryContext::unavailable());
     let uri: Uri = "file:///import-gated.shape".parse().unwrap();
     let offset = source.find("Job").unwrap();
@@ -332,6 +348,11 @@ fn import_gated_session_is_unavailable_not_an_ordinary_fallthrough() {
         super::generated_capture_definition(&program, source, offset, &uri, &session),
         GeneratedCaptureLookup::Unavailable,
     ));
+    assert_eq!(
+        crate::generated_symbols::generated_capture_compile_count(),
+        0,
+        "missing import context must refuse before compiling",
+    );
 }
 
 fn offset_position(text: &str, offset: usize) -> Position {

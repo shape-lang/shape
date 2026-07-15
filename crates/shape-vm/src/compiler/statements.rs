@@ -2725,11 +2725,16 @@ impl BytecodeCompiler {
         Ok(())
     }
 
-    /// Pre-register items from an imported module (enums, struct types, functions).
+    /// Pre-register items from an imported module (enums, struct types, functions,
+    /// and annotations).
     ///
     /// Called by the LSP before compilation to make imported enums/types known
-    /// to the compiler's type tracker. Reuses `register_enum` as single source of truth.
-    pub fn register_imported_items(&mut self, items: &[Item]) {
+    /// to the compiler's type tracker. `module_path` is the same canonical import
+    /// scope recorded by `register_import_names`; annotations are compiled under
+    /// that qualified identity so two modules cannot alias through a bare name.
+    /// Reuses the ordinary module qualification and registration paths as the
+    /// single source of truth.
+    pub fn register_imported_items(&mut self, module_path: &str, items: &[Item]) {
         for item in items {
             match item {
                 Item::Export(export, _) => {
@@ -2744,6 +2749,23 @@ impl BytecodeCompiler {
                         ExportItem::Function(func_def) => {
                             // Register function so it's known during compilation
                             let _ = self.register_function(func_def);
+                        }
+                        ExportItem::Annotation(_) => {
+                            let Ok(Item::Export(qualified, _)) =
+                                self.qualify_module_item(item, module_path)
+                            else {
+                                continue;
+                            };
+                            let ExportItem::Annotation(annotation_def) = qualified.item else {
+                                continue;
+                            };
+                            if !self
+                                .program
+                                .compiled_annotations
+                                .contains_key(&annotation_def.name)
+                            {
+                                let _ = self.compile_annotation_def(&annotation_def);
+                            }
                         }
                         _ => {}
                     }

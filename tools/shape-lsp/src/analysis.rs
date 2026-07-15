@@ -157,7 +157,8 @@ pub fn validate_imports_and_register_items(
                             Some(text),
                         )
                     {
-                        compiler.register_imported_items(&module_info.program.items);
+                        compiler
+                            .register_imported_items(&import_stmt.from, &module_info.program.items);
                     } else {
                         diagnostics.push(make_span_diagnostic(
                             text,
