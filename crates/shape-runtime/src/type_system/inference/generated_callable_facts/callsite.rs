@@ -317,7 +317,10 @@ impl TypeInferenceEngine {
                         .apply_substitutions(&crate::type_system::Type::Variable(
                             instantiation.instantiated().clone(),
                         ));
-                if !type_is_semantically_resolved(&resolved, false) {
+                // A nested generic call may solve to an enclosing declared
+                // capability. It is exact relative to that specialization;
+                // raw holes and constrained variables remain unresolved.
+                if !type_is_semantically_resolved(&resolved, true) {
                     unavailable.push(format!(
                         "semantic argument '{}' remained unresolved after solving",
                         provenance.source_name()

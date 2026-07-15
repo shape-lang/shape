@@ -1,4 +1,5 @@
 use super::*;
+use crate::type_system::{TypeConstraint, tyvar_to_annotation};
 use shape_ast::ast::GeneratedNodeOrigin;
 use shape_ast::parser::parse_program;
 
@@ -127,4 +128,149 @@ fn generic_function_value_alias_never_fabricates_exact_callsite_evidence() {
         "a value alias must not impersonate the original generic declaration"
     );
     assert!(facts.semantic_callee_declaration("identity").is_some());
+}
+
+#[test]
+fn nested_same_spelled_argument_retains_the_exact_outer_capability() {
+    let program = parse_program(
+        r#"
+            fn inner<T>(value: T) -> T { value }
+            fn outer<T>(value: T) -> T { inner(value) }
+            let answer = outer(42)
+        "#,
+    )
+    .expect("nested same-spelled fixture parses");
+    let mut engine = TypeInferenceEngine::new();
+
+    let (facts, errors) = engine.infer_program_facts_best_effort(&program);
+
+    assert!(errors.is_empty(), "unexpected inference errors: {errors:?}");
+    let exact = |callee: &str| {
+        facts
+            .semantic_callsite_facts()
+            .iter()
+            .find_map(|(key, fact)| (key.callee() == callee).then_some(fact))
+            .and_then(SemanticCallSiteFact::exact)
+            .unwrap_or_else(|| panic!("{callee} call must publish exact evidence"))
+    };
+    let outer = exact("outer");
+    let inner = exact("inner");
+    assert!(
+        facts
+            .semantic_callee_declaration("outer")
+            .expect("outer declaration capability is published")
+            .matches_exact(outer)
+    );
+    assert!(
+        facts
+            .semantic_callee_declaration("inner")
+            .expect("inner declaration capability is published")
+            .matches_exact(inner)
+    );
+
+    let outer_argument = &outer.arguments()[0];
+    let inner_argument = &inner.arguments()[0];
+    let outer_provenance = outer_argument
+        .declared()
+        .declared_provenance()
+        .expect("outer argument is keyed by its declared capability");
+    let inner_provenance = inner_argument
+        .declared()
+        .declared_provenance()
+        .expect("inner argument is keyed by its declared capability");
+    assert_eq!(outer_provenance.source_name(), "T");
+    assert_eq!(inner_provenance.source_name(), "T");
+    assert_eq!(outer_provenance.ordinal(), 0);
+    assert_eq!(inner_provenance.ordinal(), 0);
+    assert_ne!(
+        outer_provenance.owner(),
+        inner_provenance.owner(),
+        "same spelling must not collapse distinct declaration owners"
+    );
+    assert_eq!(
+        inner_argument.candidate().ty(),
+        &Type::Variable(outer_argument.declared().clone()),
+        "inner T remains an exact dependency on the outer declared token"
+    );
+}
+
+fn reduce_single_argument(
+    engine: &TypeInferenceEngine,
+    declared: TypeVar,
+    instantiated: TypeVar,
+) -> SemanticCallSiteFact {
+    engine.reduce_callsite_candidates(vec![SemanticCallSiteCandidate {
+        instantiations: vec![SemanticDeclaredInstantiation::new(declared, instantiated)],
+        parameter_types: None,
+        arguments: None,
+    }])
+}
+
+fn assert_unresolved(fact: SemanticCallSiteFact) {
+    let SemanticCallSiteFact::Unavailable(issue) = fact else {
+        panic!("partial inference state must remain unavailable: {fact:?}")
+    };
+    assert!(issue.detail().contains("remained unresolved after solving"));
+}
+
+#[test]
+fn recursive_declared_carriers_are_exact_but_partial_carriers_refuse() {
+    let mut engine = TypeInferenceEngine::new();
+    let outer = TypeVar::declared(engine.type_var_gen.fresh_declared_owner(), 0, "T");
+    let callee = TypeVar::declared(engine.type_var_gen.fresh_declared_owner(), 0, "U");
+
+    let declared_array = Type::Concrete(shape_ast::ast::TypeAnnotation::Array(Box::new(
+        tyvar_to_annotation(&outer),
+    )));
+    let declared_instance = engine.type_var_gen.fresh_var();
+    engine
+        .solver
+        .unifier_mut()
+        .bind(declared_instance.clone(), declared_array.clone());
+    let exact = reduce_single_argument(&engine, callee.clone(), declared_instance);
+    let SemanticCallSiteFact::Exact(exact) = exact else {
+        panic!("authenticated Array<T> must remain exact: {exact:?}")
+    };
+    assert_eq!(exact.arguments()[0].candidate().ty(), &declared_array);
+
+    let raw = engine.type_var_gen.fresh_var();
+    let raw_instance = engine.type_var_gen.fresh_var();
+    engine
+        .solver
+        .unifier_mut()
+        .bind(raw_instance.clone(), Type::Variable(raw));
+    assert_unresolved(reduce_single_argument(
+        &engine,
+        callee.clone(),
+        raw_instance,
+    ));
+
+    let nested_raw = engine.type_var_gen.fresh_var();
+    let nested_raw_instance = engine.type_var_gen.fresh_var();
+    engine.solver.unifier_mut().bind(
+        nested_raw_instance.clone(),
+        Type::Concrete(shape_ast::ast::TypeAnnotation::Array(Box::new(
+            tyvar_to_annotation(&nested_raw),
+        ))),
+    );
+    assert_unresolved(reduce_single_argument(
+        &engine,
+        callee.clone(),
+        nested_raw_instance,
+    ));
+
+    let constrained_instance = engine.type_var_gen.fresh_var();
+    let constrained = engine.type_var_gen.fresh_var();
+    engine.solver.unifier_mut().bind(
+        constrained_instance.clone(),
+        Type::Constrained {
+            var: constrained,
+            constraint: Box::new(TypeConstraint::Comparable),
+        },
+    );
+    assert_unresolved(reduce_single_argument(
+        &engine,
+        callee,
+        constrained_instance,
+    ));
 }
