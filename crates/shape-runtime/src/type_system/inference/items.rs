@@ -27,33 +27,6 @@ impl TypeInferenceEngine {
             .collect()
     }
 
-    fn existing_declared_type_params(
-        &self,
-        callable_name: &str,
-        params: &[TypeParam],
-    ) -> Option<Vec<TypeVar>> {
-        if params.is_empty() {
-            return Some(Vec::new());
-        }
-        let quantified = self.env.lookup(callable_name)?.quantified.clone();
-        if quantified.len() != params.len() {
-            return None;
-        }
-        let owner = quantified.first()?.declared_provenance()?.owner();
-        quantified
-            .iter()
-            .zip(params)
-            .enumerate()
-            .all(|(ordinal, (var, param))| {
-                var.declared_provenance().is_some_and(|provenance| {
-                    provenance.owner() == owner
-                        && usize::try_from(provenance.ordinal()).ok() == Some(ordinal)
-                        && provenance.source_name() == param.name()
-                })
-            })
-            .then_some(quantified)
-    }
-
     fn validate_declared_type_param_vector(
         &self,
         callable_name: &str,
@@ -825,13 +798,7 @@ impl TypeInferenceEngine {
     ) -> TypeResult<(Type, Vec<TypeVar>)> {
         let type_params = func.type_params.as_deref().unwrap_or_default();
         let type_param_vars = if require_predeclared && !type_params.is_empty() {
-            self.existing_declared_type_params(&func.name, type_params)
-                .ok_or_else(|| {
-                    TypeError::ConstraintViolation(
-                        "internal inference error: generic function body has no exact predeclared parameter capability"
-                            .to_string(),
-                    )
-                })?
+            self.declared_type_parameters_for_callable(func)?
         } else {
             self.mint_declared_type_params(type_params)
         };
@@ -2315,14 +2282,7 @@ impl TypeInferenceEngine {
             self.validate_declared_type_params_in_type(func, &func_type, &[])?;
             return Ok(self.env.generalize(&func_type));
         };
-        let vars = self
-            .existing_declared_type_params(&func.name, type_params)
-            .ok_or_else(|| {
-                TypeError::ConstraintViolation(format!(
-                    "internal inference error: `{}` has no exact declared parameter capabilities for scheme publication",
-                    func.name
-                ))
-            })?;
+        let vars = self.declared_type_parameters_for_callable(func)?;
         self.make_function_scheme_with_params(func, func_type, &vars)
     }
 
@@ -3670,12 +3630,15 @@ mod tests {
 
         let mut vars = TypeVarGen::new();
         let hole = vars.fresh_var();
-        let other_inference_hole = TypeVarGen::new().fresh_var();
+        let mut other_vars = TypeVarGen::new();
+        let other_inference_hole = other_vars.fresh_var();
         let owner_a = vars.fresh_declared_owner();
         let owner_b = vars.fresh_declared_owner();
+        let other_inference_owner = other_vars.fresh_declared_owner();
         let declared = TypeVar::declared(owner_a, 0, "T0");
         let renamed = TypeVar::declared(owner_a, 0, "RenamedT");
         let other_owner = TypeVar::declared(owner_b, 0, "T0");
+        let other_inference_declared = TypeVar::declared(other_inference_owner, 0, "T0");
         let legacy = TypeVar::new("T0".to_string());
 
         assert_eq!(hole.presentation_name(), declared.presentation_name());
@@ -3687,6 +3650,7 @@ mod tests {
         assert_ne!(hole, other_inference_hole);
         assert_ne!(declared, legacy);
         assert_ne!(declared, other_owner);
+        assert_ne!(declared, other_inference_declared);
         assert_eq!(declared, renamed, "spelling is presentation-only");
         assert_eq!(HashSet::from([declared.clone(), renamed]).len(), 1);
         assert!(hole.declared_provenance().is_none());
@@ -3735,6 +3699,56 @@ mod tests {
     }
 
     #[test]
+    fn semantic_conversion_refuses_tyvar_annotations_at_every_depth() {
+        let mut vars = TypeVarGen::new();
+        let marker = tyvar_to_annotation(&vars.fresh_var());
+        let wrappers = vec![
+            marker.clone(),
+            TypeAnnotation::Array(Box::new(marker.clone())),
+            TypeAnnotation::Tuple(vec![marker.clone()]),
+            TypeAnnotation::Object(vec![shape_ast::ast::ObjectTypeField {
+                name: "field".to_string(),
+                optional: false,
+                type_annotation: marker.clone(),
+                annotations: vec![],
+            }]),
+            TypeAnnotation::Function {
+                params: vec![shape_ast::ast::FunctionParam {
+                    name: None,
+                    optional: false,
+                    type_annotation: marker.clone(),
+                }],
+                returns: Box::new(TypeAnnotation::Basic("int".to_string())),
+            },
+            TypeAnnotation::Union(vec![marker.clone()]),
+            TypeAnnotation::Intersection(vec![marker.clone()]),
+            TypeAnnotation::Generic {
+                name: "Wrapper".into(),
+                args: vec![marker.clone()],
+            },
+            TypeAnnotation::Borrow {
+                mutable: false,
+                inner: Box::new(marker.clone()),
+            },
+            TypeAnnotation::Existential {
+                witnesses: vec!["W".to_string()],
+                inner: Box::new(marker),
+            },
+        ];
+
+        for annotation in wrappers {
+            assert!(Type::Concrete(annotation).to_semantic().is_none());
+        }
+        assert!(
+            Type::Concrete(TypeAnnotation::Array(Box::new(TypeAnnotation::Basic(
+                "int".to_string(),
+            ))))
+            .to_semantic()
+            .is_some()
+        );
+    }
+
+    #[test]
     fn function_predeclare_body_and_scheme_reuse_declared_tokens() {
         use shape_ast::parser::parse_program;
 
@@ -3751,7 +3765,7 @@ mod tests {
         );
         let mut engine = TypeInferenceEngine::new();
         engine.predeclare_function_signature(func).unwrap();
-        let predeclared = engine.env.lookup("preserve").unwrap().clone();
+        let predeclared = engine.declared_type_parameters_for_callable(func).unwrap();
         let (function_type, body_vars) = engine
             .infer_function_with_declared_params(func, true)
             .unwrap();
@@ -3759,7 +3773,7 @@ mod tests {
             .make_function_scheme_with_params(func, function_type.clone(), &body_vars)
             .unwrap();
 
-        assert_eq!(body_vars, predeclared.quantified);
+        assert_eq!(body_vars, predeclared);
         assert_eq!(scheme.quantified, body_vars);
         let declared = &scheme.quantified[0];
         assert!(scheme.trait_bounds.contains_key(declared));
@@ -3824,6 +3838,38 @@ mod tests {
                 .is_err(),
             "source spelling mismatch must refuse"
         );
+    }
+
+    #[test]
+    fn same_named_ast_declarations_keep_distinct_declared_capabilities() {
+        use shape_ast::parser::parse_program;
+
+        let source = "fn duplicate<T>(value: T) -> T { value }";
+        let first_program = parse_program(source).unwrap();
+        let second_program = parse_program(source).unwrap();
+        let Item::Function(first, _) = &first_program.items[0] else {
+            panic!("expected first function")
+        };
+        let Item::Function(second, _) = &second_program.items[0] else {
+            panic!("expected second function")
+        };
+        let mut engine = TypeInferenceEngine::new();
+        engine.predeclare_function_signature(first).unwrap();
+        engine.predeclare_function_signature(second).unwrap();
+
+        let first_vars = engine.declared_type_parameters_for_callable(first).unwrap();
+        let second_vars = engine
+            .declared_type_parameters_for_callable(second)
+            .unwrap();
+        assert_ne!(first_vars, second_vars);
+        let (_, first_body_vars) = engine
+            .infer_function_with_declared_params(first, true)
+            .unwrap();
+        let (_, second_body_vars) = engine
+            .infer_function_with_declared_params(second, true)
+            .unwrap();
+        assert_eq!(first_body_vars, first_vars);
+        assert_eq!(second_body_vars, second_vars);
     }
 
     #[test]

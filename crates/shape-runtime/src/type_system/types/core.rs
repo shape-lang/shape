@@ -11,8 +11,13 @@ use super::builtins::BuiltinTypes;
 use super::constraints::TypeConstraint;
 use crate::type_system::semantic::{SemanticType, TypeVarId};
 
-/// Per-inference-run generator for holes and declared-parameter capabilities.
-#[derive(Debug, Clone)]
+/// Non-cloneable generator for per-inference holes and declared capabilities.
+///
+/// ```compile_fail
+/// # use shape_runtime::type_system::TypeVarGen;
+/// let _ = TypeVarGen::new().clone();
+/// ```
+#[derive(Debug)]
 pub struct TypeVarGen {
     next_id: u32,
     inference_owner: u64,
@@ -105,7 +110,6 @@ impl<'a> DeclaredTypeVarProvenance<'a> {
     }
 }
 
-/// Type variable for inference
 #[derive(Clone)]
 pub struct TypeVar(pub String);
 
@@ -225,6 +229,25 @@ pub fn annotation_as_tyvar(ann: &TypeAnnotation) -> Option<TypeVar> {
             .strip_prefix(TYVAR_ANNOTATION_PREFIX)
             .map(|rest| TypeVar(rest.to_string())),
         _ => None,
+    }
+}
+
+fn annotation_contains_tyvar(ann: &TypeAnnotation) -> bool {
+    let contains = annotation_contains_tyvar;
+    match ann {
+        _ if annotation_as_tyvar(ann).is_some() => true,
+        TypeAnnotation::Array(inner)
+        | TypeAnnotation::Borrow { inner, .. }
+        | TypeAnnotation::Existential { inner, .. } => contains(inner),
+        TypeAnnotation::Tuple(items)
+        | TypeAnnotation::Union(items)
+        | TypeAnnotation::Intersection(items) => items.iter().any(contains),
+        TypeAnnotation::Object(fields) => fields.iter().any(|f| contains(&f.type_annotation)),
+        TypeAnnotation::Function { params, returns } => {
+            params.iter().any(|param| contains(&param.type_annotation)) || contains(returns)
+        }
+        TypeAnnotation::Generic { args, .. } => args.iter().any(contains),
+        _ => false,
     }
 }
 
@@ -355,7 +378,6 @@ impl TypeScheme {
             .collect()
     }
 
-    /// Compatibility wrapper retaining the original tuple result.
     pub fn instantiate_with_bounds(
         &self,
         var_gen: &mut TypeVarGen,
@@ -393,7 +415,6 @@ impl TypeScheme {
                 });
             }
 
-            // Emit ImplementsTrait constraints for trait bounds
             if let Some(bounds) = self.trait_bounds.get(var) {
                 for trait_name in bounds {
                     let bound_var = var_gen.fresh_var();
@@ -523,7 +544,6 @@ impl Type {
                 ))),
                 args: args.iter().map(Self::canonicalize_annotation).collect(),
             },
-            // Functions canonicalize before comparison, like generic collections.
             TypeAnnotation::Function { params, returns } => Type::Function {
                 params: params
                     .iter()
@@ -531,7 +551,6 @@ impl Type {
                     .collect(),
                 returns: Box::new(Self::canonicalize_annotation(returns)),
             },
-            // Tyvar annotations remain encoded until substitution.
             other => Type::Concrete(other.clone()),
         }
     }
@@ -546,7 +565,6 @@ impl Type {
                         args.iter().map(|arg| arg.to_annotation()).collect();
 
                     arg_annotations.map(|args| {
-                        // Preserve the established annotation spelling.
                         if (name.as_str() == "Array" || name.as_str() == "Vec") && args.len() == 1 {
                             TypeAnnotation::Array(Box::new(args.into_iter().next().unwrap()))
                         } else {
@@ -585,10 +603,10 @@ impl Type {
 
     pub fn to_semantic(&self) -> Option<SemanticType> {
         match self {
+            Type::Concrete(ann) if annotation_contains_tyvar(ann) => None,
             Type::Concrete(ann) => Some(super::annotations::annotation_to_semantic(ann)),
             Type::Variable(var) => Some(SemanticType::TypeVar(var.legacy_semantic_id()?)),
             Type::Generic { base, args } => {
-                // Handle known generic types
                 if let Type::Concrete(TypeAnnotation::Reference(name)) = base.as_ref() {
                     let semantic_args: Vec<_> =
                         args.iter().map(Type::to_semantic).collect::<Option<_>>()?;
@@ -601,8 +619,6 @@ impl Type {
                             ok_type: Box::new(semantic_args[0].clone()),
                             err_type: semantic_args.get(1).cloned().map(Box::new),
                         }),
-                        // U1: "Array" is the canonical collection base name;
-                        // "Vec" is its alias. Both map to SemanticType::Array.
                         "Vec" | "Array" if semantic_args.len() == 1 => {
                             Some(SemanticType::Array(Box::new(semantic_args[0].clone())))
                         }
@@ -716,8 +732,6 @@ impl SemanticType {
             SemanticType::Enum { name, .. } => {
                 Type::Concrete(TypeAnnotation::Reference(name.as_str().into()))
             }
-            // References: convert to the inner type for inference purposes.
-            // The reference wrapper is tracked separately by the compiler.
             SemanticType::Ref(inner) | SemanticType::RefMut(inner) => inner.to_inference_type(),
         }
     }
