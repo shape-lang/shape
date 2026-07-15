@@ -4472,7 +4472,7 @@ fn probe() -> int { 2 }
                 type_params: Vec::new(),
                 runtime_field_types: [(
                     "min".to_string(),
-                    tyvar_to_annotation(&TypeVar("T3".to_string())),
+                    tyvar_to_annotation(&TypeVar::new("T3".to_string())),
                 )]
                 .into_iter()
                 .collect::<std::collections::HashMap<String, TypeAnnotation>>(),

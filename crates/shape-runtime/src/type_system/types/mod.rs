@@ -13,12 +13,14 @@ pub mod annotations;
 pub mod builtins;
 pub mod constraints;
 pub mod core;
+mod type_var;
 
 // Re-export public types
 pub use annotations::{annotation_to_semantic, annotation_to_string, semantic_to_annotation};
 pub use builtins::BuiltinTypes;
 pub use constraints::TypeConstraint;
-pub use core::{
-    TYVAR_ANNOTATION_PREFIX, Type, TypeScheme, TypeVar, TypeVarGen, annotation_as_tyvar,
-    substitute, tyvar_to_annotation,
+pub use core::{Type, TypeScheme, substitute};
+pub use type_var::{
+    DeclaredTypeVarOwner, DeclaredTypeVarProvenance, TYVAR_ANNOTATION_PREFIX, TypeVar, TypeVarGen,
+    annotation_as_tyvar, annotation_contains_reserved_type_var_carrier, tyvar_to_annotation,
 };

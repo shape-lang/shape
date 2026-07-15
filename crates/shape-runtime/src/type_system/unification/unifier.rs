@@ -296,7 +296,7 @@ mod occurs_check_tests {
 
     #[test]
     fn occurs_check_sees_tyvar_marker_inside_concrete_object() {
-        let x = TypeVar("X".to_string());
+        let x = TypeVar::new("X".to_string());
         let cyclic = object_over_tyvar("state", &x);
         assert!(
             occurs_check(&x, &cyclic),
@@ -304,7 +304,7 @@ mod occurs_check_tests {
              Concrete object annotation"
         );
         // A different variable must NOT be reported as occurring.
-        let y = TypeVar("Y".to_string());
+        let y = TypeVar::new("Y".to_string());
         assert!(!occurs_check(&y, &cyclic));
     }
 
@@ -319,7 +319,7 @@ mod occurs_check_tests {
     /// refuse the cyclic binding, and substitution must terminate.
     #[test]
     fn bind_refuses_cyclic_object_binding_and_substitution_terminates() {
-        let x = TypeVar("X".to_string());
+        let x = TypeVar::new("X".to_string());
         let cyclic = object_over_tyvar("state", &x);
 
         let mut unifier = Unifier::new();
@@ -340,8 +340,8 @@ mod occurs_check_tests {
     #[test]
     fn bind_still_stores_acyclic_object_binding() {
         // A non-self-referential object binding must still be stored.
-        let x = TypeVar("X".to_string());
-        let y = TypeVar("Y".to_string());
+        let x = TypeVar::new("X".to_string());
+        let y = TypeVar::new("Y".to_string());
         let acyclic = object_over_tyvar("field", &y); // mentions Y, not X
 
         let mut unifier = Unifier::new();

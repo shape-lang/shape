@@ -1569,7 +1569,9 @@ impl MethodTable {
     /// placeholder from accidentally unifying their result types (D1, S4).
     fn freshen_oob_placeholder(ty: Type, var_gen: &mut crate::type_system::TypeVarGen) -> Type {
         match ty {
-            Type::Variable(ref v) if v.0 == "_oob" => var_gen.fresh_type(),
+            Type::Variable(ref variable) if variable.is_legacy_named("_oob") => {
+                var_gen.fresh_type()
+            }
             Type::Variable(_) | Type::Concrete(_) => ty,
             Type::Generic { base, args } => Type::Generic {
                 base: Box::new(Self::freshen_oob_placeholder(*base, var_gen)),
