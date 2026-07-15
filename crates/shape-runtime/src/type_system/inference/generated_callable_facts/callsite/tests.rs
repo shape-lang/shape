@@ -1,5 +1,5 @@
 use super::*;
-use crate::type_system::{Type, TypeConstraint, tyvar_to_annotation};
+use crate::type_system::{BuiltinTypes, Type, TypeConstraint, TypeScheme, tyvar_to_annotation};
 use shape_ast::ast::GeneratedNodeOrigin;
 use shape_ast::parser::parse_program;
 
@@ -16,6 +16,41 @@ fn node(expansion_low: i64) -> GeneratedNodeKey {
     GeneratedNodeKey::from_origin(&origin)
 }
 
+fn identity_scheme(engine: &mut TypeInferenceEngine, source_name: &str) -> TypeScheme {
+    let declared = TypeVar::declared(
+        engine.type_var_gen.fresh_declared_owner(),
+        0,
+        source_name,
+    );
+    let parameter = Type::Variable(declared.clone());
+    TypeScheme::poly(
+        vec![declared],
+        Type::Function {
+            params: vec![parameter.clone()],
+            returns: Box::new(parameter),
+        },
+    )
+}
+
+fn record_scheme_candidate(
+    engine: &mut TypeInferenceEngine,
+    scheme: &TypeScheme,
+    callee: &str,
+    call_span: Span,
+    resolved: Type,
+) {
+    let instantiation = scheme.instantiate_with_metadata(&mut engine.type_var_gen);
+    let instantiated = instantiation.declared_instantiations[0]
+        .instantiated()
+        .clone();
+    engine.record_declared_type_instantiations(
+        callee,
+        call_span,
+        &instantiation.declared_instantiations,
+    );
+    engine.solver.unifier_mut().bind(instantiated, resolved);
+}
+
 #[test]
 fn identical_generated_call_offsets_do_not_collide_across_nodes() {
     let span = Span::new(4, 9);
@@ -27,6 +62,91 @@ fn identical_generated_call_offsets_do_not_collide_across_nodes() {
     facts.insert(left, "left");
     facts.insert(right, "right");
     assert_eq!(facts.len(), 2);
+}
+
+#[test]
+fn primary_receiver_still_conflicts_on_different_exact_observations() {
+    let mut engine = TypeInferenceEngine::new();
+    let scheme = identity_scheme(&mut engine, "T");
+    let span = Span::new(11, 19);
+
+    record_scheme_candidate(
+        &mut engine,
+        &scheme,
+        "identity",
+        span,
+        BuiltinTypes::integer(),
+    );
+    record_scheme_candidate(
+        &mut engine,
+        &scheme,
+        "identity",
+        span,
+        BuiltinTypes::string(),
+    );
+    engine.finalize_semantic_callsite_facts();
+
+    let key = SemanticCallSiteKey::new(None, "identity", span);
+    let SemanticCallSiteFact::Conflict(issue) = &engine.generated_inference.callsite_facts[&key]
+    else {
+        panic!("different primary observations must remain conflicting")
+    };
+    assert!(
+        issue
+            .detail()
+            .contains("structurally identical call sites resolved different semantic arguments")
+    );
+}
+
+#[test]
+fn replay_isolation_restores_primary_candidates_after_nested_errors() {
+    let mut engine = TypeInferenceEngine::new();
+    let scheme = identity_scheme(&mut engine, "T");
+    let primary_key = SemanticCallSiteKey::new(None, "primary", Span::new(21, 29));
+    let replay_key = SemanticCallSiteKey::new(None, "replay", Span::new(31, 39));
+    let nested_key = SemanticCallSiteKey::new(None, "nested", Span::new(41, 49));
+    record_scheme_candidate(
+        &mut engine,
+        &scheme,
+        primary_key.callee(),
+        primary_key.call_span(),
+        BuiltinTypes::integer(),
+    );
+
+    let result: Result<(), &'static str> = engine.with_isolated_semantic_callsite_replay(|engine| {
+        record_scheme_candidate(
+            engine,
+            &scheme,
+            replay_key.callee(),
+            replay_key.call_span(),
+            BuiltinTypes::string(),
+        );
+        let nested_result: Result<(), &'static str> =
+            engine.with_isolated_semantic_callsite_replay(|engine| {
+                record_scheme_candidate(
+                    engine,
+                    &scheme,
+                    nested_key.callee(),
+                    nested_key.call_span(),
+                    BuiltinTypes::boolean(),
+                );
+                Err("nested replay stopped")
+            });
+        assert_eq!(nested_result, Err("nested replay stopped"));
+        assert!(engine.generated_inference.callsite_candidates.contains_key(&replay_key));
+        assert!(!engine.generated_inference.callsite_candidates.contains_key(&nested_key));
+        Err("outer replay stopped")
+    });
+
+    assert_eq!(result, Err("outer replay stopped"));
+    assert_eq!(engine.generated_inference.callsite_candidates.len(), 1);
+    assert!(
+        engine
+            .generated_inference
+            .callsite_candidates
+            .contains_key(&primary_key)
+    );
+    assert!(!engine.generated_inference.callsite_candidates.contains_key(&replay_key));
 }
 
 #[test]

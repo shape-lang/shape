@@ -177,6 +177,21 @@ impl From<&DeclaredTypeVarInstantiation> for SemanticDeclaredInstantiation {
 }
 
 impl TypeInferenceEngine {
+    /// Keep post-callsite body replay from publishing a second semantic
+    /// observation for the same source call. The initial inference walk owns
+    /// declaration-relative callsite evidence; replay may use a concretized
+    /// parameter view and therefore records only transient candidates.
+    pub(in crate::type_system::inference) fn with_isolated_semantic_callsite_replay<T>(
+        &mut self,
+        replay: impl FnOnce(&mut Self) -> T,
+    ) -> T {
+        let authoritative = std::mem::take(&mut self.generated_inference.callsite_candidates);
+        let result = replay(self);
+        self.generated_inference.callsite_candidates.clear();
+        self.generated_inference.callsite_candidates = authoritative;
+        result
+    }
+
     /// Receiver invoked by named-call inference immediately after a bounded
     /// scheme is instantiated. Resolution is deferred until the solver has
     /// finalized every fresh instance variable.
