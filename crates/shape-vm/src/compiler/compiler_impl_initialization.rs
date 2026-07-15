@@ -185,7 +185,7 @@ impl BytecodeCompiler {
             owned_mutable_capture_inner_kinds: HashMap::new(),
             shared_capture_inner_kinds: HashMap::new(),
             pending_closure_capture_parameter_evidence: None,
-            inherited_shared_capture_locals: HashSet::new(),
+            inherited_capture_parameter_evidence: HashMap::new(),
             boxed_locals: HashSet::new(),
             shared_locals: HashSet::new(),
             owned_mutable_locals: HashSet::new(),
@@ -222,7 +222,8 @@ impl BytecodeCompiler {
             monomorphization_cache:
                 crate::compiler::monomorphization::cache::MonomorphizationCache::new(),
             monomorphization_in_progress: std::collections::HashSet::new(),
-            specialization_type_param_overlay: None,
+            specialization_type_overlays: Default::default(),
+            active_generated_node_stack: Vec::new(),
             generated_node_issuer: shape_ast::ast::GeneratedNodeIssuer::new(),
             generated_symbols:
                 crate::compiler::comptime_builtins::expansion_provenance::GeneratedSymbolTable::new(

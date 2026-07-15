@@ -67,10 +67,10 @@ pub(crate) mod comptime_builtins;
 pub use comptime_builtins::capture_plan::{
     CaptureSiteRole, GENERATED_CAPTURE_ARTIFACT_CONFLICT_CODE,
     GENERATED_CAPTURE_SOURCE_UNAVAILABLE_CODE, GeneratedCaptureBindingIdentity,
-    GeneratedCaptureDescriptorView, GeneratedCaptureOccurrenceIdentity, GeneratedCaptureQuery,
-    GeneratedCaptureQueryIssue, GeneratedCaptureSite, GeneratedCaptureSlot,
-    GeneratedCaptureSourceMap, GeneratedCaptureSpecialization,
-    GeneratedCaptureSpecializationIdentity, GeneratedCaptureStage,
+    GeneratedCaptureDescriptorView, GeneratedCaptureOccurrenceIdentity, GeneratedCapturePosition,
+    GeneratedCaptureQuery, GeneratedCaptureQueryIssue, GeneratedCaptureSemanticType,
+    GeneratedCaptureSite, GeneratedCaptureSlot, GeneratedCaptureSourceMap,
+    GeneratedCaptureSpecialization, GeneratedCaptureSpecializationIdentity, GeneratedCaptureStage,
 };
 pub use comptime_builtins::expansion_provenance::{
     GeneratedNodePath, GeneratedSymbolProvenance, GeneratedSymbolTable, HygienicRole,
@@ -1638,12 +1638,13 @@ pub struct BytecodeCompiler {
     pub(crate) pending_closure_capture_parameter_evidence:
         Option<Vec<crate::compiler::comptime_builtins::capture_plan::CaptureParameterEvidence>>,
 
-    /// Local slots in the current closure body whose synthetic capture
-    /// parameter carries a canonical raw `*const SharedCell`. The body itself
-    /// still reads/writes the capture through `shared_closure_captures` and the
-    /// frame upvalue table; this slot is the structurally proven carrier used
-    /// when a nested closure recaptures the same cell.
-    pub(crate) inherited_shared_capture_locals: HashSet<u16>,
+    /// Structural evidence for every synthetic capture parameter in the
+    /// current closure body, keyed by compiler-issued local slot. Every entry
+    /// preserves the original binding lineage and exact semantic type through
+    /// nested forwarding; `CaptureAccess::SharedCell` additionally proves that
+    /// the slot carries the canonical raw `*const SharedCell` carrier.
+    pub(crate) inherited_capture_parameter_evidence:
+        HashMap<u16, crate::compiler::comptime_builtins::capture_plan::CaptureParameterEvidence>,
 
     /// Variables in the current scope that have been boxed into SharedCells
     /// by a mutable closure capture. When a subsequent closure captures one
@@ -1859,35 +1860,29 @@ pub struct BytecodeCompiler {
 
     /// BUG3 — cycle detector for generic method / free-function monomorphization.
     ///
-    /// Holds the set of `mono_key`s whose specialization is currently being
-    /// compiled further down the call stack. If `ensure_monomorphic_function`
-    /// is (re-)entered for a key that is already in-progress, it means the
-    /// specialized body is transitively trying to resolve itself before its
-    /// own `compile_function` has finished — without the guard this would
-    /// overflow the compiler stack or cache the wrong index. The entry is
-    /// inserted BEFORE the inner `compile_function` call and removed right
-    /// after, whether compilation succeeded or failed.
+    /// Holds typed exact-or-legacy keys whose specialization is currently
+    /// being compiled. The domain tag prevents an ABI-only attempt from
+    /// blocking or borrowing a semantically exact attempt with the same
+    /// physical ABI key.
     ///
     /// Note: direct self-recursion in the body is already handled by the
     /// cache-insert-before-compile behaviour; this guard only fires on the
     /// pathological transitive-resolution cycle.
-    pub(crate) monomorphization_in_progress: std::collections::HashSet<String>,
+    pub(crate) monomorphization_in_progress: std::collections::HashSet<
+        monomorphization::semantic_specialization::SpecializationProgressKey,
+    >,
 
-    /// ADR-009 A3 — `(base generic fn name, declared type-param names)` for
-    /// the specialization whose body is currently being compiled. Set/restored
-    /// (Err-safe, save-then-restore) around the `compile_function` calls in
-    /// `monomorphization/cache.rs` and consumed by
-    /// `build_type_reflection_snapshot` as an explicit overlay extending the
-    /// existing discovery path (spec §4.1 — one derivation, no second
-    /// parameter table). A specialized def is registered with
-    /// `type_params = None` (substitution strips them), so without this
-    /// overlay `type_ref(T)` inside a generic body freezes to an INVALID
-    /// identity when the mono body compiles. The owner is the BASE function
-    /// name, never the mono key, so Parameter identities stay
-    /// declaration-stable across instantiations (ADR-009 §Semantic Freeze,
-    /// Decision 52 pre-substitution identities). `None` outside a
-    /// specialized-body compile.
-    pub(crate) specialization_type_param_overlay: Option<(String, Vec<String>)>,
+    /// Drop-restored semantic overlays for nested specialized-body compiles.
+    /// Declaration-only frames preserve existing generic reflection while
+    /// refusing instantiated capture evidence; exact frames additionally map
+    /// declared TypeVar capabilities to closed semantic candidates.
+    pub(crate) specialization_type_overlays:
+        monomorphization::semantic_specialization::SpecializationTypeOverlayStack,
+
+    /// Structural generated-function nesting used to address inference-owned
+    /// semantic call-site facts. Source offsets alone are not unique across
+    /// generated nodes.
+    pub(crate) active_generated_node_stack: Vec<shape_runtime::type_system::GeneratedNodeKey>,
 
     /// ADR-009 C1: compilation-instance capability for generated AST nodes.
     /// A provenance carrier is trusted only when this exact issuer recognizes

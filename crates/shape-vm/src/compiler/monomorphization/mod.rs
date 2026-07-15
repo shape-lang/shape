@@ -21,6 +21,7 @@
 
 pub mod cache;
 pub mod call_site_consts;
+pub(crate) mod semantic_specialization;
 pub mod substitution;
 pub mod type_resolution;
 

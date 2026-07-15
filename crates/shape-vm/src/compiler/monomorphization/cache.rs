@@ -23,6 +23,9 @@ use shape_value::v2::ConcreteType;
 use std::collections::HashMap;
 
 use crate::compiler::BytecodeCompiler;
+use crate::compiler::monomorphization::semantic_specialization::{
+    SemanticSpecializationRequest, SpecializationProgressKey,
+};
 use crate::compiler::monomorphization::substitution;
 use crate::compiler::monomorphization::substitution::concrete_to_annotation;
 use crate::compiler::monomorphization::type_resolution::{
@@ -39,121 +42,12 @@ use crate::compiler::monomorphization::type_resolution::{
 /// `docs/v2-closure-specialization.md` for the rationale.
 pub const DEFAULT_CLOSURE_SPECIALIZATION_BUDGET: u32 = 64;
 
-/// ADR-009 A3 (S2) — typed classification of specialization failures.
-///
-/// [`BytecodeCompiler::ensure_monomorphic_function`] /
-/// [`BytecodeCompiler::ensure_monomorphic_function_with_consts`] can fail for
-/// two very different reasons, and callers must treat them differently:
-///
-/// - [`SpecializationFailure::Soft`] — the specialization MACHINERY could not
-///   produce a specialization: cycle detected, missing `FunctionDef` AST,
-///   declared-param/supplied-arg arity mismatch, const-default resolution
-///   failure, registration / index bookkeeping. Callers may fall back to the
-///   generic-template path; the call site then surfaces its own diagnostic
-///   ("cannot infer type argument(s) ...") when the callee is generic.
-/// - [`SpecializationFailure::Hard`] — the specialized BODY itself failed to
-///   compile: a real user-code compile error (e.g. a comptime semantic-freeze
-///   failure such as "type_ref received an unknown semantic type identity")
-///   surfaced while compiling the substituted body. Swallowing it and
-///   re-reporting a call-site inference failure masks the real diagnostic.
-///   Callers MUST propagate it (surface-and-stop).
-#[derive(Debug)]
-pub enum SpecializationFailure {
-    /// Resolution-stage failure — callers may fall back to the generic path.
-    Soft(ShapeError),
-    /// Specialized-body compile error — callers must propagate.
-    Hard(ShapeError),
-}
-
-impl SpecializationFailure {
-    /// Unwrap the underlying compile error regardless of classification.
-    pub fn into_error(self) -> ShapeError {
-        match self {
-            SpecializationFailure::Soft(e) | SpecializationFailure::Hard(e) => e,
-        }
-    }
-}
-
-/// Every bare `ShapeError` raised inside the specialization machinery via `?`
-/// is a resolution-stage failure — the body-compile site opts into `Hard`
-/// explicitly with `map_err(SpecializationFailure::Hard)`.
-impl From<ShapeError> for SpecializationFailure {
-    fn from(e: ShapeError) -> Self {
-        SpecializationFailure::Soft(e)
-    }
-}
-
-impl From<SpecializationFailure> for ShapeError {
-    fn from(f: SpecializationFailure) -> Self {
-        f.into_error()
-    }
-}
-
-/// Cache mapping a monomorphization key to the compiled function index.
-///
-/// The cache is owned by [`crate::compiler::BytecodeCompiler`] and lives for
-/// the duration of one compilation session. It is parallel to (not a
-/// replacement for) `const_specializations`, which keys on compile-time const
-/// argument values.
-#[derive(Debug, Default, Clone)]
-pub struct MonomorphizationCache {
-    entries: HashMap<String, u16>,
-}
-
-impl MonomorphizationCache {
-    /// Create an empty cache.
-    pub fn new() -> Self {
-        Self {
-            entries: HashMap::new(),
-        }
-    }
-
-    /// Look up a previously specialized function by its mono key.
-    ///
-    /// Returns the function index in `BytecodeProgram::functions`, or `None`
-    /// if no specialization has been recorded for this key yet.
-    pub fn lookup(&self, mono_key: &str) -> Option<u16> {
-        self.entries.get(mono_key).copied()
-    }
-
-    /// Record that the function compiled at `function_idx` is the
-    /// specialization for `mono_key`.
-    ///
-    /// If the key already exists, the existing entry is overwritten — callers
-    /// should `lookup` first if they need to detect duplicates.
-    pub fn insert(&mut self, mono_key: String, function_idx: u16) {
-        self.entries.insert(mono_key, function_idx);
-    }
-
-    /// Number of distinct specializations currently cached.
-    #[allow(dead_code)]
-    pub fn len(&self) -> usize {
-        self.entries.len()
-    }
-
-    /// Whether the cache is empty.
-    #[allow(dead_code)]
-    pub fn is_empty(&self) -> bool {
-        self.entries.is_empty()
-    }
-
-    /// Iterate over `(mono_key, function_idx)` pairs.
-    ///
-    /// Useful for diagnostics and incremental-compilation snapshots.
-    #[allow(dead_code)]
-    pub fn iter(&self) -> impl Iterator<Item = (&String, &u16)> {
-        self.entries.iter()
-    }
-
-    /// Iterate over the cached `mono_key` strings.
-    ///
-    /// Used by diagnostics and by Agent 4's integration tests, which assert
-    /// that specific keys land in the cache after compiling generic call
-    /// sites.
-    pub fn keys(&self) -> impl Iterator<Item = &String> {
-        self.entries.keys()
-    }
-}
+mod failure;
+#[cfg(test)]
+mod route_tests;
+mod store;
+pub use failure::SpecializationFailure;
+pub use store::MonomorphizationCache;
 
 /// Construct a monomorphization key from a base function name and a tuple of
 /// concrete type arguments.
@@ -299,6 +193,19 @@ impl BytecodeCompiler {
         base_fn_name: &str,
         type_args: &[ConcreteType],
     ) -> std::result::Result<u16, SpecializationFailure> {
+        self.ensure_monomorphic_function_for_callsite(
+            base_fn_name,
+            type_args,
+            SemanticSpecializationRequest::Legacy,
+        )
+    }
+
+    pub(crate) fn ensure_monomorphic_function_for_callsite(
+        &mut self,
+        base_fn_name: &str,
+        type_args: &[ConcreteType],
+        semantic_request: SemanticSpecializationRequest,
+    ) -> std::result::Result<u16, SpecializationFailure> {
         // B.3 — if the callee declares any const generic parameters, auto-bind
         // them from their declared default expressions (literals only today —
         // no call-site `::<4>` turbofish syntax exists yet) and route through
@@ -320,41 +227,28 @@ impl BytecodeCompiler {
         {
             if type_params.iter().any(|tp| tp.is_const()) {
                 let const_args = resolve_const_defaults_or_error(base_fn_name, &type_params)?;
-                return self.ensure_monomorphic_function_with_consts(
+                return self.ensure_monomorphic_function_with_consts_for_callsite(
                     base_fn_name,
                     type_args,
                     &const_args,
+                    semantic_request,
                 );
             }
         }
 
         let mono_key = build_mono_key(base_fn_name, type_args);
+        let semantic = self
+            .prepare_semantic_specialization(
+                base_fn_name,
+                mono_key.clone(),
+                type_args.len(),
+                semantic_request,
+            )
+            .map_err(SpecializationFailure::Hard)?;
 
-        if let Some(existing) = self.monomorphization_cache.lookup(&mono_key) {
-            return Ok(existing);
-        }
-
-        // BUG3 — cycle detector. If this exact `(base_fn_name, type_args)`
-        // specialization is already being compiled further down the call
-        // stack, its cache entry has not been written yet (that happens after
-        // `register_function` / `find_function` below). A transitive attempt
-        // to resolve the same specialization — e.g. a generic body whose
-        // `x.type()` dispatch path re-enters monomorphization for the same
-        // `(type, method)` pair — would recurse forever. Refuse to descend a
-        // second time and let the caller fall back to the generic path.
-        if self.monomorphization_in_progress.contains(&mono_key) {
-            return Err(SpecializationFailure::Soft(ShapeError::SemanticError {
-                message: format!(
-                    "ensure_monomorphic_function: cycle detected while specializing '{}' — the generic body transitively resolves to itself",
-                    mono_key
-                ),
-                location: None,
-            }));
-        }
-
-        // Look up the original FunctionDef AST. The bytecode compiler always
-        // populates `function_defs` during `register_function`, so this is
-        // the canonical store for substitution input.
+        // Resolve and validate the actual callee declaration before any
+        // cache lookup. Exact provenance that belongs to another declaration
+        // or spelling must never reuse a previously compiled entry.
         let original_def = self
             .function_defs
             .get(base_fn_name)
@@ -366,14 +260,6 @@ impl BytecodeCompiler {
                 ),
                 location: None,
             })?;
-
-        // Build the {type-param-name -> ConcreteType} substitution map that
-        // Agent 2's `substitute_function_def` consumes. This requires the
-        // callee's declared `type_params` to align positionally with the
-        // supplied `type_args`. Const-kind params are filtered out here (they
-        // contribute nothing to type substitution) — the short-circuit above
-        // already redirected any callee-with-const-params to the const-aware
-        // entry point, so this path only sees type-kind params.
         let declared_type_params: Vec<String> = original_def
             .type_params
             .as_ref()
@@ -384,7 +270,6 @@ impl BytecodeCompiler {
                     .collect()
             })
             .unwrap_or_default();
-
         if declared_type_params.is_empty() {
             return Err(SpecializationFailure::Soft(ShapeError::SemanticError {
                 message: format!(
@@ -406,7 +291,40 @@ impl BytecodeCompiler {
                 location: None,
             }));
         }
+        let specialization_overlay = semantic
+            .overlay(base_fn_name, &declared_type_params)
+            .map_err(SpecializationFailure::Hard)?;
 
+        if let Some(existing) = semantic.cache_lookup(&self.monomorphization_cache) {
+            return Ok(existing);
+        }
+
+        // BUG3 — cycle detector. If this exact `(base_fn_name, type_args)`
+        // specialization is already being compiled further down the call
+        // stack, its cache entry has not been written yet (that happens after
+        // `register_function` / `find_function` below). A transitive attempt
+        // to resolve the same specialization — e.g. a generic body whose
+        // `x.type()` dispatch path re-enters monomorphization for the same
+        // `(type, method)` pair — would recurse forever. Refuse to descend a
+        // second time and let the caller fall back to the generic path.
+        let progress_key = SpecializationProgressKey::from(&semantic);
+        if self.monomorphization_in_progress.contains(&progress_key) {
+            return Err(SpecializationFailure::Soft(ShapeError::SemanticError {
+                message: format!(
+                    "ensure_monomorphic_function: cycle detected while specializing '{}' — the generic body transitively resolves to itself",
+                    mono_key
+                ),
+                location: None,
+            }));
+        }
+
+        // Build the {type-param-name -> ConcreteType} substitution map that
+        // Agent 2's `substitute_function_def` consumes. This requires the
+        // callee's declared `type_params` to align positionally with the
+        // supplied `type_args`. Const-kind params are filtered out here (they
+        // contribute nothing to type substitution) — the short-circuit above
+        // already redirected any callee-with-const-params to the const-aware
+        // entry point, so this path only sees type-kind params.
         let subs: HashMap<String, ConcreteType> = declared_type_params
             .iter()
             .cloned()
@@ -420,7 +338,8 @@ impl BytecodeCompiler {
         // Substitute type parameters throughout the cloned AST. Agent 2's
         // helper renames the function deterministically using
         // `mono_key_from_subs`, so the new name is unique per (base, subs).
-        let specialized_def = substitution::substitute_function_def(&original_def, &subs);
+        let mut specialized_def = substitution::substitute_function_def(&original_def, &subs);
+        specialized_def.name = semantic.specialized_symbol(specialized_def.name);
         let specialized_name = specialized_def.name.clone();
 
         // Register the new function definition in the program. This populates
@@ -449,8 +368,7 @@ impl BytecodeCompiler {
         // Cache the index BEFORE compiling the body so recursive calls inside
         // the specialized function self-reference the same cache entry instead
         // of recursively re-monomorphizing.
-        self.monomorphization_cache
-            .insert(mono_key.clone(), specialization_idx);
+        semantic.cache_insert(&mut self.monomorphization_cache, specialization_idx);
         self.next_monomorphization_id = self.next_monomorphization_id.saturating_add(1);
 
         // BUG3 — mark this key as in-progress before compiling the body. The
@@ -459,7 +377,8 @@ impl BytecodeCompiler {
         // helper that re-triggers monomorphization for the same `(name,
         // type_args)` pair via a different entry point) would otherwise
         // recurse forever. The entry is removed below regardless of success.
-        self.monomorphization_in_progress.insert(mono_key.clone());
+        self.monomorphization_in_progress
+            .insert(progress_key.clone());
 
         // F7: save/restore `closure_function_ids` across the recursive
         // `compile_function` call. The specialized body's own
@@ -477,16 +396,9 @@ impl BytecodeCompiler {
         let saved_local_concrete_facts =
             std::mem::take(&mut self.current_function_local_concrete_facts);
         let saved_local_binding_spans = std::mem::take(&mut self.local_binding_spans);
-        // ADR-009 A3 — expose the BASE generic function's declared type-param
-        // names to comptime reflection snapshots built while the specialized
-        // body compiles (the specialized def carries `type_params = None`).
-        // Saved/restored unconditionally below so the Err path restores too;
-        // nested monomorphizations stack correctly through the same
-        // save/restore discipline.
-        let saved_type_param_overlay = std::mem::replace(
-            &mut self.specialization_type_param_overlay,
-            Some((base_fn_name.to_string(), declared_type_params.clone())),
-        );
+        let specialization_overlay_guard = self
+            .specialization_type_overlays
+            .enter(specialization_overlay);
         // Compile the specialized body. On failure, surface the error — the
         // caller is responsible for falling through to the generic path on
         // any failure mode it wants to tolerate.
@@ -494,8 +406,11 @@ impl BytecodeCompiler {
         self.closure_function_ids = saved_closure_function_ids;
         self.current_function_local_concrete_facts = saved_local_concrete_facts;
         self.local_binding_spans = saved_local_binding_spans;
-        self.specialization_type_param_overlay = saved_type_param_overlay;
-        self.monomorphization_in_progress.remove(&mono_key);
+        drop(specialization_overlay_guard);
+        self.monomorphization_in_progress.remove(&progress_key);
+        if result.is_err() {
+            semantic.cache_remove(&mut self.monomorphization_cache);
+        }
         // ADR-009 A3 (S2) — a specialized-body compile error is a HARD
         // failure: it is the user's real diagnostic (e.g. a comptime
         // semantic-freeze rejection) and must not be soft-swallowed into a
@@ -549,28 +464,40 @@ impl BytecodeCompiler {
         type_args: &[ConcreteType],
         const_args: &[ComptimeConstValue],
     ) -> std::result::Result<u16, SpecializationFailure> {
+        self.ensure_monomorphic_function_with_consts_for_callsite(
+            base_fn_name,
+            type_args,
+            const_args,
+            SemanticSpecializationRequest::Legacy,
+        )
+    }
+
+    pub(crate) fn ensure_monomorphic_function_with_consts_for_callsite(
+        &mut self,
+        base_fn_name: &str,
+        type_args: &[ConcreteType],
+        const_args: &[ComptimeConstValue],
+        semantic_request: SemanticSpecializationRequest,
+    ) -> std::result::Result<u16, SpecializationFailure> {
         // Fast path: no const args at all → reuse the existing entry point so
         // type-only callers stay byte-for-byte identical.
         if const_args.is_empty() {
-            return self.ensure_monomorphic_function(base_fn_name, type_args);
+            return self.ensure_monomorphic_function_for_callsite(
+                base_fn_name,
+                type_args,
+                semantic_request,
+            );
         }
 
         let mono_key = build_mono_key_with_consts(base_fn_name, type_args, const_args);
-
-        if let Some(existing) = self.monomorphization_cache.lookup(&mono_key) {
-            return Ok(existing);
-        }
-
-        // BUG3 — cycle detector (see `ensure_monomorphic_function`).
-        if self.monomorphization_in_progress.contains(&mono_key) {
-            return Err(SpecializationFailure::Soft(ShapeError::SemanticError {
-                message: format!(
-                    "ensure_monomorphic_function_with_consts: cycle detected while specializing '{}' — the generic body transitively resolves to itself",
-                    mono_key
-                ),
-                location: None,
-            }));
-        }
+        let semantic = self
+            .prepare_semantic_specialization(
+                base_fn_name,
+                mono_key.clone(),
+                type_args.len(),
+                semantic_request,
+            )
+            .map_err(SpecializationFailure::Hard)?;
 
         let original_def = self
             .function_defs
@@ -583,18 +510,11 @@ impl BytecodeCompiler {
                 ),
                 location: None,
             })?;
-
-        // Partition the declared generic params into type-kind names and
-        // const-kind names (positional against `type_args` / `const_args`
-        // respectively). This became tractable in B.2 when `TypeParam` grew
-        // a `Const` variant — prior to B.3 the wiring here fell back to
-        // synthetic `__const_<i>` names because there was no split.
         let (type_param_names, const_param_names) = original_def
             .type_params
             .as_ref()
             .map(|tps| split_type_and_const_param_names(tps))
             .unwrap_or_default();
-
         if type_param_names.len() != type_args.len() {
             return Err(SpecializationFailure::Soft(ShapeError::SemanticError {
                 message: format!(
@@ -606,7 +526,6 @@ impl BytecodeCompiler {
                 location: None,
             }));
         }
-
         if const_param_names.len() != const_args.len() {
             return Err(SpecializationFailure::Soft(ShapeError::SemanticError {
                 message: format!(
@@ -618,7 +537,31 @@ impl BytecodeCompiler {
                 location: None,
             }));
         }
+        let specialization_overlay = semantic
+            .overlay(base_fn_name, &type_param_names)
+            .map_err(SpecializationFailure::Hard)?;
 
+        if let Some(existing) = semantic.cache_lookup(&self.monomorphization_cache) {
+            return Ok(existing);
+        }
+
+        // BUG3 — cycle detector (see `ensure_monomorphic_function`).
+        let progress_key = SpecializationProgressKey::from(&semantic);
+        if self.monomorphization_in_progress.contains(&progress_key) {
+            return Err(SpecializationFailure::Soft(ShapeError::SemanticError {
+                message: format!(
+                    "ensure_monomorphic_function_with_consts: cycle detected while specializing '{}' — the generic body transitively resolves to itself",
+                    mono_key
+                ),
+                location: None,
+            }));
+        }
+
+        // Partition the declared generic params into type-kind names and
+        // const-kind names (positional against `type_args` / `const_args`
+        // respectively). This became tractable in B.2 when `TypeParam` grew
+        // a `Const` variant — prior to B.3 the wiring here fell back to
+        // synthetic `__const_<i>` names because there was no split.
         let type_subs: HashMap<String, ConcreteType> = type_param_names
             .iter()
             .cloned()
@@ -641,12 +584,13 @@ impl BytecodeCompiler {
             .zip(const_args.iter().cloned())
             .collect();
 
-        let specialized_def = substitution::substitute_function_def_with_consts(
+        let mut specialized_def = substitution::substitute_function_def_with_consts(
             &original_def,
             &type_subs,
             &const_subs,
             &mono_key,
         );
+        specialized_def.name = semantic.specialized_symbol(specialized_def.name);
         let specialized_name = specialized_def.name.clone();
 
         self.register_function(&specialized_def)?;
@@ -672,12 +616,12 @@ impl BytecodeCompiler {
         // Cache BEFORE compiling so a recursive const-generic call inside
         // the body resolves through the cache instead of recursively
         // re-monomorphizing.
-        self.monomorphization_cache
-            .insert(mono_key.clone(), specialization_idx);
+        semantic.cache_insert(&mut self.monomorphization_cache, specialization_idx);
         self.next_monomorphization_id = self.next_monomorphization_id.saturating_add(1);
 
         // BUG3 — mark this key as in-progress while its body is compiled.
-        self.monomorphization_in_progress.insert(mono_key.clone());
+        self.monomorphization_in_progress
+            .insert(progress_key.clone());
 
         // F7: see note in `ensure_monomorphic_function` above.
         let saved_closure_function_ids = std::mem::take(&mut self.closure_function_ids);
@@ -686,19 +630,18 @@ impl BytecodeCompiler {
         let saved_local_concrete_facts =
             std::mem::take(&mut self.current_function_local_concrete_facts);
         let saved_local_binding_spans = std::mem::take(&mut self.local_binding_spans);
-        // ADR-009 A3 — see `ensure_monomorphic_function`: base-name-scoped
-        // declared type params for reflection snapshots (type-kind only;
-        // const-kind params are value bindings, not Parameter identities).
-        let saved_type_param_overlay = std::mem::replace(
-            &mut self.specialization_type_param_overlay,
-            Some((base_fn_name.to_string(), type_param_names.clone())),
-        );
+        let specialization_overlay_guard = self
+            .specialization_type_overlays
+            .enter(specialization_overlay);
         let result = self.compile_function(&specialized_def);
         self.closure_function_ids = saved_closure_function_ids;
         self.current_function_local_concrete_facts = saved_local_concrete_facts;
         self.local_binding_spans = saved_local_binding_spans;
-        self.specialization_type_param_overlay = saved_type_param_overlay;
-        self.monomorphization_in_progress.remove(&mono_key);
+        drop(specialization_overlay_guard);
+        self.monomorphization_in_progress.remove(&progress_key);
+        if result.is_err() {
+            semantic.cache_remove(&mut self.monomorphization_cache);
+        }
         // ADR-009 A3 (S2) — see `ensure_monomorphic_function`: body compile
         // errors are HARD and must propagate.
         result.map_err(SpecializationFailure::Hard)?;
@@ -741,17 +684,86 @@ impl BytecodeCompiler {
         closure_defs: &[ClosureDefPeek],
         callee_closure_param_names: &[String],
     ) -> Result<Option<u16>> {
+        self.ensure_monomorphic_function_with_closures_for_callsite(
+            base_fn_name,
+            type_args,
+            closure_specs,
+            closure_defs,
+            callee_closure_param_names,
+            SemanticSpecializationRequest::Legacy,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn ensure_monomorphic_function_with_closures_for_callsite(
+        &mut self,
+        base_fn_name: &str,
+        type_args: &[ConcreteType],
+        closure_specs: &[ClosureSpec],
+        closure_defs: &[ClosureDefPeek],
+        callee_closure_param_names: &[String],
+        semantic_request: SemanticSpecializationRequest,
+    ) -> Result<Option<u16>> {
         let mono_key = build_mono_key_with_closures(base_fn_name, type_args, closure_specs);
 
+        // Resolve the actual callee and validate exact provenance before an
+        // optimization refusal. Invalid exact declaration provenance is never
+        // downgraded to the ordinary closure path.
+        let original_def = match self.function_defs.get(base_fn_name).cloned() {
+            Some(definition) => definition,
+            None => return Ok(None),
+        };
+        let declared_type_params: Vec<String> = original_def
+            .type_params
+            .as_ref()
+            .map(|tps| {
+                tps.iter()
+                    .filter(|tp| !tp.is_const())
+                    .map(|tp| tp.name().to_string())
+                    .collect()
+            })
+            .unwrap_or_default();
+        self.validate_semantic_specialization_request(
+            base_fn_name,
+            type_args.len(),
+            Some(&declared_type_params),
+            &semantic_request,
+        )?;
+        if declared_type_params.len() != type_args.len() {
+            return Ok(None);
+        }
+        if self
+            .specialization_type_overlays
+            .current()
+            .is_some_and(|outer| {
+                outer.has_lexical_parameter_name_collision(&declared_type_params)
+            })
+        {
+            // One name map cannot preserve whether an inlined `type_ref(T)`
+            // originated in the caller closure or the callee template. Keep
+            // both lexical owners honest by refusing this optimization before
+            // cache/progress/symbol publication; the caller uses the ordinary
+            // already-compiled closure path.
+            return Ok(None);
+        }
+        let semantic = self.prepare_lexical_inline_specialization(
+            base_fn_name,
+            mono_key.clone(),
+            type_args.len(),
+            semantic_request,
+        )?;
+        let specialization_overlay = semantic.overlay(base_fn_name, &declared_type_params)?;
+
         // Cache hit — reuse.
-        if let Some(existing) = self.monomorphization_cache.lookup(&mono_key) {
+        if let Some(existing) = semantic.cache_lookup(&self.monomorphization_cache) {
             return Ok(Some(existing));
         }
 
         // BUG3 — cycle detector (see `ensure_monomorphic_function`).
         // Closure-aware specialization is the soft-fail variant: bail to the
         // generic path when a cycle is hit rather than surfacing the error.
-        if self.monomorphization_in_progress.contains(&mono_key) {
+        let progress_key = SpecializationProgressKey::from(&semantic);
+        if self.monomorphization_in_progress.contains(&progress_key) {
             return Ok(None);
         }
 
@@ -767,25 +779,6 @@ impl BytecodeCompiler {
         if closure_defs.len() != closure_specs.len()
             || callee_closure_param_names.len() != closure_specs.len()
         {
-            return Ok(None);
-        }
-
-        // Look up the base def; fail soft if missing.
-        let original_def = match self.function_defs.get(base_fn_name).cloned() {
-            Some(d) => d,
-            None => return Ok(None),
-        };
-
-        let declared_type_params: Vec<String> = original_def
-            .type_params
-            .as_ref()
-            .map(|tps| tps.iter().map(|tp| tp.name().to_string()).collect())
-            .unwrap_or_default();
-
-        // If type args and declared params disagree, bail (falls back to
-        // generic path) rather than raise — the caller may still want to
-        // compile the call with an unspecialized body.
-        if declared_type_params.len() != type_args.len() {
             return Ok(None);
         }
 
@@ -810,7 +803,7 @@ impl BytecodeCompiler {
         let mut specialized_def = substitution::substitute_function_def(&original_def, &subs);
         // Overwrite the name with the full closure-aware key so the cache key
         // and the registered function name agree.
-        specialized_def.name = mono_key.clone();
+        specialized_def.name = semantic.specialized_symbol(mono_key.clone());
 
         // Inline each closure body in turn.
         for (i, spec_info) in closure_defs.iter().enumerate() {
@@ -900,13 +893,13 @@ impl BytecodeCompiler {
 
         // Cache BEFORE compile_function so any recursive call inside the
         // specialized body resolves through the cache.
-        self.monomorphization_cache
-            .insert(mono_key.clone(), specialization_idx);
+        semantic.cache_insert(&mut self.monomorphization_cache, specialization_idx);
         self.next_monomorphization_id = self.next_monomorphization_id.saturating_add(1);
         self.closure_specialization_count = self.closure_specialization_count.saturating_add(1);
 
         // BUG3 — mark this key as in-progress while its body is compiled.
-        self.monomorphization_in_progress.insert(mono_key.clone());
+        self.monomorphization_in_progress
+            .insert(progress_key.clone());
 
         // F7: see note in `ensure_monomorphic_function`.
         let saved_closure_function_ids = std::mem::take(&mut self.closure_function_ids);
@@ -915,36 +908,21 @@ impl BytecodeCompiler {
         let saved_local_concrete_facts =
             std::mem::take(&mut self.current_function_local_concrete_facts);
         let saved_local_binding_spans = std::mem::take(&mut self.local_binding_spans);
-        // ADR-009 A3 — see `ensure_monomorphic_function`: base-name-scoped
-        // declared type params for reflection snapshots. Unlike the local
-        // `declared_type_params` above (which is positional against
-        // `type_args` and unfiltered), the overlay carries type-kind names
-        // only — const-kind params are value bindings, not Parameter
-        // identities.
-        let overlay_type_params: Vec<String> = original_def
-            .type_params
-            .as_ref()
-            .map(|tps| {
-                tps.iter()
-                    .filter(|tp| !tp.is_const())
-                    .map(|tp| tp.name().to_string())
-                    .collect()
-            })
-            .unwrap_or_default();
-        let saved_type_param_overlay = std::mem::replace(
-            &mut self.specialization_type_param_overlay,
-            Some((base_fn_name.to_string(), overlay_type_params)),
-        );
+        let specialization_overlay_guard = self
+            .specialization_type_overlays
+            .enter_lexical_inline(specialization_overlay);
         let compile_result = self.compile_function(&specialized_def);
         self.closure_function_ids = saved_closure_function_ids;
         self.current_function_local_concrete_facts = saved_local_concrete_facts;
         self.local_binding_spans = saved_local_binding_spans;
-        self.specialization_type_param_overlay = saved_type_param_overlay;
-        self.monomorphization_in_progress.remove(&mono_key);
+        drop(specialization_overlay_guard);
+        self.monomorphization_in_progress.remove(&progress_key);
         if compile_result.is_err() {
-            // Compilation failed — we already inserted the cache entry; the
-            // caller will fall back to the generic path anyway. Returning
-            // Ok(None) keeps the error surface clean.
+            // Never leave a registered-but-uncompiled function reachable
+            // through either cache domain. The caller falls back with the
+            // same semantic request through the type-only authority.
+            semantic.cache_remove(&mut self.monomorphization_cache);
+            self.closure_specialization_count = self.closure_specialization_count.saturating_sub(1);
             //
             // ADR-009 A3 (S2) — this stays a SOFT failure by design, unlike
             // the type-only / const-aware entry points above. The closure-
