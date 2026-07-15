@@ -1522,6 +1522,7 @@ pub(super) fn identity_from_hex(hex: &str) -> Option<FrozenTypeIdentity> {
 /// [`canonical_applied`] raises), an unknown name the named unknown-identity
 /// rejection. The minted descriptor is distinct from the bare nominal leaf so
 /// a `TypeConstructorRef` is never confused with a `TypeRef`.
+#[cfg(test)]
 pub(super) fn canonical_constructor(
     head: &str,
     overlay: &FreezeOverlay,

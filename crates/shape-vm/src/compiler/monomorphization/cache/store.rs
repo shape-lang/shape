@@ -23,11 +23,13 @@ impl MonomorphizationCache {
     }
 
     /// Look up only the legacy ABI execution domain.
+    #[cfg(test)]
     pub fn lookup(&self, mono_key: &str) -> Option<u16> {
         self.lookup_legacy(&LegacySpecializationKey::new(mono_key.to_string()))
     }
 
     /// Insert only into the legacy ABI execution domain.
+    #[cfg(test)]
     pub fn insert(&mut self, mono_key: String, function_idx: u16) {
         self.insert_legacy(LegacySpecializationKey::new(mono_key), function_idx);
     }

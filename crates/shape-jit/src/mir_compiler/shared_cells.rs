@@ -356,12 +356,12 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                     kind,
                     SharedCellCarrierOrigin::DeclaringFrameLocal,
                 )?;
-                Ok((*slot, kind, kind_code))
+                Ok((*slot, kind_code))
             })
             .collect::<Result<Vec<_>, String>>()?;
-        slots.sort_by_key(|(slot, _, _)| slot.0);
+        slots.sort_by_key(|(slot, _)| slot.0);
 
-        for (slot, kind, kind_code) in slots {
+        for (slot, kind_code) in slots {
             let Some(&variable) = self.locals.get(&slot) else {
                 continue;
             };

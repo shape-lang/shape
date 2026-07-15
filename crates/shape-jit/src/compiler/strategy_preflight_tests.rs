@@ -187,7 +187,7 @@ fn user_function_body_rejects_forged_inherited_shared_capture_before_publication
 
     assert_eq!(
         error,
-        "INTERNAL SharedCell kind invariant: inherited Shared capture parameter slot 1 \
+        "INTERNAL SharedCell kind invariant: inherited Shared capture parameter slot _1 \
          resolved to unsupported Ptr(NativeScalar). The exhaustive ConcreteType capture-kind \
          issuer cannot produce a carrier-less kind; forged or external layout metadata must \
          be rejected before JIT emission or allocation."

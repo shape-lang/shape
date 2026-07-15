@@ -60,6 +60,7 @@ pub(crate) fn build_some(schemas: &BuiltinSchemaIds, payload: KindedSlot) -> Kin
     build_variant_object(schemas.option as u64, OPTION_VARIANT_SOME, payload)
 }
 
+#[cfg(test)]
 #[inline]
 pub(crate) fn build_none(schemas: &BuiltinSchemaIds) -> KindedSlot {
     build_variant_object(
