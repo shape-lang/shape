@@ -1099,6 +1099,9 @@ pub struct BytecodeCompiler {
     pub(crate) imported_names: HashMap<String, ImportedSymbol>,
     /// Imported annotations: local_name -> ImportedAnnotationSymbol
     pub(crate) imported_annotations: HashMap<String, ImportedAnnotationSymbol>,
+    /// Opaque evidence that annotation declaration installation completed.
+    annotation_declarations:
+        statements::annotation_declarations::AnnotationDeclarationState,
     /// R8 W8 Cluster A (2026-05-24): imported `pub const NAME = expr`
     /// initializers, keyed by the local binding name (alias-respecting).
     /// At identifier-load time, references to these names compile to an

@@ -80,8 +80,8 @@ fn annotation_import(module: &str, module_id: ModuleId, local_name: &str) -> Res
 fn local_annotation_shadows_two_imports_through_the_full_pipeline() {
     let program = parse(
         r#"
-from ./alpha use { @same }
-from ./beta use { @same }
+from pkg::alpha use { @same }
+from pkg::beta use { @same }
 
 annotation same() {
   targets: [type]
@@ -196,11 +196,40 @@ pub annotation same() {
             vec![explicit_id, synthetic_id],
             root_id,
         );
-        let bytecode = BytecodeCompiler::new()
-            .compile_with_graph(&root, std::sync::Arc::new(graph))
+        let mut compiler = BytecodeCompiler::new();
+        compiler
+            .compile_with_graph_and_prelude_in_place(
+                &root,
+                std::sync::Arc::new(graph),
+                &[],
+            )
             .expect("the local tombstone prevents both remote handlers from running");
         assert!(
-            bytecode
+            compiler.imported_annotations.get("same").is_none(),
+            "the completed graph pipeline must retain the local-shadow tombstone"
+        );
+        assert_eq!(
+            compiler
+                .program
+                .compiled_annotations
+                .keys()
+                .map(String::as_str)
+                .collect::<std::collections::BTreeSet<_>>(),
+            std::collections::BTreeSet::from([
+                "pkg::explicit::same",
+                "same",
+                "std::prelude::same",
+            ]),
+            "all three exact declaration carriers must survive without alias publication"
+        );
+        assert_eq!(
+            compiler.generated_symbol_query().len(),
+            1,
+            "only the local handler may generate a declaration"
+        );
+        assert!(
+            compiler
+                .program
                 .functions
                 .iter()
                 .any(|function| function.name == "Probe.answer"),

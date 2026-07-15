@@ -42,6 +42,7 @@ struct ModuleDirectiveOutcome {
     replaced: bool,
 }
 
+pub(super) mod annotation_declarations;
 mod annotation_imports;
 mod graph_imports;
 
@@ -826,9 +827,7 @@ impl BytecodeCompiler {
                     self.type_inference.env.define_trait(trait_def);
                     Ok(())
                 }
-                ExportItem::Annotation(annotation_def) => {
-                    self.compile_annotation_def(annotation_def)
-                }
+                ExportItem::Annotation(_) => Ok(()),
                 ExportItem::ForeignFunction(def) => {
                     // Same registration as Item::ForeignFunction
                     let caller_visible = def.params.iter().filter(|p| !p.is_out).count();
@@ -1918,7 +1917,7 @@ impl BytecodeCompiler {
                 match &export.item {
                     ExportItem::Function(func_def) => self.compile_function(func_def)?,
                     ExportItem::Annotation(annotation_def) => {
-                        self.compile_annotation_def(annotation_def)?;
+                        self.require_prepared_annotation(annotation_def)?;
                     }
                     ExportItem::Enum(enum_def) => self.register_enum(enum_def)?,
                     ExportItem::Struct(struct_def) => {
@@ -2093,7 +2092,7 @@ impl BytecodeCompiler {
                 }
             }
             Item::AnnotationDef(ann_def, _) => {
-                self.compile_annotation_def(ann_def)?;
+                self.require_prepared_annotation(ann_def)?;
             }
             Item::Comptime(stmts, span) => {
                 // Execute comptime block at compile time (side-effects only; result discarded)
@@ -2567,6 +2566,21 @@ impl BytecodeCompiler {
     /// Reuses the ordinary module qualification and registration paths as the
     /// single source of truth.
     pub fn register_imported_items(&mut self, module_path: &str, items: &[Item]) {
+        let qualified_annotations = items
+            .iter()
+            .filter_map(|item| match item {
+                Item::Export(export, _)
+                    if matches!(&export.item, ExportItem::Annotation(_)) =>
+                {
+                    self.qualify_module_item(item, module_path).ok()
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        // Preserve the legacy best-effort `()` surface. Atomic rollback on a
+        // later installation failure belongs to the planned LSP transaction.
+        let _ = self.prepare_annotation_scope(&qualified_annotations);
+
         for item in items {
             match item {
                 Item::Export(export, _) => {
@@ -2582,23 +2596,7 @@ impl BytecodeCompiler {
                             // Register function so it's known during compilation
                             let _ = self.register_function(func_def);
                         }
-                        ExportItem::Annotation(_) => {
-                            let Ok(Item::Export(qualified, _)) =
-                                self.qualify_module_item(item, module_path)
-                            else {
-                                continue;
-                            };
-                            let ExportItem::Annotation(annotation_def) = qualified.item else {
-                                continue;
-                            };
-                            if !self
-                                .program
-                                .compiled_annotations
-                                .contains_key(&annotation_def.name)
-                            {
-                                let _ = self.compile_annotation_def(&annotation_def);
-                            }
-                        }
+                        ExportItem::Annotation(_) => {}
                         _ => {}
                     }
                 }
@@ -3333,292 +3331,6 @@ impl BytecodeCompiler {
                 }
             }
         }
-    }
-
-    /// Compile an annotation definition.
-    ///
-    /// Each handler is compiled as an internal function:
-    /// - before(args, ctx) → `{name}___before(self, period, args, ctx)`
-    /// - after(args, result, ctx) → `{name}___after(self, period, args, result, ctx)`
-    ///
-    /// `self` is the annotated item (function/method/property).
-    /// Annotation params (e.g., `period`) are prepended after `self`.
-    fn compile_annotation_def(&mut self, ann_def: &shape_ast::ast::AnnotationDef) -> Result<()> {
-        use crate::bytecode::CompiledAnnotation;
-        use shape_ast::ast::AnnotationHandlerType;
-
-        let mut compiled = CompiledAnnotation {
-            name: ann_def.name.clone(),
-            param_names: ann_def
-                .params
-                .iter()
-                .flat_map(|p| p.get_identifiers())
-                .collect(),
-            param_defs: ann_def.params.clone(),
-            before_handler: None,
-            after_handler: None,
-            on_define_handler: None,
-            metadata_handler: None,
-            comptime_pre_handler: None,
-            comptime_post_handler: None,
-            before_handler_template: None,
-            after_handler_template: None,
-            allowed_targets: Vec::new(),
-        };
-
-        for handler in &ann_def.handlers {
-            // Comptime handlers are stored as AST (not compiled to bytecode).
-            // They are executed at compile time when the annotation is applied.
-            match handler.handler_type {
-                AnnotationHandlerType::ComptimePre => {
-                    compiled.comptime_pre_handler = Some(handler.clone());
-                    continue;
-                }
-                AnnotationHandlerType::ComptimePost => {
-                    compiled.comptime_post_handler = Some(handler.clone());
-                    continue;
-                }
-                _ => {}
-            }
-
-            if handler.params.iter().any(|p| p.is_variadic) {
-                return Err(ShapeError::SemanticError {
-                    message:
-                        "Variadic annotation handler params (`...args`) are only supported on comptime handlers"
-                            .to_string(),
-                    location: Some(self.span_to_source_location(handler.span)),
-                });
-            }
-
-            let handler_type_str = match handler.handler_type {
-                AnnotationHandlerType::Before => "before",
-                AnnotationHandlerType::After => "after",
-                AnnotationHandlerType::OnDefine => "on_define",
-                AnnotationHandlerType::Metadata => "metadata",
-                AnnotationHandlerType::ComptimePre => unreachable!(),
-                AnnotationHandlerType::ComptimePost => unreachable!(),
-            };
-
-            let func_name = format!("{}___{}", ann_def.name, handler_type_str);
-
-            if matches!(
-                handler.handler_type,
-                AnnotationHandlerType::Before | AnnotationHandlerType::After
-            ) {
-                let placeholder = FunctionDef {
-                    name: func_name.clone(),
-                    name_span: Span::DUMMY,
-                    declaring_module_path: None,
-                    doc_comment: None,
-                    params: Vec::new(),
-                    return_type: handler.return_type.clone(),
-                    body: Vec::new(),
-                    type_params: Some(Vec::new()),
-                    annotations: Vec::new(),
-                    is_async: false,
-                    is_comptime: false,
-                    where_clause: None,
-                };
-                self.register_function(&placeholder)?;
-                let func_id = self.find_function(&func_name).ok_or_else(|| {
-                    ShapeError::RuntimeError {
-                        message: format!(
-                            "Internal error: annotation handler function '{}' was not registered",
-                            func_name
-                        ),
-                        location: None,
-                    }
-                })? as u16;
-                match handler.handler_type {
-                    AnnotationHandlerType::Before => {
-                        compiled.before_handler = Some(func_id);
-                        compiled.before_handler_template = Some(handler.clone());
-                    }
-                    AnnotationHandlerType::After => {
-                        compiled.after_handler = Some(func_id);
-                        compiled.after_handler_template = Some(handler.clone());
-                    }
-                    _ => unreachable!(),
-                }
-                continue;
-            }
-
-            // Build function params: self + annotation_params + handler_params
-            let mut params = vec![FunctionParameter {
-                pattern: shape_ast::ast::DestructurePattern::Identifier(
-                    "self".to_string(),
-                    Span::DUMMY,
-                ),
-                is_const: false,
-                is_reference: false,
-                is_mut_reference: false,
-                is_out: false,
-                type_annotation: None,
-                default_value: None,
-            }];
-            // Add annotation params (e.g., period)
-            for ann_param in &ann_def.params {
-                params.push(ann_param.clone());
-            }
-            // Add handler params (e.g., args, ctx)
-            for param in &handler.params {
-                let inferred_type = if param.name == "ctx" {
-                    Some(TypeAnnotation::Object(vec![
-                        shape_ast::ast::ObjectTypeField {
-                            name: "state".to_string(),
-                            optional: false,
-                            type_annotation: TypeAnnotation::Basic("unknown".to_string()),
-                            annotations: vec![],
-                        },
-                        shape_ast::ast::ObjectTypeField {
-                            name: "event_log".to_string(),
-                            optional: false,
-                            type_annotation: TypeAnnotation::Array(Box::new(
-                                TypeAnnotation::Basic("unknown".to_string()),
-                            )),
-                            annotations: vec![],
-                        },
-                    ]))
-                } else if matches!(
-                    handler.handler_type,
-                    AnnotationHandlerType::OnDefine | AnnotationHandlerType::Metadata
-                ) && (param.name == "fn" || param.name == "target")
-                {
-                    Some(TypeAnnotation::Object(vec![
-                        shape_ast::ast::ObjectTypeField {
-                            name: "name".to_string(),
-                            optional: false,
-                            type_annotation: TypeAnnotation::Basic("string".to_string()),
-                            annotations: vec![],
-                        },
-                        shape_ast::ast::ObjectTypeField {
-                            name: "kind".to_string(),
-                            optional: false,
-                            type_annotation: TypeAnnotation::Basic("string".to_string()),
-                            annotations: vec![],
-                        },
-                        shape_ast::ast::ObjectTypeField {
-                            name: "id".to_string(),
-                            optional: false,
-                            type_annotation: TypeAnnotation::Basic("int".to_string()),
-                            annotations: vec![],
-                        },
-                    ]))
-                } else {
-                    None
-                };
-
-                params.push(FunctionParameter {
-                    pattern: shape_ast::ast::DestructurePattern::Identifier(
-                        param.name.clone(),
-                        Span::DUMMY,
-                    ),
-                    is_const: false,
-                    is_reference: false,
-                    is_mut_reference: false,
-                    is_out: false,
-                    type_annotation: inferred_type,
-                    default_value: None,
-                });
-            }
-
-            // Convert handler body (Expr) to function body (Vec<Statement>)
-            let body = vec![Statement::Return(Some(handler.body.clone()), Span::DUMMY)];
-
-            let func_def = FunctionDef {
-                name: func_name,
-                name_span: Span::DUMMY,
-                declaring_module_path: None,
-                doc_comment: None,
-                params,
-                return_type: handler.return_type.clone(),
-                body,
-                type_params: Some(Vec::new()),
-                annotations: Vec::new(),
-                is_async: false,
-                is_comptime: false,
-                where_clause: None,
-            };
-
-            self.register_function(&func_def)?;
-            self.compile_function(&func_def)?;
-
-            // Capture frame descriptor for the annotation handler function.
-            // Mirrors functions.rs:1750 — required for v2 typed opcode verification
-            // (ADR-006 §2.7.5.1) and JIT deoptimization map construction. Without
-            // this, v2 typed opcodes emitted in the handler body (e.g. NewTypedArrayI64,
-            // TypedArrayPushI64 from CoW array mutations) fail verification and the
-            // JIT SEGFAULTs on deopt paths.
-            let func_idx = self.program.functions.len() - 1;
-            self.program.functions[func_idx].locals_count = self.next_local;
-            self.capture_function_local_storage_hints(func_idx);
-
-            let func_id = (self.program.functions.len() - 1) as u16;
-
-            match handler.handler_type {
-                AnnotationHandlerType::Before => compiled.before_handler = Some(func_id),
-                AnnotationHandlerType::After => compiled.after_handler = Some(func_id),
-                AnnotationHandlerType::OnDefine => compiled.on_define_handler = Some(func_id),
-                AnnotationHandlerType::Metadata => compiled.metadata_handler = Some(func_id),
-                AnnotationHandlerType::ComptimePre => {} // handled above
-                AnnotationHandlerType::ComptimePost => {} // handled above
-            }
-        }
-
-        // Resolve allowed target kinds.
-        // Explicit `targets: [...]` in the annotation definition has priority.
-        // Otherwise infer from handlers:
-        // before/after handlers only make sense on functions (they wrap calls),
-        // lifecycle handlers (on_define/metadata) are definition-time only.
-        if let Some(explicit) = &ann_def.allowed_targets {
-            compiled.allowed_targets = explicit.clone();
-        } else if compiled.before_handler.is_some()
-            || compiled.after_handler.is_some()
-            || compiled.comptime_pre_handler.is_some()
-            || compiled.comptime_post_handler.is_some()
-        {
-            compiled.allowed_targets =
-                vec![shape_ast::ast::functions::AnnotationTargetKind::Function];
-        } else if compiled.on_define_handler.is_some() || compiled.metadata_handler.is_some() {
-            compiled.allowed_targets = vec![
-                shape_ast::ast::functions::AnnotationTargetKind::Function,
-                shape_ast::ast::functions::AnnotationTargetKind::Type,
-                shape_ast::ast::functions::AnnotationTargetKind::Module,
-            ];
-        }
-
-        // Enforce that definition-time lifecycle hooks only target definition
-        // sites (`function` / `type`).
-        if compiled.on_define_handler.is_some() || compiled.metadata_handler.is_some() {
-            if compiled.allowed_targets.is_empty() {
-                return Err(ShapeError::SemanticError {
-                    message: format!(
-                        "Annotation '{}' uses `on_define`/`metadata` and cannot have unrestricted targets. Allowed targets are: function, type, module",
-                        ann_def.name
-                    ),
-                    location: Some(self.span_to_source_location(ann_def.span)),
-                });
-            }
-            if let Some(invalid) = compiled
-                .allowed_targets
-                .iter()
-                .find(|kind| !Self::is_definition_annotation_target(**kind))
-            {
-                let invalid_label = format!("{:?}", invalid).to_lowercase();
-                return Err(ShapeError::SemanticError {
-                    message: format!(
-                        "Annotation '{}' uses `on_define`/`metadata`, but target '{}' is not a definition target. Allowed targets are: function, type, module",
-                        ann_def.name, invalid_label
-                    ),
-                    location: Some(self.span_to_source_location(ann_def.span)),
-                });
-            }
-        }
-
-        self.program
-            .compiled_annotations
-            .insert(ann_def.name.clone(), compiled);
-        Ok(())
     }
 
     /// Register ONLY a struct's runtime `TypeSchema` into the compiler's
@@ -6239,6 +5951,7 @@ impl BytecodeCompiler {
         for qualified in &qualified_items {
             self.register_missing_module_items(qualified)?;
         }
+        self.prepare_annotation_scope(&qualified_items)?;
 
         self.non_function_mir_context_stack
             .push(module_path.clone());

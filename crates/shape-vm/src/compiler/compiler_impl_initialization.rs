@@ -100,6 +100,8 @@ impl BytecodeCompiler {
             source_lines: Vec::new(),
             imported_names: HashMap::new(),
             imported_annotations: HashMap::new(),
+            annotation_declarations:
+                statements::annotation_declarations::AnnotationDeclarationState::default(),
             imported_consts: HashMap::new(),
             module_builtin_functions: HashMap::new(),
             module_namespace_bindings: HashSet::new(),

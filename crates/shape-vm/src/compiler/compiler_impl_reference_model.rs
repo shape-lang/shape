@@ -2327,6 +2327,7 @@ impl BytecodeCompiler {
         for item in &program.items {
             self.register_item_functions(item)?;
         }
+        self.prepare_annotation_scope(&program.items)?;
 
         // (WS-9b struct-schema predeclare + ADR-009 freeze-input predeclare +
         // the semantic-freeze barrier ran earlier, before the §4.5.1
@@ -3056,116 +3057,10 @@ impl BytecodeCompiler {
         mut self,
         root_program: &Program,
         graph: std::sync::Arc<crate::module_graph::ModuleGraph>,
-        _prelude_paths: &[String],
+        prelude_paths: &[String],
     ) -> Result<BytecodeProgram> {
-        use crate::module_graph::ModuleSourceKind;
-
-        self.module_graph = Some(graph.clone());
-
-        // Root graph imports are stripped before the standard compiler driver,
-        // but imported annotation handlers must resolve before declaration
-        // discovery. Validate the root's complete semantic view now without
-        // publishing it: dependency compilation below gets its own scoped view,
-        // and this root snapshot is restored immediately before root discovery.
-        let root_annotation_semantics =
-            self.stage_graph_annotation_imports_for_module(root_program, graph.root_id(), &graph)?;
-
-        // ADR-009 §4.1 (A1 review round 1, findings 1+2): the semantic-freeze
-        // barrier is per COMPILATION UNIT — and on this pipeline the unit is
-        // root + graph dependencies. Phase 1 below compiles dependency
-        // modules, including any comptime site they contain (a top-level
-        // `comptime { }` item, an `Expr::Comptime` in an imported fn body, or
-        // an annotation comptime handler on an imported item), so the barrier
-        // must run BEFORE Phase 1 — the barrier inside `compile()` (Phase 2,
-        // root) alone left every dependency-module comptime site without a
-        // handle (row-3 NO_FREEZE_HANDLE diagnostic). Predeclare the named
-        // freeze inputs (struct schemas, type aliases, enum schemas) of every
-        // graph module under their qualified names — mirroring
-        // `compile_module_from_graph`'s own qualification — then the root's,
-        // then install the single freeze. The freeze reads no function
-        // tables, so running it ahead of body compilation loses nothing;
-        // predeclare registration is idempotent with the pass-2 item arms.
-        // This is the ONE unit barrier, not a per-module re-freeze:
-        // `compile()` skips its install when the graph entry point already
-        // ran it.
-        // ADR-009 (ticket B2, S1): the freeze-input predeclare runs as two
-        // sub-passes over the WHOLE unit (every graph module, then the
-        // root) — all type/trait definitions first, then all impls — so an
-        // impl anywhere in the unit registers with its trait def already
-        // present regardless of source or topo position (see
-        // `SemanticFreezePredeclarePass`). Struct schemas predeclare once,
-        // during the first sub-pass.
-        for pass in [
-            super::statements::SemanticFreezePredeclarePass::TypesAndTraits,
-            super::statements::SemanticFreezePredeclarePass::Impls,
-        ] {
-            for &dep_id in graph.topo_order() {
-                let dep_node = graph.node(dep_id);
-                if !matches!(
-                    dep_node.source_kind,
-                    ModuleSourceKind::ShapeSource | ModuleSourceKind::Hybrid
-                ) {
-                    continue;
-                }
-                let Some(dep_ast) = dep_node.ast.clone() else {
-                    continue;
-                };
-                let module_path = dep_node.canonical_path.clone();
-                self.module_scope_stack.push(module_path.clone());
-                let predeclare_result = (|| -> Result<()> {
-                    for item in &dep_ast.items {
-                        if matches!(item, shape_ast::ast::Item::Import(..)) {
-                            continue;
-                        }
-                        // Only freeze-input-bearing items need qualification
-                        // here (the kinds the two predeclare walks act on);
-                        // skipping the rest avoids deep-cloning every
-                        // imported fn body a second time.
-                        if !Self::item_can_carry_semantic_freeze_inputs(item) {
-                            continue;
-                        }
-                        let qualified = self.qualify_module_item(item, &module_path)?;
-                        if pass == super::statements::SemanticFreezePredeclarePass::TypesAndTraits {
-                            self.predeclare_item_struct_schemas(&qualified);
-                        }
-                        self.predeclare_item_semantic_freeze_inputs(&qualified, pass)?;
-                    }
-                    Ok(())
-                })();
-                self.module_scope_stack.pop();
-                predeclare_result?;
-            }
-            for item in &root_program.items {
-                if pass == super::statements::SemanticFreezePredeclarePass::TypesAndTraits {
-                    self.predeclare_item_struct_schemas(item);
-                }
-                self.predeclare_item_semantic_freeze_inputs(item, pass)?;
-            }
-        }
-        self.install_semantic_freeze()?;
-
-        // Phase 1: compile every dependency under its scoped import semantics.
-        self.compile_graph_dependency_modules(&graph)?;
-
-        // Phase 2: Compile the root module using the graph for its imports.
-        // NOTE: root's imports are registered INSIDE `compile()` after the
-        // `__main__` blob builder starts, so any emitted Load/Store for
-        // namespace-alias bindings (e.g. `use std::core::set` creates a
-        // runtime copy from canonical binding `std::core::set` to alias
-        // binding `set`) lands inside `__main__`. Registering them here —
-        // before `compile()` opens the `__main__` blob — would leave those
-        // instructions in an unreachable gap between module bodies and
-        // `__main__`'s entry point.
-
-        // Strip import items from root program (imports already resolved via graph)
-        let mut stripped_program = root_program.clone();
-        stripped_program
-            .items
-            .retain(|item| !matches!(item, shape_ast::ast::Item::Import(..)));
-
-        // Compile the stripped root program using the standard two-pass pipeline
-        self.restore_annotation_import_semantics(&root_annotation_semantics);
-        self.compile(&stripped_program)
+        self.compile_with_graph_and_prelude_in_place(root_program, graph, prelude_paths)?;
+        Ok(std::mem::take(&mut self.program))
     }
 
     /// Compile a single module from the graph.
@@ -3256,6 +3151,7 @@ impl BytecodeCompiler {
         for item in &qualified_items {
             self.register_missing_module_items(item)?;
         }
+        self.prepare_annotation_scope(&qualified_items)?;
 
         // 4. Phase 2: Compile function bodies
         self.non_function_mir_context_stack
