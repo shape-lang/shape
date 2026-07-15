@@ -60,13 +60,16 @@ Shared captures now have exact VM/JIT stdout and ZERO-fallback coverage in
 `jit_closure_capture_native.rs`. `f3` remains a module-binding/W39 negative
 control; it must not be read as evidence that capturing closures generally
 deopt. C1's separate `move` / `share` zero-fallback battery is authored in
-`jit_generated_capture_native.rs` over four `c1-generated-*` fixtures plus the
-ordinary inferred `c1-inferred-nested-share.shape` #53 reproduction. That
-battery is committed on the C1 branch, but it has not run under the supervisor
-lane against the final C1 head; it is not a verified capability claim until
-that gate passes. Module-binding capture inside a JIT-compiled function is
-still blocked by W39 F1, and refcounted Shared payloads still surface-and-stop
-before native allocation (the N9 control in `jit_closure_capture_native.rs`).
+`jit_generated_capture_native.rs` over five `c1-generated-*` fixtures plus the
+ordinary inferred scalar and String nested-share #53 controls. Refcounted
+Shared is now an authored native path: N9 in `jit_closure_capture_native.rs`
+requires exact String output and zero fallback, while the canonical 36-entry
+`HeapKind::ALL` catalog and direct Matrix/MatrixSlice zero/read/write/drop tests
+prove the compact kind route and typed lifecycle are complete. These tests are
+committed on the C1 branch but have not run under the supervisor lane against
+the final head; they are not verified capability claims until that gate passes.
+Module-binding capture inside a JIT-compiled function remains blocked by W39
+F1.
 
 `f1` is the canonical baseline preserved verbatim from the W12 close
 (`docs/cluster-audits/v0.3-w12-jit-mode-semantics-close.md` §3.2) — its

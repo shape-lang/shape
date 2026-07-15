@@ -359,115 +359,15 @@ ShapeTest (`tools/shape-test/tests/comptime/typed_constructor.rs`) and LSP
 (`tools/shape-test/tests/lsp/typed_comptime.rs`); book-chapter examples land in
 stage F1 per the program spec.
 
-**CURRENT / C1 branch - declared generated closure captures and exact semantic
-evidence (final ratification pending)**
-
-Generated closures can declare their complete capture set after a semicolon in
-the closure pipe:
-
-```shape
-|item: int; move scale, share total| item * scale + total
-```
-
-The clause is a generated-code-only surface. An explicit clause in ordinary
-source is the named `[C0903]` rejection, while an ordinary closure without a
-clause keeps capture inference. A generated closure that uses an undeclared
-binding still receives the deterministic implicit-capture rejection; a stale
-declared-but-unused entry is also a compile error.
-
-`captures: Option<CaptureClause>` on `Expr::FunctionExpr` is the canonical
-carrier. Directly generated source is its C1 producer. C2 `CheckedBody` staging
-will populate that same field; it is a second producer of one carrier, not a
-parallel capture mechanism.
-
-The final mode mapping is closed:
-
-| Declaration | Binding | Result |
-|---|---|---|
-| `move x` | local `let` | `CaptureKind::Immutable` |
-| `move x` | local `let mut` | `CaptureKind::OwnedMutable` |
-| `move x` | module binding | `[C0906]` rejection |
-| `share x` | `var`, existing `SharedCell`, or module binding | `CaptureKind::Shared` |
-| `share x` | plain local `let` / `let mut` | `[C0908]` rejection |
-| `&x` / `&mut x` | any binding | `[C0902] ReferenceEscapeIntoClosure` rejection until regions exist |
-
-Declaration and discovery are compared by compiler-issued slot identity, never
-by source name or span. For a generated closure, the resulting declared plan is
-the sole authority for emitted layout and access opcodes. Inference may supply
-binding facts for validation, but cannot fill an absent declaration, change its
-mode, or act as a second producer.
-
-The compiler carrier, structural identity, generated-only restriction, and
-mode/rejection matrix are committed on the C1 branch. Generated callable and
-capture facts preserve an explicit `Exact` / `Unavailable` / `Conflict`
-classification. Exact capture types close through `SemanticFreeze`, including
-the full parameter modes, optionality, and return semantics of callable-valued
-captures; an ABI pointer kind, registry id, rendered name, or span is never
-promoted into semantic type evidence.
-
-Declared generic parameters are opaque compiler-issued `TypeVar`
-capabilities. Their semantic identity is owner + ordinal; a source spelling is
-presentation and an independent active-declaration consistency check, not an
-identity. The transient annotation carrier is authenticated and fails closed.
-Before any exact cache lookup, an exact call-site fact must match the active,
-inference-issued `SemanticCalleeDeclaration` by its opaque parameter token,
-ordinal, and current spelling. An asserted exact fact whose callee capability
-is missing, foreign, stale, renamed, or malformed is `[C0911]`; it never
-downgrades into an ABI-only result.
-
-Exact-semantic and legacy ABI specializations occupy physically disjoint cache
-maps, progress keys, and symbols. Exact keys add ordered frozen semantic
-arguments and the frozen identities of every active lexical parameter scope;
-legacy keys can carry that lexical context but cannot borrow an exact entry.
-Only a call site classified as missing, unavailable, or conflicting evidence
-enters the legacy domain. Ordinary recursive compilation installs an isolated
-callee scope. Lexically spliced closure bodies are the sole path that composes
-caller and callee scopes.
-
-One bounded optimization limitation remains. If a lexically inlined caller
-body and the actual callee both declare a generic parameter with the same
-spelling, the current name-indexed `type_ref(T)` syntax cannot preserve which
-owner authored the reference. Closure-aware inlining therefore refuses before
-cache, progress, symbol, counter, or function publication. The already-compiled
-ordinary closure and exact type-only callee route remain available, so this is
-an optimization refusal, not a semantic identity fallback. Name coincidence is
-used only as the refusal signal.
-
-The Slice-4 runtime and proof code is also committed: generated move-let,
-move-let-mut, move-heap, and nested-share cases; the ordinary inferred
-nested-Shared #53 reproduction; exact-output, zero-fallback CLI fixtures under
-`jit_generated_capture_native`; compiler proof
-`nested_declared_share_preserves_the_outer_cell_descriptor`; and balanced VM
-install/teardown proofs for scalar, heap, and nested Shared cells. These are the
-proposed structural + public closure of #53. Ordinary-source immutable,
-owned-mutable, and scalar-Shared captures already reach native JIT through the
-integrated prerequisite, but module-binding capture inside a JIT-compiled
-function remains blocked by W39 F1 and refcounted Shared payloads still refuse
-before native allocation.
-
-The generated-capture LSP surface is now committed, rather than pending.
-`EnvironmentAnalyzer::analyze_function_captures` supplies structural facts to
-the validated packs; `BytecodeCompiler::generated_capture_query` projects
-`GeneratedCaptureQuery` only from those packs and structurally verified source
-maps. Query-local binding identities join sibling and nested occurrences, while
-occurrence identities preserve exact declaration/body positions. Hover,
-go-to-definition, and references consume the same query, aggregate every
-generated application, and quarantine unavailable or conflicting source as
-C0910/C0911 instead of guessing from names or coincident spans. Frontmatter and
-import-registered requests share the same bounded compiler session.
-
-Current imported-interface replay does not publish executable specialization
-facts into the local monomorphization route. If a future serialized or remote
-specialization crosses that boundary, it must persist or reissue the opaque
-callee capability; reconstructing authority from parameter names is not a
-valid extension.
-
-Evidence status: the final implementation and focused proofs are authored and
-committed, and the exact-specialization boundary has a focused static refuter
-PASS. The post-commit cargo, ShapeTest, LSP, CLI, and broad supervisor gates and
-the whole-C1 fixed-point reviews have not run. This section therefore makes no
-overall-green or merge-ratification claim. Book prose and runnable examples
-remain TARGET stage F1 after those gates pass.
+**CURRENT / C1 branch - generated captures and exact semantic evidence.** The
+generated-only `FunctionExpr.captures` carrier, strict four-mode mapping, opaque
+semantic/cache authority, native scalar and refcounted Shared lifecycle, and
+compiler-query hover/definition/references/descriptor-authoritative rename are
+committed. String has authored exact zero-fallback proofs; the complete
+`HeapKind::ALL` path includes direct Matrix/MatrixSlice lifecycle proofs. Final
+supervisor execution gates and whole-C1 ratification remain pending. See the
+[detailed C1 status](typed-comptime/c1-generated-captures.md) and
+[rejected-design record](typed-comptime/c1-capture-defections.md).
 
 **CURRENT / VM+JIT - applied type annotation generation**
 
@@ -976,7 +876,7 @@ examples, rejection requirements, and implementation implications.
 | `FieldInitialization<Owner, F, T>` | comptime | Required or typed-default construction policy | accepted algebra; CURRENT sealed enum (`Required`/`Defaulted`) via B5 S1 — the freeze struct input carries no per-field default flag yet, so all fields are `Required` today (Dec 59 total records; `Defaulted` population is a later slice, see `docs/defections.md`) |
 | `DefaultInitializer<Owner, F, T, Effects>` | comptime code | Closed checked runtime default initializer | accepted |
 | `AnnotationDescriptor<A, Target, Args, Multiplicity>` | comptime | Typed applied annotation and target proof | accepted |
-| `CaptureDescriptor<Sig, I, T, Mode>` | comptime | Typed closure capture identity | accepted through Decision 95; compiler model + generated-only `FunctionExpr.captures` clause CURRENT on the C1 branch (supervisor gates pending) with four declared modes (`Move`, `Share`, `SharedBorrow`, `ExclusiveBorrow`), structural slot/lineage identity, exact `SemanticFreeze` capture types, and one declared plan driving layout/opcodes; borrow modes are named rejections until regions. Compiler-query LSP hover/definition/references are committed. Public `CheckedBody` construction remains TARGET C2 |
+| `CaptureDescriptor<Sig, I, T, Mode>` | comptime | Typed closure capture identity | accepted through Decision 95; compiler model + generated-only `FunctionExpr.captures` clause CURRENT on the C1 branch (supervisor gates pending) with four declared modes (`Move`, `Share`, `SharedBorrow`, `ExclusiveBorrow`), structural slot/lineage identity, exact `SemanticFreeze` capture types, and one declared plan driving layout/opcodes; borrow modes are named rejections until regions. Compiler-query hover/definition/references and descriptor-authoritative rename are committed; unavailable/conflicting evidence never falls through to name-based rename. Public `CheckedBody` construction remains TARGET C2 |
 | `HygienicSymbol<T>` | comptime | Scope-safe generated binding identity | accepted |
 | `PatternBinder<T, Mode>` | comptime code | Hygienic projected binding with stable ownership mode | accepted |
 | `GuardView<T, FinalMode>` | comptime code/capability | Read-only pre-commit binder view for arm guards | accepted |
