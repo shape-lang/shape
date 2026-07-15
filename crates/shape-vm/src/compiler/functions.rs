@@ -1604,23 +1604,6 @@ impl BytecodeCompiler {
         Ok(())
     }
 
-    /// Core function body compilation (shared by normal functions and ___impl functions)
-    pub(super) fn compile_function_body(&mut self, func_def: &FunctionDef) -> Result<()> {
-        let effective_pass_modes = self.effective_function_like_pass_modes(
-            Some(&func_def.name),
-            &func_def.params,
-            Some(&func_def.body),
-        );
-        let inferred_reference_optimizations = Self::inferred_reference_optimizations(
-            &func_def.params,
-            &effective_pass_modes,
-        );
-        self.compile_function_body_with_inferred_reference_optimizations(
-            func_def,
-            &inferred_reference_optimizations,
-        )
-    }
-
     pub(super) fn compile_function_body_with_inferred_reference_optimizations(
         &mut self,
         func_def: &FunctionDef,
