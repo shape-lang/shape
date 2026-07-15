@@ -478,12 +478,9 @@ pub unsafe extern "C" fn jit_shared_unlock_contended(ptr: u64) {
 ///
 /// The returned pointer is owned by the caller's slot; it MUST be
 /// released via `jit_arc_shared_release` exactly once when the slot
-/// exits scope. Every decodable `kind_code` returns a non-null
-/// `Arc::into_raw` pointer; Rust allocation failure aborts before this boundary
-/// can return. A reserved, sentinel, or otherwise undecodable `kind_code`
-/// returns `0` without allocating a cell or taking ownership of
-/// `initial_bits`; zero is exclusively the explicit malformed-input failure
-/// sentinel and is never a successful allocation.
+/// exits scope. Every supported decodable `kind_code` returns a non-null
+/// `Arc::into_raw` pointer. An undecodable code or a kind without a nonzero
+/// 8-byte carrier returns `0` without allocating or taking payload ownership.
 ///
 /// # Safety
 ///
@@ -494,7 +491,7 @@ pub unsafe extern "C" fn jit_shared_unlock_contended(ptr: u64) {
 ///   the caller transfers exactly one payload share into the new cell. This
 ///   function does not add another payload retain, and `SharedCell::drop`
 ///   retires that transferred share according to the supplied kind.
-/// - On an undecodable `kind_code`, ownership of `initial_bits` remains with
+/// - On an undecodable or unsupported `kind_code`, ownership of `initial_bits` remains with
 ///   the caller. The function returns `0` and does not inspect, retain, or
 ///   release the payload bits.
 /// - A nonzero return is 8-byte aligned and owns exactly one strong
@@ -505,27 +502,9 @@ pub unsafe extern "C" fn jit_shared_unlock_contended(ptr: u64) {
 pub unsafe extern "C" fn jit_alloc_shared_cell(initial_bits: u64, kind_code: u8) -> u64 {
     // ADR-006 §2.7.8 / Q10 (cell-storage parallel-kind track).
     //
-    // `SharedCell::new(value, kind)` requires the cell's `NativeKind`
-    // companion at construction — `Drop for SharedCell` dispatches its
-    // Arc-retire matrix on that field, so a wrong kind is a memory bug,
-    // not a type-checking nicety. The kind is threaded from the
-    // JIT-emitted `AllocSharedLocal` call site
-    // (`MirToIR::initialize_shared_local_slots`), which sources it from
-    // the PRODUCER at compile time — the `ClosureLayout`'s total
-    // `capture_native_kind(i)` track (authoritative; the same source the
-    // closure BODY's `shared_capture_slots` uses, so both ends agree), checked
-    // unconditionally against the slot's inferred `slot_kinds` entry when
-    // both are present. This mirrors the interpreter,
-    // which takes the kind off the §2.7.7 parallel-kind stack track in
-    // `op_alloc_shared_local`
-    // (`shape-vm/src/executor/variables/mod.rs`) — same producer, same
-    // kind. It is never fabricated from `initial_bits`.
-    //
-    // Kind-source gaps are rejected at codegen. Refcounted reads and
-    // replacements consume this same cell-owned kind through the canonical
-    // KindedSlot ownership dispatch. The FFI still validates its byte because
-    // this is a nounwind boundary: malformed input must return an explicit null
-    // sentinel without allocating or taking payload ownership, never panic.
+    // The compiler derives `kind` from ClosureLayout and cross-checks inferred
+    // slot evidence before emission. This nounwind boundary revalidates the
+    // compact code and carrier capability without inspecting `initial_bits`.
     use crate::ffi::stack_kind_code;
     use shape_value::v2::closure_layout::SharedCell;
     use std::sync::Arc;
@@ -541,6 +520,15 @@ pub unsafe extern "C" fn jit_alloc_shared_cell(initial_bits: u64, kind_code: u8)
             return 0;
         }
     };
+    if matches!(kind, shape_value::NativeKind::Ptr(heap_kind) if !heap_kind.has_kinded_slot_carrier())
+    {
+        tracing::error!(
+            target: "shape_jit",
+            ?kind,
+            "jit_alloc_shared_cell rejected carrier-less NativeKind; payload ownership unchanged",
+        );
+        return 0;
+    }
     // The sole strong share is handed to the caller's slot; it is retired
     // by exactly one `jit_arc_shared_release` at `emit_drop`. Additional
     // shares (one per capturing closure) are minted by

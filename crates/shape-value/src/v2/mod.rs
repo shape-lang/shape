@@ -1,4 +1,5 @@
 pub mod alloc_budget;
+mod capture_native_kind;
 pub mod closure_layout;
 pub mod closure_raw;
 pub mod concrete_type;

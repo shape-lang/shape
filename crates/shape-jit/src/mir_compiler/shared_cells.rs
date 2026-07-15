@@ -126,6 +126,14 @@ impl SharedLocalKindEvidence {
 /// emitted. An encoding/catalog defect therefore produces a whole-function JIT
 /// refusal instead of calling the defensive FFI branch that returns null.
 fn validated_shared_cell_kind_code(slot: SlotId, kind: NativeKind) -> Result<u8, String> {
+    if matches!(kind, NativeKind::Ptr(heap_kind) if !heap_kind.has_kinded_slot_carrier()) {
+        return Err(format!(
+            "INTERNAL SharedCell kind invariant: local slot {slot} resolved to \
+             unsupported {kind:?}. The exhaustive ConcreteType capture-kind issuer cannot \
+             produce a carrier-less kind; forged or external layout metadata must be \
+             rejected before JIT emission or allocation."
+        ));
+    }
     let code = crate::ffi::stack_kind_code::encode(kind);
     match crate::ffi::stack_kind_code::decode(code) {
         Some(decoded) if decoded == kind => Ok(code),
@@ -219,6 +227,16 @@ pub(crate) fn discover_shared_local_slots(
 }
 
 impl<'a, 'b> MirToIR<'a, 'b> {
+    /// Reject forged Shared payload metadata before any Cranelift instruction
+    /// or allocation is emitted. Semantic capture issuers cannot hit this.
+    pub(crate) fn validate_shared_local_slots(&self) -> Result<(), String> {
+        for (slot, evidence) in &self.shared_local_slots {
+            let kind = evidence.validated(*slot)?;
+            validated_shared_cell_kind_code(*slot, kind)?;
+        }
+        Ok(())
+    }
+
     /// Return the same validated payload kind used for allocation, reads,
     /// writes, and eventual SharedCell drop.
     pub(crate) fn validated_shared_local_kind(&self, slot: SlotId) -> Result<NativeKind, String> {
@@ -375,12 +393,19 @@ mod tests {
     }
 
     #[test]
-    fn every_ptr_kind_passes_shared_cell_abi_preflight() {
+    fn every_supported_ptr_kind_passes_shared_cell_abi_preflight() {
         for heap_kind in shape_value::HeapKind::ALL {
             let kind = NativeKind::Ptr(heap_kind);
-            let code = validated_shared_cell_kind_code(SlotId(7), kind)
-                .expect("the complete HeapKind catalog must preflight");
-            assert_eq!(crate::ffi::stack_kind_code::decode(code), Some(kind));
+            if heap_kind.has_kinded_slot_carrier() {
+                let code = validated_shared_cell_kind_code(SlotId(7), kind)
+                    .expect("every supported HeapKind carrier must preflight");
+                assert_eq!(crate::ffi::stack_kind_code::decode(code), Some(kind));
+            } else {
+                let error = validated_shared_cell_kind_code(SlotId(7), kind)
+                    .expect_err("carrier-less kinds must fail before JIT emission");
+                assert!(error.contains("INTERNAL SharedCell kind invariant"));
+                assert!(error.contains("Ptr(NativeScalar)"));
+            }
         }
     }
 

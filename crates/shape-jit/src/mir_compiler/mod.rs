@@ -1935,9 +1935,9 @@ impl<'a, 'b> MirToIR<'a, 'b> {
     ///
     /// Returns Ok(()) on success. The actual return instructions are emitted
     /// by compile_terminator for TerminatorKind::Return blocks.
-    /// Full compilation: create blocks, declare locals, initialize, compile body.
     /// Used when the caller hasn't set up blocks/locals externally.
     pub fn compile(&mut self) -> Result<(), String> {
+        self.validate_shared_local_slots()?;
         self.create_blocks();
         self.declare_locals();
         // Session 1 Commit 3: eagerly materialise Arc<SharedCell>s for
