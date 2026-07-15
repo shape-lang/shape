@@ -1,6 +1,6 @@
 use std::collections::{BTreeSet, HashSet};
 
-use shape_ast::ast::{Expr, Item, Span};
+use shape_ast::ast::{CaptureMode, Expr, Item, Span};
 use shape_ast::error::ShapeError;
 
 use super::*;
@@ -75,6 +75,33 @@ fn publication_state(compiler: &BytecodeCompiler) -> PublicationState {
         current_function: compiler.current_function,
         current_callee_captures: compiler.current_closure_callee_captures.clone(),
     }
+}
+
+fn assert_pristine_closure_publication(state: &PublicationState) {
+    assert_eq!(state.closure_counter, 0);
+    assert_eq!(state.closure_registry_len, 0);
+    assert_eq!(state.function_type_registry_len, 0);
+    assert_eq!(state.capture_pack_len, 0);
+    assert_eq!(state.closure_function_id_len, 0);
+    assert_eq!(state.closure_type_id_len, 0);
+    assert_eq!(state.function_type_id_len, 0);
+    assert_eq!(state.capture_name_len, 0);
+    assert_eq!(state.function_len, 1, "only the active callable exists");
+    assert_eq!(state.closure_function_count, 0);
+    assert_eq!(state.layout_len, 0);
+    assert_eq!(state.published_layout_count, 0);
+    assert_eq!(state.instruction_len, 0);
+    assert_eq!(state.promotion_opcode_count, 0);
+    assert!(state.shared_module_bindings.is_empty());
+    assert_eq!(
+        state
+            .module_semantics
+            .as_ref()
+            .map(|semantics| semantics.storage_class),
+        Some(BindingStorageClass::Direct)
+    );
+    assert_eq!(state.current_function, Some(0));
+    assert!(state.current_callee_captures.is_empty());
 }
 
 fn active_callable(
@@ -159,6 +186,7 @@ fn closure_parts(
 ) -> (
     Vec<shape_ast::ast::FunctionParameter>,
     Vec<shape_ast::ast::Statement>,
+    Option<shape_ast::ast::CaptureClause>,
     Span,
 ) {
     let program = shape_ast::parse_program(source).expect("closure fixture parses");
@@ -167,12 +195,16 @@ fn closure_parts(
         panic!("fixture must be a variable declaration");
     };
     let Some(Expr::FunctionExpr {
-        params, body, span, ..
+        params,
+        body,
+        captures,
+        span,
+        ..
     }) = decl.value
     else {
         panic!("fixture initializer must be a closure");
     };
-    (params, body, span)
+    (params, body, captures, span)
 }
 
 #[test]
@@ -210,13 +242,15 @@ fn promotion_witness_without_shared_cow_storage_rejects_without_publication() {
 #[test]
 fn active_callable_peek_declines_before_registry_layout_or_id_publication() {
     let mut compiler = active_callable("peek_owner", BindingStorageClass::Direct, false);
-    let (params, body, span) =
+    let (params, body, captures, span) =
         closure_parts("let worker = || { hits = hits + 1\n hits }");
+    assert!(captures.is_none());
     let plan = canonical_shared_module_plan(&compiler);
     assert!(compiler
         .preflight_callable_module_shared_captures(&plan, span)
         .is_err());
     let before = publication_state(&compiler);
+    assert_pristine_closure_publication(&before);
 
     assert!(compiler
         .mint_closure_type_id_peek(&params, &body, None, None, span)
@@ -229,17 +263,54 @@ fn active_callable_peek_declines_before_registry_layout_or_id_publication() {
 }
 
 #[test]
-fn generated_named_callable_uses_the_same_structural_preflight() {
+fn generated_declared_share_plan_uses_the_same_structural_preflight() {
     // Generated extend methods cannot yet resolve module bindings through the
-    // real ingress. This focused unit therefore supplies only the stable name
-    // that such a method owns; the predicate itself remains provenance-free
-    // and consumes the same canonical structural capture plan as source code.
-    let compiler = active_callable("Job::read", BindingStorageClass::Direct, false);
-    let plan = canonical_shared_module_plan(&compiler);
+    // real ingress. This focused unit therefore runs the canonical planner
+    // with a real parsed declared-share clause and compiler-issued generated
+    // provenance, then feeds that exact plan to the provenance-free preflight.
+    let mut compiler = active_callable("Job::read", BindingStorageClass::Direct, false);
+    let (_params, _body, captures, span) =
+        closure_parts("let worker = |; share hits| hits");
+    let captures = captures.expect("generated fixture has a declared capture clause");
+    let origin = compiler.generated_node_issuer.issue(
+        shape_ast::ast::GeneratedExpansionFingerprint::from_components(17, 29),
+        shape_ast::ast::GeneratedNodePath::decl_root("method:Job::read").child("closure:0"),
+        0,
+        Span::DUMMY,
+        "Job::read".to_string(),
+    );
+    let captured = vec!["hits".to_string()];
     let before = publication_state(&compiler);
+    assert_pristine_closure_publication(&before);
+    let plan = compiler
+        .plan_captures(
+            &captured,
+            &HashSet::new(),
+            None,
+            Some(&captures),
+            Some(&origin),
+            span,
+        )
+        .expect("generated declared-share plan is canonical");
+    assert_eq!(plan.len(), 1);
+    assert_eq!(plan[0].declared, Some(CaptureMode::Share));
+    assert_eq!(
+        plan[0].declaration_span,
+        captures.entries.first().map(|entry| entry.span)
+    );
+    assert_eq!(
+        plan[0].facts.target,
+        Some(CaptureTarget::ModuleBinding(MODULE_SLOT))
+    );
+    assert_eq!(plan[0].plan.access(), CaptureAccess::SharedCell);
+    assert_eq!(
+        publication_state(&compiler),
+        before,
+        "canonical generated planning must not publish closure or promotion artifacts"
+    );
 
     let error = compiler
-        .preflight_callable_module_shared_captures(&plan, CLOSURE_SPAN)
+        .preflight_callable_module_shared_captures(&plan, span)
         .expect_err("generated-named callable cannot introduce module storage");
     let message = semantic_message(error);
     assert!(message.contains("callable 'Job::read' closure capture"));
