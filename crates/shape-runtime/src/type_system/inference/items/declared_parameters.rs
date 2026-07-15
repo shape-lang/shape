@@ -105,10 +105,10 @@ impl TypeInferenceEngine {
         func: &FunctionDef,
         func_type: Type,
     ) -> TypeResult<TypeScheme> {
-        let Some(type_params) = func.type_params.as_deref() else {
+        if func.type_params.is_none() {
             self.validate_declared_type_params_in_type(func, &func_type, &[])?;
             return Ok(self.env.generalize(&func_type));
-        };
+        }
         let vars = self.declared_type_parameters_for_callable(func)?;
         self.make_function_scheme_with_params(func, func_type, &vars)
     }

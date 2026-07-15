@@ -304,7 +304,7 @@ impl TypeInferenceEngine {
             let parameter_types = candidate.parameter_types.as_deref();
             let argument_candidates = candidate.arguments.as_deref();
             let mut arguments = Vec::with_capacity(candidate.instantiations.len());
-            for instantiation in candidate.instantiations {
+            for instantiation in &candidate.instantiations {
                 let Some(provenance) = instantiation.declared().declared_provenance() else {
                     unavailable.push(
                         "scheme instantiation omitted declared-parameter provenance".to_string(),
