@@ -62,6 +62,31 @@ use super::*;
     }
 
     #[test]
+    fn c0902_reference_storage_cannot_escape_through_move_or_share() {
+        for mode in [CaptureMode::Move, CaptureMode::Share] {
+            for ownership in [
+                BindingOwnershipClass::OwnedImmutable,
+                BindingOwnershipClass::OwnedMutable,
+                BindingOwnershipClass::Flexible,
+            ] {
+                for witness_shared_local in [false, true] {
+                    let mut reference = facts(
+                        Some(CaptureTarget::Local(1)),
+                        Some(ownership),
+                        witness_shared_local,
+                    );
+                    reference.storage = Some(BindingStorageClass::Reference);
+                    let message = reject(mode, &reference);
+                    assert!(
+                        message.starts_with("[C0902] ReferenceEscapeIntoClosure:"),
+                        "{mode:?} over {ownership:?} / shared={witness_shared_local} got {message}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
     fn c0905_unresolvable_target_is_rejected_not_defaulted() {
         for mode in [CaptureMode::Move, CaptureMode::Share] {
             let message = reject(mode, &facts(None, Some(BindingOwnershipClass::OwnedImmutable), false));
@@ -219,32 +244,12 @@ use super::*;
         assert_eq!(p.kind(), CaptureKind::Shared);
     }
 
-    /// [B0003] — NEITHER WIDENED NOR NARROWED by a declaration.
-    ///
-    /// The reference-escape rule is not the declared path's to change, so this
-    /// pins the declared path against the INFERRED path at the same position,
-    /// in both directions:
-    ///
-    ///   (a) TOP-LEVEL, inferred: `[B0003]` fires. (The clause cannot reach
-    ///       here — it is generated-code-only, and generated code always
-    ///       compiles inside a function — so the arm is held by the inferred
-    ///       path, which is the only one that can.)
-    ///   (b) INSIDE A FUNCTION, inferred: it does NOT fire. The front-end arm
-    ///       is guarded on `current_function.is_none()`, and the MIR solver's
-    ///       `ReferenceEscapeIntoClosure` fact does not catch this shape.
-    ///       That is a PRE-EXISTING hole in B0003's coverage — verified on the
-    ///       INFERRED path, on the parent commit's behaviour, with no clause
-    ///       anywhere in the program.
-    ///   (c) INSIDE A GENERATED BODY, DECLARED `move`: identical to (b).
-    ///
-    /// (c) == (b) is the whole assertion. A declared `move` does not rescue a
-    /// reference the compiler would otherwise reject, and it does not reject a
-    /// reference the compiler would otherwise admit. If a future change makes
-    /// the escape check total inside function bodies, (b) and (c) must move
-    /// TOGETHER — and this test will say so, loudly, rather than letting the
-    /// declared path drift ahead of or behind inference.
+    /// A declared value mode cannot disguise a reference binding as an owned
+    /// capture. This exercises the real generated-body path so the proof
+    /// includes slot storage classification, capture discovery, clause
+    /// validation, and the one declared selector.
     #[test]
-    fn b0003_is_neither_widened_nor_narrowed_by_a_declaration() {
+    fn c0902_generated_move_of_reference_binding_is_rejected() {
         fn outcome(src: &str) -> std::result::Result<(), String> {
             let program = shape_ast::parse_program(src).expect("fixture parses");
             let mut compiler = BytecodeCompiler::new();
@@ -253,38 +258,7 @@ use super::*;
                 .map_err(|e| e.to_string())
         }
 
-        // (a) top level, inferred — the arm fires, VERBATIM.
-        let top_level = outcome(
-            r#"
-let value = 7
-let r = &value
-let worker = |y: int| y + r
-worker(2)
-"#,
-        )
-        .expect_err("a reference cannot escape into a top-level closure");
-        assert!(
-            top_level.contains(
-                "[B0003] reference 'r' cannot escape into a closure; capture a value instead"
-            ),
-            "the B0003 message must be byte-identical: {top_level}"
-        );
-
-        // (b) inside a function, inferred — the PRE-EXISTING hole.
-        let inferred_in_fn = outcome(
-            r#"
-fn read(x: int) -> int {
-  let value = 7
-  let r = &value
-  let worker = |y: int| y + r
-  worker(x)
-}
-read(2)
-"#,
-        );
-
-        // (c) inside a GENERATED body, DECLARED `move` — must match (b) exactly.
-        let declared_in_generated = outcome(
+        let error = outcome(
             r#"
 annotation add_reader() {
   targets: [type]
@@ -300,14 +274,15 @@ type Job { id: int }
 let job = Job { id: 1 }
 job.read(2)
 "#,
-        );
+        )
+        .expect_err("a reference binding cannot escape through declared `move`");
 
-        assert_eq!(
-            inferred_in_fn.is_ok(),
-            declared_in_generated.is_ok(),
-            "a declared `move` must treat a reference capture EXACTLY as inference does \
-             at the same position — inferred: {inferred_in_fn:?}, declared: \
-             {declared_in_generated:?}"
+        assert!(
+            error.contains(
+                "[C0902] ReferenceEscapeIntoClosure: declared capture 'move r' carries \
+                 reference binding 'r'"
+            ),
+            "the generated capture must fail through the named reference-escape family: {error}"
         );
     }
 

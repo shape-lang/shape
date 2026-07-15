@@ -222,6 +222,7 @@ pub(crate) fn infer_plan(facts: &CaptureBindingFacts) -> CapturePlan {
 ///   * `share` × shared-ownership → `Shared`
 ///   * `share` × plain local     → `[C0908]`
 ///   * `&` / `&mut`              → `[C0902]`
+///   * any mode × reference slot → `[C0902]`
 pub(crate) fn lower_declared(
     mode: CaptureMode,
     facts: &CaptureBindingFacts,
@@ -238,6 +239,19 @@ pub(crate) fn lower_declared(
              escapes into a closure — declare `move {name}` to take the value, or `share {name}` \
              to take a share of a shared-ownership cell",
             spelling = mode.spelling(),
+        ));
+    }
+
+    // `move r` still moves a reference when `r = &value`; changing the
+    // capture word cannot turn that slot into an owned value. Until generated
+    // closures have a region model, no declared value mode may carry a
+    // reference-classified slot across the boundary.
+    if matches!(facts.storage, Some(BindingStorageClass::Reference)) {
+        return Err(format!(
+            "[C0902] ReferenceEscapeIntoClosure: declared capture '{} {name}' carries reference \
+             binding '{name}' across a closure boundary; Shape has no region story for a \
+             reference that escapes into a closure — bind an owned or shared value instead",
+            mode.spelling(),
         ));
     }
 
