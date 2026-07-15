@@ -24,7 +24,7 @@ use super::{BytecodeCompiler, HygienicRole, ParamPassMode};
 mod generated_closure_provenance;
 use generated_closure_provenance::anchor_generated_function_decl;
 mod original_body_shadow;
-use original_body_shadow::PendingOriginalBodyShadow;
+use original_body_shadow::{PendingOriginalBodyShadow, canonical_original_callable};
 
 /// ADR-009 E3 (slice S3, legacy class U11): the TYPED capability a `replace
 /// body` replacement reaches through `ctx.original`. It replaces the deleted
@@ -41,10 +41,20 @@ use original_body_shadow::PendingOriginalBodyShadow;
 pub(crate) struct OriginalCapability {
     /// Unspellable registry name of the shadow function holding the
     /// pre-annotation body.
-    pub(crate) shadow_name: String,
+    shadow_name: String,
     /// The shadow's frozen callable signature identity — the typed
     /// `FrozenCallable` (B6) `ctx.original` denotes.
-    pub(crate) callable: FrozenTypeIdentity,
+    callable: FrozenTypeIdentity,
+}
+
+impl OriginalCapability {
+    fn shadow_name(&self) -> &str {
+        &self.shadow_name
+    }
+
+    fn callable(&self) -> FrozenTypeIdentity {
+        self.callable
+    }
 }
 
 /// Comptime handlers for one annotation, gathered by the §4.5.1 pre-pass
@@ -3031,24 +3041,7 @@ impl BytecodeCompiler {
         shadow_name: String,
     ) -> Result<OriginalCapability> {
         let overlay = self.comptime_freeze_overlay()?;
-        let mut params = Vec::with_capacity(func_def.params.len());
-        for p in &func_def.params {
-            let Some(ty) = p.type_annotation.clone() else {
-                return Err(Self::directive_error(format!(
-                    "`ctx.original` capability requires a typed parameter, but parameter '{}' of '{}' has no type annotation",
-                    p.simple_name().unwrap_or("<pattern>"),
-                    func_def.name
-                )));
-            };
-            params.push(shape_ast::ast::FunctionParam {
-                name: p.simple_name().map(str::to_string),
-                optional: p.default_value.is_some(),
-                type_annotation: ty,
-            });
-        }
-        let returns = Box::new(func_def.return_type.clone().unwrap_or(TypeAnnotation::Void));
-        let callable = overlay
-            .canonicalize_type(&TypeAnnotation::Function { params, returns })
+        let callable = canonical_original_callable(overlay.as_ref(), func_def)
             .map_err(Self::directive_error)?;
         Ok(OriginalCapability {
             shadow_name,
@@ -3152,13 +3145,6 @@ impl BytecodeCompiler {
                         &func_def.params,
                         Some(&func_def.body),
                     );
-                    let pending = PendingOriginalBodyShadow::new(
-                        func_def,
-                        shadow_name.clone(),
-                        inferred_reference_optimizations,
-                        &effective_pass_modes,
-                    )?;
-
                     // Build the typed `ctx.original` capability (B6
                     // FrozenCallable via the single freeze handle — row 3
                     // NO_FREEZE_HANDLE_DIAGNOSTIC otherwise), then rewrite every
@@ -3187,10 +3173,16 @@ impl BytecodeCompiler {
                         super::original_body_rewrite::rewrite_original_calls_in_statements(
                             &body,
                             &bound_receivers,
-                            &capability.shadow_name,
+                            capability.shadow_name(),
                         );
 
                     self.stamp_generated_replacement_body(&mut replacement, site)?;
+                    let pending = PendingOriginalBodyShadow::new(
+                        func_def,
+                        capability,
+                        inferred_reference_optimizations,
+                        &effective_pass_modes,
+                    )?;
                     *func_def = replacement;
                     *pending_original_body_shadow = Some(pending);
                 }
@@ -4510,9 +4502,9 @@ type Probe { id: int }
         let capability = compiler
             .build_original_capability(&func_def, "\u{1}shadow".to_string())
             .expect("post-barrier capability builds");
-        assert_eq!(capability.shadow_name, "\u{1}shadow");
+        assert_eq!(capability.shadow_name(), "\u{1}shadow");
         assert_ne!(
-            capability.callable,
+            capability.callable(),
             FrozenTypeIdentity::INVALID,
             "ctx.original must be a real typed FrozenCallable identity"
         );

@@ -47,6 +47,180 @@ fn compile_annotated_function(
     (compiler, outcome)
 }
 
+fn install_frozen_owners(compiler: &mut BytecodeCompiler, owners: &[&FunctionDef]) {
+    for owner in owners {
+        compiler
+            .register_function(owner)
+            .expect("semantic owner registers");
+    }
+    compiler
+        .install_semantic_freeze()
+        .expect("registration-complete fixture freezes");
+}
+
+fn authenticated_capability(
+    compiler: &BytecodeCompiler,
+    owner: &FunctionDef,
+) -> OriginalCapability {
+    compiler
+        .build_original_capability(owner, compiler.original_body_shadow_name(&owner.name))
+        .expect("semantic freeze issues an original-body capability")
+}
+
+fn artifact_counts(
+    compiler: &BytecodeCompiler,
+) -> (usize, usize, usize, usize, usize, usize, usize) {
+    (
+        compiler.function_defs.len(),
+        compiler.program.functions.len(),
+        compiler.mir_functions.len(),
+        compiler.mir_storage_plans.len(),
+        compiler.closure_capture_packs.len(),
+        compiler.closure_type_ids.len(),
+        compiler.function_type_ids.len(),
+    )
+}
+
+fn assert_prepublication_refusal(
+    compiler: &BytecodeCompiler,
+    shadow_name: &str,
+    before: (usize, usize, usize, usize, usize, usize, usize),
+) {
+    assert_eq!(artifact_counts(compiler), before);
+    assert!(!compiler.function_defs.contains_key(shadow_name));
+    assert!(compiler.find_function(shadow_name).is_none());
+    assert!(!compiler.mir_functions.contains_key(shadow_name));
+    assert!(!compiler.mir_storage_plans.contains_key(shadow_name));
+}
+
+fn assert_exact_invariant(error: ShapeError, expected: &str) {
+    match error {
+        ShapeError::RuntimeError { message, location } => {
+            assert_eq!(message, expected);
+            assert!(location.is_none());
+        }
+        other => panic!("expected RuntimeError capability invariant, got {other:?}"),
+    }
+}
+
+#[test]
+fn authentic_capability_has_a_complete_callable_payload_and_publishes() {
+    let owner = source_function("fn probe(value: int) -> int { value }", "probe");
+    let mut compiler = BytecodeCompiler::new();
+    install_frozen_owners(&mut compiler, &[&owner]);
+    let capability = authenticated_capability(&compiler, &owner);
+    let shadow_name = capability.shadow_name().to_string();
+    let freeze = compiler
+        .comptime_freeze_overlay()
+        .expect("installed semantic freeze");
+    let payload = freeze
+        .payload_of(capability.callable())
+        .expect("stored callable has a complete payload");
+    assert_eq!(payload.category(), FrozenTypeCategory::Callable);
+
+    let pending = PendingOriginalBodyShadow::new(
+        &owner,
+        capability,
+        &[None],
+        &[ParamPassMode::ByValue],
+    )
+    .expect("authenticated pending shadow");
+    compiler
+        .finalize_pending_original_body_shadow(pending)
+        .expect("authenticated shadow publishes");
+    assert!(compiler.function_defs.contains_key(&shadow_name));
+    assert!(compiler.find_function(&shadow_name).is_some());
+}
+
+#[test]
+fn same_signature_foreign_owner_capability_refuses_before_publication() {
+    let owner = source_function("fn owner(value: int) -> int { value }", "owner");
+    let foreign = source_function("fn foreign(value: int) -> int { value }", "foreign");
+    let mut compiler = BytecodeCompiler::new();
+    install_frozen_owners(&mut compiler, &[&owner, &foreign]);
+    let freeze = compiler
+        .comptime_freeze_overlay()
+        .expect("installed semantic freeze");
+    assert_eq!(
+        canonical_original_callable(freeze.as_ref(), &owner),
+        canonical_original_callable(freeze.as_ref(), &foreign),
+        "the refusal must not rely on differing callable signatures"
+    );
+    let capability = authenticated_capability(&compiler, &foreign);
+    let shadow_name = capability.shadow_name().to_string();
+    let pending = PendingOriginalBodyShadow::new(
+        &owner,
+        capability,
+        &[None],
+        &[ParamPassMode::ByValue],
+    )
+    .expect("cardinality-valid foreign binding reaches final validation");
+    let before = artifact_counts(&compiler);
+
+    let error = compiler
+        .finalize_pending_original_body_shadow(pending)
+        .expect_err("foreign owner binding must refuse");
+
+    assert_exact_invariant(error, SHADOW_IDENTITY_DIAGNOSTIC);
+    assert_prepublication_refusal(&compiler, &shadow_name, before);
+}
+
+#[test]
+fn staged_emission_signature_tamper_refuses_before_publication() {
+    let owner = source_function("fn probe(value: int) -> int { value }", "probe");
+    let mut compiler = BytecodeCompiler::new();
+    install_frozen_owners(&mut compiler, &[&owner]);
+    let capability = authenticated_capability(&compiler, &owner);
+    let shadow_name = capability.shadow_name().to_string();
+    let mut pending = PendingOriginalBodyShadow::new(
+        &owner,
+        capability,
+        &[None],
+        &[ParamPassMode::ByValue],
+    )
+    .expect("authenticated pending shadow");
+    pending.emission.return_type = Some(TypeAnnotation::Basic("string".to_string()));
+    let before = artifact_counts(&compiler);
+
+    let error = compiler
+        .finalize_pending_original_body_shadow(pending)
+        .expect_err("signature tamper must refuse");
+
+    assert_exact_invariant(error, CALLABLE_IDENTITY_DIAGNOSTIC);
+    assert_prepublication_refusal(&compiler, &shadow_name, before);
+}
+
+#[test]
+fn invalid_or_non_callable_identity_refuses_before_payload_and_publication() {
+    let owner = source_function("fn probe(value: int) -> int { value }", "probe");
+    let mut compiler = BytecodeCompiler::new();
+    install_frozen_owners(&mut compiler, &[&owner]);
+    let capability = authenticated_capability(&compiler, &owner);
+    let shadow_name = capability.shadow_name().to_string();
+    let pending = PendingOriginalBodyShadow::new(
+        &owner,
+        capability,
+        &[None],
+        &[ParamPassMode::ByValue],
+    )
+    .expect("authenticated pending shadow");
+    let freeze = compiler
+        .comptime_freeze_overlay()
+        .expect("installed semantic freeze");
+    let int_identity = freeze.identity_of("int").expect("frozen primitive identity");
+
+    for invalid in [int_identity, FrozenTypeIdentity::INVALID] {
+        let mut tampered = pending.clone();
+        tampered.capability.callable = invalid;
+        let before = artifact_counts(&compiler);
+        let error = compiler
+            .finalize_pending_original_body_shadow(tampered)
+            .expect_err("non-callable stored identity must refuse");
+        assert_exact_invariant(error, CALLABLE_IDENTITY_DIAGNOSTIC);
+        assert_prepublication_refusal(&compiler, &shadow_name, before);
+    }
+}
+
 #[test]
 fn remove_target_discards_a_staged_original_body_shadow() {
     let source = r#"
@@ -98,6 +272,8 @@ fn probe(value: int) -> int { value + 1 }
     );
     assert!(!compiler.function_defs.contains_key(&shadow));
     assert!(compiler.find_function(&shadow).is_none());
+    assert!(!compiler.mir_functions.contains_key(&shadow));
+    assert!(!compiler.mir_storage_plans.contains_key(&shadow));
 }
 
 #[test]
@@ -177,18 +353,17 @@ fn failed_shadow_emission_restores_body_analysis_authority() {
         "fn probe(value: int) -> int { let worker = |item: int| item + 1\nlet observed = worker(value)\nmissing_value }",
         "probe",
     );
-    let shadow_name = "\u{1}test:original-shadow".to_string();
+    let mut compiler = BytecodeCompiler::new();
+    install_frozen_owners(&mut compiler, &[&semantic_owner]);
+    let capability = authenticated_capability(&compiler, &semantic_owner);
+    let shadow_name = capability.shadow_name().to_string();
     let pending = PendingOriginalBodyShadow::new(
         &semantic_owner,
-        shadow_name.clone(),
+        capability,
         &[None],
         &[ParamPassMode::ByValue],
     )
-    .expect("slot-aligned pending shadow");
-    let mut compiler = BytecodeCompiler::new();
-    compiler
-        .register_function(&semantic_owner)
-        .expect("semantic owner registers");
+    .expect("slot-aligned authenticated pending shadow");
     let outer_closure_ids = vec![("outer-closure".to_string(), 73)];
     compiler.closure_function_ids = outer_closure_ids.clone();
 
@@ -233,10 +408,13 @@ fn failed_shadow_emission_restores_body_analysis_authority() {
 #[test]
 fn pending_shadow_rejects_misaligned_reference_provenance() {
     let semantic_owner = source_function("fn probe(value: int) -> int { value }", "probe");
+    let mut compiler = BytecodeCompiler::new();
+    install_frozen_owners(&mut compiler, &[&semantic_owner]);
+    let capability = authenticated_capability(&compiler, &semantic_owner);
 
     let error = PendingOriginalBodyShadow::new(
         &semantic_owner,
-        "\u{1}test:original-shadow".to_string(),
+        capability,
         &[],
         &[ParamPassMode::ByValue],
     )
