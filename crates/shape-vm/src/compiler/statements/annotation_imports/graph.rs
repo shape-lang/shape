@@ -24,6 +24,10 @@ impl BytecodeCompiler {
     ) -> Result<AnnotationImportSemanticSnapshot> {
         let local_annotations = Self::root_local_annotation_names(program);
         let mut snapshot = self.annotation_import_semantic_snapshot();
+        snapshot.shadowed_annotation_imports.clear();
+        snapshot
+            .shadowed_annotation_imports
+            .extend(local_annotations.iter().cloned());
         for local_name in &local_annotations {
             snapshot.imported_annotations.remove(local_name);
         }
@@ -263,7 +267,7 @@ impl BytecodeCompiler {
     ) -> Result<()> {
         let staged =
             self.stage_graph_annotation_imports_for_module(root_program, graph.root_id(), graph)?;
-        self.restore_annotation_import_semantics(staged);
+        self.restore_annotation_import_semantics(&staged);
         Ok(())
     }
 }

@@ -1,6 +1,7 @@
 use super::*;
 
 mod closure_layouts;
+mod graph_annotation_lifecycle;
 
 impl BytecodeCompiler {
     fn native_auto_symbol_part(name: &str) -> String {
@@ -3135,31 +3136,8 @@ impl BytecodeCompiler {
         }
         self.install_semantic_freeze()?;
 
-        // Phase 1: Compile dependency modules in topological order.
-        for &dep_id in graph.topo_order() {
-            let dep_node = graph.node(dep_id);
-            match dep_node.source_kind {
-                ModuleSourceKind::NativeModule => {
-                    let saved_semantics = self.annotation_import_semantic_snapshot();
-                    let registration = self.register_graph_imports_for_module(dep_id, &graph);
-                    self.restore_annotation_import_semantics(saved_semantics);
-                    registration?;
-                }
-                ModuleSourceKind::ShapeSource | ModuleSourceKind::Hybrid => {
-                    self.compile_module_from_graph(dep_id, &graph)?;
-                }
-                ModuleSourceKind::CompiledBytecode => {
-                    // Should have been rejected during graph construction.
-                    return Err(shape_ast::error::ShapeError::ModuleError {
-                        message: format!(
-                            "Module '{}' is only available as pre-compiled bytecode",
-                            dep_node.canonical_path
-                        ),
-                        module_path: None,
-                    });
-                }
-            }
-        }
+        // Phase 1: compile every dependency under its scoped import semantics.
+        self.compile_graph_dependency_modules(&graph)?;
 
         // Phase 2: Compile the root module using the graph for its imports.
         // NOTE: root's imports are registered INSIDE `compile()` after the
@@ -3178,7 +3156,7 @@ impl BytecodeCompiler {
             .retain(|item| !matches!(item, shape_ast::ast::Item::Import(..)));
 
         // Compile the stripped root program using the standard two-pass pipeline
-        self.restore_annotation_import_semantics(root_annotation_semantics);
+        self.restore_annotation_import_semantics(&root_annotation_semantics);
         self.compile(&stripped_program)
     }
 
@@ -3212,7 +3190,7 @@ impl BytecodeCompiler {
         let saved_annotation_semantics = self.annotation_import_semantic_snapshot();
         let module_annotation_semantics =
             self.stage_graph_annotation_imports_for_module(&ast, module_id, graph)?;
-        self.restore_annotation_import_semantics(module_annotation_semantics);
+        self.restore_annotation_import_semantics(&module_annotation_semantics);
 
         // U4-1: per-module span-table for the engine-served field-read consult.
         //
@@ -3241,7 +3219,11 @@ impl BytecodeCompiler {
         let saved_inference_facts = std::mem::replace(&mut self.inference_facts, module_facts);
 
         // 1. Register this module's imports from the graph
-        self.register_graph_imports_for_module(module_id, graph)?;
+        self.register_graph_imports_with_annotation_semantics(
+            module_id,
+            graph,
+            &module_annotation_semantics,
+        )?;
 
         // 2. Filter out import statements, qualify remaining items
         let mut qualified_items = Vec::new();
@@ -3315,7 +3297,7 @@ impl BytecodeCompiler {
 
         self.module_scope_stack.pop();
         self.allow_internal_builtins = prev_allow;
-        self.restore_annotation_import_semantics(saved_annotation_semantics);
+        self.restore_annotation_import_semantics(&saved_annotation_semantics);
         Ok(())
     }
 

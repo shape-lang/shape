@@ -5,7 +5,7 @@ mod graph;
 use crate::compiler::{BytecodeCompiler, ImportedAnnotationSymbol};
 use shape_ast::ast::{ExportItem, Item};
 use shape_ast::error::{Result, ShapeError};
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 /// Module-scoped annotation-import semantics. Graph dependency compilation
 /// temporarily installs one snapshot; the validated root snapshot is restored
@@ -13,6 +13,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 #[derive(Clone)]
 pub(in crate::compiler) struct AnnotationImportSemanticSnapshot {
     imported_annotations: HashMap<String, ImportedAnnotationSymbol>,
+    shadowed_annotation_imports: HashSet<String>,
     graph_namespace_map: HashMap<String, String>,
     module_scope_sources: HashMap<String, String>,
 }
@@ -126,6 +127,13 @@ impl BytecodeCompiler {
     ) -> AnnotationImportSemanticSnapshot {
         AnnotationImportSemanticSnapshot {
             imported_annotations: self.imported_annotations.clone(),
+            shadowed_annotation_imports: self
+                .directive_reanalysis_program
+                .as_ref()
+                .map(Self::root_local_annotation_names)
+                .unwrap_or_default()
+                .into_iter()
+                .collect(),
             graph_namespace_map: self.graph_namespace_map.clone(),
             module_scope_sources: self.module_scope_sources.clone(),
         }
@@ -133,11 +141,18 @@ impl BytecodeCompiler {
 
     pub(in crate::compiler) fn restore_annotation_import_semantics(
         &mut self,
-        snapshot: AnnotationImportSemanticSnapshot,
+        snapshot: &AnnotationImportSemanticSnapshot,
     ) {
-        self.imported_annotations = snapshot.imported_annotations;
-        self.graph_namespace_map = snapshot.graph_namespace_map;
-        self.module_scope_sources = snapshot.module_scope_sources;
+        self.imported_annotations = snapshot.imported_annotations.clone();
+        self.graph_namespace_map = snapshot.graph_namespace_map.clone();
+        self.module_scope_sources = snapshot.module_scope_sources.clone();
+    }
+
+    pub(in crate::compiler) fn annotation_import_is_shadowed(
+        snapshot: &AnnotationImportSemanticSnapshot,
+        local_name: &str,
+    ) -> bool {
+        snapshot.shadowed_annotation_imports.contains(local_name)
     }
 
     /// Pass 2 may only consume the whole-set decision made before declaration

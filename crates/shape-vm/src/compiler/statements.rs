@@ -10,8 +10,8 @@ use shape_ast::error::{Result, ShapeError};
 use shape_runtime::type_schema::{EnumVariantInfo, FieldType};
 
 use super::{
-    BytecodeCompiler, DropKind, ImportedAnnotationSymbol, ImportedSymbol, ModuleBuiltinFunction,
-    ParamPassMode, StructGenericInfo,
+    BytecodeCompiler, DropKind, ImportedSymbol, ModuleBuiltinFunction, ParamPassMode,
+    StructGenericInfo,
 };
 
 #[derive(Debug, Clone)]
@@ -43,6 +43,7 @@ struct ModuleDirectiveOutcome {
 }
 
 mod annotation_imports;
+mod graph_imports;
 
 impl BytecodeCompiler {
     fn comptime_field_slot_from_literal(
@@ -2332,248 +2333,6 @@ impl BytecodeCompiler {
                 }
             }
         }
-    }
-
-    /// Register imports for a module from the module graph.
-    ///
-    /// This is the graph-driven replacement for `register_import_names`.
-    /// For each `ResolvedImport` on the node:
-    /// - Namespace: creates canonical + alias bindings, registers schemas
-    /// - Named: populates `imported_names`, `imported_annotations`, `module_builtin_functions`
-    pub(super) fn register_graph_imports_for_module(
-        &mut self,
-        module_id: crate::module_graph::ModuleId,
-        graph: &crate::module_graph::ModuleGraph,
-    ) -> Result<()> {
-        use crate::module_graph::{ModuleSourceKind, ResolvedImport};
-
-        let node = graph.node(module_id);
-        let resolved_imports = node.resolved_imports.clone();
-
-        // Graph imports bypass the source import items in pass 2. Preflight
-        // every resolved row before publishing runtime bindings, then record
-        // the already-authorized capability set once on the active blob.
-        if let Some(pset) = self.permission_set.clone() {
-            for resolved in &resolved_imports {
-                match resolved {
-                    ResolvedImport::Namespace { canonical_path, .. } => {
-                        self.authorize_import_module_permissions(canonical_path, &pset)?;
-                    }
-                    ResolvedImport::Named {
-                        canonical_path,
-                        symbols,
-                        ..
-                    } => {
-                        for symbol in symbols {
-                            self.authorize_import_symbol_permissions(
-                                canonical_path,
-                                &symbol.original_name,
-                                &pset,
-                            )?;
-                        }
-                    }
-                }
-            }
-            for resolved in &resolved_imports {
-                match resolved {
-                    ResolvedImport::Namespace { canonical_path, .. } => {
-                        if let Some(ref mut blob) = self.current_blob_builder {
-                            let required =
-                                shape_runtime::stdlib::capability_tags::module_permissions(
-                                    canonical_path,
-                                );
-                            blob.record_permissions(&required);
-                        }
-                    }
-                    ResolvedImport::Named {
-                        canonical_path,
-                        symbols,
-                        ..
-                    } => {
-                        for symbol in symbols {
-                            self.record_blob_permissions(canonical_path, &symbol.original_name);
-                        }
-                    }
-                }
-            }
-        }
-
-        for ri in &resolved_imports {
-            match ri {
-                ResolvedImport::Namespace {
-                    local_name,
-                    canonical_path,
-                    module_id: dep_id,
-                } => {
-                    let dep_node = graph.node(*dep_id);
-
-                    // 1. Ensure canonical binding exists
-                    let canonical_idx = self.get_or_create_module_binding(canonical_path);
-
-                    // Register native schema on canonical binding for NativeModule/Hybrid
-                    if matches!(
-                        dep_node.source_kind,
-                        ModuleSourceKind::NativeModule | ModuleSourceKind::Hybrid
-                    ) {
-                        self.register_extension_module_schema(canonical_path);
-                        let module_schema_name = format!("__mod_{}", canonical_path);
-                        if self
-                            .type_tracker
-                            .schema_registry()
-                            .get(&module_schema_name)
-                            .is_some()
-                        {
-                            self.set_module_binding_type_info(canonical_idx, &module_schema_name);
-                        }
-                    }
-
-                    // 2. Create alias binding if local_name != canonical_path
-                    if local_name != canonical_path {
-                        let alias_idx = self.get_or_create_module_binding(local_name);
-
-                        // Copy type info from canonical to alias. Shape-source
-                        // modules get their object schema when the dependency
-                        // module is compiled; native modules use the synthetic
-                        // __mod_* schema registered above.
-                        if let Some(type_info) =
-                            self.type_tracker.get_binding_type(canonical_idx).cloned()
-                        {
-                            self.type_tracker.set_binding_type(alias_idx, type_info);
-                        } else {
-                            let module_schema_name = format!("__mod_{}", canonical_path);
-                            if self
-                                .type_tracker
-                                .schema_registry()
-                                .get(&module_schema_name)
-                                .is_some()
-                            {
-                                self.set_module_binding_type_info(alias_idx, &module_schema_name);
-                            }
-                        }
-
-                        // Emit runtime binding copy: alias = canonical
-                        self.emit(Instruction::new(
-                            OpCode::LoadModuleBinding,
-                            Some(Operand::ModuleBinding(canonical_idx)),
-                        ));
-                        self.emit(Instruction::new(
-                            OpCode::StoreModuleBinding,
-                            Some(Operand::ModuleBinding(alias_idx)),
-                        ));
-                    }
-
-                    // 3. Register namespace
-                    self.module_namespace_bindings.insert(local_name.clone());
-                    // The scoped early snapshot is the semantic authority.
-                    // A displaced synthetic/prelude row may still occur later
-                    // in the resolved vector, but it cannot overwrite the
-                    // explicit source decision or borrow another module's
-                    // dependency-phase namespace.
-                    self.graph_namespace_map
-                        .entry(local_name.clone())
-                        .or_insert_with(|| canonical_path.clone());
-
-                    // Namespace imports grant qualified annotation access
-                    // (`@local::ann`) through `graph_namespace_map`; they do
-                    // not synthesize bare aliases for every exported
-                    // annotation. Named `@ann` imports below are the sole bare
-                    // annotation-import authority.
-                }
-                ResolvedImport::Named {
-                    canonical_path,
-                    module_id: dep_id,
-                    symbols,
-                } => {
-                    let dep_node = graph.node(*dep_id);
-
-                    for sym in symbols {
-                        if sym.is_annotation {
-                            // W9: register annotation symbol against the canonical
-                            // module path. The compiled annotation is stored in
-                            // `compiled_annotations` under `canonical_path::name`
-                            // (the dep module's own qualify_module_item pass
-                            // produces that qualified key), so use-site resolution
-                            // just looks up `canonical_path::original_name`.
-                            self.module_scope_sources
-                                .entry(canonical_path.clone())
-                                .or_insert_with(|| canonical_path.clone());
-                            // Vacant-only consumes the scoped early snapshot:
-                            // explicit/local decisions win over any later
-                            // synthetic row, independent of vector order.
-                            self.imported_annotations
-                                .entry(sym.local_name.clone())
-                                .or_insert_with(|| ImportedAnnotationSymbol {
-                                    original_name: sym.original_name.clone(),
-                                    _module_path: canonical_path.clone(),
-                                    hidden_module_name: canonical_path.clone(),
-                                });
-                            continue;
-                        }
-
-                        // Register as imported name (vacant-only: explicit imports
-                        // are processed first and win over prelude entries)
-                        self.imported_names
-                            .entry(sym.local_name.clone())
-                            .or_insert_with(|| ImportedSymbol {
-                                original_name: sym.original_name.clone(),
-                                module_path: canonical_path.clone(),
-                                kind: Some(sym.kind),
-                            });
-
-                        // For native exports, register as module builtin function
-                        if matches!(
-                            dep_node.source_kind,
-                            ModuleSourceKind::NativeModule | ModuleSourceKind::Hybrid
-                        ) && matches!(
-                            sym.kind,
-                            shape_ast::module_utils::ModuleExportKind::Function
-                                | shape_ast::module_utils::ModuleExportKind::BuiltinFunction
-                        ) {
-                            self.module_builtin_functions
-                                .entry(sym.local_name.clone())
-                                .or_insert_with(|| ModuleBuiltinFunction {
-                                    export_name: sym.original_name.clone(),
-                                    source_module_path: canonical_path.clone(),
-                                });
-                        }
-
-                        // R8 W8 Cluster A: imported `pub const NAME = expr` —
-                        // capture the initializer expression so the consumer-
-                        // side identifier-load path can emit it inline as
-                        // `PushConst(<comptime-value>)`. ADR-006 §2.7.5
-                        // stamp-at-compile-time invariant preserved: the
-                        // constant's kind is stamped from the literal at
-                        // compile time when the compiler reaches the
-                        // identifier reference.
-                        if matches!(sym.kind, shape_ast::module_utils::ModuleExportKind::Value) {
-                            if let Some(ref dep_ast) = dep_node.ast {
-                                for item in &dep_ast.items {
-                                    if let shape_ast::ast::Item::Export(export, _) = item {
-                                        if let Some(ref decl) = export.source_decl {
-                                            if decl.kind == shape_ast::ast::VarKind::Const {
-                                                if let Some(decl_name) =
-                                                    decl.pattern.as_identifier()
-                                                {
-                                                    if decl_name == sym.original_name {
-                                                        if let Some(ref init) = decl.value {
-                                                            self.imported_consts
-                                                                .entry(sym.local_name.clone())
-                                                                .or_insert_with(|| init.clone());
-                                                        }
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        Ok(())
     }
 
     pub(super) fn register_extension_module_schema(&mut self, module_path: &str) {
@@ -8423,6 +8182,10 @@ impl BytecodeCompiler {
 #[cfg(test)]
 #[path = "statements/annotation_import_binding_tests.rs"]
 mod annotation_import_binding_tests;
+
+#[cfg(test)]
+#[path = "statements/annotation_import_pipeline_tests.rs"]
+mod annotation_import_pipeline_tests;
 
 #[cfg(test)]
 mod tests {
