@@ -295,6 +295,49 @@ fn callable_name_is_vacant(compiler: &BytecodeCompiler, name: &str) -> bool {
         && !compiler.removed_functions.contains(name)
         && !compiler.stdlib_function_names.contains(name)
         && !compiler.generated_symbols.contains_name(name)
+        && !compiler
+            .imported_names
+            .get(name)
+            .is_some_and(|imported| imported_symbol_is_callable(compiler, imported))
+}
+
+fn imported_symbol_is_callable(
+    compiler: &BytecodeCompiler,
+    imported: &crate::compiler::ImportedSymbol,
+) -> bool {
+    use shape_ast::module_utils::ModuleExportKind;
+
+    match imported.kind {
+        Some(ModuleExportKind::Function | ModuleExportKind::BuiltinFunction) => true,
+        Some(
+            ModuleExportKind::TypeAlias
+            | ModuleExportKind::BuiltinType
+            | ModuleExportKind::Trait
+            | ModuleExportKind::Enum
+            | ModuleExportKind::Annotation
+            | ModuleExportKind::Value,
+        ) => false,
+        None => {
+            let qualified = if imported.module_path.is_empty() {
+                imported.original_name.clone()
+            } else {
+                format!("{}::{}", imported.module_path, imported.original_name)
+            };
+            callable_registry_contains(compiler, &qualified)
+                || callable_registry_contains(compiler, &imported.original_name)
+        }
+    }
+}
+
+fn callable_registry_contains(compiler: &BytecodeCompiler, name: &str) -> bool {
+    compiler.function_defs.contains_key(name)
+        || compiler.foreign_function_defs.contains_key(name)
+        || compiler.module_builtin_functions.contains_key(name)
+        || compiler
+            .program
+            .functions
+            .iter()
+            .any(|function| function.name == name)
 }
 
 fn function_id_capacity_error() -> ShapeError {

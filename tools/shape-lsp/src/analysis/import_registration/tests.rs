@@ -91,3 +91,35 @@ pub annotation tagged() {
     assert!(outcome.into_diagnostics().is_empty());
     assert!(compiler.generated_queries_available());
 }
+
+#[test]
+fn semantic_analysis_emits_one_import_error_and_skips_root_compilation() {
+    let directory = tempfile::tempdir().expect("module directory");
+    let file_path = directory.path().join("main.shape");
+    let source = r#"
+from missing use { helper }
+annotation local_broken() {
+  metadata(target) { missing_handler_value }
+}
+@local_broken()
+type Probe { id: int }
+helper()
+"#;
+    let program = parse(source);
+    let diagnostics = crate::analysis::analyze_program_semantics(
+        &program,
+        source,
+        Some(&file_path),
+        Some(&ModuleCache::new()),
+        None,
+    );
+    assert_eq!(diagnostics.len(), 1, "root compiler must not run: {diagnostics:?}");
+    assert_eq!(
+        diagnostics[0].message,
+        "Cannot resolve module 'missing'. Verify the import path and declare dependencies in shape.toml when needed."
+    );
+    assert!(
+        !diagnostics[0].message.contains("missing_handler_value"),
+        "no annotation carrier or generated-query artifact may publish"
+    );
+}

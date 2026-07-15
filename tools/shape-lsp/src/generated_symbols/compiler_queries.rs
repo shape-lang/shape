@@ -5,9 +5,30 @@ use tower_lsp_server::ls_types::{GotoDefinitionResponse, Location, Uri};
 
 use super::{
     GeneratedRenameClassification, binder_token_spans_in, call_site_kind_at, call_site_name_spans,
-    comment_ranges, generated_decl_kind, generated_definition_for_kind, generated_query_compiler,
+    comment_ranges, generated_decl_kind, generated_definition_for_kind,
     generated_references_for_kind, ordinary_declaration_spans, program_may_generate_symbols,
 };
+
+/// Contextless generated-symbol entry point. Imported programs require the
+/// request-context path below, and every hard compiler error makes the query
+/// unavailable. RecoverAll is useful only when compilation returns `Ok` with
+/// accumulated diagnostics; partial compiler state after `Err` is never a
+/// query authority.
+pub(crate) fn compile_for_generated_symbol_queries(
+    program: &Program,
+    text: &str,
+) -> Option<shape_vm::BytecodeCompiler> {
+    if program
+        .items
+        .iter()
+        .any(|item| matches!(item, Item::Import(..)))
+    {
+        return None;
+    }
+    let mut compiler = generated_query_compiler(text);
+    compiler.compile_in_place(program).ok()?;
+    Some(compiler)
+}
 
 /// Compile with the same imported-item registration used by semantic
 /// diagnostics. A document containing imports is explicitly gated when the
@@ -46,10 +67,16 @@ pub(crate) fn compile_for_generated_capture_queries(
             return None;
         }
     }
-    if compiler.compile_in_place(program).is_err() && !compiler.generated_queries_available() {
-        return None;
-    }
+    compiler.compile_in_place(program).ok()?;
     Some(compiler)
+}
+
+fn generated_query_compiler(text: &str) -> shape_vm::BytecodeCompiler {
+    let mut compiler = shape_vm::BytecodeCompiler::new();
+    compiler.set_type_diagnostic_mode(shape_vm::compiler::TypeDiagnosticMode::RecoverAll);
+    compiler.set_compile_diagnostic_mode(shape_vm::compiler::CompileDiagnosticMode::RecoverAll);
+    compiler.set_source(text);
+    compiler
 }
 
 #[cfg(test)]

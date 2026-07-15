@@ -25,7 +25,8 @@ use crate::util::offset_to_line_col;
 mod compiler_queries;
 pub(crate) use compiler_queries::{
     classify_generated_rename_from_compiler, compile_for_generated_capture_queries,
-    generated_definition_from_compiler, generated_references_from_compiler,
+    compile_for_generated_symbol_queries, generated_definition_from_compiler,
+    generated_references_from_compiler,
 };
 #[cfg(test)]
 pub(crate) use compiler_queries::{
@@ -51,41 +52,8 @@ pub(crate) fn program_may_generate_symbols(program: &Program) -> bool {
     })
 }
 
-/// Compile the document through the SAME compiler pipeline the diagnostics
-/// path uses (`analysis.rs`, RecoverAll modes) and return the compiler:
-/// its `generated_symbol_query()` table then answers every navigation
-/// query of this module. Ordinary RecoverAll errors are tolerated, but a
-/// document with imports needs request context and a compiler poisoned during
-/// annotation installation is unavailable rather than an authoritative empty
-/// table.
-pub(crate) fn compile_for_generated_symbol_queries(
-    program: &Program,
-    text: &str,
-) -> Option<shape_vm::BytecodeCompiler> {
-    if program
-        .items
-        .iter()
-        .any(|item| matches!(item, Item::Import(..)))
-    {
-        return None;
-    }
-    let mut compiler = generated_query_compiler(text);
-    if compiler.compile_in_place(program).is_err() && !compiler.generated_queries_available() {
-        return None;
-    }
-    Some(compiler)
-}
-
 #[cfg(test)]
 mod import_context_tests;
-
-fn generated_query_compiler(text: &str) -> shape_vm::BytecodeCompiler {
-    let mut compiler = shape_vm::BytecodeCompiler::new();
-    compiler.set_type_diagnostic_mode(shape_vm::compiler::TypeDiagnosticMode::RecoverAll);
-    compiler.set_compile_diagnostic_mode(shape_vm::compiler::CompileDiagnosticMode::RecoverAll);
-    compiler.set_source(text);
-    compiler
-}
 
 /// The syntactic kind of a callable use-site or declaration. A generated
 /// METHOD (`Point.answer`) is only reachable through method-call syntax

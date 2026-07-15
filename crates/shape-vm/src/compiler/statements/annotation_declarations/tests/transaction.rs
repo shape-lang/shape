@@ -69,7 +69,7 @@ annotation z_bad() { metadata(target) { missing_handler_value } }
     assert_eq!(cache.memory_size(), 0);
     assert!(compiler.program.compiled_annotations.is_empty());
     assert!(compiler.completed_blobs.iter().any(|blob| blob.name == "a_good___metadata"));
-    let counts = artifact_counts(&compiler);
+    let fingerprint = poison_fingerprint(&compiler);
     assert_eq!(
         compiler
             .prepare_annotation_scope(&program.items)
@@ -77,7 +77,7 @@ annotation z_bad() { metadata(target) { missing_handler_value } }
             .to_string(),
         TERMINAL
     );
-    assert_eq!(artifact_counts(&compiler), counts);
+    assert_eq!(poison_fingerprint(&compiler), fingerprint);
 }
 
 #[test]
@@ -103,6 +103,96 @@ annotation z_bad() { metadata(target) { missing_handler_value } }
             .count(),
         0
     );
+}
+
+#[test]
+fn successful_memory_cache_replays_only_new_transaction_blobs_once() {
+    let mut compiler = compiler_with_preexisting_blob();
+    let completed_before = compiler.completed_blobs.len();
+    compiler.set_blob_cache(crate::blob_cache_v2::BlobCache::memory_only());
+    let program = parse("annotation cached() { metadata(target) { return { version: 1 } } }");
+    compiler
+        .prepare_annotation_scope(&program.items)
+        .expect("transaction succeeds");
+    let transaction_delta = compiler.completed_blobs.len() - completed_before;
+    assert!(transaction_delta > 0);
+    let cache = compiler.blob_cache.as_ref().expect("cache restored");
+    assert_eq!(cache.stats().insertions as usize, transaction_delta);
+    assert_eq!(cache.memory_size(), transaction_delta);
+
+    compiler
+        .prepare_annotation_scope(&program.items)
+        .expect("repeated preparation is a no-op");
+    let cache = compiler.blob_cache.as_ref().expect("cache retained");
+    assert_eq!(cache.stats().insertions as usize, transaction_delta);
+    assert_eq!(cache.memory_size(), transaction_delta);
+}
+
+#[test]
+fn successful_disk_cache_replays_only_new_transaction_blobs_once() {
+    let directory = tempfile::tempdir().expect("cache directory");
+    let mut compiler = compiler_with_preexisting_blob();
+    let completed_before = compiler.completed_blobs.len();
+    compiler.set_blob_cache(
+        crate::blob_cache_v2::BlobCache::with_disk(directory.path().to_path_buf())
+            .expect("disk cache"),
+    );
+    let program = parse("annotation cached() { metadata(target) { return { version: 1 } } }");
+    compiler
+        .prepare_annotation_scope(&program.items)
+        .expect("transaction succeeds");
+    let transaction_delta = compiler.completed_blobs.len() - completed_before;
+    assert!(transaction_delta > 0);
+    let cache = compiler.blob_cache.as_ref().expect("cache restored");
+    assert_eq!(cache.stats().insertions as usize, transaction_delta);
+    assert_eq!(blob_file_count(directory.path()), transaction_delta);
+
+    compiler
+        .prepare_annotation_scope(&program.items)
+        .expect("repeated preparation is a no-op");
+    let cache = compiler.blob_cache.as_ref().expect("cache retained");
+    assert_eq!(cache.stats().insertions as usize, transaction_delta);
+    assert_eq!(blob_file_count(directory.path()), transaction_delta);
+}
+
+#[test]
+fn poisoned_compiler_rejects_every_entry_without_mutating_any_artifact_family() {
+    let program = parse(
+        r#"
+annotation a_good() { metadata(target) { return { version: 1 } } }
+annotation z_bad() { metadata(target) { missing_handler_value } }
+"#,
+    );
+    let mut compiler = BytecodeCompiler::new();
+    compiler
+        .prepare_annotation_scope(&program.items)
+        .expect_err("installation failure poisons the compiler");
+    let fingerprint = poison_fingerprint(&compiler);
+    let definition = only_definition(&program);
+
+    let prepare = compiler
+        .prepare_annotation_scope(&program.items)
+        .expect_err("prepare is terminal");
+    assert_eq!(prepare.to_string(), TERMINAL);
+    assert_eq!(poison_fingerprint(&compiler), fingerprint);
+
+    let require = compiler
+        .require_prepared_annotation(&definition)
+        .expect_err("require is terminal");
+    assert_eq!(require.to_string(), TERMINAL);
+    assert_eq!(poison_fingerprint(&compiler), fingerprint);
+
+    let compile = compiler
+        .compile_in_place(&parse("let value = 1"))
+        .expect_err("compile is terminal");
+    assert_eq!(compile.to_string(), TERMINAL);
+    assert_eq!(poison_fingerprint(&compiler), fingerprint);
+
+    let import = compiler
+        .register_imported_items("pkg::late", &parse("pub fn late() { 1 }").items)
+        .expect_err("import registration is terminal");
+    assert_eq!(import.to_string(), TERMINAL);
+    assert_eq!(poison_fingerprint(&compiler), fingerprint);
 }
 
 #[test]
@@ -148,4 +238,123 @@ fn artifact_counts(compiler: &BytecodeCompiler) -> (usize, usize, usize, usize) 
         compiler.program.instructions.len(),
         compiler.completed_blobs.len(),
     )
+}
+
+fn compiler_with_preexisting_blob() -> BytecodeCompiler {
+    let mut compiler = BytecodeCompiler::new();
+    let baseline = parse("fn baseline() -> int { 1 }");
+    let Item::Function(function, _) = &baseline.items[0] else {
+        panic!("baseline function")
+    };
+    compiler.register_function(function).expect("register baseline");
+    compiler.compile_function(function).expect("compile baseline");
+    assert!(!compiler.completed_blobs.is_empty());
+    compiler
+}
+
+fn blob_file_count(path: &std::path::Path) -> usize {
+    std::fs::read_dir(path)
+        .expect("read cache directory")
+        .map(|entry| entry.expect("cache entry").path())
+        .map(|entry| {
+            if entry.is_dir() {
+                blob_file_count(&entry)
+            } else {
+                usize::from(entry.extension().is_some_and(|extension| extension == "blob"))
+            }
+        })
+        .sum()
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct PoisonFingerprint {
+    functions: String,
+    instructions: String,
+    constants: String,
+    strings: Vec<String>,
+    schemas: Vec<String>,
+    maps: Vec<Vec<String>>,
+    hints: String,
+    blobs: String,
+    hashes: String,
+    mir: String,
+}
+
+fn poison_fingerprint(compiler: &BytecodeCompiler) -> PoisonFingerprint {
+    let mut schemas = compiler
+        .program
+        .type_schema_registry
+        .type_names()
+        .chain(compiler.type_tracker.schema_registry().type_names())
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    schemas.sort();
+    PoisonFingerprint {
+        functions: format!("{:?}", compiler.program.functions),
+        instructions: format!("{:?}", compiler.program.instructions),
+        constants: format!("{:?}", compiler.program.constants),
+        strings: compiler.program.strings.clone(),
+        schemas,
+        maps: vec![
+            sorted_keys(&compiler.program.compiled_annotations),
+            sorted_keys(&compiler.program.string_index),
+            sorted_keys(&compiler.function_defs),
+            sorted_keys(&compiler.function_arity_bounds),
+            sorted_keys(&compiler.function_const_params),
+            sorted_keys(&compiler.imported_names),
+            sorted_keys(&compiler.imported_annotations),
+            sorted_keys(&compiler.module_bindings),
+            sorted_keys(&compiler.module_builtin_functions),
+            sorted_keys(&compiler.struct_types),
+            sorted_keys(&compiler.struct_generic_info),
+            sorted_keys(&compiler.type_aliases),
+            compiler
+                .generated_symbol_query()
+                .generated_symbols()
+                .iter()
+                .map(|symbol| symbol.decl_name.to_string())
+                .collect(),
+        ],
+        hints: format!(
+            "{:?}|{:?}|{:?}",
+            compiler.program.top_level_local_storage_hints,
+            compiler.program.module_binding_storage_hints,
+            compiler.program.function_local_storage_hints,
+        ),
+        blobs: format!(
+            "{:?}|{:?}",
+            compiler.completed_blobs,
+            compiler
+                .current_blob_builder
+                .as_ref()
+                .map(|builder| builder.name.as_str()),
+        ),
+        hashes: format!(
+            "{:?}|{:?}",
+            sorted_hashes(&compiler.blob_name_to_hash),
+            compiler.function_hashes_by_id,
+        ),
+        mir: format!(
+            "{:?}|{:?}|{:?}|{:?}|{:?}",
+            compiler.mir_functions,
+            compiler.mir_borrow_analyses,
+            compiler.mir_storage_plans,
+            compiler.mir_span_to_point,
+            compiler.mir_field_analyses,
+        ),
+    }
+}
+
+fn sorted_keys<V>(map: &std::collections::HashMap<String, V>) -> Vec<String> {
+    let mut keys = map.keys().cloned().collect::<Vec<_>>();
+    keys.sort();
+    keys
+}
+
+fn sorted_hashes(
+    map: &std::collections::HashMap<String, crate::bytecode::FunctionHash>,
+) -> Vec<(String, crate::bytecode::FunctionHash)> {
+    let mut entries = map.iter().map(|(name, hash)| (name.clone(), *hash)).collect::<Vec<_>>();
+    entries.sort_by(|left, right| left.0.cmp(&right.0));
+    entries
 }
