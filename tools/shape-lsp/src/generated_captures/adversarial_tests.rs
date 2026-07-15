@@ -2,13 +2,13 @@ use std::collections::BTreeSet;
 
 use shape_ast::parser::parse_program;
 use shape_vm::compiler::{GENERATED_CAPTURE_SOURCE_UNAVAILABLE_CODE, GeneratedCapturePosition};
-use tower_lsp_server::ls_types::{HoverContents, Position, Uri};
+use tower_lsp_server::ls_types::{HoverContents, Position, Range, Uri};
 
 use super::{
     CaptureQueryContext, GeneratedCaptureLookup, GeneratedQuerySession, generated_capture_hover,
-    generated_capture_references, query,
+    generated_capture_references, generated_capture_rename, query,
 };
-use crate::util::offset_to_line_col;
+use crate::util::{offset_to_line_col, position_to_offset};
 
 const TWO_APPLICATIONS: &str = r#"
 annotation add_reader() {
@@ -179,6 +179,78 @@ fn binder_references_join_every_template_application_and_nested_forwarder() {
         4,
         "binder + outer clause + inner clause + final body use",
     );
+    let reference_ranges: Vec<_> = nested_references
+        .iter()
+        .map(|location| location.range)
+        .collect();
+    let reference_offsets = exact_token_offsets(NESTED_CAPTURE, &reference_ranges, "total");
+    assert!(
+        reference_offsets
+            .windows(2)
+            .all(|pair| pair[0].1 <= pair[1].0),
+        "identity-joined reference anchors are exact, ordered, and nonoverlapping",
+    );
+
+    let mode_offsets: Vec<_> = NESTED_CAPTURE
+        .match_indices("share total")
+        .map(|(offset, _)| offset)
+        .collect();
+    assert_eq!(mode_offsets.len(), 2, "outer and inner capture modes");
+    let declaration_offsets: Vec<_> = mode_offsets
+        .iter()
+        .map(|offset| offset + "share ".len())
+        .collect();
+    let final_use = NESTED_CAPTURE.find("total + 2").unwrap();
+    let session = GeneratedQuerySession::new(
+        &nested_program,
+        NESTED_CAPTURE,
+        CaptureQueryContext::unavailable(),
+    );
+
+    for mode in mode_offsets {
+        assert!(
+            generated_capture_references(&nested_program, NESTED_CAPTURE, mode, &uri)
+                .is_not_capture(),
+            "capture mode text never selects the identity graph",
+        );
+        assert!(
+            generated_capture_rename(
+                &nested_program,
+                NESTED_CAPTURE,
+                mode,
+                &uri,
+                "amount",
+                &session,
+            )
+            .is_not_capture(),
+            "capture mode text never authorizes a rename edit",
+        );
+    }
+
+    for offset in [
+        nested_binder,
+        declaration_offsets[0],
+        declaration_offsets[1],
+        final_use,
+    ] {
+        let edit = generated_capture_rename(
+            &nested_program,
+            NESTED_CAPTURE,
+            offset,
+            &uri,
+            "amount",
+            &session,
+        )
+        .found("every identity-bearing site renames the complete nested graph");
+        let changes = edit.changes.expect("rename returns document changes");
+        let edit_ranges: Vec<_> = changes[&uri].iter().map(|edit| edit.range).collect();
+        assert_eq!(edit_ranges, reference_ranges);
+        assert_eq!(
+            exact_token_offsets(NESTED_CAPTURE, &edit_ranges, "total"),
+            reference_offsets,
+            "rename admits neither whole-entry nor overlapping edits",
+        );
+    }
 }
 
 #[test]
@@ -358,4 +430,16 @@ fn import_gated_session_is_unavailable_not_an_ordinary_fallthrough() {
 fn offset_position(text: &str, offset: usize) -> Position {
     let (line, character) = offset_to_line_col(text, offset);
     Position { line, character }
+}
+
+fn exact_token_offsets(source: &str, ranges: &[Range], expected: &str) -> Vec<(usize, usize)> {
+    ranges
+        .iter()
+        .map(|range| {
+            let start = position_to_offset(source, range.start).expect("range starts in source");
+            let end = position_to_offset(source, range.end).expect("range ends in source");
+            assert_eq!(&source[start..end], expected);
+            (start, end)
+        })
+        .collect()
 }

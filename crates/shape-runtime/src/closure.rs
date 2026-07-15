@@ -587,7 +587,7 @@ impl EnvironmentAnalyzer {
                 // attributed to both capture layers.
                 if let Some(clause) = captures {
                     for entry in &clause.entries {
-                        self.check_variable_reference_at(&entry.name, Some(entry.span));
+                        self.check_variable_reference_at(&entry.name, Some(entry.name_span));
                     }
                 }
                 let outer_use_spans = self.captured_use_spans.clone();
