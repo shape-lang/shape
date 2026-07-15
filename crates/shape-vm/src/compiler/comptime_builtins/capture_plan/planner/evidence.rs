@@ -24,6 +24,10 @@ impl BytecodeCompiler {
                 Some(BindingStorageClass::SharedCow)
             }
             (Some(CaptureTarget::Local(idx)), _) => self.mir_storage_class_for_slot(idx),
+            (Some(CaptureTarget::ModuleBinding(idx)), _) => self
+                .type_tracker
+                .get_binding_semantics(idx)
+                .map(|semantics| semantics.storage_class),
             _ => None,
         };
 

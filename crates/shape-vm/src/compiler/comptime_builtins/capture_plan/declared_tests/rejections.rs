@@ -64,23 +64,23 @@ use super::*;
     #[test]
     fn c0902_reference_storage_cannot_escape_through_move_or_share() {
         for mode in [CaptureMode::Move, CaptureMode::Share] {
-            for ownership in [
-                BindingOwnershipClass::OwnedImmutable,
-                BindingOwnershipClass::OwnedMutable,
-                BindingOwnershipClass::Flexible,
-            ] {
-                for witness_shared_local in [false, true] {
-                    let mut reference = facts(
-                        Some(CaptureTarget::Local(1)),
-                        Some(ownership),
-                        witness_shared_local,
-                    );
-                    reference.storage = Some(BindingStorageClass::Reference);
-                    let message = reject(mode, &reference);
-                    assert!(
-                        message.starts_with("[C0902] ReferenceEscapeIntoClosure:"),
-                        "{mode:?} over {ownership:?} / shared={witness_shared_local} got {message}"
-                    );
+            for target in [CaptureTarget::Local(1), CaptureTarget::ModuleBinding(1)] {
+                for ownership in [
+                    BindingOwnershipClass::OwnedImmutable,
+                    BindingOwnershipClass::OwnedMutable,
+                    BindingOwnershipClass::Flexible,
+                ] {
+                    for witness_shared_local in [false, true] {
+                        let mut reference =
+                            facts(Some(target), Some(ownership), witness_shared_local);
+                        reference.storage = Some(BindingStorageClass::Reference);
+                        let message = reject(mode, &reference);
+                        assert!(
+                            message.starts_with("[C0902] ReferenceEscapeIntoClosure:"),
+                            "{mode:?} over {target:?} / {ownership:?} / \
+                             shared={witness_shared_local} got {message}"
+                        );
+                    }
                 }
             }
         }
@@ -283,6 +283,64 @@ job.read(2)
                  reference binding 'r'"
             ),
             "the generated capture must fail through the named reference-escape family: {error}"
+        );
+    }
+
+    /// A module reference whose referent has program lifetime is valid at its
+    /// declaration site. It must still be refused when a generated closure
+    /// declares `share` over the reference binding itself, before any closure
+    /// model or emitted artifact is published.
+    #[test]
+    fn c0902_generated_share_of_module_reference_precedes_publication() {
+        let program = shape_ast::parse_program(
+            r#"
+let module_value = 7
+let module_ref = &module_value
+
+annotation add_reader() {
+  targets: [type]
+  comptime post(target, ctx) {
+    extend ("extend Job { method read(x: int) -> int {
+      let worker = |y: int; share module_ref| y + module_ref
+      worker(x) } }")
+  }
+}
+@add_reader()
+type Job { id: int }
+let job = Job { id: 1 }
+job.read(2)
+"#,
+        )
+        .expect("fixture parses");
+        let mut compiler = BytecodeCompiler::new();
+        let error = compiler
+            .compile_in_place(&program)
+            .expect_err("a module reference cannot escape through declared `share`")
+            .to_string();
+
+        assert!(
+            error.contains(
+                "[C0902] ReferenceEscapeIntoClosure: declared capture 'share module_ref' carries \
+                 reference binding 'module_ref'"
+            ),
+            "the generated capture must fail at its declared boundary, not at an unrelated \
+             top-level reference check: {error}"
+        );
+        assert!(
+            compiler.closure_capture_packs.is_empty(),
+            "rejected reference capture must not publish a capture pack"
+        );
+        assert!(
+            compiler
+                .program
+                .closure_function_layouts
+                .iter()
+                .all(Option::is_none),
+            "rejected reference capture must not publish a closure layout"
+        );
+        assert!(
+            compiler.program.functions.iter().all(|function| !function.is_closure),
+            "rejected reference capture must not publish a closure function"
         );
     }
 
