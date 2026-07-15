@@ -3,9 +3,96 @@
 use super::closure::{jit_alloc_shared_cell, jit_arc_shared_release, jit_arc_shared_retain};
 use super::shared_cell_payload::{jit_read_shared_cell_ptr, jit_write_shared_cell_ptr};
 use crate::ffi::stack_kind_code;
-use shape_value::NativeKind;
+use shape_value::heap_value::{MatrixData, MatrixSliceData};
 use shape_value::v2::closure_layout::SharedCell;
+use shape_value::{HeapKind, NativeKind};
 use std::sync::Arc;
+
+fn assert_zero_shared_payload_lifecycle(kind: NativeKind) {
+    let code = stack_kind_code::encode(kind);
+    assert_eq!(
+        stack_kind_code::decode(code),
+        Some(kind),
+        "{kind:?}: encoded SharedCell kind must be decodable"
+    );
+    let cell_ptr = unsafe { jit_alloc_shared_cell(0, code) };
+    assert_ne!(
+        cell_ptr, 0,
+        "{kind:?}: a valid code must allocate a non-null typed empty cell"
+    );
+    assert_eq!(
+        unsafe { jit_read_shared_cell_ptr(cell_ptr as i64) },
+        0,
+        "{kind:?}: reading an empty payload must not fabricate a share"
+    );
+    unsafe {
+        jit_write_shared_cell_ptr(cell_ptr as i64, 0);
+        jit_arc_shared_release(cell_ptr);
+    }
+}
+
+fn assert_arc_payload_lifecycle<T>(kind: NativeKind, initial: Arc<T>, replacement: Arc<T>) {
+    let initial_weak = Arc::downgrade(&initial);
+    let initial_bits = Arc::into_raw(initial) as u64;
+    let cell_ptr = unsafe { jit_alloc_shared_cell(initial_bits, stack_kind_code::encode(kind)) };
+    assert_ne!(cell_ptr, 0, "{kind:?}: valid allocation must be non-null");
+
+    // Keep an observer share so the cell and its immutable kind remain
+    // inspectable after the production outer-cell share is released.
+    let observer = unsafe {
+        Arc::increment_strong_count(cell_ptr as *const SharedCell);
+        Arc::from_raw(cell_ptr as *const SharedCell)
+    };
+    let cell_weak = Arc::downgrade(&observer);
+    assert_eq!(Arc::strong_count(&observer), 2);
+    assert_eq!(initial_weak.strong_count(), 1, "cell owns initial payload");
+
+    let read_bits = unsafe { jit_read_shared_cell_ptr(cell_ptr as i64) } as u64;
+    assert_eq!(read_bits, initial_bits, "read preserves payload identity");
+    assert_eq!(
+        initial_weak.strong_count(),
+        2,
+        "canonical kinded read must mint one typed payload share"
+    );
+    unsafe { drop(Arc::from_raw(read_bits as *const T)) };
+    assert_eq!(initial_weak.strong_count(), 1);
+
+    let replacement_weak = Arc::downgrade(&replacement);
+    let replacement_bits = Arc::into_raw(replacement) as u64;
+    unsafe { jit_write_shared_cell_ptr(cell_ptr as i64, replacement_bits as i64) };
+    assert_eq!(
+        initial_weak.strong_count(),
+        0,
+        "canonical kinded replacement must retire the displaced share"
+    );
+    assert_eq!(
+        replacement_weak.strong_count(),
+        1,
+        "the same cell must own the transferred replacement share"
+    );
+    assert_eq!(
+        unsafe { *observer.value.get() },
+        replacement_bits,
+        "replacement changes payload, never SharedCell identity"
+    );
+
+    let replacement_read = unsafe { jit_read_shared_cell_ptr(cell_ptr as i64) } as u64;
+    assert_eq!(replacement_read, replacement_bits);
+    assert_eq!(replacement_weak.strong_count(), 2);
+    unsafe { drop(Arc::from_raw(replacement_read as *const T)) };
+    assert_eq!(replacement_weak.strong_count(), 1);
+
+    unsafe { jit_arc_shared_release(cell_ptr) };
+    assert_eq!(Arc::strong_count(&observer), 1);
+    assert_eq!(replacement_weak.strong_count(), 1);
+    drop(observer);
+    assert_eq!(cell_weak.strong_count(), 0, "final cell share must retire");
+    assert_eq!(
+        replacement_weak.strong_count(),
+        0,
+        "final cell drop must retire the replacement payload"
+    );
+}
 
 #[test]
 fn typed_allocator_preserves_payload_kind_and_balances_cell_shares() {
@@ -88,105 +175,58 @@ fn invalid_kind_code_returns_null_without_consuming_payload_share() {
 #[test]
 fn zero_is_a_valid_empty_payload_for_every_refcounted_kind_code() {
     let mut checked = Vec::new();
-    for code in 0..stack_kind_code::SENTINEL {
-        let Some(kind) = stack_kind_code::decode(code) else {
-            continue;
-        };
-        if !kind.is_refcounted() {
-            continue;
-        }
-
-        let cell_ptr = unsafe { jit_alloc_shared_cell(0, code) };
-        assert_ne!(
-            cell_ptr, 0,
-            "{kind:?}: zero must allocate a typed empty cell"
-        );
-        assert_eq!(
-            unsafe { jit_read_shared_cell_ptr(cell_ptr as i64) },
-            0,
-            "{kind:?}: reading an empty refcounted payload must not fabricate a share"
-        );
-        unsafe {
-            jit_write_shared_cell_ptr(cell_ptr as i64, 0);
-            jit_arc_shared_release(cell_ptr);
-        }
+    let scalar_refcounted = [
+        NativeKind::String,
+        NativeKind::StringV2,
+        NativeKind::DecimalV2,
+    ];
+    for kind in scalar_refcounted
+        .into_iter()
+        .chain(HeapKind::ALL.into_iter().map(NativeKind::Ptr))
+    {
+        assert_zero_shared_payload_lifecycle(kind);
         checked.push(kind);
     }
 
-    assert!(checked.contains(&NativeKind::String));
-    assert!(checked.contains(&NativeKind::StringV2));
-    assert!(checked.contains(&NativeKind::DecimalV2));
-    assert!(
-        checked
-            .iter()
-            .any(|kind| matches!(kind, NativeKind::Ptr(_))),
-        "the proof must include the Ptr(HeapKind) family"
+    assert_eq!(
+        checked.len(),
+        scalar_refcounted.len() + HeapKind::ALL.len(),
+        "the proof must execute every refcounted scalar and every Ptr variant"
     );
+    assert!(checked.contains(&NativeKind::Ptr(HeapKind::Matrix)));
+    assert!(checked.contains(&NativeKind::Ptr(HeapKind::MatrixSlice)));
 }
 
 #[test]
 fn refcounted_read_and_replacement_balance_payload_shares() {
-    let initial = Arc::new(String::from("initial"));
-    let initial_weak = Arc::downgrade(&initial);
-    let initial_bits = Arc::into_raw(initial) as u64;
-    let cell_ptr =
-        unsafe { jit_alloc_shared_cell(initial_bits, stack_kind_code::encode(NativeKind::String)) };
-
-    // Keep an observer share so the cell and its immutable kind remain
-    // inspectable after the production outer-cell share is released.
-    let observer = unsafe {
-        Arc::increment_strong_count(cell_ptr as *const SharedCell);
-        Arc::from_raw(cell_ptr as *const SharedCell)
-    };
-    let cell_weak = Arc::downgrade(&observer);
-    assert_eq!(Arc::strong_count(&observer), 2);
-    assert_eq!(initial_weak.strong_count(), 1, "cell owns initial payload");
-
-    let read_bits = unsafe { jit_read_shared_cell_ptr(cell_ptr as i64) } as u64;
-    assert_eq!(read_bits, initial_bits, "read preserves payload identity");
-    assert_eq!(
-        initial_weak.strong_count(),
-        2,
-        "read must mint one typed payload share"
+    assert_arc_payload_lifecycle(
+        NativeKind::String,
+        Arc::new(String::from("initial")),
+        Arc::new(String::from("replacement")),
     );
-    unsafe { drop(Arc::from_raw(read_bits as *const String)) };
-    assert_eq!(initial_weak.strong_count(), 1);
+}
 
-    let replacement = Arc::new(String::from("replacement"));
-    let replacement_weak = Arc::downgrade(&replacement);
-    let replacement_bits = Arc::into_raw(replacement) as u64;
-    unsafe { jit_write_shared_cell_ptr(cell_ptr as i64, replacement_bits as i64) };
-    assert_eq!(
-        initial_weak.strong_count(),
-        0,
-        "replacement must retire the displaced payload share"
+#[test]
+fn matrix_zero_read_write_and_drop_use_canonical_typed_arc_dispatch() {
+    let kind = NativeKind::Ptr(HeapKind::Matrix);
+    assert_zero_shared_payload_lifecycle(kind);
+    assert_arc_payload_lifecycle(
+        kind,
+        Arc::new(MatrixData::new(1, 2)),
+        Arc::new(MatrixData::new(2, 1)),
     );
-    assert_eq!(
-        replacement_weak.strong_count(),
-        1,
-        "the same cell must own the transferred replacement share"
-    );
-    assert_eq!(
-        unsafe { *observer.value.get() },
-        replacement_bits,
-        "replacement changes payload, never SharedCell identity"
-    );
+}
 
-    let replacement_read = unsafe { jit_read_shared_cell_ptr(cell_ptr as i64) } as u64;
-    assert_eq!(replacement_read, replacement_bits);
-    assert_eq!(replacement_weak.strong_count(), 2);
-    unsafe { drop(Arc::from_raw(replacement_read as *const String)) };
-    assert_eq!(replacement_weak.strong_count(), 1);
-
-    unsafe { jit_arc_shared_release(cell_ptr) };
-    assert_eq!(Arc::strong_count(&observer), 1);
-    assert_eq!(replacement_weak.strong_count(), 1);
-    drop(observer);
-    assert_eq!(cell_weak.strong_count(), 0, "final cell share must retire");
-    assert_eq!(
-        replacement_weak.strong_count(),
-        0,
-        "final cell drop must retire the replacement payload"
+#[test]
+fn matrix_slice_zero_read_write_and_drop_use_canonical_typed_arc_dispatch() {
+    let kind = NativeKind::Ptr(HeapKind::MatrixSlice);
+    assert_zero_shared_payload_lifecycle(kind);
+    let initial_parent = Arc::new(MatrixData::new(1, 2));
+    let replacement_parent = Arc::new(MatrixData::new(2, 1));
+    assert_arc_payload_lifecycle(
+        kind,
+        Arc::new(MatrixSliceData::new(initial_parent, 0, 2)),
+        Arc::new(MatrixSliceData::new(replacement_parent, 0, 2)),
     );
 }
 

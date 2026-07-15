@@ -91,9 +91,9 @@ pub const C_DECIMAL_V2: u8 = 27;
 pub const C_NULL: u8 = 28;
 
 /// Base code for `Ptr(HeapKind::*)` arms. Each `HeapKind` ordinal is
-/// added to `PTR_BASE` to produce the byte. With HeapKind ordinals 0..=28
-/// today the Ptr-range is `128..=156`, well clear of the scalar codes
-/// `0..=23` and the `SENTINEL = 255`.
+/// added to `PTR_BASE` to produce the byte. With HeapKind ordinals 0..=35
+/// today the Ptr-range is `128..=163`, well clear of the scalar codes
+/// `0..=28` and the `SENTINEL = 255`.
 pub const PTR_BASE: u8 = 128;
 
 /// Encode a `NativeKind` as its single-byte parallel-track code.
@@ -192,50 +192,14 @@ pub fn decode(code: u8) -> Option<NativeKind> {
     }
 }
 
-/// Decode a `HeapKind` ordinal byte back to its variant. Mirror of the
-/// encoding side — must stay in lockstep with `heap_variants.rs`'s
-/// `#[repr(u8)]` ordinal table.
+/// Decode a `HeapKind` ordinal byte through the canonical catalog.
+///
+/// `HeapKind::ALL` is compile-time-proven to be complete, gap-free, and in
+/// `#[repr(u8)]` order. Keeping ordinal iteration in shape-value avoids a
+/// second hand-maintained decoder drifting from the discriminator.
 #[inline]
 fn decode_heap_kind(ord: u8) -> Option<HeapKind> {
-    // Safe transmute is not available for non-exhaustive enum ordinals;
-    // do an explicit dispatch matching `crates/shape-value/src/heap_variants.rs`.
-    Some(match ord {
-        0 => HeapKind::String,
-        1 => HeapKind::TypedObject,
-        2 => HeapKind::Closure,
-        3 => HeapKind::Decimal,
-        4 => HeapKind::BigInt,
-        5 => HeapKind::DataTable,
-        6 => HeapKind::Future,
-        7 => HeapKind::TaskGroup,
-        8 => HeapKind::TypedArray,
-        9 => HeapKind::Temporal,
-        10 => HeapKind::TableView,
-        11 => HeapKind::Content,
-        12 => HeapKind::Instant,
-        13 => HeapKind::IoHandle,
-        14 => HeapKind::NativeScalar,
-        15 => HeapKind::NativeView,
-        16 => HeapKind::Char,
-        17 => HeapKind::HashMap,
-        18 => HeapKind::FilterExpr,
-        19 => HeapKind::Reference,
-        20 => HeapKind::SharedCell,
-        21 => HeapKind::HashSet,
-        22 => HeapKind::Iterator,
-        23 => HeapKind::Deque,
-        24 => HeapKind::Channel,
-        25 => HeapKind::PriorityQueue,
-        26 => HeapKind::Range,
-        27 => HeapKind::Result,
-        28 => HeapKind::Option,
-        29 => HeapKind::TraitObject,
-        30 => HeapKind::Mutex,
-        31 => HeapKind::Atomic,
-        32 => HeapKind::Lazy,
-        33 => HeapKind::ModuleFn,
-        _ => return None,
-    })
+    HeapKind::ALL.get(ord as usize).copied()
 }
 
 #[cfg(test)]
@@ -260,16 +224,12 @@ mod tests {
     }
 
     #[test]
-    fn ptr_roundtrip() {
-        for hk in [
-            HeapKind::Closure,
-            HeapKind::TypedArray,
-            HeapKind::TypedObject,
-            HeapKind::HashMap,
-            HeapKind::Result,
-            HeapKind::Option,
-            HeapKind::String,
-        ] {
+    fn every_heap_kind_roundtrips_without_omission() {
+        for (ordinal, hk) in HeapKind::ALL.iter().copied().enumerate() {
+            assert_eq!(
+                hk as usize, ordinal,
+                "HeapKind::ALL must preserve the canonical repr(u8) ordinal"
+            );
             let kind = NativeKind::Ptr(hk);
             let code = encode(kind);
             assert!(
@@ -277,7 +237,12 @@ mod tests {
                 "Ptr code {} must be in [PTR_BASE, SENTINEL)",
                 code
             );
-            assert_eq!(decode(code), Some(kind));
+            assert_eq!(code, PTR_BASE + ordinal as u8);
+            assert_eq!(
+                decode(code),
+                Some(kind),
+                "encoded HeapKind::{hk:?} must never disappear from the decoder"
+            );
         }
     }
 

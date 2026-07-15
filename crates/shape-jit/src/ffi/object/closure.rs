@@ -478,10 +478,12 @@ pub unsafe extern "C" fn jit_shared_unlock_contended(ptr: u64) {
 ///
 /// The returned pointer is owned by the caller's slot; it MUST be
 /// released via `jit_arc_shared_release` exactly once when the slot
-/// exits scope. A reserved, sentinel, or otherwise undecodable `kind_code`
+/// exits scope. Every decodable `kind_code` returns a non-null
+/// `Arc::into_raw` pointer; Rust allocation failure aborts before this boundary
+/// can return. A reserved, sentinel, or otherwise undecodable `kind_code`
 /// returns `0` without allocating a cell or taking ownership of
-/// `initial_bits`; this explicit failure sentinel keeps malformed FFI input
-/// from unwinding across the C ABI.
+/// `initial_bits`; zero is exclusively the explicit malformed-input failure
+/// sentinel and is never a successful allocation.
 ///
 /// # Safety
 ///
@@ -544,7 +546,12 @@ pub unsafe extern "C" fn jit_alloc_shared_cell(initial_bits: u64, kind_code: u8)
     // shares (one per capturing closure) are minted by
     // `jit_arc_shared_retain` and balanced by `release_typed_closure`.
     let cell = Arc::new(SharedCell::new(initial_bits, kind));
-    Arc::into_raw(cell) as u64
+    let cell_ptr = Arc::into_raw(cell);
+    debug_assert!(
+        !cell_ptr.is_null(),
+        "Arc::into_raw must preserve Arc's non-null allocation invariant"
+    );
+    cell_ptr as u64
 }
 
 /// Release exactly one strong share of an `Arc<SharedCell>` at

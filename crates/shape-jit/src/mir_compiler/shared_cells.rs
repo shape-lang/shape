@@ -120,6 +120,30 @@ impl SharedLocalKindEvidence {
     }
 }
 
+/// Prove that the compact JIT ABI can recover this exact SharedCell kind.
+///
+/// This check runs for every Shared local before the first allocation is
+/// emitted. An encoding/catalog defect therefore produces a whole-function JIT
+/// refusal instead of calling the defensive FFI branch that returns null.
+fn validated_shared_cell_kind_code(slot: SlotId, kind: NativeKind) -> Result<u8, String> {
+    let code = crate::ffi::stack_kind_code::encode(kind);
+    match crate::ffi::stack_kind_code::decode(code) {
+        Some(decoded) if decoded == kind => Ok(code),
+        Some(decoded) => Err(format!(
+            "SURFACE (ADR-006 §2.7.7 / Q9 + §2.7.8 / Q10): SharedCell for local \
+             slot {slot} encodes payload kind {kind:?} as byte {code}, but the canonical \
+             JIT kind catalog decodes it as {decoded:?}. Whole-function JIT bail before \
+             cell allocation or code emission."
+        )),
+        None => Err(format!(
+            "SURFACE (ADR-006 §2.7.7 / Q9 + §2.7.8 / Q10): SharedCell for local \
+             slot {slot} encodes payload kind {kind:?} as byte {code}, but that byte is \
+             absent from the canonical JIT kind catalog. Whole-function JIT bail before \
+             cell allocation or code emission."
+        )),
+    }
+}
+
 /// Discover declaring-frame slots promoted to SharedCell storage and retain
 /// both producer-side kind proofs for validation before code emission.
 pub(crate) fn discover_shared_local_slots(
@@ -281,11 +305,15 @@ impl<'a, 'b> MirToIR<'a, 'b> {
         let mut slots = self
             .shared_local_slots
             .iter()
-            .map(|(slot, evidence)| evidence.validated(*slot).map(|kind| (*slot, kind)))
+            .map(|(slot, evidence)| {
+                let kind = evidence.validated(*slot)?;
+                let kind_code = validated_shared_cell_kind_code(*slot, kind)?;
+                Ok((*slot, kind, kind_code))
+            })
             .collect::<Result<Vec<_>, _>>()?;
-        slots.sort_by_key(|(slot, _)| slot.0);
+        slots.sort_by_key(|(slot, _, _)| slot.0);
 
-        for (slot, kind) in slots {
+        for (slot, kind, kind_code) in slots {
             let Some(&variable) = self.locals.get(&slot) else {
                 continue;
             };
@@ -298,13 +326,18 @@ impl<'a, 'b> MirToIR<'a, 'b> {
             // a refcounted kind). The first source assignment transfers the
             // real payload share into the cell.
             let initial = self.builder.ins().iconst(types::I64, 0);
-            let kind_code = crate::ffi::stack_kind_code::encode(kind);
             let kind_value = self.builder.ins().iconst(types::I8, kind_code as i64);
             let call = self
                 .builder
                 .ins()
                 .call(self.ffi.alloc_shared_cell, &[initial, kind_value]);
             let cell_pointer = self.builder.inst_results(call)[0];
+            // `kind_code` was proven decodable before this loop emitted any
+            // allocation. The accepted FFI branch is exactly
+            // `Arc::new(SharedCell) -> Arc::into_raw`: it either aborts on
+            // allocation failure or returns a non-null pointer. Its null
+            // sentinel is reserved for malformed external codes and cannot
+            // reach this generated store.
             self.builder.def_var(variable, cell_pointer);
         }
         Ok(())
@@ -339,6 +372,16 @@ mod tests {
         };
 
         assert_eq!(evidence.validated(SlotId(7)), Ok(NativeKind::Bool));
+    }
+
+    #[test]
+    fn every_ptr_kind_passes_shared_cell_abi_preflight() {
+        for heap_kind in shape_value::HeapKind::ALL {
+            let kind = NativeKind::Ptr(heap_kind);
+            let code = validated_shared_cell_kind_code(SlotId(7), kind)
+                .expect("the complete HeapKind catalog must preflight");
+            assert_eq!(crate::ffi::stack_kind_code::decode(code), Some(kind));
+        }
     }
 
     /// Lower-level D1 proof for the inherited-carrier branch.

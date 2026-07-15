@@ -38,6 +38,7 @@ pub mod heap_header;
 #[macro_use]
 pub mod heap_variants;
 pub mod heap_value;
+mod heap_kind_catalog;
 pub mod ids;
 pub mod iterator_state;
 pub mod kinded_slot;
