@@ -20,8 +20,17 @@
 
 use sha2::{Digest, Sha256};
 pub use shape_ast::ast::GeneratedNodePath;
-use shape_ast::ast::{GeneratedExpansionFingerprint, Span};
+use shape_ast::ast::Span;
 use std::collections::HashMap;
+
+mod node_origin;
+#[cfg(test)]
+mod test_support;
+
+#[cfg(test)]
+fn new_test_node_issuer() -> shape_ast::ast::GeneratedNodeIssuer {
+    shape_ast::ast::GeneratedNodeIssuer::new()
+}
 
 /// Rejection-matrix row 1 (ticket D1): a generated node without a compiler
 /// symbol identity and expansion provenance — including any attempt to anchor
@@ -566,57 +575,6 @@ pub(crate) struct GeneratedOrigin {
 }
 
 impl GeneratedOrigin {
-    /// ADR-009 C1 (slice 2) — THE mint for node-borne provenance.
-    ///
-    /// Projects this registered declaration origin into the AST-level stamp
-    /// (`shape_ast::ast::GeneratedNodeOrigin`) that
-    /// `transform::generated_origin::stamp_generated_closures` writes onto every
-    /// closure node of the generated body. shape-ast cannot depend on shape-vm,
-    /// so the CARRIER lives there and the MINT lives here — the identity is
-    /// still this module's: the stamp carries the owning `ExpansionIdentity`'s
-    /// 128-bit content fingerprint and the structured `GeneratedNodePath`,
-    /// never a name and never a `Span` (R1/R3).
-    ///
-    /// `owner_display` is diagnostic prose only (the "in generated function 'f'"
-    /// tail of the Wave-46 message); it is never compared and never a key.
-    ///
-    /// `issuer` is the current compiler instance's non-serialized capability;
-    /// `compile_expr_closure` accepts only stamps recognized by that same
-    /// issuer. Constructor visibility is therefore not the trust boundary.
-    pub(crate) fn to_node_origin(
-        &self,
-        issuer: &shape_ast::ast::GeneratedNodeIssuer,
-        owner_display: &str,
-    ) -> shape_ast::ast::GeneratedNodeOrigin {
-        let fingerprint = self.expansion.fingerprint();
-        issuer.issue(
-            GeneratedExpansionFingerprint::from_components(fingerprint.high, fingerprint.low),
-            self.node_path.clone(),
-            self.source_anchor.file_id(),
-            self.source_anchor.span(),
-            owner_display.to_string(),
-        )
-    }
-
-    /// Test-only node stamp. Tests that exercise a CARRIER (does substitution /
-    /// the `ctx.original` rewrite forward the stamp?) need a stamp without
-    /// standing up a whole expansion — but they must not become a second mint,
-    /// so they come through this file too (K1b, `scripts/check-no-dynamic.sh`).
-    #[cfg(test)]
-    pub(crate) fn node_origin_for_tests(
-        node_path: &[&str],
-        owner_display: &str,
-    ) -> shape_ast::ast::GeneratedNodeOrigin {
-        shape_ast::ast::GeneratedNodeIssuer::new().issue(
-            GeneratedExpansionFingerprint::from_components(0x0BAD_F00D, 0x0DEF_ACED),
-            GeneratedNodePath::try_from_rendered_segments(node_path.iter().copied())
-                .expect("test origin path must contain valid structural segments"),
-            3,
-            Span { start: 5, end: 9 },
-            owner_display.to_string(),
-        )
-    }
-
     /// Human-readable provenance line for compile errors: generator,
     /// application, target, and the real source anchor. Diagnostics-grade
     /// LSDS threading (three related locations) is slice S4; the named

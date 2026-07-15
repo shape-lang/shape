@@ -1,13 +1,38 @@
 //! Hover rendering for a set of compiler-issued generated capture occurrences.
 
 use std::collections::BTreeSet;
+use std::path::Path;
 
 use shape_ast::ast::Program;
+use shape_ast::parser::parse_program;
 use shape_vm::compiler::{CaptureSiteRole, GeneratedCapturePosition};
 use tower_lsp_server::ls_types::{Hover, HoverContents, MarkupContent, MarkupKind, Position};
 
-use super::{CaptureAnalysis, GeneratedCaptureLookup, GeneratedQuerySession};
-use crate::util::position_to_offset;
+use super::{CaptureAnalysis, CaptureQueryContext, GeneratedCaptureLookup, GeneratedQuerySession};
+use crate::module_cache::ModuleCache;
+use crate::util::{parser_source, position_to_offset};
+
+/// Route hover through one fresh exact parse and one compiler query session.
+/// Parse failure is `NotCapture`; unavailable compiler evidence remains a
+/// terminal quarantine and must not fall through to name-based hover.
+pub(super) fn generated_capture_hover_from_source(
+    text: &str,
+    position: Position,
+    module_cache: Option<&ModuleCache>,
+    current_file: Option<&Path>,
+) -> GeneratedCaptureLookup<Hover> {
+    let parse_src = parser_source(text);
+    let Ok(program) = parse_program(parse_src.as_ref()) else {
+        return GeneratedCaptureLookup::NotCapture;
+    };
+    let context = CaptureQueryContext {
+        file_path: current_file,
+        module_cache,
+        workspace_root: None,
+    };
+    let session = GeneratedQuerySession::new(&program, text, context);
+    generated_capture_hover(&program, text, position, &session)
+}
 
 pub(super) fn generated_capture_hover(
     program: &Program,

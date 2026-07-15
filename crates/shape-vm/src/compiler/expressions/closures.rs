@@ -21,6 +21,8 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use super::super::BytecodeCompiler;
 use crate::compiler::ClosureCallsiteHint;
 
+mod capture_peek;
+
 fn container_kind_from_concrete_type(
     ct: &ConcreteType,
 ) -> Option<crate::compiler::mutation_writeback::ContainerKind> {
@@ -4370,129 +4372,6 @@ impl BytecodeCompiler {
             }
             _ => None,
         }
-    }
-
-    /// Phase C — peek a closure literal's capture signature and mint (or
-    /// reuse) a [`ClosureTypeId`] WITHOUT lowering the closure to bytecode
-    /// and WITHOUT pushing to `closure_type_ids`.
-    ///
-    /// The resolver calls this during `try_monomorphize_method_call` to key
-    /// the monomorphization cache on the closure's layout. At emission time
-    /// the usual `compile_expr_closure` path runs as normal — because the
-    /// registry's `intern` is idempotent, both calls return the same
-    /// `ClosureTypeId`. The split responsibility (gotcha option **(a)** in
-    /// the Phase C plan) is:
-    ///
-    ///   - Resolver → peek + intern layout id only.
-    ///   - `compile_expr_closure` → intern layout id (no-op second time) AND
-    ///     push `(func_id, type_id)` into `closure_type_ids`.
-    ///
-    /// This keeps `closure_type_ids` free of duplicates while letting the
-    /// resolver see the id early. An invalid declared capture plan returns
-    /// `None`: the resolver must decline specialization and let ordinary
-    /// emission report the real diagnostic. It must never mint an inferred
-    /// stand-in layout for a declaration that failed validation.
-    pub(crate) fn mint_closure_type_id_peek(
-        &mut self,
-        params: &[shape_ast::ast::FunctionParameter],
-        body: &[shape_ast::ast::Statement],
-        // ADR-009 C1 (slice 3): the closure literal's DECLARED capture clause.
-        // Without it the peeked id is keyed on inferred kinds while the emitted
-        // id is keyed on declared kinds, and the two disagree exactly on the
-        // flagship case — a `move` over a read-only `let mut` inside a generic
-        // generated method.
-        declared: Option<&shape_ast::ast::CaptureClause>,
-        // The exact node-borne provenance and source span used by real
-        // emission's generated-only capture-surface gate.
-        generated_origin: Option<&shape_ast::ast::GeneratedNodeOrigin>,
-        closure_span: Span,
-    ) -> Option<ClosureTypeId> {
-        // Run the same capture analysis as `compile_expr_closure`, but only
-        // for the purpose of reading capture names off of the AST.
-        let proto_def = FunctionDef {
-            name: "__peek_closure__".to_string(),
-            name_span: Span::DUMMY,
-            declaring_module_path: None,
-            doc_comment: None,
-            type_params: None,
-            params: params.to_vec(),
-            return_type: None,
-            body: body.to_vec(),
-            annotations: vec![],
-            where_clause: None,
-            is_async: false,
-            is_comptime: false,
-        };
-
-        let outer_vars = self.collect_outer_scope_vars();
-        let analysis = EnvironmentAnalyzer::analyze_function_captures(&proto_def, &outer_vars);
-        let mut captured_vars = analysis.captured_vars().to_vec();
-        let mut mutated_captures = analysis.mutated_captures().clone();
-        captured_vars.sort();
-        let param_names: BTreeSet<String> =
-            params.iter().flat_map(|p| p.get_identifiers()).collect();
-        captured_vars.retain(|name| !param_names.contains(name));
-
-        // Run the SAME provenance/generated-only gate as emission before any
-        // registry interning. A peek is not permission to mint a speculative
-        // ordinary explicit or generated implicit capture layout.
-        let generated_origin = self
-            .validate_capture_surface(declared, generated_origin, &captured_vars, closure_span)
-            .ok()?;
-        let captured_var_set: BTreeSet<String> = captured_vars.iter().cloned().collect();
-        mutated_captures.extend(collect_static_mut_self_container_captures(
-            self,
-            body,
-            &captured_var_set,
-        ));
-
-        // Mirror `compile_expr_closure`'s callee-capture classification so
-        // the peeked `ClosureTypeId` matches the real one (a callable
-        // capture stamps `ConcreteType::Function`, not `Pointer(Void)`).
-        let saved_callee_captures = std::mem::replace(
-            &mut self.current_closure_callee_captures,
-            Self::collect_callee_identifier_names(body),
-        );
-        // ADR-009 C1 (slice 3): the SAME selector, then the SAME id producer
-        // emission uses — `peeked_id == emitted_id` by construction. A failed
-        // declared plan is not replaced with inference: that would create a
-        // contradictory cache artifact before emission rejects the source.
-        // Instead this non-authoritative peek declines specialization, after
-        // restoring the temporary callable-capture classification.
-        let plan = match self.plan_captures(
-            &captured_vars,
-            &mutated_captures,
-            Some(&analysis),
-            declared,
-            generated_origin,
-            closure_span,
-        ) {
-            Ok(plan) => plan,
-            Err(_) => {
-                self.current_closure_callee_captures = saved_callee_captures;
-                return None;
-            }
-        };
-        // `func_idx` is irrelevant to the id (the registry interns on types +
-        // kinds), and this pack is never pushed — the peek does not emit.
-        let user_pass_modes = self.effective_function_like_pass_modes(None, params, Some(body));
-        let callable_semantic_evidence =
-            self.callable_semantic_evidence(generated_origin, params, &user_pass_modes);
-        let pack = match self.build_capture_pack(
-            u16::MAX,
-            &plan,
-            generated_origin,
-            callable_semantic_evidence,
-        ) {
-            Ok(pack) => pack,
-            Err(_) => {
-                self.current_closure_callee_captures = saved_callee_captures;
-                return None;
-            }
-        };
-        let id = self.intern_closure_type_id_for_pack(&pack);
-        self.current_closure_callee_captures = saved_callee_captures;
-        Some(id)
     }
 
     /// Strict-typing-sweep (Cluster 2 extension): same body scan as the

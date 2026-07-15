@@ -17,6 +17,8 @@ use shape_value::{KindedSlot, NativeKind};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, Ordering};
 
+mod capture_payload_model;
+
 // ADR-009 E3 (S1, U10): the comptime mini-program formerly named its
 // generated builtin-forwarder parameters (`arg{N}`) and its handler
 // target/ctx module bindings (`__target_arg__` / `__ctx_arg__`) with
@@ -665,10 +667,7 @@ fn frozen_type_category_enum_item() -> Item {
 ///   arrive with A2/B2, so the bound set is provably empty — the honest
 ///   structural form of "complete for reachable forms" (spec §3.1/§3.7).
 fn frozen_type_payload_model_items() -> Vec<Item> {
-    use shape_ast::ast::{
-        CaptureMode as DeclaredCaptureMode, EnumDef, EnumMember, EnumMemberKind, StructField,
-        StructTypeDef,
-    };
+    use shape_ast::ast::{EnumDef, EnumMember, EnumMemberKind, StructField, StructTypeDef};
     use shape_runtime::comptime_reflection::{
         ASSOCIATED_CONST_DESCRIPTOR_SCHEMA_NAME, ENUM_DESCRIPTOR_SCHEMA_NAME,
         FIELD_DESCRIPTOR_SCHEMA_NAME, NEWTYPE_DESCRIPTOR_SCHEMA_NAME,
@@ -676,11 +675,11 @@ fn frozen_type_payload_model_items() -> Vec<Item> {
         VARIANT_DESCRIPTOR_SCHEMA_NAME,
     };
     use shape_runtime::comptime_reflection::{
-        CAPTURE_DESCRIPTOR_SCHEMA_NAME, CAPTURE_MODE_SCHEMA_NAME, FIELD_INITIALIZATION_SCHEMA_NAME,
-        FLOAT_WIDTH_SCHEMA_NAME, FROZEN_PRIMITIVE_VARIANTS, FROZEN_TYPE_ENABLED_PAYLOAD_CATEGORIES,
-        FROZEN_TYPE_PAYLOAD_ENUM_NAME, FieldInitialization, FloatWidth, INTEGER_WIDTH_SCHEMA_NAME,
-        IntegerWidth, NOMINAL_SHAPE_SCHEMA_NAME, NominalShape, PASSING_MODE_SCHEMA_NAME,
-        PassingMode, frozen_type_enabled_payload_type_name,
+        FIELD_INITIALIZATION_SCHEMA_NAME, FLOAT_WIDTH_SCHEMA_NAME, FROZEN_PRIMITIVE_VARIANTS,
+        FROZEN_TYPE_ENABLED_PAYLOAD_CATEGORIES, FROZEN_TYPE_PAYLOAD_ENUM_NAME,
+        FieldInitialization, FloatWidth, INTEGER_WIDTH_SCHEMA_NAME, IntegerWidth,
+        NOMINAL_SHAPE_SCHEMA_NAME, NominalShape, PASSING_MODE_SCHEMA_NAME, PassingMode,
+        frozen_type_enabled_payload_type_name,
     };
     // ADR-009 B7: the composite payloads' typed element-row model names.
     use shape_runtime::comptime_reflection::{
@@ -825,30 +824,8 @@ fn frozen_type_payload_model_items() -> Vec<Item> {
                 field("returns_identity_low", int_ty()),
             ],
         ),
-        // ADR-009 C1 / Decision 95: public typed capture identity. This is the
-        // exact C1 declaration axis, including the two borrow spellings that
-        // remain named lowering rejections until a region model exists.
-        enum_item(
-            CAPTURE_MODE_SCHEMA_NAME,
-            DeclaredCaptureMode::ALL
-                .into_iter()
-                .map(|mode| unit_member(mode.variant_name()))
-                .collect(),
-        ),
-        struct_item(
-            CAPTURE_DESCRIPTOR_SCHEMA_NAME,
-            vec![
-                field("signature_identity_high", int_ty()),
-                field("signature_identity_low", int_ty()),
-                field("index", int_ty()),
-                field("type_identity_high", int_ty()),
-                field("type_identity_low", int_ty()),
-                field(
-                    "mode",
-                    TypeAnnotation::Basic(CAPTURE_MODE_SCHEMA_NAME.to_string()),
-                ),
-            ],
-        ),
+        capture_payload_model::capture_mode_enum_item(),
+        capture_payload_model::capture_descriptor_struct_item(),
         // ADR-009 B5 (Dec 55-59): the nominal-shape descriptor payload model.
         // `NominalShape` is the sealed declaration-shape axis (each variant
         // carries its typed row descriptor); `FieldInitialization` the Dec 59

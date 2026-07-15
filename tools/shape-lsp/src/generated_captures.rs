@@ -19,7 +19,7 @@ mod routing;
 #[cfg(test)]
 mod semantic_tests;
 mod session;
-pub(crate) use hover::generated_capture_hover;
+pub(crate) use hover::{generated_capture_hover, generated_capture_hover_from_source};
 use presentation::push_anchor;
 pub(crate) use rename::generated_capture_rename;
 pub(crate) use routing::GeneratedCaptureLookup;

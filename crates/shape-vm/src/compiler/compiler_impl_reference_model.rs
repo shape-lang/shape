@@ -1,5 +1,7 @@
 use super::*;
 
+mod closure_layouts;
+
 impl BytecodeCompiler {
     fn native_auto_symbol_part(name: &str) -> String {
         let mut out = String::with_capacity(name.len());
@@ -2950,137 +2952,9 @@ impl BytecodeCompiler {
         }
         self.program.function_local_concrete_types = per_fn;
 
-        // Closure-spec Phase H1: build a `function_id → ClosureLayout` side
-        // table for the JIT worker. `emit_heap_closure` consumes this to lay
-        // out captures at their natural-width offsets without going through
-        // the `jit_make_closure` FFI. Closure spec §14.6 (H6.5) moves this
-        // ABOVE `build_content_addressed_program` so the layouts propagate
-        // through the `ContentAddressedProgram` → `LinkedProgram` →
-        // `BytecodeProgram` path into the VM's producer.
-        //
-        // ADR-009 C1: the ONE capture selector
-        // (`comptime_builtins::capture_plan`) produced a `CapturePack` per
-        // closure literal; this is its sole consumer. For each closure we
-        // rebuild the layout so the `capture_kinds` vector reflects the pack
-        // AND the `owned_mutable_capture_mask` / `shared_capture_mask` bits
-        // are flipped for the corresponding capture indices.
-        // `op_make_closure` reads those masks to pick the per-capture
-        // allocation discipline:
-        //   * a snapshot (`Immutable`) capture — write the capture bits as-is
-        //     at the typed offset.
-        //   * an owned-mutable capture — `Box::into_raw` a fresh
-        //     `Box<ValueWord>` around the stack value, write the pointer.
-        //   * a shared capture — the stack value carries the raw
-        //     `*const SharedCell` pointer bits of a previously-promoted outer
-        //     slot. `op_make_closure` does `Arc::increment_strong_count` to
-        //     give the closure its own refcount share, then writes the same
-        //     pointer.
-        //
-        // This was gated to "masks stay zero" during A.1C partial so the
-        // legacy `HeapValue::Closure + SharedCell` fallback could keep
-        // running while the compiler migration was incomplete. With
-        // A.1C.2 rerouting the outer-scope var lifecycle onto
-        // `AllocSharedLocal` / `LoadSharedLocal` / `StoreSharedLocal` /
-        // `DropSharedLocal` and the closure-body reads/writes onto
-        // `Load/StoreSharedCapture` and `Load/StoreOwnedMutableCapture`,
-        // the Raw-path guard can flip bits freely — there is no longer
-        // any SharedCell-wrapped ValueWord sitting on the stack at
-        // closure-creation time.
-        {
-            use crate::compiler::comptime_builtins::capture_plan::CapturePack;
-            use shape_value::v2::closure_layout::ClosureLayout;
-            let total_fns = self.program.functions.len();
-            let mut layouts: Vec<Option<std::sync::Arc<ClosureLayout>>> = vec![None; total_fns];
-            let internal_error = |message: String| shape_ast::error::ShapeError::SemanticError {
-                message: format!("internal compiler error (ADR-009 C1): {message}"),
-                location: None,
-            };
-
-            // Function index → the closure's ONE capture pack (R3: keyed by
-            // `func_idx`, never a `Span`). A HashMap collect used to silently
-            // overwrite duplicate plans; duplication is now a hard error.
-            let mut packs_by_fn: std::collections::HashMap<u16, &CapturePack> =
-                std::collections::HashMap::new();
-            for pack in &self.closure_capture_packs {
-                if packs_by_fn.insert(pack.closure, pack).is_some() {
-                    return Err(internal_error(format!(
-                        "closure {} has more than one capture pack",
-                        pack.closure
-                    )));
-                }
-            }
-            let mut consumed_packs = std::collections::HashSet::new();
-            let mut seen_closure_functions = std::collections::HashSet::new();
-            for (fn_idx, type_id) in self.closure_type_ids.iter().copied() {
-                if !seen_closure_functions.insert(fn_idx) {
-                    return Err(internal_error(format!(
-                        "closure {fn_idx} has more than one ClosureTypeId entry"
-                    )));
-                }
-                let function =
-                    self.program
-                        .functions
-                        .get(usize::from(fn_idx))
-                        .ok_or_else(|| {
-                            internal_error(format!("capture plan names missing function {fn_idx}"))
-                        })?;
-                let pack = packs_by_fn.get(&fn_idx).copied().ok_or_else(|| {
-                    internal_error(format!("closure {fn_idx} has no capture pack"))
-                })?;
-                consumed_packs.insert(fn_idx);
-                let registry_layout = self.closure_registry.get(type_id).ok_or_else(|| {
-                    internal_error(format!(
-                        "closure {fn_idx} names unregistered ClosureTypeId {type_id:?}"
-                    ))
-                })?;
-
-                // The pack drives the emitted layout. The registry is checked
-                // independently as an interned identity witness; it is not a
-                // fallback source of capture types or kinds.
-                let capture_types = pack
-                    .descriptors
-                    .iter()
-                    .map(|descriptor| descriptor.capture_type.clone())
-                    .collect::<Vec<_>>();
-                let kinds = pack.kinds();
-                if registry_layout.capture_types != capture_types
-                    || registry_layout.capture_kinds != kinds
-                {
-                    return Err(internal_error(format!(
-                        "closure {fn_idx}: interned registry layout disagrees with capture pack"
-                    )));
-                }
-                let rebuilt = ClosureLayout::from_capture_types(&capture_types, &kinds);
-
-                let end = function
-                    .entry_point
-                    .checked_add(function.body_length)
-                    .filter(|end| *end <= self.program.instructions.len())
-                    .ok_or_else(|| {
-                        internal_error(format!(
-                            "closure {fn_idx}: function instruction window is out of bounds"
-                        ))
-                    })?;
-                pack.validate_emitted_artifact(
-                    registry_layout,
-                    function,
-                    &self.program.instructions[function.entry_point..end],
-                )
-                .map_err(&internal_error)?;
-                layouts[usize::from(fn_idx)] = Some(std::sync::Arc::new(rebuilt));
-            }
-            if let Some(unconsumed) = self
-                .closure_capture_packs
-                .iter()
-                .find(|pack| !consumed_packs.contains(&pack.closure))
-            {
-                return Err(internal_error(format!(
-                    "closure {} has a capture pack but no ClosureTypeId",
-                    unconsumed.closure
-                )));
-            }
-            self.program.closure_function_layouts = layouts;
-        }
+        // Must precede content-addressed assembly so the layouts propagate to
+        // both VM and JIT program views.
+        self.finalize_closure_function_layouts()?;
 
         // Finalize the __main__ blob and build the content-addressed program.
         self.build_content_addressed_program();
