@@ -1,3 +1,4 @@
+use super::handler_resolution::ComptimeAnnotationHandlerProvenance;
 use super::*;
 
 use crate::bytecode::CompiledAnnotation;
@@ -299,56 +300,5 @@ mod nested {
     assert!(
         compiler.module_scope_stack.is_empty(),
         "lexical module scope must be restored on the error path"
-    );
-}
-
-#[test]
-fn imported_handler_helpers_are_bound_only_in_the_defining_module() {
-    fn helper(source: &str, exact_name: &str) -> FunctionDef {
-        let mut function = parse(source)
-            .items
-            .into_iter()
-            .find_map(|item| match item {
-                Item::Function(function, _) => Some(function),
-                _ => None,
-            })
-            .expect("fixture defines one helper");
-        function.name = exact_name.to_string();
-        function
-    }
-
-    let handler = error_handler("unused", "function")
-        .handlers
-        .into_iter()
-        .find(|handler| handler.handler_type == AnnotationHandlerType::ComptimePost)
-        .expect("fixture has a post handler");
-    let mut handler = handler;
-    handler.body = annotation_def(
-        r#"
-annotation helper_user() {
-  comptime post(target, ctx) { choose() }
-}
-"#,
-    )
-    .handlers
-    .remove(0)
-    .body;
-    let left = helper("comptime fn choose() -> int { 11 }", "left::choose");
-    let right = helper("comptime fn choose() -> int { 22 }", "right::choose");
-    let mut compiler = BytecodeCompiler::new();
-    compiler
-        .function_defs
-        .insert(left.name.clone(), left.clone());
-    compiler.function_defs.insert(right.name.clone(), right);
-
-    let helpers = compiler.collect_scoped_helpers_for_expr(&handler.body, Some("left"));
-    assert_eq!(helpers.len(), 1);
-    assert_eq!(helpers[0].name, "choose");
-    assert_eq!(helpers[0].body, left.body);
-    assert!(
-        compiler
-            .collect_scoped_helpers_for_expr(&handler.body, Some("missing"))
-            .is_empty(),
-        "a missing defining-module helper must not capture another module's spelling"
     );
 }

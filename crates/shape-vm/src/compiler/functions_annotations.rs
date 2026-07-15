@@ -23,12 +23,18 @@ use super::{BytecodeCompiler, HygienicRole, ParamPassMode};
 
 mod generated_closure_provenance;
 use generated_closure_provenance::anchor_generated_function_decl;
+mod handler_resolution;
+use handler_resolution::{ComptimeAnnotationHandlers, ComptimeHandlerHelperAuthority};
 mod original_body_shadow;
 use original_body_shadow::{PendingOriginalBodyShadow, canonical_original_callable};
 
 #[cfg(test)]
 #[path = "functions_annotations/imported_handler_resolution_tests.rs"]
 mod imported_handler_resolution_tests;
+
+#[cfg(test)]
+#[path = "functions_annotations/handler_helper_authority_tests.rs"]
+mod handler_helper_authority_tests;
 
 /// ADR-009 E3 (slice S3, legacy class U11): the TYPED capability a `replace
 /// body` replacement reaches through `ctx.original`. It replaces the deleted
@@ -59,29 +65,6 @@ impl OriginalCapability {
     fn callable(&self) -> FrozenTypeIdentity {
         self.callable
     }
-}
-
-/// Comptime handlers for one annotation, gathered by the §4.5.1 pre-pass
-/// (`materialize_computed_comptime_extends`) from the root program and the
-/// exact compiled-annotation registry.
-#[derive(Clone, Debug)]
-struct ComptimeAnnotationHandlers {
-    handlers: Vec<shape_ast::ast::AnnotationHandler>,
-    def_param_names: Vec<String>,
-    /// Canonical module that owns the handler body. Imported handlers execute
-    /// with this lexical scope so a bare helper name cannot bind to a
-    /// same-spelled helper from another module.
-    defining_module_path: Option<String>,
-    provenance: ComptimeAnnotationHandlerProvenance,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum ComptimeAnnotationHandlerProvenance {
-    /// Current-unit declaration observed before pass 2 has compiled its
-    /// `CompiledAnnotation` carrier.
-    LocalAst,
-    /// Exact carrier from `BytecodeProgram::compiled_annotations`.
-    Compiled,
 }
 
 /// Canonical label for the comptime handler kind inside a generator
@@ -255,19 +238,21 @@ impl BytecodeCompiler {
                     } else {
                         Self::qualify_module_symbol(ctx_module_path, &module.name)
                     };
-                    compiler.module_scope_stack.push(module_path.clone());
-                    let result = Self::apply_function_comptime_signature_directives_to_items(
-                        compiler,
-                        handler_map,
-                        extensions,
-                        trait_impls,
-                        known_type_symbols,
-                        &module_path,
-                        ctx_file,
-                        &mut module.items,
-                    );
-                    compiler.module_scope_stack.pop();
-                    result?;
+                    compiler.with_comptime_annotation_module_scope(
+                        module_path.clone(),
+                        |compiler| {
+                            Self::apply_function_comptime_signature_directives_to_items(
+                                compiler,
+                                handler_map,
+                                extensions,
+                                trait_impls,
+                                known_type_symbols,
+                                &module_path,
+                                ctx_file,
+                                &mut module.items,
+                            )
+                        },
+                    )?;
                 }
                 _ => {}
             }
@@ -309,16 +294,10 @@ impl BytecodeCompiler {
                         .defining_module_path
                         .as_deref()
                         .unwrap_or(ctx_module_path);
-                    // Exact defining-module helpers precede the global helper
-                    // catalog so a same-spelled root/foreign helper cannot win
-                    // the mini-VM's name deduplication.
-                    let mut helpers = self.collect_scoped_helpers_for_expr(
+                    let helpers = self.collect_authorized_comptime_helpers(
                         &handler.body,
-                        entry.defining_module_path.as_deref(),
+                        entry.helper_authority(),
                     );
-                    helpers.extend(self.collect_comptime_helpers());
-                    helpers.sort_by(|a, b| a.name.cmp(&b.name));
-                    helpers.dedup_by(|a, b| a.name == b.name);
 
                     // S3 pre-pass freeze rule (see `s3_freeze_gate_tests`
                     // module doc): this signature-directive pre-pass runs
@@ -1111,14 +1090,10 @@ impl BytecodeCompiler {
         let defining_module_path = resolved_annotation_name
             .as_deref()
             .and_then(|name| name.rsplit_once("::").map(|(module_path, _)| module_path));
-        // The selected annotation's defining module owns bare helper lookup.
-        // Put those exact helpers before the global catalog so later stable
-        // sorting/deduplication preserves the selected module's binding.
-        let mut comptime_helpers =
-            self.collect_scoped_helpers_for_expr(&handler.body, defining_module_path);
-        comptime_helpers.extend(self.collect_comptime_helpers());
-        comptime_helpers.sort_by(|a, b| a.name.cmp(&b.name));
-        comptime_helpers.dedup_by(|a, b| a.name == b.name);
+        let helper_authority =
+            ComptimeHandlerHelperAuthority::for_compiled_name(resolved_annotation_name.as_deref());
+        let comptime_helpers =
+            self.collect_authorized_comptime_helpers(&handler.body, helper_authority);
 
         // §4.4: the comptime `ctx` compile-context (module_path + source file).
         let ctx_module_path = defining_module_path
@@ -1162,50 +1137,6 @@ impl BytecodeCompiler {
         // §4.4: re-emit any `warning()` output anchored at this handler site.
         self.surface_comptime_warnings(&execution.warnings, handler_span);
         Ok(execution)
-    }
-
-    fn collect_scoped_helpers_for_expr(
-        &self,
-        expr: &Expr,
-        defining_module_path: Option<&str>,
-    ) -> Vec<FunctionDef> {
-        let mut pending_names = Vec::new();
-        let mut seed_names = HashSet::new();
-        Self::collect_scoped_names_in_expr(expr, &mut seed_names);
-        pending_names.extend(seed_names.into_iter());
-
-        let mut visited = HashSet::new();
-        let mut helpers = Vec::new();
-
-        while let Some(name) = pending_names.pop() {
-            if !visited.insert(name.clone()) {
-                continue;
-            }
-            let def = if name.contains("::") {
-                self.function_defs.get(&name).cloned()
-            } else if let Some(module) = defining_module_path {
-                let scoped = Self::qualify_module_symbol(module, &name);
-                self.function_defs.get(&scoped).cloned()
-            } else {
-                self.function_defs.get(&name).cloned()
-            };
-            let Some(def) = def else { continue };
-            let mut exposed = def.clone();
-            if !name.contains("::") && exposed.name != name {
-                // The mini-VM receives a flat helper list. Preserve the source
-                // handler's bare call while retaining the selected definition's
-                // body and declaring-module provenance.
-                exposed.name = name.clone();
-            }
-            helpers.push(exposed);
-            for stmt in &def.body {
-                let mut nested = HashSet::new();
-                Self::collect_scoped_names_in_statement(stmt, &mut nested);
-                pending_names.extend(nested.into_iter().filter(|n| !visited.contains(n)));
-            }
-        }
-
-        helpers
     }
 
     fn collect_scoped_names_in_statement(stmt: &Statement, names: &mut HashSet<String>) {
@@ -2183,13 +2114,10 @@ impl BytecodeCompiler {
                             .defining_module_path
                             .as_deref()
                             .unwrap_or(&ctx_module_path);
-                        let mut helpers = self.collect_scoped_helpers_for_expr(
+                        let helpers = self.collect_authorized_comptime_helpers(
                             &handler.body,
-                            entry.defining_module_path.as_deref(),
+                            entry.helper_authority(),
                         );
-                        helpers.extend(self.collect_comptime_helpers());
-                        helpers.sort_by(|a, b| a.name.cmp(&b.name));
-                        helpers.dedup_by(|a, b| a.name == b.name);
 
                         // §4.5.1: this pre-pass run is speculative (it only
                         // materializes generated function signatures); pass-2
@@ -2577,191 +2505,6 @@ impl BytecodeCompiler {
         // their signatures are already registered above, and their bodies are
         // compiled by pass-2 through the normal function driver.
         Ok(generated)
-    }
-
-    /// Collect comptime annotation handlers reachable at pre-pass time under
-    /// their exact semantic names.
-    ///
-    /// Current-unit definitions come from `program` because pass 2 has not yet
-    /// compiled them. Imported definitions come only from the compiler's
-    /// `compiled_annotations` registry: walking every dependency AST by bare
-    /// spelling let an unrelated module capture a same-named application.
-    fn collect_comptime_annotation_handlers(
-        &self,
-        program: &shape_ast::ast::Program,
-    ) -> Result<HashMap<String, ComptimeAnnotationHandlers>> {
-        use shape_ast::ast::{AnnotationHandlerType, ExportItem, Item};
-
-        let mut map: HashMap<String, ComptimeAnnotationHandlers> = HashMap::new();
-
-        fn defining_module_path(exact_name: &str) -> Option<String> {
-            exact_name
-                .rsplit_once("::")
-                .map(|(module_path, _)| module_path.to_string())
-        }
-
-        fn local_exact_name(name: &str, module_path: Option<&str>) -> String {
-            if name.contains("::") {
-                name.to_string()
-            } else if let Some(module_path) = module_path {
-                BytecodeCompiler::qualify_module_symbol(module_path, name)
-            } else {
-                name.to_string()
-            }
-        }
-
-        fn ingest_local(
-            map: &mut HashMap<String, ComptimeAnnotationHandlers>,
-            ann_def: &shape_ast::ast::AnnotationDef,
-            module_path: Option<&str>,
-        ) {
-            let handlers: Vec<shape_ast::ast::AnnotationHandler> = ann_def
-                .handlers
-                .iter()
-                .filter(|h| {
-                    matches!(
-                        h.handler_type,
-                        AnnotationHandlerType::ComptimePre | AnnotationHandlerType::ComptimePost
-                    )
-                })
-                .cloned()
-                .collect();
-            if handlers.is_empty() {
-                return;
-            }
-            let exact_name = local_exact_name(&ann_def.name, module_path);
-            let def_param_names: Vec<String> = ann_def
-                .params
-                .iter()
-                .flat_map(|p| p.get_identifiers())
-                .collect();
-            // Vacant-only: current-unit declarations are authoritative over a
-            // preloaded carrier with the same exact identity.
-            map.entry(exact_name.clone())
-                .or_insert(ComptimeAnnotationHandlers {
-                    handlers,
-                    def_param_names,
-                    defining_module_path: defining_module_path(&exact_name),
-                    provenance: ComptimeAnnotationHandlerProvenance::LocalAst,
-                });
-        }
-
-        fn ingest_local_items(
-            map: &mut HashMap<String, ComptimeAnnotationHandlers>,
-            items: &[Item],
-            parent_module_path: Option<&str>,
-        ) {
-            for item in items {
-                match item {
-                    Item::AnnotationDef(ann_def, _) => {
-                        ingest_local(map, ann_def, parent_module_path)
-                    }
-                    Item::Export(export, _) => {
-                        if let ExportItem::Annotation(ann_def) = &export.item {
-                            ingest_local(map, ann_def, parent_module_path);
-                        }
-                    }
-                    Item::Module(module, _) => {
-                        let module_path = match parent_module_path {
-                            Some(parent) => {
-                                BytecodeCompiler::qualify_module_symbol(parent, &module.name)
-                            }
-                            None => module.name.clone(),
-                        };
-                        ingest_local_items(map, &module.items, Some(&module_path));
-                    }
-                    _ => {}
-                }
-            }
-        }
-
-        ingest_local_items(
-            &mut map,
-            &program.items,
-            self.module_scope_stack.last().map(String::as_str),
-        );
-
-        // HashMap iteration is intentionally normalized so a corrupted carrier
-        // set produces one deterministic first diagnostic.
-        let mut compiled_names: Vec<&String> = self.program.compiled_annotations.keys().collect();
-        compiled_names.sort();
-        for key in compiled_names {
-            let compiled = &self.program.compiled_annotations[key];
-            if key != &compiled.name {
-                return Err(ShapeError::RuntimeError {
-                    message: format!(
-                        "Internal error: compiled annotation registry key '{}' does not match carrier name '{}'",
-                        key, compiled.name
-                    ),
-                    location: None,
-                });
-            }
-
-            let handlers: Vec<_> = [
-                compiled.comptime_pre_handler.clone(),
-                compiled.comptime_post_handler.clone(),
-            ]
-            .into_iter()
-            .flatten()
-            .collect();
-            if handlers.is_empty() {
-                continue;
-            }
-            map.entry(key.clone())
-                .or_insert(ComptimeAnnotationHandlers {
-                    handlers,
-                    def_param_names: compiled.param_names.clone(),
-                    defining_module_path: defining_module_path(key),
-                    provenance: ComptimeAnnotationHandlerProvenance::Compiled,
-                });
-        }
-
-        Ok(map)
-    }
-
-    /// Resolve one applied annotation to the exact handler row selected by the
-    /// ordinary compiled-annotation authority. No suffix/bare-name search is
-    /// permitted for imported carriers.
-    fn resolve_comptime_annotation_handlers<'a>(
-        &self,
-        handler_map: &'a HashMap<String, ComptimeAnnotationHandlers>,
-        annotation: &shape_ast::ast::Annotation,
-        lexical_module_path: Option<&str>,
-    ) -> Option<(&'a str, &'a ComptimeAnnotationHandlers)> {
-        let exact = |name: &str| {
-            handler_map
-                .get_key_value(name)
-                .map(|(key, row)| (key.as_str(), row))
-        };
-        let local = |name: &str| {
-            exact(name)
-                .filter(|(_, row)| row.provenance == ComptimeAnnotationHandlerProvenance::LocalAst)
-        };
-
-        // Qualified source spelling is first interpreted by ordinary semantic
-        // resolution (including namespace aliases). Before pass 2, an exact
-        // current-unit declaration may not have a compiled carrier yet; only
-        // that exact LocalAst row is admissible as the fallback.
-        if annotation.name.contains("::") {
-            return self
-                .resolve_compiled_annotation_name(annotation)
-                .and_then(|name| exact(&name))
-                .or_else(|| local(&annotation.name));
-        }
-
-        // An uncompiled declaration in the current lexical scope shadows an
-        // imported/prelude annotation exactly as it will after pass 2. This is
-        // an exact path derivation, never a suffix or all-modules search.
-        let local_name = match lexical_module_path {
-            Some(module_path) => Self::qualify_module_symbol(module_path, &annotation.name),
-            None => annotation.name.clone(),
-        };
-        if let Some(found) = local(&local_name) {
-            return Some(found);
-        }
-
-        self.resolve_compiled_annotation_name(annotation)
-            .and_then(|name| exact(&name))
     }
 
     pub(super) fn apply_comptime_extend_items(
