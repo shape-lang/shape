@@ -174,7 +174,7 @@ impl JITCompiler {
                 // captured slots are physically cell pointers regardless of
                 // their payload kind. Reject forged carrier-less kinds before
                 // block maps, variables, or default-value instructions exist.
-                mir_compiler.validate_shared_local_slots()?;
+                mir_compiler.validate_shared_cell_kinds()?;
                 mir_compiler.create_blocks();
                 mir_compiler.declare_locals();
                 mir_compiler.initialize_locals();
@@ -334,7 +334,7 @@ impl JITCompiler {
                     .populate_field_byte_offsets_from_schemas(&program.type_schema_registry);
                 // Keep the user-function-aware top-level route on the same
                 // pre-emission Shared-kind gate as the direct strategy route.
-                mir_compiler.validate_shared_local_slots()?;
+                mir_compiler.validate_shared_cell_kinds()?;
                 mir_compiler.create_blocks();
                 mir_compiler.declare_locals();
                 mir_compiler.initialize_locals();

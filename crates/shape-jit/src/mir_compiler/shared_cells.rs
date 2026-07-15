@@ -50,6 +50,15 @@ pub(crate) enum SharedCellCarrierOrigin {
     InheritedCapture,
 }
 
+impl SharedCellCarrierOrigin {
+    fn diagnostic_name(self) -> &'static str {
+        match self {
+            Self::DeclaringFrameLocal => "declaring-frame Shared local",
+            Self::InheritedCapture => "inherited Shared capture parameter",
+        }
+    }
+}
+
 pub(crate) fn classify_shared_capture_operand(
     operand: &Operand,
     shared_local_slots: &HashMap<SlotId, SharedLocalKindEvidence>,
@@ -122,13 +131,19 @@ impl SharedLocalKindEvidence {
 
 /// Prove that the compact JIT ABI can recover this exact SharedCell kind.
 ///
-/// This check runs for every Shared local before the first allocation is
+/// This check runs for every declaring-frame Shared local and inherited Shared
+/// capture parameter before the first body instruction or allocation is
 /// emitted. An encoding/catalog defect therefore produces a whole-function JIT
 /// refusal instead of calling the defensive FFI branch that returns null.
-fn validated_shared_cell_kind_code(slot: SlotId, kind: NativeKind) -> Result<u8, String> {
+fn validated_shared_cell_kind_code(
+    slot: SlotId,
+    kind: NativeKind,
+    origin: SharedCellCarrierOrigin,
+) -> Result<u8, String> {
+    let origin = origin.diagnostic_name();
     if matches!(kind, NativeKind::Ptr(heap_kind) if !heap_kind.has_kinded_slot_carrier()) {
         return Err(format!(
-            "INTERNAL SharedCell kind invariant: local slot {slot} resolved to \
+            "INTERNAL SharedCell kind invariant: {origin} slot {slot} resolved to \
              unsupported {kind:?}. The exhaustive ConcreteType capture-kind issuer cannot \
              produce a carrier-less kind; forged or external layout metadata must be \
              rejected before JIT emission or allocation."
@@ -138,13 +153,13 @@ fn validated_shared_cell_kind_code(slot: SlotId, kind: NativeKind) -> Result<u8,
     match crate::ffi::stack_kind_code::decode(code) {
         Some(decoded) if decoded == kind => Ok(code),
         Some(decoded) => Err(format!(
-            "SURFACE (ADR-006 §2.7.7 / Q9 + §2.7.8 / Q10): SharedCell for local \
+            "SURFACE (ADR-006 §2.7.7 / Q9 + §2.7.8 / Q10): SharedCell for {origin} \
              slot {slot} encodes payload kind {kind:?} as byte {code}, but the canonical \
              JIT kind catalog decodes it as {decoded:?}. Whole-function JIT bail before \
              cell allocation or code emission."
         )),
         None => Err(format!(
-            "SURFACE (ADR-006 §2.7.7 / Q9 + §2.7.8 / Q10): SharedCell for local \
+            "SURFACE (ADR-006 §2.7.7 / Q9 + §2.7.8 / Q10): SharedCell for {origin} \
              slot {slot} encodes payload kind {kind:?} as byte {code}, but that byte is \
              absent from the canonical JIT kind catalog. Whole-function JIT bail before \
              cell allocation or code emission."
@@ -229,10 +244,21 @@ pub(crate) fn discover_shared_local_slots(
 impl<'a, 'b> MirToIR<'a, 'b> {
     /// Reject forged Shared payload metadata before any Cranelift instruction
     /// or allocation is emitted. Semantic capture issuers cannot hit this.
-    pub(crate) fn validate_shared_local_slots(&self) -> Result<(), String> {
+    pub(crate) fn validate_shared_cell_kinds(&self) -> Result<(), String> {
         for (slot, evidence) in &self.shared_local_slots {
             let kind = evidence.validated(*slot)?;
-            validated_shared_cell_kind_code(*slot, kind)?;
+            validated_shared_cell_kind_code(
+                *slot,
+                kind,
+                SharedCellCarrierOrigin::DeclaringFrameLocal,
+            )?;
+        }
+        for (slot, kind) in &self.shared_capture_slots {
+            validated_shared_cell_kind_code(
+                *slot,
+                *kind,
+                SharedCellCarrierOrigin::InheritedCapture,
+            )?;
         }
         Ok(())
     }
@@ -325,7 +351,11 @@ impl<'a, 'b> MirToIR<'a, 'b> {
             .iter()
             .map(|(slot, evidence)| {
                 let kind = evidence.validated(*slot)?;
-                let kind_code = validated_shared_cell_kind_code(*slot, kind)?;
+                let kind_code = validated_shared_cell_kind_code(
+                    *slot,
+                    kind,
+                    SharedCellCarrierOrigin::DeclaringFrameLocal,
+                )?;
                 Ok((*slot, kind, kind_code))
             })
             .collect::<Result<Vec<_>, _>>()?;
@@ -363,105 +393,4 @@ impl<'a, 'b> MirToIR<'a, 'b> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn kind_source_disagreement_is_a_codegen_error() {
-        let evidence = SharedLocalKindEvidence {
-            layout: Some(NativeKind::Bool),
-            inferred: Some(NativeKind::Float64),
-            layout_conflict: None,
-        };
-
-        let error = evidence
-            .validated(SlotId(7))
-            .expect_err("disagreeing producer evidence must never select a kind");
-        assert!(error.contains("kind-source disagreement"));
-        assert!(error.contains("before cell allocation"));
-    }
-
-    #[test]
-    fn agreeing_sources_resolve_to_the_layout_kind() {
-        let evidence = SharedLocalKindEvidence {
-            layout: Some(NativeKind::Bool),
-            inferred: Some(NativeKind::Bool),
-            layout_conflict: None,
-        };
-
-        assert_eq!(evidence.validated(SlotId(7)), Ok(NativeKind::Bool));
-    }
-
-    #[test]
-    fn every_supported_ptr_kind_passes_shared_cell_abi_preflight() {
-        for heap_kind in shape_value::HeapKind::ALL {
-            let kind = NativeKind::Ptr(heap_kind);
-            if heap_kind.has_kinded_slot_carrier() {
-                let code = validated_shared_cell_kind_code(SlotId(7), kind)
-                    .expect("every supported HeapKind carrier must preflight");
-                assert_eq!(crate::ffi::stack_kind_code::decode(code), Some(kind));
-            } else {
-                let error = validated_shared_cell_kind_code(SlotId(7), kind)
-                    .expect_err("carrier-less kinds must fail before JIT emission");
-                assert!(error.contains("INTERNAL SharedCell kind invariant"));
-                assert!(error.contains("Ptr(NativeScalar)"));
-            }
-        }
-    }
-
-    /// Lower-level D1 proof for the inherited-carrier branch.
-    ///
-    /// ADR-009 C1 slice 4 now supplies the public source proof through the
-    /// generated and ordinary nested-share VM/JIT zero-fallback fixtures; they
-    /// mutate in the inner closure and observe through the outer holder. This
-    /// unit keeps the lower-level JIT carrier decision pinned: payload `42` is
-    /// not a valid Arc carrier and must never reach retain. Refcounted Shared
-    /// payloads and module-binding capture lowering remain separate W39 limits.
-    #[test]
-    fn inherited_shared_capture_retains_raw_cell_carrier_not_projected_payload() {
-        use crate::ffi::object::{
-            jit_alloc_shared_cell, jit_arc_shared_release, jit_arc_shared_retain,
-        };
-
-        let slot = SlotId(9);
-        let operand = Operand::Copy(Place::Local(slot));
-        let shared_local_slots = HashMap::new();
-        let shared_capture_slots = HashMap::from([(slot, NativeKind::Int64)]);
-
-        let lowering =
-            classify_shared_capture_operand(&operand, &shared_local_slots, &shared_capture_slots);
-        assert_eq!(
-            lowering,
-            SharedCaptureOperandLowering::RawCarrier {
-                slot,
-                origin: SharedCellCarrierOrigin::InheritedCapture,
-            },
-            "an inherited Shared parameter must bypass the lock-gated payload read"
-        );
-
-        let payload_bits = 42_u64;
-        let cell_bits = unsafe {
-            jit_alloc_shared_cell(
-                payload_bits,
-                crate::ffi::stack_kind_code::encode(NativeKind::Int64),
-            )
-        };
-        assert_ne!(cell_bits, 0);
-        assert_ne!(cell_bits, payload_bits);
-
-        let selected_bits = match lowering {
-            SharedCaptureOperandLowering::RawCarrier { .. } => cell_bits,
-            SharedCaptureOperandLowering::ProjectedPayload => payload_bits,
-        };
-        let retained_bits = unsafe { jit_arc_shared_retain(selected_bits) };
-        assert_eq!(
-            retained_bits, cell_bits,
-            "the nested closure must retain the cell identity, not payload bits"
-        );
-
-        unsafe {
-            jit_arc_shared_release(retained_bits);
-            jit_arc_shared_release(cell_bits);
-        }
-    }
-}
+mod tests;

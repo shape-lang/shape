@@ -1937,7 +1937,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
     /// by compile_terminator for TerminatorKind::Return blocks.
     /// Used when the caller hasn't set up blocks/locals externally.
     pub fn compile(&mut self) -> Result<(), String> {
-        self.validate_shared_local_slots()?;
+        self.validate_shared_cell_kinds()?;
         self.create_blocks();
         self.declare_locals();
         // Session 1 Commit 3: eagerly materialise Arc<SharedCell>s for
