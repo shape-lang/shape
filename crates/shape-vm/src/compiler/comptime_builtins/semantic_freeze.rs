@@ -116,9 +116,7 @@ use crate::compiler::BytecodeCompiler;
 use shape_ast::ast::{TypeAnnotation, TypeParam};
 use shape_ast::error::{Result, ShapeError};
 use shape_runtime::comptime_reflection::ParamKind;
-use shape_runtime::type_system::{
-    TypeVar, annotation_as_tyvar, annotation_contains_reserved_type_var_carrier,
-};
+use shape_runtime::type_system::{TypeVar, annotation_contains_reserved_type_var_carrier};
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
@@ -301,6 +299,7 @@ impl FrozenImplEvidenceSet {
 
     /// Evidence for named impls (`impl Trait for Type as Name`), sorted by
     /// impl name for deterministic enumeration.
+    #[cfg(test)]
     pub(crate) fn named_impls(&self) -> &[FrozenImplEvidence] {
         &self.named_impls
     }
@@ -935,6 +934,7 @@ impl FreezeOverlay {
     /// Overlay `type_params` scoped to `parameter_owner` (the enclosing
     /// function name; module scope uses `"<module>"`, matching the S1
     /// builder's default owner).
+    #[cfg(test)]
     pub(crate) fn new(
         base: Arc<SemanticFreeze>,
         parameter_owner: &str,
@@ -1426,7 +1426,7 @@ pub(crate) mod barrier_env_truth_for_tests {
 mod tests {
     use super::*;
     use shape_runtime::type_schema::EnumVariantInfo;
-    use shape_runtime::type_system::{TypeVarGen, tyvar_to_annotation};
+    use shape_runtime::type_system::{TypeVarGen, annotation_as_tyvar, tyvar_to_annotation};
 
     fn compiler_with_module_scope_types() -> BytecodeCompiler {
         let mut compiler = BytecodeCompiler::new();

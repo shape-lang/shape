@@ -78,7 +78,6 @@ impl Ord for CallableSemanticType {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(crate) enum CallableSemanticIssueKind {
     OrdinarySource,
-    PeekOnly,
     MissingInferenceFact,
     InferenceUnavailable,
     InferenceConflict,

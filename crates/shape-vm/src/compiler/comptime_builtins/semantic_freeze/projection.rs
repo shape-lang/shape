@@ -93,6 +93,7 @@ impl FreezeOverlay {
     /// rejects every variable. Declared parameters are admitted only through
     /// the provenance-bearing projection seam; constrained variables remain
     /// partial inference state. Neither is fabricated as `unknown`.
+    #[cfg(test)]
     pub(crate) fn inference_type_annotation(
         &self,
         ty: &Type,

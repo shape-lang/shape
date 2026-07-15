@@ -141,6 +141,7 @@ impl SpecializationTypeOverlay {
         }
     }
 
+    #[cfg(test)]
     pub(super) fn parameter_owner(&self) -> &str {
         &self
             .parameter_scopes
@@ -149,6 +150,7 @@ impl SpecializationTypeOverlay {
             .owner
     }
 
+    #[cfg(test)]
     pub(super) fn declared_names(&self) -> &[String] {
         &self
             .parameter_scopes

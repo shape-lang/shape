@@ -152,7 +152,7 @@ fn inherited_parameter_without_lineage_is_never_reminted_from_immediate_slot() {
             &[plan],
             Some(&origin),
             CallableSemanticEvidence::unavailable(
-                CallableSemanticIssueKind::PeekOnly,
+                CallableSemanticIssueKind::MissingInferenceFact,
                 "planner lineage test has no callable inference subject",
             ),
         )

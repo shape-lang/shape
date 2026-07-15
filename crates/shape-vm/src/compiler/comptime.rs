@@ -1276,6 +1276,7 @@ fn rewrite_comptime_type_symbol_args_scoped(
     Ok(())
 }
 
+#[cfg(test)]
 fn rewrite_comptime_type_symbol_args_expr(
     expr: &mut Expr,
     freeze: &super::comptime_builtins::FreezeOverlay,
