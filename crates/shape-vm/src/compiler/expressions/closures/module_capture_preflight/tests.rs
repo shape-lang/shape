@@ -1,6 +1,6 @@
 use std::collections::{BTreeSet, HashSet};
 
-use shape_ast::ast::{CaptureMode, Expr, Item, Span};
+use shape_ast::ast::{CaptureMode, Expr, Item, Span, Statement};
 use shape_ast::error::ShapeError;
 
 use super::*;
@@ -190,7 +190,8 @@ fn closure_parts(
     Span,
 ) {
     let program = shape_ast::parse_program(source).expect("closure fixture parses");
-    let Item::VariableDecl(decl, _) = program.items.into_iter().next().expect("one declaration")
+    let Item::Statement(Statement::VariableDecl(decl, _), _) =
+        program.items.into_iter().next().expect("one declaration")
     else {
         panic!("fixture must be a variable declaration");
     };
