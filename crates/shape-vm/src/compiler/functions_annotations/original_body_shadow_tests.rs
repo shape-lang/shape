@@ -101,9 +101,78 @@ fn probe(value: int) -> int { value + 1 }
 }
 
 #[test]
+fn replacement_mir_uses_only_its_own_distinct_closure_identity() {
+    let source = r#"
+annotation replace_with_closure() {
+  targets: [function]
+  comptime post(target, ctx) {
+    replace body {
+      let replacement = |left: int, right: int; | left + right
+      return replacement(value, 100)
+    }
+  }
+}
+
+@replace_with_closure()
+fn probe(value: int) -> int {
+  let original = |item: int| item + 1
+  original(value)
+}
+"#;
+    let (compiler, outcome) = compile_annotated_function(source, "probe");
+    outcome.expect("distinct original and replacement closures compile");
+
+    let closures: Vec<_> = compiler
+        .program
+        .functions
+        .iter()
+        .filter(|function| function.is_closure)
+        .collect();
+    assert_eq!(closures.len(), 2, "both persistent closure artifacts remain");
+    let shadow_closure = closures
+        .iter()
+        .find(|function| function.arity == 1)
+        .expect("the original shadow owns the unary closure");
+    let replacement_closure = closures
+        .iter()
+        .find(|function| function.arity == 2)
+        .expect("the replacement owns the binary closure");
+    assert_ne!(shadow_closure.name, replacement_closure.name);
+
+    let replacement_mir = compiler
+        .program
+        .functions
+        .iter()
+        .find(|function| function.name == "probe")
+        .and_then(|function| function.mir_data.as_ref())
+        .expect("public replacement publishes MIR data");
+    let referenced_closures: Vec<_> = replacement_mir
+        .mir
+        .iter_blocks()
+        .flat_map(|block| &block.statements)
+        .filter_map(|statement| match &statement.kind {
+            crate::mir::types::StatementKind::Assign(
+                _,
+                crate::mir::types::Rvalue::Use(crate::mir::types::Operand::Constant(
+                    crate::mir::types::MirConstant::Function(name),
+                )),
+            ) if name.starts_with("__closure_") => Some(name.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        referenced_closures,
+        vec![replacement_closure.name.as_str()],
+        "replacement MIR must never consume the shadow closure's transient backpatch identity"
+    );
+}
+
+#[test]
 fn failed_shadow_emission_restores_body_analysis_authority() {
-    let semantic_owner =
-        source_function("fn probe(value: int) -> int { missing_value }", "probe");
+    let semantic_owner = source_function(
+        "fn probe(value: int) -> int { let worker = |item: int| item + 1\nlet observed = worker(value)\nmissing_value }",
+        "probe",
+    );
     let shadow_name = "\u{1}test:original-shadow".to_string();
     let pending = PendingOriginalBodyShadow::new(
         &semantic_owner,
@@ -116,6 +185,8 @@ fn failed_shadow_emission_restores_body_analysis_authority() {
     compiler
         .register_function(&semantic_owner)
         .expect("semantic owner registers");
+    let outer_closure_ids = vec![("outer-closure".to_string(), 73)];
+    compiler.closure_function_ids = outer_closure_ids.clone();
 
     let error = compiler
         .finalize_pending_original_body_shadow(pending)
@@ -126,8 +197,24 @@ fn failed_shadow_emission_restores_body_analysis_authority() {
         "unexpected emission error: {error}"
     );
     assert!(compiler.active_body_analysis_authority.is_none());
+    assert_eq!(compiler.closure_function_ids, outer_closure_ids);
     assert!(compiler.mir_storage_plans.contains_key("probe"));
     assert!(!compiler.mir_storage_plans.contains_key(&shadow_name));
+    assert_eq!(
+        (
+            compiler
+                .program
+                .functions
+                .iter()
+                .filter(|function| function.is_closure)
+                .count(),
+            compiler.closure_capture_packs.len(),
+            compiler.closure_type_ids.len(),
+            compiler.function_type_ids.len(),
+        ),
+        (1, 1, 1, 1),
+        "persistent rejected-shadow artifacts follow the existing quarantine convention"
+    );
     assert!(
         compiler
             .program

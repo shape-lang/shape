@@ -412,13 +412,28 @@ fn assert_explicit_reference_is_c0902(
     parameter: &str,
     mode: ParamPassMode,
 ) {
-    let (_, outcome) = compile_stamped_probe(route, parameter, mode);
+    let (compiler, outcome) = compile_stamped_probe(route, parameter, mode);
     let error = outcome.expect_err("an explicit reference must remain true-reference evidence");
     assert!(
         error.contains(
             "[C0902] ReferenceEscapeIntoClosure: declared capture 'move value' carries reference binding 'value'"
         ),
         "explicit reference control must use exact C0902: {error}"
+    );
+    let zero_closure_artifacts = (
+        compiler.program.functions.iter().filter(|f| f.is_closure).count(),
+        compiler.closure_function_ids.len(),
+        compiler.closure_capture_packs.len(),
+        compiler.closure_type_ids.len(),
+        compiler.function_type_ids.len(),
+        compiler.closure_registry.len(),
+        compiler.function_type_registry.len(),
+        compiler.program.closure_function_layouts.iter().flatten().count(),
+    );
+    assert_eq!(
+        zero_closure_artifacts,
+        (0, 0, 0, 0, 0, 0, 0, 0),
+        "C0902 must reject before any closure function, pack, type ID, or layout is published"
     );
 }
 

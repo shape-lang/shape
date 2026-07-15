@@ -112,7 +112,13 @@ impl BytecodeCompiler {
             &semantic_owner.name,
             &effective_pass_modes,
         )?;
-        self.with_body_analysis_authority(
+        // `closure_function_ids` is an ephemeral MIR-backpatch queue owned by
+        // the function currently being compiled. Shadow closures remain
+        // persistently registered under the compiler's existing quarantine
+        // convention, but their transient IDs must never backpatch the later
+        // replacement body. Scope this queue across both success and error.
+        let saved_closure_function_ids = std::mem::take(&mut self.closure_function_ids);
+        let shadow_result = self.with_body_analysis_authority(
             emission_id,
             &semantic_owner,
             &emission,
@@ -122,7 +128,10 @@ impl BytecodeCompiler {
                     &inferred_reference_optimizations,
                 )
             },
-        )
+        );
+        self.closure_function_ids.clear();
+        self.closure_function_ids = saved_closure_function_ids;
+        shadow_result
     }
 }
 
