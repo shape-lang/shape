@@ -88,11 +88,14 @@ fn callable_unpromoted_module_shared_capture_is_c0912_before_publication() {
     match error {
         shape_ast::error::ShapeError::SemanticError { message, location } => {
             assert!(message.starts_with(&format!(
-                "[C0912] exact reference-flow conflict at callable closure capture for \
+                "[C0912] exact reference-flow conflict at callable 'run' closure capture for \
                  ModuleBinding({slot}) (name 'hits')"
             )));
             assert!(message.contains("Value [storage=Direct]"));
             assert!(message.contains("shared-module promotion witness is absent"));
+            assert!(message.contains(
+                "callable 'run' cannot introduce module storage or promotion effects"
+            ));
             let location = location.expect("module declaration is the diagnostic anchor");
             assert_eq!(location.file.as_deref(), Some("capture_preflight.shape"));
             assert_eq!(location.line, 1);

@@ -1,7 +1,7 @@
 //! Pre-emission refusal for callable-introduced module storage effects.
 
 use shape_ast::ast::Span;
-use shape_ast::error::Result;
+use shape_ast::error::{Result, ShapeError};
 
 use crate::compiler::comptime_builtins::capture_plan::{
     CaptureAccess, CaptureTarget, PlannedCapture,
@@ -23,10 +23,9 @@ impl BytecodeCompiler {
         plan: &[PlannedCapture],
         closure_span: Span,
     ) -> Result<()> {
-        if self.current_function.is_none() {
+        let Some(current_function) = self.current_function else {
             return Ok(());
-        }
-
+        };
         for planned in plan {
             if !planned.plan.needs_cell() {
                 continue;
@@ -40,8 +39,21 @@ impl BytecodeCompiler {
             if already_published {
                 continue;
             }
+            let callable_name = self
+                .program
+                .functions
+                .get(current_function)
+                .map(|function| function.name.clone())
+                .ok_or_else(|| ShapeError::RuntimeError {
+                    message: format!(
+                        "internal compiler error: active callable index {current_function} has no \
+                         function metadata during closure-capture preflight"
+                    ),
+                    location: None,
+                })?;
 
-            return Err(self.callable_module_shared_capture_effect_error(
+            return Err(self.module_capture_storage_effect_conflict(
+                &callable_name,
                 slot,
                 planned.facts.witness_shared_module_binding,
                 closure_span,
@@ -51,3 +63,7 @@ impl BytecodeCompiler {
         Ok(())
     }
 }
+
+#[cfg(test)]
+#[path = "module_capture_preflight/tests.rs"]
+mod tests;
