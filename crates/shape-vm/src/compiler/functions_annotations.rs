@@ -1224,13 +1224,14 @@ impl BytecodeCompiler {
                 }
             }
             Expr::FunctionCall {
-                name,
+                const_args,
                 args,
                 named_args,
                 ..
             } => {
-                if name.contains("::") {
-                    names.insert(name.clone());
+                handler_resolution::seed_function_call(expr, names);
+                for arg in const_args {
+                    Self::collect_scoped_names_in_expr(arg, names);
                 }
                 for arg in args {
                     Self::collect_scoped_names_in_expr(arg, names);
@@ -1240,13 +1241,15 @@ impl BytecodeCompiler {
                 }
             }
             Expr::QualifiedFunctionCall {
-                namespace,
-                function,
+                const_args,
                 args,
                 named_args,
                 ..
             } => {
-                names.insert(format!("{}::{}", namespace, function));
+                handler_resolution::seed_function_call(expr, names);
+                for arg in const_args {
+                    Self::collect_scoped_names_in_expr(arg, names);
+                }
                 for arg in args {
                     Self::collect_scoped_names_in_expr(arg, names);
                 }

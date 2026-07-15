@@ -5,6 +5,26 @@ use shape_ast::ast::{Annotation, AnnotationHandler, AnnotationHandlerType, Expr,
 use shape_ast::error::{Result, ShapeError};
 use std::collections::{HashMap, HashSet};
 
+/// Seed every direct function-call spelling before lexical authority resolves
+/// it. Bare calls are intentionally retained: dropping them here would make a
+/// defining-module helper look unavailable and tempt callers to reintroduce a
+/// global fallback. Explicit qualified calls retain their exact key.
+pub(super) fn seed_function_call(expr: &Expr, names: &mut HashSet<String>) {
+    match expr {
+        Expr::FunctionCall { name, .. } => {
+            names.insert(name.clone());
+        }
+        Expr::QualifiedFunctionCall {
+            namespace,
+            function,
+            ..
+        } => {
+            names.insert(format!("{namespace}::{function}"));
+        }
+        _ => {}
+    }
+}
+
 /// One annotation's comptime handlers, keyed by its exact semantic name.
 #[derive(Clone, Debug)]
 pub(super) struct ComptimeAnnotationHandlers {
