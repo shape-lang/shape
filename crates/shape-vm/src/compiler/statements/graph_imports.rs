@@ -2,13 +2,13 @@
 
 use super::annotation_imports::AnnotationImportSemanticSnapshot;
 use super::{
-    BytecodeCompiler, ImportedAnnotationSymbol, ImportedSymbol, Instruction, ModuleBuiltinFunction,
-    OpCode, Operand, Result,
+    BytecodeCompiler, ImportedSymbol, Instruction, ModuleBuiltinFunction, OpCode, Operand, Result,
 };
+use crate::compiler::ImportedAnnotationSymbol;
 use crate::module_graph::{ModuleGraph, ModuleId, ModuleSourceKind, ResolvedImport};
 
 impl BytecodeCompiler {
-    pub(super) fn register_graph_imports_for_module(
+    pub(in crate::compiler) fn register_graph_imports_for_module(
         &mut self,
         module_id: ModuleId,
         graph: &ModuleGraph,
@@ -35,7 +35,7 @@ impl BytecodeCompiler {
     /// Publish imports after the caller has completed permission preflight.
     /// Shape/Hybrid dependency compilation uses this half only because its
     /// preflight must precede even borrowed annotation-state staging.
-    pub(super) fn publish_graph_imports_with_annotation_semantics(
+    pub(in crate::compiler) fn publish_graph_imports_with_annotation_semantics(
         &mut self,
         module_id: ModuleId,
         graph: &ModuleGraph,
