@@ -2,8 +2,8 @@ use super::*;
 
 use shape_ast::ast::{CaptureMode, DestructurePattern, Span};
 
-use crate::compiler::comptime_builtins::capture_plan::CaptureAccess;
-use crate::type_tracking::BindingStorageClass;
+use crate::compiler::comptime_builtins::capture_plan::{CaptureAccess, capture_kind_spelling};
+use crate::type_tracking::{BindingOwnershipClass, BindingStorageClass};
 
 fn parameter(is_reference: bool, is_mut_reference: bool) -> FunctionParameter {
     FunctionParameter {
@@ -221,6 +221,7 @@ fn assert_inferred_reference_is_not_true_reference(
     route: AnnotationRoute,
     parameter: &str,
     mode: ParamPassMode,
+    expected_capture: (BindingOwnershipClass, &'static str, CaptureAccess),
 ) {
     let (compiler, outcome) = compile_stamped_probe(route, parameter, mode);
     outcome.expect("an inferred reference optimization is not a true reference capture");
@@ -233,6 +234,8 @@ fn assert_inferred_reference_is_not_true_reference(
         .collect();
     assert_eq!(descriptors.len(), 1, "fixture has one value capture");
     assert_eq!(descriptors[0].declared, Some(CaptureMode::Move));
+    assert_eq!(descriptors[0].ownership, Some(expected_capture.0));
+    assert_eq!(capture_kind_spelling(descriptors[0].lowered), expected_capture.1);
     assert_eq!(
         descriptors[0].storage,
         Some(BindingStorageClass::LocalMutablePtr),
@@ -240,8 +243,8 @@ fn assert_inferred_reference_is_not_true_reference(
     );
     assert_eq!(
         descriptors[0].access,
-        CaptureAccess::Param,
-        "inferred pass mode must preserve exact by-value capture access"
+        expected_capture.2,
+        "inferred pass mode must preserve the route's exact capture access"
     );
     assert_route_artifacts(&compiler, route);
 }
@@ -417,6 +420,11 @@ fn single_runtime_annotation_preserves_shared_reference_provenance() {
         AnnotationRoute::SingleRuntime,
         "value",
         ParamPassMode::ByRefShared,
+        (
+            BindingOwnershipClass::OwnedImmutable,
+            "immutable",
+            CaptureAccess::Param,
+        ),
     );
     assert_explicit_reference_is_c0902(
         AnnotationRoute::SingleRuntime,
@@ -431,6 +439,11 @@ fn chained_runtime_annotations_preserve_exclusive_reference_provenance() {
         AnnotationRoute::ChainedRuntime,
         "value: int",
         ParamPassMode::ByRefExclusive,
+        (
+            BindingOwnershipClass::OwnedMutable,
+            "owned-mutable",
+            CaptureAccess::OwnedMutableCell,
+        ),
     );
     assert_explicit_reference_is_c0902(
         AnnotationRoute::ChainedRuntime,
@@ -445,6 +458,11 @@ fn replace_body_ctx_original_preserves_inferred_reference_provenance() {
         AnnotationRoute::ReplaceBody,
         "value: int",
         ParamPassMode::ByRefExclusive,
+        (
+            BindingOwnershipClass::OwnedMutable,
+            "owned-mutable",
+            CaptureAccess::OwnedMutableCell,
+        ),
     );
     assert_explicit_reference_is_c0902(
         AnnotationRoute::ReplaceBody,
