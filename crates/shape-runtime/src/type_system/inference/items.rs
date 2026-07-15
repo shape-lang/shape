@@ -6,11 +6,128 @@ use super::TypeInferenceEngine;
 use crate::type_system::*;
 use shape_ast::ast::{
     DestructurePattern, Expr, ForeignFunctionDef, FunctionDef, Item, Literal, Span, Statement,
-    TraitMember, TraitMemberSignature, TypeAnnotation, TypeName, VarKind, VariableDecl,
+    TraitMember, TraitMemberSignature, TypeAnnotation, TypeName, TypeParam, VarKind, VariableDecl,
+    WherePredicate,
 };
 use std::collections::HashMap;
 
 impl TypeInferenceEngine {
+    fn mint_declared_type_params(&mut self, params: &[TypeParam]) -> Vec<TypeVar> {
+        if params.is_empty() {
+            return Vec::new();
+        }
+        let owner = self.type_var_gen.fresh_declared_owner();
+        params
+            .iter()
+            .enumerate()
+            .map(|(ordinal, param)| {
+                let ordinal = u32::try_from(ordinal).expect("declared TypeVar ordinal overflow");
+                TypeVar::declared(owner, ordinal, param.name())
+            })
+            .collect()
+    }
+
+    fn existing_declared_type_params(
+        &self,
+        callable_name: &str,
+        params: &[TypeParam],
+    ) -> Option<Vec<TypeVar>> {
+        if params.is_empty() {
+            return Some(Vec::new());
+        }
+        let quantified = self.env.lookup(callable_name)?.quantified.clone();
+        if quantified.len() != params.len() {
+            return None;
+        }
+        let owner = quantified.first()?.declared_provenance()?.owner();
+        quantified
+            .iter()
+            .zip(params)
+            .enumerate()
+            .all(|(ordinal, (var, param))| {
+                var.declared_provenance().is_some_and(|provenance| {
+                    provenance.owner() == owner
+                        && usize::try_from(provenance.ordinal()).ok() == Some(ordinal)
+                        && provenance.source_name() == param.name()
+                })
+            })
+            .then_some(quantified)
+    }
+
+    fn validate_declared_type_param_vector(
+        &self,
+        callable_name: &str,
+        params: &[TypeParam],
+        vars: &[TypeVar],
+    ) -> TypeResult<()> {
+        if params.len() != vars.len() {
+            return Err(TypeError::ConstraintViolation(format!(
+                "internal inference error: `{callable_name}` declared parameter arity does not match its capability vector"
+            )));
+        }
+        let owner = match vars.first() {
+            Some(var) => Some(
+                var.declared_provenance()
+                    .ok_or_else(|| {
+                        TypeError::ConstraintViolation(format!(
+                            "internal inference error: `{callable_name}` has a non-declared generic parameter capability"
+                        ))
+                    })?
+                    .owner(),
+            ),
+            None => None,
+        };
+        for (ordinal, (param, var)) in params.iter().zip(vars).enumerate() {
+            let expected_ordinal = u32::try_from(ordinal).map_err(|_| {
+                TypeError::ConstraintViolation(format!(
+                    "internal inference error: `{callable_name}` declared parameter ordinal overflow"
+                ))
+            })?;
+            let Some(provenance) = var.declared_provenance() else {
+                return Err(TypeError::ConstraintViolation(format!(
+                    "internal inference error: `{callable_name}` has a non-declared generic parameter capability"
+                )));
+            };
+            if Some(provenance.owner()) != owner
+                || provenance.ordinal() != expected_ordinal
+                || provenance.source_name() != param.name()
+            {
+                return Err(TypeError::ConstraintViolation(format!(
+                    "internal inference error: `{callable_name}` has a malformed declared parameter capability vector"
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    fn bind_validated_declared_type_params(&mut self, params: &[TypeParam], vars: &[TypeVar]) {
+        for (param, var) in params.iter().zip(vars) {
+            self.env
+                .define(param.name(), TypeScheme::mono(Type::Variable(var.clone())));
+        }
+    }
+
+    fn validate_declared_type_params_in_type(
+        &self,
+        func: &FunctionDef,
+        ty: &Type,
+        quantified: &[TypeVar],
+    ) -> TypeResult<()> {
+        let type_params = func.type_params.as_deref().unwrap_or_default();
+        self.validate_declared_type_param_vector(&func.name, type_params, quantified)?;
+        let mut embedded = std::collections::HashSet::new();
+        self.collect_type_vars(ty, &mut embedded);
+        if embedded.iter().any(|var| {
+            var.declared_provenance().is_some() && !quantified.iter().any(|known| known == var)
+        }) {
+            return Err(TypeError::ConstraintViolation(format!(
+                "internal inference error: `{}` type contains a foreign declared parameter capability",
+                func.name
+            )));
+        }
+        Ok(())
+    }
+
     /// Predeclare nominal type definitions that function signatures may refer to.
     ///
     /// This runs before callable-signature predeclaration, so a function can
@@ -78,35 +195,14 @@ impl TypeInferenceEngine {
                 .collect(),
         );
 
-        // Register the function's type parameters as in-scope type VARIABLES
-        // before resolving the param/return annotations, in a throwaway scope so
-        // they do not leak to siblings. Without this, `resolve_type_annotation`
-        // resolves a generic param reference (e.g. `T`) to a NOMINAL
-        // `Type::Concrete(Reference("T"))` (items.rs:633, the "name not in scope
-        // as a variable" fallback) rather than `Type::Variable(TypeVar("T"))`.
-        // `make_function_scheme` then quantifies over `TypeVar("T")` while the
-        // function type carries nominal `T`, so call-site instantiation replaces
-        // nothing and a consumer call like `clamp(5, 0, 10)` fails to unify
-        // (`T` ≠ `int`).
-        //
-        // `infer_function` (items.rs:451-465) already registers the type params
-        // as variables before resolving annotations; mirroring that here makes
-        // the PREDECLARED scheme identical to the one `infer_item` later produces.
-        // For a from-source compile this is harmless (infer_item overwrites the
-        // scheme anyway); for the cache LOAD/REPLAY path — which runs predeclare
-        // ONLY, never `infer_function` (DESIGN §2.4) — it is what makes a generic
-        // function's interface RESULTS-IDENTICAL between source-compile and
-        // cache-replay (DESIGN §3.1 binder). Verified by the
-        // `case_generic_fn_with_bounds_clamp` differential test, which diverged
-        // before this fix.
+        // Mint once during predeclaration. Body inference retrieves this exact
+        // owner/ordinal vector from the predeclared scheme; cache replay uses the
+        // same scheme directly. The temporary scope only resolves source names.
+        let type_params = func.type_params.as_deref().unwrap_or_default();
+        let type_param_vars = self.mint_declared_type_params(type_params);
+        self.validate_declared_type_param_vector(&func.name, type_params, &type_param_vars)?;
         self.env.push_scope();
-        if let Some(type_params) = &func.type_params {
-            for tp in type_params {
-                let var = TypeVar::new(tp.name().to_string());
-                self.env
-                    .define(tp.name(), TypeScheme::mono(Type::Variable(var)));
-            }
-        }
+        self.bind_validated_declared_type_params(type_params, &type_param_vars);
 
         let param_types: Vec<Type> = func
             .params
@@ -124,13 +220,19 @@ impl TypeInferenceEngine {
 
         self.env.pop_scope();
 
+        let func_type = BuiltinTypes::function(param_types, return_type);
         let scheme =
-            self.make_function_scheme(func, BuiltinTypes::function(param_types, return_type));
-        self.env.define(&func.name, scheme);
+            self.make_function_scheme_with_params(func, func_type.clone(), &type_param_vars)?;
+        self.predeclare_named_callable_scheme(func, scheme, &func_type)?;
         Ok(())
     }
 
     fn predeclare_foreign_function(&mut self, def: &ForeignFunctionDef) -> TypeResult<()> {
+        let type_params = def.type_params.as_deref().unwrap_or_default();
+        let type_param_vars = self.mint_declared_type_params(type_params);
+        self.validate_declared_type_param_vector(&def.name, type_params, &type_param_vars)?;
+        self.env.push_scope();
+        self.bind_validated_declared_type_params(type_params, &type_param_vars);
         let raw_param_types: Vec<Type> = def
             .params
             .iter()
@@ -144,6 +246,7 @@ impl TypeInferenceEngine {
             Some(ann) => self.resolve_type_annotation(ann),
             None => self.fresh_type_var(),
         };
+        self.env.pop_scope();
 
         let has_out_params = def.is_native_abi() && def.params.iter().any(|p| p.is_out);
         let param_types = if has_out_params {
@@ -162,7 +265,17 @@ impl TypeInferenceEngine {
         };
 
         let func_type = BuiltinTypes::function(param_types, return_type);
-        let scheme = TypeScheme::mono(func_type);
+        let scheme = if def.type_params.is_some() {
+            self.make_declared_param_scheme(
+                &def.name,
+                type_params,
+                None,
+                func_type,
+                &type_param_vars,
+            )?
+        } else {
+            TypeScheme::mono(func_type)
+        };
         self.env.define(&def.name, scheme);
         Ok(())
     }
@@ -224,14 +337,11 @@ impl TypeInferenceEngine {
                 .collect(),
         );
 
+        let type_params = def.type_params.as_deref().unwrap_or_default();
+        let type_param_vars = self.mint_declared_type_params(type_params);
+        self.validate_declared_type_param_vector(&def.name, type_params, &type_param_vars)?;
         self.env.push_scope();
-        if let Some(type_params) = &def.type_params {
-            for tp in type_params {
-                let var = TypeVar::new(tp.name().to_string());
-                self.env
-                    .define(tp.name(), TypeScheme::mono(Type::Variable(var)));
-            }
-        }
+        self.bind_validated_declared_type_params(type_params, &type_param_vars);
 
         let param_types: Vec<Type> = def
             .params
@@ -247,12 +357,14 @@ impl TypeInferenceEngine {
         let func_type = BuiltinTypes::function(param_types, return_type);
         // Quantify free type vars (generic imported fn) so each call site
         // instantiates a fresh copy, matching `predeclare_function_signature`.
-        let scheme = if let Some(type_params) = &def.type_params {
-            let quantified: Vec<_> = type_params
-                .iter()
-                .map(|tp| TypeVar::new(tp.name().to_string()))
-                .collect();
-            TypeScheme::poly(quantified, func_type)
+        let scheme = if def.type_params.is_some() {
+            self.make_declared_param_scheme(
+                &def.name,
+                type_params,
+                None,
+                func_type,
+                &type_param_vars,
+            )?
         } else {
             self.env.generalize(&func_type)
         };
@@ -294,10 +406,15 @@ impl TypeInferenceEngine {
     ) -> TypeResult<()> {
         match item {
             Item::Function(func, _) => {
-                let func_type = self.infer_function(func)?;
+                let (func_type, type_param_vars) =
+                    self.infer_function_with_declared_params(func, true)?;
                 // Create polymorphic type scheme for generic functions
-                let scheme = self.make_function_scheme(func, func_type.clone());
-                self.env.define(&func.name, scheme);
+                let scheme = self.make_function_scheme_with_params(
+                    func,
+                    func_type.clone(),
+                    &type_param_vars,
+                )?;
+                self.republish_named_callable_scheme(func, scheme, &func_type)?;
                 types.insert(func.name.clone(), func_type);
             }
             Item::ForeignFunction(_, _) => {
@@ -407,9 +524,14 @@ impl TypeInferenceEngine {
                 }
                 match &export.item {
                     shape_ast::ast::ExportItem::Function(func) => {
-                        let func_type = self.infer_function(func)?;
-                        let scheme = self.make_function_scheme(func, func_type.clone());
-                        self.env.define(&func.name, scheme);
+                        let (func_type, type_param_vars) =
+                            self.infer_function_with_declared_params(func, true)?;
+                        let scheme = self.make_function_scheme_with_params(
+                            func,
+                            func_type.clone(),
+                            &type_param_vars,
+                        )?;
+                        self.republish_named_callable_scheme(func, scheme, &func_type)?;
                         types.insert(func.name.clone(), func_type);
                     }
                     shape_ast::ast::ExportItem::TypeAlias(alias) => {
@@ -689,7 +811,31 @@ impl TypeInferenceEngine {
     /// Implements contagious Result inference: if the function body contains
     /// any `?` operators, the return type is automatically wrapped in Result<T>.
     /// Also handles generic functions with type parameters.
+    /// Infer an impl/extend synthetic body without publishing a named scheme.
     pub(crate) fn infer_function(&mut self, func: &FunctionDef) -> TypeResult<Type> {
+        let (ty, type_params) = self.infer_function_with_declared_params(func, false)?;
+        self.validate_declared_type_params_in_type(func, &ty, &type_params)?;
+        Ok(ty)
+    }
+
+    fn infer_function_with_declared_params(
+        &mut self,
+        func: &FunctionDef,
+        require_predeclared: bool,
+    ) -> TypeResult<(Type, Vec<TypeVar>)> {
+        let type_params = func.type_params.as_deref().unwrap_or_default();
+        let type_param_vars = if require_predeclared && !type_params.is_empty() {
+            self.existing_declared_type_params(&func.name, type_params)
+                .ok_or_else(|| {
+                    TypeError::ConstraintViolation(
+                        "internal inference error: generic function body has no exact predeclared parameter capability"
+                            .to_string(),
+                    )
+                })?
+        } else {
+            self.mint_declared_type_params(type_params)
+        };
+        self.validate_declared_type_param_vector(&func.name, type_params, &type_param_vars)?;
         self.env.push_scope();
         self.push_fallible_scope();
         self.register_callable_origin_for_name(&func.name, func.name_span);
@@ -708,21 +854,7 @@ impl TypeInferenceEngine {
             }
         }
 
-        // Create type variables for type parameters
-        let mut type_param_vars = Vec::new();
-        if let Some(type_params) = &func.type_params {
-            for tp in type_params {
-                // TODO(B.3): `TypeParam::Const` currently falls through here and
-                // is treated like a plain type variable; monomorphization (B.3)
-                // will bind const args to value expressions at call sites and
-                // B.4 substitutes them into specialized bodies.
-                let var = TypeVar::new(tp.name().to_string());
-                type_param_vars.push(var.clone());
-                // Define type param in scope so it can be referenced in param/return types
-                self.env
-                    .define(tp.name(), TypeScheme::mono(Type::Variable(var)));
-            }
-        }
+        self.bind_validated_declared_type_params(type_params, &type_param_vars);
 
         // Collect parameter types
         let mut param_types = Vec::new();
@@ -1040,7 +1172,7 @@ impl TypeInferenceEngine {
             self.register_callable_origin_for_name(&func.name, origin);
         }
 
-        Ok(function_type)
+        Ok((function_type, type_param_vars))
     }
 
     /// Re-walk named function bodies after callsite propagation has resolved
@@ -1057,24 +1189,27 @@ impl TypeInferenceEngine {
         &mut self,
         program: &shape_ast::ast::Program,
         types: &mut HashMap<String, Type>,
-    ) {
-        self.publish_rewalk_function_schemes(program, types);
+    ) -> Vec<TypeError> {
+        let mut errors = Vec::new();
+        self.publish_rewalk_function_schemes(program, types, &mut errors);
         for item in &program.items {
-            self.rewalk_resolved_function_bodies_for_item(item, types);
+            self.rewalk_resolved_function_bodies_for_item(item, types, &mut errors);
         }
+        errors
     }
 
     fn publish_rewalk_function_schemes(
         &mut self,
         program: &shape_ast::ast::Program,
         types: &HashMap<String, Type>,
+        errors: &mut Vec<TypeError>,
     ) {
         for item in &program.items {
             match item {
-                Item::Function(func, _) => self.publish_rewalk_function_scheme(func, types),
+                Item::Function(func, _) => self.publish_rewalk_function_scheme(func, types, errors),
                 Item::Export(export, _) => {
                     if let shape_ast::ast::ExportItem::Function(func) = &export.item {
-                        self.publish_rewalk_function_scheme(func, types);
+                        self.publish_rewalk_function_scheme(func, types, errors);
                     }
                 }
                 _ => {}
@@ -1086,6 +1221,7 @@ impl TypeInferenceEngine {
         &mut self,
         func: &FunctionDef,
         types: &HashMap<String, Type>,
+        errors: &mut Vec<TypeError>,
     ) {
         let Some(ty) = types.get(&func.name).cloned() else {
             return;
@@ -1101,20 +1237,29 @@ impl TypeInferenceEngine {
             return;
         }
 
-        let scheme = self.make_function_scheme(func, ty);
-        self.env.define(&func.name, scheme);
+        let scheme = match self.make_function_scheme(func, ty.clone()) {
+            Ok(scheme) => scheme,
+            Err(error) => {
+                errors.push(error);
+                return;
+            }
+        };
+        if let Err(error) = self.republish_named_callable_scheme(func, scheme, &ty) {
+            errors.push(error);
+        }
     }
 
     fn rewalk_resolved_function_bodies_for_item(
         &mut self,
         item: &Item,
         types: &mut HashMap<String, Type>,
+        errors: &mut Vec<TypeError>,
     ) {
         match item {
-            Item::Function(func, _) => self.rewalk_resolved_function_body(func, types),
+            Item::Function(func, _) => self.rewalk_resolved_function_body(func, types, errors),
             Item::Export(export, _) => {
                 if let shape_ast::ast::ExportItem::Function(func) = &export.item {
-                    self.rewalk_resolved_function_body(func, types);
+                    self.rewalk_resolved_function_body(func, types, errors);
                 }
             }
             _ => {}
@@ -1125,6 +1270,7 @@ impl TypeInferenceEngine {
         &mut self,
         func: &FunctionDef,
         types: &mut HashMap<String, Type>,
+        errors: &mut Vec<TypeError>,
     ) {
         let Some(Type::Function { params, returns }) = types.get(&func.name).cloned() else {
             return;
@@ -1193,8 +1339,17 @@ impl TypeInferenceEngine {
         };
 
         let new_type = BuiltinTypes::function(resolved_params, new_return);
-        let scheme = self.make_function_scheme(func, new_type.clone());
-        self.env.define(&func.name, scheme);
+        let scheme = match self.make_function_scheme(func, new_type.clone()) {
+            Ok(scheme) => scheme,
+            Err(error) => {
+                errors.push(error);
+                return;
+            }
+        };
+        if let Err(error) = self.republish_named_callable_scheme(func, scheme, &new_type) {
+            errors.push(error);
+            return;
+        }
         types.insert(func.name.clone(), new_type);
     }
 
@@ -2151,59 +2306,90 @@ impl TypeInferenceEngine {
         Ok(())
     }
 
-    /// Build a TypeScheme for a function, including trait bounds from type params
-    /// and where clause predicates
-    fn make_function_scheme(&self, func: &FunctionDef, func_type: Type) -> TypeScheme {
-        if let Some(type_params) = &func.type_params {
-            // TODO(B.3): const generic params currently flow through the same
-            // `TypeVar` machinery as type params. The name is still unique,
-            // so quantification is sound; monomorphization will specialise
-            // the const values when binding concrete args.
-            let quantified: Vec<_> = type_params
-                .iter()
-                .map(|tp| TypeVar::new(tp.name().to_string()))
-                .collect();
+    fn make_function_scheme(
+        &mut self,
+        func: &FunctionDef,
+        func_type: Type,
+    ) -> TypeResult<TypeScheme> {
+        let Some(type_params) = func.type_params.as_deref() else {
+            self.validate_declared_type_params_in_type(func, &func_type, &[])?;
+            return Ok(self.env.generalize(&func_type));
+        };
+        let vars = self
+            .existing_declared_type_params(&func.name, type_params)
+            .ok_or_else(|| {
+                TypeError::ConstraintViolation(format!(
+                    "internal inference error: `{}` has no exact declared parameter capabilities for scheme publication",
+                    func.name
+                ))
+            })?;
+        self.make_function_scheme_with_params(func, func_type, &vars)
+    }
 
-            let mut bounds = std::collections::HashMap::new();
-            let mut defaults = std::collections::HashMap::new();
+    fn make_function_scheme_with_params(
+        &mut self,
+        func: &FunctionDef,
+        func_type: Type,
+        quantified: &[TypeVar],
+    ) -> TypeResult<TypeScheme> {
+        self.validate_declared_type_params_in_type(func, &func_type, quantified)?;
+        let Some(type_params) = func.type_params.as_deref() else {
+            return Ok(self.env.generalize(&func_type));
+        };
+        self.make_declared_param_scheme(
+            &func.name,
+            type_params,
+            func.where_clause.as_deref(),
+            func_type,
+            quantified,
+        )
+    }
 
-            // Collect inline bounds from type params: <T: Comparable>.
-            // Const generics have no trait bounds or default *type* — only a
-            // declared type and an optional default expression, which are
-            // consumed later (B.3/B.4).
-            for tp in type_params {
-                let trait_bounds = tp.trait_bounds();
-                if !trait_bounds.is_empty() {
-                    let mut expanded: Vec<String> =
-                        trait_bounds.iter().map(|t| t.to_string()).collect();
-                    // Transitively include supertrait bounds:
-                    // If T: Foo and trait Foo: Bar + Baz, also add Bar and Baz.
-                    for trait_name in trait_bounds {
-                        let supers = self
-                            .env
-                            .get_transitive_supertrait_names(trait_name.as_str());
-                        for st in supers {
-                            if !expanded.contains(&st) {
-                                expanded.push(st);
-                            }
+    fn make_declared_param_scheme(
+        &mut self,
+        callable_name: &str,
+        type_params: &[TypeParam],
+        where_clause: Option<&[WherePredicate]>,
+        func_type: Type,
+        quantified: &[TypeVar],
+    ) -> TypeResult<TypeScheme> {
+        self.validate_declared_type_param_vector(callable_name, type_params, quantified)?;
+        self.env.push_scope();
+        self.bind_validated_declared_type_params(type_params, quantified);
+
+        let mut bounds: HashMap<TypeVar, Vec<String>> = HashMap::new();
+        let mut defaults: HashMap<TypeVar, Type> = HashMap::new();
+        for (tp, var) in type_params.iter().zip(quantified) {
+            let trait_bounds = tp.trait_bounds();
+            if !trait_bounds.is_empty() {
+                let mut expanded: Vec<String> =
+                    trait_bounds.iter().map(|t| t.to_string()).collect();
+                for trait_name in trait_bounds {
+                    let supers = self
+                        .env
+                        .get_transitive_supertrait_names(trait_name.as_str());
+                    for st in supers {
+                        if !expanded.contains(&st) {
+                            expanded.push(st);
                         }
                     }
-                    bounds.insert(tp.name().to_string(), expanded);
                 }
-                if let Some(default_ann) = tp.default_type() {
-                    defaults.insert(
-                        tp.name().to_string(),
-                        self.resolve_type_annotation(default_ann),
-                    );
-                }
+                bounds.insert(var.clone(), expanded);
             }
+            if let Some(default_ann) = tp.default_type() {
+                defaults.insert(var.clone(), self.resolve_type_annotation(default_ann));
+            }
+        }
 
-            // Merge where clause predicates: where T: Display + Serializable
-            if let Some(where_preds) = &func.where_clause {
-                for pred in where_preds {
+        if let Some(where_preds) = where_clause {
+            for pred in where_preds {
+                if let Some(var) = type_params
+                    .iter()
+                    .zip(quantified)
+                    .find_map(|(param, var)| (param.name() == pred.type_name).then_some(var))
+                {
                     let mut expanded: Vec<String> =
                         pred.bounds.iter().map(|t| t.to_string()).collect();
-                    // Transitively include supertrait bounds from where clauses too
                     for trait_name in &pred.bounds {
                         let supers = self
                             .env
@@ -2215,19 +2401,23 @@ impl TypeInferenceEngine {
                         }
                     }
                     bounds
-                        .entry(pred.type_name.clone())
+                        .entry(var.clone())
                         .or_insert_with(Vec::new)
                         .extend(expanded);
                 }
             }
+        }
+        self.env.pop_scope();
 
-            if bounds.is_empty() && defaults.is_empty() {
-                TypeScheme::poly(quantified, func_type)
-            } else {
-                TypeScheme::poly_bounded_with_defaults(quantified, func_type, bounds, defaults)
-            }
+        if bounds.is_empty() && defaults.is_empty() {
+            Ok(TypeScheme::poly(quantified.to_vec(), func_type))
         } else {
-            self.env.generalize(&func_type)
+            Ok(TypeScheme::poly_bounded_with_exact_defaults(
+                quantified.to_vec(),
+                func_type,
+                bounds,
+                defaults,
+            ))
         }
     }
 
@@ -2955,8 +3145,11 @@ impl TypeInferenceEngine {
                         .insert(name.to_string(), hints);
                 }
             }
-            self.env
-                .define(name, TypeScheme::mono(declared_type.clone()));
+            let semantic_source = self.binding_semantic_source_token(decl);
+            let token = self
+                .env
+                .define_with_token(name, TypeScheme::mono(declared_type.clone()));
+            self.record_binding_semantic_candidate(token, semantic_source, decl, &declared_type);
         } else {
             self.bind_decl_pattern(&decl.pattern, declared_type.clone());
         }
@@ -3470,6 +3663,168 @@ impl TypeInferenceEngine {
 mod tests {
     use super::*;
     use crate::type_system::inference::TypeInferenceEngine;
+
+    #[test]
+    fn declared_type_vars_have_typed_disjoint_identity_and_round_trip() {
+        use std::collections::HashSet;
+
+        let mut vars = TypeVarGen::new();
+        let hole = vars.fresh_var();
+        let other_inference_hole = TypeVarGen::new().fresh_var();
+        let owner_a = vars.fresh_declared_owner();
+        let owner_b = vars.fresh_declared_owner();
+        let declared = TypeVar::declared(owner_a, 0, "T0");
+        let renamed = TypeVar::declared(owner_a, 0, "RenamedT");
+        let other_owner = TypeVar::declared(owner_b, 0, "T0");
+        let legacy = TypeVar::new("T0".to_string());
+
+        assert_eq!(hole.presentation_name(), declared.presentation_name());
+        assert_ne!(hole, declared);
+        assert_eq!(
+            hole.presentation_name(),
+            other_inference_hole.presentation_name()
+        );
+        assert_ne!(hole, other_inference_hole);
+        assert_ne!(declared, legacy);
+        assert_ne!(declared, other_owner);
+        assert_eq!(declared, renamed, "spelling is presentation-only");
+        assert_eq!(HashSet::from([declared.clone(), renamed]).len(), 1);
+        assert!(hole.declared_provenance().is_none());
+        assert!(legacy.declared_provenance().is_none());
+        assert!(Type::Variable(hole.clone()).to_semantic().is_none());
+        assert!(Type::Variable(declared.clone()).to_semantic().is_none());
+        assert!(Type::Variable(other_owner.clone()).to_semantic().is_none());
+        assert!(Type::Variable(legacy.clone()).to_semantic().is_some());
+        assert!(
+            BuiltinTypes::function(
+                vec![Type::Variable(declared.clone())],
+                Type::Variable(other_owner.clone()),
+            )
+            .to_semantic()
+            .is_none(),
+            "semantic conversion must not collapse equal ordinals from distinct owners"
+        );
+        assert!(
+            Type::Variable(declared.clone())
+                .declared_type_var_provenance()
+                .is_some()
+        );
+        assert!(
+            Type::Constrained {
+                var: declared.clone(),
+                constraint: Box::new(TypeConstraint::Comparable),
+            }
+            .declared_type_var_provenance()
+            .is_none()
+        );
+        assert!(!format!("{hole:?}{declared:?}").contains("\u{1}"));
+
+        let round_trip = annotation_as_tyvar(&tyvar_to_annotation(&declared)).unwrap();
+        assert_eq!(round_trip, declared);
+        assert_eq!(
+            round_trip.declared_provenance(),
+            declared.declared_provenance()
+        );
+
+        let scheme = TypeScheme::poly(vec![declared.clone()], Type::Variable(declared.clone()));
+        let instance = scheme.instantiate_with_metadata(&mut vars);
+        let mapping = &instance.declared_instantiations[0];
+        assert_eq!(mapping.declared(), &declared);
+        assert!(mapping.instantiated().declared_provenance().is_none());
+        assert_eq!(instance.ty, Type::Variable(mapping.instantiated().clone()));
+    }
+
+    #[test]
+    fn function_predeclare_body_and_scheme_reuse_declared_tokens() {
+        use shape_ast::parser::parse_program;
+
+        let program = parse_program(r#"fn preserve<T: Marker = int>(value: T) -> T { value }"#)
+            .expect("generic function should parse");
+        let Item::Function(func, _) = &program.items[0] else {
+            panic!("expected function")
+        };
+        assert!(
+            TypeInferenceEngine::new()
+                .infer_function_with_declared_params(func, true)
+                .is_err(),
+            "generic body inference must refuse missing predeclaration evidence"
+        );
+        let mut engine = TypeInferenceEngine::new();
+        engine.predeclare_function_signature(func).unwrap();
+        let predeclared = engine.env.lookup("preserve").unwrap().clone();
+        let (function_type, body_vars) = engine
+            .infer_function_with_declared_params(func, true)
+            .unwrap();
+        let scheme = engine
+            .make_function_scheme_with_params(func, function_type.clone(), &body_vars)
+            .unwrap();
+
+        assert_eq!(body_vars, predeclared.quantified);
+        assert_eq!(scheme.quantified, body_vars);
+        let declared = &scheme.quantified[0];
+        assert!(scheme.trait_bounds.contains_key(declared));
+        assert!(scheme.default_types.contains_key(declared));
+        assert!(matches!(
+            function_type,
+            Type::Function { params, returns }
+                if params == vec![Type::Variable(declared.clone())]
+                    && *returns == Type::Variable(declared.clone())
+        ));
+
+        let mut instances = TypeVarGen::new();
+        let instance = scheme.instantiate_with_metadata(&mut instances);
+        let fresh = instance.declared_instantiations[0].instantiated();
+        assert!(instance.default_substitutions.contains_key(fresh));
+        assert!(instance.bound_constraints.iter().any(|(_, bound)| {
+            matches!(bound, Type::Constrained { var, .. } if var.declared_provenance().is_none())
+        }));
+
+        let mut synthetic = TypeInferenceEngine::new();
+        let (synthetic_type, synthetic_vars) = synthetic
+            .infer_function_with_declared_params(func, false)
+            .unwrap();
+        synthetic
+            .validate_declared_type_params_in_type(func, &synthetic_type, &synthetic_vars)
+            .unwrap();
+        assert!(synthetic.env.lookup("preserve").is_none());
+        assert!(
+            synthetic
+                .make_function_scheme(func, synthetic_type)
+                .is_err(),
+            "synthetic impl/extend body inference must not mint or publish a replacement owner"
+        );
+
+        let foreign_owner = engine.type_var_gen.fresh_declared_owner();
+        let foreign = TypeVar::declared(foreign_owner, 0, "T");
+        let foreign_type = BuiltinTypes::function(
+            vec![Type::Variable(foreign.clone())],
+            Type::Variable(foreign),
+        );
+        assert!(engine.make_function_scheme(func, foreign_type).is_err());
+
+        let declared_params = func.type_params.as_deref().unwrap();
+        assert!(
+            engine
+                .validate_declared_type_param_vector("preserve", declared_params, &[])
+                .is_err(),
+            "arity mismatch must refuse"
+        );
+        let wrong_ordinal = TypeVar::declared(foreign_owner, 1, "T");
+        assert!(
+            engine
+                .validate_declared_type_param_vector("preserve", declared_params, &[wrong_ordinal],)
+                .is_err(),
+            "ordinal mismatch must refuse"
+        );
+        let right_provenance = body_vars[0].declared_provenance().unwrap();
+        let wrong_name = TypeVar::declared(right_provenance.owner(), 0, "U");
+        assert!(
+            engine
+                .validate_declared_type_param_vector("preserve", declared_params, &[wrong_name])
+                .is_err(),
+            "source spelling mismatch must refuse"
+        );
+    }
 
     #[test]
     fn test_trait_registration_during_inference() {

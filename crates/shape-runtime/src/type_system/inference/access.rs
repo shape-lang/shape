@@ -994,8 +994,7 @@ impl TypeInferenceEngine {
                             .to_string(),
                     ));
                 }
-                let resolved_type_ref =
-                    self.solver.unifier().apply_substitutions(&arg_types[0]);
+                let resolved_type_ref = self.solver.unifier().apply_substitutions(&arg_types[0]);
                 match resolved_type_ref.to_annotation() {
                     Some(TypeAnnotation::Basic(name)) if name == type_ref_schema => {}
                     Some(_) => {
@@ -1123,11 +1122,7 @@ impl TypeInferenceEngine {
             // wrong-kind rejection. The argument is an ordinary closed
             // comptime int (the initial const-argument domain).
             "const_arg" => {
-                self.check_comptime_builtin_args(
-                    arg_types,
-                    &[BuiltinTypes::integer()],
-                    call_span,
-                )?;
+                self.check_comptime_builtin_args(arg_types, &[BuiltinTypes::integer()], call_span)?;
                 Type::Concrete(TypeAnnotation::Basic(
                     crate::type_schema::builtin_schemas::COMPTIME_FROZEN_TYPE_REF_SCHEMA
                         .to_string(),
@@ -1543,10 +1538,18 @@ impl TypeInferenceEngine {
             .lookup(name)
             .ok_or_else(|| TypeError::UndefinedFunction(name.to_string()))?;
 
-        // Instantiate with bounds to emit ImplementsTrait constraints for trait-bounded generics
-        let (func_type, bound_constraints, default_substitutions) =
-            func_scheme.instantiate_with_bounds(&mut self.type_var_gen);
-        self.constraints.extend(bound_constraints);
+        // Preserve the exact declared-token -> fresh-hole relation before
+        // solving consumes the instantiated signature.
+        let instantiation = func_scheme.instantiate_with_metadata(&mut self.type_var_gen);
+        self.record_declared_type_instantiations(
+            name,
+            call_span,
+            &instantiation.declared_instantiations,
+        );
+        let func_type = instantiation.ty;
+        self.record_semantic_call_arguments(name, call_span, args, &arg_types, &func_type);
+        let default_substitutions = instantiation.default_substitutions;
+        self.constraints.extend(instantiation.bound_constraints);
         self.record_function_callsite(name, &arg_types);
 
         // v0.3.3 c4-4D — HOF callee-param-inference propagation.
