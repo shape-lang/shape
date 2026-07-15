@@ -42,6 +42,8 @@ struct ModuleDirectiveOutcome {
     replaced: bool,
 }
 
+mod annotation_imports;
+
 impl BytecodeCompiler {
     fn comptime_field_slot_from_literal(
         struct_name: &str,
@@ -2166,30 +2168,23 @@ impl BytecodeCompiler {
     fn register_import_names(&mut self, import_stmt: &shape_ast::ast::ImportStmt) -> Result<()> {
         use shape_ast::ast::ImportItems;
 
-        // Check permissions before registering imports.
-        // Clone to avoid borrow conflict with &mut self in check_import_permissions.
+        // Authorization ran before comptime declaration discovery for any
+        // annotation-bearing root import. Re-check here for ordinary imports,
+        // then record permission metadata exactly once while `__main__` exists.
         if let Some(pset) = self.permission_set.clone() {
-            self.check_import_permissions(import_stmt, &pset)?;
+            self.authorize_import_permissions(import_stmt, &pset)?;
+            self.record_import_permissions(import_stmt);
         }
 
         match &import_stmt.items {
             ImportItems::Named(specs) => {
                 for spec in specs {
                     if spec.is_annotation {
-                        // W9: register against the canonical module path so the
-                        // use-site lookup matches `compiled_annotations`'s
-                        // qualified key produced by the dep module's qualify pass.
-                        self.module_scope_sources
-                            .entry(import_stmt.from.clone())
-                            .or_insert_with(|| import_stmt.from.clone());
-                        self.imported_annotations.insert(
+                        self.register_annotation_import_bindings(std::iter::once((
+                            spec.alias.clone().unwrap_or_else(|| spec.name.clone()),
                             spec.name.clone(),
-                            ImportedAnnotationSymbol {
-                                original_name: spec.name.clone(),
-                                _module_path: import_stmt.from.clone(),
-                                hidden_module_name: import_stmt.from.clone(),
-                            },
-                        );
+                            import_stmt.from.clone(),
+                        )))?;
                         continue;
                     }
                     let local_name = spec.alias.as_ref().unwrap_or(&spec.name);
@@ -2242,8 +2237,8 @@ impl BytecodeCompiler {
     ///
     /// For named imports (`from std::core::file use { read_text }`), checks each function
     /// individually. For namespace imports (`use std::core::http`), checks the whole module.
-    fn check_import_permissions(
-        &mut self,
+    fn authorize_import_permissions(
+        &self,
         import_stmt: &shape_ast::ast::ImportStmt,
         pset: &shape_abi_v1::PermissionSet,
     ) -> Result<()> {
@@ -2272,7 +2267,6 @@ impl BytecodeCompiler {
                             location: None,
                         });
                     }
-                    self.record_blob_permissions(module_name, &spec.name);
                 }
             }
             ImportItems::Namespace { .. } => {
@@ -2293,14 +2287,32 @@ impl BytecodeCompiler {
                         location: None,
                     });
                 }
-                // Record module-level permissions for namespace imports in the current blob
+            }
+        }
+        Ok(())
+    }
+
+    /// Record already-authorized import capabilities on the current blob.
+    /// Kept separate from authorization so the early annotation-alias pass
+    /// cannot emit duplicate semantic metadata before `__main__` exists.
+    fn record_import_permissions(&mut self, import_stmt: &shape_ast::ast::ImportStmt) {
+        use shape_ast::ast::ImportItems;
+
+        match &import_stmt.items {
+            ImportItems::Named(specs) => {
+                for spec in specs {
+                    self.record_blob_permissions(&import_stmt.from, &spec.name);
+                }
+            }
+            ImportItems::Namespace { .. } => {
                 if let Some(ref mut blob) = self.current_blob_builder {
-                    let module_perms = capability_tags::module_permissions(module_name);
+                    let module_perms = shape_runtime::stdlib::capability_tags::module_permissions(
+                        &import_stmt.from,
+                    );
                     blob.record_permissions(&module_perms);
                 }
             }
         }
-        Ok(())
     }
 
     /// Register imports for a module from the module graph.
@@ -2388,25 +2400,11 @@ impl BytecodeCompiler {
                     self.graph_namespace_map
                         .insert(local_name.clone(), canonical_path.clone());
 
-                    // 4. W9: Register annotation defs from imported module so
-                    // bare `@ann` and qualified `@local::ann` resolve at use-site.
-                    // The compiled annotation lives in `compiled_annotations` under
-                    // its qualified name `canonical_path::ann_name` (set during the
-                    // dep module's own compile via `qualify_module_item`).
-                    for (export_name, exp) in &dep_node.interface.exports {
-                        if matches!(
-                            exp.kind,
-                            shape_ast::module_utils::ModuleExportKind::Annotation
-                        ) {
-                            self.imported_annotations
-                                .entry(export_name.clone())
-                                .or_insert_with(|| ImportedAnnotationSymbol {
-                                    original_name: export_name.clone(),
-                                    _module_path: canonical_path.clone(),
-                                    hidden_module_name: canonical_path.clone(),
-                                });
-                        }
-                    }
+                    // Namespace imports grant qualified annotation access
+                    // (`@local::ann`) through `graph_namespace_map`; they do
+                    // not synthesize bare aliases for every exported
+                    // annotation. Named `@ann` imports below are the sole bare
+                    // annotation-import authority.
                 }
                 ResolvedImport::Named {
                     canonical_path,
@@ -8346,6 +8344,10 @@ impl BytecodeCompiler {
         Ok(())
     }
 }
+
+#[cfg(test)]
+#[path = "statements/annotation_import_binding_tests.rs"]
+mod annotation_import_binding_tests;
 
 #[cfg(test)]
 mod tests {

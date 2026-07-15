@@ -2005,6 +2005,12 @@ impl BytecodeCompiler {
 
         self.reject_user_internal_intrinsic_calls(&program)?;
 
+        // Imported comptime annotations participate in declaration discovery,
+        // which runs before the ordinary pass-2 import items. Register only
+        // their semantic aliases now, as one validated transaction. Runtime
+        // import bindings and blob permission metadata remain in pass 2.
+        self.pre_register_root_annotation_imports(&program)?;
+
         // Wave 1a PART A: bidirectional inference for let-bound closures.
         // A `let f = |a, b| a + b` compiles the closure body EAGERLY at the
         // let-site (before any `f(2, 3)` call site is seen), so the call-site
@@ -3046,6 +3052,13 @@ impl BytecodeCompiler {
         use crate::module_graph::ModuleSourceKind;
 
         self.module_graph = Some(graph.clone());
+
+        // Root graph imports are stripped before the standard compiler driver,
+        // but imported annotation handlers must resolve before declaration
+        // discovery. Install only the graph's semantic annotation bindings
+        // here; the full graph registrar still runs later inside `__main__`,
+        // where namespace alias bytecode belongs.
+        self.pre_register_root_graph_annotation_imports(root_program, &graph)?;
 
         // ADR-009 §4.1 (A1 review round 1, findings 1+2): the semantic-freeze
         // barrier is per COMPILATION UNIT — and on this pipeline the unit is
