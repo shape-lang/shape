@@ -17,6 +17,8 @@ use tower_lsp_server::ls_types::{
     Uri,
 };
 
+mod generated_queries;
+
 /// Find the definition of a symbol at the given position.
 ///
 /// When `cached_program` is provided, it is used as a fallback AST when
@@ -54,34 +56,12 @@ pub fn get_definition(
     };
 
     if has_exact_source_ast && let Some(offset) = position_to_offset(text, position) {
-        let current_path = uri.to_file_path().map(|path| path.into_owned());
-        let context = crate::generated_captures::CaptureQueryContext {
-            file_path: current_path.as_deref(),
-            module_cache,
-            workspace_root: None,
-        };
-        let generated_session =
-            crate::generated_captures::GeneratedQuerySession::new(&program, text, context);
-        match crate::generated_captures::generated_capture_definition(
-            &program,
-            text,
-            offset,
-            uri,
-            &generated_session,
-        ) {
+        match generated_queries::definition(&program, text, &word, offset, uri, module_cache) {
             crate::generated_captures::GeneratedCaptureLookup::Found(response) => {
                 return Some(response);
             }
             crate::generated_captures::GeneratedCaptureLookup::Unavailable => return None,
             crate::generated_captures::GeneratedCaptureLookup::NotCapture => {}
-        }
-
-        if let Some(compiler) = generated_session.compiler()
-            && let Some(response) = crate::generated_symbols::generated_definition_from_compiler(
-                &program, text, &word, offset, uri, compiler,
-            )
-        {
-            return Some(response);
         }
     }
 
@@ -186,33 +166,21 @@ pub fn get_references_cross_file(
     // path below is name-based and must not append same-spelling symbols from
     // other files or owners.
     let parse_src = parser_source(text);
-    let mut generated_session = None;
-    if let Ok(program) = parse_program(parse_src.as_ref())
-        && let Some(offset) = position_to_offset(text, position)
-    {
-        let current_path = uri.to_file_path().map(|path| path.into_owned());
-        let context = crate::generated_captures::CaptureQueryContext {
-            file_path: current_path.as_deref(),
-            module_cache,
-            workspace_root,
-        };
-        let session =
-            crate::generated_captures::GeneratedQuerySession::new(&program, text, context);
-        match crate::generated_captures::generated_capture_references_with_session(
-            &program, text, offset, uri, &session,
-        ) {
-            crate::generated_captures::GeneratedCaptureLookup::Found(locations) => {
-                return Some(locations);
-            }
-            crate::generated_captures::GeneratedCaptureLookup::Unavailable => return None,
-            crate::generated_captures::GeneratedCaptureLookup::NotCapture => {
-                generated_session = Some(session);
-            }
-        }
-    }
+    let generated_session = match generated_queries::cross_file_references(
+        parse_src.as_ref(),
+        text,
+        position,
+        uri,
+        module_cache,
+        workspace_root,
+    ) {
+        generated_queries::CrossFileReferences::Found(locations) => return Some(locations),
+        generated_queries::CrossFileReferences::Unavailable => return None,
+        generated_queries::CrossFileReferences::Continue(session) => session,
+    };
 
     // Local file references via ScopeTree (and text-search fallback).
-    let mut locations = get_references_with_fallback_impl(
+    let mut locations = generated_queries::references_with_fallback(
         text,
         position,
         uri,
@@ -426,118 +394,7 @@ pub fn get_references_with_fallback(
     uri: &Uri,
     cached_program: Option<&Program>,
 ) -> Option<Vec<Location>> {
-    get_references_with_fallback_impl(text, position, uri, cached_program, true, None)
-}
-
-fn get_references_with_fallback_impl(
-    text: &str,
-    position: Position,
-    uri: &Uri,
-    cached_program: Option<&Program>,
-    check_generated_capture: bool,
-    shared_generated_session: Option<&crate::generated_captures::GeneratedQuerySession>,
-) -> Option<Vec<Location>> {
-    // Get the byte offset of the cursor
-    let offset = position_to_offset(text, position)?;
-
-    // Parse, falling back to cached program or resilient parser. Generated
-    // capture references require the exact current-source AST.
-    let parse_src = parser_source(text);
-    let (program, has_exact_source_ast) = match parse_program(parse_src.as_ref()) {
-        Ok(p) => (p, true),
-        Err(_) => {
-            if let Some(cached) = cached_program {
-                (cached.clone(), false)
-            } else {
-                let partial = shape_ast::parse_program_resilient(parse_src.as_ref());
-                if partial.items.is_empty() {
-                    return None;
-                }
-                (partial.into_program(), false)
-            }
-        }
-    };
-    let owned_generated_session =
-        (check_generated_capture && has_exact_source_ast && shared_generated_session.is_none())
-            .then(|| {
-                crate::generated_captures::GeneratedQuerySession::new(
-                    &program,
-                    text,
-                    crate::generated_captures::CaptureQueryContext::unavailable(),
-                )
-            });
-    let generated_session = shared_generated_session.or(owned_generated_session.as_ref());
-    if check_generated_capture && has_exact_source_ast {
-        let session = generated_session.expect("exact generated capture check has a session");
-        match crate::generated_captures::generated_capture_references_with_session(
-            &program, text, offset, uri, session,
-        ) {
-            crate::generated_captures::GeneratedCaptureLookup::Found(locations) => {
-                return Some(locations);
-            }
-            crate::generated_captures::GeneratedCaptureLookup::Unavailable => return None,
-            crate::generated_captures::GeneratedCaptureLookup::NotCapture => {}
-        }
-    }
-    // ADR-009 D1 (S5): references on a generated declaration are answered
-    // from the compiler's SymbolId/provenance query surface (Decision 66):
-    // every AST call site + the application site. The scope/text providers
-    // below never serve generated symbols (rejection row 6 — the text-scan
-    // fallback would return decoy occurrences in comments/strings).
-    if let Some(word) = get_word_at_position(text, position) {
-        let generated_locations =
-            if let Some(compiler) = generated_session.and_then(|session| session.compiler()) {
-                crate::generated_symbols::generated_references_from_compiler(
-                    &program, text, &word, offset, uri, compiler,
-                )
-            } else if !has_exact_source_ast {
-                crate::generated_symbols::generated_references(&program, text, &word, offset, uri)
-            } else {
-                None
-            };
-        if let Some(locations) = generated_locations {
-            return Some(locations);
-        }
-    }
-
-    let tree = crate::scope::ScopeTree::build(&program, text);
-
-    // Find all references (def + uses) via scope-aware resolution
-    let spans = tree.references_of(offset)?;
-
-    let locations: Vec<Location> = spans
-        .into_iter()
-        .map(|(start, end)| {
-            let (start_line, start_col) = offset_to_line_col(text, start);
-            let (end_line, end_col) = offset_to_line_col(text, end);
-            Location {
-                uri: uri.clone(),
-                range: Range {
-                    start: Position {
-                        line: start_line,
-                        character: start_col,
-                    },
-                    end: Position {
-                        line: end_line,
-                        character: end_col,
-                    },
-                },
-            }
-        })
-        .collect();
-
-    if locations.is_empty() {
-        // Fallback to text-based search if scope tree didn't find anything
-        let word = get_word_at_position(text, position)?;
-        let fallback = find_all_references(&program, &word, uri, text);
-        if fallback.is_empty() {
-            None
-        } else {
-            Some(fallback)
-        }
-    } else {
-        Some(locations)
-    }
+    generated_queries::references_with_fallback(text, position, uri, cached_program, true, None)
 }
 
 /// Find the definition site of the *type* of the symbol at the cursor.
