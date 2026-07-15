@@ -15,11 +15,11 @@ impl CapturePack {
     /// capture opcodes against this pack. The declaration is re-derived from
     /// retained source ownership; the emitted vector is never passed in as
     /// both expected and actual.
-    pub(crate) fn validate_emitted_artifact(
+    pub(crate) fn validate_emitted_artifact<'a>(
         &self,
         layout: &ClosureLayout,
         function: &Function,
-        instructions: &[Instruction],
+        instructions: impl IntoIterator<Item = &'a Instruction>,
     ) -> std::result::Result<(), String> {
         for (ordinal, descriptor) in self.descriptors.iter().enumerate() {
             if usize::from(descriptor.index) != ordinal {

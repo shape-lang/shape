@@ -78,19 +78,18 @@ impl BytecodeCompiler {
             }
             let rebuilt = ClosureLayout::from_capture_types(&capture_types, &kinds);
 
-            let end = function
-                .entry_point
-                .checked_add(function.body_length)
-                .filter(|end| *end <= self.program.instructions.len())
-                .ok_or_else(|| {
+            let direct_instructions = self
+                .program
+                .direct_function_instructions(usize::from(function_index))
+                .map_err(|error| {
                     internal_error(format!(
-                        "closure {function_index}: function instruction window is out of bounds"
+                        "closure {function_index}: invalid function instruction windows: {error}"
                     ))
                 })?;
             pack.validate_emitted_artifact(
                 registry_layout,
                 function,
-                &self.program.instructions[function.entry_point..end],
+                direct_instructions,
             )
             .map_err(&internal_error)?;
             layouts[usize::from(function_index)] = Some(Arc::new(rebuilt));

@@ -171,6 +171,36 @@ run()
         .validate_emitted_artifact(layout, function, &without_capture_ops)
         .expect_err("cell-backed descriptor requires its exact opcode family");
     assert!(opcode_error.contains("requires opcode family"), "{opcode_error}");
+
+    let wrong_family = [crate::bytecode::Instruction::new(
+        crate::bytecode::OpCode::LoadSharedCaptureI64,
+        Some(crate::bytecode::Operand::Local(0)),
+    )];
+    let wrong_family_error = pack
+        .validate_emitted_artifact(layout, function, &wrong_family)
+        .expect_err("a different cell family must not satisfy the descriptor");
+    assert!(
+        wrong_family_error.contains("requires opcode family"),
+        "{wrong_family_error}"
+    );
+
+    let mixed_families = [
+        crate::bytecode::Instruction::new(
+            crate::bytecode::OpCode::LoadOwnedMutableCaptureI64,
+            Some(crate::bytecode::Operand::Local(0)),
+        ),
+        crate::bytecode::Instruction::new(
+            crate::bytecode::OpCode::LoadSharedCaptureI64,
+            Some(crate::bytecode::Operand::Local(0)),
+        ),
+    ];
+    let mixed_family_error = pack
+        .validate_emitted_artifact(layout, function, &mixed_families)
+        .expect_err("mixed cell families for one capture must reject");
+    assert!(
+        mixed_family_error.contains("emitted mixed capture-cell opcode families"),
+        "{mixed_family_error}"
+    );
 }
 
 /// A rejection reached while compiling the body of a Shared-capturing closure

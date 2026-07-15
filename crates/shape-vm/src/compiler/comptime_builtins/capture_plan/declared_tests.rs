@@ -55,11 +55,9 @@ scale(2)
     /// the rejected C1 branch set the mask correctly and still emitted a
     /// leading-param load in the body.
     fn closure_body_opcodes(c: &BytecodeCompiler, func_idx: u16) -> Vec<crate::bytecode::OpCode> {
-        let function = &c.program.functions[func_idx as usize];
-        let start = function.entry_point;
-        let end = (start + function.body_length).min(c.program.instructions.len());
-        c.program.instructions[start..end]
-            .iter()
+        c.program
+            .direct_function_instructions(usize::from(func_idx))
+            .expect("closure function has a valid direct instruction window")
             .map(|instruction| instruction.opcode)
             .collect()
     }

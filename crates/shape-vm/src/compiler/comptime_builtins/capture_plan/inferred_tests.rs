@@ -5,6 +5,9 @@ use crate::compiler::BytecodeCompiler;
 mod fixtures;
 use fixtures::{facts_for, legacy_pair};
 
+#[path = "inferred_tests/direct_function_instructions.rs"]
+mod direct_function_instructions;
+
 // ───────────────────────────────────────────────────────────────────
 // (a) FUSION EQUIVALENCE — the fused plan reproduces the pre-fusion
 //     `(mutable_flags[i], capture_kinds[i])` pair across the FULL
