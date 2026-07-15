@@ -1,6 +1,8 @@
 use super::*;
 use shape_ast::ast::{FunctionParam, ObjectTypeField, TypePath};
-use shape_runtime::type_system::{SemanticCallSiteFact, TypeInferenceEngine, TypeVarGen};
+use shape_runtime::type_system::{
+    SemanticCallSiteFact, TypeConstraint, TypeInferenceEngine, TypeVarGen, tyvar_to_annotation,
+};
 
 fn unknown() -> TypeAnnotation {
     TypeAnnotation::Basic("unknown".to_string())
@@ -31,6 +33,52 @@ fn lossy_unknown_detector_is_recursive_across_every_named_leaf_form() {
         })),
     ];
     assert!(cases.iter().all(annotation_has_lossy_unknown_sentinel));
+}
+
+#[test]
+fn partial_inference_inputs_refuse_through_stable_freeze_boundaries() {
+    let compiler = BytecodeCompiler::new();
+    let overlay = overlay_for_tests(&compiler);
+    let nested_unknown = TypeAnnotation::Array(Box::new(TypeAnnotation::Object(vec![
+        ObjectTypeField {
+            name: "value".to_string(),
+            optional: false,
+            type_annotation: unknown(),
+            annotations: Vec::new(),
+        },
+    ])));
+    let unknown_error = overlay
+        .canonicalize_type_projection(&nested_unknown)
+        .expect_err("nested unknown must not enter the freeze");
+    assert!(
+        unknown_error.contains("unknown semantic type identity")
+            && unknown_error.contains("type name 'unknown'"),
+        "{unknown_error}"
+    );
+
+    let mut variables = TypeVarGen::new();
+    let encoded = TypeAnnotation::Array(Box::new(tyvar_to_annotation(&variables.fresh_var())));
+    let encoded_error = overlay
+        .canonicalize_type_projection(&encoded)
+        .expect_err("authenticated inference carrier must not enter the freeze");
+    assert!(
+        encoded_error.contains("cannot be frozen")
+            && encoded_error.contains("unresolved inference variable"),
+        "{encoded_error}"
+    );
+
+    let constrained = variables.fresh_var();
+    let constrained_error = overlay
+        .inference_type_annotation(&Type::Constrained {
+            var: constrained.clone(),
+            constraint: Box::new(TypeConstraint::Comparable),
+        })
+        .expect_err("constrained variable must not enter the freeze");
+    assert!(
+        constrained_error.contains("capture semantic type contains constrained inference variable")
+            && constrained_error.contains(constrained.presentation_name().as_ref()),
+        "{constrained_error}"
+    );
 }
 
 #[test]
@@ -115,6 +163,7 @@ fn provenance_free_variables_refuse_even_when_the_spelling_is_scoped() {
         "provenance-free inference variable '{}'",
         same_spelling.presentation_name()
     )));
+    assert!(active.contains("cannot be frozen"));
 
     let stray_error = overlay
         .inference_type_annotation(&Type::Variable(stray.clone()))
@@ -123,6 +172,7 @@ fn provenance_free_variables_refuse_even_when_the_spelling_is_scoped() {
         "provenance-free inference variable '{}'",
         stray.presentation_name()
     )));
+    assert!(stray_error.contains("cannot be frozen"));
 }
 
 #[test]

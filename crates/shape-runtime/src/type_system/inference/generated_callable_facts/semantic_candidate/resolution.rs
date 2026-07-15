@@ -65,3 +65,6 @@ fn annotation_is_semantically_resolved(annotation: &TypeAnnotation, allow_declar
         | TypeAnnotation::Undefined => true,
     }
 }
+
+#[cfg(test)]
+mod tests;

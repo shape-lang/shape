@@ -146,3 +146,6 @@ impl BytecodeCompiler {
         }
     }
 }
+
+#[cfg(test)]
+mod tests;

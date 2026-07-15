@@ -143,23 +143,3 @@ fn frozen_callable_identity_distinguishes_full_signatures_and_synonyms_join() {
     assert_eq!(int.identity_components(), i64.identity_components());
     assert_eq!(semantic_hash(&int), semantic_hash(&i64));
 }
-
-#[test]
-fn unresolved_subject_never_issues_exact_capture_evidence() {
-    let program = parse_program(
-        "fn retain<T>(value: T) -> T { value }\nlet retained = retain(missing_value)",
-    )
-    .expect("unresolved semantic candidate fixture parses");
-    let mut inference = TypeInferenceEngine::new();
-    let (facts, _) = inference.infer_program_facts_best_effort(&program);
-    let fact = facts
-        .semantic_callsite_facts()
-        .iter()
-        .find_map(|(key, fact)| (key.callee() == "retain").then_some(fact))
-        .expect("unresolved generic call still publishes semantic evidence");
-
-    assert!(
-        matches!(fact, SemanticCallSiteFact::Unavailable(_)),
-        "the inference issuer must refuse unresolved exact evidence: {fact:?}"
-    );
-}

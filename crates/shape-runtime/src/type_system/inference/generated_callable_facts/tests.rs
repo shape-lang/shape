@@ -206,8 +206,13 @@ fn raw_variable_candidate_is_explicitly_unavailable() {
     );
 
     engine.finalize_generated_callable_facts();
-    assert!(matches!(
-        engine.generated_inference.callable_facts.get(&key),
-        Some(GeneratedCallableFact::Unavailable(_))
-    ));
+    let Some(GeneratedCallableFact::Unavailable(issue)) =
+        engine.generated_inference.callable_facts.get(&key)
+    else {
+        panic!("unresolved inference variable must be explicitly unavailable")
+    };
+    assert_eq!(
+        issue.detail(),
+        "semantic type retained an unresolved inference variable after solving"
+    );
 }
