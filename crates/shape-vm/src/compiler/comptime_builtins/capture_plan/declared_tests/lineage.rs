@@ -31,6 +31,14 @@ job.read()
 
     assert_eq!(outer.descriptors[0].access, CaptureAccess::Param);
     assert_eq!(inner.descriptors[0].access, CaptureAccess::Param);
+    assert_eq!(
+        outer.descriptors[0].ownership,
+        Some(BindingOwnershipClass::OwnedImmutable)
+    );
+    assert_eq!(
+        inner.descriptors[0].ownership,
+        Some(BindingOwnershipClass::OwnedImmutable)
+    );
     assert_eq!(outer.descriptors[0].declared, Some(CaptureMode::Move));
     assert_eq!(inner.descriptors[0].declared, Some(CaptureMode::Move));
     assert_ne!(

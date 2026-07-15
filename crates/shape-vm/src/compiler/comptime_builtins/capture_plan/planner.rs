@@ -42,10 +42,11 @@ impl BytecodeCompiler {
                     ),
                     location: None,
                 })?;
-            let Some(_param_name) = params
+            if params
                 .get(param_index)
                 .and_then(|param| param.pattern.as_identifier())
-            else {
+                .is_none()
+            {
                 return Err(ShapeError::RuntimeError {
                     message: format!(
                         "internal compiler error: capture parameter {param_index} of \
@@ -53,7 +54,14 @@ impl BytecodeCompiler {
                     ),
                     location: None,
                 });
-            };
+            }
+            if evidence.access == CaptureAccess::Param {
+                self.type_tracker.set_local_binding_semantics(
+                    expected_slot,
+                    Self::owned_immutable_binding_semantics(),
+                );
+                self.immutable_locals.insert(expected_slot);
+            }
             if let Some(binding_span) = evidence.binding_span {
                 self.local_binding_spans.insert(expected_slot, binding_span);
             }
