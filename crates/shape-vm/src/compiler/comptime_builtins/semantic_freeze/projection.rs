@@ -66,15 +66,17 @@ impl FreezeOverlay {
             reference: canonical.reference,
             union: canonical.union.clone(),
         };
-        let mut composites = self
-            .composites
-            .lock()
-            .expect("freeze-overlay composite memo lock poisoned");
-        if let Some(previous) = composites.insert(canonical.identity, entry) {
-            assert_eq!(
-                previous.category, canonical.category,
-                "canonical type identity collision across semantic categories"
-            );
+        {
+            let mut composites = self
+                .composites
+                .lock()
+                .expect("freeze-overlay composite memo lock poisoned");
+            if let Some(previous) = composites.insert(canonical.identity, entry) {
+                assert_eq!(
+                    previous.category, canonical.category,
+                    "canonical type identity collision across semantic categories"
+                );
+            }
         }
         Ok(FrozenSemanticTypeProjection {
             identity: canonical.identity,
