@@ -1,6 +1,6 @@
 //! Exact declaration capabilities for named and synthetic callables.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use shape_ast::ast::FunctionDef;
 
@@ -10,38 +10,68 @@ use super::{
 };
 use crate::type_system::{BindingToken, Type, TypeError, TypeResult, TypeScheme, TypeVar};
 
+fn declared_quantifiers(scheme: &TypeScheme) -> TypeResult<Vec<TypeVar>> {
+    let mut declared = Vec::new();
+    let mut owner = None;
+    let mut source_names = HashSet::new();
+    for variable in &scheme.quantified {
+        let Some(provenance) = variable.declared_provenance() else {
+            continue;
+        };
+        let ordinal = u32::try_from(declared.len()).map_err(|_| {
+            TypeError::ConstraintViolation(
+                "generic scheme declares more parameters than the provenance range supports"
+                    .to_string(),
+            )
+        })?;
+        if provenance.ordinal() != ordinal {
+            return Err(TypeError::ConstraintViolation(
+                "generic scheme parameter order disagrees with declared provenance".to_string(),
+            ));
+        }
+        if owner.is_some_and(|expected| expected != provenance.owner()) {
+            return Err(TypeError::ConstraintViolation(
+                "generic scheme combines parameters from different declaration owners"
+                    .to_string(),
+            ));
+        }
+        owner = Some(provenance.owner());
+        if !source_names.insert(provenance.source_name()) {
+            return Err(TypeError::ConstraintViolation(format!(
+                "generic scheme declares type parameter '{}' more than once",
+                provenance.source_name()
+            )));
+        }
+        declared.push(variable.clone());
+    }
+    Ok(declared)
+}
+
+fn same_declared_quantifiers(expected: &[TypeVar], actual: &[TypeVar]) -> bool {
+    expected.len() == actual.len()
+        && expected.iter().zip(actual).all(|(expected, actual)| {
+            let (Some(expected), Some(actual)) = (
+                expected.declared_provenance(),
+                actual.declared_provenance(),
+            ) else {
+                return false;
+            };
+            expected.owner() == actual.owner()
+                && expected.ordinal() == actual.ordinal()
+                && expected.source_name() == actual.source_name()
+        })
+}
+
 impl TypeInferenceEngine {
     pub(crate) fn declared_parameter_tokens(
         scheme: &TypeScheme,
     ) -> TypeResult<HashMap<String, TypeVar>> {
-        let mut parameters = HashMap::with_capacity(scheme.quantified.len());
-        let mut owner = None;
-        for (index, variable) in scheme.quantified.iter().enumerate() {
-            let provenance = variable.declared_provenance().ok_or_else(|| {
-                TypeError::ConstraintViolation(
-                    "generic scheme contains a quantified token without declared provenance"
-                        .to_string(),
-                )
-            })?;
-            if provenance.ordinal()
-                != u32::try_from(index).map_err(|_| {
-                    TypeError::ConstraintViolation(
-                        "generic scheme declares more parameters than the provenance range supports"
-                            .to_string(),
-                    )
-                })?
-            {
-                return Err(TypeError::ConstraintViolation(
-                    "generic scheme parameter order disagrees with declared provenance".to_string(),
-                ));
-            }
-            if owner.is_some_and(|expected| expected != provenance.owner()) {
-                return Err(TypeError::ConstraintViolation(
-                    "generic scheme combines parameters from different declaration owners"
-                        .to_string(),
-                ));
-            }
-            owner = Some(provenance.owner());
+        let declared = declared_quantifiers(scheme)?;
+        let mut parameters = HashMap::with_capacity(declared.len());
+        for variable in declared {
+            let provenance = variable
+                .declared_provenance()
+                .expect("declared_quantifiers returns only declared capabilities");
             if parameters
                 .insert(provenance.source_name().to_string(), variable.clone())
                 .is_some()
@@ -124,7 +154,7 @@ impl TypeInferenceEngine {
                 "internal inference error: callable declaration was predeclared twice".to_string(),
             ));
         }
-        let quantified = scheme.quantified.clone();
+        let declared = declared_quantifiers(&scheme)?;
         let token = self.env.define_with_token(&function.name, scheme);
         self.generated_inference
             .callable_binding_tokens
@@ -134,7 +164,7 @@ impl TypeInferenceEngine {
             .insert(function.name.clone(), declaration);
         self.generated_inference
             .callable_declared_parameters
-            .insert(declaration, quantified);
+            .insert(declaration, declared);
         self.record_named_callable_semantic_candidate(token, function, ty);
         Ok(())
     }
@@ -161,6 +191,7 @@ impl TypeInferenceEngine {
         scheme: TypeScheme,
         ty: &Type,
     ) -> TypeResult<()> {
+        let republished_declared = declared_quantifiers(&scheme)?;
         let declaration = InferenceCallableDeclarationToken::of(function);
         let token = self
             .generated_inference
@@ -183,7 +214,7 @@ impl TypeInferenceEngine {
                         .to_string(),
                 )
             })?;
-        if declared != &scheme.quantified {
+        if !same_declared_quantifiers(declared, &republished_declared) {
             return Err(TypeError::ConstraintViolation(
                 "internal inference error: callable re-publication changed its declared generic tokens"
                     .to_string(),
@@ -209,3 +240,6 @@ impl TypeInferenceEngine {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests;

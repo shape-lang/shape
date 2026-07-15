@@ -392,6 +392,15 @@ fn unannotated_callsites_still_widen_the_definition() {
     let mut engine = TypeInferenceEngine::new();
     let (facts, errors) = engine.infer_program_facts_best_effort(&program);
     assert!(errors.is_empty(), "unexpected inference errors: {errors:?}");
+    assert!(facts.semantic_callee_declaration("inferred").is_none());
+    assert_eq!(
+        facts
+            .semantic_callsite_facts()
+            .keys()
+            .filter(|key| key.callee() == "inferred")
+            .count(),
+        0
+    );
 
     let Type::Function { params, returns } = facts
         .top_level_type("inferred")
