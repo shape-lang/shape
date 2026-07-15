@@ -146,6 +146,10 @@ fn probe(value: int) -> int {
         .find(|function| function.name == "probe")
         .and_then(|function| function.mir_data.as_ref())
         .expect("public replacement publishes MIR data");
+    let exact_closure_identities = [
+        shadow_closure.name.as_str(),
+        replacement_closure.name.as_str(),
+    ];
     let referenced_closures: Vec<_> = replacement_mir
         .mir
         .iter_blocks()
@@ -156,7 +160,7 @@ fn probe(value: int) -> int {
                 crate::mir::types::Rvalue::Use(crate::mir::types::Operand::Constant(
                     crate::mir::types::MirConstant::Function(name),
                 )),
-            ) if name.starts_with("__closure_") => Some(name.as_str()),
+            ) if exact_closure_identities.contains(&name.as_str()) => Some(name.as_str()),
             _ => None,
         })
         .collect();
