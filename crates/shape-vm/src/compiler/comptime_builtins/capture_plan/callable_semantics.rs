@@ -85,8 +85,6 @@ pub(crate) enum CallableSemanticIssueKind {
     MissingSemanticFreeze,
     NotCallable,
     ArityMismatch,
-    ParameterTypeUnavailable,
-    ReturnTypeUnavailable,
     PassingModeConflict,
     OptionalityConflict,
     CallableShapeUnavailable,
@@ -129,15 +127,6 @@ pub(crate) enum CallableSemanticEvidence {
 impl CallableSemanticEvidence {
     pub(crate) fn unavailable(kind: CallableSemanticIssueKind, detail: impl Into<String>) -> Self {
         Self::Unavailable(CallableSemanticIssue::new(kind, detail))
-    }
-
-    pub(crate) fn callable_type(
-        &self,
-    ) -> std::result::Result<&CallableSemanticType, &CallableSemanticIssue> {
-        match self {
-            Self::Exact(callable) => Ok(callable),
-            Self::Unavailable(issue) | Self::Conflict(issue) => Err(issue),
-        }
     }
 }
 

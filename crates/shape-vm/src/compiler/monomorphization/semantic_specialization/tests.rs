@@ -315,17 +315,17 @@ fn ordinary_inner_closes_its_argument_without_inheriting_caller_scope() {
     let program = parse_program(source).expect("nested exact fixture must parse");
     let (_, _, _, facts) =
         BytecodeCompiler::infer_reference_model_with_comptime_context(&program, false);
-    let call_span = |callee: &str| {
-        facts
-            .semantic_callsite_facts()
-            .keys()
-            .find(|key| key.callee() == callee)
-            .map(SemanticCallSiteKey::call_span)
-            .expect("nested call site must have semantic evidence")
+    let (outer_span, inner_span) = {
+        let call_span = |callee: &str| {
+            facts
+                .semantic_callsite_facts()
+                .keys()
+                .find(|key| key.callee() == callee)
+                .map(SemanticCallSiteKey::call_span)
+                .expect("nested call site must have semantic evidence")
+        };
+        (call_span("outer"), call_span("inner"))
     };
-    let outer_span = call_span("outer");
-    let inner_span = call_span("inner");
-    drop(call_span);
     let mut compiler = BytecodeCompiler::new();
     compiler.inference_facts = facts;
     compiler

@@ -3599,7 +3599,8 @@ annotation reflect() {
             }),
             Span::DUMMY,
         );
-        super::rewrite_comptime_type_symbol_args(&mut statement, overlay.as_ref());
+        super::rewrite_comptime_type_symbol_args(&mut statement, overlay.as_ref())
+            .expect("trait_ref rewrite against frozen trait identity must succeed");
 
         let Statement::Return(Some(Expr::FunctionCall { name, args, .. }), _) = &statement else {
             panic!("rewrite must keep the return-call shape: {statement:?}");
@@ -3683,7 +3684,8 @@ annotation reflect() {
             }),
             Span::DUMMY,
         );
-        let _ = super::rewrite_comptime_type_symbol_args(&mut statement, overlay.as_ref());
+        super::rewrite_comptime_type_symbol_args(&mut statement, overlay.as_ref())
+            .expect("type_constructor rewrite against frozen nominal identity must succeed");
 
         let Statement::Return(Some(Expr::FunctionCall { name, args, .. }), _) = &statement else {
             panic!("rewrite must keep the return-call shape: {statement:?}");

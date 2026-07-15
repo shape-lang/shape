@@ -77,12 +77,6 @@ impl CapturePack {
         &self.callable_semantic_evidence
     }
 
-    pub(crate) fn callable_semantic_type(
-        &self,
-    ) -> std::result::Result<&CallableSemanticType, &CallableSemanticIssue> {
-        self.callable_semantic_evidence.callable_type()
-    }
-
     /// The emitted layout's `capture_kinds` vector.
     pub(crate) fn kinds(&self) -> Vec<CaptureKind> {
         self.descriptors.iter().map(|d| d.lowered).collect()

@@ -194,15 +194,6 @@ impl CaptureSemanticEvidence {
     pub(crate) fn conflict(kind: CaptureSemanticIssueKind, detail: impl Into<String>) -> Self {
         Self::Conflict(CaptureSemanticIssue::new(kind, detail))
     }
-
-    pub(crate) fn exact_type(
-        &self,
-    ) -> std::result::Result<&CaptureSemanticType, &CaptureSemanticIssue> {
-        match self {
-            Self::Exact(semantic_type) => Ok(semantic_type),
-            Self::Unavailable(issue) | Self::Conflict(issue) => Err(issue),
-        }
-    }
 }
 
 /// Everything the selector is allowed to look at.

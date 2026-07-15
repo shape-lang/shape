@@ -26,18 +26,21 @@ fn exact_lexical_inline_inherits_closed_outer_evidence_and_parameter_scopes() {
     let program = parse_program(source).expect("lexical-inline fixture must parse");
     let (_, _, _, facts) =
         BytecodeCompiler::infer_reference_model_with_comptime_context(&program, false);
-    let call_span = |callee: &str| {
-        facts
-            .semantic_callsite_facts()
-            .keys()
-            .find(|key| key.callee() == callee)
-            .map(SemanticCallSiteKey::call_span)
-            .expect("fixture call must publish semantic evidence")
+    let (outer_span, inner_span, string_span) = {
+        let call_span = |callee: &str| {
+            facts
+                .semantic_callsite_facts()
+                .keys()
+                .find(|key| key.callee() == callee)
+                .map(SemanticCallSiteKey::call_span)
+                .expect("fixture call must publish semantic evidence")
+        };
+        (
+            call_span("outer"),
+            call_span("inner"),
+            call_span("string_identity"),
+        )
     };
-    let outer_span = call_span("outer");
-    let inner_span = call_span("inner");
-    let string_span = call_span("string_identity");
-    drop(call_span);
 
     let mut compiler = BytecodeCompiler::new();
     compiler.inference_facts = facts;
