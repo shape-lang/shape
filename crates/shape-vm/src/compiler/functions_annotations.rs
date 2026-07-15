@@ -3338,11 +3338,17 @@ impl BytecodeCompiler {
         func_def: &FunctionDef,
         annotations: Vec<crate::bytecode::CompiledAnnotation>,
         inferred_reference_optimizations: &[Option<ParamPassMode>],
+        effective_pass_modes: &[ParamPassMode],
     ) -> Result<()> {
         assert_eq!(
             func_def.params.len(),
             inferred_reference_optimizations.len(),
             "runtime annotation provenance must stay slot-aligned"
+        );
+        assert_eq!(
+            func_def.params.len(),
+            effective_pass_modes.len(),
+            "runtime annotation pass modes must stay slot-aligned"
         );
         // Step 1: Compile the raw function body as a hygienic impl-body slot
         // (former user-spellable `{name}___impl`, ADR-009 E3 S4/U11).
@@ -3357,22 +3363,31 @@ impl BytecodeCompiler {
             body: func_def.body.clone(),
             type_params: func_def.type_params.clone(),
             annotations: Vec::new(),
-            where_clause: None,
+            where_clause: func_def.where_clause.clone(),
             is_async: func_def.is_async,
             is_comptime: func_def.is_comptime,
         };
         self.register_function(&impl_def)?;
-        self.compile_function_body_with_inferred_reference_optimizations(
+        let impl_idx = self
+            .find_function(&impl_name)
+            .ok_or_else(|| ShapeError::RuntimeError {
+                message: format!("Impl function '{}' not found after registration", impl_name),
+                location: None,
+            })?;
+        self.refresh_runtime_annotation_impl_metadata(
+            impl_idx,
             &impl_def,
-            inferred_reference_optimizations,
+            &func_def.name,
+            effective_pass_modes,
         )?;
+        self.with_body_analysis_authority(impl_idx, func_def, &impl_def, |compiler| {
+            compiler.compile_function_body_with_inferred_reference_optimizations(
+                &impl_def,
+                inferred_reference_optimizations,
+            )
+        })?;
 
-        let mut current_impl_idx =
-            self.find_function(&impl_name)
-                .ok_or_else(|| ShapeError::RuntimeError {
-                    message: format!("Impl function '{}' not found after compilation", impl_name),
-                    location: None,
-                })? as u16;
+        let mut current_impl_idx = impl_idx as u16;
 
         // Step 2: Apply annotations inside-out (last annotation wraps first)
         // For @a @b @c: wrap order is c(impl) -> b(c_wrapper) -> a(b_wrapper)
@@ -3446,11 +3461,17 @@ impl BytecodeCompiler {
         func_def: &FunctionDef,
         compiled_ann: crate::bytecode::CompiledAnnotation,
         inferred_reference_optimizations: &[Option<ParamPassMode>],
+        effective_pass_modes: &[ParamPassMode],
     ) -> Result<()> {
         assert_eq!(
             func_def.params.len(),
             inferred_reference_optimizations.len(),
             "runtime annotation provenance must stay slot-aligned"
+        );
+        assert_eq!(
+            func_def.params.len(),
+            effective_pass_modes.len(),
+            "runtime annotation pass modes must stay slot-aligned"
         );
         // Find the annotation on the function to get the arg expressions
         let ann = func_def
@@ -3476,22 +3497,29 @@ impl BytecodeCompiler {
             body: func_def.body.clone(),
             type_params: func_def.type_params.clone(),
             annotations: Vec::new(),
-            where_clause: None,
+            where_clause: func_def.where_clause.clone(),
             is_async: func_def.is_async,
             is_comptime: func_def.is_comptime,
         };
         self.register_function(&impl_def)?;
-        self.compile_function_body_with_inferred_reference_optimizations(
-            &impl_def,
-            inferred_reference_optimizations,
-        )?;
-
         let impl_idx = self
             .find_function(&impl_name)
             .ok_or_else(|| ShapeError::RuntimeError {
-                message: format!("Impl function '{}' not found after compilation", impl_name),
+                message: format!("Impl function '{}' not found after registration", impl_name),
                 location: None,
-            })? as u16;
+            })?;
+        self.refresh_runtime_annotation_impl_metadata(
+            impl_idx,
+            &impl_def,
+            &func_def.name,
+            effective_pass_modes,
+        )?;
+        self.with_body_analysis_authority(impl_idx, func_def, &impl_def, |compiler| {
+            compiler.compile_function_body_with_inferred_reference_optimizations(
+                &impl_def,
+                inferred_reference_optimizations,
+            )
+        })?;
 
         // Step 2: Compile the wrapper
         let func_idx =
@@ -3501,7 +3529,13 @@ impl BytecodeCompiler {
                     location: None,
                 })?;
 
-        self.compile_annotation_wrapper(func_def, func_idx, impl_idx, &compiled_ann, &ann_arg_exprs)
+        self.compile_annotation_wrapper(
+            func_def,
+            func_idx,
+            impl_idx as u16,
+            &compiled_ann,
+            &ann_arg_exprs,
+        )
     }
 
     /// §4.1.5 runtime-hook `ctx` type. Field order MUST match the ctx object

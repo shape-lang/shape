@@ -3076,10 +3076,7 @@ fn closure_body_terminal_expr(body: &[shape_ast::ast::Statement]) -> Option<&Exp
 impl BytecodeCompiler {
     pub(crate) fn callable_return_hint_name_for_expr(&self, expr: &Expr) -> Option<String> {
         callable_selection_arity(expr)?;
-        let function_name = self
-            .current_function
-            .and_then(|idx| self.program.functions.get(idx))
-            .map(|function| function.name.clone())?;
+        let function_name = self.current_body_semantic_owner_key()?.to_string();
         if function_name.starts_with("__closure_") {
             return None;
         }
@@ -3316,20 +3313,15 @@ impl BytecodeCompiler {
             .and_then(|span| self.inference_facts.binding_type(span))
             .and_then(|ty| function_type_param_hints(ty, params.len()));
         let returned_callsite_param_hints: Option<Vec<Option<TypeAnnotation>>> = self
-            .current_function
-            .and_then(|idx| self.program.functions.get(idx))
-            .and_then(|function| {
-                self.returned_closure_callsite_param_hints
-                    .get(&function.name)
-            })
+            .current_body_semantic_owner_key()
+            .and_then(|name| self.returned_closure_callsite_param_hints.get(name))
             .and_then(|hint| match hint {
                 ClosureCallsiteHint::Types(types) => Some(types.clone()),
                 ClosureCallsiteHint::Conflict => None,
             });
         let returned_closure_param_hints: Option<Vec<Option<TypeAnnotation>>> = self
-            .current_function
-            .and_then(|idx| self.program.functions.get(idx))
-            .and_then(|function| self.inference_facts.function_signature(&function.name))
+            .current_body_semantic_owner_key()
+            .and_then(|name| self.inference_facts.function_signature(name))
             .and_then(|signature| match signature.canonicalize() {
                 Type::Function { returns, .. } => {
                     function_type_param_hints(returns.as_ref(), params.len())

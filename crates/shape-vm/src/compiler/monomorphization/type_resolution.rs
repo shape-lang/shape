@@ -3781,13 +3781,7 @@ fn current_function_param_concrete_type_from_facts(
         return None;
     }
 
-    let current_fn_idx = compiler.current_function?;
-    let current_fn_name = compiler
-        .program
-        .functions
-        .get(current_fn_idx)?
-        .name
-        .as_str();
+    let current_fn_name = compiler.current_body_semantic_owner_key()?;
     let Type::Function { params, .. } = compiler
         .inference_facts
         .function_signature(current_fn_name)?

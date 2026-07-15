@@ -37,6 +37,7 @@ impl BytecodeCompiler {
         Self {
             program: BytecodeProgram::new(),
             current_function: None,
+            active_body_analysis_authority: None,
             locals: vec![HashMap::new()],
             hygienic_local_nonce: 0,
             module_bindings: HashMap::new(),

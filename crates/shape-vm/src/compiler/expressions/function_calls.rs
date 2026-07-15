@@ -1066,8 +1066,7 @@ impl BytecodeCompiler {
         param_name: &str,
         arg_count: Option<usize>,
     ) -> Option<Type> {
-        let current_idx = self.current_function?;
-        let function_name = self.program.functions.get(current_idx)?.name.as_str();
+        let function_name = self.current_body_semantic_owner_key()?;
         let Type::Function { params, .. } = self
             .inference_facts
             .function_signature(function_name)?

@@ -80,6 +80,7 @@ pub(crate) mod comptime_concrete;
 pub(crate) mod comptime_diagnostics;
 pub(crate) mod comptime_target;
 mod control_flow;
+mod body_analysis_authority;
 mod expressions;
 mod functions;
 mod functions_annotations;
@@ -672,6 +673,11 @@ pub struct BytecodeCompiler {
 
     /// Current function being compiled
     pub(crate) current_function: Option<usize>,
+
+    /// Scoped authority for compiling a byte-identical generated function body
+    /// under a distinct emission identity. The owned semantic-owner key may be
+    /// consulted only while `current_function` is the exact emission id.
+    active_body_analysis_authority: Option<body_analysis_authority::ActiveBodyAnalysisAuthority>,
 
     /// Local variable mappings (name -> index)
     pub(crate) locals: Vec<HashMap<String, u16>>,

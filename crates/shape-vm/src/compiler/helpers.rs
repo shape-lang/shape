@@ -3787,7 +3787,13 @@ impl BytecodeCompiler {
                 // U4-5b: classify the Result/Option discriminator off the
                 // recorded return `ConcreteType` — no return-NAME string head
                 // match.
-                let func_name = self.program.functions[func_idx].name.clone();
+                let func_name = if self.current_function == Some(func_idx) {
+                    self.current_body_semantic_owner_key()
+                        .unwrap_or(self.program.functions[func_idx].name.as_str())
+                        .to_string()
+                } else {
+                    self.program.functions[func_idx].name.clone()
+                };
                 self.type_tracker
                     .get_function_return_concrete_type(&func_name)
                     .map(classify_concrete_return_metadata)

@@ -628,7 +628,7 @@ impl BytecodeCompiler {
 
     fn param_annotation_for_destructure_context(
         &self,
-        func_def: &FunctionDef,
+        semantic_owner_key: &str,
         param_idx: usize,
         param: &shape_ast::ast::FunctionParameter,
     ) -> Option<shape_ast::ast::TypeAnnotation> {
@@ -637,7 +637,7 @@ impl BytecodeCompiler {
         }
 
         let shape_runtime::type_system::Type::Function { params, .. } =
-            self.inference_facts.function_signature(&func_def.name)?
+            self.inference_facts.function_signature(semantic_owner_key)?
         else {
             return None;
         };
@@ -684,7 +684,7 @@ impl BytecodeCompiler {
 
     fn seed_param_destructure_context(
         &mut self,
-        func_def: &FunctionDef,
+        semantic_owner_key: &str,
         param_idx: usize,
         param: &shape_ast::ast::FunctionParameter,
     ) {
@@ -692,7 +692,11 @@ impl BytecodeCompiler {
         self.last_expr_type_info = None;
 
         let Some(annotation) =
-            self.param_annotation_for_destructure_context(func_def, param_idx, param)
+            self.param_annotation_for_destructure_context(
+                semantic_owner_key,
+                param_idx,
+                param,
+            )
         else {
             return;
         };
@@ -1134,6 +1138,11 @@ impl BytecodeCompiler {
 
         // Check for annotation-based wrapping BEFORE compiling
         let annotations = self.find_compiled_annotations(&effective_def);
+        let body_pass_modes = self.effective_function_like_pass_modes(
+            Some(&effective_def.name),
+            &effective_def.params,
+            Some(&effective_def.body),
+        );
         // WF-1A Item 3 (anno-jit-parity): the runtime before/after hooks are
         // woven into the function's OWN bytecode by `compile_wrapped_function`
         // / `compile_chained_annotations` below, NOT into a separate wrapper
@@ -1156,12 +1165,14 @@ impl BytecodeCompiler {
                 &effective_def,
                 annotations.into_iter().next().expect("checked len == 1"),
                 &inferred_reference_optimizations,
+                &body_pass_modes,
             )?;
         } else if annotations.len() > 1 {
             self.compile_chained_annotations(
                 &effective_def,
                 annotations,
                 &inferred_reference_optimizations,
+                &body_pass_modes,
             )?;
         } else {
             self.compile_function_body_with_inferred_reference_optimizations(
@@ -1968,10 +1979,14 @@ impl BytecodeCompiler {
 
         // Set up isolated locals for function compilation
         self.current_function = Some(func_idx);
+        let semantic_owner_key = self
+            .current_body_semantic_owner_key()
+            .unwrap_or(&func_def.name)
+            .to_string();
         self.current_function_is_async = func_def.is_async;
         self.current_function_return_reference_summary = self
             .function_return_reference_summaries
-            .get(&func_def.name)
+            .get(&semantic_owner_key)
             .cloned();
         // ADR-006 §2.7.30 (FlipLive): record whether this function declares a
         // `&T` / `&mut T` return so the `Statement::Return` + implicit-return
@@ -2032,7 +2047,10 @@ impl BytecodeCompiler {
             self.program.strings.len(),
         ));
 
-        let inferred_modes = self.inferred_param_pass_modes.get(&func_def.name).cloned();
+        let inferred_modes = self
+            .inferred_param_pass_modes
+            .get(&semantic_owner_key)
+            .cloned();
 
         // Bind parameters as locals - destructure each parameter value
         // Parameters arrive in local slots 0, 1, 2, ... from caller
@@ -2052,7 +2070,11 @@ impl BytecodeCompiler {
                 });
 
             if param.pattern.as_identifier().is_none() {
-                self.seed_param_destructure_context(func_def, idx, param);
+                self.seed_param_destructure_context(
+                    &semantic_owner_key,
+                    idx,
+                    param,
+                );
             }
 
             // Load parameter value from its slot
@@ -2170,7 +2192,7 @@ impl BytecodeCompiler {
                         // resolves. The field types are inference output,
                         // never fabricated.
                         let object_fields = self.inferred_param_object_fields_from_facts(
-                            &func_def.name,
+                            &semantic_owner_key,
                             func_def,
                             idx,
                         );
@@ -2214,8 +2236,11 @@ impl BytecodeCompiler {
                         // text is unavailable, there is no source-level audit
                         // here, so by-value unannotated params are left at the
                         // global fact and the template remains deferrable.
-                        let global_inferred =
-                            self.inferred_param_type_name_from_facts(&func_def.name, func_def, idx);
+                        let global_inferred = self.inferred_param_type_name_from_facts(
+                            &semantic_owner_key,
+                            func_def,
+                            idx,
+                        );
                         let body_local_inferred =
                             crate::compiler::expressions::closures::infer_param_type_from_body(
                                 name,
@@ -2236,7 +2261,7 @@ impl BytecodeCompiler {
                                     ),
                                 ) if param.is_reference
                                     || self.direct_callsite_param_evidence_is_integer_only(
-                                        &func_def.name,
+                                        &semantic_owner_key,
                                         idx,
                                         name,
                                     ) =>
@@ -2274,7 +2299,7 @@ impl BytecodeCompiler {
                             // re-parse of the param's tracker `type_name` string.
                             if let Some(shape_value::v2::ConcreteType::Array(elem)) = self
                                 .inferred_param_concrete_type_from_facts(
-                                    &func_def.name,
+                                    &semantic_owner_key,
                                     func_def,
                                     idx,
                                 )
