@@ -328,7 +328,7 @@ pub struct TypeInferenceEngine {
     /// Structural generated-node, binding, declaration, and call-site facts
     /// for one inference run. Kept out of this legacy root so all lifecycle
     /// state is initialized and cleared as one cohesive capability.
-    pub(super) generated_inference: generated_callable_facts::GeneratedInferenceState,
+    generated_inference: generated_callable_facts::GeneratedInferenceState,
     /// Array/object parameter destructure links created while binding function
     /// parameter patterns. Once the whole parameter resolves to a statically
     /// known array/object/struct type, these links bind child binder variables
