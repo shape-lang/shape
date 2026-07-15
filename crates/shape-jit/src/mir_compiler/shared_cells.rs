@@ -358,7 +358,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                 )?;
                 Ok((*slot, kind, kind_code))
             })
-            .collect::<Result<Vec<_>, _>>()?;
+            .collect::<Result<Vec<_>, String>>()?;
         slots.sort_by_key(|(slot, _, _)| slot.0);
 
         for (slot, kind, kind_code) in slots {
