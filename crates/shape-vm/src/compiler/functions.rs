@@ -1152,9 +1152,14 @@ impl BytecodeCompiler {
             self.compile_wrapped_function(
                 &effective_def,
                 annotations.into_iter().next().expect("checked len == 1"),
+                &inferred_reference_optimizations,
             )?;
         } else if annotations.len() > 1 {
-            self.compile_chained_annotations(&effective_def, annotations)?;
+            self.compile_chained_annotations(
+                &effective_def,
+                annotations,
+                &inferred_reference_optimizations,
+            )?;
         } else {
             self.compile_function_body_with_inferred_reference_optimizations(
                 &effective_def,
@@ -1809,7 +1814,7 @@ impl BytecodeCompiler {
         )
     }
 
-    fn compile_function_body_with_inferred_reference_optimizations(
+    pub(super) fn compile_function_body_with_inferred_reference_optimizations(
         &mut self,
         func_def: &FunctionDef,
         inferred_reference_optimizations: &[Option<ParamPassMode>],

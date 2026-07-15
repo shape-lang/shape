@@ -26,6 +26,37 @@ pub(crate) use model::{
 use model::{ReferenceFlowConflict, ReferenceFlowEvidence};
 
 impl BytecodeCompiler {
+    fn first_class_reference_class(&self, key: BindingKey) -> Option<ReferenceClass> {
+        let (is_reference, is_exclusive, referent) = match key {
+            BindingKey::Local(slot) => (
+                self.reference_value_locals.contains(&slot)
+                    || self.exclusive_reference_value_locals.contains(&slot),
+                self.exclusive_reference_value_locals.contains(&slot),
+                self.reference_value_local_referent_concrete_type
+                    .get(&slot)
+                    .cloned(),
+            ),
+            BindingKey::ModuleBinding(slot) => (
+                self.reference_value_module_bindings.contains(&slot)
+                    || self
+                        .exclusive_reference_value_module_bindings
+                        .contains(&slot),
+                self.exclusive_reference_value_module_bindings
+                    .contains(&slot),
+                self.reference_value_module_binding_referent_concrete_type
+                    .get(&slot)
+                    .cloned(),
+            ),
+        };
+        is_reference.then(|| {
+            if is_exclusive {
+                ReferenceClass::ExclusiveReference { referent }
+            } else {
+                ReferenceClass::SharedReference { referent }
+            }
+        })
+    }
+
     /// Return the exact reference class carried by the current binding slot.
     ///
     /// First-class reference values are authoritative over parameter ABI
@@ -38,40 +69,10 @@ impl BytecodeCompiler {
         &self,
         key: BindingKey,
     ) -> Option<ReferenceClass> {
+        if let Some(class) = self.first_class_reference_class(key) {
+            return Some(class);
+        }
         match key {
-            BindingKey::Local(slot)
-                if self.reference_value_locals.contains(&slot)
-                    || self.exclusive_reference_value_locals.contains(&slot) =>
-            {
-                let referent = self
-                    .reference_value_local_referent_concrete_type
-                    .get(&slot)
-                    .cloned();
-                if self.exclusive_reference_value_locals.contains(&slot) {
-                    Some(ReferenceClass::ExclusiveReference { referent })
-                } else {
-                    Some(ReferenceClass::SharedReference { referent })
-                }
-            }
-            BindingKey::ModuleBinding(slot)
-                if self.reference_value_module_bindings.contains(&slot)
-                    || self
-                        .exclusive_reference_value_module_bindings
-                        .contains(&slot) =>
-            {
-                let referent = self
-                    .reference_value_module_binding_referent_concrete_type
-                    .get(&slot)
-                    .cloned();
-                if self
-                    .exclusive_reference_value_module_bindings
-                    .contains(&slot)
-                {
-                    Some(ReferenceClass::ExclusiveReference { referent })
-                } else {
-                    Some(ReferenceClass::SharedReference { referent })
-                }
-            }
             BindingKey::Local(slot)
                 if self.ref_locals.contains(&slot)
                     && !self.inferred_ref_locals.contains(&slot) =>
@@ -96,16 +97,11 @@ impl BytecodeCompiler {
             .copied()
             .collect();
         for slot in local_slots {
-            let referent = self
-                .reference_value_local_referent_concrete_type
-                .get(&slot)
-                .cloned();
-            let class = if self.exclusive_reference_value_locals.contains(&slot) {
-                ReferenceClass::ExclusiveReference { referent }
-            } else {
-                ReferenceClass::SharedReference { referent }
-            };
-            classes.insert(BindingKey::Local(slot), class);
+            let key = BindingKey::Local(slot);
+            let class = self
+                .first_class_reference_class(key)
+                .expect("slot came from a first-class local reference marker");
+            classes.insert(key, class);
         }
 
         let module_slots: BTreeSet<_> = self
@@ -115,19 +111,11 @@ impl BytecodeCompiler {
             .copied()
             .collect();
         for slot in module_slots {
-            let referent = self
-                .reference_value_module_binding_referent_concrete_type
-                .get(&slot)
-                .cloned();
-            let class = if self
-                .exclusive_reference_value_module_bindings
-                .contains(&slot)
-            {
-                ReferenceClass::ExclusiveReference { referent }
-            } else {
-                ReferenceClass::SharedReference { referent }
-            };
-            classes.insert(BindingKey::ModuleBinding(slot), class);
+            let key = BindingKey::ModuleBinding(slot);
+            let class = self
+                .first_class_reference_class(key)
+                .expect("slot came from a first-class module reference marker");
+            classes.insert(key, class);
         }
 
         let mut storage_keys = BTreeSet::new();

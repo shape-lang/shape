@@ -19,7 +19,7 @@ use super::comptime_builtins::expansion_provenance::{
     ExpansionIdentity, ExpansionSite, GeneratedNodePath, GeneratedOrigin, GeneratedSymbolTable,
     GeneratorRef, SymbolReservation, TargetIdentity,
 };
-use super::{BytecodeCompiler, HygienicRole};
+use super::{BytecodeCompiler, HygienicRole, ParamPassMode};
 
 mod generated_closure_provenance;
 use generated_closure_provenance::anchor_generated_function_decl;
@@ -3320,7 +3320,13 @@ impl BytecodeCompiler {
         &mut self,
         func_def: &FunctionDef,
         annotations: Vec<crate::bytecode::CompiledAnnotation>,
+        inferred_reference_optimizations: &[Option<ParamPassMode>],
     ) -> Result<()> {
+        assert_eq!(
+            func_def.params.len(),
+            inferred_reference_optimizations.len(),
+            "runtime annotation provenance must stay slot-aligned"
+        );
         // Step 1: Compile the raw function body as a hygienic impl-body slot
         // (former user-spellable `{name}___impl`, ADR-009 E3 S4/U11).
         let impl_name = self.annotation_hook_impl_name(&func_def.name);
@@ -3339,7 +3345,10 @@ impl BytecodeCompiler {
             is_comptime: func_def.is_comptime,
         };
         self.register_function(&impl_def)?;
-        self.compile_function_body(&impl_def)?;
+        self.compile_function_body_with_inferred_reference_optimizations(
+            &impl_def,
+            inferred_reference_optimizations,
+        )?;
 
         let mut current_impl_idx =
             self.find_function(&impl_name)
@@ -3419,7 +3428,13 @@ impl BytecodeCompiler {
         &mut self,
         func_def: &FunctionDef,
         compiled_ann: crate::bytecode::CompiledAnnotation,
+        inferred_reference_optimizations: &[Option<ParamPassMode>],
     ) -> Result<()> {
+        assert_eq!(
+            func_def.params.len(),
+            inferred_reference_optimizations.len(),
+            "runtime annotation provenance must stay slot-aligned"
+        );
         // Find the annotation on the function to get the arg expressions
         let ann = func_def
             .annotations
@@ -3449,7 +3464,10 @@ impl BytecodeCompiler {
             is_comptime: func_def.is_comptime,
         };
         self.register_function(&impl_def)?;
-        self.compile_function_body(&impl_def)?;
+        self.compile_function_body_with_inferred_reference_optimizations(
+            &impl_def,
+            inferred_reference_optimizations,
+        )?;
 
         let impl_idx = self
             .find_function(&impl_name)
