@@ -10,6 +10,9 @@ use super::field_types::FieldType;
 use super::registry::{TypeSchemaBuilder, TypeSchemaRegistry};
 use crate::comptime_reflection::FrozenTypeCategory;
 
+mod generated_capture;
+pub use generated_capture::COMPTIME_CAPTURE_DESCRIPTOR_SCHEMA;
+
 /// Unspellable schema identity for compiler-issued comptime `TypeRef` values.
 /// The SOH prefix cannot occur in a Shape identifier, so source code cannot
 /// construct a lookalike nominal carrier.
@@ -91,13 +94,6 @@ pub const COMPTIME_FROZEN_CALLABLE_SCHEMA: &str = "\u{1}comptime:FrozenCallable"
 /// string field. DISTINCT from the legacy `__ComptimeParamDescriptor` (a
 /// string-typed E5 path — do NOT reuse).
 pub const COMPTIME_FROZEN_PARAM_DESCRIPTOR_SCHEMA: &str = "\u{1}comptime:ParamDescriptor";
-
-/// ADR-009 C1 / Decision 95 — unspellable value-carrier schema for one
-/// signature-indexed typed closure capture (`CaptureDescriptor<Sig,I,T,Mode>`).
-/// The carrier contains only exact signature/value-type identities, the
-/// structural position, and the typed `CaptureMode` enum. No source name,
-/// rendered type, `Any`, or JSON enters the descriptor.
-pub const COMPTIME_CAPTURE_DESCRIPTOR_SCHEMA: &str = "\u{1}comptime:CaptureDescriptor";
 
 /// ADR-009 B7 (Stage 2, Dec 50/94) — unspellable schema identities for the four
 /// composite `FrozenType` payloads and their element rows. Each carries only
@@ -621,27 +617,7 @@ pub fn register_builtin_schemas(registry: &mut TypeSchemaRegistry) -> BuiltinSch
         .int_field("returns_identity_low")
         .register(registry);
 
-    // -- ADR-009 C1 / Decision 95: typed generated-capture descriptors ------
-    // The mode catalog is the AST's exact four-member declaration axis. Its
-    // two borrow members are typed, named rejection states in C1—not lowering
-    // promises. CaptureDescriptor is fully typed and identity/index based;
-    // source names remain diagnostic prose in the compiler's private pack.
-    let _capture_mode = registry.register_enum_scoped(
-        crate::comptime_reflection::CAPTURE_MODE_SCHEMA_NAME,
-        shape_ast::ast::CaptureMode::ALL
-            .into_iter()
-            .enumerate()
-            .map(|(id, mode)| EnumVariantInfo::new(mode.variant_name(), id as u16, 0))
-            .collect(),
-    );
-    let _comptime_capture_descriptor = TypeSchemaBuilder::new(COMPTIME_CAPTURE_DESCRIPTOR_SCHEMA)
-        .int_field("signature_identity_high")
-        .int_field("signature_identity_low")
-        .int_field("index")
-        .int_field("type_identity_high")
-        .int_field("type_identity_low")
-        .object_field("mode", crate::comptime_reflection::CAPTURE_MODE_SCHEMA_NAME)
-        .register(registry);
+    generated_capture::register(registry);
 
     // -- ADR-009 B5 (Stage 2, Dec 55-59): nominal-shape descriptors -----------
     //
@@ -1068,30 +1044,6 @@ mod tests {
         assert!(passing_mode.variant_id("Move").is_some());
         assert!(passing_mode.variant_id("SharedBorrow").is_some());
         assert!(passing_mode.variant_id("ExclusiveBorrow").is_some());
-
-        // ADR-009 C1 / Decision 95: a typed capture descriptor and the exact
-        // four-member declaration axis. Borrow members are representable but
-        // remain named C1 lowering rejections.
-        assert!(registry.has_type(COMPTIME_CAPTURE_DESCRIPTOR_SCHEMA));
-        assert!(registry.has_type(crate::comptime_reflection::CAPTURE_MODE_SCHEMA_NAME));
-        let capture_descriptor = registry.get(COMPTIME_CAPTURE_DESCRIPTOR_SCHEMA).unwrap();
-        assert_eq!(capture_descriptor.field_count(), 6);
-        for field in [
-            "signature_identity_high",
-            "signature_identity_low",
-            "index",
-            "type_identity_high",
-            "type_identity_low",
-            "mode",
-        ] {
-            assert!(capture_descriptor.get_field(field).is_some(), "{field}");
-        }
-        let capture_mode = registry
-            .get(crate::comptime_reflection::CAPTURE_MODE_SCHEMA_NAME)
-            .unwrap();
-        for variant in ["Move", "Share", "SharedBorrow", "ExclusiveBorrow"] {
-            assert!(capture_mode.variant_id(variant).is_some(), "{variant}");
-        }
 
         // ADR-009 B5 (Stage 2, Dec 55-59): the nominal-shape descriptor family
         // + the NominalShape declaration-shape axis + FieldInitialization.

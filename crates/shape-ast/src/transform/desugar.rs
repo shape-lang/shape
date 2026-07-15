@@ -824,11 +824,7 @@ fn make_lambda(param: &str, body: &Expr, span: Span) -> Expr {
         }],
         return_type: None,
         body: vec![Statement::Return(Some(body.clone()), span)],
-        // ADR-009 C1 (slice 2): query desugaring rewrites ORDINARY user source
-        // — the lambda is not a comptime-generated node.
         generated_origin: None,
-        // ADR-009 C1 (slice 3): a desugared query lambda declares no captures;
-        // it keeps inference, like the source it was desugared from.
         captures: None,
         span,
     }
@@ -859,9 +855,7 @@ fn make_binary_lambda(param1: &str, param2: &str, body: &Expr, span: Span) -> Ex
         ],
         return_type: None,
         body: vec![Statement::Return(Some(body.clone()), span)],
-        // ADR-009 C1 (slice 2): ordinary user source (see `make_lambda`).
         generated_origin: None,
-        // ADR-009 C1 (slice 3): see `make_lambda`.
         captures: None,
         span,
     }

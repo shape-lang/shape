@@ -18,6 +18,9 @@ use crate::type_schema::builtin_schemas::{
 use shape_value::heap_value::HeapKind;
 use shape_value::{KindedSlot, NativeKind};
 
+mod reflection_catalog;
+pub use reflection_catalog::reflection_enum_variant_names;
+
 // ADR-009 B3 (Dec 51) — canonical existential-package rejection diagnostics.
 // These live in shape-runtime so BOTH the type-inference tier (this crate) and
 // the freeze/compile tier (`shape-vm` `comptime_builtins::existential`, which
@@ -614,117 +617,6 @@ pub fn frozen_type_payload_variant_ordinal(variant_name: &str) -> Option<u16> {
         .into_iter()
         .find(|category| category.variant_name() == variant_name)
         .map(FrozenTypeCategory::catalog_ordinal)
-}
-
-/// ADR-009 B1 S5 — catalog-keyed variant lookup for the reflection enums the
-/// LSP completes (`FrozenTypeCategory`, the enabled `FrozenType` payload sum,
-/// `FrozenPrimitive`, and the width-domain enums). Every returned list is
-/// generated from the same shared catalog constants the compiler consumes
-/// (`FrozenTypeCategory::ALL`, [`FROZEN_TYPE_ENABLED_PAYLOAD_CATEGORIES`],
-/// [`FROZEN_PRIMITIVE_VARIANTS`], `IntegerWidth::ALL`, `FloatWidth::ALL`) —
-/// deliberately no second hand-written variant list (the exact defect the A1
-/// close-out deleted), and no Unknown/Any arm anywhere. The `FrozenType`
-/// payload sum completes ONLY its enabled payload variants; non-enabled
-/// categories have no completion arm just as they have no descriptor.
-/// Returns `None` for names outside the reflection catalog (including the
-/// `FrozenNever`/`FrozenErased` payload STRUCTS, which have no variants) so
-/// callers fall back to user-defined enums.
-pub fn reflection_enum_variant_names(enum_name: &str) -> Option<Vec<&'static str>> {
-    if enum_name == "FrozenTypeCategory" {
-        return Some(
-            FrozenTypeCategory::ALL
-                .into_iter()
-                .map(FrozenTypeCategory::variant_name)
-                .collect(),
-        );
-    }
-    if enum_name == FROZEN_TYPE_PAYLOAD_ENUM_NAME {
-        return Some(
-            FROZEN_TYPE_ENABLED_PAYLOAD_CATEGORIES
-                .into_iter()
-                .map(FrozenTypeCategory::variant_name)
-                .collect(),
-        );
-    }
-    // The only enabled payload descriptor TYPE that is itself an enum is
-    // `FrozenPrimitive` (`FrozenNever`/`FrozenErased` are structs); its name
-    // comes from the catalog-generated type-name derivation, never a second
-    // literal.
-    if Some(enum_name) == frozen_type_enabled_payload_type_name(FrozenTypeCategory::Primitive) {
-        return Some(FROZEN_PRIMITIVE_VARIANTS.iter().map(|v| v.name).collect());
-    }
-    if enum_name == INTEGER_WIDTH_SCHEMA_NAME {
-        return Some(
-            IntegerWidth::ALL
-                .into_iter()
-                .map(IntegerWidth::variant_name)
-                .collect(),
-        );
-    }
-    if enum_name == FLOAT_WIDTH_SCHEMA_NAME {
-        return Some(
-            FloatWidth::ALL
-                .into_iter()
-                .map(FloatWidth::variant_name)
-                .collect(),
-        );
-    }
-    // ADR-009 B4 (Stage 2, Dec 54): the `ParamKind` type-vs-const vocabulary,
-    // generated from the same shared catalog the freeze's kind vector and
-    // `.apply(...)` consume (`ParamKind::ALL`) — no second variant list.
-    if enum_name == PARAM_KIND_SCHEMA_NAME {
-        return Some(
-            ParamKind::ALL
-                .into_iter()
-                .map(ParamKind::variant_name)
-                .collect(),
-        );
-    }
-    // ADR-009 B6 (Stage 2, Dec 63): the `PassingMode` parameter-mode
-    // vocabulary, generated from the same shared catalog the freeze's
-    // structural descriptor and the LSP signature help consume
-    // (`PassingMode::ALL`) — no second variant list. `FrozenCallable` and
-    // `ParamDescriptor` are STRUCTS (not enums), so they have no arm here and
-    // fall through to `None` (matching `FrozenNever` / `FrozenErased`).
-    if enum_name == PASSING_MODE_SCHEMA_NAME {
-        return Some(
-            PassingMode::ALL
-                .into_iter()
-                .map(PassingMode::variant_name)
-                .collect(),
-        );
-    }
-    if enum_name == CAPTURE_MODE_SCHEMA_NAME {
-        return Some(
-            shape_ast::ast::CaptureMode::ALL
-                .into_iter()
-                .map(shape_ast::ast::CaptureMode::variant_name)
-                .collect(),
-        );
-    }
-    // ADR-009 B5 (Stage 2, Dec 55/59): the sealed `NominalShape` declaration-
-    // shape axis and the `FieldInitialization` disposition, generated from the
-    // shared catalogs (`NominalShape::ALL` / `FieldInitialization::ALL`) — no
-    // second variant list. The `FrozenNominal` / `*Descriptor` payload STRUCTS
-    // have no variants (like `FrozenCallable` / `ParamDescriptor`), so they
-    // have no arm here and fall through to `None`.
-    if enum_name == NOMINAL_SHAPE_SCHEMA_NAME {
-        return Some(
-            NominalShape::ALL
-                .into_iter()
-                .map(NominalShape::variant_name)
-                .collect(),
-        );
-    }
-    if enum_name == FIELD_INITIALIZATION_SCHEMA_NAME {
-        return Some(
-            FieldInitialization::ALL
-                .into_iter()
-                .map(FieldInitialization::variant_name)
-                .collect(),
-        );
-    }
-    None
 }
 
 /// LSP-visible builtin row for `reflect`, owned by the shared reflection

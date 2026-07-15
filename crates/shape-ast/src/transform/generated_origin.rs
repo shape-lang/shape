@@ -13,7 +13,9 @@ use crate::ast::statements::ForInit;
 use crate::ast::windows::{WindowExpr, WindowFunction, WindowSpec};
 use crate::ast::{Expr, ObjectEntry, Statement};
 
+mod path_cursor;
 mod source_paths;
+use path_cursor::GeneratedClosurePathCursor;
 pub use source_paths::{GeneratedClosureSourcePath, generated_closure_source_paths};
 
 /// Stamp every closure literal in a generated body (and every closure nested
@@ -22,21 +24,17 @@ pub use source_paths::{GeneratedClosureSourcePath, generated_closure_source_path
 /// Re-stamping is idempotent because path indices are traversal-derived.
 pub fn stamp_generated_closures(body: &mut [Statement], origin: &GeneratedNodeOrigin) {
     let mut walker = Stamper {
-        origin: Some(origin),
-        node_path: origin.node_path().to_vec(),
-        source_paths: None,
-        next_index: 0,
+        origin,
+        paths: GeneratedClosurePathCursor::new(origin.path().clone()),
     };
     walker.statements(body);
 }
 
-struct Stamper<'origin, 'paths> {
-    origin: Option<&'origin GeneratedNodeOrigin>,
-    node_path: Vec<String>,
-    source_paths: Option<&'paths mut Vec<GeneratedClosureSourcePath>>,
-    next_index: u32,
+struct Stamper<'origin> {
+    origin: &'origin GeneratedNodeOrigin,
+    paths: GeneratedClosurePathCursor,
 }
-impl Stamper<'_, '_> {
+impl Stamper<'_> {
     fn statements(&mut self, stmts: &mut [Statement]) {
         for stmt in stmts {
             self.statement(stmt);
@@ -155,22 +153,10 @@ impl Stamper<'_, '_> {
                 generated_origin,
                 // Capture clauses are authored by the generator; stamping only
                 // attaches provenance and never rewrites the declaration.
-                captures,
+                captures: _,
                 span: _,
             } => {
-                let index = self.next_index;
-                self.next_index += 1;
-                let segment = format!("closure:{index}");
-                let mut closure_path = self.node_path.clone();
-                closure_path.push(segment.clone());
-                if let Some(source_paths) = self.source_paths.as_deref_mut() {
-                    source_paths.push(GeneratedClosureSourcePath {
-                        node_path: closure_path.clone(),
-                        params: params.clone(),
-                        body: body.clone(),
-                        captures: captures.clone(),
-                    });
-                }
+                let closure_path = self.paths.next_closure();
                 // Parameter defaults are evaluated in the ENCLOSING scope, so
                 // they belong to the enclosing level's sibling numbering.
                 for param in params.iter_mut() {
@@ -178,17 +164,13 @@ impl Stamper<'_, '_> {
                         self.expr(default);
                     }
                 }
-                let closure_origin = self.origin.map(|origin| origin.child(segment));
-                if let Some(closure_origin) = closure_origin.as_ref() {
-                    debug_assert_eq!(closure_origin.node_path(), closure_path);
-                    *generated_origin = Some(closure_origin.clone());
-                }
+                let closure_origin = self.origin.child(closure_path.segment());
+                debug_assert_eq!(closure_origin.path(), closure_path.path());
+                *generated_origin = Some(closure_origin.clone());
                 // Closures nested in this body hang off THIS closure's path.
                 let mut nested = Stamper {
-                    origin: closure_origin.as_ref(),
-                    node_path: closure_path,
-                    source_paths: self.source_paths.as_deref_mut(),
-                    next_index: 0,
+                    origin: &closure_origin,
+                    paths: closure_path.nested_cursor(),
                 };
                 nested.statements(body);
             }

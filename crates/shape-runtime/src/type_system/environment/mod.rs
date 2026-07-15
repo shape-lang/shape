@@ -4,16 +4,19 @@
 //! in different scopes during type inference and checking.
 
 mod evolution;
+mod lexical_bindings;
 mod registry;
 
 // Re-export public types
 pub use evolution::{
     CanonicalField, CanonicalType, ControlFlowContext, EvolvedField, TypeEvolution,
 };
+pub use lexical_bindings::BindingToken;
 pub use registry::{BlanketImplEntry, RecordField, RecordSchema, TraitImplEntry, TypeAliasEntry};
 
 use super::*;
 use evolution::EvolutionRegistry;
+use lexical_bindings::LexicalBindingTokens;
 use registry::TypeRegistry;
 use shape_ast::ast::{EnumDef, Expr, ObjectTypeField, Span, TraitDef, TypeAnnotation};
 use std::collections::{HashMap, HashSet};
@@ -27,20 +30,11 @@ pub struct HoistedField {
     pub field_type: Type,
 }
 
-/// Opaque inference-run identity of one live lexical binding.
-///
-/// Tokens are transient lookup capabilities. They never enter semantic type
-/// identity, diagnostics, serialization, or generated-code source mapping.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct BindingToken(u64);
-
 #[derive(Debug, Clone)]
 pub struct TypeEnvironment {
     /// Stack of scopes, each containing variable bindings
     scopes: Vec<HashMap<String, TypeScheme>>,
-    /// Token map parallel to `scopes`; innermost lexical lookup wins in both.
-    binding_tokens: Vec<HashMap<String, BindingToken>>,
-    next_binding_token: u64,
+    lexical_binding_tokens: LexicalBindingTokens,
     /// Built-in function types
     builtins: HashMap<String, TypeScheme>,
     /// Type registry (aliases, interfaces, enums)
@@ -67,8 +61,7 @@ impl TypeEnvironment {
     pub fn new() -> Self {
         let mut env = TypeEnvironment {
             scopes: vec![HashMap::new()],
-            binding_tokens: vec![HashMap::new()],
-            next_binding_token: 0,
+            lexical_binding_tokens: LexicalBindingTokens::new(),
             builtins: HashMap::new(),
             type_registry: TypeRegistry::new(),
             evolution_registry: EvolutionRegistry::new(),
@@ -1445,52 +1438,6 @@ impl TypeEnvironment {
         // Note: top-level map/filter/reduce removed — use method syntax: arr.map(fn).
     }
 
-    /// Define a variable in the current scope
-    pub fn define(&mut self, name: &str, scheme: TypeScheme) {
-        self.define_with_token(name, scheme);
-    }
-
-    /// Define a variable and return its opaque lexical binding token.
-    pub fn define_with_token(&mut self, name: &str, scheme: TypeScheme) -> BindingToken {
-        let token = BindingToken(self.next_binding_token);
-        self.next_binding_token = self
-            .next_binding_token
-            .checked_add(1)
-            .expect("TypeEnvironment binding-token overflow");
-        if let Some(scope) = self.scopes.last_mut() {
-            scope.insert(name.to_string(), scheme);
-        }
-        if let Some(tokens) = self.binding_tokens.last_mut() {
-            tokens.insert(name.to_string(), token);
-        }
-        token
-    }
-
-    /// Republish the scheme of the exact current binding without minting a
-    /// second token. Intended only for repeated passes over the same AST
-    /// declaration (predeclare, infer, rewalk).
-    pub(crate) fn redefine_with_token(
-        &mut self,
-        name: &str,
-        expected: BindingToken,
-        scheme: TypeScheme,
-    ) -> Result<(), String> {
-        let current = self
-            .binding_tokens
-            .last()
-            .and_then(|tokens| tokens.get(name).copied());
-        if current != Some(expected) {
-            return Err(format!(
-                "binding '{name}' is no longer the expected current lexical declaration"
-            ));
-        }
-        let Some(scope) = self.scopes.last_mut() else {
-            return Err("type environment has no live lexical scope".to_string());
-        };
-        scope.insert(name.to_string(), scheme);
-        Ok(())
-    }
-
     /// Look up a variable type
     pub fn lookup(&self, name: &str) -> Option<&TypeScheme> {
         // Search from innermost to outermost scope
@@ -1502,62 +1449,6 @@ impl TypeEnvironment {
 
         // Check built-ins
         self.builtins.get(name)
-    }
-
-    /// Opaque token of the innermost live lexical binding. Builtins have no
-    /// token because they are not closure-capturable environment cells.
-    pub(crate) fn lookup_binding_token(&self, name: &str) -> Option<BindingToken> {
-        self.binding_tokens
-            .iter()
-            .rev()
-            .find_map(|scope| scope.get(name).copied())
-    }
-
-    /// Deterministic names of lexical bindings visible at the current point.
-    ///
-    /// Builtins are deliberately excluded: closure capture analysis operates
-    /// only over bindings backed by the live lexical scopes. Shadowed names
-    /// occur once; [`Self::lookup`] remains the authority for the innermost
-    /// scheme associated with each name.
-    pub(crate) fn visible_binding_names(&self) -> Vec<String> {
-        let mut names: Vec<String> = self
-            .scopes
-            .iter()
-            .flat_map(|scope| scope.keys().cloned())
-            .collect();
-        names.sort();
-        names.dedup();
-        names
-    }
-
-    /// Push a new scope
-    pub fn push_scope(&mut self) {
-        self.scopes.push(HashMap::new());
-        self.binding_tokens.push(HashMap::new());
-    }
-
-    /// Number of live scopes (1 = module scope). ADR-009 B3: used to compare
-    /// the declaring depth of an assignment target against a `some`-loop body
-    /// depth for witness-escape detection.
-    pub fn scope_depth(&self) -> usize {
-        self.scopes.len()
-    }
-
-    /// Depth (1-based, innermost wins) of the scope that declares `name`, or
-    /// `None` if unbound. ADR-009 B3 witness-escape check.
-    pub fn declaring_scope_depth(&self, name: &str) -> Option<usize> {
-        self.scopes
-            .iter()
-            .rposition(|scope| scope.contains_key(name))
-            .map(|idx| idx + 1)
-    }
-
-    /// Pop the current scope
-    pub fn pop_scope(&mut self) {
-        if self.scopes.len() > 1 {
-            self.scopes.pop();
-            self.binding_tokens.pop();
-        }
     }
 
     /// Define a type alias with optional meta parameter overrides

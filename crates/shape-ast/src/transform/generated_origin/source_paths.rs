@@ -1,9 +1,15 @@
-//! Read-only authored-source projection of the canonical generated-node walk.
+//! Read-only authored-source projection of generated closure paths.
 
-use crate::ast::{CaptureClause, FunctionParameter, Statement};
+use crate::ast::expr_helpers::{BlockItem, ComprehensionClause, QueryClause};
+use crate::ast::patterns::DestructurePattern;
+use crate::ast::statements::ForInit;
+use crate::ast::windows::{WindowExpr, WindowFunction, WindowSpec};
+use crate::ast::{CaptureClause, Expr, FunctionParameter, ObjectEntry, Statement};
 
-/// One closure located by the same structural traversal that stamps generated
-/// node provenance. This clone carries no compiler provenance authority.
+use super::path_cursor::GeneratedClosurePathCursor;
+
+/// One authored closure located by the canonical generated-node path cursor.
+/// Cloned fields carry no compiler provenance authority.
 #[derive(Debug, Clone, PartialEq)]
 pub struct GeneratedClosureSourcePath {
     pub node_path: Vec<String>,
@@ -12,22 +18,463 @@ pub struct GeneratedClosureSourcePath {
     pub captures: Option<CaptureClause>,
 }
 
-/// Enumerate authored closure paths without minting or attaching provenance.
-/// The implementation is the live stamper's traversal, not a second walker.
+/// Enumerate authored closure paths without cloning or mutating the input AST.
 pub fn generated_closure_source_paths(
     body: &[Statement],
     root_path: &[String],
 ) -> Vec<GeneratedClosureSourcePath> {
-    let mut cloned_body = body.to_vec();
-    let mut source_paths = Vec::new();
-    let mut walker = super::Stamper {
-        origin: None,
-        node_path: root_path.to_vec(),
-        source_paths: Some(&mut source_paths),
-        next_index: 0,
+    let mut projected = Vec::new();
+    let mut walker = SourcePathWalker {
+        paths: GeneratedClosurePathCursor::from_rendered(root_path),
+        projected: &mut projected,
     };
-    walker.statements(&mut cloned_body);
-    source_paths
+    walker.statements(body);
+    projected
+}
+
+struct SourcePathWalker<'projected> {
+    paths: GeneratedClosurePathCursor,
+    projected: &'projected mut Vec<GeneratedClosureSourcePath>,
+}
+
+impl SourcePathWalker<'_> {
+    fn statements(&mut self, statements: &[Statement]) {
+        for statement in statements {
+            self.statement(statement);
+        }
+    }
+
+    fn statement(&mut self, statement: &Statement) {
+        match statement {
+            Statement::Return(value, _) => {
+                if let Some(value) = value {
+                    self.expr(value);
+                }
+            }
+            Statement::Break(_) | Statement::Continue(_) | Statement::RemoveTarget(_) => {}
+            Statement::VariableDecl(declaration, _) => {
+                self.destructure_pattern(&declaration.pattern);
+                if let Some(value) = declaration.value.as_ref() {
+                    self.expr(value);
+                }
+            }
+            Statement::Assignment(assignment, _) => {
+                self.destructure_pattern(&assignment.pattern);
+                self.expr(&assignment.value);
+            }
+            Statement::Expression(expr, _) => self.expr(expr),
+            Statement::For(for_loop, _) => {
+                match &for_loop.init {
+                    ForInit::ForIn { pattern, iter } => {
+                        self.destructure_pattern(pattern);
+                        self.expr(iter);
+                    }
+                    ForInit::ForC {
+                        init,
+                        condition,
+                        update,
+                    } => {
+                        self.statement(init);
+                        self.expr(condition);
+                        self.expr(update);
+                    }
+                }
+                self.statements(&for_loop.body);
+            }
+            Statement::While(while_loop, _) => {
+                self.expr(&while_loop.condition);
+                self.statements(&while_loop.body);
+            }
+            Statement::If(if_statement, _) => {
+                self.expr(&if_statement.condition);
+                self.statements(&if_statement.then_body);
+                if let Some(else_body) = if_statement.else_body.as_ref() {
+                    self.statements(else_body);
+                }
+            }
+            Statement::Extend(extend, _) => {
+                for method in &extend.methods {
+                    for parameter in &method.params {
+                        if let Some(default) = parameter.default_value.as_ref() {
+                            self.expr(default);
+                        }
+                    }
+                    if let Some(when_clause) = method.when_clause.as_ref() {
+                        self.expr(when_clause);
+                    }
+                    self.statements(&method.body);
+                }
+            }
+            Statement::SetParamType { .. } | Statement::SetReturnType { .. } => {}
+            Statement::SetParamTypeExpr { expression, .. }
+            | Statement::SetParamValue { expression, .. }
+            | Statement::SetReturnExpr { expression, .. }
+            | Statement::ReplaceBodyExpr { expression, .. }
+            | Statement::ReplaceModuleExpr { expression, .. }
+            | Statement::ExtendItemsExpr { expression, .. } => self.expr(expression),
+            Statement::ReplaceBody { body, .. } => self.statements(body),
+        }
+    }
+
+    fn destructure_pattern(&mut self, pattern: &DestructurePattern) {
+        match pattern {
+            DestructurePattern::Identifier(_, _) | DestructurePattern::Decomposition(_) => {}
+            DestructurePattern::Array(elements) => {
+                for element in elements {
+                    self.destructure_pattern(element);
+                }
+            }
+            DestructurePattern::Object(fields) => {
+                for field in fields {
+                    self.destructure_pattern(&field.pattern);
+                }
+            }
+            DestructurePattern::Rest(inner) => self.destructure_pattern(inner),
+        }
+    }
+
+    fn exprs(&mut self, expressions: &[Expr]) {
+        for expression in expressions {
+            self.expr(expression);
+        }
+    }
+
+    fn named(&mut self, named: &[(String, Expr)]) {
+        for (_, expression) in named {
+            self.expr(expression);
+        }
+    }
+
+    fn expr(&mut self, expr: &Expr) {
+        match expr {
+            Expr::FunctionExpr {
+                params,
+                return_type: _,
+                body,
+                generated_origin: _,
+                captures,
+                span: _,
+            } => {
+                let closure_path = self.paths.next_closure();
+                self.projected.push(GeneratedClosureSourcePath {
+                    node_path: closure_path.rendered(),
+                    params: params.clone(),
+                    body: body.clone(),
+                    captures: captures.clone(),
+                });
+
+                // Defaults execute in the enclosing scope and therefore share
+                // its sibling cursor, exactly like the mutating stamper.
+                for parameter in params {
+                    if let Some(default) = parameter.default_value.as_ref() {
+                        self.expr(default);
+                    }
+                }
+                let mut nested = SourcePathWalker {
+                    paths: closure_path.nested_cursor(),
+                    projected: &mut *self.projected,
+                };
+                nested.statements(body);
+            }
+
+            Expr::Literal(_, _)
+            | Expr::Identifier(_, _)
+            | Expr::DataRef(_, _)
+            | Expr::DataDateTimeRef(_, _)
+            | Expr::TimeRef(_, _)
+            | Expr::DateTime(_, _)
+            | Expr::PatternRef(_, _)
+            | Expr::TypeSyntax(_, _)
+            | Expr::Duration(_, _)
+            | Expr::Continue(_)
+            | Expr::Unit(_) => {}
+
+            Expr::DataRelativeAccess { reference, .. } => self.expr(reference),
+            Expr::PropertyAccess { object, .. } => self.expr(object),
+            Expr::UnaryOp { operand, .. } => self.expr(operand),
+            Expr::Spread(inner, _) => self.expr(inner),
+            Expr::TryOperator(inner, _) => self.expr(inner),
+            Expr::UsingImpl { expr: inner, .. } => self.expr(inner),
+            Expr::Await(inner, _) => self.expr(inner),
+            Expr::AsyncScope(inner, _) => self.expr(inner),
+            Expr::TypeAssertion {
+                expr: inner,
+                meta_param_overrides,
+                ..
+            } => {
+                self.expr(inner);
+                if let Some(overrides) = meta_param_overrides {
+                    for value in overrides.values() {
+                        self.expr(value);
+                    }
+                }
+            }
+            Expr::InstanceOf { expr: inner, .. } => self.expr(inner),
+            Expr::TimeframeContext { expr: inner, .. } => self.expr(inner),
+            Expr::Reference { expr: inner, .. } => self.expr(inner),
+            Expr::Annotated {
+                annotation, target, ..
+            } => {
+                self.exprs(&annotation.args);
+                self.expr(target);
+            }
+            Expr::Break(value, _) | Expr::Return(value, _) => {
+                if let Some(value) = value {
+                    self.expr(value);
+                }
+            }
+
+            Expr::IndexAccess {
+                object,
+                index,
+                end_index,
+                ..
+            } => {
+                self.expr(object);
+                self.expr(index);
+                if let Some(end_index) = end_index {
+                    self.expr(end_index);
+                }
+            }
+            Expr::BinaryOp { left, right, .. } | Expr::FuzzyComparison { left, right, .. } => {
+                self.expr(left);
+                self.expr(right);
+            }
+            Expr::FunctionCall {
+                const_args,
+                args,
+                named_args,
+                ..
+            }
+            | Expr::QualifiedFunctionCall {
+                const_args,
+                args,
+                named_args,
+                ..
+            } => {
+                self.exprs(const_args);
+                self.exprs(args);
+                self.named(named_args);
+            }
+            Expr::MethodCall {
+                receiver,
+                args,
+                named_args,
+                ..
+            } => {
+                self.expr(receiver);
+                self.exprs(args);
+                self.named(named_args);
+            }
+            Expr::EnumConstructor { payload, .. } => match payload {
+                crate::ast::expressions::EnumConstructorPayload::Unit => {}
+                crate::ast::expressions::EnumConstructorPayload::Tuple(values) => {
+                    self.exprs(values)
+                }
+                crate::ast::expressions::EnumConstructorPayload::Struct(fields) => {
+                    self.named(fields)
+                }
+            },
+            Expr::Conditional {
+                condition,
+                then_expr,
+                else_expr,
+                ..
+            } => {
+                self.expr(condition);
+                self.expr(then_expr);
+                if let Some(else_expr) = else_expr {
+                    self.expr(else_expr);
+                }
+            }
+            Expr::Object(entries, _) => {
+                for entry in entries {
+                    match entry {
+                        ObjectEntry::Field { value, .. } | ObjectEntry::Spread(value) => {
+                            self.expr(value)
+                        }
+                    }
+                }
+            }
+            Expr::Array(elements, _) => self.exprs(elements),
+            Expr::TableRows(rows, _) => {
+                for row in rows {
+                    self.exprs(row);
+                }
+            }
+            Expr::StructLiteral { fields, .. } => self.named(fields),
+            Expr::SimulationCall { params, .. } => self.named(params),
+            Expr::ListComprehension(comprehension, _) => {
+                self.expr(&comprehension.element);
+                for ComprehensionClause {
+                    pattern,
+                    iterable,
+                    filter,
+                } in &comprehension.clauses
+                {
+                    self.destructure_pattern(pattern);
+                    self.expr(iterable);
+                    if let Some(filter) = filter {
+                        self.expr(filter);
+                    }
+                }
+            }
+            Expr::Block(block, _) => {
+                for item in &block.items {
+                    match item {
+                        BlockItem::VariableDecl(declaration) => {
+                            self.destructure_pattern(&declaration.pattern);
+                            if let Some(value) = declaration.value.as_ref() {
+                                self.expr(value);
+                            }
+                        }
+                        BlockItem::Assignment(assignment) => {
+                            self.destructure_pattern(&assignment.pattern);
+                            self.expr(&assignment.value);
+                        }
+                        BlockItem::Statement(statement) => self.statement(statement),
+                        BlockItem::Expression(expression) => self.expr(expression),
+                    }
+                }
+            }
+            Expr::If(if_expr, _) => {
+                self.expr(&if_expr.condition);
+                self.expr(&if_expr.then_branch);
+                if let Some(else_branch) = if_expr.else_branch.as_ref() {
+                    self.expr(else_branch);
+                }
+            }
+            Expr::While(while_expr, _) => {
+                self.expr(&while_expr.condition);
+                self.expr(&while_expr.body);
+            }
+            Expr::For(for_expr, _) => {
+                self.expr(&for_expr.iterable);
+                self.expr(&for_expr.body);
+            }
+            Expr::Loop(loop_expr, _) => self.expr(&loop_expr.body),
+            Expr::Let(let_expr, _) => {
+                if let Some(value) = let_expr.value.as_ref() {
+                    self.expr(value);
+                }
+                self.expr(&let_expr.body);
+            }
+            Expr::Assign(assignment, _) => {
+                self.expr(&assignment.target);
+                self.expr(&assignment.value);
+            }
+            Expr::Match(match_expr, _) => {
+                self.expr(&match_expr.scrutinee);
+                for arm in &match_expr.arms {
+                    if let Some(guard) = arm.guard.as_ref() {
+                        self.expr(guard);
+                    }
+                    self.expr(&arm.body);
+                }
+            }
+            Expr::Range { start, end, .. } => {
+                if let Some(start) = start {
+                    self.expr(start);
+                }
+                if let Some(end) = end {
+                    self.expr(end);
+                }
+            }
+            Expr::Join(join_expr, _) => {
+                for branch in &join_expr.branches {
+                    for annotation in &branch.annotations {
+                        self.exprs(&annotation.args);
+                    }
+                    self.expr(&branch.expr);
+                }
+            }
+            Expr::AsyncLet(async_let, _) => self.expr(&async_let.expr),
+            Expr::Comptime(body, _) => self.statements(body),
+            Expr::ComptimeFor(comptime_for, _) => {
+                self.expr(&comptime_for.iterable);
+                self.statements(&comptime_for.body);
+            }
+            Expr::FromQuery(query, _) => {
+                self.expr(&query.source);
+                for clause in &query.clauses {
+                    match clause {
+                        QueryClause::Where(condition) => self.expr(condition),
+                        QueryClause::OrderBy(specs) => {
+                            for spec in specs {
+                                self.expr(&spec.key);
+                            }
+                        }
+                        QueryClause::GroupBy { element, key, .. } => {
+                            self.expr(element);
+                            self.expr(key);
+                        }
+                        QueryClause::Join {
+                            source,
+                            left_key,
+                            right_key,
+                            ..
+                        } => {
+                            self.expr(source);
+                            self.expr(left_key);
+                            self.expr(right_key);
+                        }
+                        QueryClause::Let { value, .. } => self.expr(value),
+                    }
+                }
+                self.expr(&query.select);
+            }
+            Expr::WindowExpr(window, _) => self.window_expr(window),
+        }
+    }
+
+    fn window_expr(&mut self, window: &WindowExpr) {
+        let WindowExpr { function, over } = window;
+        match function {
+            WindowFunction::Lag {
+                expr,
+                default,
+                offset: _,
+            }
+            | WindowFunction::Lead {
+                expr,
+                default,
+                offset: _,
+            } => {
+                self.expr(expr);
+                if let Some(default) = default {
+                    self.expr(default);
+                }
+            }
+            WindowFunction::RowNumber
+            | WindowFunction::Rank
+            | WindowFunction::DenseRank
+            | WindowFunction::Ntile(_) => {}
+            WindowFunction::FirstValue(expr)
+            | WindowFunction::LastValue(expr)
+            | WindowFunction::NthValue(expr, _)
+            | WindowFunction::Sum(expr)
+            | WindowFunction::Avg(expr)
+            | WindowFunction::Min(expr)
+            | WindowFunction::Max(expr) => self.expr(expr),
+            WindowFunction::Count(expr) => {
+                if let Some(expr) = expr {
+                    self.expr(expr);
+                }
+            }
+        }
+
+        let WindowSpec {
+            partition_by,
+            order_by,
+            frame: _,
+        } = over;
+        self.exprs(partition_by);
+        if let Some(order_by) = order_by {
+            for (key, _direction) in &order_by.columns {
+                self.expr(key);
+            }
+        }
+    }
 }
 
 #[cfg(test)]
