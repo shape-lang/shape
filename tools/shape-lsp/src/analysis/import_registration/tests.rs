@@ -35,6 +35,11 @@ fn annotation_registration_error_is_rooted_at_import_and_not_publishable() {
     let directory = tempfile::tempdir().expect("module directory");
     let file_path = directory.path().join("main.shape");
     std::fs::write(
+        directory.path().join("shape.toml"),
+        "[modules]\npaths = []\n",
+    )
+    .expect("write project manifest");
+    std::fs::write(
         directory.path().join("support.shape"),
         r#"
 pub annotation broken() {
@@ -43,7 +48,7 @@ pub annotation broken() {
 "#,
     )
     .expect("write dependency");
-    let source = "from ./support use { @broken }\n@broken()\ntype Probe { id: int }";
+    let source = "from support use { @broken }\n@broken()\ntype Probe { id: int }";
     let program = parse(source);
     let mut compiler = shape_vm::BytecodeCompiler::new();
     let diagnostic = validate_imports_and_register_items(
@@ -66,6 +71,11 @@ fn imported_helper_header_precedes_annotation_handler_compilation() {
     let directory = tempfile::tempdir().expect("module directory");
     let file_path = directory.path().join("main.shape");
     std::fs::write(
+        directory.path().join("shape.toml"),
+        "[modules]\npaths = []\n",
+    )
+    .expect("write project manifest");
+    std::fs::write(
         directory.path().join("support.shape"),
         r#"
 fn local_version() -> int { 7 }
@@ -75,7 +85,7 @@ pub annotation tagged() {
 "#,
     )
     .expect("write dependency");
-    let source = "from ./support use { @tagged }\n@tagged()\ntype Probe { id: int }";
+    let source = "from support use { @tagged }\n@tagged()\ntype Probe { id: int }";
     let program = parse(source);
     let mut compiler = shape_vm::BytecodeCompiler::new();
     let outcome = validate_imports_and_register_items(

@@ -29,11 +29,16 @@ fn poisoned_imported_annotation_maps_to_unavailable() {
     let directory = tempfile::tempdir().expect("module directory");
     let file_path = directory.path().join("main.shape");
     std::fs::write(
+        directory.path().join("shape.toml"),
+        "[modules]\npaths = []\n",
+    )
+    .expect("write project manifest");
+    std::fs::write(
         directory.path().join("support.shape"),
         "pub annotation broken() { metadata(target) { missing_handler_value } }",
     )
     .expect("write dependency");
-    let source = "from ./support use { @broken }\n@broken()\ntype Probe { id: int }";
+    let source = "from support use { @broken }\n@broken()\ntype Probe { id: int }";
     let program = shape_ast::parse_program(source).expect("fixture parses");
     let cache = crate::module_cache::ModuleCache::new();
     let session = GeneratedQuerySession::new(
