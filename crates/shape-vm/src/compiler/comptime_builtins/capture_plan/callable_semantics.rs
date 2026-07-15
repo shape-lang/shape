@@ -326,10 +326,10 @@ mod tests {
     fn optionality_and_passing_mode_are_semantic_identity() {
         let compiler = BytecodeCompiler::new();
         let overlay = super::super::super::semantic_freeze::overlay_for_tests(&compiler);
-        let required_candidate = callable_candidate("|value: int| \"ok\"");
-        let optional_candidate = callable_candidate("|value: int = 1| \"ok\"");
-        let borrowed_candidate = callable_candidate("|&value: int| \"ok\"");
-        let exclusive_candidate = callable_candidate("|&mut value: int| \"ok\"");
+        let required_candidate = callable_candidate("fn(value: int) { return \"ok\" }");
+        let optional_candidate = callable_candidate("fn(value: int = 1) { return \"ok\" }");
+        let borrowed_candidate = callable_candidate("fn(&value: int) { return \"ok\" }");
+        let exclusive_candidate = callable_candidate("fn(&mut value: int) { return \"ok\" }");
         let required = freeze_exact_callable(
             &required_candidate,
             &[parameter("value", false, ParamPassMode::ByValue)],
