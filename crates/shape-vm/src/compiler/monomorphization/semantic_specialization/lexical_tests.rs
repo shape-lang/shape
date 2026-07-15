@@ -4,7 +4,7 @@ use sha2::{Digest, Sha256};
 use shape_ast::ast::{Expr, Item, Span, Statement, TypeAnnotation};
 use shape_ast::parser::parse_program;
 use shape_runtime::comptime_reflection::FrozenTypeCategory;
-use shape_runtime::type_system::{SemanticCallSiteKey, Type};
+use shape_runtime::type_system::SemanticCallSiteKey;
 use shape_value::v2::ConcreteType;
 use shape_value::v2::concrete_type::ClosureTypeId;
 
@@ -19,7 +19,9 @@ fn exact_lexical_inline_inherits_closed_outer_evidence_and_parameter_scopes() {
     let source = r#"
         fn inner<U>(value: U) -> U { value }
         fn outer<T>(value: T) -> T { inner(value) }
+        fn string_identity<S>(value: S) -> S { value }
         let answer = outer(42)
+        let shadow = string_identity("shadow")
     "#;
     let program = parse_program(source).expect("lexical-inline fixture must parse");
     let (_, _, _, facts) =
@@ -34,6 +36,7 @@ fn exact_lexical_inline_inherits_closed_outer_evidence_and_parameter_scopes() {
     };
     let outer_span = call_span("outer");
     let inner_span = call_span("inner");
+    let string_span = call_span("string_identity");
     drop(call_span);
 
     let mut compiler = BytecodeCompiler::new();
@@ -42,6 +45,11 @@ fn exact_lexical_inline_inherits_closed_outer_evidence_and_parameter_scopes() {
         .install_semantic_freeze()
         .expect("fixture must install SemanticFreeze");
 
+    let string_request =
+        compiler.semantic_specialization_request("string_identity", string_span);
+    let SemanticSpecializationRequest::Exact(string_exact) = &string_request else {
+        panic!("string call must preserve exact string evidence")
+    };
     let outer_request = compiler.semantic_specialization_request("outer", outer_span);
     let SemanticSpecializationRequest::Exact(outer_exact) = &outer_request else {
         panic!("outer call must preserve exact int evidence")
@@ -107,7 +115,7 @@ fn exact_lexical_inline_inherits_closed_outer_evidence_and_parameter_scopes() {
     let closed_string = compiler
         .comptime_freeze_overlay()
         .expect("outer overlay must restore")
-        .close_semantic_candidate(&Type::Concrete(TypeAnnotation::Basic("string".to_string())))
+        .close_semantic_candidate(string_exact.arguments()[0].candidate())
         .expect("string candidate must close");
     let shadow = SpecializationTypeOverlay::exact(
         "inner_shadow",

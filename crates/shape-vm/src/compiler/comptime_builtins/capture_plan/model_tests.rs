@@ -1,10 +1,14 @@
 use super::*;
 use crate::compiler::BytecodeCompiler;
 use shape_ast::ast::{
-    FunctionParam, GeneratedExpansionFingerprint, GeneratedNodeIssuer, GeneratedNodePath,
-    ObjectTypeField, TypeAnnotation, TypePath,
+    GeneratedExpansionFingerprint, GeneratedNodeIssuer, GeneratedNodePath,
 };
-use shape_runtime::type_system::{Type, TypeConstraint, TypeVar, tyvar_to_annotation};
+use shape_ast::parser::parse_program;
+use shape_runtime::type_system::{
+    SemanticCallSiteFact, SemanticTypeCandidate, TypeInferenceEngine,
+};
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
 
 fn origin(issuer: &GeneratedNodeIssuer, closure: u32, anchor_file_id: u16) -> GeneratedNodeOrigin {
     issuer.issue(
@@ -84,70 +88,78 @@ fn malformed_generated_capture_path_is_a_structured_refusal() {
     assert!(error.to_string().contains("invalid structural segment"));
 }
 
-fn concrete(name: &str) -> Type {
-    Type::Concrete(TypeAnnotation::Basic(name.to_string()))
+fn exact_argument_candidate(value: &str) -> SemanticTypeCandidate {
+    let program = parse_program(&format!(
+        "fn retain<T>(value: T) -> T {{ value }}\nlet retained = retain({value})"
+    ))
+    .expect("semantic candidate fixture parses");
+    let mut inference = TypeInferenceEngine::new();
+    let (facts, errors) = inference.infer_program_facts_best_effort(&program);
+    assert!(errors.is_empty(), "unexpected inference errors: {errors:?}");
+    let fact = facts
+        .semantic_callsite_facts()
+        .iter()
+        .find_map(|(key, fact)| (key.callee() == "retain").then_some(fact))
+        .expect("generic call publishes semantic evidence");
+    let SemanticCallSiteFact::Exact(exact) = fact else {
+        panic!("generic call must publish exact semantic evidence: {fact:?}")
+    };
+    exact.arguments()[0].candidate().clone()
+}
+
+fn semantic_hash(value: &CaptureSemanticType) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    value.hash(&mut hasher);
+    hasher.finish()
 }
 
 #[test]
 fn frozen_callable_identity_distinguishes_full_signatures_and_synonyms_join() {
     let compiler = BytecodeCompiler::new();
     let freeze = super::super::super::semantic_freeze::overlay_for_tests(&compiler);
-    let int_to_string = Type::Function {
-        params: vec![concrete("int")],
-        returns: Box::new(concrete("string")),
-    };
-    let int_to_bool = Type::Function {
-        params: vec![concrete("int")],
-        returns: Box::new(concrete("bool")),
-    };
+    let int_to_string = exact_argument_candidate("|value: int| \"ok\"");
+    let int_to_bool = exact_argument_candidate("|value: int| true");
 
-    let first = CaptureSemanticType::from_inference_fact(&int_to_string, &freeze)
+    let first = CaptureSemanticType::from_semantic_candidate(&int_to_string, &freeze)
         .expect("resolved callable freezes");
-    let second = CaptureSemanticType::from_inference_fact(&int_to_bool, &freeze)
+    let second = CaptureSemanticType::from_semantic_candidate(&int_to_bool, &freeze)
         .expect("resolved callable freezes");
     assert_ne!(first, second);
     assert_ne!(first.cmp(&second), std::cmp::Ordering::Equal);
+    assert_ne!(first.identity_components(), second.identity_components());
     assert_eq!(first.category().variant_name(), "Callable");
 
-    let int =
-        CaptureSemanticType::from_inference_fact(&concrete("int"), &freeze).expect("int freezes");
-    let i64 =
-        CaptureSemanticType::from_inference_fact(&concrete("i64"), &freeze).expect("i64 freezes");
+    let int = CaptureSemanticType::from_semantic_candidate(
+        &exact_argument_candidate("1 as int"),
+        &freeze,
+    )
+    .expect("int freezes");
+    let i64 = CaptureSemanticType::from_semantic_candidate(
+        &exact_argument_candidate("1 as i64"),
+        &freeze,
+    )
+    .expect("i64 freezes");
     assert_eq!(int, i64, "primitive synonyms share the freeze identity");
+    assert_eq!(int.identity_components(), i64.identity_components());
+    assert_eq!(semantic_hash(&int), semantic_hash(&i64));
 }
 
 #[test]
-fn unresolved_nested_and_constrained_types_never_become_capture_evidence() {
-    let compiler = BytecodeCompiler::new();
-    let freeze = super::super::super::semantic_freeze::overlay_for_tests(&compiler);
-    let nested_unknown =
-        Type::Concrete(TypeAnnotation::Array(Box::new(TypeAnnotation::Function {
-            params: vec![FunctionParam {
-                name: None,
-                optional: false,
-                type_annotation: TypeAnnotation::Object(vec![ObjectTypeField {
-                    name: "value".to_string(),
-                    optional: false,
-                    type_annotation: TypeAnnotation::Basic("unknown".to_string()),
-                    annotations: Vec::new(),
-                }]),
-            }],
-            returns: Box::new(TypeAnnotation::Basic("int".to_string())),
-        })));
-    let nested_tyvar = Type::Concrete(TypeAnnotation::Generic {
-        name: TypePath::simple("Array"),
-        args: vec![tyvar_to_annotation(&TypeVar::new("T9".to_string()))],
-    });
-    let variable = Type::Variable(TypeVar::new("T10".to_string()));
-    let constrained = Type::Constrained {
-        var: TypeVar::new("T11".to_string()),
-        constraint: Box::new(TypeConstraint::Comparable),
-    };
+fn unresolved_subject_never_issues_exact_capture_evidence() {
+    let program = parse_program(
+        "fn retain<T>(value: T) -> T { value }\nlet retained = retain(missing_value)",
+    )
+    .expect("unresolved semantic candidate fixture parses");
+    let mut inference = TypeInferenceEngine::new();
+    let (facts, _) = inference.infer_program_facts_best_effort(&program);
+    let fact = facts
+        .semantic_callsite_facts()
+        .iter()
+        .find_map(|(key, fact)| (key.callee() == "retain").then_some(fact))
+        .expect("unresolved generic call still publishes semantic evidence");
 
-    for unresolved in [nested_unknown, nested_tyvar, variable, constrained] {
-        assert!(
-            CaptureSemanticType::from_inference_fact(&unresolved, &freeze).is_err(),
-            "unresolved type must not produce frozen capture evidence: {unresolved:?}"
-        );
-    }
+    assert!(
+        matches!(fact, SemanticCallSiteFact::Unavailable(_)),
+        "the inference issuer must refuse unresolved exact evidence: {fact:?}"
+    );
 }
