@@ -1,5 +1,5 @@
 use super::*;
-use crate::type_system::{TypeConstraint, tyvar_to_annotation};
+use crate::type_system::{Type, TypeConstraint, tyvar_to_annotation};
 use shape_ast::ast::GeneratedNodeOrigin;
 use shape_ast::parser::parse_program;
 
