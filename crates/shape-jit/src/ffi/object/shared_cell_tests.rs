@@ -5,6 +5,8 @@ use super::shared_cell_payload::{jit_read_shared_cell_ptr, jit_write_shared_cell
 use crate::ffi::stack_kind_code;
 use shape_value::heap_value::{MatrixData, MatrixSliceData};
 use shape_value::v2::closure_layout::SharedCell;
+use shape_value::v2::heap_element::HeapElement;
+use shape_value::v2::string_obj::StringObj;
 use shape_value::{HeapKind, NativeKind};
 use std::sync::Arc;
 
@@ -173,28 +175,98 @@ fn invalid_kind_code_returns_null_without_consuming_payload_share() {
 }
 
 #[test]
-fn zero_is_a_valid_empty_payload_for_every_refcounted_kind_code() {
+fn nonzero_native_scalar_is_rejected_without_allocation_or_consumption() {
+    let bits = 0x0123_4567_89ab_cdef;
+    let kind = NativeKind::Ptr(HeapKind::NativeScalar);
+    assert_eq!(
+        unsafe { jit_alloc_shared_cell(bits, stack_kind_code::encode(kind)) },
+        0,
+        "carrier-less NativeScalar metadata must fail before allocating a cell"
+    );
+}
+
+#[test]
+fn every_ptr_kind_is_either_supported_or_explicitly_rejected() {
     let mut checked = Vec::new();
+    let mut rejected = Vec::new();
     let scalar_refcounted = [
         NativeKind::String,
         NativeKind::StringV2,
         NativeKind::DecimalV2,
     ];
-    for kind in scalar_refcounted
-        .into_iter()
-        .chain(HeapKind::ALL.into_iter().map(NativeKind::Ptr))
-    {
+    for kind in scalar_refcounted {
         assert_zero_shared_payload_lifecycle(kind);
         checked.push(kind);
     }
+    for heap_kind in HeapKind::ALL {
+        let kind = NativeKind::Ptr(heap_kind);
+        if heap_kind.has_kinded_slot_carrier() {
+            assert_zero_shared_payload_lifecycle(kind);
+            checked.push(kind);
+        } else {
+            assert_eq!(
+                unsafe { jit_alloc_shared_cell(1, stack_kind_code::encode(kind)) },
+                0
+            );
+            rejected.push(kind);
+        }
+    }
 
     assert_eq!(
-        checked.len(),
-        scalar_refcounted.len() + HeapKind::ALL.len(),
-        "the proof must execute every refcounted scalar and every Ptr variant"
+        checked.len() + rejected.len(),
+        scalar_refcounted.len() + HeapKind::ALL.len()
     );
+    assert_eq!(rejected, [NativeKind::Ptr(HeapKind::NativeScalar)]);
     assert!(checked.contains(&NativeKind::Ptr(HeapKind::Matrix)));
     assert!(checked.contains(&NativeKind::Ptr(HeapKind::MatrixSlice)));
+}
+
+#[test]
+fn nonzero_inline_ptr_payloads_copy_without_fabricated_ownership() {
+    for (kind, initial, replacement) in [
+        (NativeKind::Ptr(HeapKind::Char), 'a' as u64, 'z' as u64),
+        (NativeKind::Ptr(HeapKind::Future), 41, 42),
+        (NativeKind::Ptr(HeapKind::ModuleFn), 7, 9),
+    ] {
+        let cell = unsafe { jit_alloc_shared_cell(initial, stack_kind_code::encode(kind)) };
+        assert_ne!(cell, 0);
+        assert_eq!(
+            unsafe { jit_read_shared_cell_ptr(cell as i64) } as u64,
+            initial
+        );
+        unsafe { jit_write_shared_cell_ptr(cell as i64, replacement as i64) };
+        assert_eq!(
+            unsafe { jit_read_shared_cell_ptr(cell as i64) } as u64,
+            replacement
+        );
+        unsafe { jit_arc_shared_release(cell) };
+    }
+}
+
+#[test]
+fn nonzero_v2_header_payload_balances_retain_replace_and_drop() {
+    let initial = StringObj::new("initial");
+    let replacement = StringObj::new("replacement");
+    unsafe {
+        shape_value::v2::refcount::v2_retain(&(*initial).header);
+        shape_value::v2::refcount::v2_retain(&(*replacement).header);
+    }
+    let kind = NativeKind::StringV2;
+    let cell = unsafe { jit_alloc_shared_cell(initial as u64, stack_kind_code::encode(kind)) };
+    assert_ne!(cell, 0);
+    let read = unsafe { jit_read_shared_cell_ptr(cell as i64) } as *const StringObj;
+    assert_eq!(read, initial);
+    assert_eq!(unsafe { (*initial).header.get_refcount() }, 3);
+    unsafe { StringObj::release_elem(read) };
+    unsafe { jit_write_shared_cell_ptr(cell as i64, replacement as i64) };
+    assert_eq!(unsafe { (*initial).header.get_refcount() }, 1);
+    assert_eq!(unsafe { (*replacement).header.get_refcount() }, 2);
+    unsafe { jit_arc_shared_release(cell) };
+    assert_eq!(unsafe { (*replacement).header.get_refcount() }, 1);
+    unsafe {
+        StringObj::release_elem(initial);
+        StringObj::release_elem(replacement);
+    }
 }
 
 #[test]
