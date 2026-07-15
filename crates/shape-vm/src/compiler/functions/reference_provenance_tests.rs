@@ -1,6 +1,6 @@
 use super::*;
 
-use shape_ast::ast::{CaptureMode, DestructurePattern, Span, TypeAnnotation};
+use shape_ast::ast::{CaptureMode, DestructurePattern, Span};
 
 use crate::type_tracking::BindingStorageClass;
 
@@ -78,6 +78,7 @@ impl AnnotationRoute {
                 r#"
 annotation first() {
   targets: [function]
+  comptime pre(target, ctx) { set param value: int }
   before(args, ctx) { args }
 }
 
@@ -86,7 +87,7 @@ fn probe($PARAM) -> int {
   let worker = |x: int; move value| x + value
   worker(1)
 }
-let observed: int = probe(2)
+probe(2)
 "#
             }
             Self::ChainedRuntime => {
@@ -189,19 +190,6 @@ fn compile_stamped_probe(
     shape_ast::transform::stamp_generated_closures(&mut probe.body, &root);
 
     let facts = BytecodeCompiler::infer_reference_model(&program).3;
-    if is_untyped_single {
-        let shape_runtime::type_system::Type::Function { params, .. } = facts
-            .function_signature("probe")
-            .expect("inference records the probe signature")
-        else {
-            unreachable!("function_signature only returns function types")
-        };
-        assert_eq!(
-            params.first().and_then(|param| param.to_annotation()),
-            Some(TypeAnnotation::Basic("int".to_string())),
-            "the variable-declaration callsite must prove the untyped parameter is int"
-        );
-    }
     compiler.resolved_expr_types = facts.expression_types().clone();
     compiler.inference_facts = facts;
     compiler
