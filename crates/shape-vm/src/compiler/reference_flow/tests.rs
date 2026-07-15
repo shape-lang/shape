@@ -5,13 +5,13 @@ use super::{BindingKey, ReferenceClass, ReferenceFlowPredecessor};
 use crate::compiler::BytecodeCompiler;
 use crate::type_tracking::{BindingOwnershipClass, BindingSemantics, BindingStorageClass};
 
-fn semantics(storage_class: BindingStorageClass) -> BindingSemantics {
+pub(super) fn semantics(storage_class: BindingStorageClass) -> BindingSemantics {
     let mut semantics = BindingSemantics::deferred(BindingOwnershipClass::OwnedMutable);
     semantics.storage_class = storage_class;
     semantics
 }
 
-fn compiler_with_named_slots() -> BytecodeCompiler {
+pub(super) fn compiler_with_named_slots() -> BytecodeCompiler {
     let mut compiler = BytecodeCompiler::new();
     compiler
         .locals
@@ -32,7 +32,7 @@ fn compiler_with_named_slots() -> BytecodeCompiler {
     compiler
 }
 
-fn semantic_message(error: ShapeError) -> String {
+pub(super) fn semantic_message(error: ShapeError) -> String {
     match error {
         ShapeError::SemanticError { message, .. } => message,
         other => panic!("expected semantic error, got {other:?}"),
@@ -155,10 +155,13 @@ fn value_reference_join_is_named_and_deterministic() {
     let message = semantic_message(error);
 
     assert!(message.starts_with(
-        "heterogeneous reference flow at if merge for binding 'module_ref'"
+        "[C0912] exact reference-flow conflict at if merge for ModuleBinding(7) \
+         (name 'module_ref')"
     ));
-    assert!(message.contains("predecessor 'a-reference' is SharedReference<?>"));
-    assert!(message.contains("predecessor 'z-value' is Value"));
+    assert!(message.contains(
+        "predecessor 'a-reference' is SharedReference<?> [storage=Reference]"
+    ));
+    assert!(message.contains("predecessor 'z-value' is Value [storage=Direct]"));
 }
 
 #[test]
@@ -186,7 +189,8 @@ fn shared_exclusive_join_is_a_conflict() {
         .expect_err("borrow modes are distinct representations");
 
     assert!(semantic_message(error).starts_with(
-        "conflicting reference flow at branch merge for binding 'module_ref'"
+        "[C0912] exact reference-flow conflict at branch merge for ModuleBinding(7) \
+         (name 'module_ref')"
     ));
 }
 
@@ -297,3 +301,5 @@ fn pop_scope_evicts_exact_local_reference_state() {
         .reference_value_local_referent_concrete_type
         .contains_key(&scoped));
 }
+
+mod core_fixes;

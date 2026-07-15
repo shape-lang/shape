@@ -8,101 +8,21 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use shape_ast::error::{Result, ShapeError};
+use shape_ast::ast::Span;
+use shape_ast::error::Result;
 use shape_value::v2::ConcreteType;
 
 use crate::type_tracking::BindingStorageClass;
 
 use super::BytecodeCompiler;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub(crate) enum BindingKey {
-    Local(u16),
-    ModuleBinding(u16),
-}
+mod diagnostic;
+mod model;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum ReferenceClass {
-    Value,
-    SharedReference {
-        referent: Option<ConcreteType>,
-    },
-    ExclusiveReference {
-        referent: Option<ConcreteType>,
-    },
-}
-
-impl ReferenceClass {
-    fn description(&self) -> String {
-        match self {
-            Self::Value => "Value".to_string(),
-            Self::SharedReference { referent: None } => "SharedReference<?>".to_string(),
-            Self::SharedReference {
-                referent: Some(referent),
-            } => format!("SharedReference<{referent:?}>"),
-            Self::ExclusiveReference { referent: None } => {
-                "ExclusiveReference<?>".to_string()
-            }
-            Self::ExclusiveReference {
-                referent: Some(referent),
-            } => format!("ExclusiveReference<{referent:?}>"),
-        }
-    }
-
-    fn is_reference(&self) -> bool {
-        !matches!(self, Self::Value)
-    }
-}
-
-/// Exact snapshot of the existing reference markers and their synchronized
-/// storage evidence. Absence from `classes` means [`ReferenceClass::Value`].
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct ReferenceFlowState {
-    classes: BTreeMap<BindingKey, ReferenceClass>,
-    storage_classes: BTreeMap<BindingKey, BindingStorageClass>,
-}
-
-impl ReferenceFlowState {
-    fn class(&self, key: BindingKey) -> ReferenceClass {
-        self.classes
-            .get(&key)
-            .cloned()
-            .unwrap_or(ReferenceClass::Value)
-    }
-
-    fn keys(&self) -> impl Iterator<Item = BindingKey> + '_ {
-        self.classes.keys().copied()
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct ReferenceFlowPredecessor {
-    label: String,
-    state: ReferenceFlowState,
-    reachable: bool,
-}
-
-impl ReferenceFlowPredecessor {
-    // Slice 1 publishes the exact join vocabulary; control-flow consumers land
-    // in the separately owned follow-up slice.
-    #[allow(dead_code)]
-    pub(crate) fn reachable(label: impl Into<String>, state: ReferenceFlowState) -> Self {
-        Self {
-            label: label.into(),
-            state,
-            reachable: true,
-        }
-    }
-
-    #[allow(dead_code)]
-    pub(crate) fn unreachable(label: impl Into<String>, state: ReferenceFlowState) -> Self {
-        Self {
-            label: label.into(),
-            state,
-            reachable: false,
-        }
-    }
-}
+pub(crate) use model::{
+    BindingKey, ReferenceClass, ReferenceFlowPredecessor, ReferenceFlowState,
+};
+use model::ReferenceFlowConflict;
 
 impl BytecodeCompiler {
     pub(crate) fn reference_flow_snapshot(&self) -> ReferenceFlowState {
@@ -199,6 +119,11 @@ impl BytecodeCompiler {
     }
 
     pub(crate) fn restore_reference_flow_snapshot(&mut self, state: &ReferenceFlowState) {
+        let current = self.reference_flow_snapshot();
+        let current_keys = current.keys();
+        let saved_keys = state.keys();
+        let current_only: Vec<_> = current_keys.difference(&saved_keys).copied().collect();
+
         self.reference_value_locals.clear();
         self.exclusive_reference_value_locals.clear();
         self.reference_value_local_referent_concrete_type.clear();
@@ -206,6 +131,21 @@ impl BytecodeCompiler {
         self.exclusive_reference_value_module_bindings.clear();
         self.reference_value_module_binding_referent_concrete_type
             .clear();
+
+        // A binding first introduced after the snapshot may still have
+        // Reference storage even though its marker has just been removed.
+        // Reset those current-only keys before reinstalling the saved state.
+        for key in current_only {
+            let storage = match key {
+                BindingKey::Local(slot) => {
+                    self.default_binding_storage_class_for_slot(slot, true)
+                }
+                BindingKey::ModuleBinding(slot) => {
+                    self.default_binding_storage_class_for_slot(slot, false)
+                }
+            };
+            self.set_reference_flow_storage(key, storage);
+        }
 
         for (&key, class) in &state.classes {
             self.install_reference_flow_class(key, class.clone());
@@ -223,6 +163,16 @@ impl BytecodeCompiler {
         merge_name: &str,
         predecessors: impl IntoIterator<Item = ReferenceFlowPredecessor>,
     ) -> Result<Option<ReferenceFlowState>> {
+        self.join_reference_flow_predecessors_at(merge_name, None, predecessors)
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn join_reference_flow_predecessors_at(
+        &self,
+        merge_name: &str,
+        fallback_span: Option<Span>,
+        predecessors: impl IntoIterator<Item = ReferenceFlowPredecessor>,
+    ) -> Result<Option<ReferenceFlowState>> {
         let mut reachable: Vec<_> = predecessors
             .into_iter()
             .filter(|predecessor| predecessor.reachable)
@@ -237,31 +187,21 @@ impl BytecodeCompiler {
             .flat_map(|predecessor| predecessor.state.keys())
             .collect();
         for key in keys {
-            let expected = first.state.class(key);
+            let expected = first.state.evidence(key);
             for predecessor in reachable.iter().skip(1) {
-                let actual = predecessor.state.class(key);
+                let actual = predecessor.state.evidence(key);
                 if actual == expected {
                     continue;
                 }
-                let conflict_kind = if expected.is_reference() == actual.is_reference() {
-                    "conflicting"
-                } else {
-                    "heterogeneous"
-                };
-                let binding_name = self.reference_flow_binding_name(key);
-                return Err(ShapeError::SemanticError {
-                    message: format!(
-                        "{conflict_kind} reference flow at {merge_name} for binding \
-                         '{binding_name}': predecessor '{}' is {}, but predecessor '{}' is {}; \
-                         every reachable path must use one exact Value, SharedReference, or \
-                         ExclusiveReference representation",
-                        first.label,
-                        expected.description(),
-                        predecessor.label,
-                        actual.description(),
-                    ),
-                    location: None,
-                });
+                let conflict = ReferenceFlowConflict::new(
+                    merge_name,
+                    key,
+                    first.label.clone(),
+                    expected,
+                    predecessor.label.clone(),
+                    actual,
+                );
+                return Err(self.reference_flow_conflict_error(conflict, fallback_span));
             }
         }
 
@@ -399,27 +339,6 @@ impl BytecodeCompiler {
                 .type_tracker
                 .set_binding_storage_class(slot, storage),
         }
-    }
-
-    fn reference_flow_binding_name(&self, key: BindingKey) -> String {
-        let mut names: Vec<_> = match key {
-            BindingKey::Local(slot) => self
-                .locals
-                .iter()
-                .flat_map(|scope| scope.iter())
-                .filter_map(|(name, &candidate)| (candidate == slot).then_some(name.clone()))
-                .collect(),
-            BindingKey::ModuleBinding(slot) => self
-                .module_bindings
-                .iter()
-                .filter_map(|(name, &candidate)| (candidate == slot).then_some(name.clone()))
-                .collect(),
-        };
-        names.sort();
-        names.into_iter().next().unwrap_or_else(|| match key {
-            BindingKey::Local(slot) => format!("<local:{slot}>"),
-            BindingKey::ModuleBinding(slot) => format!("<module-binding:{slot}>"),
-        })
     }
 }
 
