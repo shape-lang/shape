@@ -5,6 +5,8 @@ use shape_ast::ast::{
 };
 use std::collections::HashSet;
 
+mod annotation_handlers;
+
 impl BytecodeCompiler {
     pub(super) fn module_local_function_names(items: &[Item]) -> HashSet<String> {
         let mut names = HashSet::new();
@@ -79,6 +81,13 @@ impl BytecodeCompiler {
                 ExportItem::Function(func) => {
                     Self::qualify_local_calls_in_function(func, module_path, local_functions);
                 }
+                ExportItem::Annotation(definition) => {
+                    Self::qualify_local_calls_in_annotation_definition(
+                        definition,
+                        module_path,
+                        local_functions,
+                    );
+                }
                 ExportItem::BuiltinFunction(_)
                 | ExportItem::BuiltinType(_)
                 | ExportItem::TypeAlias(_)
@@ -86,7 +95,6 @@ impl BytecodeCompiler {
                 | ExportItem::Enum(_)
                 | ExportItem::Struct(_)
                 | ExportItem::Trait(_)
-                | ExportItem::Annotation(_)
                 | ExportItem::ForeignFunction(_) => {}
             },
             Item::Extend(extend, _) => {
@@ -110,7 +118,6 @@ impl BytecodeCompiler {
             | Item::Stream(_, _)
             | Item::Test(_, _)
             | Item::Optimize(_, _)
-            | Item::AnnotationDef(_, _)
             | Item::StructType(_, _)
             | Item::DataSource(_, _)
             | Item::QueryDecl(_, _)
@@ -119,6 +126,13 @@ impl BytecodeCompiler {
             | Item::BuiltinTypeDecl(_, _)
             | Item::BuiltinFunctionDecl(_, _)
             | Item::ForeignFunction(_, _) => {}
+            Item::AnnotationDef(definition, _) => {
+                Self::qualify_local_calls_in_annotation_definition(
+                    definition,
+                    module_path,
+                    local_functions,
+                );
+            }
         }
     }
 

@@ -45,6 +45,7 @@ struct ModuleDirectiveOutcome {
 pub(super) mod annotation_declarations;
 mod annotation_imports;
 mod graph_imports;
+mod imported_items;
 
 impl BytecodeCompiler {
     fn comptime_field_slot_from_literal(
@@ -2554,58 +2555,6 @@ impl BytecodeCompiler {
             }
         }
         Ok(())
-    }
-
-    /// Pre-register items from an imported module (enums, struct types, functions,
-    /// and annotations).
-    ///
-    /// Called by the LSP before compilation to make imported enums/types known
-    /// to the compiler's type tracker. `module_path` is the same canonical import
-    /// scope recorded by `register_import_names`; annotations are compiled under
-    /// that qualified identity so two modules cannot alias through a bare name.
-    /// Reuses the ordinary module qualification and registration paths as the
-    /// single source of truth.
-    pub fn register_imported_items(&mut self, module_path: &str, items: &[Item]) {
-        let qualified_annotations = items
-            .iter()
-            .filter_map(|item| match item {
-                Item::Export(export, _)
-                    if matches!(&export.item, ExportItem::Annotation(_)) =>
-                {
-                    self.qualify_module_item(item, module_path).ok()
-                }
-                _ => None,
-            })
-            .collect::<Vec<_>>();
-        // Preserve the legacy best-effort `()` surface. Atomic rollback on a
-        // later installation failure belongs to the planned LSP transaction.
-        let _ = self.prepare_annotation_scope(&qualified_annotations);
-
-        for item in items {
-            match item {
-                Item::Export(export, _) => {
-                    match &export.item {
-                        ExportItem::Enum(enum_def) => {
-                            let _ = self.register_enum(enum_def);
-                        }
-                        ExportItem::Struct(struct_def) => {
-                            // Register struct type fields so the compiler knows about them
-                            let _ = self.register_struct_type(struct_def, Span::DUMMY);
-                        }
-                        ExportItem::Function(func_def) => {
-                            // Register function so it's known during compilation
-                            let _ = self.register_function(func_def);
-                        }
-                        ExportItem::Annotation(_) => {}
-                        _ => {}
-                    }
-                }
-                Item::Enum(enum_def, _) => {
-                    let _ = self.register_enum(enum_def);
-                }
-                _ => {}
-            }
-        }
     }
 
     /// Register a meta definition in the format registry

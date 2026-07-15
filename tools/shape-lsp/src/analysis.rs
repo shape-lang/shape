@@ -14,10 +14,14 @@ use crate::diagnostics::{
 use crate::module_cache::ModuleCache;
 use crate::scope::ScopeTree;
 use crate::util::offset_to_line_col;
-use shape_ast::ast::{Expr, ImportItems, Item, Program};
+use shape_ast::ast::{Expr, Item, Program};
 use shape_runtime::visitor::{Visitor, walk_program};
 use std::collections::{HashMap, HashSet};
-use tower_lsp_server::ls_types::{Diagnostic, DiagnosticSeverity, Position, Range};
+use tower_lsp_server::ls_types::Diagnostic;
+
+mod import_registration;
+
+pub use import_registration::{ImportRegistrationOutcome, validate_imports_and_register_items};
 
 const MAX_SEMANTIC_DIAGNOSTICS: usize = 200;
 
@@ -80,33 +84,53 @@ pub fn analyze_program_semantics_for_document(
     compiler.set_type_diagnostic_mode(shape_vm::compiler::TypeDiagnosticMode::RecoverAll);
     compiler.set_compile_diagnostic_mode(shape_vm::compiler::CompileDiagnosticMode::RecoverAll);
 
+    let has_imports = program
+        .items
+        .iter()
+        .any(|item| matches!(item, Item::Import(..)));
+    let mut import_setup_ready = !has_imports;
     if let (Some(path), Some(cache)) = (file_path, module_cache) {
-        diagnostics.extend(validate_imports_and_register_items(
+        match validate_imports_and_register_items(
             program,
             text,
             path,
             cache,
             workspace_root,
             &mut compiler,
-        ));
+        ) {
+            Ok(outcome) => {
+                import_setup_ready = outcome.is_ready();
+                diagnostics.extend(outcome.into_diagnostics());
+            }
+            Err(diagnostic) => diagnostics.push(diagnostic),
+        }
     }
 
-    compiler.set_source(text);
-    if let Err(compile_error) = compiler.compile_in_place(program) {
-        // Carry the document URI so location-bearing notes map to
-        // relatedInformation (file-less in-memory locations included).
-        let mut compile_diagnostics =
-            crate::diagnostics::error_to_diagnostic_with_uri(&compile_error, document_uri.cloned());
-        combine_same_line_undefined_variable_diagnostics(program, text, &mut compile_diagnostics);
-        diagnostics.extend(compile_diagnostics);
-    }
+    if import_setup_ready {
+        compiler.set_source(text);
+        if let Err(compile_error) = compiler.compile_in_place(program) {
+            // Carry the document URI so location-bearing notes map to
+            // relatedInformation (file-less in-memory locations included).
+            let mut compile_diagnostics = crate::diagnostics::error_to_diagnostic_with_uri(
+                &compile_error,
+                document_uri.cloned(),
+            );
+            combine_same_line_undefined_variable_diagnostics(
+                program,
+                text,
+                &mut compile_diagnostics,
+            );
+            diagnostics.extend(compile_diagnostics);
+        }
 
-    // Compiler-issued generated-capture artifacts are the only authority for
-    // source availability. Unmapped artifacts get stable diagnostics rather
-    // than guessed hover/navigation locations.
-    diagnostics.extend(crate::generated_captures::capture_query_diagnostics(
-        &compiler, program, text,
-    ));
+        if compiler.generated_queries_available() {
+            // Compiler-issued generated-capture artifacts are the only authority
+            // for source availability. Poisoned sessions publish nothing.
+            diagnostics.extend(crate::generated_captures::capture_query_diagnostics(
+                &compiler, program, text,
+            ));
+        }
+    }
 
     dedupe_and_cap_diagnostics(&mut diagnostics);
     // W2.3 / 1.17 + 1.19 — backfill code_description (book URL) + tags
@@ -116,105 +140,6 @@ pub fn analyze_program_semantics_for_document(
     // per-validator construction sites.
     enrich_diagnostics_with_code_metadata(&mut diagnostics);
     diagnostics
-}
-
-/// Validate import statements and register imported items in the compiler.
-pub fn validate_imports_and_register_items(
-    program: &Program,
-    text: &str,
-    file_path: &std::path::Path,
-    module_cache: &ModuleCache,
-    workspace_root: Option<&std::path::Path>,
-    compiler: &mut shape_vm::BytecodeCompiler,
-) -> Vec<Diagnostic> {
-    let mut diagnostics = Vec::new();
-    let importable_modules = module_cache.list_importable_modules_with_context_and_source(
-        file_path,
-        workspace_root,
-        Some(text),
-    );
-    let mut known_module_names = crate::completion::imports::module_names_with_context_and_source(
-        Some(file_path),
-        workspace_root,
-        Some(text),
-    );
-    known_module_names.extend(importable_modules.iter().filter_map(|module_path| {
-        module_path
-            .split('.')
-            .next()
-            .map(|segment| segment.to_string())
-    }));
-
-    for item in &program.items {
-        if let Item::Import(import_stmt, import_span) = item {
-            match &import_stmt.items {
-                ImportItems::Named(_) => {
-                    if let Some(module_info) = module_cache
-                        .load_module_by_import_with_context_and_source(
-                            &import_stmt.from,
-                            file_path,
-                            workspace_root,
-                            Some(text),
-                        )
-                    {
-                        compiler
-                            .register_imported_items(&import_stmt.from, &module_info.program.items);
-                    } else {
-                        diagnostics.push(make_span_diagnostic(
-                            text,
-                            *import_span,
-                            format!(
-                                "Cannot resolve module '{}'. Verify the import path and declare dependencies in shape.toml when needed.",
-                                import_stmt.from
-                            ),
-                            DiagnosticSeverity::ERROR,
-                        ));
-                    }
-                }
-                ImportItems::Namespace { name, .. } => {
-                    if !known_module_names.iter().any(|module| module == name) {
-                        diagnostics.push(make_span_diagnostic(
-                            text,
-                            *import_span,
-                            format!(
-                                "Cannot resolve module '{}'. Verify the import path and declare dependencies in shape.toml when needed.",
-                                name
-                            ),
-                            DiagnosticSeverity::ERROR,
-                        ));
-                    }
-                }
-            }
-        }
-    }
-
-    diagnostics
-}
-
-fn make_span_diagnostic(
-    text: &str,
-    span: shape_ast::ast::Span,
-    message: String,
-    severity: DiagnosticSeverity,
-) -> Diagnostic {
-    let (start_line, start_col) = offset_to_line_col(text, span.start);
-    let (end_line, end_col) = offset_to_line_col(text, span.end);
-    Diagnostic {
-        range: Range {
-            start: Position {
-                line: start_line,
-                character: start_col,
-            },
-            end: Position {
-                line: end_line,
-                character: end_col,
-            },
-        },
-        severity: Some(severity),
-        message,
-        source: Some("shape".to_string()),
-        ..Default::default()
-    }
 }
 
 fn combine_same_line_undefined_variable_diagnostics(

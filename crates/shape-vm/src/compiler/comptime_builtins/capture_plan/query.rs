@@ -334,6 +334,9 @@ impl BytecodeCompiler {
     /// never produces identity or capture semantics; those come exclusively
     /// from the compiler-issued pack.
     pub fn generated_capture_query(&self, source_program: &Program) -> GeneratedCaptureQuery {
+        if !self.generated_queries_available() {
+            return GeneratedCaptureQuery::default();
+        }
         GeneratedCaptureQuery::from_compiler(self, source_program)
     }
 }

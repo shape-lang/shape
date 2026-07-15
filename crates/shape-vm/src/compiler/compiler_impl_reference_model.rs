@@ -1980,6 +1980,8 @@ impl BytecodeCompiler {
     /// `generated_symbol_query()` — the ONE query API of spec §4.1, never a
     /// second evaluator.
     pub fn compile_in_place(&mut self, program: &Program) -> Result<()> {
+        self.ensure_annotation_compiler_usable()?;
+
         // First: desugar the program (converts FromQuery to method chains, etc.)
         let mut program = program.clone();
         shape_ast::transform::desugar_program(&mut program);

@@ -33,16 +33,22 @@ pub(crate) fn compile_for_generated_capture_queries(
 
     let mut compiler = generated_query_compiler(text);
     if let (Some(file_path), Some(module_cache)) = (file_path, module_cache) {
-        let _ = crate::analysis::validate_imports_and_register_items(
+        let registration = crate::analysis::validate_imports_and_register_items(
             program,
             text,
             file_path,
             module_cache,
             workspace_root,
             &mut compiler,
-        );
+        )
+        .ok()?;
+        if !registration.is_ready() {
+            return None;
+        }
     }
-    let _ = compiler.compile_in_place(program);
+    if compiler.compile_in_place(program).is_err() && !compiler.generated_queries_available() {
+        return None;
+    }
     Some(compiler)
 }
 

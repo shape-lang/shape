@@ -14,6 +14,7 @@ impl BytecodeCompiler {
         graph: Arc<ModuleGraph>,
         _prelude_paths: &[String],
     ) -> Result<()> {
+        self.ensure_annotation_compiler_usable()?;
         self.module_graph = Some(graph.clone());
 
         // Stage the root view before dependency compilation mutates scoped

@@ -9,6 +9,8 @@ use tower_lsp_server::ls_types::{Diagnostic, GotoDefinitionResponse, Location, U
 
 #[cfg(test)]
 mod adversarial_tests;
+#[cfg(test)]
+mod import_registration_tests;
 mod hover;
 mod navigation;
 mod presentation;

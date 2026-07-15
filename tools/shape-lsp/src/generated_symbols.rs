@@ -54,17 +54,30 @@ pub(crate) fn program_may_generate_symbols(program: &Program) -> bool {
 /// Compile the document through the SAME compiler pipeline the diagnostics
 /// path uses (`analysis.rs`, RecoverAll modes) and return the compiler:
 /// its `generated_symbol_query()` table then answers every navigation
-/// query of this module. Compile errors are tolerated — the table holds
-/// every reservation made before a failure, and navigation must keep
-/// working on broken documents.
+/// query of this module. Ordinary RecoverAll errors are tolerated, but a
+/// document with imports needs request context and a compiler poisoned during
+/// annotation installation is unavailable rather than an authoritative empty
+/// table.
 pub(crate) fn compile_for_generated_symbol_queries(
     program: &Program,
     text: &str,
-) -> shape_vm::BytecodeCompiler {
+) -> Option<shape_vm::BytecodeCompiler> {
+    if program
+        .items
+        .iter()
+        .any(|item| matches!(item, Item::Import(..)))
+    {
+        return None;
+    }
     let mut compiler = generated_query_compiler(text);
-    let _ = compiler.compile_in_place(program);
-    compiler
+    if compiler.compile_in_place(program).is_err() && !compiler.generated_queries_available() {
+        return None;
+    }
+    Some(compiler)
 }
+
+#[cfg(test)]
+mod import_context_tests;
 
 fn generated_query_compiler(text: &str) -> shape_vm::BytecodeCompiler {
     let mut compiler = shape_vm::BytecodeCompiler::new();
@@ -295,7 +308,7 @@ pub fn generated_definition(
     }
     let sites = call_site_name_spans(program, text, word);
     let cursor_kind = call_site_kind_at(&sites, offset)?;
-    let compiler = compile_for_generated_symbol_queries(program, text);
+    let compiler = compile_for_generated_symbol_queries(program, text)?;
     generated_definition_for_kind(program, text, word, uri, &compiler, cursor_kind)
 }
 
@@ -360,7 +373,7 @@ pub fn generated_references(
     }
     let sites = call_site_name_spans(program, text, word);
     let cursor_kind = call_site_kind_at(&sites, offset)?;
-    let compiler = compile_for_generated_symbol_queries(program, text);
+    let compiler = compile_for_generated_symbol_queries(program, text)?;
     generated_references_for_kind(program, text, word, uri, &compiler, &sites, cursor_kind)
 }
 
@@ -578,7 +591,7 @@ pub fn classify_generated_rename(
     if !program_may_generate_symbols(program) {
         return None;
     }
-    let compiler = compile_for_generated_symbol_queries(program, text);
+    let compiler = compile_for_generated_symbol_queries(program, text)?;
     classify_generated_rename_from_compiler(program, text, word, offset, &compiler)
 }
 
@@ -590,7 +603,9 @@ pub fn generated_decl_ranges(program: &Program, text: &str) -> Vec<Span> {
     if !program_may_generate_symbols(program) {
         return Vec::new();
     }
-    let compiler = compile_for_generated_symbol_queries(program, text);
+    let Some(compiler) = compile_for_generated_symbol_queries(program, text) else {
+        return Vec::new();
+    };
     compiler
         .generated_symbol_query()
         .generated_symbols()
@@ -619,7 +634,9 @@ pub(crate) fn generated_workspace_symbols(
     if !program_may_generate_symbols(program) {
         return Vec::new();
     }
-    let compiler = compile_for_generated_symbol_queries(program, text);
+    let Some(compiler) = compile_for_generated_symbol_queries(program, text) else {
+        return Vec::new();
+    };
     let query_lower = query.to_lowercase();
     compiler
         .generated_symbol_query()
@@ -660,7 +677,9 @@ pub(crate) fn generated_symbol_completions(program: &Program, text: &str) -> Vec
     if !program_may_generate_symbols(program) {
         return Vec::new();
     }
-    let compiler = compile_for_generated_symbol_queries(program, text);
+    let Some(compiler) = compile_for_generated_symbol_queries(program, text) else {
+        return Vec::new();
+    };
     compiler
         .generated_symbol_query()
         .generated_symbols()
@@ -719,7 +738,7 @@ pub(crate) fn generated_render_inputs_at(
     }
     let sites = call_site_name_spans(program, text, word);
     let cursor_kind = call_site_kind_at(&sites, offset)?;
-    let compiler = compile_for_generated_symbol_queries(program, text);
+    let compiler = compile_for_generated_symbol_queries(program, text)?;
     let inputs: Vec<GeneratedSymbolRenderInputs> = compiler
         .generated_symbol_query()
         .symbols_named(word)
@@ -751,7 +770,9 @@ pub(crate) fn generated_render_inputs_all(
     if !program_may_generate_symbols(program) {
         return Vec::new();
     }
-    let compiler = compile_for_generated_symbol_queries(program, text);
+    let Some(compiler) = compile_for_generated_symbol_queries(program, text) else {
+        return Vec::new();
+    };
     compiler
         .generated_symbol_query()
         .generated_symbols()
@@ -1378,7 +1399,8 @@ let a = p.answer()
     #[test]
     fn compiled_document_answers_generated_symbol_names() {
         let program = parse_program(GENERATING_PROGRAM).expect("parses");
-        let compiler = compile_for_generated_symbol_queries(&program, GENERATING_PROGRAM);
+        let compiler = compile_for_generated_symbol_queries(&program, GENERATING_PROGRAM)
+            .expect("query compiler remains available");
         let names: Vec<String> = compiler
             .generated_symbol_query()
             .symbols_named("answer")
@@ -1395,7 +1417,9 @@ pub(crate) fn generated_document_symbols(program: &Program, text: &str) -> Vec<D
     if !program_may_generate_symbols(program) {
         return Vec::new();
     }
-    let compiler = compile_for_generated_symbol_queries(program, text);
+    let Some(compiler) = compile_for_generated_symbol_queries(program, text) else {
+        return Vec::new();
+    };
     compiler
         .generated_symbol_query()
         .generated_symbols()

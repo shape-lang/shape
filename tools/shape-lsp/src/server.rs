@@ -2841,7 +2841,9 @@ let conn = duckdb.connect("duckdb://analytics.db")
             &module_cache,
             None,
             &mut compiler,
-        );
+        )
+        .expect("import validation completes")
+        .into_diagnostics();
 
         assert!(
             diagnostics.iter().all(|diag| {
@@ -2872,7 +2874,9 @@ let conn = duckdb.connect("duckdb://analytics.db")
             &module_cache,
             None,
             &mut compiler,
-        );
+        )
+        .expect("import validation completes")
+        .into_diagnostics();
 
         assert!(
             diagnostics
