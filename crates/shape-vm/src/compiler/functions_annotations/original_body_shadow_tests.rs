@@ -115,8 +115,8 @@ annotation replace_with_closure() {
 
 @replace_with_closure()
 fn probe(value: int) -> int {
-  let original = |item: int| item + 1
-  original(value)
+  let unary = |item: int| item + 1
+  unary(value)
 }
 "#;
     let (compiler, outcome) = compile_annotated_function(source, "probe");
