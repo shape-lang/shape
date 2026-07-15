@@ -23,7 +23,7 @@ use crate::folding::get_folding_ranges;
 use crate::formatting::{format_document, format_on_type, format_range};
 use crate::hover::get_hover;
 use crate::inlay_hints::{InlayHintConfig, get_inlay_hints_with_context};
-use crate::rename::{prepare_rename, rename_cross_file};
+use crate::rename::{prepare_rename, rename_cross_file_after_generated_query};
 use crate::semantic_tokens::{get_legend, get_semantic_tokens};
 use crate::signature_help::get_signature_help;
 use crate::util::{
@@ -1825,33 +1825,33 @@ impl LanguageServer for ShapeLanguageServer {
 
         let cached = self.last_good_programs.get(&uri);
         let cached_ref = cached.as_ref().map(|r| r.value());
+        let module_cache = self.documents.get_module_cache();
+        let workspace_root = self.project_root.get().map(|p| p.as_path());
 
-        // ADR-009 D1 (S6, Decision 68): rename over GENERATED symbols is
-        // answered from the compiler query surface first. A source-binder
-        // name renames by recomputation (source occurrences only); a
-        // wholly generator-controlled name is NEVER a text edit — the
-        // named report (with the generator-definition location in its
-        // message) is surfaced to the editor as the request's error
-        // response.
-        match crate::rename::generated_rename(&text, &uri, position, &new_name, cached_ref) {
-            Some(crate::rename::GeneratedRename::GeneratorControlled(report)) => {
+        // One query owns generated capture/symbol rename and quarantine.
+        let current_path = uri.to_file_path().map(|path| path.into_owned());
+        match crate::rename::generated_rename_request(
+            &text,
+            &uri,
+            position,
+            &new_name,
+            cached_ref,
+            current_path.as_deref(),
+            &module_cache,
+            workspace_root,
+        ) {
+            crate::rename::GeneratedRenameRequest::Edits(edit) => return Ok(Some(edit)),
+            crate::rename::GeneratedRenameRequest::GeneratorControlled(report) => {
                 return Err(tower_lsp_server::jsonrpc::Error::invalid_params(
                     report.message,
                 ));
             }
-            Some(crate::rename::GeneratedRename::Edits(edit)) => {
-                return Ok(Some(edit));
-            }
-            None => {}
+            crate::rename::GeneratedRenameRequest::Unavailable => return Ok(None),
+            crate::rename::GeneratedRenameRequest::NotGenerated => {}
         }
 
-        // W2.6 — cross-file rename via ScopeTree-driven scan over open
-        // documents + workspace .shape files. Same-file path remains
-        // scope-aware; cross-file restricted to module-scope-visible
-        // top-level symbols.
-        let module_cache = self.documents.get_module_cache();
-        let workspace_root = self.project_root.get().map(|p| p.as_path());
-        let edit = rename_cross_file(
+        // Ordinary cross-file rename runs only after generated abstention.
+        let edit = rename_cross_file_after_generated_query(
             &text,
             &uri,
             position,

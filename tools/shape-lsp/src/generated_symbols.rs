@@ -642,16 +642,9 @@ fn binder_token_spans_in(
     spans
 }
 
-/// Classify a rename request over a generated symbol (Decision 68
-/// identity-controlled rename). `None` = the position does not target a
-/// generated symbol — ordinary rename applies. The classification is
-/// derived from the compiler-issued provenance: a name whose token appears
-/// inside the expansion's generator or application anchor is an explicit
-/// source binder (renaming it there recomputes the expansion); a name whose
-/// token appears in NO source anchor is generator-controlled. When several
-/// generated symbols answer to one name, every one must be source-bound for
-/// a text rename — otherwise the coarse-but-sound answer is
-/// generator-controlled (a partial text edit would desynchronize the rest).
+/// Classify generated-symbol rename from compiler provenance. A source-bound
+/// name renames by recomputation; wholly or partly generator-controlled sets
+/// refuse text edits. `None` leaves an ordinary symbol to the scope provider.
 pub fn classify_generated_rename(
     program: &Program,
     text: &str,
@@ -661,9 +654,19 @@ pub fn classify_generated_rename(
     if !program_may_generate_symbols(program) {
         return None;
     }
+    let compiler = compile_for_generated_symbol_queries(program, text);
+    classify_generated_rename_from_compiler(program, text, word, offset, &compiler)
+}
+
+pub(crate) fn classify_generated_rename_from_compiler(
+    program: &Program,
+    text: &str,
+    word: &str,
+    offset: usize,
+    compiler: &shape_vm::BytecodeCompiler,
+) -> Option<GeneratedRenameClassification> {
     let sites = call_site_name_spans(program, text, word);
     let cursor_kind = call_site_kind_at(&sites, offset)?;
-    let compiler = compile_for_generated_symbol_queries(program, text);
     let matches: Vec<_> = compiler
         .generated_symbol_query()
         .symbols_named(word)
@@ -673,11 +676,8 @@ pub fn classify_generated_rename(
     if matches.is_empty() {
         return None;
     }
-    // A hand-written declaration of the SAME callable kind shares the bare
-    // name: without receiver-type resolution the call sites are ambiguous
-    // between the generated and the hand-written symbol — a text edit over
-    // that set would corrupt one of them (round-1 review finding). The
-    // generated classification abstains; ordinary rename applies.
+    // A hand-written declaration of the same callable kind makes bare-name
+    // call sites ambiguous, so generated classification must abstain.
     if !ordinary_declaration_spans(program, word, cursor_kind).is_empty() {
         return None;
     }

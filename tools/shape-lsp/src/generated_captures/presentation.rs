@@ -67,7 +67,7 @@ pub(super) fn push_anchor(
     }
 }
 
-fn range_from_anchor(anchor: shape_vm::compiler::SourceAnchor, text: &str) -> Range {
+pub(super) fn range_from_anchor(anchor: shape_vm::compiler::SourceAnchor, text: &str) -> Range {
     let span = anchor.span();
     let (start_line, start_col) = offset_to_line_col(text, span.start);
     let (end_line, end_col) = offset_to_line_col(text, span.end);

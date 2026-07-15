@@ -10,13 +10,18 @@ use tower_lsp_server::ls_types::{Diagnostic, GotoDefinitionResponse, Location, U
 #[cfg(test)]
 mod adversarial_tests;
 mod hover;
+mod navigation;
 mod presentation;
+mod rename;
+#[cfg(test)]
+mod rename_tests;
 mod routing;
 #[cfg(test)]
 mod semantic_tests;
 mod session;
 pub(crate) use hover::generated_capture_hover;
 use presentation::push_anchor;
+pub(crate) use rename::generated_capture_rename;
 pub(crate) use routing::GeneratedCaptureLookup;
 use routing::{CaptureAnalysis, analyze, analyze_session};
 pub(crate) use session::{CaptureQueryContext, GeneratedQuerySession};
@@ -92,25 +97,12 @@ pub(crate) fn generated_capture_references_with_session(
         }
         Some(GeneratedCapturePosition::Available(site)) => site,
     };
-    let mut identities: Vec<_> = site
-        .captures()
-        .iter()
-        .map(|capture| capture.identity().clone())
-        .collect();
-    identities.sort_by_key(|identity| identity.canonical_descriptor());
-    identities.dedup();
+    let Some(anchors) = navigation::complete_binding_anchors(&captures, &site) else {
+        return GeneratedCaptureLookup::Unavailable;
+    };
     let mut locations = Vec::new();
-    for identity in identities {
-        for occurrence in captures.captures_for_binding(&identity) {
-            let Some(source) = occurrence.source_map() else {
-                continue;
-            };
-            push_anchor(&mut locations, source.binding(), text, uri);
-            push_anchor(&mut locations, source.declaration(), text, uri);
-            for use_site in source.uses() {
-                push_anchor(&mut locations, *use_site, text, uri);
-            }
-        }
+    for anchor in anchors {
+        push_anchor(&mut locations, anchor, text, uri);
     }
     GeneratedCaptureLookup::Found(locations)
 }
