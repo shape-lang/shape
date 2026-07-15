@@ -1,9 +1,10 @@
 //! Reference tracking, borrow key management, and callable pass mode utilities
 
+use super::reference_flow::{BindingKey, ReferenceClass};
 use super::{BorrowMode, BorrowPlace};
 use crate::bytecode::{Constant, Instruction, OpCode, Operand};
 use crate::executor::typed_object_ops::field_type_to_tag;
-use crate::type_tracking::{BindingStorageClass, VariableKind, VariableTypeInfo};
+use crate::type_tracking::{VariableKind, VariableTypeInfo};
 use shape_ast::ast::{BlockItem, Expr, Item, Statement};
 use shape_ast::error::{Result, ShapeError, SourceLocation};
 use shape_runtime::type_schema::FieldType;
@@ -489,22 +490,17 @@ impl BytecodeCompiler {
     }
 
     pub(super) fn mark_reference_binding(&mut self, slot: u16, is_local: bool, is_exclusive: bool) {
-        if is_local {
-            self.reference_value_locals.insert(slot);
-            if is_exclusive {
-                self.exclusive_reference_value_locals.insert(slot);
-            } else {
-                self.exclusive_reference_value_locals.remove(&slot);
-            }
+        let key = if is_local {
+            BindingKey::Local(slot)
         } else {
-            self.reference_value_module_bindings.insert(slot);
-            if is_exclusive {
-                self.exclusive_reference_value_module_bindings.insert(slot);
-            } else {
-                self.exclusive_reference_value_module_bindings.remove(&slot);
-            }
-        }
-        self.set_binding_storage_class(slot, is_local, BindingStorageClass::Reference);
+            BindingKey::ModuleBinding(slot)
+        };
+        let class = if is_exclusive {
+            ReferenceClass::ExclusiveReference { referent: None }
+        } else {
+            ReferenceClass::SharedReference { referent: None }
+        };
+        self.set_reference_flow_class(key, class);
     }
 
     pub(super) fn compile_expr_for_reference_binding(
@@ -718,15 +714,12 @@ impl BytecodeCompiler {
 
     pub(super) fn clear_reference_binding(&mut self, slot: u16, is_local: bool) {
         self.release_tracked_reference_borrow(slot, is_local);
-        if is_local {
-            self.reference_value_locals.remove(&slot);
-            self.exclusive_reference_value_locals.remove(&slot);
+        let key = if is_local {
+            BindingKey::Local(slot)
         } else {
-            self.reference_value_module_bindings.remove(&slot);
-            self.exclusive_reference_value_module_bindings.remove(&slot);
-        }
-        let fallback_storage = self.default_binding_storage_class_for_slot(slot, is_local);
-        self.set_binding_storage_class(slot, is_local, fallback_storage);
+            BindingKey::ModuleBinding(slot)
+        };
+        self.set_reference_flow_class(key, ReferenceClass::Value);
     }
 
     pub(super) fn update_reference_binding_from_expr(
@@ -781,14 +774,13 @@ impl BytecodeCompiler {
         is_local: bool,
         expr: &shape_ast::ast::Expr,
     ) {
-        if is_local {
-            self.reference_value_local_referent_concrete_type
-                .remove(&slot);
+        let key = if is_local {
+            BindingKey::Local(slot)
         } else {
-            self.reference_value_module_binding_referent_concrete_type
-                .remove(&slot);
-        }
+            BindingKey::ModuleBinding(slot)
+        };
         let shape_ast::ast::Expr::Reference { expr: inner, .. } = expr else {
+            self.set_reference_flow_referent(key, None);
             return;
         };
         // U4-5b: record the referent's `ConcreteType` STRUCTURALLY — one carrier
@@ -800,17 +792,9 @@ impl BytecodeCompiler {
         // (ADR-006 §2.7.5) — the U4-5b deletion collapsed the parallel
         // `"int"`/`"int[]"` display-string carrier the read sites previously
         // consulted. An unresolved referent records nothing (surface-and-stop).
-        if let Some(referent_ct) =
-            crate::compiler::monomorphization::type_resolution::concrete_type_for_expr(self, inner)
-        {
-            if is_local {
-                self.reference_value_local_referent_concrete_type
-                    .insert(slot, referent_ct);
-            } else {
-                self.reference_value_module_binding_referent_concrete_type
-                    .insert(slot, referent_ct);
-            }
-        }
+        let referent =
+            crate::compiler::monomorphization::type_resolution::concrete_type_for_expr(self, inner);
+        self.set_reference_flow_referent(key, referent);
     }
 
     /// U4-5b: the referent's SCALAR type name for an identifier bound to a

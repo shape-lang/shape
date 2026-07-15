@@ -1807,14 +1807,7 @@ impl BytecodeCompiler {
         // binding inside the nested function).
         let saved_local_callable_closure_bodies =
             std::mem::take(&mut self.local_callable_closure_bodies);
-        let saved_reference_value_locals = std::mem::take(&mut self.reference_value_locals);
-        let saved_exclusive_reference_value_locals =
-            std::mem::take(&mut self.exclusive_reference_value_locals);
-        let saved_reference_value_local_referent_concrete_type =
-            std::mem::take(&mut self.reference_value_local_referent_concrete_type);
-        let saved_reference_value_module_bindings = self.reference_value_module_bindings.clone();
-        let saved_exclusive_reference_value_module_bindings =
-            self.exclusive_reference_value_module_bindings.clone();
+        let saved_reference_flow = self.enter_function_reference_flow();
         let saved_comptime_mode = self.comptime_mode;
         let saved_drop_locals = std::mem::take(&mut self.drop_locals);
         // Phase V1.1C fix: the ownership-aware drop-local scope stack must be
@@ -1942,9 +1935,6 @@ impl BytecodeCompiler {
         self.local_callable_pass_modes.clear();
         self.local_callable_return_reference_summaries.clear();
         self.local_callable_closure_bodies.clear();
-        self.reference_value_locals.clear();
-        self.exclusive_reference_value_locals.clear();
-        self.reference_value_local_referent_concrete_type.clear();
         self.immutable_locals.clear();
         self.param_locals.clear();
         // v0.3 WS-6: per-function local ConcreteType facts — local slot
@@ -2508,15 +2498,7 @@ impl BytecodeCompiler {
                         // compile completes.
                         self.local_callable_closure_bodies =
                             saved_local_callable_closure_bodies.clone();
-                        self.reference_value_locals = saved_reference_value_locals;
-                        self.exclusive_reference_value_locals =
-                            saved_exclusive_reference_value_locals;
-                        self.reference_value_local_referent_concrete_type =
-                            saved_reference_value_local_referent_concrete_type;
-                        self.reference_value_module_bindings =
-                            saved_reference_value_module_bindings;
-                        self.exclusive_reference_value_module_bindings =
-                            saved_exclusive_reference_value_module_bindings;
+                        self.restore_reference_flow_snapshot(&saved_reference_flow);
                         self.comptime_mode = saved_comptime_mode;
                         self.current_function_return_reference_summary =
                             saved_current_function_return_reference_summary;
@@ -2639,13 +2621,7 @@ impl BytecodeCompiler {
             saved_local_callable_return_reference_summaries;
         // cluster-2-cw-IB-class-b: restore retained closure bodies.
         self.local_callable_closure_bodies = saved_local_callable_closure_bodies;
-        self.reference_value_locals = saved_reference_value_locals;
-        self.exclusive_reference_value_locals = saved_exclusive_reference_value_locals;
-        self.reference_value_local_referent_concrete_type =
-            saved_reference_value_local_referent_concrete_type;
-        self.reference_value_module_bindings = saved_reference_value_module_bindings;
-        self.exclusive_reference_value_module_bindings =
-            saved_exclusive_reference_value_module_bindings;
+        self.restore_reference_flow_snapshot(&saved_reference_flow);
         self.comptime_mode = saved_comptime_mode;
         self.current_function_return_reference_summary =
             saved_current_function_return_reference_summary;

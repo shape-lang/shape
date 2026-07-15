@@ -99,6 +99,7 @@ pub(crate) mod monomorphization;
 mod original_body_rewrite;
 pub(crate) mod patterns;
 pub(crate) mod post_inference_verify;
+mod reference_flow;
 mod statements;
 pub mod string_interpolation;
 mod trait_object_emission;

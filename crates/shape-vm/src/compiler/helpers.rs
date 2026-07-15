@@ -3560,6 +3560,7 @@ impl BytecodeCompiler {
 
     /// Pop a scope
     pub(super) fn pop_scope(&mut self) {
+        self.evict_current_scope_reference_flow();
         self.locals.pop();
         self.type_tracker.pop_scope();
     }
