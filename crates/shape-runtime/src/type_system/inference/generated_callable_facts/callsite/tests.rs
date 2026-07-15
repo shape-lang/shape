@@ -1,7 +1,34 @@
 use super::*;
-use crate::type_system::{BuiltinTypes, Type, TypeConstraint, TypeScheme, tyvar_to_annotation};
-use shape_ast::ast::GeneratedNodeOrigin;
+use crate::type_system::{
+    BuiltinTypes, InferenceFacts, Type, TypeConstraint, TypeScheme, tyvar_to_annotation,
+};
+use shape_ast::ast::{GeneratedNodeOrigin, TypeAnnotation};
 use shape_ast::parser::parse_program;
+
+fn require_exact<'a>(
+    callee: &str,
+    fact: &'a SemanticCallSiteFact,
+) -> &'a ExactSemanticCallSiteFact {
+    match fact {
+        SemanticCallSiteFact::Exact(exact) => exact,
+        SemanticCallSiteFact::Unavailable(issue) => {
+            panic!("{callee} call is unavailable: {}", issue.detail())
+        }
+        SemanticCallSiteFact::Conflict(issue) => {
+            panic!("{callee} call conflicts: {}", issue.detail())
+        }
+    }
+}
+
+fn exact_call<'a>(facts: &'a InferenceFacts, callee: &str) -> &'a ExactSemanticCallSiteFact {
+    let matching: Vec<_> = facts
+        .semantic_callsite_facts()
+        .iter()
+        .filter_map(|(key, fact)| (key.callee() == callee).then_some(fact))
+        .collect();
+    assert_eq!(matching.len(), 1, "expected exactly one {callee} call fact");
+    require_exact(callee, matching[0])
+}
 
 fn node(expansion_low: i64) -> GeneratedNodeKey {
     let origin: GeneratedNodeOrigin = serde_json::from_value(serde_json::json!({
@@ -265,16 +292,8 @@ fn nested_same_spelled_argument_retains_the_exact_outer_capability() {
     let (facts, errors) = engine.infer_program_facts_best_effort(&program);
 
     assert!(errors.is_empty(), "unexpected inference errors: {errors:?}");
-    let exact = |callee: &str| {
-        facts
-            .semantic_callsite_facts()
-            .iter()
-            .find_map(|(key, fact)| (key.callee() == callee).then_some(fact))
-            .and_then(SemanticCallSiteFact::exact)
-            .unwrap_or_else(|| panic!("{callee} call must publish exact evidence"))
-    };
-    let outer = exact("outer");
-    let inner = exact("inner");
+    let outer = exact_call(&facts, "outer");
+    let inner = exact_call(&facts, "inner");
     assert!(
         facts
             .semantic_callee_declaration("outer")
@@ -312,6 +331,80 @@ fn nested_same_spelled_argument_retains_the_exact_outer_capability() {
         &Type::Variable(outer_argument.declared().clone()),
         "inner T remains an exact dependency on the outer declared token"
     );
+}
+
+#[test]
+fn explicit_generic_calls_specialize_without_widening_the_declaration() {
+    let program = parse_program(
+        r#"
+            fn identity<T>(value: T) -> T { value }
+            let integer = identity(42)
+            let string = identity("forty-two")
+        "#,
+    )
+    .expect("two-call generic fixture parses");
+    let mut engine = TypeInferenceEngine::new();
+    let (facts, errors) = engine.infer_program_facts_best_effort(&program);
+    assert!(errors.is_empty(), "unexpected inference errors: {errors:?}");
+
+    let Type::Function { params, returns } = facts
+        .top_level_type("identity")
+        .expect("generic signature is retained")
+    else {
+        panic!("identity must retain its function signature")
+    };
+    let [Type::Variable(declared)] = params.as_slice() else {
+        panic!("identity must retain one declared parameter: {params:?}")
+    };
+    assert_eq!(returns.as_ref(), &Type::Variable(declared.clone()));
+    let declaration = facts
+        .semantic_callee_declaration("identity")
+        .expect("identity declaration capability is published");
+    assert_eq!(declaration.parameters()[0].token(), declared);
+    assert!(engine.solver.unifier().lookup(declared).is_none());
+
+    let exact: Vec<_> = facts
+        .semantic_callsite_facts()
+        .iter()
+        .filter_map(|(key, fact)| {
+            (key.callee() == "identity").then(|| require_exact("identity", fact))
+        })
+        .collect();
+    assert_eq!(exact.len(), 2, "each call retains a separate exact fact");
+    let candidates: Vec<_> = exact
+        .iter()
+        .map(|call| call.arguments()[0].candidate().ty())
+        .collect();
+    assert!(candidates.contains(&&BuiltinTypes::integer()));
+    assert!(candidates.contains(&&BuiltinTypes::string()));
+}
+
+#[test]
+fn unannotated_callsites_still_widen_the_definition() {
+    let program = parse_program(
+        r#"
+            fn inferred(value) { return value }
+            let integer = inferred(42)
+            let string = inferred("forty-two")
+        "#,
+    )
+    .expect("unannotated widening fixture parses");
+    let mut engine = TypeInferenceEngine::new();
+    let (facts, errors) = engine.infer_program_facts_best_effort(&program);
+    assert!(errors.is_empty(), "unexpected inference errors: {errors:?}");
+
+    let Type::Function { params, returns } = facts
+        .top_level_type("inferred")
+        .expect("inferred signature is retained")
+    else {
+        panic!("inferred must retain its function signature")
+    };
+    assert_eq!(&params[0], returns.as_ref());
+    let Type::Concrete(TypeAnnotation::Union(members)) = &params[0] else {
+        panic!("unannotated calls must retain callsite widening: {params:?}")
+    };
+    assert!(members.contains(&TypeAnnotation::Basic("int".to_string())));
+    assert!(members.contains(&TypeAnnotation::Basic("string".to_string())));
 }
 
 fn reduce_single_argument(

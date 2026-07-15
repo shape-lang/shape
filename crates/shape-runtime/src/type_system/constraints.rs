@@ -310,6 +310,23 @@ impl ConstraintSolver {
         match (&t1, &t2) {
             // Variable constraints
             (Type::Variable(v1), Type::Variable(v2)) if v1 == v2 => Ok(()),
+            (Type::Variable(v1), Type::Variable(v2)) => {
+                // A declared variable is an authenticated semantic capability,
+                // while an ordinary variable is an inference hole. Preserve
+                // that capability as the representative in either constraint
+                // orientation; all other variable pairs retain the historical
+                // left-to-right binding direction.
+                let (hole, representative) = match (
+                    v1.declared_provenance().is_some(),
+                    v2.declared_provenance().is_some(),
+                ) {
+                    (true, false) => (v2, v1),
+                    _ => (v1, v2),
+                };
+                self.unifier
+                    .bind(hole.clone(), Type::Variable(representative.clone()));
+                Ok(())
+            }
 
             // Constrained type variables — must be matched BEFORE the general
             // Variable arm, otherwise (Variable, Constrained) pairs are caught
@@ -1742,6 +1759,10 @@ impl ConstraintSolver {
         &mut self.unifier
     }
 }
+
+#[cfg(test)]
+#[path = "constraints/declared_variable_tests.rs"]
+mod declared_variable_tests;
 
 #[cfg(test)]
 mod tests {

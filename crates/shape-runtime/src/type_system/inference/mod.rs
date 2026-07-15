@@ -3306,16 +3306,24 @@ impl TypeInferenceEngine {
                     if index >= widened_params.len() {
                         break;
                     }
+                    // Definition-wide callsite widening belongs only to the
+                    // inference hole minted for an unannotated parameter. An
+                    // annotated slot (including an explicit generic `T`) has
+                    // no source hole and must retain its declared signature;
+                    // each call's fresh instantiation carries specialization.
+                    let Some(source_var) = param_source_vars
+                        .get(index)
+                        .and_then(|variable| variable.clone())
+                    else {
+                        continue;
+                    };
                     let Some(widened_type) =
                         self.union_from_observed_types_with_resolved(observed_types, &resolved)
                     else {
                         continue;
                     };
 
-                    let source_var = param_source_vars.get(index).and_then(|var| var.clone());
-                    if let Some(var) = source_var.clone() {
-                        substitutions.insert(var, widened_type.clone());
-                    }
+                    substitutions.insert(source_var, widened_type.clone());
 
                     let current_param = widened_params[index].clone();
                     match current_param {
@@ -3323,10 +3331,9 @@ impl TypeInferenceEngine {
                             widened_params[index] = widened_type.clone();
                             substitutions.insert(var, widened_type);
                         }
-                        _ if source_var.is_some() => {
+                        _ => {
                             widened_params[index] = widened_type;
                         }
-                        _ => {}
                     }
                 }
 
