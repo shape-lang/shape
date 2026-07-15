@@ -173,7 +173,7 @@ mod tests {
             .expect("primitive argument must be exact"),
         };
         let exact = ExactSemanticCallSiteFact::new(vec![argument]);
-        let active = SemanticCalleeDeclaration::from_tokens(&[authored_u])
+        let active = SemanticCalleeDeclaration::from_tokens(std::slice::from_ref(&authored_u))
             .expect("declared parameter must produce a catalog capability");
 
         assert_eq!(authored_t, authored_u, "TypeVar identity ignores spelling");

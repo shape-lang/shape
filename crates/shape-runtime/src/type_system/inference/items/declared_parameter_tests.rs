@@ -264,9 +264,8 @@ fn same_named_ast_declarations_keep_distinct_declared_capabilities() {
         second_vars
     );
     engine.finalize_semantic_callee_declarations();
-    let active = engine
-        .generated_inference
-        .callee_declarations
+    let declarations = engine.take_semantic_callee_declarations();
+    let active = declarations
         .get("duplicate")
         .expect("active same-named declaration must enter the callee catalog");
     assert_eq!(active.parameters().len(), 1);
