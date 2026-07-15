@@ -297,7 +297,7 @@ impl GeneratedCaptureQuery {
         }
 
         let mut captures = Vec::new();
-        let mut role = None;
+        let mut role: Option<CaptureSiteRole> = None;
         for capture in &self.captures {
             let Some(candidate_role) = capture
                 .source_map()

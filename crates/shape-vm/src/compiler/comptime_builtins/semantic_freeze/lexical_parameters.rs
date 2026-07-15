@@ -48,6 +48,13 @@ impl LexicalParameters {
         self.effective_by_name.get(name).copied()
     }
 
+    pub(super) fn names_for_identity(&self, identity: FrozenTypeIdentity) -> Vec<&str> {
+        self.effective_by_name
+            .iter()
+            .filter_map(|(name, &candidate)| (candidate == identity).then_some(name.as_str()))
+            .collect()
+    }
+
     pub(super) fn contains_name(&self, name: &str) -> bool {
         self.effective_by_name.contains_key(name)
     }
@@ -90,6 +97,20 @@ mod tests {
             overlay.identity_of("T"),
             Some(identities[1]),
             "ordinary name lookup retains inner lexical shadowing"
+        );
+        assert!(
+            overlay
+                .lexical_parameters
+                .names_for_identity(identities[0])
+                .is_empty(),
+            "a shadowed outer identity must not claim the effective source spelling"
+        );
+        assert_eq!(
+            overlay
+                .lexical_parameters
+                .names_for_identity(identities[1]),
+            vec!["T"],
+            "the effective inner identity retains its authored presentation"
         );
         assert_eq!(
             overlay.category_of(identities[0]),

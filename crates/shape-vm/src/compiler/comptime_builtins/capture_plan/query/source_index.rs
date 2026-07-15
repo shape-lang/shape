@@ -250,7 +250,7 @@ fn closure_use_spans(closure: &GeneratedClosureSourcePath, name: &str) -> Vec<Sp
         is_async: false,
         is_comptime: false,
     };
-    let outer_vars = HashSet::from([name.to_string()]);
+    let outer_vars = [name.to_string()];
     let analysis = EnvironmentAnalyzer::analyze_function_captures(&function, &outer_vars);
     normalized_spans(analysis.use_spans(name))
 }

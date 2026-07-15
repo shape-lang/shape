@@ -189,10 +189,10 @@ fn registered_name(identity: FrozenTypeIdentity, overlay: &FreezeOverlay) -> Opt
         .collect::<Vec<_>>();
     names.extend(
         overlay
-            .parameters
-            .iter()
-            .filter(|(_, frozen)| **frozen == identity)
-            .map(|(name, _)| name.clone()),
+            .lexical_parameters
+            .names_for_identity(identity)
+            .into_iter()
+            .map(str::to_string),
     );
     names.extend(
         overlay
