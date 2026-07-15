@@ -93,23 +93,19 @@ impl BytecodeCompiler {
         }
     }
 
-    /// Authorize the complete resolved-import set before mutating compiler state,
-    /// then stage its exact union for the sole authenticated owner.
+    /// Derive the complete resolved-import permission union, authorize it when
+    /// the compiler is bound to an explicit grant, then stage it for the sole
+    /// authenticated owner. An unbound compiler still emits exact metadata.
     pub(super) fn authorize_and_stage_graph_import_permissions(
         &mut self,
         module_id: ModuleId,
         graph: &ModuleGraph,
         resolved_imports: &[ResolvedImport],
     ) -> Result<()> {
-        let Some(granted) = self.permission_set.clone() else {
-            return self.assert_no_pending_module_permissions(module_id);
-        };
-
         let mut required = PermissionSet::pure();
         for resolved in resolved_imports {
             match resolved {
                 ResolvedImport::Namespace { canonical_path, .. } => {
-                    self.authorize_import_module_permissions(canonical_path, &granted)?;
                     required = required.union(
                         &shape_runtime::stdlib::capability_tags::module_permissions(canonical_path),
                     );
@@ -120,17 +116,34 @@ impl BytecodeCompiler {
                     ..
                 } => {
                     for symbol in symbols {
-                        self.authorize_import_symbol_permissions(
-                            canonical_path,
-                            &symbol.original_name,
-                            &granted,
-                        )?;
                         required = required.union(
                             &shape_runtime::stdlib::capability_tags::required_permissions(
                                 canonical_path,
                                 &symbol.original_name,
                             ),
                         );
+                    }
+                }
+            }
+        }
+        if let Some(granted) = self.permission_set.clone() {
+            for resolved in resolved_imports {
+                match resolved {
+                    ResolvedImport::Namespace { canonical_path, .. } => {
+                        self.authorize_import_module_permissions(canonical_path, &granted)?;
+                    }
+                    ResolvedImport::Named {
+                        canonical_path,
+                        symbols,
+                        ..
+                    } => {
+                        for symbol in symbols {
+                            self.authorize_import_symbol_permissions(
+                                canonical_path,
+                                &symbol.original_name,
+                                &granted,
+                            )?;
+                        }
                     }
                 }
             }
@@ -170,9 +183,6 @@ impl BytecodeCompiler {
         module_id: ModuleId,
         graph: &ModuleGraph,
     ) -> Result<()> {
-        if self.permission_set.is_none() {
-            return self.assert_no_pending_module_permissions(module_id);
-        }
         if module_id == graph.root_id() {
             return Err(Self::permission_state_error(
                 "root import permissions complete on the __main__ path".to_string(),
@@ -381,16 +391,6 @@ impl BytecodeCompiler {
         if active.module_id != module_id || active.canonical_path != canonical_path {
             return Err(Self::permission_state_error(format!(
                 "dependency permission owner mismatch for {:?}",
-                module_id
-            )));
-        }
-        Ok(())
-    }
-
-    fn assert_no_pending_module_permissions(&self, module_id: ModuleId) -> Result<()> {
-        if self.graph_permission_state.pending.contains_key(&module_id) {
-            return Err(Self::permission_state_error(format!(
-                "unchecked module {:?} retained pending import permissions",
                 module_id
             )));
         }

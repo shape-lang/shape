@@ -9,6 +9,10 @@ use shape_abi_v1::{Permission, PermissionSet};
 use shape_ast::ast::Program as AstProgram;
 use shape_ast::module_utils::ModuleExportKind;
 
+mod denial;
+mod integration;
+mod provenance;
+
 fn parse(source: &str) -> AstProgram {
     shape_ast::parse_program(source).expect("permission-carrier fixture parses")
 }

@@ -29,6 +29,20 @@ impl BytecodeCompiler {
         // The complete import set is authorized before any imported symbol,
         // annotation, module binding, instruction, or carrier is published.
         self.authorize_and_stage_graph_import_permissions(module_id, graph, &resolved_imports)?;
+        self.publish_graph_imports_with_annotation_semantics(module_id, graph, semantics)
+    }
+
+    /// Publish imports after the caller has completed permission preflight.
+    /// Shape/Hybrid dependency compilation uses this half only because its
+    /// preflight must precede even borrowed annotation-state staging.
+    pub(super) fn publish_graph_imports_with_annotation_semantics(
+        &mut self,
+        module_id: ModuleId,
+        graph: &ModuleGraph,
+        semantics: &AnnotationImportSemanticSnapshot,
+    ) -> Result<()> {
+        let node = graph.node(module_id);
+        let resolved_imports = node.resolved_imports.clone();
 
         for resolved in &resolved_imports {
             match resolved {

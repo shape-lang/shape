@@ -5,6 +5,7 @@
 
 mod cache;
 mod loading;
+mod origin;
 mod resolution;
 #[cfg(all(test, feature = "deep-tests"))]
 mod resolution_deep_tests;
@@ -20,6 +21,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use cache::ModuleCache;
+pub use origin::ModuleArtifactOrigin;
 pub use resolver::{
     FilesystemResolver, InMemoryResolver, ModuleCode, ModuleResolver, ResolvedModuleArtifact,
 };
@@ -123,6 +125,7 @@ pub struct Module {
     pub path: String,
     pub exports: HashMap<String, Export>,
     pub ast: Program,
+    artifact_origin: ModuleArtifactOrigin,
 }
 
 impl Module {
@@ -134,6 +137,11 @@ impl Module {
     /// Get all export names
     pub fn export_names(&self) -> Vec<&str> {
         self.exports.keys().map(|s| s.as_str()).collect()
+    }
+
+    /// Resolver branch that actually supplied this module's artifact.
+    pub fn artifact_origin(&self) -> ModuleArtifactOrigin {
+        self.artifact_origin
     }
 }
 
@@ -696,7 +704,8 @@ impl ModuleLoader {
         }
 
         // Compile the module
-        let module = loading::compile_module(compile_module_path, ast)?;
+        let mut module = loading::compile_module(compile_module_path, ast)?;
+        module.artifact_origin = ModuleArtifactOrigin::Filesystem;
         let module = Arc::new(module);
 
         // Cache it
@@ -712,6 +721,7 @@ impl ModuleLoader {
         source: &str,
         origin_path: Option<PathBuf>,
         context_path: Option<&PathBuf>,
+        artifact_origin: ModuleArtifactOrigin,
     ) -> Result<Arc<Module>> {
         // Parse the module (process-global parsed-AST memo; RESULTS-IDENTICAL,
         // see `parse_program_cached`).
@@ -736,7 +746,8 @@ impl ModuleLoader {
         // dependencies so that cross-module references can find it. Circular
         // dependency detection is handled in load_module_with_context which
         // checks the loading_stack before consulting the cache.
-        let module = loading::compile_module(compile_module_path, ast)?;
+        let mut module = loading::compile_module(compile_module_path, ast)?;
+        module.artifact_origin = artifact_origin;
         let module = Arc::new(module);
         self.cache.insert(cache_key, module.clone());
 
@@ -756,23 +767,23 @@ impl ModuleLoader {
         &self,
         module_path: &str,
         context_path: Option<&PathBuf>,
-    ) -> Result<ResolvedModuleArtifact> {
+    ) -> Result<(ResolvedModuleArtifact, ModuleArtifactOrigin)> {
         let context = context_path.map(|p| p.as_path());
 
         if let Some(artifact) = self.extension_resolver.resolve(module_path, context)? {
-            return Ok(artifact);
+            return Ok((artifact, ModuleArtifactOrigin::Extension));
         }
 
         // Check bundle resolver (compiled bundle modules)
         if let Some(artifact) = self.bundle_resolver.resolve(module_path, context)? {
-            return Ok(artifact);
+            return Ok((artifact, ModuleArtifactOrigin::Bundle));
         }
 
         if let Some(artifact) = self
             .embedded_stdlib_resolver
             .resolve(module_path, context)?
         {
-            return Ok(artifact);
+            return Ok((artifact, ModuleArtifactOrigin::EmbeddedStdlib));
         }
 
         let filesystem = FilesystemResolver {
@@ -781,7 +792,7 @@ impl ModuleLoader {
             dependency_paths: &self.dependency_paths,
         };
 
-        filesystem.resolve(module_path, context)?.ok_or_else(|| {
+        let artifact = filesystem.resolve(module_path, context)?.ok_or_else(|| {
             // Check if this is a bare-name import that should use a canonical path.
             let message = if let Some(hint) = bare_name_migration_hint(module_path) {
                 hint
@@ -792,7 +803,8 @@ impl ModuleLoader {
                 message,
                 module_path: None,
             }
-        })
+        })?;
+        Ok((artifact, ModuleArtifactOrigin::Filesystem))
     }
 
     /// Load a module with optional context path
@@ -813,7 +825,8 @@ impl ModuleLoader {
         }
 
         // Resolve module artifact from chained resolvers.
-        let artifact = self.resolve_module_artifact_with_context(module_path, context_path)?;
+        let (artifact, artifact_origin) =
+            self.resolve_module_artifact_with_context(module_path, context_path)?;
         // Add to loading stack and ensure cleanup even on early error returns.
         self.cache.push_loading(module_path.to_string());
         let result = match artifact.code {
@@ -823,6 +836,7 @@ impl ModuleLoader {
                 source.as_ref(),
                 artifact.origin_path,
                 context_path,
+                artifact_origin,
             ),
             ModuleCode::Both { source, .. } => self.load_module_from_source_artifact(
                 module_path.to_string(),
@@ -830,6 +844,7 @@ impl ModuleLoader {
                 source.as_ref(),
                 artifact.origin_path,
                 context_path,
+                artifact_origin,
             ),
             ModuleCode::Compiled(_compiled) => {
                 // Create a minimal Module for compiled-only artifacts.
@@ -846,6 +861,7 @@ impl ModuleLoader {
                         items: vec![],
                         docs: shape_ast::ast::ProgramDocs::default(),
                     },
+                    artifact_origin,
                 };
                 let module = Arc::new(module);
                 self.cache.insert(module_path.to_string(), module.clone());
@@ -978,6 +994,7 @@ impl ModuleLoader {
                         items: vec![],
                         docs: shape_ast::ast::ProgramDocs::default(),
                     },
+                    artifact_origin,
                 };
                 let module = Arc::new(module);
                 self.cache.insert(module_path.to_string(), module.clone());

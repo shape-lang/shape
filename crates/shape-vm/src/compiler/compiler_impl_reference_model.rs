@@ -3039,6 +3039,14 @@ impl BytecodeCompiler {
         self.compile_with_graph_and_prelude(root_program, graph, &[])
     }
 
+    #[cfg(test)]
+    pub(crate) fn compile_graph_dependencies_for_permission_test(
+        &mut self,
+        graph: &crate::module_graph::ModuleGraph,
+    ) -> Result<()> {
+        self.compile_graph_dependency_modules(graph)
+    }
+
     /// Compile with graph and prelude information.
     ///
     /// All modules (including prelude dependencies) compile uniformly
@@ -3177,6 +3185,16 @@ impl BytecodeCompiler {
         };
 
         let module_path = node.canonical_path.clone();
+        let resolved_imports = node.resolved_imports.clone();
+
+        // Permission preflight precedes every borrowed annotation/import state
+        // mutation. The graph lifecycle consumes this pending state on success
+        // or discards it on every later module-compilation error.
+        self.authorize_and_stage_graph_import_permissions(
+            module_id,
+            graph,
+            &resolved_imports,
+        )?;
 
         // All modules compile uniformly through the normal module path.
         // Set allow_internal_builtins for stdlib modules.
@@ -3219,7 +3237,7 @@ impl BytecodeCompiler {
         let saved_inference_facts = std::mem::replace(&mut self.inference_facts, module_facts);
 
         // 1. Register this module's imports from the graph
-        self.register_graph_imports_with_annotation_semantics(
+        self.publish_graph_imports_with_annotation_semantics(
             module_id,
             graph,
             &module_annotation_semantics,

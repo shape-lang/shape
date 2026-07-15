@@ -11,6 +11,7 @@ use std::sync::Arc;
 use shape_ast::Program;
 use shape_ast::ast::FunctionDef;
 use shape_ast::module_utils::ModuleExportKind;
+use shape_runtime::module_loader::ModuleArtifactOrigin;
 
 // ---------------------------------------------------------------------------
 // Core identifiers
@@ -624,18 +625,11 @@ fn build_module_graph_with_prelude_structure(
     structured_prelude: &[PreludeImport],
 ) -> Result<ModuleGraph, GraphBuildError> {
     let mut builder = GraphBuilder::new();
-    let embedded_stdlib_paths = loader
-        .embedded_stdlib_module_paths()
-        .into_iter()
-        .collect::<HashSet<_>>();
 
     // Step 1: Pre-register native extension modules.
     // These have no source artifact in the loader; they are Rust-backed.
     for ext in extensions {
         let ext_id = builder.get_or_create_node(&ext.name);
-        if embedded_stdlib_paths.contains(&ext.name) {
-            builder.stdlib_bootstrap_modules.insert(ext_id);
-        }
         let node = &mut builder.nodes[ext_id.0 as usize];
         node.source_kind = ModuleSourceKind::NativeModule;
         node.interface = build_native_interface(ext);
@@ -651,6 +645,9 @@ fn build_module_graph_with_prelude_structure(
         // overlays for the embedded stdlib (e.g. `pub annotation remote(addr)`
         // in `std::core::remote`). Always probing the loader picks those up.
         if let Ok(module) = loader.load_module(&ext.name) {
+            if module.artifact_origin() == ModuleArtifactOrigin::EmbeddedStdlib {
+                builder.stdlib_bootstrap_modules.insert(ext_id);
+            }
             let shape_interface = build_shape_interface(&module.ast);
             // Merge: Shape exports take priority over native
             let node = &mut builder.nodes[ext_id.0 as usize];
@@ -900,7 +897,7 @@ fn visit_module(
                     })?;
 
                 let dep_id = builder.get_or_create_node(dep_path);
-                if kind_hint == ModuleSourceKindHint::EmbeddedStdlib {
+                if module.artifact_origin() == ModuleArtifactOrigin::EmbeddedStdlib {
                     builder.stdlib_bootstrap_modules.insert(dep_id);
                 }
                 let node = &mut builder.nodes[dep_id.0 as usize];
