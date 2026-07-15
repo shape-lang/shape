@@ -24,10 +24,18 @@ impl BytecodeCompiler {
                 Some(BindingStorageClass::SharedCow)
             }
             (Some(CaptureTarget::Local(idx)), _) => self.mir_storage_class_for_slot(idx),
-            (Some(CaptureTarget::ModuleBinding(idx)), _) => self
-                .type_tracker
-                .get_binding_semantics(idx)
-                .map(|semantics| semantics.storage_class),
+            (Some(CaptureTarget::ModuleBinding(idx)), _) => {
+                // Declaration finalization may restore generic `Direct`
+                // semantics; the compiler-authenticated reference-slot marker
+                // remains authoritative for this exact module slot.
+                if self.reference_value_module_bindings.contains(&idx) {
+                    Some(BindingStorageClass::Reference)
+                } else {
+                    self.type_tracker
+                        .get_binding_semantics(idx)
+                        .map(|semantics| semantics.storage_class)
+                }
+            }
             _ => None,
         };
 
