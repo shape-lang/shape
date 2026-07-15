@@ -290,6 +290,18 @@ impl TypeInferenceEngine {
         }
 
         let scheme = self.env.lookup(name).cloned()?;
+        // A declared generic scheme must take the ordinary named-call path.
+        // That path instantiates with metadata and records the exact
+        // declared-token -> fresh-hole relation used by semantic call-site
+        // specialization. This compatibility path predates that authority and
+        // intentionally handles only inference-hole function values.
+        if scheme
+            .quantified
+            .iter()
+            .any(|variable| variable.declared_provenance().is_some())
+        {
+            return None;
+        }
         let func_type = scheme.instantiate(&mut self.type_var_gen);
         let (params, returns) = Self::function_shape_for_value_call(func_type)?;
         if !params
@@ -445,6 +457,7 @@ impl TypeInferenceEngine {
     /// table captures the body-walk's own output at the site it was computed.
     pub fn infer_expr(&mut self, expr: &Expr) -> TypeResult<Type> {
         let ty = self.infer_expr_inner(expr)?;
+        self.record_generated_callable_candidate(expr, &ty);
         // Record under the expression's own span. Skip dummy spans (synthetic /
         // desugared nodes with no source location): they collide on `(0,0)` and
         // would alias unrelated expressions.
@@ -1291,7 +1304,7 @@ impl TypeInferenceEngine {
                 receiver,
                 method,
                 args,
-                span: _,
+                span,
                 ..
             } => {
                 let receiver_type = self.infer_expr(receiver)?;
@@ -1740,6 +1753,27 @@ impl TypeInferenceEngine {
                                 .bind(ret_var.clone(), resolved_actual);
                         }
                     }
+                }
+
+                // Preserve the exact declared receiver/method parameter
+                // instantiations for the compiler-qualified generic method.
+                // This is the method-call counterpart of the named-call
+                // producer in `infer_function_call`; the existing method table
+                // remains the sole type-checking authority.
+                if let (Some(type_name), Some(expected)) =
+                    (type_name.as_deref(), expected_arg_types.as_deref())
+                {
+                    self.record_semantic_method_call_arguments(
+                        &format!("{type_name}.{method}"),
+                        *span,
+                        receiver,
+                        &receiver_type,
+                        &receiver_params,
+                        &method_vars,
+                        args,
+                        &arg_types,
+                        expected,
+                    );
                 }
 
                 // STRICT-FLIP (v0.3.3): resolve the method-call RESULT type using
@@ -2713,8 +2747,15 @@ impl TypeInferenceEngine {
                 params,
                 return_type,
                 body,
+                generated_origin,
                 ..
             } => {
+                let generated_fact_scope = self.enter_generated_function_fact_scope(
+                    generated_origin.as_ref(),
+                    params,
+                    return_type.as_ref(),
+                    body,
+                )?;
                 self.env.push_scope();
                 self.push_fallible_scope();
 
@@ -2774,6 +2815,7 @@ impl TypeInferenceEngine {
                 }
                 let is_fallible = self.pop_fallible_scope();
                 self.env.pop_scope();
+                self.exit_generated_function_fact_scope(generated_fact_scope.as_ref())?;
                 let inferred_return = inferred_result?;
 
                 let ret_type = if let Some(ann) = return_type {

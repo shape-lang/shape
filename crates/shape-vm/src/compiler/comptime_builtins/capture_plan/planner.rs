@@ -1,13 +1,15 @@
 use super::*;
 use crate::compiler::BytecodeCompiler;
 
+mod evidence;
+
 impl BytecodeCompiler {
     /// Install structural capture-pack evidence on the synthetic leading
     /// parameters of one recursively compiled closure body.
     ///
-    /// Only Shared cells need a separately addressable parameter carrier for
-    /// nested recapture. Every descriptor can also carry its original binding
-    /// span for query presentation. The vector is produced from this closure's
+    /// Every descriptor carries its original lineage and frozen semantic type;
+    /// Shared cells additionally need a separately addressable raw-cell
+    /// carrier for nested recapture. The vector is produced from this closure's
     /// [`CapturePack`] and aligned by parameter ordinal, so no source-name,
     /// span, or runtime-tag lookup participates.
     pub(crate) fn install_inherited_capture_parameter_evidence(
@@ -57,58 +59,13 @@ impl BytecodeCompiler {
             }
             // The descriptor ordinal is the authority: synthetic capture
             // parameters are the compiler-issued leading locals, so ordinal
-            // is their slot without a spelling-based re-resolution.
-            if evidence.access == CaptureAccess::SharedCell {
-                self.inherited_shared_capture_locals.insert(expected_slot);
-            }
+            // is their slot without a spelling-based re-resolution. Retain
+            // every mode so immutable/move forwarding cannot lose the
+            // original binding lineage or semantic type.
+            self.inherited_capture_parameter_evidence
+                .insert(expected_slot, evidence);
         }
         Ok(())
-    }
-
-    /// Gather [`CaptureBindingFacts`] for one captured name, in the enclosing
-    /// function's scope.
-    fn capture_binding_facts(&self, name: &str, mutated: bool) -> CaptureBindingFacts {
-        // ONE slot resolver, shared with the declared-clause set diff — so a
-        // declared entry and the discovered capture it describes can never
-        // resolve to different targets.
-        let target = self.resolve_capture_target(name);
-
-        let storage = match target {
-            Some(CaptureTarget::Local(idx))
-                if self.inherited_shared_capture_locals.contains(&idx) =>
-            {
-                Some(BindingStorageClass::SharedCow)
-            }
-            Some(CaptureTarget::Local(idx)) => self.mir_storage_class_for_slot(idx),
-            _ => None,
-        };
-
-        let inherited_shared_cell = matches!(
-            target,
-            Some(CaptureTarget::Local(idx))
-                if self.inherited_shared_capture_locals.contains(&idx)
-        );
-        let binding_span = match target {
-            Some(CaptureTarget::Local(idx)) => self.local_binding_spans.get(&idx).copied(),
-            Some(CaptureTarget::ModuleBinding(idx)) => self.module_binding_spans.get(&idx).copied(),
-            None => None,
-        };
-
-        CaptureBindingFacts {
-            name: name.to_string(),
-            target,
-            binding_span,
-            ownership: self
-                .binding_semantics_for_name(name)
-                .map(|(_, _, sem)| sem.ownership_class),
-            storage,
-            mutated,
-            boxed: self.boxed_locals.contains(name),
-            witness_shared_local: self.shared_locals.contains(name),
-            witness_shared_module_binding: self.shared_module_binding_contains(name),
-            witness_owned_mutable_local: self.owned_mutable_locals.contains(name),
-            inherited_shared_cell,
-        }
     }
 
     /// THE producer. One call, one plan per capture, in `captured_vars` order.
@@ -138,10 +95,26 @@ impl BytecodeCompiler {
         origin: Option<&GeneratedNodeOrigin>,
         closure_span: Span,
     ) -> Result<Vec<PlannedCapture>> {
+        let freeze = self.comptime_freeze_overlay();
         let facts: Vec<CaptureBindingFacts> = captured_vars
             .iter()
-            .map(|name| self.capture_binding_facts(name, mutated_captures.contains(name)))
-            .collect();
+            .enumerate()
+            .map(|(ordinal, name)| -> Result<CaptureBindingFacts> {
+                let ordinal = u16::try_from(ordinal).map_err(|_| ShapeError::RuntimeError {
+                    message: format!(
+                        "generated closure capture ordinal {ordinal} exceeds the descriptor range"
+                    ),
+                    location: None,
+                })?;
+                Ok(self.capture_binding_facts(
+                    name,
+                    mutated_captures.contains(name),
+                    origin,
+                    ordinal,
+                    freeze.as_deref().map_err(ToString::to_string),
+                ))
+            })
+            .collect::<Result<Vec<_>>>()?;
 
         let Some(clause) = declared else {
             return Ok(facts
@@ -374,16 +347,33 @@ impl BytecodeCompiler {
         func_idx: u16,
         plan: &[PlannedCapture],
         origin: Option<&GeneratedNodeOrigin>,
-    ) -> CapturePack {
+        callable_semantic_evidence: CallableSemanticEvidence,
+    ) -> Result<CapturePack> {
         let descriptors = plan
             .iter()
             .enumerate()
-            .map(|(i, planned)| {
+            .map(|(i, planned)| -> Result<CaptureDescriptor> {
                 let capture_type = self.resolve_capture_concrete_type(&planned.facts.name);
-                CaptureDescriptor {
+                let binding_lineage = if planned.facts.inherited_capture_parameter {
+                    planned.facts.binding_lineage.clone()
+                } else {
+                    match (origin, planned.facts.target) {
+                        (Some(origin), Some(target)) => {
+                            Some(CaptureBindingLineage::from_generated_capture(
+                                origin,
+                                planned.facts.binding_file_id,
+                                target,
+                            )?)
+                        }
+                        _ => None,
+                    }
+                };
+                Ok(CaptureDescriptor {
                     index: i as u16,
                     target: planned.facts.target,
                     binding_span: planned.facts.binding_span,
+                    binding_lineage,
+                    semantic_type: planned.facts.semantic_type.clone(),
                     capture_type,
                     declared: planned.declared,
                     declaration_span: planned.declaration_span,
@@ -394,13 +384,18 @@ impl BytecodeCompiler {
                     storage: planned.facts.storage,
                     inherited_shared_cell: planned.facts.inherited_shared_cell,
                     name: planned.facts.name.clone(),
-                }
+                })
             })
-            .collect();
-        CapturePack {
+            .collect::<Result<Vec<_>>>()?;
+        Ok(CapturePack {
             closure: func_idx,
             origin: origin.cloned(),
+            callable_semantic_evidence,
             descriptors,
-        }
+        })
     }
 }
+
+#[cfg(test)]
+#[path = "planner_tests.rs"]
+mod planner_tests;

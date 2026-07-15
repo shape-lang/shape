@@ -14,7 +14,7 @@ use shape_ast::ast::{
 };
 use shape_ast::error::{Result, ShapeError};
 use shape_runtime::closure::EnvironmentAnalyzer;
-use shape_runtime::type_system::{BindingFact, InferenceFacts, Type};
+use shape_runtime::type_system::{BindingFact, GeneratedNodeKey, InferenceFacts, Type};
 use shape_value::v2::concrete_type::{ClosureTypeId, ConcreteType};
 use std::collections::{BTreeSet, HashMap, HashSet};
 
@@ -372,10 +372,14 @@ fn inference_facts_with_closure_binding_facts(
         }
     }
     changed.then(|| {
-        InferenceFacts::with_binding_facts(
+        InferenceFacts::with_all_facts(
             base.top_level_types().clone(),
             base.expression_types().clone(),
             binding_facts,
+            base.generated_callable_facts().clone(),
+            base.generated_capture_facts().clone(),
+            base.semantic_callsite_facts().clone(),
+            base.semantic_callee_declarations().clone(),
         )
     })
 }
@@ -3430,7 +3434,7 @@ impl BytecodeCompiler {
         let user_pass_modes = self.effective_function_like_pass_modes(None, params, Some(body));
         let mut closure_pass_modes =
             vec![crate::compiler::ParamPassMode::ByValue; captured_vars.len()];
-        closure_pass_modes.extend(user_pass_modes);
+        closure_pass_modes.extend(user_pass_modes.iter().copied());
         let ref_params: Vec<_> = closure_pass_modes
             .iter()
             .map(|mode| mode.is_reference())
@@ -3472,7 +3476,14 @@ impl BytecodeCompiler {
         // `Span` (R1/R3). Slice 2 hung the closure's PROVENANCE off it; slice 3
         // hangs the DECLARED mode off each descriptor.
         let func_idx = self.program.functions.len();
-        let pack = self.build_capture_pack(func_idx as u16, &capture_plan, generated_origin);
+        let callable_semantic_evidence =
+            self.callable_semantic_evidence(generated_origin, params, &user_pass_modes);
+        let pack = self.build_capture_pack(
+            func_idx as u16,
+            &capture_plan,
+            generated_origin,
+            callable_semantic_evidence,
+        )?;
 
         // ADR-009 C1 (slice 3): ONE `ClosureTypeId` producer, shared with
         // `mint_closure_type_id_peek`. It reads the PACK (declared or
@@ -3728,11 +3739,11 @@ impl BytecodeCompiler {
         .map(|facts| std::mem::replace(&mut self.inference_facts, facts));
         // ADR-009 C1 slice 4 / #53: hand the recursive function compile the
         // outer pack's structural descriptor evidence in capture-parameter
-        // order. The function compiler consumes this one-shot vector, records
-        // Shared synthetic parameters by compiler-issued local slot, and
-        // retains authored binding spans for nested query presentation.
-        // Without it, ordinary parameter binding semantics erase Shared to
-        // OwnedMutable before a nested closure plans its recapture.
+        // order. The function compiler consumes this one-shot vector and
+        // records every synthetic parameter by compiler-issued local slot so
+        // lineage and frozen semantic type survive move/immutable/Shared
+        // forwarding alike. Shared entries additionally preserve the raw-cell
+        // carrier that ordinary parameter semantics would erase.
         let capture_parameter_evidence = pack
             .descriptors
             .iter()
@@ -3745,13 +3756,36 @@ impl BytecodeCompiler {
                 CaptureParameterEvidence {
                     access: descriptor.access,
                     binding_span: descriptor.binding_span,
+                    binding_lineage: descriptor.binding_lineage.clone(),
+                    semantic_type: descriptor.semantic_type.clone(),
                 }
             })
             .collect();
         let saved_pending_capture_parameter_evidence = self
             .pending_closure_capture_parameter_evidence
             .replace(capture_parameter_evidence);
+        let generated_node = generated_origin.map(GeneratedNodeKey::from_origin);
+        if let Some(node) = generated_node.as_ref() {
+            self.active_generated_node_stack.push(node.clone());
+        }
         let compile_result = self.compile_function(&closure_def);
+        let compile_result = if let Some(expected) = generated_node {
+            match self.active_generated_node_stack.pop() {
+                Some(observed) if observed == expected => compile_result,
+                observed => {
+                    self.active_generated_node_stack.clear();
+                    Err(ShapeError::RuntimeError {
+                        message: format!(
+                            "internal compiler error: generated closure {} left a mismatched semantic node stack frame ({observed:?})",
+                            closure_def.name
+                        ),
+                        location: None,
+                    })
+                }
+            }
+        } else {
+            compile_result
+        };
         // `compile_function_inner` can reject during MIR/borrow/mutability
         // analysis before `compile_function_body` consumes this one-shot
         // carrier. Clear an unconsumed value on every error path and restore
@@ -3759,12 +3793,19 @@ impl BytecodeCompiler {
         // Successful compilation must still consume it exactly once.
         let unconsumed_capture_parameter_evidence =
             self.pending_closure_capture_parameter_evidence.take();
-        if compile_result.is_ok() {
-            debug_assert!(
-                unconsumed_capture_parameter_evidence.is_none(),
-                "compile_function did not consume closure capture parameter evidence"
-            );
-        }
+        let compile_result = if compile_result.is_ok()
+            && unconsumed_capture_parameter_evidence.is_some()
+        {
+            Err(ShapeError::RuntimeError {
+                message: format!(
+                    "internal compiler error: closure {} compiled without consuming its capture parameter evidence",
+                    closure_def.name
+                ),
+                location: None,
+            })
+        } else {
+            compile_result
+        };
         self.pending_closure_capture_parameter_evidence = saved_pending_capture_parameter_evidence;
         if let Some(saved) = saved_inference_facts {
             self.inference_facts = saved;
@@ -3919,8 +3960,10 @@ impl BytecodeCompiler {
                         // It must never be projected to the payload or wrapped
                         // in a second cell. Ordinary declaring-frame locals
                         // still allocate on first promotion.
-                        let inherited_shared =
-                            self.inherited_shared_capture_locals.contains(&local_idx);
+                        let inherited_shared = self
+                            .inherited_capture_parameter_evidence
+                            .get(&local_idx)
+                            .is_some_and(|evidence| evidence.access == CaptureAccess::SharedCell);
                         if !inherited_shared && !self.shared_locals.contains(captured) {
                             // First promotion: push current value, alloc
                             // the Arc cell, then push the pointer bits.
@@ -4432,7 +4475,21 @@ impl BytecodeCompiler {
         };
         // `func_idx` is irrelevant to the id (the registry interns on types +
         // kinds), and this pack is never pushed — the peek does not emit.
-        let pack = self.build_capture_pack(u16::MAX, &plan, generated_origin);
+        let user_pass_modes = self.effective_function_like_pass_modes(None, params, Some(body));
+        let callable_semantic_evidence =
+            self.callable_semantic_evidence(generated_origin, params, &user_pass_modes);
+        let pack = match self.build_capture_pack(
+            u16::MAX,
+            &plan,
+            generated_origin,
+            callable_semantic_evidence,
+        ) {
+            Ok(pack) => pack,
+            Err(_) => {
+                self.current_closure_callee_captures = saved_callee_captures;
+                return None;
+            }
+        };
         let id = self.intern_closure_type_id_for_pack(&pack);
         self.current_closure_callee_captures = saved_callee_captures;
         Some(id)

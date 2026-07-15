@@ -291,6 +291,19 @@ job.read()
             inner.descriptors[0].binding_span, outer.descriptors[0].binding_span,
             "the synthetic capture parameter must preserve the outer binding span by ordinal"
         );
+        assert_eq!(
+            inner.descriptors[0].binding_lineage, outer.descriptors[0].binding_lineage,
+            "nested Shared forwarding must preserve the original binding lineage"
+        );
+        assert!(outer.descriptors[0].binding_lineage.is_some());
+        assert_eq!(
+            inner.descriptors[0].semantic_type, outer.descriptors[0].semantic_type,
+            "nested Shared forwarding must preserve frozen semantic evidence"
+        );
+        assert!(matches!(
+            &outer.descriptors[0].semantic_type,
+            CaptureSemanticEvidence::Exact(_)
+        ));
         for pack in [outer, inner] {
             assert_eq!(pack.descriptors[0].declared, Some(CaptureMode::Share));
             assert_eq!(pack.descriptors[0].access, CaptureAccess::SharedCell);
@@ -318,6 +331,9 @@ job.read()
 
     #[path = "declared_tests/peek.rs"]
     mod peek;
+
+    #[path = "declared_tests/lineage.rs"]
+    mod lineage;
 
     /// `move` over a `let` — `Immutable`, and when the value is a heap type the
     /// `heap_capture_mask` bit follows the TYPE, not the mode.

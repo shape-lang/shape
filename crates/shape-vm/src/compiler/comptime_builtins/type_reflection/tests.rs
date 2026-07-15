@@ -306,8 +306,12 @@ fn specialization_overlay_supplies_base_scoped_parameter_identity() {
     assert_eq!(bare.identity_of("T"), None);
 
     // With the overlay, T resolves to a Parameter identity owned by the BASE name.
-    compiler.specialization_type_param_overlay =
-        Some(("describe".to_string(), vec!["T".to_string()]));
+    let _specialization = compiler.specialization_type_overlays.enter(
+        super::super::semantic_freeze::SpecializationTypeOverlay::declaration_only(
+            "describe",
+            vec!["T".to_string()],
+        ),
+    );
     let overlay = compiler
         .comptime_freeze_overlay()
         .expect("post-barrier site obtains the handle");
@@ -362,8 +366,12 @@ fn specialization_overlay_identity_is_stable_across_instantiations() {
         compiler
             .install_semantic_freeze()
             .expect("registration-complete state freezes");
-        compiler.specialization_type_param_overlay =
-            Some((base_name.to_string(), vec!["T".to_string()]));
+        let _specialization = compiler.specialization_type_overlays.enter(
+            super::super::semantic_freeze::SpecializationTypeOverlay::declaration_only(
+                base_name,
+                vec!["T".to_string()],
+            ),
+        );
         let overlay = compiler
             .comptime_freeze_overlay()
             .expect("post-barrier site obtains the handle");
@@ -689,11 +697,11 @@ fn callable_descriptor_is_positional_and_return_significant() {
 
 /// ADR-009 B6: the callable's PRESERVED structural descriptor (the widened
 /// composite memo input) records ordered per-position params with their
-/// passing mode and name, WITHOUT those facts leaking into the identity hash.
-/// Names are identity-insignificant; passing mode is derived from the borrow
-/// wrapper and is NOT part of the descriptor string.
+/// passing mode and name. Names are identity-insignificant; passing mode is
+/// identity-significant through the borrow wrapper already present in the
+/// canonical parameter member and is not duplicated as another string field.
 #[test]
-fn callable_structural_descriptor_records_modes_and_names_off_the_identity() {
+fn callable_structural_descriptor_records_names_and_identity_significant_modes() {
     // `PassingMode` is in scope via `use super::*`.
     let overlay = module_overlay(|_| {});
 
@@ -732,8 +740,7 @@ fn callable_structural_descriptor_records_modes_and_names_off_the_identity() {
     assert_eq!(descriptor.returns, overlay.identity_of("bool").unwrap());
 
     // Renaming every parameter is identity-neutral (names insignificant) and
-    // the mode axis does not perturb the identity beyond the borrow wrapper the
-    // grammar already embeds.
+    // the mode axis is exactly the borrow wrapper the grammar already embeds.
     let renamed = TypeAnnotation::Function {
         params: vec![
             named("x", basic("int")),
@@ -1169,7 +1176,7 @@ fn unresolved_leaf_names_reject_at_any_depth() {
 #[test]
 fn inference_holes_reject_with_freeze_boundary_diagnostic() {
     let overlay = module_overlay(|_| {});
-    let hole = tyvar_to_annotation(&TypeVar("T3".to_string()));
+    let hole = tyvar_to_annotation(&TypeVar::new("T3".to_string()));
 
     for annotation in [
         hole.clone(),
@@ -1457,7 +1464,7 @@ fn composite_identities_round_trip_their_canonical_descriptors() {
     let mut compiler = BytecodeCompiler::new();
     let holed = TypeAnnotation::Tuple(vec![
         basic("int"),
-        tyvar_to_annotation(&TypeVar("T9".to_string())),
+        tyvar_to_annotation(&TypeVar::new("T9".to_string())),
     ]);
     compiler
         .type_aliases
@@ -1942,7 +1949,8 @@ mod payload_query {
     /// payload from the widened composite memo — ordered params with stable
     /// type identities, optionality flags, and passing modes derived from the
     /// borrow annotation, plus the return identity. Reconstructed WITHOUT
-    /// inverting the one-way SHA-256 identity (which drops names + modes).
+    /// inverting the one-way SHA-256 identity (which drops names while modes
+    /// remain encoded by the canonical borrow wrapper).
     #[test]
     fn site_interned_callable_answers_full_payload() {
         use super::payloads::{CallableDescriptor, ParamDescriptor};
@@ -2117,18 +2125,18 @@ mod payload_query {
             vec![param(
                 None,
                 false,
-                tyvar_to_annotation(&TypeVar("P".to_string())),
+                tyvar_to_annotation(&TypeVar::new("P".to_string())),
             )],
             basic("bool"),
         );
         let holed_return = function(
             vec![param(None, false, basic("int"))],
-            tyvar_to_annotation(&TypeVar("R".to_string())),
+            tyvar_to_annotation(&TypeVar::new("R".to_string())),
         );
         let holed_nested = callable(
             vec![TypeAnnotation::Tuple(vec![
                 basic("int"),
-                tyvar_to_annotation(&TypeVar("N".to_string())),
+                tyvar_to_annotation(&TypeVar::new("N".to_string())),
             ])],
             basic("bool"),
         );

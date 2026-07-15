@@ -54,23 +54,35 @@ use shape_value::v2::concrete_type::ConcreteType;
 use crate::type_tracking::{BindingOwnershipClass, BindingStorageClass};
 
 mod artifact;
+mod callable_semantics;
 mod model;
 mod planner;
 mod query;
 mod surface;
 mod validation;
 
+pub(crate) use callable_semantics::*;
 pub(crate) use model::*;
 pub use query::{
     CaptureSiteRole, GENERATED_CAPTURE_ARTIFACT_CONFLICT_CODE,
     GENERATED_CAPTURE_SOURCE_UNAVAILABLE_CODE, GeneratedCaptureBindingIdentity,
-    GeneratedCaptureDescriptorView, GeneratedCaptureOccurrenceIdentity, GeneratedCaptureQuery,
-    GeneratedCaptureQueryIssue, GeneratedCaptureSite, GeneratedCaptureSlot,
-    GeneratedCaptureSourceMap, GeneratedCaptureSpecialization,
-    GeneratedCaptureSpecializationIdentity, GeneratedCaptureStage,
+    GeneratedCaptureDescriptorView, GeneratedCaptureOccurrenceIdentity, GeneratedCapturePosition,
+    GeneratedCaptureQuery, GeneratedCaptureQueryIssue, GeneratedCaptureSemanticType,
+    GeneratedCaptureSite, GeneratedCaptureSlot, GeneratedCaptureSourceMap,
+    GeneratedCaptureSpecialization, GeneratedCaptureSpecializationIdentity, GeneratedCaptureStage,
 };
 
 impl CapturePack {
+    pub(crate) fn callable_semantic_evidence(&self) -> &CallableSemanticEvidence {
+        &self.callable_semantic_evidence
+    }
+
+    pub(crate) fn callable_semantic_type(
+        &self,
+    ) -> std::result::Result<&CallableSemanticType, &CallableSemanticIssue> {
+        self.callable_semantic_evidence.callable_type()
+    }
+
     /// The emitted layout's `capture_kinds` vector.
     pub(crate) fn kinds(&self) -> Vec<CaptureKind> {
         self.descriptors.iter().map(|d| d.lowered).collect()

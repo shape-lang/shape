@@ -13,6 +13,198 @@ pub(crate) enum CaptureTarget {
     ModuleBinding(u16),
 }
 
+/// Canonical compiler-issued identity of the original captured binding.
+///
+/// Unlike [`CaptureTarget`], which is relative to the immediately enclosing
+/// frame, this lineage survives forwarding through synthetic capture
+/// parameters. No spelling or presentation span participates. Module bindings
+/// deliberately exclude expansion ownership so every generated occurrence of
+/// one `(file, module-slot)` binding joins; locals retain the structural
+/// expansion owner and original slot so distinct cells cannot collide.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) enum CaptureBindingLineage {
+    Local {
+        expansion_fingerprint: (i64, i64),
+        binding_owner_path: Vec<String>,
+        file_id: u16,
+        slot: u16,
+    },
+    ModuleBinding {
+        file_id: u16,
+        slot: u16,
+    },
+}
+
+impl CaptureBindingLineage {
+    pub(crate) fn from_generated_capture(
+        origin: &GeneratedNodeOrigin,
+        binding_file_id: u16,
+        target: CaptureTarget,
+    ) -> Result<Self> {
+        let mut binding_owner_path = origin.node_path().to_vec();
+        let closure_segment = binding_owner_path.pop().ok_or_else(|| ShapeError::RuntimeError {
+            message:
+                "internal compiler error: generated capture origin has no structural closure segment"
+                    .to_string(),
+            location: None,
+        })?;
+        let valid_closure_segment = closure_segment
+            .strip_prefix("closure:")
+            .is_some_and(|index| !index.is_empty() && index.parse::<u32>().is_ok());
+        if !valid_closure_segment {
+            return Err(ShapeError::RuntimeError {
+                message: format!(
+                    "internal compiler error: generated capture origin ends in invalid structural segment '{closure_segment}'"
+                ),
+                location: None,
+            });
+        }
+        match target {
+            CaptureTarget::Local(slot) => Ok(Self::Local {
+                expansion_fingerprint: origin.expansion_fingerprint(),
+                binding_owner_path,
+                file_id: binding_file_id,
+                slot,
+            }),
+            CaptureTarget::ModuleBinding(slot) => Ok(Self::ModuleBinding {
+                file_id: binding_file_id,
+                slot,
+            }),
+        }
+    }
+}
+
+/// Frozen semantic type of a captured binding.
+///
+/// This is independent of [`ConcreteType`], whose closure/function IDs and
+/// pointer fallbacks are runtime ABI carriers, not semantic identity. The
+/// value is issued only by the ADR-009 semantic freeze's single canonicalizer;
+/// no inference carrier or second type descriptor is retained here.
+#[derive(Debug, Clone)]
+pub(crate) struct CaptureSemanticType(super::super::semantic_freeze::FrozenSemanticTypeProjection);
+
+impl CaptureSemanticType {
+    pub(crate) fn from_semantic_candidate(
+        candidate: &shape_runtime::type_system::SemanticTypeCandidate,
+        freeze: &super::super::semantic_freeze::FreezeOverlay,
+    ) -> std::result::Result<Self, String> {
+        let annotation = freeze.semantic_candidate_annotation(candidate)?;
+        freeze.canonicalize_type_projection(&annotation).map(Self)
+    }
+
+    pub(crate) fn category(&self) -> shape_runtime::comptime_reflection::FrozenTypeCategory {
+        self.0.category()
+    }
+
+    pub(crate) fn identity_components(&self) -> (i64, i64) {
+        let identity = self.0.identity();
+        (identity.high, identity.low)
+    }
+
+    /// Canonical freeze descriptor for diagnostic rendering only. It must
+    /// never be parsed or used as an identity key.
+    pub(crate) fn presentation(&self) -> &str {
+        self.0.presentation()
+    }
+}
+
+impl PartialEq for CaptureSemanticType {
+    fn eq(&self, other: &Self) -> bool {
+        self.category() == other.category()
+            && self.identity_components() == other.identity_components()
+    }
+}
+
+impl Eq for CaptureSemanticType {}
+
+impl std::hash::Hash for CaptureSemanticType {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        std::hash::Hash::hash(&self.category().catalog_ordinal(), state);
+        std::hash::Hash::hash(&self.identity_components(), state);
+    }
+}
+
+impl PartialOrd for CaptureSemanticType {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for CaptureSemanticType {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        (
+            self.category().catalog_ordinal(),
+            self.identity_components(),
+        )
+            .cmp(&(
+                other.category().catalog_ordinal(),
+                other.identity_components(),
+            ))
+    }
+}
+
+/// Stable reason why a capture descriptor cannot expose an exact semantic
+/// type. The detail is diagnostic-only and never participates in identity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub(crate) enum CaptureSemanticIssueKind {
+    MissingSemanticFreeze,
+    MissingInferenceFact,
+    InferenceUnavailable,
+    InferenceConflict,
+    FreezeRejected,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CaptureSemanticIssue {
+    kind: CaptureSemanticIssueKind,
+    detail: String,
+}
+
+impl CaptureSemanticIssue {
+    pub(crate) fn new(kind: CaptureSemanticIssueKind, detail: impl Into<String>) -> Self {
+        Self {
+            kind,
+            detail: detail.into(),
+        }
+    }
+
+    pub(crate) fn kind(&self) -> CaptureSemanticIssueKind {
+        self.kind
+    }
+
+    pub(crate) fn detail(&self) -> &str {
+        &self.detail
+    }
+}
+
+/// Exact semantic capture evidence, or an explicit reason it cannot be used.
+/// Missing and conflicting evidence are never collapsed into `None`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum CaptureSemanticEvidence {
+    Exact(CaptureSemanticType),
+    Unavailable(CaptureSemanticIssue),
+    Conflict(CaptureSemanticIssue),
+}
+
+impl CaptureSemanticEvidence {
+    pub(crate) fn unavailable(kind: CaptureSemanticIssueKind, detail: impl Into<String>) -> Self {
+        Self::Unavailable(CaptureSemanticIssue::new(kind, detail))
+    }
+
+    pub(crate) fn conflict(kind: CaptureSemanticIssueKind, detail: impl Into<String>) -> Self {
+        Self::Conflict(CaptureSemanticIssue::new(kind, detail))
+    }
+
+    pub(crate) fn exact_type(
+        &self,
+    ) -> std::result::Result<&CaptureSemanticType, &CaptureSemanticIssue> {
+        match self {
+            Self::Exact(semantic_type) => Ok(semantic_type),
+            Self::Unavailable(issue) | Self::Conflict(issue) => Err(issue),
+        }
+    }
+}
+
 /// Everything the selector is allowed to look at.
 ///
 /// Gathered once, in the enclosing function's scope, before the closure body
@@ -34,6 +226,17 @@ pub(crate) struct CaptureBindingFacts {
     /// originates in authored source. Presentation evidence only: capture
     /// identity and lowering remain slot-keyed through `target`.
     pub(crate) binding_span: Option<Span>,
+    /// Canonical original binding identity, when this fact was forwarded from
+    /// an inherited generated capture parameter. Initial generated captures
+    /// mint lineage only when their descriptor is built with node provenance.
+    pub(crate) binding_lineage: Option<CaptureBindingLineage>,
+    /// Source-file namespace in which `target` was resolved. This comes from
+    /// the compiler's active binding/module tables, never from the generated
+    /// expansion's application anchor.
+    pub(crate) binding_file_id: u16,
+    /// Exact, fully resolved semantic type from canonical binding inference,
+    /// or a typed unavailable/conflict state. Never an ABI carrier fallback.
+    pub(crate) semantic_type: CaptureSemanticEvidence,
     /// `binding_semantics_for_name(..).ownership_class`.
     pub(crate) ownership: Option<BindingOwnershipClass>,
     /// `mir_storage_class_for_slot` for local targets (ADR-006 §4.2).
@@ -51,6 +254,10 @@ pub(crate) struct CaptureBindingFacts {
     /// `owned_mutable_locals` witness (a sibling closure already classified
     /// this local `OwnedMutable`).
     pub(crate) witness_owned_mutable_local: bool,
+    /// This target is a compiler-issued leading parameter inherited from an
+    /// enclosing capture pack. Even when lineage is unavailable, a nested
+    /// pack must not mint a replacement identity from this immediate slot.
+    pub(crate) inherited_capture_parameter: bool,
     /// Structural evidence from the enclosing closure's capture pack: this
     /// synthetic parameter slot carries the raw `Arc<SharedCell>` pointer.
     /// Unlike the legacy witness sets, this is slot-keyed and survives nested
@@ -96,13 +303,15 @@ pub(crate) enum CaptureAccess {
 /// One descriptor's structural evidence threaded into the synthetic leading
 /// parameter of its recursively compiled closure body.
 ///
-/// Descriptor ordinal selects the local slot. `binding_span` is presentation
-/// evidence copied from the outer pack; it never participates in capture
-/// selection or storage classification.
-#[derive(Debug, Clone, Copy)]
+/// Descriptor ordinal selects the local slot. Lineage and frozen semantic type
+/// are copied unchanged for every capture mode; `binding_span` remains
+/// presentation-only and never participates in selection or classification.
+#[derive(Debug, Clone)]
 pub(crate) struct CaptureParameterEvidence {
     pub(crate) access: CaptureAccess,
     pub(crate) binding_span: Option<Span>,
+    pub(crate) binding_lineage: Option<CaptureBindingLineage>,
+    pub(crate) semantic_type: CaptureSemanticEvidence,
 }
 
 impl CaptureAccess {
@@ -171,6 +380,13 @@ pub(crate) struct CaptureDescriptor {
     /// raw SharedCell carrier. Retained so artifact/unit proofs can distinguish
     /// true nested sharing from a coincidental local `var` classification.
     pub(crate) inherited_shared_cell: bool,
+    /// Canonical original binding identity. Every nested capture mode copies
+    /// this unchanged from the outer descriptor by capture ordinal.
+    pub(crate) binding_lineage: Option<CaptureBindingLineage>,
+    /// Fully resolved semantic binding type, or a typed unavailable/conflict
+    /// state. ABI emission continues to use `capture_type`; tooling must use
+    /// this evidence or refuse.
+    pub(crate) semantic_type: CaptureSemanticEvidence,
     /// Exact authored declaration span for the captured binding, when one is
     /// available. This never participates in capture identity.
     pub(crate) binding_span: Option<Span>,
@@ -198,5 +414,12 @@ pub(crate) struct CapturePack {
     /// [`CapturePack::generated_note`], which attributes a capture diagnostic
     /// raised inside generated code to the expansion that produced it.
     pub(crate) origin: Option<GeneratedNodeOrigin>,
+    /// Exact whole-callable semantics for specialization/tooling, or a typed
+    /// reason they are unavailable/conflicting. ABI execution never reads it.
+    pub(crate) callable_semantic_evidence: CallableSemanticEvidence,
     pub(crate) descriptors: Vec<CaptureDescriptor>,
 }
+
+#[cfg(test)]
+#[path = "model_tests.rs"]
+mod model_tests;

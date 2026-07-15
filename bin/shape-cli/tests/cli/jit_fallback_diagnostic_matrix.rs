@@ -478,13 +478,14 @@ fn fallback_f6_struct_move_then_read_falls_through_to_vm() {
 /// the generated method + its closure execute as native JIT code (zero
 /// `[jit-fallback]` lines, JIT stdout == VM stdout).
 ///
-/// It is the POSITIVE CONTROL for the Slice-4 JIT battery: the harness
-/// (`run_shape` + `count_fallback_lines` in this module) is the one Slice 4
-/// reuses. It is deliberately CAPTURE-FREE — see the Slice-0 report: a closure
-/// that captures ANYTHING (generated or ordinary source) still whole-program-
-/// deopts at HEAD (`f3-preflight-closure-capture.shape` above pins the same
-/// class), so the capturing half of R5 is blocked on a pre-existing shape-jit
-/// closure-capture lowering defect, not on anything C1 introduces.
+/// It remains the CAPTURE-FREE positive control for the Slice-4 JIT battery:
+/// it isolates annotation-generated `extend` from capture lowering. The old
+/// Slice-0 conclusion that every capturing closure deopts is no longer true;
+/// the integrated closure-lowering prerequisite gives ordinary immutable,
+/// owned-mutable, and scalar-Shared captures dedicated zero-fallback coverage.
+/// C1's generated `move` / `share` cases live in the separate Slice-4
+/// `jit_generated_capture_native` battery. `f3` is a module-binding/W39
+/// negative control, not a general capturing-closure result.
 #[test]
 fn adr009_c1_generated_extend_method_closure_jits_natively() {
     let vm = run_shape("vm", "c1-generated-extend-capture-free.shape");

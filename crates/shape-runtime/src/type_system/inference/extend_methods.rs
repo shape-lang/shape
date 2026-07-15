@@ -62,6 +62,14 @@ impl TypeInferenceEngine {
             let is_generic = has_receiver_params || !method_type_params.is_empty();
 
             if is_generic {
+                for target in &targets {
+                    self.register_declared_method_type_parameters(
+                        &format!("{}.{}", target, method.name),
+                        method,
+                        &receiver_type_params,
+                        &method_type_params,
+                    )?;
+                }
                 // Build TypeParamExpr-based signature for generic method resolution.
                 let param_exprs: Vec<TypeParamExpr> = method
                     .params
@@ -164,12 +172,37 @@ impl TypeInferenceEngine {
                 &self_ann,
                 &receiver_type_params,
             );
-            let func_type = self.infer_function(&func)?;
+            let registered = if func.type_params.is_some() {
+                Some(self.declared_type_parameters_for_method(method)?)
+            } else {
+                None
+            };
+            let func_type = match registered.as_ref() {
+                Some((declared, _)) => {
+                    self.infer_function_with_declared_parameter_capability(&func, declared)?
+                }
+                None => self.infer_function(&func)?,
+            };
             if method.return_type.is_none() && !receiver_param_names.is_empty() {
+                let Some((declared, receiver_count)) = registered.as_ref() else {
+                    return Err(TypeError::ConstraintViolation(
+                        "inferred generic extend method lost its declaration capability"
+                            .to_string(),
+                    ));
+                };
+                if declared.len() < *receiver_count {
+                    return Err(TypeError::ConstraintViolation(
+                        "inferred extend method lost receiver generic-parameter provenance"
+                            .to_string(),
+                    ));
+                }
+                let (receiver_tokens, method_tokens) = declared.split_at(*receiver_count);
                 self.refresh_extend_method_return_from_body(
                     &type_name,
                     method,
                     &receiver_param_names,
+                    receiver_tokens,
+                    method_tokens,
                     &func_type,
                 );
             }
@@ -379,6 +412,8 @@ impl TypeInferenceEngine {
         type_name: &str,
         method: &MethodDef,
         receiver_type_params: &[String],
+        receiver_parameter_tokens: &[TypeVar],
+        method_parameter_tokens: &[TypeVar],
         func_type: &Type,
     ) {
         let Type::Function { returns, .. } = func_type else {
@@ -391,8 +426,8 @@ impl TypeInferenceEngine {
             .unwrap_or_default();
         let Some(return_expr) = Self::type_to_extend_type_param_expr(
             returns,
-            receiver_type_params,
-            &method_type_params,
+            receiver_parameter_tokens,
+            method_parameter_tokens,
         ) else {
             return;
         };
@@ -423,25 +458,30 @@ impl TypeInferenceEngine {
 
     fn type_to_extend_type_param_expr(
         ty: &Type,
-        receiver_params: &[String],
-        method_params: &[String],
+        receiver_params: &[TypeVar],
+        method_params: &[TypeVar],
     ) -> Option<TypeParamExpr> {
         match ty {
             Type::Variable(var) | Type::Constrained { var, .. } => {
-                if let Some(idx) = receiver_params.iter().position(|name| name == &var.0) {
+                if let Some(idx) = receiver_params.iter().position(|declared| declared == var) {
                     Some(TypeParamExpr::ReceiverParam(idx))
                 } else {
                     method_params
                         .iter()
-                        .position(|name| name == &var.0)
+                        .position(|declared| declared == var)
                         .map(TypeParamExpr::MethodParam)
                 }
             }
-            Type::Concrete(ann) => Some(Self::annotation_to_type_param_expr(
-                ann,
-                receiver_params,
-                method_params,
-            )),
+            Type::Concrete(ann) => {
+                if let Some(variable) = annotation_as_tyvar(ann) {
+                    return Self::type_to_extend_type_param_expr(
+                        &Type::Variable(variable),
+                        receiver_params,
+                        method_params,
+                    );
+                }
+                Some(TypeParamExpr::Concrete(Type::Concrete(ann.clone())))
+            }
             Type::Generic { base, args } => {
                 let name = match base.as_ref() {
                     Type::Concrete(TypeAnnotation::Reference(path)) => path.to_string(),

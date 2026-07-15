@@ -39,8 +39,8 @@ pub mod universal_error;
 // Re-export from types module
 pub use types::{
     BuiltinTypes, TYVAR_ANNOTATION_PREFIX, Type, TypeConstraint, TypeScheme, TypeVar, TypeVarGen,
-    annotation_as_tyvar, annotation_to_semantic, annotation_to_string, semantic_to_annotation,
-    substitute, tyvar_to_annotation,
+    annotation_as_tyvar, annotation_contains_reserved_type_var_carrier, annotation_to_semantic,
+    annotation_to_string, semantic_to_annotation, substitute, tyvar_to_annotation,
 };
 
 // Re-export other public types
@@ -49,11 +49,15 @@ pub use checker::{
     analyze_program_full, analyze_program_with_mode,
     analyze_program_with_mode_and_comptime_context,
 };
-pub use environment::TypeEnvironment;
+pub use environment::{BindingToken, TypeEnvironment};
 pub use errors::{TypeError, TypeErrorWithLocation, TypeResult};
 pub use inference::{
-    BindingFact, InferenceFacts, PropertyAssignment, PropertyAssignmentCollector,
-    TypeInferenceEngine,
+    BindingFact, ExactSemanticCallSiteFact, GeneratedCallableFact, GeneratedCaptureFact,
+    GeneratedCaptureKey, GeneratedNodeKey, GeneratedSemanticFactIssue, InferenceFacts,
+    PropertyAssignment, PropertyAssignmentCollector, RecursiveCallableShape, SemanticCallSiteFact,
+    SemanticCallSiteKey, SemanticCallableNodeShape, SemanticCallableParameterShape,
+    SemanticCalleeDeclaration, SemanticDeclaredParameter, SemanticPassingMode,
+    SemanticTypeArgument, SemanticTypeCandidate, SemanticTypePathSegment, TypeInferenceEngine,
 };
 pub use semantic::{EnumVariant, FunctionParam, FunctionSignature, SemanticType, TypeVarId};
 pub use storage::StorageType;

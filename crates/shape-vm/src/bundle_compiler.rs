@@ -1687,7 +1687,7 @@ mod results_identical_differential {
     use super::*;
     use shape_ast::parser::parse_program;
     use shape_runtime::type_system::inference::TypeInferenceEngine;
-    use shape_runtime::type_system::{Type, TypeError};
+    use shape_runtime::type_system::{Type, TypeError, TypeVar};
     use std::collections::HashMap;
 
     /// LSDS-rendered diagnostic surface: the user-facing Display string for each
@@ -1707,13 +1707,14 @@ mod results_identical_differential {
 
     /// TypeVar-id-NORMALIZING renderer for the inferred-type surface (§3.3
     /// amendment). Two routes may start their `fresh_type_var` counter at
-    /// different points, so a raw TypeVar id that leaks into a rendered type
-    /// would make the surfaces differ spuriously — or coincide and mask a real
-    /// difference. We assign each DISTINCT TypeVar a first-encounter ordinal
+    /// different points, so an inference-local TypeVar identity in a rendered
+    /// type would make the surfaces differ spuriously — or coincide and mask a
+    /// real difference. We assign each DISTINCT typed TypeVar identity a
+    /// first-encounter ordinal
     /// (`'#0`, `'#1`, …) scoped to ONE render call, so the rendering depends on
     /// the *structure* of the type, never on the absolute id.
     struct VarNormalizer {
-        map: HashMap<String, usize>,
+        map: HashMap<TypeVar, usize>,
     }
     impl VarNormalizer {
         fn new() -> Self {
@@ -1721,17 +1722,17 @@ mod results_identical_differential {
                 map: HashMap::new(),
             }
         }
-        fn norm(&mut self, raw: &str) -> String {
+        fn norm(&mut self, variable: &TypeVar) -> String {
             let n = self.map.len();
-            let id = *self.map.entry(raw.to_string()).or_insert(n);
+            let id = *self.map.entry(variable.clone()).or_insert(n);
             format!("'#{}", id)
         }
         fn render(&mut self, ty: &Type) -> String {
             match ty {
                 Type::Concrete(ann) => format!("{:?}", ann),
-                Type::Variable(v) => self.norm(&v.0),
+                Type::Variable(v) => self.norm(v),
                 Type::Constrained { var, constraint } => {
-                    format!("{}:{:?}", self.norm(&var.0), constraint)
+                    format!("{}:{:?}", self.norm(var), constraint)
                 }
                 Type::Generic { base, args } => {
                     let base = self.render(base);

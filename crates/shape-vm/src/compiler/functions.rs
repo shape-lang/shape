@@ -806,14 +806,16 @@ impl BytecodeCompiler {
             self.deferring_uninstantiated_template_body = true;
         }
         // ADR-009 C1 slice 4 / #53: `compile_function_body` isolates this
-        // slot-keyed set for the nested function, but its many established
+        // slot-keyed map for the nested function, but its many established
         // diagnostic `?` exits predate that state and do not all run the
         // body's success cleanup. Keep one outer all-exit restoration point so
-        // a rejected closure body can never leak inherited Shared evidence
+        // a rejected closure body can never leak inherited capture evidence
         // into a later compilation that reuses the same local ordinal.
-        let saved_inherited_shared_capture_locals = self.inherited_shared_capture_locals.clone();
+        let saved_inherited_capture_parameter_evidence =
+            self.inherited_capture_parameter_evidence.clone();
         let result = self.compile_function_inner(func_def);
-        self.inherited_shared_capture_locals = saved_inherited_shared_capture_locals;
+        self.inherited_capture_parameter_evidence =
+            saved_inherited_capture_parameter_evidence;
         self.deferring_uninstantiated_template_body = saved_deferring_template;
         result
     }
@@ -1831,12 +1833,12 @@ impl BytecodeCompiler {
         // scope (parallel to the ownership/boxed restoration above).
         let saved_shared_locals = std::mem::take(&mut self.shared_locals);
         let saved_shared_drop_locals = std::mem::take(&mut self.shared_drop_locals);
-        // ADR-009 C1 slice 4: inherited Shared capture parameters are
-        // function-local slot evidence. Isolate them exactly like the other
+        // ADR-009 C1 slice 4: inherited capture parameters carry
+        // function-local slot evidence. Isolate it exactly like the other
         // per-function slot maps, then consume the one-shot descriptor vector
         // supplied by `compile_expr_closure` for this closure body.
-        let saved_inherited_shared_capture_locals =
-            std::mem::take(&mut self.inherited_shared_capture_locals);
+        let saved_inherited_capture_parameter_evidence =
+            std::mem::take(&mut self.inherited_capture_parameter_evidence);
         let incoming_closure_capture_parameter_evidence =
             self.pending_closure_capture_parameter_evidence.take();
         // ADR-006 §2.7.30.4 (escape-Drop-deferral, closure-capture arm): the
@@ -2468,8 +2470,8 @@ impl BytecodeCompiler {
                         self.boxed_locals = saved_boxed_locals;
                         self.shared_locals = saved_shared_locals;
                         self.shared_drop_locals = saved_shared_drop_locals;
-                        self.inherited_shared_capture_locals =
-                            saved_inherited_shared_capture_locals;
+                        self.inherited_capture_parameter_evidence =
+                            saved_inherited_capture_parameter_evidence;
                         self.closure_escape_drop_skip_locals =
                             saved_closure_escape_drop_skip_locals;
                         self.closure_binding_capture_drop_locals =
@@ -2610,7 +2612,8 @@ impl BytecodeCompiler {
         self.boxed_locals = saved_boxed_locals;
         self.shared_locals = saved_shared_locals;
         self.shared_drop_locals = saved_shared_drop_locals;
-        self.inherited_shared_capture_locals = saved_inherited_shared_capture_locals;
+        self.inherited_capture_parameter_evidence =
+            saved_inherited_capture_parameter_evidence;
         self.closure_escape_drop_skip_locals = saved_closure_escape_drop_skip_locals;
         self.closure_binding_capture_drop_locals = saved_closure_binding_capture_drop_locals;
         self.closure_capture_drop_locals = saved_closure_capture_drop_locals;

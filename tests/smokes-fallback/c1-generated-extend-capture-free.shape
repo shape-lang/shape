@@ -11,10 +11,10 @@
 // `[jit-fallback]` lines — i.e. the generated extend method AND its closure
 // run under native JIT code.
 //
-// The closure here is CAPTURE-FREE by necessity: at HEAD any implicit capture
-// inside a generated body is rejected by the Wave-46 gate
-// (compiler/expressions/closures.rs:3116-3138), which is precisely the gap
-// ADR-009 C1's declared-capture clause exists to close.
+// The closure remains deliberately CAPTURE-FREE so this fixture isolates the
+// generated-extend deopt question. C1's generated-only declared-capture clause
+// now covers capturing closures; its `move` / `share` native proofs belong to
+// the separate Slice-4 battery.
 
 annotation add_answer() {
   targets: [type]

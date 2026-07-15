@@ -791,6 +791,22 @@ impl TypeInferenceEngine {
         Ok(ty)
     }
 
+    /// Infer a synthetic callable using the declaration capability registered
+    /// by its owning source construct. This keeps method-body inference and
+    /// method-call specialization on the same exact declared TypeVars.
+    pub(crate) fn infer_function_with_declared_parameter_capability(
+        &mut self,
+        func: &FunctionDef,
+        type_params: &[TypeVar],
+    ) -> TypeResult<Type> {
+        self.install_callable_declared_parameters(func, type_params.to_vec())?;
+        let inferred = self.infer_function_with_declared_params(func, true);
+        self.remove_callable_declared_parameters(func);
+        let (ty, inferred_params) = inferred?;
+        self.validate_declared_type_params_in_type(func, &ty, &inferred_params)?;
+        Ok(ty)
+    }
+
     fn infer_function_with_declared_params(
         &mut self,
         func: &FunctionDef,
@@ -3885,6 +3901,19 @@ mod tests {
         assert_eq!(
             engine.env.lookup("duplicate").unwrap().quantified,
             second_vars
+        );
+        engine.finalize_semantic_callee_declarations();
+        let active = engine
+            .generated_inference
+            .callee_declarations
+            .get("duplicate")
+            .expect("active same-named declaration must enter the callee catalog");
+        assert_eq!(active.parameters().len(), 1);
+        assert_eq!(active.parameters()[0].token(), &second_vars[0]);
+        assert_ne!(
+            active.parameters()[0].token(),
+            &first_vars[0],
+            "the shadowed declaration must not remain catalog authority"
         );
     }
 

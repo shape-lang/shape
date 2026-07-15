@@ -1441,31 +1441,9 @@ impl BytecodeCompiler {
     /// `unknown` is treated as not-concrete anywhere in the annotation tree so
     /// we never seed a param from a fabricated type like `Array<unknown>`.
     fn annotation_is_unknown(ann: &shape_ast::ast::TypeAnnotation) -> bool {
-        use shape_ast::ast::TypeAnnotation;
-        match ann {
-            TypeAnnotation::Basic(n) => n == "unknown",
-            TypeAnnotation::Reference(path) => path.to_string() == "unknown",
-            TypeAnnotation::Array(inner) | TypeAnnotation::Borrow { inner, .. } => {
-                Self::annotation_is_unknown(inner)
-            }
-            TypeAnnotation::Tuple(items)
-            | TypeAnnotation::Union(items)
-            | TypeAnnotation::Intersection(items) => items.iter().any(Self::annotation_is_unknown),
-            TypeAnnotation::Object(fields) => fields
-                .iter()
-                .any(|field| Self::annotation_is_unknown(&field.type_annotation)),
-            TypeAnnotation::Function { params, returns } => {
-                params
-                    .iter()
-                    .any(|param| Self::annotation_is_unknown(&param.type_annotation))
-                    || Self::annotation_is_unknown(returns)
-            }
-            TypeAnnotation::Generic { name, args } => {
-                name.to_string() == "unknown" || args.iter().any(Self::annotation_is_unknown)
-            }
-            TypeAnnotation::Dyn(paths) => paths.iter().any(|path| path.to_string() == "unknown"),
-            _ => false,
-        }
+        crate::compiler::comptime_builtins::semantic_freeze::annotation_has_lossy_unknown_sentinel(
+            ann,
+        )
     }
 
     pub(super) fn inferred_param_concrete_type_from_facts(

@@ -69,7 +69,7 @@ fn peek_applies_canonical_capture_surface_before_minting_artifacts() {
 
     let origin = compiler.generated_node_issuer.issue(
         (7, 9),
-        vec!["peek".to_string()],
+        vec!["method:peek".to_string(), "closure:0".to_string()],
         0,
         shape_ast::ast::Span::DUMMY,
         "worker".to_string(),

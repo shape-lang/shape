@@ -804,7 +804,8 @@ pub(super) struct CanonicalType {
     /// ADR-009 B6 (Dec 63): the ordered structural descriptor for a `Callable`
     /// form (ordered params with name/type-identity/optionality/passing-mode +
     /// return identity). `None` for every non-callable category. The one-way
-    /// SHA-256 identity drops names and passing modes by design; this preserved
+    /// SHA-256 identity drops parameter names; passing modes remain identity-
+    /// significant through the canonical outer borrow wrapper. This preserved
     /// structure is what the freeze's widened composite memo carries so
     /// `payload_of` can reconstruct a `FrozenCallable` WITHOUT inverting the
     /// hash. Identity-insignificant: two callables that produce the same
@@ -1029,10 +1030,10 @@ fn canonicalize_resolved(
                     identity_hex(member.identity),
                     if param.optional { "?" } else { "" }
                 ));
-                // Passing mode is NOT part of the identity string — it is
-                // derived from the outermost borrow of the parameter annotation
-                // (ADR mode axis). The parameter's VALUE type is the referent
-                // when borrowed; otherwise the whole annotation identity.
+                // Passing mode has no second string field: its identity axis is
+                // already encoded by the outermost borrow in `member.identity`.
+                // The descriptor projects that same wrapper to an explicit mode;
+                // its VALUE type is the referent when borrowed.
                 let (mode, value_identity) = match &param.type_annotation {
                     TypeAnnotation::Borrow { mutable, inner } => {
                         let referent = canonicalize_resolved(inner, scope)?;

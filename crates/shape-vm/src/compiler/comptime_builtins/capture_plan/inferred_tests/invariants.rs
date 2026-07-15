@@ -196,14 +196,14 @@ outer()
         .expect_err("ordinary explicit clause must reject inside the outer closure body");
     assert!(error.to_string().contains("[C0903]"), "{error}");
     assert!(
-        compiler.inherited_shared_capture_locals.is_empty(),
-        "the rejected closure body must restore inherited Shared slot evidence"
+        compiler.inherited_capture_parameter_evidence.is_empty(),
+        "the rejected closure body must restore inherited capture-parameter evidence"
     );
 
     // Establish a clean ordinary binding environment on the SAME compiler,
     // deliberately reusing the leaked ordinal. Other legacy body-error state
     // is irrelevant to this focused invariant and is cleared explicitly; the
-    // inherited-Shared set above is not touched.
+    // inherited-capture map above is not touched.
     compiler.locals = vec![std::collections::HashMap::new()];
     compiler.next_local = 0;
     compiler.type_tracker.clear_locals();

@@ -35,7 +35,7 @@ pub enum TypeError {
     ArityMismatch(usize, usize),
 
     /// Infinite type (occurs check failure)
-    #[error("Cannot construct infinite type for '{}'", .0.0)]
+    #[error("Cannot construct infinite type for '{}'", .0.presentation_name())]
     InfiniteType(TypeVar),
 
     /// Unsolved type constraints
@@ -360,5 +360,22 @@ impl TypeErrorBuilder {
 
     pub fn row_expected(actual: &str) -> TypeError {
         TypeError::TypeMismatch("row".to_string(), actual.to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::TypeError;
+    use crate::type_system::{TypeVar, TypeVarGen};
+
+    #[test]
+    fn infinite_type_uses_the_declared_parameter_presentation() {
+        let mut variables = TypeVarGen::new();
+        let parameter = TypeVar::declared(variables.fresh_declared_owner(), 0, "Element");
+
+        let rendered = TypeError::InfiniteType(parameter).to_string();
+
+        assert_eq!(rendered, "Cannot construct infinite type for 'Element'");
+        assert!(!rendered.contains('\u{1}'));
     }
 }

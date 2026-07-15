@@ -2022,13 +2022,13 @@ impl TypeInferenceEngine {
     }
 
     /// True if the type mentions any `Type::Variable` / `Type::Constrained`
-    /// anywhere in its structure, or carries an encoded `tyvar:Tn` annotation
-    /// marker. Used to gate R4 closure-arg propagation to fully-closed concrete
-    /// function types only.
+    /// anywhere in its structure, or carries any reserved type-variable
+    /// annotation (authenticated or tampered). Used to gate R4 closure-arg
+    /// propagation to fully-closed concrete function types only.
     fn type_contains_variable(ty: &Type) -> bool {
         match ty {
             Type::Variable(_) | Type::Constrained { .. } => true,
-            Type::Concrete(ann) => Self::annotation_contains_tyvar(ann),
+            Type::Concrete(ann) => annotation_contains_reserved_type_var_carrier(ann),
             Type::Generic { base, args } => {
                 Self::type_contains_variable(base) || args.iter().any(Self::type_contains_variable)
             }
@@ -2036,27 +2036,6 @@ impl TypeInferenceEngine {
                 params.iter().any(Self::type_contains_variable)
                     || Self::type_contains_variable(returns)
             }
-        }
-    }
-
-    /// True if a `TypeAnnotation` carries an encoded `tyvar:Tn` marker (the
-    /// closure-valued-field representation) anywhere in its structure.
-    fn annotation_contains_tyvar(ann: &TypeAnnotation) -> bool {
-        if annotation_as_tyvar(ann).is_some() {
-            return true;
-        }
-        match ann {
-            TypeAnnotation::Array(inner) => Self::annotation_contains_tyvar(inner),
-            TypeAnnotation::Function { params, returns } => {
-                params
-                    .iter()
-                    .any(|p| Self::annotation_contains_tyvar(&p.type_annotation))
-                    || Self::annotation_contains_tyvar(returns)
-            }
-            TypeAnnotation::Generic { args, .. } => {
-                args.iter().any(Self::annotation_contains_tyvar)
-            }
-            _ => false,
         }
     }
 
