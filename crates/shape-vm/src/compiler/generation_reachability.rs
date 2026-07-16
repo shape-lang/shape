@@ -9,7 +9,7 @@ pub use walk::program_may_generate;
 mod tests {
     use super::program_may_generate;
     use crate::compiler::BytecodeCompiler;
-    use shape_ast::ast::{Item, TypeName};
+    use shape_ast::ast::{Expr, Item, Statement, TypeName};
 
     fn parse(source: &str) -> shape_ast::ast::Program {
         shape_ast::parse_program(source).expect("generation reachability fixture parses")
@@ -161,7 +161,12 @@ annotation mark() {
 let probe = @mark() 1
 "#,
         );
-        assert!(matches!(&program.items[1], Item::VariableDecl(..)));
+        assert!(matches!(
+            &program.items[1],
+            Item::Statement(Statement::VariableDecl(declaration, _), _)
+                if declaration.pattern.as_identifier() == Some("probe")
+                    && matches!(declaration.value.as_ref(), Some(Expr::Annotated { .. }))
+        ));
         assert!(program_may_generate(&program));
     }
 
