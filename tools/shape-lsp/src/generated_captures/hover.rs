@@ -13,8 +13,12 @@ use crate::module_cache::ModuleCache;
 use crate::util::{parser_source, position_to_offset};
 
 /// Route hover through one fresh exact parse and one compiler query session.
-/// Parse failure is `NotCapture`; unavailable compiler evidence remains a
-/// terminal quarantine and must not fall through to name-based hover.
+/// Parse failure is `NotCapture`. A document-level unavailable query (a
+/// may-generate document whose contextless compile fails) also falls through to
+/// ordinary hover: with no capture query, no capture region can be established
+/// at the cursor, so quarantining would kill hover at every cursor. Only a
+/// cursor that lands on a genuine capture site whose source evidence is missing
+/// stays a terminal quarantine and must not fall through to name-based hover.
 pub(crate) fn generated_capture_hover_from_source(
     text: &str,
     position: Position,
@@ -45,11 +49,18 @@ pub(super) fn generated_capture_hover(
     };
     let captures = match super::analyze_session(session, program) {
         CaptureAnalysis::NotNeeded => return GeneratedCaptureLookup::NotCapture,
-        CaptureAnalysis::Unavailable => return GeneratedCaptureLookup::Unavailable,
+        // No capture query for this document, so no capture region can be
+        // established at the cursor. Fall through to the ordinary providers
+        // instead of quarantining every cursor in a may-generate document; the
+        // site-level guard below still fires wherever an actual capture position
+        // is hit.
+        CaptureAnalysis::Unavailable => return GeneratedCaptureLookup::NotCapture,
         CaptureAnalysis::Ready(captures) => captures,
     };
     let site = match captures.capture_at(0, offset) {
         None => return GeneratedCaptureLookup::NotCapture,
+        // Cursor genuinely on a capture site whose source evidence is missing:
+        // preserve the quarantine so no misleading name-based hover is shown.
         Some(GeneratedCapturePosition::Unavailable) => {
             return GeneratedCaptureLookup::Unavailable;
         }
