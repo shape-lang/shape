@@ -351,6 +351,7 @@ fn imported_annotation_registration_survives_capture_fallthrough() {
     let support_path = temp.path().join("support.shape");
     let decoy_path = temp.path().join("decoy.shape");
     let main_path = temp.path().join("main.shape");
+    let manifest_path = temp.path().join("shape.toml");
     let support = r#"
 pub annotation add_reader() {
   targets: [type]
@@ -372,9 +373,23 @@ pub annotation add_reader() {
 }
 pub fn helper() { 0 }
 "#;
+    // `decoy` and `support` are declared as shape.toml path dependencies whose
+    // roots resolve to the sibling `decoy.shape`/`support.shape` files through
+    // the `<dep_root>.shape` fallback in module resolution. This is the shipped
+    // route for importing local files by bare module name — the grammar has no
+    // `./` module-path syntax, so the previous `from ./support` spelling died at
+    // parse before any of the registration logic below could run.
+    let manifest = r#"[dependencies]
+decoy = { path = "decoy" }
+support = { path = "support" }
+"#;
+    // `decoy` is imported first so it is registered ahead of `support`,
+    // preserving the same-name collision the test probes: a first-wins bug would
+    // retain the decoy's `add_reader` even though `@add_reader` is explicitly
+    // imported from `support`.
     let source = r#"
-from ./decoy use { helper }
-from ./support use { @add_reader }
+from decoy use { helper }
+from support use { @add_reader }
 @add_reader()
 type Job { id: int }
 let job = Job { id: 1 }
@@ -382,6 +397,7 @@ job.read()
 "#;
     std::fs::write(&support_path, support).expect("write imported annotation module");
     std::fs::write(&decoy_path, decoy).expect("write same-named decoy annotation module");
+    std::fs::write(&manifest_path, manifest).expect("write shape.toml path dependencies");
     std::fs::write(&main_path, source).expect("write importing source");
     let cache = crate::module_cache::ModuleCache::new();
     let uri = Uri::from_file_path(&main_path).expect("file URI");
