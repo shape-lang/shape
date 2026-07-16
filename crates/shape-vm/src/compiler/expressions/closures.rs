@@ -3672,13 +3672,11 @@ impl BytecodeCompiler {
                 // the outer-scope promotion opcodes differ.
                 CaptureAccess::SharedCell => {
                     self.shared_closure_captures.insert(name.clone(), i);
-                    // A2-refined / task #17: record the cell's interior
-                    // `FieldKind` so the closure body's shared read/write
-                    // emit sites can dispatch to the typed Wave D.2
-                    // opcodes (codes 0x156-0x16B), mirroring the
-                    // owned-mutable population below. Falls back to `Ptr`
-                    // when the type isn't statically resolved.
-                    let inner_kind = self.resolve_capture_concrete_type(name).to_field_kind();
+                    // The pack's resolved type is the sole authority for both
+                    // layout and body opcode selection. Re-resolving the
+                    // diagnostic name here could disagree with the already
+                    // interned layout or silently fall back to `Ptr`.
+                    let inner_kind = descriptor.capture_type.to_field_kind();
                     self.shared_capture_inner_kinds
                         .insert(name.clone(), inner_kind);
                 }
@@ -3692,13 +3690,10 @@ impl BytecodeCompiler {
                         "OwnedMutableCell access requires a local slot"
                     );
                     self.owned_mutable_closure_captures.insert(name.clone(), i);
-                    // Wave E: record the cell's interior `FieldKind` so the
-                    // closure body's read/write emit sites can dispatch to
-                    // the typed Wave D.1 opcodes (codes 0x140-0x155) — the
-                    // same type `op_make_closure`'s `alloc_owned_mutable_<kind>`
-                    // selection uses. Falls back to `Ptr` when the type isn't
-                    // statically resolved.
-                    let inner_kind = self.resolve_capture_concrete_type(name).to_field_kind();
+                    // Use the same pack type that selected the layout and
+                    // owned-cell allocator; there is no name-based second
+                    // resolver or fallback on the body-emission path.
+                    let inner_kind = descriptor.capture_type.to_field_kind();
                     self.owned_mutable_capture_inner_kinds
                         .insert(name.clone(), inner_kind);
                 }

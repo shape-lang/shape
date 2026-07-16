@@ -1,6 +1,7 @@
 //! Structural identities published by the generated-capture query.
 
 use super::super::CaptureBindingLineage;
+use shape_ast::ast::{GeneratedExpansionFingerprint, GeneratedNodePath};
 use shape_runtime::type_system::GeneratedNodeKey;
 
 /// Slot namespace of the captured binding in its exact owner.
@@ -18,8 +19,8 @@ pub enum GeneratedCaptureSlot {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum GeneratedCaptureBindingScope {
     Local {
-        expansion_fingerprint: (i64, i64),
-        owner_path: Vec<String>,
+        expansion_fingerprint: GeneratedExpansionFingerprint,
+        owner_path: GeneratedNodePath,
         slot: u16,
     },
     Module {
@@ -78,14 +79,14 @@ impl GeneratedCaptureBindingIdentity {
             GeneratedCaptureBindingScope::Local {
                 expansion_fingerprint,
                 ..
-            } => Some(*expansion_fingerprint),
+            } => Some(expansion_fingerprint.components()),
             GeneratedCaptureBindingScope::Module { .. } => None,
         }
     }
 
     pub fn owner_path(&self) -> Option<&[String]> {
         match &self.scope {
-            GeneratedCaptureBindingScope::Local { owner_path, .. } => Some(owner_path),
+            GeneratedCaptureBindingScope::Local { owner_path, .. } => Some(owner_path.segments()),
             GeneratedCaptureBindingScope::Module { .. } => None,
         }
     }
@@ -108,17 +109,20 @@ impl GeneratedCaptureBindingIdentity {
     pub fn canonical_descriptor(&self) -> String {
         match &self.scope {
             GeneratedCaptureBindingScope::Local {
-                expansion_fingerprint: (high, low),
+                expansion_fingerprint,
                 owner_path,
                 slot,
-            } => format!(
-                "capture:{:016x}{:016x}:file:{}:owner:{}:local:{}",
-                *high as u64,
-                *low as u64,
-                self.file_id,
-                owner_path.join("/"),
-                slot,
-            ),
+            } => {
+                let (high, low) = expansion_fingerprint.components();
+                format!(
+                    "capture:{:016x}{:016x}:file:{}:owner:{}:local:{}",
+                    high as u64,
+                    low as u64,
+                    self.file_id,
+                    owner_path.render(),
+                    slot,
+                )
+            }
             GeneratedCaptureBindingScope::Module { slot } => {
                 format!("capture:file:{}:module:{slot}", self.file_id)
             }
@@ -149,22 +153,37 @@ mod tests {
     }
 
     #[test]
-    fn local_identity_retains_expansion_and_structural_owner() {
+    fn local_identity_retains_typed_expansion_and_structural_owner() {
         let first =
             GeneratedCaptureBindingIdentity::from_binding_lineage(&CaptureBindingLineage::Local {
-                expansion_fingerprint: (1, 2),
-                binding_owner_path: vec!["method:first".to_string()],
+                expansion_fingerprint: GeneratedExpansionFingerprint::from_components(1, 2),
+                binding_owner_path: GeneratedNodePath::decl_root("method:first"),
                 file_id: 0,
                 slot: 3,
             });
         let second =
             GeneratedCaptureBindingIdentity::from_binding_lineage(&CaptureBindingLineage::Local {
-                expansion_fingerprint: (1, 2),
-                binding_owner_path: vec!["method:second".to_string()],
+                expansion_fingerprint: GeneratedExpansionFingerprint::from_components(1, 2),
+                binding_owner_path: GeneratedNodePath::decl_root("method:second"),
                 file_id: 0,
                 slot: 3,
             });
+        let different_expansion = GeneratedCaptureBindingIdentity::from_binding_lineage(
+            &CaptureBindingLineage::Local {
+                expansion_fingerprint: GeneratedExpansionFingerprint::from_components(2, 1),
+                binding_owner_path: GeneratedNodePath::decl_root("method:first"),
+                file_id: 0,
+                slot: 3,
+            },
+        );
         assert_ne!(first, second);
+        assert_ne!(first, different_expansion);
+        assert_eq!(first.expansion_fingerprint(), Some((1, 2)));
+        assert_eq!(first.owner_path(), Some(&["method:first".to_string()][..]));
+        assert_eq!(
+            first.canonical_descriptor(),
+            "capture:00000000000000010000000000000002:file:0:owner:method:first:local:3",
+        );
     }
 
     #[test]

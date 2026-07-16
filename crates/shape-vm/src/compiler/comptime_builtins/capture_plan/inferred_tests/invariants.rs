@@ -184,6 +184,35 @@ run()
         "{wrong_family_error}"
     );
 
+    assert_eq!(
+        pack.descriptors[0].capture_type.to_field_kind(),
+        shape_value::v2::struct_layout::FieldKind::I64,
+        "fixture must prove a wrong kind inside the correct opcode family",
+    );
+    let wrong_same_family_kind = [crate::bytecode::Instruction::new(
+        crate::bytecode::OpCode::LoadOwnedMutableCaptureU64,
+        Some(crate::bytecode::Operand::Local(0)),
+    )];
+    let wrong_kind_error = pack
+        .validate_emitted_artifact(layout, function, &wrong_same_family_kind)
+        .expect_err("the right cell family with the wrong payload kind must reject");
+    assert!(
+        wrong_kind_error.contains("requires exact capture opcodes"),
+        "{wrong_kind_error}"
+    );
+
+    let forbidden_dynamic_cell_opcode = [crate::bytecode::Instruction::new(
+        crate::bytecode::OpCode::LoadOwnedMutableCapture,
+        Some(crate::bytecode::Operand::Local(0)),
+    )];
+    let dynamic_cell_error = pack
+        .validate_emitted_artifact(layout, function, &forbidden_dynamic_cell_opcode)
+        .expect_err("dynamic cell opcodes are reserved for an explicit legacy access plan");
+    assert!(
+        dynamic_cell_error.contains("requires exact capture opcodes"),
+        "{dynamic_cell_error}"
+    );
+
     let mixed_families = [
         crate::bytecode::Instruction::new(
             crate::bytecode::OpCode::LoadOwnedMutableCaptureI64,

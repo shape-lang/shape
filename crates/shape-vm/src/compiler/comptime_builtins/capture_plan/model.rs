@@ -1,4 +1,5 @@
 use super::*;
+use shape_ast::ast::{GeneratedExpansionFingerprint, GeneratedNodePath};
 
 /// Slot-keyed identity of a captured binding.
 ///
@@ -24,8 +25,8 @@ pub(crate) enum CaptureTarget {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) enum CaptureBindingLineage {
     Local {
-        expansion_fingerprint: (i64, i64),
-        binding_owner_path: Vec<String>,
+        expansion_fingerprint: GeneratedExpansionFingerprint,
+        binding_owner_path: GeneratedNodePath,
         file_id: u16,
         slot: u16,
     },
@@ -41,14 +42,18 @@ impl CaptureBindingLineage {
         binding_file_id: u16,
         target: CaptureTarget,
     ) -> Result<Self> {
-        let mut binding_owner_path = origin.node_path().to_vec();
-        let closure_segment = binding_owner_path.pop().ok_or_else(|| ShapeError::RuntimeError {
-            message:
-                "internal compiler error: generated capture origin has no structural closure segment"
-                    .to_string(),
-            location: None,
-        })?;
+        let closure_segment = origin
+            .path()
+            .typed_segments()
+            .last()
+            .ok_or_else(|| ShapeError::RuntimeError {
+                message:
+                    "internal compiler error: generated capture origin has no structural closure segment"
+                        .to_string(),
+                location: None,
+            })?;
         let valid_closure_segment = closure_segment
+            .as_str()
             .strip_prefix("closure:")
             .is_some_and(|index| !index.is_empty() && index.parse::<u32>().is_ok());
         if !valid_closure_segment {
@@ -59,9 +64,13 @@ impl CaptureBindingLineage {
                 location: None,
             });
         }
+        let binding_owner_path = origin
+            .path()
+            .parent()
+            .expect("a validated terminal closure segment has a structural parent path");
         match target {
             CaptureTarget::Local(slot) => Ok(Self::Local {
-                expansion_fingerprint: origin.expansion_fingerprint(),
+                expansion_fingerprint: origin.identity().expansion(),
                 binding_owner_path,
                 file_id: binding_file_id,
                 slot,

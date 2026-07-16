@@ -107,6 +107,7 @@ impl CapturePack {
         }
 
         let mut opcode_families = vec![None; self.len()];
+        let mut capture_opcodes = vec![Vec::new(); self.len()];
         for instruction in instructions {
             let Some(family) = artifact::cell_capture_family(instruction.opcode) else {
                 continue;
@@ -117,7 +118,8 @@ impl CapturePack {
                     self.closure, instruction.opcode
                 ));
             };
-            let Some(slot) = opcode_families.get_mut(usize::from(index)) else {
+            let capture_index = usize::from(index);
+            let Some(slot) = opcode_families.get_mut(capture_index) else {
                 return Err(format!(
                     "closure {}: capture-cell opcode {:?} names missing capture {}",
                     self.closure, instruction.opcode, index
@@ -130,6 +132,7 @@ impl CapturePack {
                 ));
             }
             *slot = Some(family);
+            capture_opcodes[capture_index].push(instruction.opcode);
         }
 
         for descriptor in &self.descriptors {
@@ -179,7 +182,12 @@ impl CapturePack {
                 Ok(_) => {}
             }
 
-            let expected_family = artifact::family_for_access(descriptor.access);
+            let expected_opcodes = artifact::exact_opcodes_for_access(
+                descriptor.access,
+                descriptor.capture_type.to_field_kind(),
+            );
+            let expected_family = expected_opcodes
+                .and_then(|opcodes| artifact::cell_capture_family(opcodes[0]));
             if opcode_families[index] != expected_family {
                 return Err(format!(
                     "closure {} capture {} ('{}'): {:?} requires opcode family {:?}, emitted {:?}",
@@ -189,6 +197,21 @@ impl CapturePack {
                     descriptor.access,
                     expected_family,
                     opcode_families[index],
+                ));
+            }
+            if let Some(actual_opcode) = capture_opcodes[index].iter().find(|&&opcode| {
+                expected_opcodes.is_none_or(|expected| !expected.contains(&opcode))
+            }) {
+                return Err(format!(
+                    "closure {} capture {} ('{}'): {:?} with payload {:?} requires exact capture \
+                     opcodes {:?}, emitted {:?}",
+                    self.closure,
+                    index,
+                    descriptor.name,
+                    descriptor.access,
+                    descriptor.capture_type.to_field_kind(),
+                    expected_opcodes,
+                    actual_opcode,
                 ));
             }
         }

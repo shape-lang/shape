@@ -40,10 +40,25 @@ fn sibling_captures_join_by_binding_authority_while_distinct_slots_do_not() {
 
     assert_eq!(first, sibling);
     assert_ne!(first, distinct);
-    assert!(matches!(
-        first,
-        CaptureBindingLineage::Local { file_id: 7, .. }
-    ));
+    let CaptureBindingLineage::Local {
+        expansion_fingerprint,
+        binding_owner_path,
+        file_id,
+        ..
+    } = &first
+    else {
+        panic!("local capture must retain local binding lineage")
+    };
+    assert_eq!(
+        *expansion_fingerprint,
+        GeneratedExpansionFingerprint::from_components(11, 13),
+    );
+    assert_eq!(*file_id, 7);
+    assert_eq!(
+        binding_owner_path,
+        &GeneratedNodePath::decl_root("extend:Job").child("method:read"),
+        "the typed parent path, not its rendered closure child, is binding identity",
+    );
 }
 
 #[test]
