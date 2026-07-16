@@ -23,8 +23,9 @@ impl TypeInferenceEngine {
         // Extract receiver type param names from generic extend blocks.
         // e.g., `extend Vec<T>` -> receiver_type_params = ["T"]
         // e.g., `extend HashMap<K, V>` -> receiver_type_params = ["K", "V"]
-        let mut receiver_type_params =
+        let implicit_receiver_type_params =
             Self::implicit_extend_receiver_type_params(&extend.type_name);
+        let mut receiver_type_params = implicit_receiver_type_params.clone();
         let explicit_receiver_type_params: Vec<String> = match &extend.type_name {
             TypeName::Generic { type_args, .. } => type_args
                 .iter()
@@ -60,6 +61,20 @@ impl TypeInferenceEngine {
                 .as_ref()
                 .map(|tps| tps.iter().map(|tp| tp.name().to_string()).collect())
                 .unwrap_or_default();
+
+            // A scalar/collection extend synthesizes an implicit receiver type
+            // param (Number's `N`, bare Array/Vec's `T`). That name is a
+            // compiler artifact, not a user binder: when a method declares its
+            // own type param of the same name, the explicit method binder
+            // shadows the synthetic receiver, so drop the redeclared implicit
+            // name before provenance registration counts it a second time.
+            // Explicit user-written receiver params (e.g. `extend Vec<T>`) stay
+            // intact and still collide as genuine shadows.
+            let mut receiver_type_params = receiver_type_params.clone();
+            receiver_type_params.retain(|name| {
+                !(method_type_params.contains(name)
+                    && implicit_receiver_type_params.contains(name))
+            });
 
             let is_generic = has_receiver_params || !method_type_params.is_empty();
 
