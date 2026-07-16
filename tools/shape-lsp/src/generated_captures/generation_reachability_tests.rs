@@ -1,4 +1,7 @@
-use super::{CaptureQueryContext, GeneratedQuerySession};
+use super::{
+    CaptureQueryContext, GeneratedCaptureLookup, GeneratedQuerySession, generated_capture_hover,
+    generated_capture_rename,
+};
 use crate::generated_symbols::{
     generated_capture_compile_count, reset_generated_capture_compile_count,
 };
@@ -11,7 +14,7 @@ use tower_lsp_server::ls_types::Position;
 
 const NESTED_GENERATED_CAPTURE: &str = r#"
 mod generated {
-  annotation add_reader() {
+  pub annotation add_reader() {
     targets: [function]
     comptime post(target, ctx) {
       extend Number {
@@ -118,10 +121,17 @@ fn nested_annotated_method_session_is_ready_with_exact_capture_descriptor() {
         &NESTED_GENERATED_CAPTURE[declaration.start..declaration.end],
         "total",
     );
+    assert!(
+        captures
+            .issues()
+            .iter()
+            .all(|issue| issue.code() != "C0910"),
+        "nested exported direct syntax has an exact authored source map",
+    );
 }
 
 #[test]
-fn expression_annotation_session_is_ready_with_exact_capture_descriptor() {
+fn expression_annotation_missing_inference_is_terminally_quarantined() {
     reset_generated_capture_compile_count();
     let program = shape_ast::parse_program(EXPRESSION_GENERATED_CAPTURE).expect("fixture parses");
     let session = GeneratedQuerySession::new(
@@ -129,7 +139,7 @@ fn expression_annotation_session_is_ready_with_exact_capture_descriptor() {
         EXPRESSION_GENERATED_CAPTURE,
         CaptureQueryContext::unavailable(),
     );
-    let GeneratedQuerySession::Ready(compiler) = session else {
+    let GeneratedQuerySession::Ready(compiler) = &session else {
         panic!("expression-level generation must compile into a ready query session")
     };
     assert_eq!(generated_capture_compile_count(), 1);
@@ -150,18 +160,51 @@ fn expression_annotation_session_is_ready_with_exact_capture_descriptor() {
     );
 
     let captures = compiler.generated_capture_query(&program);
-    let matching: Vec<_> = captures
-        .captures()
-        .iter()
-        .filter(|capture| capture.display_name() == "total")
-        .collect();
-    assert_eq!(matching.len(), 1, "one exact generated capture descriptor");
-    let capture = matching[0];
-    assert_eq!(capture.owner_display(), "Job.expression_read");
-    assert_eq!(capture.mode().variant_name(), "Share");
+    assert!(
+        captures.captures().is_empty(),
+        "missing inference evidence cannot publish a capture descriptor",
+    );
+    let [issue] = captures.issues() else {
+        panic!("expression capture must produce one exact semantic-evidence refusal")
+    };
+    assert_eq!(issue.code(), "C0911");
+    let message = issue.message();
+    assert!(message.contains("MissingInferenceFact"));
+    assert!(
+        message.contains("capture 'total' has no structural inference fact at ordinal 0"),
+        "the refusal pins the missing compiler fact instead of synthesizing one",
+    );
+
+    let declaration = EXPRESSION_GENERATED_CAPTURE.find("share total").unwrap() + "share ".len();
+    assert!(matches!(
+        captures.capture_at(0, declaration),
+        Some(shape_vm::compiler::GeneratedCapturePosition::Unavailable),
+    ));
+    assert!(matches!(
+        generated_capture_hover(
+            &program,
+            EXPRESSION_GENERATED_CAPTURE,
+            position(EXPRESSION_GENERATED_CAPTURE, declaration),
+            &session,
+        ),
+        GeneratedCaptureLookup::Unavailable,
+    ));
+    let uri = "file:///expression-capture.shape".parse().expect("URI");
+    assert!(matches!(
+        generated_capture_rename(
+            &program,
+            EXPRESSION_GENERATED_CAPTURE,
+            declaration,
+            &uri,
+            "renamed_total",
+            &session,
+        ),
+        GeneratedCaptureLookup::Unavailable,
+    ));
     assert_eq!(
-        capture.uniform_capture_type().map(ToString::to_string),
-        Some("int".to_string()),
+        generated_capture_compile_count(),
+        1,
+        "hover and rename reuse the request's quarantined compiler query",
     );
 }
 

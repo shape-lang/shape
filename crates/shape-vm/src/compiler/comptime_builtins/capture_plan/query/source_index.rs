@@ -8,12 +8,12 @@
 use std::collections::HashSet;
 
 use shape_ast::ast::{
-    DestructurePattern, Expr, FunctionDef, FunctionParameter, Item, Pattern, Program, Span,
-    Statement, TypeName,
+    AnnotationDef, DestructurePattern, ExportItem, Expr, FunctionDef, FunctionParameter, Item,
+    Pattern, Program, Span, Statement, TypeName,
 };
 use shape_ast::transform::{GeneratedClosureSourcePath, generated_closure_source_paths};
 use shape_runtime::closure::EnvironmentAnalyzer;
-use shape_runtime::visitor::{Visitor, walk_expr, walk_stmt};
+use shape_runtime::visitor::{Visitor, walk_expr, walk_program, walk_stmt};
 
 use crate::compiler::{BytecodeCompiler, SourceAnchor};
 
@@ -38,34 +38,12 @@ pub(super) struct AuthoredCaptureIndex {
 impl AuthoredCaptureIndex {
     pub(super) fn build(program: &Program) -> Self {
         let mut index = Self::default();
-        for item in &program.items {
-            match item {
-                Item::AnnotationDef(definition, _) => {
-                    for handler in &definition.handlers {
-                        let mut collector = DirectExtendCollector {
-                            generator_span: handler.span,
-                            target_parameter: handler
-                                .params
-                                .first()
-                                .map(|param| param.name.clone()),
-                            methods: &mut index.methods,
-                        };
-                        walk_expr(&mut collector, &handler.body);
-                    }
-                }
-                Item::Comptime(statements, span) => {
-                    let mut collector = DirectExtendCollector {
-                        generator_span: *span,
-                        target_parameter: None,
-                        methods: &mut index.methods,
-                    };
-                    for statement in statements {
-                        walk_stmt(&mut collector, statement);
-                    }
-                }
-                _ => {}
-            }
-        }
+        walk_program(
+            &mut GeneratorCarrierCollector {
+                methods: &mut index.methods,
+            },
+            program,
+        );
         index
     }
 
@@ -90,6 +68,57 @@ impl AuthoredCaptureIndex {
     }
 }
 
+struct GeneratorCarrierCollector<'index> {
+    methods: &'index mut Vec<DirectGeneratedMethod>,
+}
+
+impl GeneratorCarrierCollector<'_> {
+    fn collect_annotation(&mut self, definition: &AnnotationDef) {
+        for handler in &definition.handlers {
+            let mut collector = DirectExtendCollector {
+                generator_span: handler.span,
+                target_parameter: handler.params.first().map(|param| param.name.clone()),
+                methods: &mut *self.methods,
+            };
+            walk_expr(&mut collector, &handler.body);
+        }
+    }
+
+    fn collect_comptime(&mut self, statements: &[Statement], span: Span) {
+        let mut collector = DirectExtendCollector {
+            generator_span: span,
+            target_parameter: None,
+            methods: &mut *self.methods,
+        };
+        for statement in statements {
+            walk_stmt(&mut collector, statement);
+        }
+    }
+}
+
+impl Visitor for GeneratorCarrierCollector<'_> {
+    fn visit_item(&mut self, item: &Item) -> bool {
+        match item {
+            Item::AnnotationDef(definition, _) => self.collect_annotation(definition),
+            Item::Export(export, _) => {
+                if let ExportItem::Annotation(definition) = &export.item {
+                    self.collect_annotation(definition);
+                }
+            }
+            Item::Comptime(statements, span) => self.collect_comptime(statements, *span),
+            _ => {}
+        }
+        true
+    }
+
+    fn visit_expr_comptime(&mut self, expression: &Expr, span: Span) -> bool {
+        if let Expr::Comptime(statements, _) = expression {
+            self.collect_comptime(statements, span);
+        }
+        true
+    }
+}
+
 struct DirectExtendCollector<'index> {
     generator_span: Span,
     target_parameter: Option<String>,
@@ -97,6 +126,11 @@ struct DirectExtendCollector<'index> {
 }
 
 impl Visitor for DirectExtendCollector<'_> {
+    fn visit_expr_comptime(&mut self, _expression: &Expr, _span: Span) -> bool {
+        // A nested comptime expression is an independent generator carrier.
+        false
+    }
+
     fn visit_stmt(&mut self, statement: &Statement) -> bool {
         let Statement::Extend(extension, _) = statement else {
             return true;
