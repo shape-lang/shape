@@ -358,3 +358,7 @@ impl Visitor for BindingIndex {
         true
     }
 }
+
+#[cfg(test)]
+#[path = "source_index_tests.rs"]
+mod tests;

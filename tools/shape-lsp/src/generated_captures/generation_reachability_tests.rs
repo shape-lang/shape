@@ -14,6 +14,21 @@ use tower_lsp_server::ls_types::Position;
 
 const NESTED_GENERATED_CAPTURE: &str = r#"
 mod generated {
+  mod decoy {
+    pub annotation add_reader() {
+      targets: [function]
+      comptime post(target, ctx) {
+        extend Number {
+          method read(x: int) -> int {
+            var decoy_total = 99
+            let worker = |y: int; share decoy_total| y + decoy_total
+            worker(x)
+          }
+        }
+      }
+    }
+  }
+
   pub annotation add_reader() {
     targets: [function]
     comptime post(target, ctx) {
@@ -112,22 +127,28 @@ fn nested_annotated_method_session_is_ready_with_exact_capture_descriptor() {
         capture.uniform_capture_type().map(ToString::to_string),
         Some("int".to_string()),
     );
-    let declaration = capture
+    let source_map = capture
         .source_map()
-        .expect("direct generated capture has an authored source map")
-        .declaration()
-        .span();
+        .expect("direct generated capture has an authored source map");
+    let binding = source_map.binding().span();
+    let declaration = source_map.declaration().span();
+    let [use_site] = source_map.uses() else {
+        panic!("direct generated capture has one exact authored use")
+    };
+    assert_eq!(
+        &NESTED_GENERATED_CAPTURE[binding.start..binding.end],
+        "total",
+    );
     assert_eq!(
         &NESTED_GENERATED_CAPTURE[declaration.start..declaration.end],
         "total",
     );
-    assert!(
-        captures
-            .issues()
-            .iter()
-            .all(|issue| issue.code() != "C0910"),
-        "nested exported direct syntax has an exact authored source map",
+    let use_site = use_site.span();
+    assert_eq!(
+        &NESTED_GENERATED_CAPTURE[use_site.start..use_site.end],
+        "total",
     );
+    assert!(captures.issues().is_empty());
 }
 
 #[test]
@@ -168,11 +189,9 @@ fn expression_annotation_missing_inference_is_terminally_quarantined() {
         panic!("expression capture must produce one exact semantic-evidence refusal")
     };
     assert_eq!(issue.code(), "C0911");
-    let message = issue.message();
-    assert!(message.contains("MissingInferenceFact"));
-    assert!(
-        message.contains("capture 'total' has no structural inference fact at ordinal 0"),
-        "the refusal pins the missing compiler fact instead of synthesizing one",
+    assert_eq!(
+        issue.message(),
+        "[C0911] generated capture 'total' cannot establish a structural specialization identity: capture descriptor 0 semantic evidence is unavailable (MissingInferenceFact): capture 'total' has no structural inference fact at ordinal 0: occurrence:0ba24839b354aaf7857a2f7dfedaf0f6:node:extend:Job/method:expression_read/closure:0:descriptor:0",
     );
 
     let declaration = EXPRESSION_GENERATED_CAPTURE.find("share total").unwrap() + "share ".len();
