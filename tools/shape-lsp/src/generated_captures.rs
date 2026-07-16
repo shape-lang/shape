@@ -29,7 +29,9 @@ pub(crate) use hover::generated_capture_hover_from_source;
 use presentation::push_anchor;
 pub(crate) use rename::generated_capture_rename;
 pub(crate) use routing::GeneratedCaptureLookup;
-use routing::{CaptureAnalysis, analyze, analyze_session};
+#[cfg(test)]
+use routing::analyze;
+use routing::{CaptureAnalysis, analyze_session};
 pub(crate) use session::{CaptureQueryContext, GeneratedQuerySession};
 
 #[cfg(test)]
@@ -74,6 +76,7 @@ pub(crate) fn generated_capture_definition(
     GeneratedCaptureLookup::Found(GotoDefinitionResponse::Array(locations))
 }
 
+#[cfg(test)]
 pub(crate) fn generated_capture_references(
     program: &Program,
     text: &str,

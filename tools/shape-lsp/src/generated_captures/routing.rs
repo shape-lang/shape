@@ -3,7 +3,9 @@
 use shape_ast::ast::Program;
 use shape_vm::compiler::GeneratedCaptureQuery;
 
-use super::session::{CaptureQueryContext, GeneratedQuerySession};
+#[cfg(test)]
+use super::session::CaptureQueryContext;
+use super::session::GeneratedQuerySession;
 
 pub(crate) enum GeneratedCaptureLookup<T> {
     NotCapture,
@@ -32,6 +34,7 @@ pub(super) enum CaptureAnalysis {
     Ready(GeneratedCaptureQuery),
 }
 
+#[cfg(test)]
 pub(super) fn analyze(
     program: &Program,
     text: &str,
