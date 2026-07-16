@@ -29,6 +29,8 @@ mod generated {
     method marker() { self }
   }
 }
+
+let force = 2.0.read(0)
 "#;
 
 const NESTED_POISONED_GENERATION: &str = r#"
@@ -131,6 +133,21 @@ fn expression_annotation_session_is_ready_with_exact_capture_descriptor() {
         panic!("expression-level generation must compile into a ready query session")
     };
     assert_eq!(generated_capture_compile_count(), 1);
+
+    let generated_symbols = compiler
+        .generated_symbol_query()
+        .symbols_named("expression_read");
+    assert_eq!(
+        generated_symbols.len(),
+        1,
+        "the expression handler publishes one generated method symbol",
+    );
+    assert_eq!(generated_symbols[0].decl_name, "Job.expression_read");
+    assert_eq!(
+        compiler.function_type_ids().len(),
+        1,
+        "Job.expression_read compiles its one closure body before capture projection",
+    );
 
     let captures = compiler.generated_capture_query(&program);
     let matching: Vec<_> = captures
