@@ -144,3 +144,83 @@ generated_read(2)
     assert_c0902(outcome, "share module_ref", "module_ref");
     assert_no_closure_artifacts(&compiler);
 }
+
+/// RULING 1 (real-compile) — `move` never lies about a MODULE binding. The
+/// synthetic `lower_declared` unit test proves the arm in isolation
+/// (`declared_tests::rejections::c0906_move_on_module_binding_is_rejected`);
+/// this drives the whole generated-code pipeline so the [C0906] refusal is
+/// proven where it actually fires. Capture clauses are a generated-code-only
+/// surface ([C0903] guards user source), so — exactly like the [C0902] sibling
+/// above — the declared `move` rides a GENERATED FREE FUNCTION. The binding is
+/// a NON-reference module value (`let count = 41`), so it clears the reference
+/// guard and lands on the module-binding arm rather than [C0902].
+#[test]
+fn generated_free_function_module_value_move_rejects_with_c0906() {
+    let (compiler, outcome) = compile_outcome_with_known_bindings(
+        r#"
+let count = 41
+
+annotation add_reader() {
+  targets: [type]
+  comptime post(target, ctx) {
+    extend ("fn generated_read(x: int) -> int {
+      let worker = |; move count| count
+      x + worker() }")
+  }
+}
+@add_reader()
+type Job { id: int }
+generated_read(2)
+"#,
+        &["count"],
+    );
+    let error = outcome.expect_err("`move` on a module-level value binding admits no move");
+    assert!(
+        error.contains("[C0906]"),
+        "a generated declared `move` over a module binding must carry the C0906 code: {error}"
+    );
+    assert!(
+        error.contains(
+            "module-level binding 'count' cannot be moved into a closure; module bindings \
+             live for the program and admit no move"
+        ),
+        "the [C0906] refusal must be the exact ruled sentence for the named binding: {error}"
+    );
+    assert_no_closure_artifacts(&compiler);
+}
+
+/// The [C0906] refusal above is a fact about `move`, not about the fixture:
+/// flipping the sole mode word to `share` never reuses the move-only code.
+/// (`share` of a fresh, un-promoted module binding inside a callable is refused
+/// by the interprocedural-effect preflight [C0912] — a DIFFERENT arm — so this
+/// control also holds if that path ever relaxes to accept.)
+#[test]
+fn generated_free_function_module_value_share_does_not_reuse_the_move_refusal() {
+    let (_, outcome) = compile_outcome_with_known_bindings(
+        r#"
+let count = 41
+
+annotation add_reader() {
+  targets: [type]
+  comptime post(target, ctx) {
+    extend ("fn generated_read(x: int) -> int {
+      let worker = |; share count| count
+      x + worker() }")
+  }
+}
+@add_reader()
+type Job { id: int }
+generated_read(2)
+"#,
+        &["count"],
+    );
+    let reused_move_refusal = outcome
+        .as_ref()
+        .err()
+        .is_some_and(|error| error.contains("[C0906]"));
+    assert!(
+        !reused_move_refusal,
+        "changing `move`->`share` on the same fixture must not reproduce the move-only \
+         [C0906]: {outcome:?}"
+    );
+}

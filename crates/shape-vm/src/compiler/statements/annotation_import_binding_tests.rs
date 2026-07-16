@@ -125,6 +125,27 @@ from pkg::support use { @same }
         .pre_register_root_annotation_imports(&standalone)
         .expect("local annotation makes the imported bare spelling non-vacant");
     assert!(standalone_compiler.imported_annotations.is_empty());
+    // POSITIVE precedence, not mere suppression: `same` IS the recognized
+    // local annotation name — the exact predicate the import prepass consults
+    // to decide the bare spelling is already locally owned.
+    assert!(
+        BytecodeCompiler::root_local_annotation_names(&standalone).contains("same"),
+        "the local `annotation same()` must be the recognized local owner of `same`"
+    );
+    // Anti-vacuity control: the SAME import with no local declaration DOES
+    // install, so the empty map above is a real local-wins suppression rather
+    // than a dead import path that would drop the alias regardless.
+    let import_only = parse("from pkg::support use { @same }");
+    let mut import_only_compiler = BytecodeCompiler::new();
+    import_only_compiler
+        .pre_register_root_annotation_imports(&import_only)
+        .expect("absent any local declaration the bare `@same` import is installable");
+    let installed = import_only_compiler
+        .imported_annotations
+        .get("same")
+        .expect("without a local `annotation same()` the import installs — proving the \
+                 suppression above is caused by the local declaration");
+    assert_eq!(installed._module_path, "pkg::support");
 
     let graph_program = parse("annotation same() { targets: [type] }");
     let graph = root_graph(
@@ -136,6 +157,15 @@ from pkg::support use { @same }
         .pre_register_root_graph_annotation_imports(&graph_program, &graph)
         .expect("local annotation keeps precedence over a synthetic prelude alias");
     assert!(graph_compiler.imported_annotations.is_empty());
+    // Same positive precedence for the graph path: the graph program's local
+    // `annotation same()` is the recognized owner. (Graph imports DO install
+    // absent a local — proven by
+    // `graph_explicit_annotation_import_wins_without_resolved_vector_order` —
+    // so this empty map is likewise a real suppression, not a dead path.)
+    assert!(
+        BytecodeCompiler::root_local_annotation_names(&graph_program).contains("same"),
+        "the graph program's local `annotation same()` must be the recognized owner of `same`"
+    );
 }
 
 #[test]
