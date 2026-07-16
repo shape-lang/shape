@@ -1,6 +1,7 @@
 //! Exact annotation-handler and comptime-helper authority for prepass execution.
 
 use super::BytecodeCompiler;
+use super::declaration_discovery::source_module_topology_is_stable;
 use shape_ast::ast::{Annotation, AnnotationHandler, AnnotationHandlerType, Expr, FunctionDef};
 use shape_ast::error::{Result, ShapeError};
 use std::collections::{HashMap, HashSet};
@@ -166,6 +167,9 @@ impl BytecodeCompiler {
                         }
                     }
                     Item::Module(module, _) => {
+                        if !source_module_topology_is_stable(module) {
+                            continue;
+                        }
                         let module_path = match parent_module_path {
                             Some(parent) => {
                                 BytecodeCompiler::qualify_module_symbol(parent, &module.name)

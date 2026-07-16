@@ -2006,10 +2006,13 @@ pub fn infer_reference_model(
 /// result, never from a parallel scan.
 ///
 /// A structural fast path returns no items only when the complete inline item
-/// tree proves it cannot generate (no supported annotation applications and
-/// no `comptime` items), avoiding a compile for the common case. The compile
-/// runs in RecoverAll modes and tolerates errors — the executed authority still
-/// records every declaration reserved before a failure.
+/// tree proves that no semantic compilation stage can generate, avoiding a
+/// compile for the common case. Module annotations and raw module `comptime`
+/// blocks conservatively force compilation through their separate pass-2
+/// topology-mutating APIs, although their output is not represented by this
+/// fixed-point query. The compile runs in RecoverAll modes and tolerates errors
+/// — the executed authority still records every declaration reserved before a
+/// failure.
 pub fn executed_generated_items(program: &Program) -> Vec<Item> {
     if !program_may_generate(program) {
         return Vec::new();

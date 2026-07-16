@@ -23,6 +23,8 @@ use super::{BytecodeCompiler, HygienicRole, ParamPassMode};
 
 mod generated_closure_provenance;
 use generated_closure_provenance::anchor_generated_function_decl;
+mod declaration_discovery;
+use declaration_discovery::DeclarationDiscoveryTarget;
 mod handler_resolution;
 use handler_resolution::{ComptimeAnnotationHandlers, ComptimeHandlerHelperAuthority};
 mod original_body_shadow;
@@ -1894,45 +1896,6 @@ impl BytecodeCompiler {
     ) -> Result<Vec<shape_ast::ast::Item>> {
         use shape_ast::ast::Item;
 
-        // ADR-009 E3 (S1 parity): declaration-PRODUCING comptime attaches to two
-        // target kinds — struct/type definitions and annotated functions. A
-        // function-target annotation whose comptime handler emits
-        // `extend Type { … }` must enter the SAME declaration-discovery fixed
-        // point as a type-target one (Decision 67), so both flow through ONE
-        // worklist, ONE run-once memo, and ONE recording path — never a parallel
-        // scan. Only the target-object construction and the Dec-56 representation
-        // authority differ per kind; everything downstream (claim, execute,
-        // directive recording) is shared inline below.
-        enum DiscoveryTarget {
-            Struct(shape_ast::ast::types::StructTypeDef),
-            Function(FunctionDef),
-        }
-        impl DiscoveryTarget {
-            fn name(&self) -> &str {
-                match self {
-                    DiscoveryTarget::Struct(sd) => &sd.name,
-                    DiscoveryTarget::Function(fd) => &fd.name,
-                }
-            }
-            fn annotations(&self) -> &[shape_ast::ast::functions::Annotation] {
-                match self {
-                    DiscoveryTarget::Struct(sd) => &sd.annotations,
-                    DiscoveryTarget::Function(fd) => &fd.annotations,
-                }
-            }
-            /// ADR-009 B5 declaration shape of the target this handler extends.
-            /// A struct target is a product `NominalShape::Struct`; a function
-            /// target is not a decomposable nominal type (`Opaque`), and an
-            /// `extend <target>` against a function target has no nominal owner
-            /// to substitute anyway.
-            fn nominal_shape(&self) -> NominalShape {
-                match self {
-                    DiscoveryTarget::Struct(_) => NominalShape::Struct,
-                    DiscoveryTarget::Function(_) => NominalShape::Opaque,
-                }
-            }
-        }
-
         // annotation bare-name -> (comptime handlers, annotation-def param names)
         let handler_map = self.collect_comptime_annotation_handlers(program)?;
         if handler_map.is_empty() {
@@ -1946,17 +1909,25 @@ impl BytecodeCompiler {
             .unwrap_or_default();
         let trait_impls = self.type_inference.env.trait_impl_keys();
 
-        // Known type symbols: local struct/type names plus every type symbol
-        // already registered (imported modules compiled in graph phase 1).
+        // Snapshot the complete source-executable v1 annotation frontier in
+        // pass-2 lexical form. The collector recurses inline modules, unwraps
+        // exported functions/structs, and lowers source Extend/Impl methods via
+        // the same compiler desugarers pass 2 uses.
+        let discovery_seed = self.collect_declaration_discovery_targets(program)?;
+
+        // Known type symbols: every discovered source struct plus every type
+        // symbol already registered (imported modules compiled in graph phase
+        // 1). Nested/exported types therefore enter handler execution under
+        // the same qualified identity pass 2 observes.
         let mut known_type_symbols: HashSet<String> = self
             .struct_types
             .keys()
             .chain(self.type_aliases.keys())
             .cloned()
             .collect();
-        for item in &program.items {
-            if let Item::StructType(sd, _) = item {
-                known_type_symbols.insert(sd.name.clone());
+        for target in &discovery_seed {
+            if matches!(target, DeclarationDiscoveryTarget::Struct { .. }) {
+                known_type_symbols.insert(target.name().to_string());
             }
         }
 
@@ -1968,27 +1939,6 @@ impl BytecodeCompiler {
             .get_file(self.current_file_id)
             .unwrap_or("")
             .to_string();
-
-        // Snapshot the discovery targets (struct/type defs + annotated
-        // functions) so we can borrow `self` mutably while running the mini-VM.
-        // Function targets carry no representation authority (Dec 56); per the
-        // v1 directive surface they never emit a new annotated type, so they are
-        // a flat one-round seed — the additions-only re-scan below still keeps
-        // multi-level discovery total for any generated annotated struct.
-        let mut discovery_seed: Vec<DiscoveryTarget> = program
-            .items
-            .iter()
-            .filter_map(|item| match item {
-                Item::StructType(sd, _) => Some(DiscoveryTarget::Struct(sd.clone())),
-                _ => None,
-            })
-            .collect();
-        discovery_seed.extend(program.items.iter().filter_map(|item| match item {
-            Item::Function(fd, _) if !fd.annotations.is_empty() => {
-                Some(DiscoveryTarget::Function(fd.clone()))
-            }
-            _ => None,
-        }));
 
         let mut generated: Vec<Item> = Vec::new();
 
@@ -2006,7 +1956,7 @@ impl BytecodeCompiler {
         // annotated type — so real programs converge in one round; the worklist
         // machinery makes multi-level discovery total and its rejections named.
         let mut discovery = DeclarationDiscoveryFixedPoint::new();
-        let mut worklist: Vec<DiscoveryTarget> = discovery_seed;
+        let mut worklist: Vec<DeclarationDiscoveryTarget> = discovery_seed;
         // Generated annotated type → the application whose expansion produced
         // it (the output-triggers edge source for cycle detection).
         let mut type_producer: HashMap<String, ExpansionIdentity> = HashMap::new();
@@ -2027,14 +1977,14 @@ impl BytecodeCompiler {
                 .map_err(|message| self.build_discovery_failure(message, None))?;
             // Types generated this round, re-scanned next round (additions-only;
             // discovered headers stay immutable through discovery).
-            let mut newly_generated_types: Vec<DiscoveryTarget> = Vec::new();
+            let mut newly_generated_types: Vec<DeclarationDiscoveryTarget> = Vec::new();
 
             for disc_target in &round_defs {
                 for ann in disc_target.annotations() {
                     let Some((_, entry)) = self.resolve_comptime_annotation_handlers(
                         &handler_map,
                         ann,
-                        (!ctx_module_path.is_empty()).then_some(ctx_module_path.as_str()),
+                        disc_target.lexical_module_path(),
                     ) else {
                         continue;
                     };
@@ -2045,36 +1995,7 @@ impl BytecodeCompiler {
                         // FUNCTION target builds from the signature and receives no
                         // authority (`access_type_name = None`). Everything below
                         // is shared.
-                        let (target, access_type_name): (_, Option<String>) = match disc_target {
-                            DiscoveryTarget::Struct(struct_def) => {
-                                let fields: Vec<(
-                                    String,
-                                    Option<TypeAnnotation>,
-                                    Vec<shape_ast::ast::functions::Annotation>,
-                                )> = struct_def
-                                    .fields
-                                    .iter()
-                                    .map(|f| {
-                                        (
-                                            f.name.clone(),
-                                            Some(f.type_annotation.clone()),
-                                            f.annotations.clone(),
-                                        )
-                                    })
-                                    .collect();
-                                (
-                                    super::comptime_target::ComptimeTarget::from_type(
-                                        &struct_def.name,
-                                        &fields,
-                                    ),
-                                    Some(struct_def.name.clone()),
-                                )
-                            }
-                            DiscoveryTarget::Function(func_def) => (
-                                super::comptime_target::ComptimeTarget::from_function(func_def),
-                                None,
-                            ),
-                        };
+                        let (target, access_type_name) = disc_target.comptime_target();
                         // ADR-009 D1 (S2): the pre-pass builds the SAME expansion
                         // site pass-2 will build for this application (same ann
                         // node, same handler AST, same ComptimeTarget inputs), so
@@ -2116,6 +2037,7 @@ impl BytecodeCompiler {
                         let handler_module_path = entry
                             .defining_module_path
                             .as_deref()
+                            .or_else(|| disc_target.lexical_module_path())
                             .unwrap_or(&ctx_module_path);
                         let helpers = self.collect_authorized_comptime_helpers(
                             &handler.body,
@@ -2476,7 +2398,14 @@ impl BytecodeCompiler {
                                                 sd.name.clone(),
                                                 expansion_site.identity().clone(),
                                             );
-                                            newly_generated_types.push(DiscoveryTarget::Struct(sd));
+                                            newly_generated_types.push(
+                                                DeclarationDiscoveryTarget::Struct {
+                                                    definition: sd,
+                                                    lexical_module_path: disc_target
+                                                        .lexical_module_path()
+                                                        .map(str::to_string),
+                                                },
+                                            );
                                         }
                                     }
                                     _ => {}

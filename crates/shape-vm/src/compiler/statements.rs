@@ -2709,7 +2709,7 @@ impl BytecodeCompiler {
     /// This is in-compiler source-side completion of contract information
     /// that already exists in source code — trait declarations carry the
     /// return type, the compiler just wasn't propagating it.
-    fn desugar_impl_method(
+    pub(super) fn desugar_impl_method(
         &self,
         method: &shape_ast::ast::types::MethodDef,
         trait_name: &str,
