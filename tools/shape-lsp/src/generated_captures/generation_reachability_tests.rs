@@ -24,8 +24,10 @@ mod generated {
     }
   }
 
-  @add_reader()
-  fn marker() -> int { 0 }
+  extend Number {
+    @add_reader()
+    method marker() { self }
+  }
 }
 "#;
 
@@ -45,7 +47,11 @@ mod nested {
 #[test]
 fn ordinary_program_is_not_needed_without_compiler_invocation() {
     reset_generated_capture_compile_count();
-    let source = "fn add(left: int, right: int) -> int { left + right }";
+    let source = r#"
+mod arithmetic {
+  fn add(left: int, right: int) -> int { left + right }
+}
+"#;
     let program = shape_ast::parse_program(source).expect("fixture parses");
 
     assert!(matches!(
@@ -56,7 +62,7 @@ fn ordinary_program_is_not_needed_without_compiler_invocation() {
 }
 
 #[test]
-fn nested_generation_session_is_ready_with_exact_capture_descriptor() {
+fn nested_annotated_method_session_is_ready_with_exact_capture_descriptor() {
     reset_generated_capture_compile_count();
     let program = shape_ast::parse_program(NESTED_GENERATED_CAPTURE).expect("fixture parses");
     let session = GeneratedQuerySession::new(
