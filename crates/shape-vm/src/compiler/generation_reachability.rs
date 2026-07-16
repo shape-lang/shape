@@ -1,68 +1,9 @@
 //! Conservative structural reachability for executable generation producers.
 
-use shape_ast::ast::{ExportItem, Item, MethodDef, Program, TraitDef, TraitMember, TypeName};
+#[path = "generation_reachability_walk.rs"]
+mod walk;
 
-/// Whether the program's item tree can reach an executable generation
-/// producer on any existing semantic compilation path.
-///
-/// This is deliberately a narrow structural walk, not an evaluator. A false
-/// result proves that semantic compilation cannot generate. A true result only
-/// delegates that decision to the compiler: module annotations and raw module
-/// `comptime` blocks remain true here even though they mutate topology through
-/// separate pass-2 APIs rather than the Decision-67 fixed point.
-pub fn program_may_generate(program: &Program) -> bool {
-    program.items.iter().any(item_may_generate)
-}
-
-fn item_may_generate(item: &Item) -> bool {
-    match item {
-        Item::Comptime(..) => true,
-        Item::Function(def, _) => !def.is_comptime && !def.annotations.is_empty(),
-        Item::StructType(def, _) => !def.annotations.is_empty(),
-        // Annotated trait defaults execute only when pass 2 installs the
-        // default into an impl. They are a conservative compile trigger, not a
-        // member of the v1 pre-analysis fixed-point frontier.
-        Item::Trait(def, _) => trait_default_may_generate(def),
-        Item::Extend(def, _) => methods_may_generate(&def.methods),
-        Item::Impl(def, _) => {
-            !def.is_comptime
-                && !matches!(
-                    &def.trait_name,
-                    TypeName::Simple(name) | TypeName::Generic { name, .. }
-                        if matches!(name.as_str(), "From" | "TryFrom")
-                )
-                && methods_may_generate(&def.methods)
-        }
-        Item::Module(def, _) => {
-            !def.annotations.is_empty() || def.items.iter().any(item_may_generate)
-        }
-        Item::Export(export, _) => match &export.item {
-            ExportItem::Function(def) => !def.is_comptime && !def.annotations.is_empty(),
-            ExportItem::Struct(def) => !def.annotations.is_empty(),
-            ExportItem::BuiltinFunction(_)
-            | ExportItem::BuiltinType(_)
-            | ExportItem::TypeAlias(_)
-            | ExportItem::Named(_)
-            | ExportItem::Enum(_)
-            | ExportItem::Annotation(_)
-            | ExportItem::ForeignFunction(_) => false,
-            ExportItem::Trait(def) => trait_default_may_generate(def),
-        },
-        _ => false,
-    }
-}
-
-fn methods_may_generate(methods: &[MethodDef]) -> bool {
-    methods
-        .iter()
-        .any(|method| !method.annotations.is_empty())
-}
-
-fn trait_default_may_generate(definition: &TraitDef) -> bool {
-    definition.members.iter().any(|member| {
-        matches!(member, TraitMember::Default(method) if !method.annotations.is_empty())
-    })
-}
+pub use walk::program_may_generate;
 
 #[cfg(test)]
 mod tests {
@@ -157,20 +98,6 @@ mod generated {}
     }
 
     #[test]
-    fn annotated_trait_default_conservatively_delegates_to_pass_two() {
-        let program = parse(
-            r#"
-trait Runnable {
-    @mark()
-    method run() -> int { 0 }
-}
-"#,
-        );
-
-        assert!(program_may_generate(&program));
-    }
-
-    #[test]
     fn annotated_exported_supported_target_is_reachable() {
         let program = parse(
             r#"
@@ -202,6 +129,108 @@ impl Runnable for Job {
 "#,
         );
 
+        assert!(program_may_generate(&program));
+    }
+
+    #[test]
+    fn annotation_in_otherwise_unannotated_function_body_is_reachable() {
+        let program = parse(
+            r#"
+annotation mark() {
+    targets: [expression]
+    comptime post(target, ctx) { 0 }
+}
+fn probe() -> int { @mark() 1 }
+"#,
+        );
+        assert!(matches!(
+            &program.items[1],
+            Item::Function(def, _) if def.annotations.is_empty()
+        ));
+        assert!(program_may_generate(&program));
+    }
+
+    #[test]
+    fn annotation_in_binding_initializer_is_reachable() {
+        let program = parse(
+            r#"
+annotation mark() {
+    targets: [expression]
+    comptime post(target, ctx) { 0 }
+}
+let probe = @mark() 1
+"#,
+        );
+        assert!(matches!(&program.items[1], Item::VariableDecl(..)));
+        assert!(program_may_generate(&program));
+    }
+
+    #[test]
+    fn annotation_on_block_expression_is_reachable() {
+        let program = parse(
+            r#"
+annotation mark() {
+    targets: [block]
+    comptime post(target, ctx) { 0 }
+}
+fn probe() -> int { @mark() { 1 } }
+"#,
+        );
+        assert!(matches!(
+            &program.items[1],
+            Item::Function(def, _) if def.annotations.is_empty()
+        ));
+        assert!(program_may_generate(&program));
+    }
+
+    #[test]
+    fn annotation_inside_await_expression_is_reachable() {
+        let program = parse(
+            r#"
+annotation mark() {
+    targets: [await_expr]
+    comptime post(target, ctx) { 0 }
+}
+async function ready() { 1 }
+async function probe() { await @mark() ready() }
+"#,
+        );
+        assert!(
+            program
+                .items
+                .iter()
+                .filter_map(|item| match item {
+                    Item::Function(def, _) => Some(def),
+                    _ => None,
+                })
+                .all(|def| def.annotations.is_empty())
+        );
+        assert!(program_may_generate(&program));
+    }
+
+    #[test]
+    fn comptime_expression_in_otherwise_unannotated_body_is_reachable() {
+        let program = parse("fn probe() -> int { comptime { 1 } }");
+        assert!(matches!(
+            &program.items[0],
+            Item::Function(def, _) if def.annotations.is_empty()
+        ));
+        assert!(program_may_generate(&program));
+    }
+
+    #[test]
+    fn expression_annotation_in_trait_default_body_is_reachable() {
+        let program = parse(
+            r#"
+annotation mark() {
+    targets: [expression]
+    comptime post(target, ctx) { 0 }
+}
+trait Runnable {
+    method run() -> int { @mark() 0 }
+}
+"#,
+        );
         assert!(program_may_generate(&program));
     }
 

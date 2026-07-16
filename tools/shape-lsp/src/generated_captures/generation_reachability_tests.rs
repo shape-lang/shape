@@ -44,6 +44,24 @@ mod nested {
 }
 "#;
 
+const EXPRESSION_GENERATED_CAPTURE: &str = r#"
+annotation add_reader() {
+  targets: [expression]
+  comptime post(target, ctx) {
+    extend Job {
+      method expression_read(x: int) -> int {
+        var total = 5
+        let worker = |y: int; share total| y + total
+        worker(x)
+      }
+    }
+  }
+}
+
+type Job { id: int }
+let trigger = @add_reader() 0
+"#;
+
 #[test]
 fn ordinary_program_is_not_needed_without_compiler_invocation() {
     reset_generated_capture_compile_count();
@@ -97,6 +115,37 @@ fn nested_annotated_method_session_is_ready_with_exact_capture_descriptor() {
     assert_eq!(
         &NESTED_GENERATED_CAPTURE[declaration.start..declaration.end],
         "total",
+    );
+}
+
+#[test]
+fn expression_annotation_session_is_ready_with_exact_capture_descriptor() {
+    reset_generated_capture_compile_count();
+    let program =
+        shape_ast::parse_program(EXPRESSION_GENERATED_CAPTURE).expect("fixture parses");
+    let session = GeneratedQuerySession::new(
+        &program,
+        EXPRESSION_GENERATED_CAPTURE,
+        CaptureQueryContext::unavailable(),
+    );
+    let GeneratedQuerySession::Ready(compiler) = session else {
+        panic!("expression-level generation must compile into a ready query session")
+    };
+    assert_eq!(generated_capture_compile_count(), 1);
+
+    let captures = compiler.generated_capture_query(&program);
+    let matching: Vec<_> = captures
+        .captures()
+        .iter()
+        .filter(|capture| capture.display_name() == "total")
+        .collect();
+    assert_eq!(matching.len(), 1, "one exact generated capture descriptor");
+    let capture = matching[0];
+    assert_eq!(capture.owner_display(), "Job.expression_read");
+    assert_eq!(capture.mode().variant_name(), "Share");
+    assert_eq!(
+        capture.uniform_capture_type().map(ToString::to_string),
+        Some("int".to_string()),
     );
 }
 
