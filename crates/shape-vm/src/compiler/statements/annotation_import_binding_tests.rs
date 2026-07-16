@@ -46,16 +46,16 @@ fn annotation_import(module: &str, local: &str) -> ResolvedImport {
 fn standalone_annotation_alias_conflict_is_order_independent_and_transactional() {
     let first = parse(
         r#"
-from ./ok use { @ok }
-from ./alpha use { @same }
-from ./beta use { @same }
+from pkg::ok use { @ok }
+from pkg::alpha use { @same }
+from pkg::beta use { @same }
 "#,
     );
     let reversed = parse(
         r#"
-from ./beta use { @same }
-from ./alpha use { @same }
-from ./ok use { @ok }
+from pkg::beta use { @same }
+from pkg::alpha use { @same }
+from pkg::ok use { @ok }
 "#,
     );
 
@@ -82,16 +82,16 @@ from ./ok use { @ok }
     }
 
     assert_eq!(messages[0], messages[1]);
-    assert!(messages[0].contains("./alpha::same"));
-    assert!(messages[0].contains("./beta::same"));
+    assert!(messages[0].contains("pkg::alpha::same"));
+    assert!(messages[0].contains("pkg::beta::same"));
 }
 
 #[test]
 fn exact_repeated_annotation_alias_is_idempotent() {
     let program = parse(
         r#"
-from ./alpha use { @same }
-from ./alpha use { @same }
+from pkg::alpha use { @same }
+from pkg::alpha use { @same }
 "#,
     );
     let mut compiler = BytecodeCompiler::new();
@@ -109,7 +109,7 @@ from ./alpha use { @same }
         .get("same")
         .expect("the exact alias is installed");
     assert_eq!(binding.original_name, "same");
-    assert_eq!(binding._module_path, "./alpha");
+    assert_eq!(binding._module_path, "pkg::alpha");
 }
 
 #[test]
@@ -117,7 +117,7 @@ fn root_local_annotation_keeps_lexical_precedence_over_imports_and_prelude() {
     let standalone = parse(
         r#"
 annotation same() { targets: [type] }
-from ./support use { @same }
+from pkg::support use { @same }
 "#,
     );
     let mut standalone_compiler = BytecodeCompiler::new();
@@ -140,14 +140,14 @@ from ./support use { @same }
 
 #[test]
 fn graph_explicit_annotation_import_wins_without_resolved_vector_order() {
-    let program = parse("from ./support use { @same }");
+    let program = parse("from pkg::support use { @same }");
     let orders = [
         vec![
             annotation_import("std::prelude", "same"),
-            annotation_import("./support", "same"),
+            annotation_import("pkg::support", "same"),
         ],
         vec![
-            annotation_import("./support", "same"),
+            annotation_import("pkg::support", "same"),
             annotation_import("std::prelude", "same"),
         ],
     ];
@@ -162,7 +162,7 @@ fn graph_explicit_annotation_import_wins_without_resolved_vector_order() {
             .imported_annotations
             .get("same")
             .expect("explicit annotation alias is installed");
-        assert_eq!(binding._module_path, "./support");
+        assert_eq!(binding._module_path, "pkg::support");
         assert_eq!(binding.original_name, "same");
     }
 }
