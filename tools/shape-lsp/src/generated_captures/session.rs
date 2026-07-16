@@ -1,10 +1,9 @@
 //! One context-registered compiler per LSP navigation request.
 
 use shape_ast::ast::Program;
+use shape_vm::compiler::program_may_generate;
 
-use crate::generated_symbols::{
-    compile_for_generated_capture_queries, program_may_generate_symbols,
-};
+use crate::generated_symbols::compile_for_generated_capture_queries;
 use crate::module_cache::ModuleCache;
 
 pub(crate) struct CaptureQueryContext<'request> {
@@ -31,7 +30,7 @@ pub(crate) enum GeneratedQuerySession {
 
 impl GeneratedQuerySession {
     pub(crate) fn new(program: &Program, text: &str, context: CaptureQueryContext<'_>) -> Self {
-        if !program_may_generate_symbols(program) {
+        if !program_may_generate(program) {
             return Self::NotNeeded;
         }
         match compile_for_generated_capture_queries(

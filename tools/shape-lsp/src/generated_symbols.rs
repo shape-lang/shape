@@ -33,24 +33,10 @@ pub(crate) use compiler_queries::{
     generated_capture_compile_count, reset_generated_capture_compile_count,
 };
 
-/// Structural pre-filter: a document can only hold generated declarations
-/// when some item carries an annotation application or a top-level
-/// `comptime { }` block exists (the only producers on the existing
-/// extend/materialization path). Purely AST-shape based — NOT a text scan —
-/// and only a compile-avoidance gate: a `false` skips the compiler query
-/// for documents that cannot generate.
-pub(crate) fn program_may_generate_symbols(program: &Program) -> bool {
-    program.items.iter().any(|item| match item {
-        Item::Comptime(..) => true,
-        Item::Function(def, _) => !def.annotations.is_empty(),
-        Item::ForeignFunction(def, _) => !def.annotations.is_empty(),
-        Item::StructType(def, _) => !def.annotations.is_empty(),
-        Item::Enum(def, _) => !def.annotations.is_empty(),
-        Item::Trait(def, _) => !def.annotations.is_empty(),
-        Item::Module(def, _) => !def.annotations.is_empty(),
-        _ => false,
-    })
-}
+/// Compiler-owned structural prefilter shared by generation discovery and
+/// tooling query sessions. False is proof over the complete inline item tree;
+/// true delegates the semantic decision to the compiler.
+pub(crate) use shape_vm::compiler::program_may_generate as program_may_generate_symbols;
 
 #[cfg(test)]
 mod import_context_tests;

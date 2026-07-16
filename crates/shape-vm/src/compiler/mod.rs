@@ -76,6 +76,7 @@ pub use comptime_builtins::expansion_provenance::{
     GeneratedNodePath, GeneratedSymbolProvenance, GeneratedSymbolTable, HygienicRole,
     HygienicSymbol, SourceAnchor, SymbolId,
 };
+pub use generation_reachability::program_may_generate;
 pub(crate) mod comptime_concrete;
 pub(crate) mod comptime_diagnostics;
 pub(crate) mod comptime_target;
@@ -85,6 +86,7 @@ mod expressions;
 mod functions;
 mod functions_annotations;
 mod functions_foreign;
+mod generation_reachability;
 mod helpers;
 mod helpers_binding;
 mod helpers_reference;
@@ -2003,23 +2005,13 @@ pub fn infer_reference_model(
 /// helpers, the `expand-comptime` CLI) obtain them here, from the executed
 /// result, never from a parallel scan.
 ///
-/// A structural fast path returns no items for programs that cannot generate
-/// (no annotation applications and no `comptime` blocks), avoiding a compile
-/// for the common case. The compile runs in RecoverAll modes and tolerates
-/// errors — the executed authority still records every declaration reserved
-/// before a failure.
+/// A structural fast path returns no items only when the complete inline item
+/// tree proves it cannot generate (no supported annotation applications and
+/// no `comptime` items), avoiding a compile for the common case. The compile
+/// runs in RecoverAll modes and tolerates errors — the executed authority still
+/// records every declaration reserved before a failure.
 pub fn executed_generated_items(program: &Program) -> Vec<Item> {
-    let may_generate = program.items.iter().any(|item| match item {
-        Item::Comptime(..) => true,
-        Item::Function(def, _) => !def.annotations.is_empty(),
-        Item::ForeignFunction(def, _) => !def.annotations.is_empty(),
-        Item::StructType(def, _) => !def.annotations.is_empty(),
-        Item::Enum(def, _) => !def.annotations.is_empty(),
-        Item::Trait(def, _) => !def.annotations.is_empty(),
-        Item::Module(def, _) => !def.annotations.is_empty(),
-        _ => false,
-    });
-    if !may_generate {
+    if !program_may_generate(program) {
         return Vec::new();
     }
     let mut compiler = BytecodeCompiler::new();
