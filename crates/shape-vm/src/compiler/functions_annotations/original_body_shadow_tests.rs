@@ -14,19 +14,16 @@ fn source_function(source: &str, name: &str) -> FunctionDef {
         .unwrap_or_else(|| panic!("fixture must define function '{name}'"))
 }
 
+fn annotation_carrier_identity(compiler: &BytecodeCompiler, name: &str) -> Option<String> {
+    compiler.program.compiled_annotations.get(name)
+        .map(|carrier| format!("{carrier:#?}"))
+}
+
 fn compile_annotated_function(
     source: &str,
     name: &str,
 ) -> (BytecodeCompiler, std::result::Result<(), String>) {
     let program = shape_ast::parse_program(source).expect("fixture parses");
-    let mut compiler = BytecodeCompiler::new();
-    for item in &program.items {
-        if matches!(item, Item::AnnotationDef(..)) {
-            compiler
-                .compile_item_with_context(item, false)
-                .expect("annotation definition registers");
-        }
-    }
     let function = program
         .items
         .iter()
@@ -35,12 +32,44 @@ fn compile_annotated_function(
             _ => None,
         })
         .unwrap_or_else(|| panic!("fixture must define function '{name}'"));
+    let annotation_names = program
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            Item::AnnotationDef(definition, _) => Some(definition.name.clone()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let [expected_annotation_name] = annotation_names.as_slice() else {
+        panic!("fixture must define exactly one annotation")
+    };
+    let mut compiler = BytecodeCompiler::new();
     compiler
         .register_function(&function)
         .expect("target function registers");
     compiler
         .install_semantic_freeze()
         .expect("registration-complete fixture freezes");
+    compiler
+        .prepare_annotation_scope(&program.items)
+        .expect("annotation scope prepares before pass two");
+    let prepared_cardinality = compiler.program.compiled_annotations.len();
+    let prepared_identity = annotation_carrier_identity(&compiler, expected_annotation_name)
+        .expect("expected annotation carrier is installed during preparation");
+    for item in &program.items {
+        if matches!(item, Item::AnnotationDef(..)) {
+            compiler
+                .compile_item_with_context(item, false)
+                .expect("annotation definition consumes preparation evidence");
+        }
+    }
+    assert_eq!(compiler.program.compiled_annotations.len(), prepared_cardinality);
+    assert_eq!(
+        annotation_carrier_identity(&compiler, expected_annotation_name)
+            .expect("pass two retains the prepared annotation carrier"),
+        prepared_identity,
+        "pass two must not reinstall the prepared annotation carrier"
+    );
     let outcome = compiler
         .compile_function(&function)
         .map_err(|error| error.to_string());
