@@ -101,11 +101,7 @@ impl Visitor for GenerationReachability {
         !self.reachable
     }
 
-    fn visit_expr_type_assertion(
-        &mut self,
-        expr: &Expr,
-        _span: shape_ast::ast::Span,
-    ) -> bool {
+    fn visit_expr_type_assertion(&mut self, expr: &Expr, _span: shape_ast::ast::Span) -> bool {
         if let Expr::TypeAssertion {
             meta_param_overrides: Some(overrides),
             ..
@@ -227,9 +223,9 @@ fn methods_may_generate(methods: &[MethodDef]) -> bool {
 }
 
 fn trait_default_may_generate(definition: &TraitDef) -> bool {
-    definition.members.iter().any(|member| {
-        matches!(member, TraitMember::Default(method) if !method.annotations.is_empty())
-    })
+    definition.members.iter().any(
+        |member| matches!(member, TraitMember::Default(method) if !method.annotations.is_empty()),
+    )
 }
 
 fn walk_annotations(visitor: &mut GenerationReachability, annotations: &[Annotation]) {
@@ -329,8 +325,6 @@ fn walk_export_omissions(visitor: &mut GenerationReachability, item: &ExportItem
             walk_parameter_defaults(visitor, &def.params);
             walk_annotations(visitor, &def.annotations);
         }
-        ExportItem::BuiltinFunction(_)
-        | ExportItem::BuiltinType(_)
-        | ExportItem::Named(_) => {}
+        ExportItem::BuiltinFunction(_) | ExportItem::BuiltinType(_) | ExportItem::Named(_) => {}
     }
 }

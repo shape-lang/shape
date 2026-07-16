@@ -121,8 +121,7 @@ fn nested_annotated_method_session_is_ready_with_exact_capture_descriptor() {
 #[test]
 fn expression_annotation_session_is_ready_with_exact_capture_descriptor() {
     reset_generated_capture_compile_count();
-    let program =
-        shape_ast::parse_program(EXPRESSION_GENERATED_CAPTURE).expect("fixture parses");
+    let program = shape_ast::parse_program(EXPRESSION_GENERATED_CAPTURE).expect("fixture parses");
     let session = GeneratedQuerySession::new(
         &program,
         EXPRESSION_GENERATED_CAPTURE,

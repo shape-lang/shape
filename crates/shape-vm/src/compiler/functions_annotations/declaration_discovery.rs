@@ -68,7 +68,10 @@ impl DeclarationDiscoveryTarget {
 
     pub(super) fn comptime_target(
         &self,
-    ) -> (super::super::comptime_target::ComptimeTarget, Option<String>) {
+    ) -> (
+        super::super::comptime_target::ComptimeTarget,
+        Option<String>,
+    ) {
         match self {
             Self::Struct { definition, .. } => {
                 let fields = definition
@@ -134,8 +137,9 @@ impl BytecodeCompiler {
         for source_item in items {
             let item = if qualify_items {
                 let module_path = lexical_module_path.ok_or_else(|| ShapeError::RuntimeError {
-                    message: "Internal error: nested declaration discovery lost its lexical module path"
-                        .to_string(),
+                    message:
+                        "Internal error: nested declaration discovery lost its lexical module path"
+                            .to_string(),
                     location: None,
                 })?;
                 self.qualify_module_item_with_local_function_calls(
