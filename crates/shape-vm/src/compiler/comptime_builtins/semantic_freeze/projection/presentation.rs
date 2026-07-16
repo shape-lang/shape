@@ -227,7 +227,7 @@ fn canonical_name_rank(name: &str) -> (usize, usize, String) {
     (preferred, name.len(), name.to_string())
 }
 
-fn format_identity(identity: FrozenTypeIdentity) -> String {
+pub(super) fn format_identity(identity: FrozenTypeIdentity) -> String {
     format!(
         "type#{:016x}{:016x}",
         identity.high as u64, identity.low as u64

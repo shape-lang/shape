@@ -7,7 +7,7 @@ use shape_runtime::type_system::{
 };
 
 mod presentation;
-use presentation::canonical_type_presentation;
+use presentation::{canonical_type_presentation, format_identity};
 
 /// Result of the semantic freeze's single type canonicalizer.
 ///
@@ -81,7 +81,13 @@ impl FreezeOverlay {
         Ok(FrozenSemanticTypeProjection {
             identity: canonical.identity,
             category: canonical.category,
-            presentation: canonical_type_presentation(annotation, self)?,
+            // Presentation is diagnostic-only and must not gate the
+            // authoritative identity/category: the renderer re-canonicalizes
+            // sub-annotations context-free and cannot yet spell trait-context
+            // members or existential witnesses, so fall back to the
+            // already-computed canonical identity rather than failing.
+            presentation: canonical_type_presentation(annotation, self)
+                .unwrap_or_else(|_| format_identity(canonical.identity)),
         })
     }
 
