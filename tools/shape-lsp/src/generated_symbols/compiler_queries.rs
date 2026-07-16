@@ -10,10 +10,10 @@ use super::{
 };
 
 /// Contextless generated-symbol entry point. Imported programs require the
-/// request-context path below, and every hard compiler error makes the query
-/// unavailable. RecoverAll is useful only when compilation returns `Ok` with
-/// accumulated diagnostics; partial compiler state after `Err` is never a
-/// query authority.
+/// request-context path below. A clean compile is authoritative; a recoverable
+/// failure keeps its authority only when declaration discovery had already
+/// reserved generated declarations before erroring (see
+/// [`query_authority_or_none`]).
 pub(crate) fn compile_for_generated_symbol_queries(
     program: &Program,
     text: &str,
@@ -26,8 +26,33 @@ pub(crate) fn compile_for_generated_symbol_queries(
         return None;
     }
     let mut compiler = generated_query_compiler(text);
-    compiler.compile_in_place(program).ok()?;
-    Some(compiler)
+    let compiled = compiler.compile_in_place(program).is_ok();
+    query_authority_or_none(compiler, compiled)
+}
+
+/// A query compiler is authoritative when compilation returns `Ok`, OR when a
+/// recoverable failure still reserved generated declarations before erroring —
+/// the same tolerance the compiler's own `executed_generated_items` relies on.
+/// A mid-edit document (an undeclared trailing identifier a completion is about
+/// to finish), a nested capture whose method reserved before a late lowering
+/// error, or a per-closure capture rejection all leave the reserved
+/// generated-declaration table intact, and navigation must keep answering from
+/// it. A failure that reserved NOTHING — a hard structural error before
+/// declaration discovery (`__intrinsic_std(..)`), or a poisoned annotation
+/// compiler (which clears the table) — carries no query authority and routes to
+/// `None` (Unavailable).
+fn query_authority_or_none(
+    compiler: shape_vm::BytecodeCompiler,
+    compiled: bool,
+) -> Option<shape_vm::BytecodeCompiler> {
+    if compiled {
+        return Some(compiler);
+    }
+    let reserved_generated_declarations = !compiler
+        .generated_symbol_query()
+        .generated_symbols()
+        .is_empty();
+    reserved_generated_declarations.then_some(compiler)
 }
 
 /// Compile with the same imported-item registration used by semantic
@@ -67,8 +92,8 @@ pub(crate) fn compile_for_generated_capture_queries(
             return None;
         }
     }
-    compiler.compile_in_place(program).ok()?;
-    Some(compiler)
+    let compiled = compiler.compile_in_place(program).is_ok();
+    query_authority_or_none(compiler, compiled)
 }
 
 fn generated_query_compiler(text: &str) -> shape_vm::BytecodeCompiler {
