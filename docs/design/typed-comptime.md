@@ -390,6 +390,65 @@ ratification remain pending. See the [detailed C1
 status](typed-comptime/c1-generated-captures.md) and [rejected-design
 record](typed-comptime/c1-capture-defections.md).
 
+**CURRENT / VM+JIT - single installation chokepoint with atomic commit (C2
+`CheckedBody` validator LANDED on `adr009/c2`, ticket ADR009-C2 #13).** Every
+comptime-generated body (annotation `extend` methods, generated free functions,
+and `replace body` edits) now publishes through ONE atomic install transaction
+(`checked_body::InstallTransaction`): a watermark + a displaced-entry undo
+journal bracket the whole `compile_in_place` driver, so a rejection at analysis
+OR at pass-2 body compile rolls back every publication (function table, the
+name-keyed side tables, the `analyze_function_body` fact bundle, the closure
+index cluster, capture packs, generated-symbol reservations) — no partial
+generated body is ever observable (proven by the `c2_slice0_preflight_tests`
+atomicity pins + H1/H2/M3/M4 displaced-entry pins). The §4.2 ten-check battery
+(type, effect, ownership, borrow-with-capture-loans, lifetime, suspension,
+`Send`, cleanup, sync `Drop`, async-drop-context) provably executes over body +
+complete environment inside that span (`checked_body::battery`), reusing the
+shipped analyzer/solver codes (D4) and minting new codes only for the two
+genuinely new install classes: `[C0922]` (a drop-obligated value across a
+suspension point in a generated body, D6 conservative/fail-closed) and `[C0923]`
+(async cleanup required in a sync context). Existing-body edits (`replace body`)
+run inside that one transaction under one expansion identity (D7): the
+async-drop gate is evaluated over the EFFECTIVE definition, so an edit is policed
+on the REPLACEMENT it ships, and the D7 shape guards `[C0924]`
+(split/two-identity) / `[C0925]` (incomplete environment) are wired as
+defense-in-depth. VM+JIT install-success is proven by serialized-subprocess
+zero-fallback proofs (`jit_c2_install_native`: a replace-body edit and a
+generated `move`-capture method both run natively in both tiers). LSP
+capture/symbol queries answer over an edited body's post-install truth through
+the same C1 shared query surface (no second surface).
+
+Findings ledger: (1) a GENERATED closure's capture/reference checks are enforced
+at the C1 surface layer (`[C0902]` reference-escape, the C0003 "captures must be
+explicit" envelope), NOT the solver — so the battery's row-5 lifetime rejection
+is `[C0902]`, not solver `[B0003]`. (2) Async-`let` blocks containing a closure
+fail Future unification before the borrow check (battery row 7 is
+BLOCKED-BY-INFERENCE, a named production candidate). (3) The comptime-diagnostics
+firewall (`sanitize_comptime_internal`) strips any `COMPTIME_JARGON_MARKERS`
+token, so every install-rejection message is marker-free ("rejected", never
+"refused"); the D6 message survives the firewall by that discipline. (4) The D6
+headline drop-live-across-await case was a tripwire that FLIPPED: an
+install-chokepoint flag + marker-free message made D6's end gate catch it ahead
+of wave40. (5) An inherited RAII emission hole (a `MethodCall`-returned `Drop`
+value bound to an unannotated local never ran `drop()`) was exposed and REPAIRED
+via the `initializer_call_return_drop_type` MethodCall arm. (6) The
+D6-effective-def move superseded the originally-surfaced `FunctionDef` AST field
+(31 files / 78 sites) — the field would have left the gate scanning the pre-edit
+body; see the defections record.
+
+Deferred cells: D6 over-rejects on liveness (any drop-obligated local + any
+suspension), and wave40's AsyncDrop/MustSettle program supplies the liveness
+PRECISION that relaxes it — nothing installed under C2 can become retroactively
+unsound. The `[C0924]`/`[C0925]` end-to-end NEGATIVES are not constructible from
+a real program without production sabotage today (structurally: one transaction,
+one identity, a C1-validated discovered environment), so their guards are wired
+but their e2e pins are marked not-constructible; the constructors are exercised
+directly for jargon-cleanliness. The public typed-builder surface
+(`ctx.rewrite.replace_body(quote …)` producing a `CheckedBody`) is E-track
+(E1/E2, blocked BY C2), not C2: C2's public surface is the shipped
+annotation/`extend`/`replace body` pathway now routing through the validator. See
+the [rejected-design record](../defections.md).
+
 **CURRENT / VM+JIT - applied type annotation generation**
 
 ```shape
