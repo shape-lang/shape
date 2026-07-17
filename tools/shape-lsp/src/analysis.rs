@@ -83,6 +83,13 @@ pub fn analyze_program_semantics_for_document(
     let mut compiler = shape_vm::BytecodeCompiler::new();
     compiler.set_type_diagnostic_mode(shape_vm::compiler::TypeDiagnosticMode::RecoverAll);
     compiler.set_compile_diagnostic_mode(shape_vm::compiler::CompileDiagnosticMode::RecoverAll);
+    // ADR-009 C2 #13 (slice 1): this is a query/diagnostics session, not an
+    // install. Without the retain mode a tolerated compile `Err` (e.g. one
+    // unrelated type error elsewhere in the file) rolls back `closure_capture_packs`
+    // and `capture_query_diagnostics` below goes silent for the WHOLE document.
+    // Retain the LSP-read reservation tables so generated-capture diagnostics
+    // still emit alongside the recovered error.
+    compiler.set_retain_generated_reservations_for_query_session(true);
 
     let has_imports = program
         .items
