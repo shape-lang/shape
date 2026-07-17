@@ -67,7 +67,7 @@
 //! | 7 | Send (non-sendable across detached boundary) | D4 reuse — solver `NonSendableAcrossTaskBoundary` | `B0014` | `[B0014]` | `battery_row7_*` (B0014-isolation fixture — see below) |
 //! | 8 | cleanup | not generated-reachable-as-rejection (finding) | — | — | — |
 //! | 9 + 10a | sync `Drop` / async-cleanup-in-sync-context | NEW — `statements.rs`'s `AsyncOnly`-in-sync gate had no code | **`C0923`** | `[C0923]` | `battery_row9_and_10a_*` |
-//! | 10b | async-drop-context ex.1 (D6, greenfield) | NEW — no shipped check combines drop-obligation with suspension | **`C0922`** | `[C0922]` | `battery_row10b_*` (+ the `#[ignore]`'d method-call pin, asserting the same `[C0922]` for when the RAII hole is fixed) |
+//! | 10b | async-drop-context ex.1 (D6, greenfield) | NEW — no shipped check combines drop-obligation with suspension | **`C0922`** | `[C0922]` | `battery_row10b_*` (+ the method-call pin that surfaced & drove the inherited RAII repair, now asserting `[C0922]`) |
 //!
 //! ## Code-block allocation (D2, verified empirically)
 //!
@@ -138,19 +138,13 @@
 //! (drop-local-without-suspension and suspension-without-drop-local both install)
 //! so the D6 rejection is attributable to the COMBINATION.
 //!
-//! **The method-call pin is `#[ignore]`'d — it exposed a pre-existing RAII
-//! EMISSION HOLE, not a D6 gap (traced 2026-07-17, surfaced to the supervisor).**
-//! Neither `initializer_call_return_drop_type` (statements.rs:7238, `_ => None`
-//! for MethodCall) nor `concrete_type_for_expr`'s MethodCall arm resolves a user
-//! method's declared return, so `x`'s type never stamps; the drop-plan emits an
-//! UNTYPED `DropCall` and `dispatch_user_drop` (trait_object_ops.rs:766) runs no
-//! `drop()` — `Conn::drop` NEVER RUNS for `let x = p.acquire()`, in USER code
-//! identically to generated. The D6 flag (`local_drop_kind`) faithfully mirrors
-//! that leaking emission (single-authority parity holds; it did not
-//! under-detect a discharged obligation). The single-authority fix — extend
-//! `initializer_call_return_drop_type` to resolve a MethodCall's declared
-//! return — closes emission AND un-ignores this pin; it changes runtime drop
-//! behavior, so it is the supervisor's call, not a D6 patch.
+//! **Method-call pin history:** it masked the pre-rework HIGH, then (once the
+//! scaffold compiled) EXPOSED a pre-existing RAII emission hole — a
+//! MethodCall-returned Drop value bound to an unannotated local never ran
+//! `drop()` (an untyped `DropCall`), in USER code identically to generated —
+//! now REPAIRED by the `initializer_call_return_drop_type` MethodCall arm
+//! (helpers.rs; single-authority, pinned by the `auto_drop` user-code tests), so
+//! the pin REJECTS with `[C0922]` via the emission authority.
 //!
 //! Two rows are NOT-GENERATED-REACHABLE — a
 //! finding, not a gap:
