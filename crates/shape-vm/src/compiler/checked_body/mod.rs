@@ -141,6 +141,9 @@
 
 use crate::compiler::BytecodeCompiler;
 
+/// Slice 2 — the §4.2 validation-battery manifest (which check runs where for
+/// generated bodies, inside this transaction's span).
+pub(in crate::compiler) mod battery;
 mod journal;
 mod rollback;
 
