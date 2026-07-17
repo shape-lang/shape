@@ -1,0 +1,21 @@
+// ADR-009 C2 slice 5 — regression net. A generated `extend` method that declares
+// a `move` capture STILL JIT-compiles natively (zero [jit-fallback]) after C2's
+// slice-4 machinery landed (the D6 gate move to the effective definition + the
+// parameter-threaded generated origin + the deleted pending field). This mirrors
+// the C1 generated-capture native matrix in the post-C2 tree — if the C2 changes
+// had perturbed generated-body lowering or provenance, this capturing generated
+// method would deopt. It prints 123.
+annotation add_answer() {
+  targets: [type]
+  comptime post(target, ctx) {
+    extend ("extend Job { method answer() -> int { let base = 100
+      let worker = |; move base| base + 23
+      worker() } }")
+  }
+}
+
+@add_answer()
+type Job { id: int }
+
+let job = Job { id: 1 }
+print(job.answer())
