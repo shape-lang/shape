@@ -47,6 +47,16 @@ use crate::compiler::comptime_builtins::expansion_provenance::SymbolId;
 /// [`BytecodeCompiler::build_checked_module`](crate::compiler::BytecodeCompiler::build_checked_module)
 /// from the typed `ReplaceModuleChecked` route — a source/JSON string never
 /// participates.
+///
+/// **`Exports` (slice 1):** the reserved hygienic export symbols, one per
+/// generated declaration. Slice 1's only typed producer is `item_fn`, which
+/// mints exactly one function, so a slice-1 `CheckedModule`'s `Exports` is the
+/// single hygienic exported symbol of that one function.
+///
+/// **Single-item limitation (slice 1):** `items` is a `Vec<Item>` internally,
+/// but the slice-1 typed producer (`item_fn`) yields exactly one function; the
+/// multi-item module is a straight `Vec` extension once a multi-item producer
+/// (`quote module { … }`) lands in a later slice — no shape change here.
 pub(in crate::compiler) struct CheckedModule {
     /// The provenance-stamped replacement items, ready to become the module's
     /// body (the module-compile flow qualifies + registers them as usual).
