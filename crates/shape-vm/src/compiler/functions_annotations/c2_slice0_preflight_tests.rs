@@ -443,7 +443,7 @@ annotation genm4() {
 @genm4()
 type M4 { id: int }
 
-let ghost_obj = { id: 0 }
+let mut ghost_obj = { id: 0 }
 ghost_obj.extra = 5
 ghost_obj.extra
 "#;
@@ -461,7 +461,7 @@ annotation genm4ok() {
 @genm4ok()
 type M4ok { id: int }
 
-let ghost_obj = { id: 0 }
+let mut ghost_obj = { id: 0 }
 ghost_obj.extra = 5
 ghost_obj.extra
 "#;
