@@ -249,3 +249,28 @@
 //! gate reads the new body and ONLY the new body; the fresh-body regression net
 //! is `battery_row10b_*` (unchanged), which the parameter-threaded origin keeps
 //! arming after the field deletion.
+//!
+//! ## The edit transaction (D7): one transaction, atomic
+//!
+//! An existing-body edit (`replace body`, incl. a capture-set change) runs
+//! inside the ONE slice-1 install transaction (`compile_in_place`): the pre-edit
+//! body becomes the hygienic `ctx.original` shadow, the replacement compiles
+//! under the user function name, and both ride the same transaction span. The
+//! edit path's re-publications route through the SAME journal hooks the
+//! fresh-body path uses — `analyze_function_body` (the fact bundle) and, for a
+//! capture-bearing replacement, the index-keyed closure cluster + capture packs
+//! — so a failed edit rolls BOTH the shadow and the replacement back and leaves
+//! no half-edited hybrid; a successful edit supersedes the pre-edit body cleanly
+//! (it moves to the shadow, the replacement becomes the live body). Pinned by
+//! `c2_slice4_edit_tests` (B.i failed-edit-no-hybrid / B.ii success-supersedes /
+//! B.iii capture-set + body commit-or-roll-back together), each failing pin
+//! using a PASS-2 mutability error so the rollback is exercised over PUBLISHED
+//! state.
+//!
+//! Single-compile scope (supervisor-ruled): the reused-compiler restore of a
+//! `.`-named generated body is already pinned by the preflight H1/H2 pins, and
+//! every constructible edit failure fails in analysis/pass-2 BEFORE body-emit.
+//! One residual is left UNEXERCISED as a finding, not a gap: a reused-compiler
+//! plain-name EMIT-time edit failure (which would overwrite a below-watermark
+//! function slot in place) is not constructible via a real error today (analysis
+//! precedes emit for every constructible failure; the dedup path skips re-push).

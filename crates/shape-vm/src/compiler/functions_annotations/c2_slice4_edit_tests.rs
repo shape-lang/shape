@@ -150,3 +150,211 @@ fn replace_body_edit_drop_plus_await_only_in_pre_edit_body_installs() {
 fn replace_body_edit_suspension_without_drop_in_replacement_installs() {
     assert_edit_installs(&replace_body_program("0", "await tick(); return 0"));
 }
+
+// ── Deliverable B — the edit transaction (D7): one transaction, atomic ───────
+//
+// A `replace body` edit runs inside the ONE slice-1 install transaction
+// (`compile_in_place`): the pre-edit body becomes the hygienic `ctx.original`
+// shadow, the replacement compiles under the user function name, and BOTH ride
+// the same transaction span. These pins assert the D7 all-or-nothing over that
+// span — a failed edit leaves no half-edited hybrid, a successful edit
+// supersedes the pre-edit body cleanly, and a capture-set change publishes
+// together with its body or not at all. Single-compile scope (supervisor-ruled):
+// the reused-compiler restore is already pinned by the preflight H1/H2 pins, and
+// every constructible failure fails in analysis/pass-2, never mid-emit. Each
+// failing pin uses a PASS-2 mutability error (an immutable reassignment) — the
+// same lever the preflight `..._pass2_failure_leaves_nothing` pin uses — because
+// it rejects AFTER the shadow (and, for the capture pin, the closure) has
+// already compiled, so the rollback is exercised over PUBLISHED state.
+
+/// A plain (non-async) `replace body` edit fixture: `fn probe(value: int)` whose
+/// pre-edit body is the identity `value`, with a comptime `post` handler that
+/// swaps in `replacement_body`. Plain functions suffice here — the D7 contract is
+/// about the transaction, not the async-drop gate.
+fn plain_edit_program(replacement_body: &str) -> String {
+    format!(
+        r#"
+annotation edit() {{
+  targets: [function]
+  comptime post(target, ctx) {{
+    replace body {{ {replacement_body} }}
+  }}
+}}
+
+@edit()
+fn probe(value: int) -> int {{ value }}
+"#
+    )
+}
+
+/// (B.i) FAILED edit → NO half-edited hybrid.
+///
+/// The replacement rejects at PASS-2 (an immutable reassignment), which fires
+/// AFTER the `ctx.original` shadow has compiled and AFTER the edited function's
+/// fact bundle has published — so the install transaction must roll BOTH back.
+/// Nothing partial survives: no function-table entry for the edited fn, no
+/// staged shadow, no fact bundle. This is the "pre-edit body fully intact, not a
+/// half-edited hybrid" guarantee — behavior-preservation of the edited fn is
+/// carried by the runnable-body invariant in (B.ii) (the codebase convention;
+/// full VM/JIT execution of an installed edit is the slice-5 install-success
+/// proof territory).
+#[test]
+fn failed_replace_body_edit_leaves_no_half_edited_hybrid() {
+    let program =
+        shape_ast::parse_program(&plain_edit_program("let z = 1; z = 2; return z"))
+            .expect("slice-4 fixture parses");
+    let mut compiler = BytecodeCompiler::new();
+    let shadow = compiler.original_body_shadow_name(EDIT_TARGET_NAME);
+
+    compiler.compile_in_place(&program).expect_err(
+        "a replace-body edit whose replacement fails pass-2 must reject; an Ok means the \
+         edit was not policed by the transaction",
+    );
+
+    assert!(
+        !compiler
+            .program
+            .functions
+            .iter()
+            .any(|f| f.name == EDIT_TARGET_NAME),
+        "B.i: a failed edit leaves NO function-table entry for the edited fn"
+    );
+    assert!(
+        compiler.find_function(&shadow).is_none(),
+        "B.i: a failed edit leaves NO staged ctx.original shadow"
+    );
+    assert!(
+        !compiler.mir_functions.contains_key(EDIT_TARGET_NAME),
+        "B.i: a failed edit rolls back the edited fn's analyze_function_body fact bundle"
+    );
+}
+
+/// (B.ii) SUCCESSFUL edit → the replacement supersedes the pre-edit body cleanly.
+///
+/// The replacement is `return ctx.original(value)` — the proven shape — so the
+/// pre-edit body is preserved AS the hygienic shadow and the replacement (which
+/// calls that shadow) becomes the live `probe` body. Asserting the shadow is
+/// present is what proves the REPLACEMENT is live: had `probe` kept the pre-edit
+/// body, no shadow would exist. Exactly one `probe` entry (no pre-edit/
+/// replacement duplicate), runnable (non-ghost `entry_point`/`body_length`), and
+/// its fact bundle published — the old publications fully superseded, no stale
+/// remnant under the fn name.
+#[test]
+fn successful_replace_body_edit_supersedes_pre_edit_body_cleanly() {
+    let program = shape_ast::parse_program(&plain_edit_program("return ctx.original(value)"))
+        .expect("slice-4 fixture parses");
+    let mut compiler = BytecodeCompiler::new();
+    let shadow = compiler.original_body_shadow_name(EDIT_TARGET_NAME);
+
+    compiler
+        .compile_in_place(&program)
+        .expect("a valid replace-body edit installs");
+
+    let probes: Vec<_> = compiler
+        .program
+        .functions
+        .iter()
+        .filter(|f| f.name == EDIT_TARGET_NAME)
+        .collect();
+    assert_eq!(
+        probes.len(),
+        1,
+        "B.ii: exactly one edited-fn entry — no pre-edit/replacement duplicate"
+    );
+    assert!(
+        probes[0].body_length > 0 && probes[0].entry_point > 0,
+        "B.ii: the replacement is a real (runnable) body, not a zero-length ghost"
+    );
+    assert!(
+        compiler.find_function(&shadow).is_some(),
+        "B.ii: the pre-edit body is preserved AS the ctx.original shadow (proving the \
+         replacement, which calls it, is the live body)"
+    );
+    assert!(
+        compiler.mir_functions.contains_key(EDIT_TARGET_NAME),
+        "B.ii: the edited fn's fact bundle is published"
+    );
+}
+
+/// (B.iii) CAPTURE-SET change + body change commit TOGETHER.
+///
+/// The replacement introduces a declared-capture closure (`move owned`), a
+/// change to the capture SET that only the replacement carries. On success the
+/// body (`probe`), the closure function, AND the closure's capture pack all
+/// publish — the capture-set change lands WITH the body. The failing sibling
+/// (`..._rolls_back_together`) proves the inverse: neither lands.
+#[test]
+fn replace_body_edit_capture_set_and_body_commit_together() {
+    let program = shape_ast::parse_program(&plain_edit_program(
+        "let owned = 7; let worker = |y: int; move owned| y + owned; return worker(value)",
+    ))
+    .expect("slice-4 fixture parses");
+    let mut compiler = BytecodeCompiler::new();
+
+    compiler
+        .compile_in_place(&program)
+        .expect("a valid capture-bearing replace-body edit installs");
+
+    assert!(
+        compiler
+            .program
+            .functions
+            .iter()
+            .any(|f| f.name == EDIT_TARGET_NAME),
+        "B.iii: the edited fn body is published"
+    );
+    assert!(
+        compiler
+            .program
+            .functions
+            .iter()
+            .any(|f| f.is_closure),
+        "B.iii: the replacement's closure is published WITH the body"
+    );
+    assert!(
+        !compiler.closure_capture_packs.is_empty(),
+        "B.iii: the capture-set change (the declared-capture pack) is published WITH the body"
+    );
+}
+
+/// (B.iii, inverse) CAPTURE-SET change + body change roll back TOGETHER.
+///
+/// The same capture-bearing replacement, but with a trailing pass-2 mutability
+/// error. The edit rejects and NEITHER the body, the closure, NOR the capture
+/// pack survives — the capture-set change and the body change are bound to one
+/// transaction (both land or neither), never a body-without-captures (or the
+/// reverse) partial.
+#[test]
+fn replace_body_edit_capture_set_and_body_roll_back_together() {
+    let program = shape_ast::parse_program(&plain_edit_program(
+        "let owned = 7; let worker = |y: int; move owned| y + owned; let z = 1; z = 2; return worker(z)",
+    ))
+    .expect("slice-4 fixture parses");
+    let mut compiler = BytecodeCompiler::new();
+
+    compiler
+        .compile_in_place(&program)
+        .expect_err("a capture-bearing replace-body edit that fails pass-2 must reject");
+
+    assert!(
+        !compiler
+            .program
+            .functions
+            .iter()
+            .any(|f| f.name == EDIT_TARGET_NAME),
+        "B.iii-inverse: a failed edit publishes no body"
+    );
+    assert!(
+        !compiler
+            .program
+            .functions
+            .iter()
+            .any(|f| f.is_closure),
+        "B.iii-inverse: a failed edit publishes no closure (rolled back WITH the body)"
+    );
+    assert!(
+        compiler.closure_capture_packs.is_empty(),
+        "B.iii-inverse: a failed edit publishes no capture pack (the capture-set change \
+         rolls back WITH the body)"
+    );
+}
