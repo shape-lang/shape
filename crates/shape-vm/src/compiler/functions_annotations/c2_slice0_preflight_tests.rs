@@ -149,7 +149,9 @@ fn assert_no_install_publication_survives(compiler: &BytecodeCompiler, method_na
             .is_none(),
         "rejected generated install must leave NO type_tracker return type"
     );
-    // The `analyze_function_body` fact bundle, keyed by function name.
+    // The `analyze_function_body` fact bundle — ALL SEVEN name-keyed maps (the
+    // subset hazard the review flagged: a partial set lets a table re-hide the
+    // ghost).
     assert!(
         !compiler.mir_functions.contains_key(method_name),
         "rejected generated install must leave NO mir_functions fact"
@@ -161,6 +163,24 @@ fn assert_no_install_publication_survives(compiler: &BytecodeCompiler, method_na
     assert!(
         !compiler.mir_storage_plans.contains_key(method_name),
         "rejected generated install must leave NO mir_storage_plans fact"
+    );
+    assert!(
+        !compiler.mir_field_analyses.contains_key(method_name),
+        "rejected generated install must leave NO mir_field_analyses fact"
+    );
+    assert!(
+        !compiler.mir_span_to_point.contains_key(method_name),
+        "rejected generated install must leave NO mir_span_to_point fact"
+    );
+    assert!(
+        !compiler.function_borrow_summaries.contains_key(method_name),
+        "rejected generated install must leave NO function_borrow_summaries fact"
+    );
+    assert!(
+        !compiler
+            .function_return_reference_summaries
+            .contains_key(method_name),
+        "rejected generated install must leave NO function_return_reference_summaries fact"
     );
 }
 
@@ -257,6 +277,45 @@ fn successful_generated_install_publishes_and_runs() {
     assert!(
         compiler.mir_functions.contains_key(SUCCESS_METHOD_NAME),
         "successful install keeps its analyze_function_body fact bundle"
+    );
+}
+
+/// H2 — a failed install does not destroy an EARLIER successful install's
+/// reservation on a reused compiler.
+///
+/// The pre-journal rollback reset `generated_symbols` wholesale, which would
+/// have destroyed a below-watermark reservation. The undo journal removes only
+/// the failed install's own `Fresh` reservations. Compiles a successful
+/// generated install, then a failing one on the SAME compiler, and asserts the
+/// first install's reservation survives while the second's is gone.
+#[test]
+fn failed_install_after_a_successful_one_preserves_the_earlier_reservation() {
+    let mut compiler = BytecodeCompiler::new();
+
+    let succeeding =
+        shape_ast::parse_program(SUCCEEDING_BODY_PROGRAM).expect("success fixture parses");
+    compiler
+        .compile_in_place(&succeeding)
+        .expect("the first generated install compiles");
+    assert!(
+        compiler.generated_symbols.contains_name(SUCCESS_METHOD_NAME),
+        "the first install reserves its generated symbol"
+    );
+
+    let failing =
+        shape_ast::parse_program(FAILING_ANALYSIS_BODY_PROGRAM).expect("failing fixture parses");
+    assert!(
+        compiler.compile_in_place(&failing).is_err(),
+        "the second generated install rejects"
+    );
+
+    assert!(
+        compiler.generated_symbols.contains_name(SUCCESS_METHOD_NAME),
+        "H2: the earlier successful install's reservation must survive a later failed install"
+    );
+    assert!(
+        !compiler.generated_symbols.contains_name(ANALYSIS_METHOD_NAME),
+        "the failed install's own reservation is rolled back"
     );
 }
 
