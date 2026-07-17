@@ -22,11 +22,26 @@
 //! resolving (the SAME query the emission uses; `Some` iff the local's stamped
 //! type carries a `Drop` impl). Living at that chokepoint — rather than at each
 //! `VariableDecl` drop-plan copy — is load-bearing: a drop-obligated local in a
-//! BLOCK EXPRESSION (`expressions/misc.rs`), a loop / `if` body, or a CLOSURE
-//! body all register through `track_drop_local` too, so they are covered by
-//! construction; a per-copy flag site would silently UNDER-detect every scope
-//! but the statement one (unsound — it installs exactly what wave40 must not
-//! inherit). This also catches an INFERRED drop type (`let x = make_droppable()`
+//! BLOCK EXPRESSION (`expressions/misc.rs`), a loop / `if` body, or the SAME
+//! function's other scopes all register through `track_drop_local` too, so they
+//! are covered by construction; a per-copy flag site would silently UNDER-detect
+//! every scope but the statement one (unsound — it installs exactly what wave40
+//! must not inherit).
+//!
+//! NESTED-CLOSURE CAVEAT (D6 review finding): a drop local living inside a
+//! NESTED CLOSURE is NOT covered by construction — the closure body compiles in
+//! its own `compile_function` frame, whose save/restore of the drop flag
+//! (functions.rs, stopping monomorphization bleed) also isolates the closure's
+//! flag, so a generated body whose drop obligation AND suspension both live
+//! inside a nested closure would install unrejected by the enclosing function's
+//! gate. This is LATENT: that construct cannot currently compile (it fails
+//! Future unification before the borrow check — battery row 7,
+//! BLOCKED-BY-INFERENCE). WHEN ROW 7 FLIPS, this case MUST be re-verified; the
+//! bounded full fix is to run this gate over the closure itself by threading the
+//! closure's generated origin at its compile seam (`expressions/closures.rs`,
+//! which already holds it). See `helpers.rs::track_drop_local`.
+//!
+//! This also catches an INFERRED drop type (`let x = make_droppable()`
 //! / `let x = p.acquire()`) an AST annotation scan would miss. Drop-obligated
 //! PARAMETERS are resolved separately by their annotation (a parameter is always
 //! explicitly typed, so an annotation query is sound — no inference gap).
@@ -48,6 +63,33 @@
 //! site) or at the `replace body` stamp, never re-derived here. A rejection
 //! rides the driver-level install transaction's atomic no-publish. A non-async
 //! body has no suspension point, so the scan short-circuits it.
+//!
+//! # UNCOVERED CLASS: generic generated bodies (D6 review finding, Route 2)
+//!
+//! The gate does NOT cover GENERIC generated bodies (an `extend Vec<T> { async
+//! … }` or a generated `async method run<T>(…)`). Two facts combine: (1) a
+//! generic template EARLY-RETURNS from `compile_function_with_generated_origin`
+//! (functions.rs, the non-empty `type_params` guard) before the gate — so the
+//! template body never hits it; (2) its specialization is later compiled by
+//! MONOMORPHIZATION via the plain `compile_function` delegate (origin `None`), so
+//! the gate short-circuits (not a recognized generated body). A generic
+//! generated async body with a drop-obligated local + a suspension therefore
+//! INSTALLS UNREJECTED — a fail-OPEN for the whole generic class.
+//!
+//! This is Route 2 (documented + pinned), not fixed, by supervisor ruling: the
+//! bounded fix (store the origin keyed by the template name at registration and
+//! re-arm `compile_function_with_generated_origin(Some(origin))` on the
+//! specialization compile) has to touch SIX monomorphization compile sites
+//! (`monomorphization/cache.rs` ×3 — `ensure_monomorphic_function{,_with_consts,
+//! _with_closures}`; `expressions/function_calls.rs` ×3 — `ensure_const_specialization`
+//! / `try_specialize_implicit_generic_free_function_call` /
+//! `try_specialize_concrete_user_method_call`), each with its OWN substitute →
+//! register → compile and no shared helper, and the two specialized-name mangling
+//! schemes (`semantic_specialization::keys`) block deriving the base name from a
+//! specialized name for a single-point lookup. That exceeds a bounded seam; the
+//! uncovered class is pinned as a live tripwire
+//! (`c2_slice2_battery_tests::battery_row10b_generic_monomorphization_uncovered_installs`)
+//! that FLIPS to `[C0922]` when the re-arm lands.
 
 use shape_ast::ast::{FunctionDef, GeneratedNodeOrigin};
 use shape_ast::error::{Result, ShapeError};

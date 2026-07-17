@@ -300,6 +300,15 @@ type Widget { id: int }
 /// with" text will vanish, and this assertion FLIPS LOUDLY — surfacing the fix
 /// and demanding the row be re-classified to its real code. The fixture is kept
 /// exactly as the closure-bearing shape that is the finding's evidence.
+///
+/// D6 CROSS-LINK (C2 #13 review finding): the SAME inference gate that blocks
+/// this row also makes the D6 nested-closure hole unreachable — a generated body
+/// whose drop obligation AND suspension both live inside a nested closure cannot
+/// compile today for the same Future-unification reason. WHEN THIS TRIPWIRE
+/// FLIPS, the D6 nested-closure case MUST be re-verified and (if it then
+/// compiles) the closure-origin D6 fix landed. See
+/// `checked_body::async_drop_context` (NESTED-CLOSURE CAVEAT) +
+/// `helpers.rs::track_drop_local`.
 #[test]
 fn battery_row7_send_nonsendable_across_task_boundary_rejects_atomically() {
     assert_generated_install_rejected(
@@ -494,4 +503,63 @@ fn battery_row10b_d6_control_drop_local_without_suspension_installs() {
     assert_generated_install_succeeds(&d6_program(
         r#"async method run() -> int \{ let c: Conn = Conn \{ id: 1 \}; c.id \}"#,
     ));
+}
+
+/// TRIPWIRE — D6 UNCOVERED CLASS: generic generated bodies (review finding,
+/// supervisor Route 2). A GENERIC generated async method with a drop-obligated
+/// local + a suspension currently INSTALLS UNREJECTED: the generic template
+/// early-returns from the D6-armed compile (non-empty `type_params`), and its
+/// monomorphization (`job.run(7)` forces `run<int>`) compiles via the plain
+/// `compile_function` delegate with origin `None`, so the gate short-circuits
+/// (see `checked_body::async_drop_context` "UNCOVERED CLASS" for the six-site
+/// mechanism that made the re-arm exceed a bounded seam). The `Conn` drop is
+/// DISCHARGED before the `await` (inner block) so emission stays on the shipped
+/// sync-drop path — the fail-OPEN is purely D6 not running, not an emission
+/// artifact.
+///
+/// This pin asserts the current fail-OPEN as a LIVE TRIPWIRE: when the origin
+/// re-arm lands on the monomorphization path, D6's conservative check will fire
+/// and this compile will REJECT `[C0922]`, flipping the assertion loudly and
+/// demanding this pin be rewritten to assert the rejection.
+#[test]
+fn battery_row10b_generic_monomorphization_uncovered_installs() {
+    let program = shape_ast::parse_program(
+        r#"
+type Conn { id: int }
+impl Drop for Conn {
+    method drop() { }
+}
+async fn tick() -> int { 0 }
+
+annotation gen_generic() {
+  targets: [type]
+  comptime post(target, ctx) {
+    extend target {
+      async method run<T>(value: T) -> int {
+        let kept: int = { let c: Conn = Conn { id: 1 }; c.id }
+        await tick()
+        kept
+      }
+    }
+  }
+}
+
+@gen_generic()
+type Job { id: int }
+
+let job = Job { id: 1 }
+job.run(7)
+"#,
+    )
+    .expect("generic uncovered-class fixture parses");
+    let mut compiler = BytecodeCompiler::new();
+    let outcome = compiler.compile_in_place(&program);
+    assert!(
+        outcome.is_ok(),
+        "TRIPWIRE: a generic generated async body with a drop-obligated local + a suspension \
+         currently INSTALLS unrejected (D6 uncovered generic-monomorphization class). If this \
+         is now an Err, the monomorphization D6 re-arm likely landed — re-verify it rejects \
+         [C0922] and rewrite this pin to assert the rejection. err={:?}",
+        outcome.err(),
+    );
 }

@@ -39,7 +39,7 @@
 //! | 4 | borrow (MIR solver WITH capture loans) | `mir::solver::analyze_with_options` via `analyze_function_body`; `closure_capture_loans` are gathered from the body's MIR (`solver.rs:414`), so a generated body's captures feed the loan set through the SAME MIR-lowering path (see the verification note below) | ALREADY-COVERED (captures→loans verified) |
 //! | 5 | lifetime | the same solver's `return_reference_summary` / escaped-loan analysis via `analyze_function_body` → `function_return_reference_summaries` | ALREADY-COVERED |
 //! | 6 | suspension | the solver's task-boundary analysis (`task_boundary_loans`, `solver.rs:110/370`) via `analyze_function_body` | ALREADY-COVERED |
-//! | 7 | Send (task-boundary) | the solver's `non_sendable_task_boundary` (`solver.rs:129/401`) → `BorrowErrorKind::NonSendableAcrossTaskBoundary` via `analyze_function_body` | ALREADY-COVERED |
+//! | 7 | Send (task-boundary) | the solver's `non_sendable_task_boundary` (`solver.rs:129/401`) → `BorrowErrorKind::NonSendableAcrossTaskBoundary` via `analyze_function_body`; the SOLVER path is present, but the one generated-reachable FIRING shape (a closure-valued `async let` block) is BLOCKED-BY-INFERENCE (see the matrix row 7 + "Gate correction" below) — Future unification fails before the borrow check | BLOCKED-BY-INFERENCE (solver present; firing shape inference-gated) |
 //! | 8 | cleanup | drop-obligation discharge during `compile_function` drop-scope emission (`emit_drops_for_early_exit`, statements.rs) | ALREADY-COVERED |
 //! | 9 | sync `Drop` / `DropKind` context legality | `DropKind` context selection during drop emission; a `DropKind::AsyncOnly` value in a sync context is rejected at statements.rs:7246 (`current_function_is_async` gate) | ALREADY-COVERED |
 //! | 10a | async-drop-context ex.2 (async cleanup required in a sync context) | SAME site as #9: statements.rs:7246 already rejects a `drop_async`-only type used where `!current_function_is_async` | ALREADY-COVERED |
@@ -150,9 +150,21 @@
 //! cases. It is the NAMED `C0922` installation rejection (assigned slice 3),
 //! never a soft-fail or runtime fallback. Wired in [`super::async_drop_context`],
 //! evaluated at `compile_function`'s end on an authenticated generated body, so
-//! it covers every generated body that reaches `compile_function` uniformly
-//! (extend methods + generated free functions; ReplaceBody replacements are a
-//! separate compile-timing coupling tracked as a slice-4 follow-up).
+//! it covers every NON-GENERIC generated body that reaches `compile_function`
+//! uniformly (extend methods + generated free functions; ReplaceBody
+//! replacements, closed by slice 4 — see the Slice-4 section below).
+//!
+//! UNCOVERED CLASS (D6 review finding, supervisor Route 2): GENERIC generated
+//! bodies fail-OPEN. A generic template early-returns from
+//! `compile_function_with_generated_origin` before the gate (non-empty
+//! `type_params`), and its monomorphization compiles via the plain
+//! `compile_function` delegate with origin `None`, so the gate short-circuits.
+//! The bounded re-arm (origin keyed by template name, re-armed on the
+//! specialization compile) has to touch SIX monomorphization sites with no
+//! shared helper (see `super::async_drop_context` "UNCOVERED CLASS"), exceeding
+//! a bounded seam — so it is documented + pinned as a live tripwire
+//! (`c2_slice2_battery_tests::battery_row10b_generic_monomorphization_uncovered_installs`)
+//! that flips to `[C0922]` when the re-arm lands, not fixed here.
 //!
 //! # Slice-2 pin coverage (one firing fixture per check)
 //!

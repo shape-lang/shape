@@ -6194,9 +6194,26 @@ impl BytecodeCompiler {
         // `emit_drop_call_for_local` drives EVERY typed scope-exit `DropCall`
         // from `drop_locals`, which only this function populates. So a
         // per-function flag set here mirrors emission for a drop-obligated local
-        // in ANY scope — function body, block expression, loop/if body, or
-        // closure body — by construction, with no per-copy flag site (the
-        // block/closure copies would otherwise silently under-detect). Gated on
+        // in the SAME function's frame — function body, block expression, or
+        // loop/if body — by construction, with no per-copy flag site (those
+        // copies would otherwise silently under-detect).
+        //
+        // NESTED-CLOSURE CAVEAT (ADR-009 C2 #13, D6 review finding): a drop
+        // local living inside a NESTED CLOSURE does NOT reach the ENCLOSING
+        // generated function's flag. A closure body compiles in its OWN
+        // `compile_function` frame, whose save/restore of
+        // `current_function_saw_drop_obligated_local` (functions.rs, added to
+        // stop monomorphization bleed) also ISOLATES the closure's drop flag —
+        // so a generated body whose drop obligation AND suspension both live
+        // inside a nested closure would install unrejected by the enclosing
+        // function's D6 gate. This is LATENT: the construct (a closure-valued
+        // `async let` / a closure holding drop+await) cannot currently compile —
+        // it fails Future unification before the borrow check (battery row 7,
+        // BLOCKED-BY-INFERENCE). The bounded full fix, available when row 7
+        // flips, is to run D6 over the closure itself by threading the closure's
+        // generated origin at its compile seam (`expressions/closures.rs`, which
+        // already holds `generated_origin`). When row 7 flips, THIS case must be
+        // re-verified. Gated on
         // the drop obligation ACTUALLY resolving: `local_drop_kind` is `Some`
         // iff the local's stamped type carries a `Drop` impl — exactly the shape
         // `emit_drop_call_for_local` emits a TYPED `DropCall` for (a non-Drop
