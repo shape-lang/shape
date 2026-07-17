@@ -769,6 +769,18 @@ scope()
 /// pre-existing runtime soundness gap with no prior test) is what the D6
 /// mask-breaker exposed. Pins the runtime half of the repair: exactly one TYPED
 /// `DropCall(Conn)` is emitted, which invokes `Conn::drop` at scope exit.
+///
+/// SINGLE-EXIT TAIL-EXPRESSION body (`… x.id`) on purpose. `track_drop_local`
+/// registers `x` exactly ONCE (verified: the method-call compile registers no
+/// drop for its result; the re-arm sets `drop_kind` once), so the typed-DropCall
+/// COUNT equals the number of scope-exit paths. An explicit-`return` body would
+/// statically emit TWO `DropCall(Conn)` — the return-path drop PLUS the dead
+/// fall-through epilogue (`functions.rs`: the `Statement::Return` arm ~2413-2425
+/// falls through to the epilogue ~2460-2464; the 2nd is unreachable after the
+/// terminal return, so exactly one still EXECUTES). That is a pre-existing shape
+/// artifact of explicit returns, NOT a MethodCall-specific double-registration
+/// — the FunctionCall sibling below shows the identical single count under the
+/// same shape.
 #[test]
 fn test_method_call_returned_drop_value_runs_drop_at_scope_exit() {
     let bytecode = compile(
@@ -780,7 +792,7 @@ fn test_method_call_returned_drop_value_runs_drop_at_scope_exit() {
         function test_fn() -> int {
             let p: Pool = Pool { n: 0 }
             let x = p.acquire()
-            return 0
+            x.id
         }
         test_fn()
     "#,
@@ -803,12 +815,40 @@ fn test_method_call_returned_drop_value_runs_drop_at_scope_exit() {
         function test_fn() -> int {
             let p: Pool = Pool { n: 0 }
             let x = p.acquire()
-            return 0
+            x.id
         }
         test_fn()
     "#,
     );
-    assert_eq!(result.as_i64(), Some(0));
+    assert_eq!(result.as_i64(), Some(1));
+}
+
+/// Parity sibling — the `FunctionCall` factory route (`let x = make_conn()`)
+/// that the re-arm ALREADY covered emits the SAME single typed `DropCall(Conn)`
+/// under the identical single-exit shape. Two things at once: the MethodCall arm
+/// did NOT change the FunctionCall path (no regression), and the earlier
+/// method-call "double" was purely the explicit-`return` shape artifact — a
+/// same-shape FunctionCall body counts 1 too, not 2.
+#[test]
+fn test_function_call_returned_drop_value_runs_drop_at_scope_exit() {
+    let bytecode = compile(
+        r#"
+        type Conn { id: int }
+        impl Drop for Conn { method drop() { } }
+        fn make_conn() -> Conn { Conn { id: 1 } }
+        function test_fn() -> int {
+            let x = make_conn()
+            x.id
+        }
+        test_fn()
+    "#,
+    );
+    assert_eq!(
+        drop_call_type_name_count(&bytecode, "Conn"),
+        1,
+        "the FunctionCall factory route (the sibling the re-arm already covered) emits \
+         exactly one typed DropCall(Conn) — symmetric with the MethodCall route"
+    );
 }
 
 /// Control for the repair: the SAME shape with a NON-Drop method return
@@ -826,7 +866,7 @@ fn test_method_call_returned_non_drop_value_emits_no_typed_drop() {
         function test_fn() -> int {
             let p: Pool = Pool { n: 0 }
             let x = p.get_id()
-            return x
+            x
         }
         test_fn()
     "#,
