@@ -17,7 +17,7 @@ use super::comptime_builtins::FrozenTypeIdentity;
 use super::comptime_builtins::expansion_provenance::{
     ApplicationClaim, ApplicationId, CanonicalHash, ComptimeStage, DeclarationDiscoveryFixedPoint,
     ExpansionIdentity, ExpansionSite, GeneratedNodePath, GeneratedOrigin, GeneratedSymbolTable,
-    GeneratorRef, SymbolReservation, TargetIdentity,
+    GeneratorRef, SourceAnchor, SymbolId, SymbolReservation, TargetIdentity,
 };
 use super::{BytecodeCompiler, HygienicRole, ParamPassMode};
 
@@ -2855,6 +2855,54 @@ impl BytecodeCompiler {
         matches!(expr, Expr::Identifier(name, _) if name == expected)
     }
 
+    /// ADR-009 E2 #18 (slice 1/2): the SHARED per-item check sequence — anchor,
+    /// generated closure-provenance stamp (`GeneratedNodeIssuer`), hygienic
+    /// export reservation (`SymbolId`, journaled through the InstallTransaction)
+    /// — used by BOTH the typed replace-module consumer (`build_checked_module`,
+    /// slice 1) and the typed extend-items / `CheckedItem` consumer (slice 2),
+    /// so the two never duplicate the sequence. Returns the stamped item and its
+    /// reserved hygienic export symbol; the fingerprint is taken BEFORE anchoring
+    /// so pass-2's raw hash agrees (ADR-009 D1 S3). Does NOT `register_function`:
+    /// the caller decides (module-replace does not — the module-compile flow
+    /// registers; extend-items does — see `apply_comptime_extend_items`).
+    ///
+    /// (Lives in `functions_annotations` rather than `comptime_fragments/`
+    /// because `stamp_generated_closure_provenance` / `generated_free_fn_content`
+    /// / `expansion_rejection` are module-private here; the DATA carriers
+    /// `CheckedModule` / `CheckedItem` are the `comptime_fragments/` half.)
+    fn check_generated_function_item(
+        &mut self,
+        mut func_def: FunctionDef,
+        span: Span,
+        site: &ExpansionSite,
+        source_anchor: SourceAnchor,
+        generator_anchor: SourceAnchor,
+        node_path_prefix: &str,
+    ) -> Result<(shape_ast::ast::Item, SymbolId)> {
+        // Fingerprint BEFORE anchoring so pass-2's raw hash agrees (ADR-009 D1
+        // S3), then re-base decl spans to the anchor.
+        let content = generated_free_fn_content(&func_def);
+        anchor_generated_function_decl(&mut func_def, site.application_span());
+        let node_path =
+            GeneratedNodePath::decl_root(format!("{node_path_prefix}:{}", func_def.name));
+        let origin = GeneratedOrigin {
+            expansion: site.identity().clone(),
+            node_path,
+            source_anchor,
+        };
+        self.stamp_generated_closure_provenance(&mut func_def.body, &origin, &func_def.name);
+        let export = match self.reserve_generated_decl_journaled(
+            &func_def.name,
+            origin,
+            content,
+            generator_anchor,
+        ) {
+            Ok(SymbolReservation::Fresh(id)) | Ok(SymbolReservation::Reissued(id)) => id,
+            Err(message) => return Err(self.expansion_rejection(message, site)),
+        };
+        Ok((shape_ast::ast::Item::Function(func_def, span), export))
+    }
+
     /// ADR-009 E2 #18 (slice 1): build the typed `CheckedModule` for a
     /// `ReplaceModuleChecked` directive (the module-target consumer,
     /// `process_comptime_directives_for_module`). Each generated item is
@@ -2891,37 +2939,17 @@ impl BytecodeCompiler {
         let mut exports = Vec::new();
         for item in items {
             match item {
-                Item::Function(mut func_def, span) => {
-                    // Fingerprint BEFORE anchoring so pass-2's raw hash agrees
-                    // (ADR-009 D1 S3), then re-base decl spans to the anchor.
-                    let content = generated_free_fn_content(&func_def);
-                    anchor_generated_function_decl(&mut func_def, site.application_span());
-                    let node_path =
-                        GeneratedNodePath::decl_root(format!("module_fn:{}", func_def.name));
-                    let origin = GeneratedOrigin {
-                        expansion: site.identity().clone(),
-                        node_path,
+                Item::Function(func_def, span) => {
+                    let (checked, export) = self.check_generated_function_item(
+                        func_def,
+                        span,
+                        site,
                         source_anchor,
-                    };
-                    self.stamp_generated_closure_provenance(
-                        &mut func_def.body,
-                        &origin,
-                        &func_def.name,
-                    );
-                    match self.reserve_generated_decl_journaled(
-                        &func_def.name,
-                        origin,
-                        content,
                         generator_anchor,
-                    ) {
-                        Ok(SymbolReservation::Fresh(id)) | Ok(SymbolReservation::Reissued(id)) => {
-                            exports.push(id);
-                        }
-                        Err(message) => {
-                            return Err(self.expansion_rejection(message, site));
-                        }
-                    }
-                    stamped.push(Item::Function(func_def, span));
+                        "module_fn",
+                    )?;
+                    exports.push(export);
+                    stamped.push(checked);
                 }
                 other => stamped.push(other),
             }

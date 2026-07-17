@@ -45,6 +45,35 @@ is restated here; anything deeper is re-derived from the repo directly.
   serde/serialize.shape, llm/tools.shape) off the `extend(source_string)` arm
   onto the typed fragment path within its own scope (slice 4). The U03
   deletion is TOTAL — no surviving source-reparse arm, no deferral to E6.
+- **E2-D9 (module pre-analysis materialization): DEFERRED with a FLIP
+  CONDITION.** Module-target handlers do NOT flow through the slice-0
+  `materialize_computed_comptime_extends` discovery loop —
+  `declaration_discovery.rs` excludes module targets BY DESIGN (they mutate
+  module topology through separate pass-2 APIs); they run in pass-2 via
+  `execute_module_comptime_handlers`, and `recheck_replaced_module_items`
+  already re-runs `analyze_program_full` over the replacement. The C0911
+  closure-fact gap is UNCONSTRUCTIBLE for slice 1's typed producer: `item_fn`
+  mints only a literal-returning, closure-free function, and the legacy
+  string route (the only closure-carrying route) never stamps generated
+  provenance, so [C0911] cannot fire either way. Module pre-analysis
+  materialization is therefore deferred to the `quote module` producer slice.
+  **FLIP CONDITION:** when `quote module` lands, the closure-bearing pin is
+  written FIRST; its result decides between the discovery-worklist topology
+  change (which `declaration_discovery` explicitly declined — escalates to
+  supervisor/user) and extended pass-2 fact publication. No improvised
+  topology change before then.
+- **E2-D10 (item_fn survival — inventory ruling): SURFACE PERSISTS, SCHEMA
+  DIES.** `item_fn`'s SURFACE — the comptime builtin name + call signature —
+  SURVIVES E2 as the CheckedItem constructor (deleting it would orphan D10
+  parity while `quote item` is E-track-future). The U07 slice-5 deletion
+  covers its INTERNALS: the `__ComptimeItemFragment` schema
+  (builtin_schemas.rs:849), the sentinel fields,
+  `literal_fragment_fields_from_slot` / `build_function_item_fragment` /
+  `function_item_from_fragment`, and the source-reparse machinery. In slice 2
+  `item_fn` produces the typed `CheckedItem` carrier instead of the sentinel
+  fragment; the legacy fragment machinery stays byte-unchanged (dead-but-
+  present) beside it until slice 5 deletes it whole (E2-D8 staging).
+  Documented at the builtin.
 
 ## Slice plan (phase-1, condensed)
 
