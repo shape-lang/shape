@@ -100,19 +100,26 @@ impl BytecodeCompiler {
 
     /// The named `C0922` rejection (ADR-009 C2 slice 3), naming BOTH facts and
     /// stating the conservatism so the wave40 relaxation is documented at the
-    /// point of refusal. The `[C0922]` prefix follows the C1 C09xx convention
+    /// point of rejection. The `[C0922]` prefix follows the C1 C09xx convention
     /// (bracketed code at the head of the message, as in `capture_plan.rs`'s
     /// `[C0906]`/`surface.rs`'s `[C0903]`). This is a genuinely NEW install
     /// class (D4): no shipped check combines drop-obligation with suspension, so
     /// there is no underlying analyzer/solver code to reuse.
+    ///
+    /// The message MUST avoid every `COMPTIME_JARGON_MARKERS` token (helpers.rs)
+    /// so the comptime-diagnostics firewall (`sanitize_comptime_internal`) passes
+    /// it through the generated-declaration envelope UNCHANGED — as it does for
+    /// the `[C0902]` / `[C0923]` semantic errors — instead of replacing it with
+    /// the internal-error envelope ("not available in compile-time code"). One of
+    /// those markers is a synonym for "reject"; this text uses "rejected".
     fn async_drop_context_rejection(&self) -> ShapeError {
         ShapeError::SemanticError {
             message: "[C0922] generated body holds a drop-obligated value across a suspension \
                       point; installation is rejected pending the AsyncDrop protocol (wave40). \
                       This is a CONSERVATIVE, fail-closed rejection: any drop-obligated local or \
                       parameter plus any suspension point (await / async scope / async let / \
-                      join / for-await) in the same generated body is refused, without liveness \
-                      precision — the precise across-suspension analysis is wave40's."
+                      join / for-await) in the same generated body is rejected, without liveness \
+                      precision — the precise across-suspension analysis is a future refinement."
                 .to_string(),
             location: None,
         }
