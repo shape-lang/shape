@@ -52,12 +52,9 @@ impl BytecodeCompiler {
         }
     }
 
-    /// Roll back the generated-query reservation tables. Runs ONLY in the
+    /// Roll back the `generated_symbols` reservation table. Runs ONLY in the
     /// batch/install path; the query-session retain mode skips this so the
-    /// tables the LSP answers from survive a recoverable `Err`.
-    ///
-    /// `closure_capture_packs` (read by `generated_capture_query`) is a
-    /// `Vec` truncated to its watermark.
+    /// table the LSP symbol query answers from survives a recoverable `Err`.
     ///
     /// `generated_symbols` (read by `generated_symbol_query`) is reset to empty
     /// — the same quarantine the annotation-declaration transaction's
@@ -69,12 +66,14 @@ impl BytecodeCompiler {
     /// baseline. Gating on the watermark keeps an early error that reserved
     /// nothing (e.g. a poisoned compiler rejecting at the usability gate) from
     /// mutating an already-settled table.
-    pub(in crate::compiler) fn rollback_generated_query_reservations(
+    ///
+    /// `closure_capture_packs` is NOT rolled back here (or anywhere): it is one
+    /// member of a closure-registry consistency cluster that cannot be partially
+    /// truncated, and is treated as query metadata. See the module docs.
+    pub(in crate::compiler) fn rollback_generated_symbol_reservations(
         &mut self,
         transaction: &InstallTransaction,
     ) {
-        self.closure_capture_packs
-            .truncate(transaction.capture_packs_watermark);
         if self.generated_symbols.len() > transaction.generated_symbols_watermark {
             self.generated_symbols = GeneratedSymbolTable::new();
         }

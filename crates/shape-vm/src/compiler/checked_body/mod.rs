@@ -42,8 +42,28 @@
 //!   removing a non-last entry would shift every later `FunctionId`, corrupting
 //!   already-emitted `Operand::Function` operands in other bodies.
 //! - the `analyze_function_body` fact bundle keyed by function name.
-//! - `generated_symbols` reservations and `closure_capture_packs` — the two
-//!   tables the LSP generated-symbol / generated-capture queries read.
+//! - `generated_symbols` reservations.
+//!
+//! ## Rollback-set correction: `closure_capture_packs` is NEVER rolled back
+//!
+//! `closure_capture_packs` was initially listed here but is DELIBERATELY not
+//! rolled back. It is one member of a ~7-way parallel closure-registry cluster
+//! (`closure_type_ids`, `closure_function_ids`, `closure_capture_names`,
+//! `function_type_ids` are `Vec`s; `closure_registry`, `function_type_registry`
+//! are registry structs). The cluster must stay mutually consistent: truncating
+//! only the packs desynchronises it, so a REUSED compiler that re-registers a
+//! closure index trips the `closure N has more than one ClosureTypeId entry`
+//! uniqueness check (`compiler_impl_reference_model/closure_layouts.rs`). The
+//! packs are per-function closure state populated by ALL closures (user and
+//! generated), which the per-function reference-flow transaction intentionally
+//! leaves as a consistent, harmless ghost — this install-level transaction must
+//! not reach into it. Rolling back the whole cluster instead would couple into
+//! the registry structs (no truncate API), so the packs are treated as query
+//! metadata, not an executable publication, and are never rolled back. A
+//! rejected generated closure never reaches the pack push anyway (the capture
+//! rejection precedes the push), so no generated ghost pack is produced. (Slice
+//! review: the claim "a ghost pack is unreachable from any executable or
+//! observable surface post-reject" is the one to attack.)
 //!
 //! # Query-session retain mode
 //!
@@ -55,10 +75,11 @@
 //! `generated_symbols`, the capture query reads `closure_capture_packs`
 //! (`capture_plan/query.rs`). A query session never executes and never ships a
 //! program, so it still rolls back every truly-executable publication
-//! (`program.functions`, the name-keyed side tables, the fact bundle); it
-//! retains ONLY those two reservation tables so post-`Err` queryability
-//! survives (the tolerance commit `4dce9471` relies on). Ordinary
-//! (batch/install) compilation leaves the mode off and rolls back everything.
+//! (`program.functions`, the name-keyed side tables, the fact bundle). The mode
+//! gates exactly ONE table — `generated_symbols` — so it survives for post-`Err`
+//! queryability (the tolerance commit `4dce9471` relies on); `closure_capture_packs`
+//! survives everywhere by never being rolled back at all (above). Ordinary
+//! (batch/install) compilation leaves the mode off and rolls back `generated_symbols`.
 
 use crate::compiler::BytecodeCompiler;
 
@@ -66,12 +87,12 @@ mod rollback;
 
 /// The baseline captured when a generated-body install begins.
 ///
-/// Watermark semantics only: `program.functions` and `closure_capture_packs`
-/// are append-only during an install, so recording their length before the
-/// install begins lets rollback truncate exactly the install's additions and
-/// keep every pre-existing entry. `generated_symbols` is a name/id map that
-/// cannot be truncated; its watermark is a length gate so an install that
-/// reserved nothing does not disturb an already-settled table.
+/// Watermark semantics only: `program.functions` is append-only during an
+/// install, so recording its length before the install begins lets rollback
+/// truncate exactly the install's additions and keep every pre-existing entry.
+/// `generated_symbols` is a name/id map that cannot be truncated; its watermark
+/// is a length gate so an install that reserved nothing does not disturb an
+/// already-settled table.
 ///
 /// Committing is simply DROPPING this token on the success path — every
 /// publication stays. The failure path passes it to
@@ -79,7 +100,6 @@ mod rollback;
 /// to restore.
 pub(in crate::compiler) struct InstallTransaction {
     functions_watermark: usize,
-    capture_packs_watermark: usize,
     generated_symbols_watermark: usize,
 }
 
@@ -90,7 +110,6 @@ impl BytecodeCompiler {
     pub(in crate::compiler) fn begin_checked_body_install(&self) -> InstallTransaction {
         InstallTransaction {
             functions_watermark: self.program.functions.len(),
-            capture_packs_watermark: self.closure_capture_packs.len(),
             generated_symbols_watermark: self.generated_symbols.len(),
         }
     }
@@ -99,17 +118,17 @@ impl BytecodeCompiler {
     /// partial generated install is observable.
     ///
     /// Every truly-executable publication rolls back unconditionally. The
-    /// generated-query reservation tables (`generated_symbols`,
-    /// `closure_capture_packs`) roll back too UNLESS the named query-session
-    /// retain mode is set, in which case they survive for post-`Err`
-    /// queryability (see the module docs).
+    /// `generated_symbols` reservation table rolls back too UNLESS the named
+    /// query-session retain mode is set, in which case it survives for
+    /// post-`Err` queryability. `closure_capture_packs` is never rolled back in
+    /// either mode (see the module docs).
     pub(in crate::compiler) fn rollback_checked_body_install(
         &mut self,
         transaction: InstallTransaction,
     ) {
         self.rollback_executable_publications(&transaction);
         if !self.retain_generated_reservations_for_query_session {
-            self.rollback_generated_query_reservations(&transaction);
+            self.rollback_generated_symbol_reservations(&transaction);
         }
     }
 }

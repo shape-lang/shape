@@ -103,10 +103,12 @@ fn generated_query_compiler(text: &str) -> shape_vm::BytecodeCompiler {
     // ADR-009 C2 #13 (slice 1): this is a query session, not an install. It
     // never executes or ships a program, so the atomic install transaction
     // still discards every executable publication on a recoverable `Err`; the
-    // retain mode keeps only the generated-query reservation tables
-    // (`generated_symbols`, `closure_capture_packs`) so
-    // `query_authority_or_none` can keep answering from them (the tolerance
-    // this file relies on).
+    // retain mode keeps the `generated_symbols` reservation table so
+    // `query_authority_or_none` (and the symbol query) can keep answering from
+    // it (the tolerance this file relies on). `closure_capture_packs` — read by
+    // the capture query — survives everywhere because the transaction never
+    // rolls it back (it is a closure-registry consistency-cluster member, not an
+    // executable publication).
     compiler.set_retain_generated_reservations_for_query_session(true);
     compiler.set_source(text);
     compiler
