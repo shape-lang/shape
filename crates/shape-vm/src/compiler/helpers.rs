@@ -6185,6 +6185,26 @@ impl BytecodeCompiler {
 
     /// Track a local variable as needing Drop at scope exit.
     pub(super) fn track_drop_local(&mut self, local_idx: u16, is_async: bool) {
+        // ADR-009 C2 #13 (slice 2, D6): the emission authority for the
+        // async-drop-context gate lives HERE — `track_drop_local` is the ONE
+        // universal scope-exit drop registration point. Every drop-plan copy
+        // funnels through it (the `Statement::VariableDecl` path in statements.rs
+        // and the block-expression `BlockItem::VariableDecl` path in
+        // expressions/misc.rs are its only two callers), and
+        // `emit_drop_call_for_local` drives EVERY typed scope-exit `DropCall`
+        // from `drop_locals`, which only this function populates. So a
+        // per-function flag set here mirrors emission for a drop-obligated local
+        // in ANY scope — function body, block expression, loop/if body, or
+        // closure body — by construction, with no per-copy flag site (the
+        // block/closure copies would otherwise silently under-detect). Gated on
+        // the drop obligation ACTUALLY resolving: `local_drop_kind` is `Some`
+        // iff the local's stamped type carries a `Drop` impl — exactly the shape
+        // `emit_drop_call_for_local` emits a TYPED `DropCall` for (a non-Drop
+        // local is tracked too, for the runtime-skipped generic `DropCall`, but
+        // it is not a drop obligation and must not set the flag).
+        if self.local_drop_kind(local_idx).is_some() {
+            self.current_function_saw_drop_obligated_local = true;
+        }
         if let Some(scope) = self.drop_locals.last_mut() {
             scope.push((local_idx, is_async));
         }

@@ -13,15 +13,23 @@
 //!
 //! # Drop-obligation is read from the EMISSION AUTHORITY, not an AST scan
 //!
-//! The drop-obligated-LOCAL signal (`saw_drop_obligated_local`) is set by the
-//! RAII drop-plan during `compile_function` (`statements.rs`, where
-//! `local_drop_kind` / annotation / initializer-call-return resolve `drop_kind`
-//! — the SAME query the drop emission uses). This catches an INFERRED drop type
-//! (`let x = make_droppable()`), which an AST annotation scan would
-//! UNDER-detect — and under-detection here is unsound (it installs exactly what
-//! wave40 must not inherit), not conservative. Drop-obligated PARAMETERS are
-//! resolved separately by their annotation (a parameter is always explicitly
-//! typed, so an annotation query is sound — no inference gap).
+//! The drop-obligated-LOCAL signal (`current_function_saw_drop_obligated_local`)
+//! is defined as "a TYPED scope-exit drop obligation was registered for this
+//! function", and it is set at the ONE universal chokepoint every drop-plan copy
+//! funnels through: `track_drop_local` (`helpers.rs`) — the sole populator of
+//! `drop_locals`, which `emit_drop_call_for_local` drains into every typed
+//! scope-exit `DropCall`. The flag is set there gated on `local_drop_kind`
+//! resolving (the SAME query the emission uses; `Some` iff the local's stamped
+//! type carries a `Drop` impl). Living at that chokepoint — rather than at each
+//! `VariableDecl` drop-plan copy — is load-bearing: a drop-obligated local in a
+//! BLOCK EXPRESSION (`expressions/misc.rs`), a loop / `if` body, or a CLOSURE
+//! body all register through `track_drop_local` too, so they are covered by
+//! construction; a per-copy flag site would silently UNDER-detect every scope
+//! but the statement one (unsound — it installs exactly what wave40 must not
+//! inherit). This also catches an INFERRED drop type (`let x = make_droppable()`
+//! / `let x = p.acquire()`) an AST annotation scan would miss. Drop-obligated
+//! PARAMETERS are resolved separately by their annotation (a parameter is always
+//! explicitly typed, so an annotation query is sound — no inference gap).
 //!
 //! # Placement and provenance gate
 //!

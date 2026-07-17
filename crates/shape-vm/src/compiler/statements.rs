@@ -7242,17 +7242,12 @@ impl BytecodeCompiler {
                                 }
                             }
 
-                            // ADR-009 C2 #13 (slice 2, D6): the emission authority
-                            // for the async-drop-context gate. `drop_kind` here is
-                            // resolved via `local_drop_kind` / annotation /
-                            // initializer-call-return — the SAME query the drop-plan
-                            // emits from — so an INFERRED drop type is recorded, not
-                            // under-detected by an AST annotation scan. Set before the
-                            // AsyncOnly-in-sync early return below (harmless: that path
-                            // rejects the compile anyway).
-                            if drop_kind.is_some() {
-                                self.current_function_saw_drop_obligated_local = true;
-                            }
+                            // ADR-009 C2 #13 (slice 2, D6): the per-function
+                            // drop-obligation flag is set at the single chokepoint
+                            // `track_drop_local` (helpers.rs) below — the ONE
+                            // universal scope-exit drop registration point — so
+                            // block/loop/closure-body scoped drop locals are covered
+                            // by the same authority. No per-copy flag site here.
 
                             let is_async = match drop_kind {
                                 Some(DropKind::AsyncOnly) => {
