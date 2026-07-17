@@ -1975,11 +1975,13 @@ impl BytecodeCompiler {
     /// whole-program pre-pass registers generated signatures before the shared
     /// analyzer runs, and pass-2 compiles the bodies after it, so a rejection
     /// can surface at analysis time OR in pass-2 body compile. This wrapper
-    /// records a pre-install watermark, runs the whole driver, and on ANY `Err`
-    /// restores the compiler to that baseline so no partial generated install
-    /// is observable; on success every publication stays exactly as compiled.
-    /// See [`checked_body`](crate::compiler::checked_body) for the rollback set
-    /// and the query-session retain mode.
+    /// records a pre-install watermark, opens an undo journal, runs the whole
+    /// driver, and on ANY `Err` restores the compiler to that baseline so no
+    /// partial generated install is observable; on success the journal is
+    /// dropped and no publication is rolled back. (Rollback restores to
+    /// COMPILE-START, not to a partial-recovery point — a consideration only for
+    /// the LSP RecoverAll mode; see [`checked_body`](crate::compiler::checked_body)
+    /// for the rollback set, the retain mode, and that caveat.)
     pub fn compile_in_place(&mut self, program: &Program) -> Result<()> {
         let transaction = self.begin_checked_body_install();
         let result = self.compile_in_place_inner(program);

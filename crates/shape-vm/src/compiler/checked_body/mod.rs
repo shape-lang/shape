@@ -124,6 +124,20 @@
 //! so a retained pack whose function index was truncated still answers
 //! correctly. The batch path rolls back all cluster members together and stays
 //! fully consistent.
+//!
+//! # Caveat: rollback restores to COMPILE-START, not a partial-recovery point
+//!
+//! On `Err` this restores every rolled-back table to its value when the
+//! transaction began — the whole compilation's start — NOT to some
+//! partially-recovered state. Under `TypeDiagnosticMode::Strict` /
+//! `CompileDiagnosticMode::FailFast` (the ship path) that is exactly right: a
+//! failed compile ships nothing, so compile-start IS the correct end state. It
+//! matters only under `RecoverAll`, where a caller might want the
+//! partially-published facts of a recovered compile; there, an install rollback
+//! discards them for the rolled-back tables. That mode is LSP-only today (the
+//! query/diagnostics sessions), and those sessions read the reservation tables
+//! the retain mode keeps — so the caveat is currently benign, but it is a real
+//! constraint if `RecoverAll` ever feeds an executing program.
 
 use crate::compiler::BytecodeCompiler;
 
