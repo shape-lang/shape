@@ -1817,7 +1817,7 @@ impl BytecodeCompiler {
             // a duplicate slot). The body is still compiled below, filling
             // the pre-registered slot, so the method is compiled exactly
             // once through the identical path.
-            match self.generated_symbols.reserve_generated_decl(
+            match self.reserve_generated_decl_journaled(
                 &func_def.name,
                 origin,
                 content,
@@ -2211,7 +2211,7 @@ impl BytecodeCompiler {
                                             &origin,
                                             &func_def.name,
                                         );
-                                        match self.generated_symbols.reserve_generated_decl(
+                                        match self.reserve_generated_decl_journaled(
                                             &func_def.name,
                                             origin,
                                             content,
@@ -2319,7 +2319,7 @@ impl BytecodeCompiler {
                                                 &origin,
                                                 &owner,
                                             );
-                                            match self.generated_symbols.reserve_generated_decl(
+                                            match self.reserve_generated_decl_journaled(
                                                 &func_def.name,
                                                 origin,
                                                 content,
@@ -2503,7 +2503,7 @@ impl BytecodeCompiler {
                 source_anchor,
             };
             self.stamp_generated_closure_provenance(&mut func_def.body, &origin, &func_def.name);
-            match self.generated_symbols.reserve_generated_decl(
+            match self.reserve_generated_decl_journaled(
                 &func_def.name,
                 origin,
                 content,

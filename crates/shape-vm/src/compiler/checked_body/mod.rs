@@ -127,53 +127,67 @@
 
 use crate::compiler::BytecodeCompiler;
 
+mod journal;
 mod rollback;
+
+pub(in crate::compiler) use journal::InstallJournal;
 
 /// The baseline captured when a generated-body install begins.
 ///
-/// Watermark semantics only: `program.functions` is append-only during an
-/// install, so recording its length before the install begins lets rollback
-/// truncate exactly the install's additions and keep every pre-existing entry.
-/// `generated_symbols` is a name/id map that cannot be truncated; its watermark
-/// is a length gate so an install that reserved nothing does not disturb an
-/// already-settled table.
+/// Two rollback mechanisms cooperate. Append-only tables keyed by
+/// `program.functions` INDEX (the function table and the closure-index cluster)
+/// can never displace a below-watermark entry, so a length WATERMARK is
+/// sufficient and cheapest — recorded here. Tables keyed by a NAME that an
+/// install can OVERWRITE (side tables, the fact bundle, `generated_symbols`,
+/// `owned_mutable_locals`, `hoisted_fields`) are restored by the displaced-entry
+/// undo [`journal`](journal), populated at the write sites while the transaction
+/// is live (`self.install_journal`).
 ///
-/// Committing is simply DROPPING this token on the success path — every
-/// publication stays. The failure path passes it to
+/// Committing is simply DROPPING this token and clearing the journal on the
+/// success path — every publication stays. The failure path passes it to
 /// [`rollback_checked_body_install`](BytecodeCompiler::rollback_checked_body_install)
 /// to restore.
 pub(in crate::compiler) struct InstallTransaction {
     functions_watermark: usize,
-    generated_symbols_watermark: usize,
 }
 
 impl BytecodeCompiler {
-    /// Record the pre-install baseline. Called before the generated-body
-    /// install begins (the whole-program comptime pre-pass); the returned token
-    /// is committed (dropped) on success or rolled back on any `Err`.
-    pub(in crate::compiler) fn begin_checked_body_install(&self) -> InstallTransaction {
+    /// Record the pre-install baseline and open the undo journal. Called before
+    /// the generated-body install begins (the whole-program comptime pre-pass);
+    /// the returned token is committed (dropped) on success or rolled back on
+    /// any `Err`. Every keyed install write from now until commit/rollback
+    /// records its displaced prior into `self.install_journal`.
+    pub(in crate::compiler) fn begin_checked_body_install(&mut self) -> InstallTransaction {
+        self.install_journal = Some(InstallJournal::default());
         InstallTransaction {
             functions_watermark: self.program.functions.len(),
-            generated_symbols_watermark: self.generated_symbols.len(),
         }
     }
 
     /// Failure path: restore the compiler to the pre-install baseline so no
     /// partial generated install is observable.
     ///
-    /// Every truly-executable publication rolls back unconditionally (including
-    /// the executable members of the closure-index cluster). The reservation
-    /// tables the LSP queries read — `generated_symbols` and
-    /// `closure_capture_packs` — roll back too UNLESS the named query-session
-    /// retain mode is set, in which case they survive for post-`Err`
-    /// queryability (see the module docs).
+    /// The undo journal replays first, restoring every displaced name-keyed
+    /// entry and removing fresh ones; then the index-keyed Vec tables truncate
+    /// back to the watermark. The executable journal + the index tables restore
+    /// in BOTH modes. The query-retained journal (`generated_symbols`
+    /// reservations) and `closure_capture_packs` roll back too UNLESS the named
+    /// query-session retain mode is set, in which case they survive for
+    /// post-`Err` queryability (see the module docs).
     pub(in crate::compiler) fn rollback_checked_body_install(
         &mut self,
         transaction: InstallTransaction,
     ) {
-        self.rollback_executable_publications(&transaction);
-        if !self.retain_generated_reservations_for_query_session {
-            self.rollback_query_retained_reservations(&transaction);
+        let retain = self.retain_generated_reservations_for_query_session;
+        if let Some(mut journal) = self.install_journal.take() {
+            self.replay_executable_journal(&mut journal);
+            if !retain {
+                self.replay_query_retained_journal(&mut journal);
+            }
+        }
+        self.rollback_indexed_publications(&transaction);
+        if !retain {
+            self.rollback_capture_packs(&transaction);
         }
     }
 }

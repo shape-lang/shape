@@ -3554,6 +3554,8 @@ impl BytecodeCompiler {
         // `op_make_closure`'s layout-mismatch guard.
         for descriptor in &pack.descriptors {
             if descriptor.access == CaptureAccess::OwnedMutableCell {
+                // ADR-009 C2 #13 (M3): a rollback removes this witness.
+                self.journal_record_owned_mutable_local(&descriptor.name);
                 self.owned_mutable_locals.insert(descriptor.name.clone());
             }
         }

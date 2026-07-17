@@ -1927,6 +1927,14 @@ pub struct BytecodeCompiler {
     /// soft-fail: executable publications still roll back in both modes.
     pub(crate) retain_generated_reservations_for_query_session: bool,
 
+    /// ADR-009 C2 #13 (slice 1) — the install transaction's displaced-entry undo
+    /// journal (see [`checked_body::journal`]). `Some` only while a generated-body
+    /// install transaction is live (opened in `begin_checked_body_install`,
+    /// cleared on commit or consumed on rollback); every keyed install write
+    /// records its displaced prior here so a rollback restores it rather than
+    /// deleting a shared prelude/dependency key.
+    pub(in crate::compiler) install_journal: Option<checked_body::InstallJournal>,
+
     /// ADR-009 E3 (slice S1) — the generated analysis items materialized by
     /// the executed declaration-discovery pre-pass
     /// (`materialize_computed_comptime_extends`) for this compilation unit.

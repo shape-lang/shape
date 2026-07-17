@@ -22,7 +22,12 @@ use std::collections::{HashMap, HashSet};
 pub type FieldKey = (SlotId, FieldIdx);
 
 /// Results of field-level analysis for a single MIR function.
-#[derive(Debug)]
+///
+/// `Clone` is required by the ADR-009 C2 install transaction's undo journal
+/// (`compiler::checked_body`), which records a displaced prior `FieldAnalysis`
+/// before an install overwrites `mir_field_analyses` under a shared function
+/// name, and restores it on rollback.
+#[derive(Debug, Clone)]
 pub struct FieldAnalysis {
     /// Fields that are definitely initialized at the *entry* of each block.
     pub definitely_initialized: HashMap<BasicBlockId, HashSet<FieldKey>>,

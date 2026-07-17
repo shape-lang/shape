@@ -781,6 +781,23 @@ impl GeneratedSymbolTable {
         Ok(SymbolReservation::Fresh(id))
     }
 
+    /// ADR-009 C2 #13: undo a `Fresh` reservation on install rollback.
+    ///
+    /// The install transaction's undo journal (`compiler::checked_body`)
+    /// records each `Fresh(id)` it made and replays this to remove EXACTLY
+    /// those, restoring the pre-install table WITHOUT disturbing below-watermark
+    /// reservations (dependency-module compiles, or earlier successful installs
+    /// on a reused compiler — the H2 finding a wholesale reset destroyed). A
+    /// `Fresh` reservation is genuinely new — a same-name reservation under a
+    /// different identity errors instead of displacing — so removal is exact and
+    /// never orphans a surviving reservation's name index.
+    pub(crate) fn remove_reservation(&mut self, decl_name: &str, id: SymbolId) {
+        self.records.remove(&id);
+        if self.names.get(decl_name) == Some(&id) {
+            self.names.remove(decl_name);
+        }
+    }
+
     fn provenance_view<'a>(
         &self,
         id: SymbolId,

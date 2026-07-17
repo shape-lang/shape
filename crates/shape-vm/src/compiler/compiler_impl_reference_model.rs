@@ -1985,8 +1985,11 @@ impl BytecodeCompiler {
         let result = self.compile_in_place_inner(program);
         if result.is_err() {
             self.rollback_checked_body_install(transaction);
+        } else {
+            // Commit: drop the undo journal (no replay) and the token — every
+            // publication stays exactly as compiled.
+            self.install_journal = None;
         }
-        // Success commits by dropping `transaction` here — every publication stays.
         result
     }
 
@@ -2343,6 +2346,9 @@ impl BytecodeCompiler {
                         type_map.insert(a.property.clone(), ft);
                     }
                 }
+                // ADR-009 C2 #13 (M4): a rollback restores the prior hoist for
+                // this binding name (both field-hoisting tables).
+                self.journal_record_hoisted_field(&var_name);
                 if !type_map.is_empty() {
                     self.hoisted_field_types.insert(var_name.clone(), type_map);
                 }
