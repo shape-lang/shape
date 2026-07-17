@@ -6,9 +6,13 @@
 //! (`compile_in_place`, the slice-1 atomic-transaction wrapper) and asserted to
 //! REJECT with NOTHING published — the same nothing-survives guarantee the
 //! slice-0/1 preflight pins assert, reused here via
-//! [`assert_no_install_publication_survives`]. Assertions are GENERIC (install
-//! FAILS + nothing survives), not code-specific: slice 3 attaches one named
-//! `C09xx` code per test, so each check keeps its own test fn.
+//! [`assert_no_install_publication_survives`]. Slice 3 UPGRADED each assertion
+//! from generic (install fails + nothing survives) to CODE-SPECIFIC: every
+//! firing pin now asserts the rendered rejection carries its row's exact
+//! distinguisher — the reused analyzer/solver token (`Type mismatch`, `[B0005]`,
+//! …) or the newly-minted `[C0922]` / `[C0923]` — per the slice-3 rejection
+//! matrix in [`super::super::checked_body::battery`]. Each check keeps its own
+//! test fn.
 //!
 //! Every fixture trips its check on the identical pass-2
 //! `apply_comptime_extend → compile_function → analyze_function_body` path a
@@ -25,10 +29,10 @@
 //! | 4 | borrow | `battery_row4_borrow_conflict_rejects_atomically` |
 //! | 5 | lifetime | `battery_row5_lifetime_reference_escape_rejects_atomically` |
 //! | 6 | suspension | `battery_row6_suspension_exclusive_ref_across_task_boundary_rejects_atomically` |
-//! | 7 | Send (task-boundary) | `battery_row7_send_nonsendable_across_task_boundary_rejects_atomically` (see confidence note) |
+//! | 7 | Send (task-boundary) | `battery_row7_send_nonsendable_across_task_boundary_rejects_atomically` (B0014-isolation fixture — see note) |
 //! | 8 | cleanup | **NOT-GENERATED-REACHABLE-AS-REJECTION** — see below |
 //! | 9 + 10a | sync `Drop` / async-cleanup-in-sync-context | `battery_row9_and_10a_async_only_drop_in_sync_context_rejects_atomically` |
-//! | 10b | async-drop-context (D6) | `battery_row10b_d6_drop_obligated_across_suspension_rejects_atomically` (+ a `#[ignore]`'d method-call pin that exposed a RAII emission hole + two controls) |
+//! | 10b | async-drop-context (D6) | `battery_row10b_d6_drop_obligated_across_suspension_rejects_atomically` (+ a method-call firing pin that surfaced & drove an inherited RAII repair + two controls) |
 //!
 //! ## NOT-GENERATED-REACHABLE rows (a finding, not a gap)
 //!
@@ -52,13 +56,18 @@
 //! manifest — an `AsyncOnly`-drop local in a sync context. One fixture covers
 //! both; not fabricated as two distinct trips.
 //!
-//! ## Row 7 confidence note
+//! ## Row 7 B0014 isolation (slice-3, discharged)
 //!
-//! No existing green source-level fixture trips `NonSendableAcrossTaskBoundary`
-//! (B0014); coverage is production-code only (solver.rs:392-405 — a detached
-//! task-boundary operand that is a mutable-capture closure slot). The pin below
-//! authors that shape and asserts GENERIC rejection, so a sibling task-boundary
-//! rejection still passes; its exact-code attribution is a slice-3 follow-up.
+//! Slice 2 asserted GENERIC rejection for row 7 because no green source fixture
+//! pinned `NonSendableAcrossTaskBoundary` (B0014) specifically and a sibling
+//! task-boundary code might also fire. Slice 3 replaces the fixture with a
+//! read-only capture of a REASSIGNED local (`|| x` with two `x = x + 1`s) and
+//! asserts `[B0014]` exactly: the read-only capture crosses as a by-value `Copy`
+//! (no reference loan ⇒ no B0006/B0012), while the reassigned `x` is a
+//! `mutable_capture` slot the loan-independent sendability path flags as B0014.
+//! The checks CAN be separated at this site, so this is a clean isolation, not
+//! the "both codes accepted" fallback. Full argument: the battery manifest's
+//! "Row 7 B0014 isolation" section + the pin docstring.
 
 use super::BytecodeCompiler;
 use super::c2_slice0_preflight_tests::assert_no_install_publication_survives;
@@ -68,16 +77,27 @@ const GENERATED_METHOD_NAME: &str = "Widget.run";
 
 /// Compile `program_src` through the real install path and assert the generated
 /// install is REJECTED with nothing published (the atomic no-partial-publication
-/// guarantee, asserted identically to the preflight reject pins).
-fn assert_generated_install_rejected(program_src: &str) {
+/// guarantee, asserted identically to the preflight reject pins) AND that the
+/// rendered rejection carries its row's exact `expected_distinguisher` per the
+/// slice-3 rejection matrix ([`super::super::checked_body::battery`]).
+///
+/// The distinguisher is the reused analyzer/solver token (`Type mismatch`,
+/// `[B0005]`, …) or the newly-minted `[C0922]` / `[C0923]`; asserting the code
+/// string in the rendered `ShapeError` follows the C1 pin convention
+/// (`functions.rs` asserts `format!("{err}").contains("[B0003]")` the same way).
+fn assert_generated_install_rejected(program_src: &str, expected_distinguisher: &str) {
     let program = shape_ast::parse_program(program_src).expect("battery fixture parses");
     let mut compiler = BytecodeCompiler::new();
 
-    let outcome = compiler.compile_in_place(&program);
-    assert!(
-        outcome.is_err(),
+    let error = compiler.compile_in_place(&program).expect_err(
         "battery fixture must REJECT the generated install (the check must run for the \
-         generated body and fail); if this is Ok the fixture stopped exercising a rejection"
+         generated body and fail); if this is Ok the fixture stopped exercising a rejection",
+    );
+    let rendered = error.to_string();
+    assert!(
+        rendered.contains(expected_distinguisher),
+        "battery fixture must reject with its row's distinguisher `{expected_distinguisher}` \
+         (the reused analyzer/solver code or the new C09xx); got: {rendered}"
     );
     assert_no_install_publication_survives(&compiler, GENERATED_METHOD_NAME);
 }
@@ -121,6 +141,10 @@ annotation gen1() {
 @gen1()
 type Widget { id: int }
 "#,
+        // Row 1 D4-reuse: the shared analyzer's `TypeError::TypeMismatch`
+        // ("Type mismatch: expected …, found …") stays authoritative; C2 mints
+        // no wrapper code.
+        "Type mismatch",
     );
 }
 
@@ -142,6 +166,8 @@ annotation gen3() {
 @gen3()
 type Widget { id: int }
 "#,
+        // Row 3 D4-reuse: solver `UseAfterMove` → B0005.
+        "[B0005]",
     );
 }
 
@@ -163,6 +189,8 @@ annotation gen4() {
 @gen4()
 type Widget { id: int }
 "#,
+        // Row 4 D4-reuse: solver `ConflictSharedExclusive` → B0001.
+        "[B0001]",
     );
 }
 
@@ -185,6 +213,8 @@ annotation gen5() {
 @gen5()
 type Widget { id: int }
 "#,
+        // Row 5 D4-reuse: solver `ReferenceEscapeIntoClosure` → B0003.
+        "[B0003]",
     );
 }
 
@@ -206,16 +236,31 @@ annotation gen6() {
 @gen6()
 type Widget { id: int }
 "#,
+        // Row 6 D4-reuse: solver `ExclusiveRefAcrossTaskBoundary` → B0006 (the
+        // `&mut x` exclusive loan crosses the detached boundary).
+        "[B0006]",
     );
 }
 
 // ── Row 7: Send (non-sendable across a detached task boundary) ──────────────
 
-/// A generated ASYNC body that spawns a mutable-capture closure across a
-/// detached `async let` boundary — the solver's non-sendable-across-task-boundary
-/// check (B0014). CONFIDENCE: no existing green source fixture backs B0014 (see
-/// module docs); the assertion is generic, so a sibling task-boundary rejection
-/// also passes.
+/// B0014 ISOLATION (slice-3 obligation). A generated ASYNC body reads a
+/// REASSIGNED local through a READ-ONLY closure capture (`|| x`) spawned across a
+/// detached `async let` boundary. This trips `NonSendableAcrossTaskBoundary`
+/// (B0014) and ONLY B0014 — not the sibling B0006/B0012:
+///
+/// - The read-only capture crosses as a by-value `Copy` operand, so NO reference
+///   loan crosses (`local_loans_from_operands` is empty); the loan path that
+///   produces B0006 (exclusive) / B0012 (shared) never fires.
+/// - `x` is captured AND assigned twice, so it is a `mutable_capture` slot
+///   (`collect_closure_captures`, `assign_counts > 1`); the loan-independent
+///   sendability path (`solver.rs:394-406`) flags it non-sendable across the
+///   detached boundary, and the loan-sink loop having emitted nothing, B0014 is
+///   `first_borrow_error`.
+///
+/// Two reassignments make `assign_counts > 1` hold whether or not the initial
+/// `let mut x = 1` binding counts as an `Assign`. See the battery manifest's
+/// "Row 7 B0014 isolation" section for the full separation argument.
 #[test]
 fn battery_row7_send_nonsendable_across_task_boundary_rejects_atomically() {
     assert_generated_install_rejected(
@@ -223,13 +268,16 @@ fn battery_row7_send_nonsendable_across_task_boundary_rejects_atomically() {
 annotation gen7() {
   targets: [type]
   comptime post(target, ctx) {
-    extend (f"extend {target.name} \{ async method run() -> int \{ let mut x = 1; async let fut = || \{ x = x + 1 \}; await fut; 0 \} \}")
+    extend (f"extend {target.name} \{ async method run() -> int \{ let mut x = 1; x = x + 1; x = x + 1; async let fut = || x; await fut; 0 \} \}")
   }
 }
 
 @gen7()
 type Widget { id: int }
 "#,
+        // Row 7 D4-reuse: solver `NonSendableAcrossTaskBoundary` → B0014,
+        // isolated from the loan-based siblings (see the docstring).
+        "[B0014]",
     );
 }
 
@@ -259,6 +307,9 @@ annotation gen9() {
 @gen9()
 type Widget { id: int }
 "#,
+        // Rows 9 + 10a NEW code: the AsyncOnly-in-sync gate (statements.rs) had
+        // no named code; slice 3 assigns C0923 (async-drop-context ex.2).
+        "[C0923]",
     );
 }
 
@@ -266,13 +317,11 @@ type Widget { id: int }
 
 /// The shared preamble for the D6 firing pins + controls: a Drop-bearing type
 /// (`Conn`, sync drop), a `Pool` whose `acquire` METHOD returns a `Conn` (for
-/// the `#[ignore]`'d method-call pin — a `MethodCall` return is what neither
-/// `initializer_call_return_drop_type` (`_ => None`) NOR `concrete_type_for_expr`
-/// resolves, which is exactly the RAII emission hole that pin exposed: `Conn`'s
-/// `drop()` never runs, so the drop obligation is not discharged and D6 rightly
-/// stays silent — see that pin's docstring), and an async callee to `await`. The
-/// firing fixtures differ ONLY in the generated method body, so a rejection is
-/// attributable to the drop-obligated-value + suspension COMBINATION.
+/// the method-call firing pin — the route the inherited RAII repair now drops
+/// via the `initializer_call_return_drop_type` MethodCall arm), and an async
+/// callee to `await`. The firing fixtures differ ONLY in the generated method
+/// body, so a rejection is attributable to the drop-obligated-value +
+/// suspension COMBINATION.
 fn d6_program(method_body: &str) -> String {
     format!(
         r#"
@@ -305,34 +354,39 @@ type Widget {{ id: int }}
 /// pin proves for an in-span rejection).
 #[test]
 fn battery_row10b_d6_drop_obligated_across_suspension_rejects_atomically() {
-    assert_generated_install_rejected(&d6_program(
-        r#"async method run() -> int \{ let c: Conn = Conn \{ id: 1 \}; await tick(); c.id \}"#,
-    ));
+    assert_generated_install_rejected(
+        &d6_program(
+            r#"async method run() -> int \{ let c: Conn = Conn \{ id: 1 \}; await tick(); c.id \}"#,
+        ),
+        // Row 10b NEW code: the D6 greenfield async-drop-context ex.1 check,
+        // slice 3 assigns C0922.
+        "[C0922]",
+    );
 }
 
 /// FIRING (MASK-BREAKER — inferred via a METHOD CALL) — the drop-obligated
-/// local is UNANNOTATED and initialized by a method call (`let x =
-/// p.acquire()`) whose return type is a `Drop` type. `#[ignore]`'d: it EXPOSED a
-/// pre-existing RAII EMISSION HOLE, not a D6 gap (traced 2026-07-17). The shared
-/// drop-type authority `initializer_call_return_drop_type` (statements.rs:7238)
-/// resolves only `FunctionCall` / `QualifiedFunctionCall`, never a `MethodCall`
-/// (helpers.rs `_ => None`), AND `concrete_type_for_expr`'s MethodCall arm has
-/// no fallback for a user method's declared return — so `x`'s type NEVER stamps,
-/// the drop-plan emits an UNTYPED `DropCall`, and `dispatch_user_drop`
-/// (trait_object_ops.rs:766) resolves no drop fn from a `None` type name: `Conn`'s
-/// `drop()` NEVER RUNS at scope exit, in USER code identically to generated. The
-/// D6 flag (`local_drop_kind`) faithfully mirrors that leaking emission — it
-/// correctly does NOT fire because there is no discharged drop obligation to
-/// protect. Un-ignore ONLY after the RAII gap is fixed (extend
-/// `initializer_call_return_drop_type` to resolve a MethodCall's declared return
-/// the way method dispatch does — the single-authority fix that makes emission
-/// run `Conn::drop` AND makes this D6 pin fire). See the supervisor finding.
+/// local is UNANNOTATED and initialized by a method call (`let x = p.acquire()`)
+/// whose return type is a `Drop` type. History: this pin masked the pre-rework
+/// HIGH, then (once the scaffold compiled) EXPOSED a pre-existing RAII emission
+/// hole — `initializer_call_return_drop_type` re-armed only `FunctionCall`, so a
+/// `MethodCall`-returned Drop value never ran `drop()` (an UNTYPED `DropCall`),
+/// in USER code identically to generated. That inherited RAII gap is now
+/// REPAIRED (the MethodCall arm in `initializer_call_return_drop_type`,
+/// helpers.rs): the drop-plan stamps `x`'s type via its single authority, so
+/// `Conn::drop` runs at scope exit AND `local_drop_kind` resolves — the D6 gate
+/// sees the drop-obligated local across the `await` and REJECTS. The runtime
+/// half is pinned independently by the `auto_drop` user-code tests.
 #[test]
-#[ignore = "exposes a pre-existing RAII emission hole (method-call-returned Drop values never run drop()); un-ignore after the initializer_call_return_drop_type MethodCall fix — see the docstring + supervisor finding"]
 fn battery_row10b_d6_inferred_method_call_drop_local_across_suspension_rejects_atomically() {
-    assert_generated_install_rejected(&d6_program(
-        r#"async method run() -> int \{ let p: Pool = Pool \{ n: 0 \}; let x = p.acquire(); await tick(); x.id \}"#,
-    ));
+    assert_generated_install_rejected(
+        &d6_program(
+            r#"async method run() -> int \{ let p: Pool = Pool \{ n: 0 \}; let x = p.acquire(); await tick(); x.id \}"#,
+        ),
+        // Same NEW C0922 as the sibling firing pin; now that the inherited RAII
+        // gap is repaired, `x`'s drop obligation is discharged so D6 fires here
+        // too (this pin was `#[ignore]`'d while the gap was open).
+        "[C0922]",
+    );
 }
 
 /// CONTROL (no drop-obligated local) — the SAME async body with the `Conn`
