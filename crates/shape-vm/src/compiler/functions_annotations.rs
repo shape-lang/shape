@@ -50,6 +50,10 @@ mod c2_slice2_battery_tests;
 #[path = "functions_annotations/c2_slice4_edit_tests.rs"]
 mod c2_slice4_edit_tests;
 
+#[cfg(test)]
+#[path = "functions_annotations/e2_slice0_spike_tests.rs"]
+mod e2_slice0_spike_tests;
+
 /// ADR-009 E3 (slice S3, legacy class U11): the TYPED capability a `replace
 /// body` replacement reaches through `ctx.original`. It replaces the deleted
 /// name-encoded `__original__` alias: the pre-annotation body is compiled into
