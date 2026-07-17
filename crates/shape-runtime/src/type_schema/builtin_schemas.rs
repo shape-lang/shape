@@ -10,6 +10,9 @@ use super::field_types::FieldType;
 use super::registry::{TypeSchemaBuilder, TypeSchemaRegistry};
 use crate::comptime_reflection::FrozenTypeCategory;
 
+mod generated_capture;
+pub use generated_capture::COMPTIME_CAPTURE_DESCRIPTOR_SCHEMA;
+
 /// Unspellable schema identity for compiler-issued comptime `TypeRef` values.
 /// The SOH prefix cannot occur in a Shape identifier, so source code cannot
 /// construct a lookalike nominal carrier.
@@ -486,8 +489,8 @@ pub fn register_builtin_schemas(registry: &mut TypeSchemaRegistry) -> BuiltinSch
     );
 
     // `FrozenNever`: zero-field marker descriptor.
-    let _comptime_frozen_never = TypeSchemaBuilder::new(COMPTIME_FROZEN_NEVER_SCHEMA)
-        .register(registry);
+    let _comptime_frozen_never =
+        TypeSchemaBuilder::new(COMPTIME_FROZEN_NEVER_SCHEMA).register(registry);
 
     // `FrozenErased`: the bound-set array only. Bounds are reachable today
     // solely as the empty set (`any`); trait-bound elements arrive with
@@ -613,6 +616,8 @@ pub fn register_builtin_schemas(registry: &mut TypeSchemaRegistry) -> BuiltinSch
         .int_field("returns_identity_high")
         .int_field("returns_identity_low")
         .register(registry);
+
+    generated_capture::register(registry);
 
     // -- ADR-009 B5 (Stage 2, Dec 55-59): nominal-shape descriptors -----------
     //
@@ -1023,7 +1028,9 @@ mod tests {
         assert!(callable.get_field("returns_identity_high").is_some());
         assert!(callable.get_field("returns_identity_low").is_some());
 
-        let param_descriptor = registry.get(COMPTIME_FROZEN_PARAM_DESCRIPTOR_SCHEMA).unwrap();
+        let param_descriptor = registry
+            .get(COMPTIME_FROZEN_PARAM_DESCRIPTOR_SCHEMA)
+            .unwrap();
         assert_eq!(param_descriptor.field_count(), 4);
         assert!(param_descriptor.get_field("type_identity_high").is_some());
         assert!(param_descriptor.get_field("type_identity_low").is_some());

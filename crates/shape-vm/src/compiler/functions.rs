@@ -1,11 +1,13 @@
 //! Function and closure compilation
 
 use crate::bytecode::{Instruction, OpCode, Operand};
-use shape_ast::ast::{Expr, FunctionDef, Item, Span, Spanned, Statement};
+use shape_ast::ast::{Expr, FunctionDef, FunctionParameter, Item, Span, Spanned, Statement};
 use shape_ast::error::{ErrorNote, Result, ShapeError, SourceLocation};
 use std::collections::{HashMap, HashSet};
 
 use super::{BytecodeCompiler, ParamPassMode};
+
+mod body_analysis;
 
 /// Bridge from an LSDS [`shape_diagnostics::Diagnostic`] to a
 /// [`ShapeError::SemanticError`].
@@ -379,6 +381,25 @@ impl BytecodeCompiler {
             .collect()
     }
 
+    fn inferred_reference_optimizations(
+        params: &[FunctionParameter],
+        effective_pass_modes: &[ParamPassMode],
+    ) -> Vec<Option<ParamPassMode>> {
+        assert_eq!(
+            params.len(),
+            effective_pass_modes.len(),
+            "parameter provenance must stay slot-aligned with effective pass modes"
+        );
+        params
+            .iter()
+            .zip(effective_pass_modes.iter().copied())
+            .map(|(param, mode)| {
+                (mode.is_reference() && !param.is_reference && !param.is_mut_reference)
+                    .then_some(mode)
+            })
+            .collect()
+    }
+
     pub(super) fn effective_function_like_pass_modes(
         &self,
         name: Option<&str>,
@@ -609,7 +630,7 @@ impl BytecodeCompiler {
 
     fn param_annotation_for_destructure_context(
         &self,
-        func_def: &FunctionDef,
+        semantic_owner_key: &str,
         param_idx: usize,
         param: &shape_ast::ast::FunctionParameter,
     ) -> Option<shape_ast::ast::TypeAnnotation> {
@@ -618,7 +639,7 @@ impl BytecodeCompiler {
         }
 
         let shape_runtime::type_system::Type::Function { params, .. } =
-            self.inference_facts.function_signature(&func_def.name)?
+            self.inference_facts.function_signature(semantic_owner_key)?
         else {
             return None;
         };
@@ -665,7 +686,7 @@ impl BytecodeCompiler {
 
     fn seed_param_destructure_context(
         &mut self,
-        func_def: &FunctionDef,
+        semantic_owner_key: &str,
         param_idx: usize,
         param: &shape_ast::ast::FunctionParameter,
     ) {
@@ -673,7 +694,11 @@ impl BytecodeCompiler {
         self.last_expr_type_info = None;
 
         let Some(annotation) =
-            self.param_annotation_for_destructure_context(func_def, param_idx, param)
+            self.param_annotation_for_destructure_context(
+                semantic_owner_key,
+                param_idx,
+                param,
+            )
         else {
             return;
         };
@@ -805,7 +830,24 @@ impl BytecodeCompiler {
         if deferring_template {
             self.deferring_uninstantiated_template_body = true;
         }
-        let result = self.compile_function_inner(func_def);
+        // ADR-009 C1 slice 4 / #53: `compile_function_body` isolates this
+        // slot-keyed map for the nested function, but its many established
+        // diagnostic `?` exits predate that state and do not all run the
+        // body's success cleanup. Keep one outer all-exit restoration point so
+        // a rejected closure body can never leak inherited capture evidence
+        // into a later compilation that reuses the same local ordinal.
+        let saved_inherited_capture_parameter_evidence =
+            self.inherited_capture_parameter_evidence.clone();
+        // Reference-flow state has the same all-exit requirement. The
+        // transaction also refuses successful module representation effects
+        // until callable effect summaries exist.
+        let result = self.with_callable_reference_flow_transaction(
+            &func_def.name,
+            func_def.name_span,
+            |compiler| compiler.compile_function_inner(func_def),
+        );
+        self.inherited_capture_parameter_evidence =
+            saved_inherited_capture_parameter_evidence;
         self.deferring_uninstantiated_template_body = saved_deferring_template;
         result
     }
@@ -816,6 +858,14 @@ impl BytecodeCompiler {
             Some(&effective_def.name),
             &effective_def.params,
             Some(&effective_def.body),
+        );
+        // Preserve the original declaration boundary before effective pass
+        // modes rewrite the cloned parameter flags. This slot-aligned value is
+        // the only authority for distinguishing an inferred reference
+        // optimization from an explicit shared/exclusive reference parameter.
+        let inferred_reference_optimizations = Self::inferred_reference_optimizations(
+            &func_def.params,
+            &effective_pass_modes,
         );
         for (idx, param) in effective_def.params.iter_mut().enumerate() {
             let effective_mode = effective_pass_modes
@@ -847,7 +897,10 @@ impl BytecodeCompiler {
             // against the body through the ordinary type-analysis path.
             let sig_params_before = effective_def.params.clone();
             let sig_return_before = effective_def.return_type.clone();
-            if self.execute_comptime_handlers(&mut effective_def)? {
+            if self.execute_comptime_handlers(
+                &mut effective_def,
+                &inferred_reference_optimizations,
+            )? {
                 // Track removed functions so call sites produce a clear error
                 // instead of jumping to an invalid entry point (stack overflow).
                 self.removed_functions.insert(effective_def.name.clone());
@@ -865,216 +918,7 @@ impl BytecodeCompiler {
         // synchronized with the final post-directive function shape.
         self.refresh_function_signature_metadata(&effective_def)?;
 
-        // Lower every compiled function to MIR and run the shared borrow analysis.
-        // MIR borrow analysis is the primary authority for functions with clean
-        // lowering (no fallbacks). When authoritative, the lexical borrow checker
-        // calls in helpers.rs are skipped. For functions where MIR lowering had
-        // fallbacks, the lexical checker remains the active fallback.
-        let fn_return_types = self.build_fn_return_type_seed();
-        let unit_variant_names = self.build_unit_variant_name_seed();
-        let mir_lowering = crate::mir::lowering::lower_function_detailed_with_returns_and_variants(
-            &effective_def.name,
-            &effective_def.params,
-            &effective_def.body,
-            effective_def.name_span,
-            fn_return_types,
-            unit_variant_names,
-        );
-        let callee_summaries =
-            self.build_callee_summaries(Some(&effective_def.name), &mir_lowering.all_local_names);
-        let borrow_analysis_options = crate::mir::solver::BorrowAnalysisOptions {
-            allow_return_slot_local_escape_promotion: effective_def
-                .return_type
-                .as_ref()
-                .map(|ann| matches!(ann, shape_ast::ast::TypeAnnotation::Borrow { .. }))
-                .unwrap_or(false),
-        };
-        let mut mir_analysis = crate::mir::solver::analyze_with_options(
-            &mir_lowering.mir,
-            &callee_summaries,
-            borrow_analysis_options,
-        );
-        mir_analysis.mutability_errors =
-            crate::mir::lowering::compute_mutability_errors(&mir_lowering);
-        crate::mir::repair::attach_repairs(&mut mir_analysis, &mir_lowering.mir);
-        // MIR is the sole authority for borrow checking. Span-granular error
-        // filtering: when lowering had fallbacks, only suppress errors whose span
-        // overlaps a fallback span. Errors in cleanly-lowered regions pass through.
-        let first_mutability_error = if mir_lowering.fallback_spans.is_empty() {
-            mir_analysis.mutability_errors.first().cloned()
-        } else {
-            mir_analysis
-                .mutability_errors
-                .iter()
-                .find(|e| !Self::span_overlaps_any(&e.span, &mir_lowering.fallback_spans))
-                .cloned()
-        };
-        let first_mir_error = if mir_lowering.fallback_spans.is_empty() {
-            mir_analysis.errors.first().cloned()
-        } else {
-            mir_analysis
-                .errors
-                .iter()
-                .find(|e| !Self::span_overlaps_any(&e.span, &mir_lowering.fallback_spans))
-                .cloned()
-        };
-        if let Some(summary) = mir_analysis.return_reference_summary.clone() {
-            self.function_return_reference_summaries
-                .insert(effective_def.name.clone(), summary.into());
-        } else {
-            self.function_return_reference_summaries
-                .remove(&effective_def.name);
-        }
-        // Run storage planning pass: decide Direct / UniqueHeap / SharedCow / Reference
-        // for each MIR slot based on closure captures, aliasing, and mutation.
-        {
-            let (closure_captures, mutable_captures) =
-                crate::mir::storage_planning::collect_closure_captures(&mir_lowering.mir);
-
-            // Gather binding semantics from the type tracker for each slot.
-            let mut binding_semantics = std::collections::HashMap::new();
-            for slot_idx in 0..mir_lowering.mir.num_locals {
-                if let Some(sem) = self.type_tracker.get_local_binding_semantics(slot_idx) {
-                    binding_semantics.insert(slot_idx, *sem);
-                }
-            }
-
-            let planner_input = crate::mir::storage_planning::StoragePlannerInput {
-                mir: &mir_lowering.mir,
-                analysis: &mir_analysis,
-                binding_semantics: &binding_semantics,
-                closure_captures: &closure_captures,
-                mutable_captures: &mutable_captures,
-                had_fallbacks: mir_lowering.had_fallbacks,
-                callee_summaries: Some(&self.function_borrow_summaries),
-            };
-
-            let storage_plan = crate::mir::storage_planning::plan_storage(&planner_input);
-
-            self.mir_storage_plans
-                .insert(effective_def.name.clone(), storage_plan);
-        }
-
-        // Run field-level definite-initialization and liveness analysis.
-        // This is Phase 2 of the two-phase TypedObject hoisting design:
-        // the AST pre-pass (Phase 1, in compiler_impl_part4.rs) collects
-        // property assignments for initial schema sizing, and this MIR
-        // analysis validates initialization flow and detects dead fields.
-        let field_cfg = crate::mir::cfg::ControlFlowGraph::build(&mir_lowering.mir);
-        let mut field_analysis = crate::mir::field_analysis::analyze_fields(
-            &crate::mir::field_analysis::FieldAnalysisInput {
-                mir: &mir_lowering.mir,
-                cfg: &field_cfg,
-            },
-        );
-
-        // Populate hoisting_recommendations from field names (MIR-authoritative).
-        // Dead fields are pruned: if a field is written but never read, it's
-        // excluded from the recommendation (schema compaction).
-        for (slot_id, field_indices) in &field_analysis.hoisted_fields {
-            let recommendations: Vec<(crate::mir::FieldIdx, String)> = field_indices
-                .iter()
-                .filter(|idx| !field_analysis.dead_fields.contains(&(*slot_id, **idx)))
-                .filter_map(|idx| {
-                    mir_lowering
-                        .field_names
-                        .get(idx)
-                        .map(|name| (*idx, name.clone()))
-                })
-                .collect();
-            if !recommendations.is_empty() {
-                field_analysis
-                    .hoisting_recommendations
-                    .insert(*slot_id, recommendations);
-            }
-        }
-
-        // Merge MIR-derived hoisted fields into the AST pre-pass hoisted_fields map.
-        // MIR field analysis is authoritative per-function: it refines the AST
-        // pre-pass (which over-hoists conservatively). Dead fields detected by MIR
-        // are excluded from the hoisted list.
-        for (slot_id, field_indices) in &field_analysis.hoisted_fields {
-            if let Some(binding) = mir_lowering
-                .binding_infos
-                .iter()
-                .find(|b| b.slot == *slot_id)
-            {
-                let var_name = &binding.name;
-                let field_names: Vec<String> = field_indices
-                    .iter()
-                    // Prune dead fields from hoisted list (schema compaction)
-                    .filter(|idx| !field_analysis.dead_fields.contains(&(*slot_id, **idx)))
-                    .filter_map(|idx| mir_lowering.field_names.get(idx))
-                    .cloned()
-                    .collect();
-                if !field_names.is_empty() {
-                    // For function scope, use MIR list as authoritative (replace, don't merge)
-                    self.hoisted_fields.insert(var_name.clone(), field_names);
-                }
-            }
-        }
-
-        self.mir_field_analyses
-            .insert(effective_def.name.clone(), field_analysis);
-
-        // Build span→point mapping for ownership decision lookups.
-        // This lets the bytecode compiler translate AST spans (which it knows
-        // at expression compile time) into MIR Points (which the ownership
-        // decision API expects).
-        {
-            let mut span_to_point = HashMap::new();
-            for block in mir_lowering.mir.iter_blocks() {
-                for stmt in &block.statements {
-                    span_to_point.entry(stmt.span).or_insert(stmt.point);
-                }
-            }
-            self.mir_span_to_point
-                .insert(effective_def.name.clone(), span_to_point);
-        }
-
-        // Extract and store borrow summary for interprocedural alias checking.
-        // Thread previously-computed return-ownership modes into the inference
-        // pass so call-through functions (fn wrap() { make() }) can inherit
-        // their callee's mode instead of falling back to Unknown.
-        let callee_return_modes = self.build_callee_return_modes(Some(&effective_def.name));
-        let borrow_summary = crate::mir::solver::extract_borrow_summary_with_callees(
-            &mir_lowering.mir,
-            mir_analysis.return_reference_summary.clone(),
-            &callee_return_modes,
-        );
-        let has_informative_summary = !borrow_summary.conflict_pairs.is_empty()
-            || borrow_summary.return_summary.is_some()
-            || borrow_summary.return_ownership_mode != crate::mir::ReturnOwnershipMode::Unknown
-            // Any non-escaping closure-param bit is useful for the storage
-            // planner (Closure Spec Phase B).
-            || borrow_summary.closure_param_escapes.iter().any(|escapes| !escapes);
-        if has_informative_summary {
-            self.function_borrow_summaries
-                .insert(effective_def.name.clone(), borrow_summary);
-        } else {
-            self.function_borrow_summaries.remove(&effective_def.name);
-        }
-
-        // Interprocedural alias checking: scan call sites in this function's MIR
-        // for argument aliasing conflicts using stored callee summaries.
-        let alias_errors =
-            self.check_call_site_aliasing(&mir_lowering.mir, &mir_lowering.fallback_spans);
-        let first_alias_error = alias_errors.first().cloned();
-        mir_analysis.errors.extend(alias_errors);
-
-        self.mir_functions
-            .insert(effective_def.name.clone(), mir_lowering.mir);
-        self.mir_borrow_analyses
-            .insert(effective_def.name.clone(), mir_analysis);
-        if let Some(error) = first_mutability_error.as_ref() {
-            return Err(self.mir_mutability_error(error));
-        }
-        if let Some(error) = first_mir_error.as_ref() {
-            return Err(self.mir_borrow_error(error));
-        }
-        if let Some(error) = first_alias_error.as_ref() {
-            return Err(self.mir_borrow_error(error));
-        }
+        self.analyze_function_body(&effective_def)?;
 
         // Enable __* builtin access only for stdlib-origin functions
         // (or preserve if an enclosing stdlib compilation context already enabled it).
@@ -1087,6 +931,11 @@ impl BytecodeCompiler {
 
         // Check for annotation-based wrapping BEFORE compiling
         let annotations = self.find_compiled_annotations(&effective_def);
+        let body_pass_modes = self.effective_function_like_pass_modes(
+            Some(&effective_def.name),
+            &effective_def.params,
+            Some(&effective_def.body),
+        );
         // WF-1A Item 3 (anno-jit-parity): the runtime before/after hooks are
         // woven into the function's OWN bytecode by `compile_wrapped_function`
         // / `compile_chained_annotations` below, NOT into a separate wrapper
@@ -1108,11 +957,21 @@ impl BytecodeCompiler {
             self.compile_wrapped_function(
                 &effective_def,
                 annotations.into_iter().next().expect("checked len == 1"),
+                &inferred_reference_optimizations,
+                &body_pass_modes,
             )?;
         } else if annotations.len() > 1 {
-            self.compile_chained_annotations(&effective_def, annotations)?;
+            self.compile_chained_annotations(
+                &effective_def,
+                annotations,
+                &inferred_reference_optimizations,
+                &body_pass_modes,
+            )?;
         } else {
-            self.compile_function_body(&effective_def)?;
+            self.compile_function_body_with_inferred_reference_optimizations(
+                &effective_def,
+                &inferred_reference_optimizations,
+            )?;
         }
 
         // Restore previous flag (safe for nested compilation).
@@ -1745,8 +1604,16 @@ impl BytecodeCompiler {
         Ok(())
     }
 
-    /// Core function body compilation (shared by normal functions and ___impl functions)
-    pub(super) fn compile_function_body(&mut self, func_def: &FunctionDef) -> Result<()> {
+    pub(super) fn compile_function_body_with_inferred_reference_optimizations(
+        &mut self,
+        func_def: &FunctionDef,
+        inferred_reference_optimizations: &[Option<ParamPassMode>],
+    ) -> Result<()> {
+        assert_eq!(
+            func_def.params.len(),
+            inferred_reference_optimizations.len(),
+            "parameter provenance must stay slot-aligned through body compilation"
+        );
         // Find function index
         let func_idx = self
             .program
@@ -1797,14 +1664,6 @@ impl BytecodeCompiler {
         // binding inside the nested function).
         let saved_local_callable_closure_bodies =
             std::mem::take(&mut self.local_callable_closure_bodies);
-        let saved_reference_value_locals = std::mem::take(&mut self.reference_value_locals);
-        let saved_exclusive_reference_value_locals =
-            std::mem::take(&mut self.exclusive_reference_value_locals);
-        let saved_reference_value_local_referent_concrete_type =
-            std::mem::take(&mut self.reference_value_local_referent_concrete_type);
-        let saved_reference_value_module_bindings = self.reference_value_module_bindings.clone();
-        let saved_exclusive_reference_value_module_bindings =
-            self.exclusive_reference_value_module_bindings.clone();
         let saved_comptime_mode = self.comptime_mode;
         let saved_drop_locals = std::mem::take(&mut self.drop_locals);
         // Phase V1.1C fix: the ownership-aware drop-local scope stack must be
@@ -1823,6 +1682,14 @@ impl BytecodeCompiler {
         // scope (parallel to the ownership/boxed restoration above).
         let saved_shared_locals = std::mem::take(&mut self.shared_locals);
         let saved_shared_drop_locals = std::mem::take(&mut self.shared_drop_locals);
+        // ADR-009 C1 slice 4: inherited capture parameters carry
+        // function-local slot evidence. Isolate it exactly like the other
+        // per-function slot maps, then consume the one-shot descriptor vector
+        // supplied by `compile_expr_closure` for this closure body.
+        let saved_inherited_capture_parameter_evidence =
+            std::mem::take(&mut self.inherited_capture_parameter_evidence);
+        let incoming_closure_capture_parameter_evidence =
+            self.pending_closure_capture_parameter_evidence.take();
         // ADR-006 §2.7.30.4 (escape-Drop-deferral, closure-capture arm): the
         // escaping-closure capture skip-set is keyed by frame-local slot
         // index, so it must be isolated per function — a capture skip for a
@@ -1888,10 +1755,14 @@ impl BytecodeCompiler {
 
         // Set up isolated locals for function compilation
         self.current_function = Some(func_idx);
+        let semantic_owner_key = self
+            .current_body_semantic_owner_key()
+            .unwrap_or(&func_def.name)
+            .to_string();
         self.current_function_is_async = func_def.is_async;
         self.current_function_return_reference_summary = self
             .function_return_reference_summaries
-            .get(&func_def.name)
+            .get(&semantic_owner_key)
             .cloned();
         // ADR-006 §2.7.30 (FlipLive): record whether this function declares a
         // `&T` / `&mut T` return so the `Statement::Return` + implicit-return
@@ -1924,9 +1795,6 @@ impl BytecodeCompiler {
         self.local_callable_pass_modes.clear();
         self.local_callable_return_reference_summaries.clear();
         self.local_callable_closure_bodies.clear();
-        self.reference_value_locals.clear();
-        self.exclusive_reference_value_locals.clear();
-        self.reference_value_local_referent_concrete_type.clear();
         self.immutable_locals.clear();
         self.param_locals.clear();
         // v0.3 WS-6: per-function local ConcreteType facts — local slot
@@ -1955,7 +1823,10 @@ impl BytecodeCompiler {
             self.program.strings.len(),
         ));
 
-        let inferred_modes = self.inferred_param_pass_modes.get(&func_def.name).cloned();
+        let inferred_modes = self
+            .inferred_param_pass_modes
+            .get(&semantic_owner_key)
+            .cloned();
 
         // Bind parameters as locals - destructure each parameter value
         // Parameters arrive in local slots 0, 1, 2, ... from caller
@@ -1975,7 +1846,11 @@ impl BytecodeCompiler {
                 });
 
             if param.pattern.as_identifier().is_none() {
-                self.seed_param_destructure_context(func_def, idx, param);
+                self.seed_param_destructure_context(
+                    &semantic_owner_key,
+                    idx,
+                    param,
+                );
             }
 
             // Load parameter value from its slot
@@ -2093,7 +1968,7 @@ impl BytecodeCompiler {
                         // resolves. The field types are inference output,
                         // never fabricated.
                         let object_fields = self.inferred_param_object_fields_from_facts(
-                            &func_def.name,
+                            &semantic_owner_key,
                             func_def,
                             idx,
                         );
@@ -2137,8 +2012,11 @@ impl BytecodeCompiler {
                         // text is unavailable, there is no source-level audit
                         // here, so by-value unannotated params are left at the
                         // global fact and the template remains deferrable.
-                        let global_inferred =
-                            self.inferred_param_type_name_from_facts(&func_def.name, func_def, idx);
+                        let global_inferred = self.inferred_param_type_name_from_facts(
+                            &semantic_owner_key,
+                            func_def,
+                            idx,
+                        );
                         let body_local_inferred =
                             crate::compiler::expressions::closures::infer_param_type_from_body(
                                 name,
@@ -2159,7 +2037,7 @@ impl BytecodeCompiler {
                                     ),
                                 ) if param.is_reference
                                     || self.direct_callsite_param_evidence_is_integer_only(
-                                        &func_def.name,
+                                        &semantic_owner_key,
                                         idx,
                                         name,
                                     ) =>
@@ -2197,7 +2075,7 @@ impl BytecodeCompiler {
                             // re-parse of the param's tracker `type_name` string.
                             if let Some(shape_value::v2::ConcreteType::Array(elem)) = self
                                 .inferred_param_concrete_type_from_facts(
-                                    &func_def.name,
+                                    &semantic_owner_key,
                                     func_def,
                                     idx,
                                 )
@@ -2236,27 +2114,30 @@ impl BytecodeCompiler {
             }
         }
 
+        // ADR-009 C1 slice 4 / #53: preserve outer-pack Shared storage on the
+        // synthetic capture parameters through the one capture-plan authority.
+        self.install_inherited_capture_parameter_evidence(
+            &func_def.name,
+            &func_def.params,
+            self.program.functions[func_idx].captures_count as usize,
+            incoming_closure_capture_parameter_evidence,
+        )?;
+
         // Mark reference parameters in ref_locals so identifier/assignment compilation
         // emits DerefLoad/DerefStore/SetIndexRef instead of LoadLocal/StoreLocal/SetLocalIndex.
         // Also track which ref_locals were INFERRED (not explicitly declared) so that
         // closure capture can distinguish true borrows from pass-by-ref optimizations.
         for (idx, param) in func_def.params.iter().enumerate() {
-            if param.is_reference {
+            if param.is_reference || param.is_mut_reference {
                 self.ref_locals.insert(idx as u16);
                 if param.is_mut_reference {
                     self.exclusive_ref_locals.insert(idx as u16);
                 }
-                // A param is "inferred ref" if it has no type annotation and no explicit
-                // mut reference — the compiler's pass-mode inference set is_reference.
-                let was_inferred = param.type_annotation.is_none()
-                    && !param.is_mut_reference
-                    && inferred_modes
-                        .as_ref()
-                        .and_then(|modes| modes.get(idx))
-                        .map_or(false, |mode| mode.is_reference());
-                if was_inferred {
-                    self.inferred_ref_locals.insert(idx as u16);
-                }
+            }
+            let was_inferred = inferred_reference_optimizations[idx]
+                .is_some_and(ParamPassMode::is_reference);
+            if was_inferred {
+                self.inferred_ref_locals.insert(idx as u16);
             }
         }
 
@@ -2443,17 +2324,19 @@ impl BytecodeCompiler {
                         self.boxed_locals = saved_boxed_locals;
                         self.shared_locals = saved_shared_locals;
                         self.shared_drop_locals = saved_shared_drop_locals;
+                        self.inherited_capture_parameter_evidence =
+                            saved_inherited_capture_parameter_evidence;
                         self.closure_escape_drop_skip_locals =
                             saved_closure_escape_drop_skip_locals;
                         self.closure_binding_capture_drop_locals =
                             saved_closure_binding_capture_drop_locals;
                         self.closure_capture_drop_locals = saved_closure_capture_drop_locals;
                         self.captured_let_mut_moved = saved_captured_let_mut_moved;
+                        self.pop_scope();
                         self.type_tracker
                             .restore_local_binding_semantics(saved_local_binding_semantics);
                         self.param_locals = saved_param_locals;
                         self.current_function_params = saved_function_params;
-                        self.pop_scope();
                         // Sweep phase 3c.1: restore outer-function local
                         // types AFTER pop_scope. pop_scope reads from
                         // local_type_scopes to evict matching local_types
@@ -2479,15 +2362,6 @@ impl BytecodeCompiler {
                         // compile completes.
                         self.local_callable_closure_bodies =
                             saved_local_callable_closure_bodies.clone();
-                        self.reference_value_locals = saved_reference_value_locals;
-                        self.exclusive_reference_value_locals =
-                            saved_exclusive_reference_value_locals;
-                        self.reference_value_local_referent_concrete_type =
-                            saved_reference_value_local_referent_concrete_type;
-                        self.reference_value_module_bindings =
-                            saved_reference_value_module_bindings;
-                        self.exclusive_reference_value_module_bindings =
-                            saved_exclusive_reference_value_module_bindings;
                         self.comptime_mode = saved_comptime_mode;
                         self.current_function_return_reference_summary =
                             saved_current_function_return_reference_summary;
@@ -2583,14 +2457,16 @@ impl BytecodeCompiler {
         self.boxed_locals = saved_boxed_locals;
         self.shared_locals = saved_shared_locals;
         self.shared_drop_locals = saved_shared_drop_locals;
+        self.inherited_capture_parameter_evidence =
+            saved_inherited_capture_parameter_evidence;
         self.closure_escape_drop_skip_locals = saved_closure_escape_drop_skip_locals;
         self.closure_binding_capture_drop_locals = saved_closure_binding_capture_drop_locals;
         self.closure_capture_drop_locals = saved_closure_capture_drop_locals;
         self.captured_let_mut_moved = saved_captured_let_mut_moved;
+        self.pop_scope();
         self.type_tracker
             .restore_local_binding_semantics(saved_local_binding_semantics);
         self.current_function_params = saved_function_params;
-        self.pop_scope();
         // Sweep phase 3c.1: restore outer-function local types AFTER
         // pop_scope (see early-return path comment).
         self.type_tracker.restore_local_types(saved_local_types);
@@ -2608,13 +2484,6 @@ impl BytecodeCompiler {
             saved_local_callable_return_reference_summaries;
         // cluster-2-cw-IB-class-b: restore retained closure bodies.
         self.local_callable_closure_bodies = saved_local_callable_closure_bodies;
-        self.reference_value_locals = saved_reference_value_locals;
-        self.exclusive_reference_value_locals = saved_exclusive_reference_value_locals;
-        self.reference_value_local_referent_concrete_type =
-            saved_reference_value_local_referent_concrete_type;
-        self.reference_value_module_bindings = saved_reference_value_module_bindings;
-        self.exclusive_reference_value_module_bindings =
-            saved_exclusive_reference_value_module_bindings;
         self.comptime_mode = saved_comptime_mode;
         self.current_function_return_reference_summary =
             saved_current_function_return_reference_summary;
@@ -2701,6 +2570,10 @@ fn arg_root_slot(
 
     operand_root_slot(op, &alias_roots)
 }
+
+#[cfg(test)]
+#[path = "functions/reference_provenance_tests.rs"]
+mod reference_provenance_tests;
 
 #[cfg(test)]
 mod param_destructure_tests {

@@ -1,5 +1,8 @@
 use super::*;
 
+mod closure_layouts;
+mod graph_annotation_lifecycle;
+
 impl BytecodeCompiler {
     fn native_auto_symbol_part(name: &str) -> String {
         let mut out = String::with_capacity(name.len());
@@ -1441,31 +1444,9 @@ impl BytecodeCompiler {
     /// `unknown` is treated as not-concrete anywhere in the annotation tree so
     /// we never seed a param from a fabricated type like `Array<unknown>`.
     fn annotation_is_unknown(ann: &shape_ast::ast::TypeAnnotation) -> bool {
-        use shape_ast::ast::TypeAnnotation;
-        match ann {
-            TypeAnnotation::Basic(n) => n == "unknown",
-            TypeAnnotation::Reference(path) => path.to_string() == "unknown",
-            TypeAnnotation::Array(inner) | TypeAnnotation::Borrow { inner, .. } => {
-                Self::annotation_is_unknown(inner)
-            }
-            TypeAnnotation::Tuple(items)
-            | TypeAnnotation::Union(items)
-            | TypeAnnotation::Intersection(items) => items.iter().any(Self::annotation_is_unknown),
-            TypeAnnotation::Object(fields) => fields
-                .iter()
-                .any(|field| Self::annotation_is_unknown(&field.type_annotation)),
-            TypeAnnotation::Function { params, returns } => {
-                params
-                    .iter()
-                    .any(|param| Self::annotation_is_unknown(&param.type_annotation))
-                    || Self::annotation_is_unknown(returns)
-            }
-            TypeAnnotation::Generic { name, args } => {
-                name.to_string() == "unknown" || args.iter().any(Self::annotation_is_unknown)
-            }
-            TypeAnnotation::Dyn(paths) => paths.iter().any(|path| path.to_string() == "unknown"),
-            _ => false,
-        }
+        crate::compiler::comptime_builtins::semantic_freeze::annotation_has_lossy_unknown_sentinel(
+            ann,
+        )
     }
 
     pub(super) fn inferred_param_concrete_type_from_facts(
@@ -1999,6 +1980,8 @@ impl BytecodeCompiler {
     /// `generated_symbol_query()` — the ONE query API of spec §4.1, never a
     /// second evaluator.
     pub fn compile_in_place(&mut self, program: &Program) -> Result<()> {
+        self.ensure_annotation_compiler_usable()?;
+
         // First: desugar the program (converts FromQuery to method chains, etc.)
         let mut program = program.clone();
         shape_ast::transform::desugar_program(&mut program);
@@ -2024,6 +2007,12 @@ impl BytecodeCompiler {
         shape_ast::transform::rebind_named_args(&mut program)?;
 
         self.reject_user_internal_intrinsic_calls(&program)?;
+
+        // Imported comptime annotations participate in declaration discovery,
+        // which runs before the ordinary pass-2 import items. Register only
+        // their semantic aliases now, as one validated transaction. Runtime
+        // import bindings and blob permission metadata remain in pass 2.
+        self.pre_register_root_annotation_imports(&program)?;
 
         // Wave 1a PART A: bidirectional inference for let-bound closures.
         // A `let f = |a, b| a + b` compiles the closure body EAGERLY at the
@@ -2340,6 +2329,7 @@ impl BytecodeCompiler {
         for item in &program.items {
             self.register_item_functions(item)?;
         }
+        self.prepare_annotation_scope(&program.items)?;
 
         // (WS-9b struct-schema predeclare + ADR-009 freeze-input predeclare +
         // the semantic-freeze barrier ran earlier, before the §4.5.1
@@ -2972,90 +2962,9 @@ impl BytecodeCompiler {
         }
         self.program.function_local_concrete_types = per_fn;
 
-        // Closure-spec Phase H1: build a `function_id → ClosureLayout` side
-        // table for the JIT worker. `emit_heap_closure` consumes this to lay
-        // out captures at their natural-width offsets without going through
-        // the `jit_make_closure` FFI. Closure spec §14.6 (H6.5) moves this
-        // ABOVE `build_content_addressed_program` so the layouts propagate
-        // through the `ContentAddressedProgram` → `LinkedProgram` →
-        // `BytecodeProgram` path into the VM's producer.
-        //
-        // Track A.1C.2: the compiler derives per-capture `CaptureKind`s
-        // from the source binding form (see `compile_expr_closure`) and
-        // stores them in `closure_capture_kinds`. For each closure literal
-        // we rebuild the layout so the `capture_kinds` vector reflects
-        // those kinds AND the `owned_mutable_capture_mask` /
-        // `shared_capture_mask` bits are flipped for the corresponding
-        // capture indices. `op_make_closure` reads those masks to pick
-        // the per-capture allocation discipline:
-        //   * `CaptureKind::Immutable`   — write the capture bits as-is
-        //     at the typed offset.
-        //   * `CaptureKind::OwnedMutable` — `Box::into_raw` a fresh
-        //     `Box<ValueWord>` around the stack value, write the pointer.
-        //   * `CaptureKind::Shared`       — the stack value carries the
-        //     raw `*const SharedCell` pointer bits of a previously-
-        //     promoted outer slot. `op_make_closure` does
-        //     `Arc::increment_strong_count` to give the closure its own
-        //     refcount share, then writes the same pointer.
-        //
-        // This was gated to "masks stay zero" during A.1C partial so the
-        // legacy `HeapValue::Closure + SharedCell` fallback could keep
-        // running while the compiler migration was incomplete. With
-        // A.1C.2 rerouting the outer-scope var lifecycle onto
-        // `AllocSharedLocal` / `LoadSharedLocal` / `StoreSharedLocal` /
-        // `DropSharedLocal` and the closure-body reads/writes onto
-        // `Load/StoreSharedCapture` and `Load/StoreOwnedMutableCapture`,
-        // the Raw-path guard can flip bits freely — there is no longer
-        // any SharedCell-wrapped ValueWord sitting on the stack at
-        // closure-creation time.
-        {
-            use shape_value::v2::closure_layout::{CaptureKind, ClosureLayout};
-            let total_fns = self.program.functions.len();
-            let mut layouts: Vec<Option<std::sync::Arc<ClosureLayout>>> = vec![None; total_fns];
-            // Map function index → per-capture CaptureKind vector.
-            let kinds_by_fn: std::collections::HashMap<u16, &Vec<CaptureKind>> = self
-                .closure_capture_kinds
-                .iter()
-                .map(|(fid, kinds)| (*fid, kinds))
-                .collect();
-            for (fn_idx, type_id) in self.closure_type_ids.iter().copied() {
-                if let Some(registry_layout) = self.closure_registry.get(type_id) {
-                    if (fn_idx as usize) < total_fns {
-                        // Track A.1C.3: authoritative per-function kinds.
-                        // Both `Shared` AND `OwnedMutable` captures flip
-                        // their corresponding mask bits; `op_make_closure`
-                        // allocates `Box::into_raw(Box::new(initial))` for
-                        // OwnedMutable slots and `Arc::into_raw(Arc::new(
-                        // parking_lot::Mutex<ValueWord>))` / `Arc::increment_
-                        // strong_count` for Shared slots. Module-binding
-                        // `var` captures (migrated in A.1C.3) are also
-                        // Shared and follow the same closure-side
-                        // allocation discipline; the outer-scope promotion
-                        // emits `AllocSharedModuleBinding` (vs.
-                        // `AllocSharedLocal` for locals).
-                        let per_fn_kinds = kinds_by_fn.get(&fn_idx);
-                        let layout_arc = if let Some(kinds) = per_fn_kinds
-                            && kinds.len() == registry_layout.capture_types.len()
-                        {
-                            let rebuilt = ClosureLayout::from_capture_types(
-                                &registry_layout.capture_types,
-                                kinds,
-                            );
-                            // Preserve the authoritative per-capture
-                            // `capture_kinds` for diagnostics and
-                            // A.1D/E JIT lowering.
-                            let mut rebuilt = rebuilt;
-                            rebuilt.capture_kinds = (*kinds).clone();
-                            std::sync::Arc::new(rebuilt)
-                        } else {
-                            std::sync::Arc::new(registry_layout.clone())
-                        };
-                        layouts[fn_idx as usize] = Some(layout_arc);
-                    }
-                }
-            }
-            self.program.closure_function_layouts = layouts;
-        }
+        // Must precede content-addressed assembly so the layouts propagate to
+        // both VM and JIT program views.
+        self.finalize_closure_function_layouts()?;
 
         // Finalize the __main__ blob and build the content-addressed program.
         self.build_content_addressed_program();
@@ -3133,6 +3042,14 @@ impl BytecodeCompiler {
         self.compile_with_graph_and_prelude(root_program, graph, &[])
     }
 
+    #[cfg(test)]
+    pub(crate) fn compile_graph_dependencies_for_permission_test(
+        &mut self,
+        graph: &crate::module_graph::ModuleGraph,
+    ) -> Result<()> {
+        self.compile_graph_dependency_modules(graph)
+    }
+
     /// Compile with graph and prelude information.
     ///
     /// All modules (including prelude dependencies) compile uniformly
@@ -3142,127 +3059,10 @@ impl BytecodeCompiler {
         mut self,
         root_program: &Program,
         graph: std::sync::Arc<crate::module_graph::ModuleGraph>,
-        _prelude_paths: &[String],
+        prelude_paths: &[String],
     ) -> Result<BytecodeProgram> {
-        use crate::module_graph::ModuleSourceKind;
-
-        self.module_graph = Some(graph.clone());
-
-        // ADR-009 §4.1 (A1 review round 1, findings 1+2): the semantic-freeze
-        // barrier is per COMPILATION UNIT — and on this pipeline the unit is
-        // root + graph dependencies. Phase 1 below compiles dependency
-        // modules, including any comptime site they contain (a top-level
-        // `comptime { }` item, an `Expr::Comptime` in an imported fn body, or
-        // an annotation comptime handler on an imported item), so the barrier
-        // must run BEFORE Phase 1 — the barrier inside `compile()` (Phase 2,
-        // root) alone left every dependency-module comptime site without a
-        // handle (row-3 NO_FREEZE_HANDLE diagnostic). Predeclare the named
-        // freeze inputs (struct schemas, type aliases, enum schemas) of every
-        // graph module under their qualified names — mirroring
-        // `compile_module_from_graph`'s own qualification — then the root's,
-        // then install the single freeze. The freeze reads no function
-        // tables, so running it ahead of body compilation loses nothing;
-        // predeclare registration is idempotent with the pass-2 item arms.
-        // This is the ONE unit barrier, not a per-module re-freeze:
-        // `compile()` skips its install when the graph entry point already
-        // ran it.
-        // ADR-009 (ticket B2, S1): the freeze-input predeclare runs as two
-        // sub-passes over the WHOLE unit (every graph module, then the
-        // root) — all type/trait definitions first, then all impls — so an
-        // impl anywhere in the unit registers with its trait def already
-        // present regardless of source or topo position (see
-        // `SemanticFreezePredeclarePass`). Struct schemas predeclare once,
-        // during the first sub-pass.
-        for pass in [
-            super::statements::SemanticFreezePredeclarePass::TypesAndTraits,
-            super::statements::SemanticFreezePredeclarePass::Impls,
-        ] {
-            for &dep_id in graph.topo_order() {
-                let dep_node = graph.node(dep_id);
-                if !matches!(
-                    dep_node.source_kind,
-                    ModuleSourceKind::ShapeSource | ModuleSourceKind::Hybrid
-                ) {
-                    continue;
-                }
-                let Some(dep_ast) = dep_node.ast.clone() else {
-                    continue;
-                };
-                let module_path = dep_node.canonical_path.clone();
-                self.module_scope_stack.push(module_path.clone());
-                let predeclare_result = (|| -> Result<()> {
-                    for item in &dep_ast.items {
-                        if matches!(item, shape_ast::ast::Item::Import(..)) {
-                            continue;
-                        }
-                        // Only freeze-input-bearing items need qualification
-                        // here (the kinds the two predeclare walks act on);
-                        // skipping the rest avoids deep-cloning every
-                        // imported fn body a second time.
-                        if !Self::item_can_carry_semantic_freeze_inputs(item) {
-                            continue;
-                        }
-                        let qualified = self.qualify_module_item(item, &module_path)?;
-                        if pass == super::statements::SemanticFreezePredeclarePass::TypesAndTraits {
-                            self.predeclare_item_struct_schemas(&qualified);
-                        }
-                        self.predeclare_item_semantic_freeze_inputs(&qualified, pass)?;
-                    }
-                    Ok(())
-                })();
-                self.module_scope_stack.pop();
-                predeclare_result?;
-            }
-            for item in &root_program.items {
-                if pass == super::statements::SemanticFreezePredeclarePass::TypesAndTraits {
-                    self.predeclare_item_struct_schemas(item);
-                }
-                self.predeclare_item_semantic_freeze_inputs(item, pass)?;
-            }
-        }
-        self.install_semantic_freeze()?;
-
-        // Phase 1: Compile dependency modules in topological order.
-        for &dep_id in graph.topo_order() {
-            let dep_node = graph.node(dep_id);
-            match dep_node.source_kind {
-                ModuleSourceKind::NativeModule => {
-                    self.register_graph_imports_for_module(dep_id, &graph)?;
-                }
-                ModuleSourceKind::ShapeSource | ModuleSourceKind::Hybrid => {
-                    self.compile_module_from_graph(dep_id, &graph)?;
-                }
-                ModuleSourceKind::CompiledBytecode => {
-                    // Should have been rejected during graph construction.
-                    return Err(shape_ast::error::ShapeError::ModuleError {
-                        message: format!(
-                            "Module '{}' is only available as pre-compiled bytecode",
-                            dep_node.canonical_path
-                        ),
-                        module_path: None,
-                    });
-                }
-            }
-        }
-
-        // Phase 2: Compile the root module using the graph for its imports.
-        // NOTE: root's imports are registered INSIDE `compile()` after the
-        // `__main__` blob builder starts, so any emitted Load/Store for
-        // namespace-alias bindings (e.g. `use std::core::set` creates a
-        // runtime copy from canonical binding `std::core::set` to alias
-        // binding `set`) lands inside `__main__`. Registering them here —
-        // before `compile()` opens the `__main__` blob — would leave those
-        // instructions in an unreachable gap between module bodies and
-        // `__main__`'s entry point.
-
-        // Strip import items from root program (imports already resolved via graph)
-        let mut stripped_program = root_program.clone();
-        stripped_program
-            .items
-            .retain(|item| !matches!(item, shape_ast::ast::Item::Import(..)));
-
-        // Compile the stripped root program using the standard two-pass pipeline
-        self.compile(&stripped_program)
+        self.compile_with_graph_and_prelude_in_place(root_program, graph, prelude_paths)?;
+        Ok(std::mem::take(&mut self.program))
     }
 
     /// Compile a single module from the graph.
@@ -3282,6 +3082,16 @@ impl BytecodeCompiler {
         };
 
         let module_path = node.canonical_path.clone();
+        let resolved_imports = node.resolved_imports.clone();
+
+        // Permission preflight precedes every borrowed annotation/import state
+        // mutation. The graph lifecycle consumes this pending state on success
+        // or discards it on every later module-compilation error.
+        self.authorize_and_stage_graph_import_permissions(
+            module_id,
+            graph,
+            &resolved_imports,
+        )?;
 
         // All modules compile uniformly through the normal module path.
         // Set allow_internal_builtins for stdlib modules.
@@ -3291,6 +3101,11 @@ impl BytecodeCompiler {
         }
 
         self.module_scope_stack.push(module_path.clone());
+
+        let saved_annotation_semantics = self.annotation_import_semantic_snapshot();
+        let module_annotation_semantics =
+            self.stage_graph_annotation_imports_for_module(&ast, module_id, graph)?;
+        self.restore_annotation_import_semantics(&module_annotation_semantics);
 
         // U4-1: per-module span-table for the engine-served field-read consult.
         //
@@ -3319,7 +3134,11 @@ impl BytecodeCompiler {
         let saved_inference_facts = std::mem::replace(&mut self.inference_facts, module_facts);
 
         // 1. Register this module's imports from the graph
-        self.register_graph_imports_for_module(module_id, graph)?;
+        self.publish_graph_imports_with_annotation_semantics(
+            module_id,
+            graph,
+            &module_annotation_semantics,
+        )?;
 
         // 2. Filter out import statements, qualify remaining items
         let mut qualified_items = Vec::new();
@@ -3334,6 +3153,7 @@ impl BytecodeCompiler {
         for item in &qualified_items {
             self.register_missing_module_items(item)?;
         }
+        self.prepare_annotation_scope(&qualified_items)?;
 
         // 4. Phase 2: Compile function bodies
         self.non_function_mir_context_stack
@@ -3393,6 +3213,7 @@ impl BytecodeCompiler {
 
         self.module_scope_stack.pop();
         self.allow_internal_builtins = prev_allow;
+        self.restore_annotation_import_semantics(&saved_annotation_semantics);
         Ok(())
     }
 

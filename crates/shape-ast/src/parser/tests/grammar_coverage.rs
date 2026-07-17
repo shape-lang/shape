@@ -5,6 +5,7 @@
 
 use super::super::*;
 use crate::error::{Result, ShapeError};
+mod capture_clauses;
 
 /// Helper to parse a full program and return items
 fn parse_items(input: &str) -> Result<Vec<crate::ast::Item>> {

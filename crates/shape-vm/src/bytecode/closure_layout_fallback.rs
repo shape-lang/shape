@@ -171,18 +171,48 @@ fn representative_capture_type(
         | NativeKind::NullableUIntSize => ConcreteType::U64,
         NativeKind::Bool => ConcreteType::Bool,
         NativeKind::String => ConcreteType::String,
-        NativeKind::StringV2 | NativeKind::DecimalV2 | NativeKind::Ptr(_) => match kind {
-            NativeKind::Ptr(
-                HeapKind::Closure
-                | HeapKind::Reference
-                | HeapKind::SharedCell
-                | HeapKind::IoHandle
-                | HeapKind::Future
-                | HeapKind::TaskGroup,
-            ) => {
+        NativeKind::StringV2 | NativeKind::DecimalV2 => {
+            ConcreteType::Pointer(Box::new(ConcreteType::Void))
+        }
+        NativeKind::Ptr(heap_kind) => match heap_kind {
+            HeapKind::Closure
+            | HeapKind::Reference
+            | HeapKind::SharedCell
+            | HeapKind::IoHandle
+            | HeapKind::Future
+            | HeapKind::TaskGroup => {
                 return Err(TransferredClosureLayoutError::UnsupportedCaptureKind { index, kind });
             }
-            _ => ConcreteType::Pointer(Box::new(ConcreteType::Void)),
+            HeapKind::String
+            | HeapKind::TypedObject
+            | HeapKind::Decimal
+            | HeapKind::BigInt
+            | HeapKind::DataTable
+            | HeapKind::TypedArray
+            | HeapKind::Temporal
+            | HeapKind::TableView
+            | HeapKind::Content
+            | HeapKind::Instant
+            | HeapKind::NativeScalar
+            | HeapKind::NativeView
+            | HeapKind::Char
+            | HeapKind::HashMap
+            | HeapKind::FilterExpr
+            | HeapKind::HashSet
+            | HeapKind::Iterator
+            | HeapKind::Deque
+            | HeapKind::Channel
+            | HeapKind::PriorityQueue
+            | HeapKind::Range
+            | HeapKind::Result
+            | HeapKind::Option
+            | HeapKind::TraitObject
+            | HeapKind::Mutex
+            | HeapKind::Atomic
+            | HeapKind::Lazy
+            | HeapKind::ModuleFn
+            | HeapKind::Matrix
+            | HeapKind::MatrixSlice => ConcreteType::Pointer(Box::new(ConcreteType::Void)),
         },
         NativeKind::Null => {
             return Err(TransferredClosureLayoutError::UnsupportedCaptureKind { index, kind });

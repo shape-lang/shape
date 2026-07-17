@@ -1770,10 +1770,24 @@ impl BytecodeCompiler {
                 self.compile_expr_enum_constructor(enum_name, variant, payload)
             }
 
-            // Closures
+            // Closures. ADR-009 C1 (slice 2): the node's own generated-code
+            // provenance is THE Wave-46 capture-gate predicate — pass it in
+            // rather than re-deriving "am I in generated code?" from the
+            // enclosing function's NAME.
             Expr::FunctionExpr {
-                params, body, span, ..
-            } => self.compile_expr_closure(params, body, *span),
+                params,
+                body,
+                generated_origin,
+                captures,
+                span,
+                ..
+            } => self.compile_expr_closure(
+                params,
+                body,
+                captures.as_deref(),
+                generated_origin.as_deref(),
+                *span,
+            ),
 
             // Conditionals
             Expr::Conditional {

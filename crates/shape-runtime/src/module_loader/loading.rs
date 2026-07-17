@@ -371,6 +371,7 @@ pub(super) fn compile_module(module_path: &str, ast: Program) -> Result<Module> 
         path: module_path.to_string(),
         exports,
         ast,
+        artifact_origin: super::ModuleArtifactOrigin::Direct,
     })
 }
 

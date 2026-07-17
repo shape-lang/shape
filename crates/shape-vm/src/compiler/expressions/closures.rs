@@ -1,6 +1,11 @@
 //! Closure (function expression) compilation
 
 use crate::bytecode::{Function, Instruction, OpCode, Operand};
+// ADR-009 C1 — THE one capture selector. `compile_expr_closure` reads its plan
+// and nothing else; it does not classify captures itself.
+use crate::compiler::comptime_builtins::capture_plan::{
+    CaptureAccess, CaptureParameterEvidence, CaptureTarget,
+};
 use crate::compiler::monomorphization::type_resolution::concrete_type_for_expr;
 use crate::type_tracking::{BindingOwnershipClass, BindingStorageClass};
 use shape_ast::ast::type_path::TypePath;
@@ -9,12 +14,15 @@ use shape_ast::ast::{
 };
 use shape_ast::error::{Result, ShapeError};
 use shape_runtime::closure::EnvironmentAnalyzer;
-use shape_runtime::type_system::{BindingFact, InferenceFacts, Type};
+use shape_runtime::type_system::{BindingFact, GeneratedNodeKey, InferenceFacts, Type};
 use shape_value::v2::concrete_type::{ClosureTypeId, ConcreteType};
 use std::collections::{BTreeSet, HashMap, HashSet};
 
 use super::super::BytecodeCompiler;
 use crate::compiler::ClosureCallsiteHint;
+
+mod capture_peek;
+mod module_capture_preflight;
 
 fn container_kind_from_concrete_type(
     ct: &ConcreteType,
@@ -367,10 +375,14 @@ fn inference_facts_with_closure_binding_facts(
         }
     }
     changed.then(|| {
-        InferenceFacts::with_binding_facts(
+        InferenceFacts::with_all_facts(
             base.top_level_types().clone(),
             base.expression_types().clone(),
             binding_facts,
+            base.generated_callable_facts().clone(),
+            base.generated_capture_facts().clone(),
+            base.semantic_callsite_facts().clone(),
+            base.semantic_callee_declarations().clone(),
         )
     })
 }
@@ -3064,10 +3076,7 @@ fn closure_body_terminal_expr(body: &[shape_ast::ast::Statement]) -> Option<&Exp
 impl BytecodeCompiler {
     pub(crate) fn callable_return_hint_name_for_expr(&self, expr: &Expr) -> Option<String> {
         callable_selection_arity(expr)?;
-        let function_name = self
-            .current_function
-            .and_then(|idx| self.program.functions.get(idx))
-            .map(|function| function.name.clone())?;
+        let function_name = self.current_body_semantic_owner_key()?.to_string();
         if function_name.starts_with("__closure_") {
             return None;
         }
@@ -3085,10 +3094,23 @@ impl BytecodeCompiler {
         &mut self,
         params: &[shape_ast::ast::FunctionParameter],
         body: &[shape_ast::ast::Statement],
+        // ADR-009 C1 (slice 3): the DECLARED capture clause
+        // (`|acc; move cfg, share total|`). When present it DRIVES emission —
+        // inference is not consulted for the kind, only for validating that
+        // the declared set is exactly the discovered set. Generated-code-only
+        // surface: a clause on an ordinary source closure is [C0903].
+        declared: Option<&shape_ast::ast::CaptureClause>,
+        // ADR-009 C1 (slice 2): node-borne generated-code provenance, stamped
+        // by `transform::generated_origin::stamp_generated_closures` at every
+        // point where comptime-produced AST enters the program. THE predicate
+        // of the Wave-46 capture gate.
+        generated_origin: Option<&shape_ast::ast::GeneratedNodeOrigin>,
         closure_span: Span,
     ) -> Result<()> {
+        // Peek the deterministic name, but do not consume its identity until
+        // canonical capture planning and the callable module-effect preflight
+        // have both succeeded. A refused closure leaves no counter gap.
         let closure_name = format!("__closure_{}", self.closure_counter);
-        self.closure_counter += 1;
 
         let proto_def = FunctionDef {
             name: closure_name.clone(),
@@ -3106,36 +3128,20 @@ impl BytecodeCompiler {
         };
 
         let outer_vars = self.collect_outer_scope_vars();
-        let (mut captured_vars, mut mutated_captures) =
-            EnvironmentAnalyzer::analyze_function_with_mutability(&proto_def, &outer_vars);
+        let analysis = EnvironmentAnalyzer::analyze_function_captures(&proto_def, &outer_vars);
+        let mut captured_vars = analysis.captured_vars().to_vec();
+        let mut mutated_captures = analysis.mutated_captures().clone();
         captured_vars.sort();
         let param_names: BTreeSet<String> =
             params.iter().flat_map(|p| p.get_identifiers()).collect();
         captured_vars.retain(|name| !param_names.contains(name));
 
-        let generated_owner = self
-            .current_function
-            .and_then(|idx| self.program.functions.get(idx))
-            .map(|function| function.name.as_str())
-            // ADR-009 D1 (S2): generated-decl membership is the
-            // GeneratedSymbolTable's derived name view.
-            .filter(|name| self.generated_symbols.contains_name(name));
-        if let Some(owner) = generated_owner
-            && !captured_vars.is_empty()
-        {
-            let captures = captured_vars
-                .iter()
-                .map(|name| format!("'{name}'"))
-                .collect::<Vec<_>>()
-                .join(", ");
-            return Err(ShapeError::SemanticError {
-                message: format!(
-                    "generated closure implicitly captures {captures}; generated captures must \
-                     be explicit (in generated function '{owner}')"
-                ),
-                location: Some(self.span_to_source_location(closure_span)),
-            });
-        }
+        let generated_origin = self.validate_capture_surface(
+            declared,
+            generated_origin,
+            &captured_vars,
+            closure_span,
+        )?;
 
         let captured_var_set: BTreeSet<String> = captured_vars.iter().cloned().collect();
         mutated_captures.extend(collect_static_mut_self_container_captures(
@@ -3221,42 +3227,39 @@ impl BytecodeCompiler {
             });
         }
 
-        // Build per-capture cell-access flags (aligned with captured_vars order).
-        // Historically this vector was named "mutable_captures", but in the
-        // strict layout it means "not a leading immutable param": the body
-        // must access the capture through `frame.upvalues` because the slot is
-        // `CaptureKind::OwnedMutable` or `CaptureKind::Shared`.
+        // ADR-009 C1 (slice 1) — THE ONE SELECTOR.
         //
-        // A capture needs that path if the closure itself mutates it, if a
-        // previous closure already promoted the source to a SharedCell, or if
-        // the source binding is `var` (`BindingOwnershipClass::Flexible`).
-        // The last case matters for sibling closures: a read-only closure over
-        // a `var` must observe the same shared cell as a mutating sibling, not
-        // snapshot the current cell contents at construction time.
-        let mutable_flags: Vec<bool> = captured_vars
-            .iter()
-            .map(|name| {
-                let is_local_slot = self.resolve_local(name).is_some();
-                let is_module_binding_slot = !is_local_slot
-                    && (self.resolve_scoped_module_binding_name(name).is_some()
-                        || self.module_bindings.contains_key(name));
-                let ownership = self
-                    .binding_semantics_for_name(name)
-                    .map(|(_, _, sem)| sem.ownership_class);
-                let is_flexible_capture =
-                    matches!(ownership, Some(BindingOwnershipClass::Flexible))
-                        && (is_local_slot || is_module_binding_slot);
+        // This used to be two coupled vectors: `mutable_flags: Vec<bool>` here,
+        // and a separate `capture_kinds: Vec<CaptureKind>` derived ~300 lines
+        // below (which short-circuited to `Immutable` whenever the flag was
+        // false, and otherwise re-read the same binding facts). Every emission
+        // decision read one or the other, and nothing forced them to agree —
+        // which is precisely how a declared capture mode can flip the layout
+        // mask while the body still reads a leading param.
+        //
+        // `plan_captures` is now the single producer of both. `plan[i].access()`
+        // is the old `mutable_flags[i]`, refined into the four dispositions the
+        // emitter actually distinguishes; `plan[i].kind()` is the old
+        // `capture_kinds[i]`, which lands in the emitted `ClosureLayout`.
+        // Slice 3's declared capture clause enters at exactly one place: this
+        // call. See `compiler/comptime_builtins/capture_plan.rs`.
+        let capture_plan = self.plan_captures(
+            &captured_vars,
+            &mutated_captures,
+            Some(&analysis),
+            declared,
+            generated_origin,
+            closure_span,
+        )?;
+        self.preflight_callable_module_shared_captures(&capture_plan, closure_span)?;
+        self.closure_counter += 1;
 
-                mutated_captures.contains(name)
-                    || self.boxed_locals.contains(name)
-                    || self.shared_locals.contains(name)
-                    || self.shared_module_binding_contains(name)
-                    || is_flexible_capture
-            })
-            .collect();
-
-        // Build closure parameters: only immutable captures become leading params.
-        // Mutable captures are accessed via LoadClosure/StoreClosure opcodes.
+        // Build one leading synthetic parameter slot per capture so descriptor
+        // ordinal, function metadata, and frame layout stay aligned. Immutable
+        // captures read their value from that local. Shared captures read/write
+        // through the upvalue table but retain the raw cell carrier in the
+        // corresponding local for nested recapture. OwnedMutable captures use
+        // only their uniquely owned upvalue cell; their local stays a sentinel.
         //
         // Strict-typing-sweep (Cluster 1): synthesize a `type_annotation` for each
         // capture from its resolved upstream `ConcreteType`. Without this the
@@ -3310,20 +3313,15 @@ impl BytecodeCompiler {
             .and_then(|span| self.inference_facts.binding_type(span))
             .and_then(|ty| function_type_param_hints(ty, params.len()));
         let returned_callsite_param_hints: Option<Vec<Option<TypeAnnotation>>> = self
-            .current_function
-            .and_then(|idx| self.program.functions.get(idx))
-            .and_then(|function| {
-                self.returned_closure_callsite_param_hints
-                    .get(&function.name)
-            })
+            .current_body_semantic_owner_key()
+            .and_then(|name| self.returned_closure_callsite_param_hints.get(name))
             .and_then(|hint| match hint {
                 ClosureCallsiteHint::Types(types) => Some(types.clone()),
                 ClosureCallsiteHint::Conflict => None,
             });
         let returned_closure_param_hints: Option<Vec<Option<TypeAnnotation>>> = self
-            .current_function
-            .and_then(|idx| self.program.functions.get(idx))
-            .and_then(|function| self.inference_facts.function_signature(&function.name))
+            .current_body_semantic_owner_key()
+            .and_then(|name| self.inference_facts.function_signature(name))
             .and_then(|signature| match signature.canonicalize() {
                 Type::Function { returns, .. } => {
                     function_type_param_hints(returns.as_ref(), params.len())
@@ -3435,7 +3433,7 @@ impl BytecodeCompiler {
         let user_pass_modes = self.effective_function_like_pass_modes(None, params, Some(body));
         let mut closure_pass_modes =
             vec![crate::compiler::ParamPassMode::ByValue; captured_vars.len()];
-        closure_pass_modes.extend(user_pass_modes);
+        closure_pass_modes.extend(user_pass_modes.iter().copied());
         let ref_params: Vec<_> = closure_pass_modes
             .iter()
             .map(|mode| mode.is_reference())
@@ -3457,8 +3455,8 @@ impl BytecodeCompiler {
         // cache key. Emission is unchanged.
         // C2 Bucket-3 carrier-stamp fix: record which captures are invoked
         // as callees in this closure body so `resolve_capture_concrete_type`
-        // (used by both `mint_closure_type_id` below and the kinds-aware
-        // re-intern further down) classifies an unannotated callable capture
+        // (used by the pack + the ONE `ClosureTypeId` producer below)
+        // classifies an unannotated callable capture
         // as `ConcreteType::Function` (→ `Ptr(HeapKind::Closure)`) rather
         // than the `Pointer(Void)` → `NativeView` "unknown" sentinel. Set
         // for the duration of this closure's capture-type resolution and
@@ -3468,7 +3466,31 @@ impl BytecodeCompiler {
             Self::collect_callee_identifier_names(body),
         );
 
-        let closure_type_id = self.mint_closure_type_id(&captured_vars);
+        // ADR-009 C1 (slice 1/2/3) — the capture pack, built BEFORE the id.
+        //
+        // The pack is the model; `program.closure_function_layouts[func_idx]`
+        // is the emitted artifact built from it, and the `ClosureTypeId` below
+        // is interned from the SAME `capture_type`s and the SAME kinds. Keyed
+        // by `func_idx` — structural identity, never a source name and never a
+        // `Span` (R1/R3). Slice 2 hung the closure's PROVENANCE off it; slice 3
+        // hangs the DECLARED mode off each descriptor.
+        let func_idx = self.program.functions.len();
+        let callable_semantic_evidence =
+            self.callable_semantic_evidence(generated_origin, params, &user_pass_modes);
+        let pack = self.build_capture_pack(
+            func_idx as u16,
+            &capture_plan,
+            generated_origin,
+            callable_semantic_evidence,
+        )?;
+
+        // ADR-009 C1 (slice 3): ONE `ClosureTypeId` producer, shared with
+        // `mint_closure_type_id_peek`. It reads the PACK (declared or
+        // inferred), so the id the monomorphization cache is keyed on is the id
+        // the emitted closure carries — including when a declared `move` over a
+        // read-only `let mut` makes the layout OwnedMutable where inference
+        // would have said Immutable.
+        let closure_type_id = self.intern_closure_type_id_for_pack(&pack);
 
         // Phase F: mint a FunctionTypeId for the callable signature. This is
         // the `Function<A, R>` identity — the signature omits captures and
@@ -3485,7 +3507,6 @@ impl BytecodeCompiler {
         // (int) -> int>>` relies on for polymorphic dispatch.
         let function_type_id = self.mint_function_type_id_for_params(params);
 
-        let func_idx = self.program.functions.len();
         self.program.functions.push(Function {
             name: closure_name.clone(),
             arity: closure_def.params.len() as u16,
@@ -3502,7 +3523,12 @@ impl BytecodeCompiler {
             is_async: false,
             ref_params,
             ref_mutates,
-            mutable_captures: mutable_flags.clone(),
+            // ADR-009 C1: a view on the plan — "this capture is not a leading
+            // immutable param".
+            mutable_captures: capture_plan
+                .iter()
+                .map(|planned| planned.plan.needs_cell())
+                .collect(),
             frame_descriptor: None,
             osr_entry_points: Vec::new(),
             mir_data: None,
@@ -3520,164 +3546,34 @@ impl BytecodeCompiler {
         self.function_type_ids
             .push((func_idx as u16, function_type_id));
 
-        // Track A.1C — derive the `CaptureKind` for each capture based on
-        // the source binding's declared form AND whether the closure body
-        // actually needs cell-backed capture access.
-        //
-        // Binding form (when cell-backed) → CaptureKind:
-        //   `let mut x = ...`   (OwnedMutable source)   → CaptureKind::OwnedMutable
-        //   `var x = ...`       (Flexible source)       → CaptureKind::Shared
-        //
-        // Everything else (including read-only captures of `let mut`, and all
-        // captures of `let` / function parameters) → `CaptureKind::Immutable`.
-        // Read-only `var` captures are intentionally excluded from the
-        // snapshot path: `var` is the shared/smart binding form, so sibling
-        // closures must observe the same `SharedCell` state.
-        //
-        // Note (A.1C partial): this metadata rides on the layout's
-        // `capture_kinds` field only. The mutable-mask bits on the layout
-        // remain zero in this commit — see the design note on
-        // `build_closure_function_layouts`. The interpreter's
-        // `op_make_closure` still routes mutable-capture closures through
-        // the legacy `HeapValue::Closure` + SharedCell path because the
-        // compiler has not yet been rewired to emit the A.1B
-        // `Load/StoreOwnedMutableCapture` / `Load/StoreSharedCapture`
-        // opcodes in closure bodies, and outer-scope reads of promoted
-        // `let mut` / `var` bindings still flow through `LoadClosure` +
-        // `HeapValue::SharedCell` auto-deref. Full routing is the A.1C
-        // residual.
-        use shape_value::v2::closure_layout::CaptureKind;
-        let capture_kinds: Vec<CaptureKind> = captured_vars
-            .iter()
-            .enumerate()
-            .map(|(i, name)| {
-                // Only cell-access captures need indirection. Read-only
-                // non-`var` captures are snapshot-by-value and stay Immutable
-                // regardless of the source binding's ownership class. This
-                // keeps function-parameter captures (default `OwnedMutable`
-                // per `binding_semantics_for_param`) on the Immutable path
-                // when the closure doesn't write through them.
-                if !mutable_flags.get(i).copied().unwrap_or(false) {
-                    return CaptureKind::Immutable;
-                }
-                // Track A.1C.2 (locals) + A.1C.3 (module bindings): any
-                // mutable `var` capture routes through
-                // `CaptureKind::Shared`, whether the outer slot is a
-                // local or a module binding. Both paths allocate an
-                // `Arc<parking_lot::Mutex<u64>>` and install its
-                // `Arc::into_raw` pointer into the closure's Ptr slot;
-                // `op_make_closure` bumps the strong count. The compiler
-                // emits different *outer-scope* opcodes for local vs
-                // module-binding promotion (`AllocSharedLocal` vs
-                // `AllocSharedModuleBinding`), but the closure-side
-                // machinery is the same.
-                let is_local_slot = self.resolve_local(name).is_some();
-                let is_module_binding_slot = !is_local_slot
-                    && (self.resolve_scoped_module_binding_name(name).is_some()
-                        || self.module_bindings.contains_key(name));
-                let ownership = self
-                    .binding_semantics_for_name(name)
-                    .map(|(_, _, sem)| sem.ownership_class);
-                match ownership {
-                    // Track A.1C.2b: `let mut` captures whose outer slot
-                    // is a local flow through the A.1B OwnedMutable
-                    // Raw path. For module-binding `let mut` (top-level
-                    // `let mut sum = 0` in REPL-style eval compiles to
-                    // a module binding), there is no move-into-closure
-                    // semantics — the binding is program-lifetime. Fall
-                    // through to the Shared pipeline so mutations from
-                    // the closure propagate to the outer slot, matching
-                    // the pre-A.1C.3 legacy SharedCell semantics.
-                    Some(BindingOwnershipClass::OwnedMutable) if is_local_slot => {
-                        CaptureKind::OwnedMutable
-                    }
-                    Some(BindingOwnershipClass::OwnedMutable) if is_module_binding_slot => {
-                        CaptureKind::Shared
-                    }
-                    Some(BindingOwnershipClass::OwnedMutable) => CaptureKind::Immutable,
-                    Some(BindingOwnershipClass::Flexible)
-                        if is_local_slot || is_module_binding_slot =>
-                    {
-                        CaptureKind::Shared
-                    }
-                    Some(BindingOwnershipClass::Flexible) => CaptureKind::Immutable,
-                    // Track A.1C.2 / A.1C.3: semantics lookup can return
-                    // `None` when a prior closure's `compile_function`
-                    // wiped the outer function's type-tracker local
-                    // semantics. Fall back to persistent witnesses
-                    // populated by the previous classification pass:
-                    //   - `shared_locals` / `shared_module_bindings`
-                    //     for `var` captures.
-                    //   - `owned_mutable_locals` for `let mut` local
-                    //     captures (A.1C.3: without this witness, a
-                    //     second closure capturing a different local
-                    //     would reclassify to `Immutable`, nulling the
-                    //     layout's OwnedMutable mask and tripping the
-                    //     `op_make_closure` layout-mismatch guard).
-                    _ if is_local_slot && self.shared_locals.contains(name) => CaptureKind::Shared,
-                    _ if is_local_slot && self.owned_mutable_locals.contains(name) => {
-                        CaptureKind::OwnedMutable
-                    }
-                    _ if is_module_binding_slot && self.shared_module_binding_contains(name) => {
-                        CaptureKind::Shared
-                    }
-                    // A.1C.3: module-binding captures with no resolved
-                    // ownership semantics (e.g. imported functions used
-                    // as callable values, top-level `let` without `mut`
-                    // — unreachable here since `mutable_flags[i]` is
-                    // true) also go through Shared when the closure
-                    // mutates them. `mutable_flags[i]` is already known
-                    // true at this point (early return above).
-                    _ if is_module_binding_slot => CaptureKind::Shared,
-                    _ => CaptureKind::Immutable,
-                }
-            })
-            .collect();
-        // Track A.1C.3: record persistent witnesses for each classified
-        // capture so sibling closures (after the type-tracker has been
-        // wiped by `compile_function`) reclassify the same way rather
-        // than falling back to `Immutable`.
-        for (i, name) in captured_vars.iter().enumerate() {
-            match capture_kinds[i] {
-                CaptureKind::OwnedMutable if self.resolve_local(name).is_some() => {
-                    self.owned_mutable_locals.insert(name.clone());
-                }
-                _ => {}
+        // Record persistent witnesses for each classified capture so sibling
+        // closures (whose classification runs after `compile_function` has
+        // re-pointed the type tracker at the nested function's slots)
+        // reclassify the same way rather than falling back to a snapshot
+        // capture — which would null the layout's OwnedMutable mask and trip
+        // `op_make_closure`'s layout-mismatch guard.
+        for descriptor in &pack.descriptors {
+            if descriptor.access == CaptureAccess::OwnedMutableCell {
+                self.owned_mutable_locals.insert(descriptor.name.clone());
             }
         }
-        self.closure_capture_kinds
-            .push((func_idx as u16, capture_kinds.clone()));
         // Distributed §4.4: record the captured variable names in the same
         // declaration order for legible remote-capture-refusal messages.
         self.closure_capture_names
             .push((func_idx as u16, captured_vars.clone()));
 
-        // Track A.1C.2: if any capture is non-Immutable, re-intern the
-        // closure_type_id under the kinds-aware registry key so two
-        // closures with identical types but different kinds get distinct
-        // `ClosureTypeId`s. When all captures are Immutable, the original
-        // types-only intern already returned the canonical id — skip.
-        if capture_kinds
-            .iter()
-            .any(|k| !matches!(k, CaptureKind::Immutable))
-        {
-            let mut capture_types: Vec<ConcreteType> = Vec::with_capacity(captured_vars.len());
-            for name in &captured_vars {
-                capture_types.push(self.resolve_capture_concrete_type(name));
-            }
-            let kinds_id = self
-                .closure_registry
-                .intern_with_kinds(capture_types, capture_kinds.clone());
-            // Overwrite the last-pushed `closure_type_ids` entry for this
-            // function with the kinds-aware id. The Immutable entry
-            // produced by `mint_closure_type_id` (which ignores kinds)
-            // remains in the registry for all-immutable closures.
-            if let Some(last) = self.closure_type_ids.last_mut() {
-                debug_assert_eq!(last.0, func_idx as u16);
-                last.1 = kinds_id;
-            }
-            let _ = closure_type_id; // the kinds-aware id supersedes it.
-        }
+        // ADR-009 C1 (slice 3): the kinds-aware re-intern that used to live
+        // here is gone. `intern_closure_type_id_for_plan` (above) already keyed
+        // the id on the plan's kinds when any capture is cell-backed, and the
+        // PEEK routes through the same producer — so the id pushed into
+        // `closure_type_ids` needs no correction, and there is no window in
+        // which a types-only id is the closure's identity.
+
+        // ADR-009 C1: ONE artifact. `build_closure_function_layouts` reads the
+        // pack (and nothing else) to stamp the emitted `ClosureLayout`. The
+        // local copy below DRIVES the rest of emission (escape veto, body maps,
+        // capture push) — the pack is not a side-table that emission ignores.
+        self.closure_capture_packs.push(pack.clone());
 
         // Capture-type resolution for this closure is complete; restore the
         // enclosing closure's callee-capture set (closures nest).
@@ -3698,35 +3594,45 @@ impl BytecodeCompiler {
         //
         // The heap-promotion signal is `emit_make_closure_heap_next`.
         let closure_is_escaping = self.emit_make_closure_heap_next;
-        for (i, name) in captured_vars.iter().enumerate() {
-            if !mutable_flags.get(i).copied().unwrap_or(false) {
+        for descriptor in &pack.descriptors {
+            // ADR-009 C1 / #53: the veto reads the SAME structural access
+            // discipline emission reads. Re-resolving `descriptor.name`
+            // here is a second authority and misclassifies an inherited
+            // Shared synthetic parameter as an ordinary OwnedMutable
+            // by-value parameter. Only a proven OwnedMutable cell in an
+            // escaping closure violates the unique-owner rule. The literal
+            // signal covers direct escape sites; the retained storage plan
+            // also covers bind-then-return/collection escape vectors that the
+            // single-shot literal flag cannot see. Both are compiler-issued
+            // facts already frozen into this pack. Shared captures bypass the
+            // veto by their proven access discipline before storage is read.
+            let storage_proves_escape = !matches!(
+                descriptor.storage,
+                Some(BindingStorageClass::LocalMutablePtr)
+                    | Some(BindingStorageClass::Reference)
+                    | Some(BindingStorageClass::Direct)
+                    | Some(BindingStorageClass::Deferred)
+                    | None,
+            );
+            if descriptor.access != CaptureAccess::OwnedMutableCell
+                || (!closure_is_escaping && !storage_proves_escape)
+            {
                 continue;
             }
-            let local_idx = self.resolve_local(name);
-            let plan_class = local_idx.and_then(|idx| self.mir_storage_class_for_slot(idx));
-            let ownership = self
-                .binding_semantics_for_name(name)
-                .map(|(_, _, sem)| sem.ownership_class);
-
-            if matches!(ownership, Some(BindingOwnershipClass::OwnedMutable))
-                && !matches!(
-                    plan_class,
-                    Some(BindingStorageClass::LocalMutablePtr)
-                        | Some(BindingStorageClass::Reference)
-                        | Some(BindingStorageClass::Direct)
-                        | Some(BindingStorageClass::Deferred)
-                        | None,
-                )
-            {
-                return Err(ShapeError::SemanticError {
-                    message: format!(
-                        "[B0003] mutable binding '{}' cannot be captured by an escaping closure; \
-                         promote the source to `var` or restructure to keep the closure local",
-                        name
-                    ),
-                    location: None,
-                });
-            }
+            return Err(ShapeError::SemanticError {
+                message: format!(
+                    "[B0003] mutable binding '{}' cannot be captured by an escaping closure; \
+                     promote the source to `var` or restructure to keep the closure local{}",
+                    descriptor.name,
+                    // ADR-009 C1 (slice 2): empty for ordinary source (the
+                    // message is byte-identical); inside generated code the
+                    // error names the owning expansion + node path, because
+                    // the closure's span points at handler-emitted snippet
+                    // offsets that resolve nowhere in the user's file.
+                    pack.generated_note()
+                ),
+                location: None,
+            });
         }
 
         // Set up the per-kind closure-body emission maps. During body
@@ -3749,58 +3655,56 @@ impl BytecodeCompiler {
         let saved_owned_mutable_capture_inner_kinds =
             std::mem::take(&mut self.owned_mutable_capture_inner_kinds);
         let saved_shared_capture_inner_kinds = std::mem::take(&mut self.shared_capture_inner_kinds);
-        let _ = closure_is_escaping;
-        for (i, name) in captured_vars.iter().enumerate() {
-            if mutable_flags.get(i).copied().unwrap_or(false) {
-                self.mutable_closure_captures.insert(name.clone(), i as u16);
-                let kind = capture_kinds
-                    .get(i)
-                    .copied()
-                    .unwrap_or(CaptureKind::Immutable);
-                // Track A.1C.2 + A.1C.3: Shared (var) captures — whether
-                // the outer slot is a local or a module binding — route
-                // through the A.1B Load/StoreSharedCapture opcodes
-                // inside the closure body. The closure-side machinery
-                // is identical; only the outer-scope promotion opcodes
-                // differ between locals and module bindings.
-                if matches!(kind, CaptureKind::Shared) {
-                    self.shared_closure_captures.insert(name.clone(), i as u16);
-                    // A2-refined / task #17: record the cell's interior
-                    // `FieldKind` so the closure body's Shared read/write
-                    // emit sites can dispatch to the typed Wave D.2
-                    // opcodes (codes 0x156-0x16B), mirroring the
-                    // OwnedMutable population a few lines below. The
-                    // inner kind is derived from the captured binding's
-                    // resolved `ConcreteType`. Falls back to `Ptr` when
-                    // the type isn't statically resolved.
-                    let inner_kind = self.resolve_capture_concrete_type(name).to_field_kind();
+        for descriptor in &pack.descriptors {
+            // ADR-009 C1: the body-emission maps are a VIEW on the pack's
+            // access discipline. `CaptureAccess::Param` captures are leading
+            // immutable params and appear in no map; everything else reaches
+            // the capture through the frame's capture slots.
+            let (access, name, i) = (descriptor.access, &descriptor.name, descriptor.index);
+            if !access.needs_cell() {
+                continue;
+            }
+            self.mutable_closure_captures.insert(name.clone(), i);
+            match access {
+                // `var` captures — local slot or module binding alike — route
+                // through the A.1B Load/StoreSharedCapture opcodes inside the
+                // closure body. The closure-side machinery is identical; only
+                // the outer-scope promotion opcodes differ.
+                CaptureAccess::SharedCell => {
+                    self.shared_closure_captures.insert(name.clone(), i);
+                    // The pack's resolved type is the sole authority for both
+                    // layout and body opcode selection. Re-resolving the
+                    // diagnostic name here could disagree with the already
+                    // interned layout or silently fall back to `Ptr`.
+                    let inner_kind = descriptor.capture_type.to_field_kind();
                     self.shared_capture_inner_kinds
                         .insert(name.clone(), inner_kind);
                 }
-                // Track A.1C.2b: OwnedMutable (let mut) captures route
-                // through the A.1B Load/StoreOwnedMutableCapture
-                // opcodes. Gate on `resolve_local` — only locals can be
-                // captured OwnedMutable (module bindings have program-
-                // lifetime and don't admit move semantics); for module-
-                // binding sources the capture was reclassified to
-                // `Immutable` upstream.
-                if matches!(kind, CaptureKind::OwnedMutable) && self.resolve_local(name).is_some() {
-                    self.owned_mutable_closure_captures
-                        .insert(name.clone(), i as u16);
-                    // Wave E: record the cell's interior `FieldKind` so the
-                    // closure body's read/write emit sites can dispatch to
-                    // the typed Wave D.1 opcodes (codes 0x140-0x155). The
-                    // inner kind is derived from the captured binding's
-                    // resolved `ConcreteType` at this construction site —
-                    // identical to the type used for `op_make_closure`'s
-                    // `alloc_owned_mutable_<kind>` selection. Falls back to
-                    // `Ptr` when the type isn't statically resolved
-                    // (matches `concrete_type_for_expr`'s default for
-                    // unresolved heap-typed captures).
-                    let inner_kind = self.resolve_capture_concrete_type(name).to_field_kind();
+                // `let mut` captures route through the A.1B
+                // Load/StoreOwnedMutableCapture opcodes. Only locals reach
+                // this arm — the selector proves it (module bindings have
+                // program lifetime and admit no move).
+                CaptureAccess::OwnedMutableCell => {
+                    debug_assert!(
+                        self.resolve_local(name).is_some(),
+                        "OwnedMutableCell access requires a local slot"
+                    );
+                    self.owned_mutable_closure_captures.insert(name.clone(), i);
+                    // Use the same pack type that selected the layout and
+                    // owned-cell allocator; there is no name-based second
+                    // resolver or fallback on the body-emission path.
+                    let inner_kind = descriptor.capture_type.to_field_kind();
                     self.owned_mutable_capture_inner_kinds
                         .insert(name.clone(), inner_kind);
                 }
+                // The inference residual: cell access is needed but the kind
+                // stayed a snapshot, so the body falls back to the legacy
+                // `LoadClosure`/`StoreClosure` pair via
+                // `mutable_closure_captures` alone. Preserved bit-for-bit
+                // from the pre-fusion selector; the DECLARED path (slice 3)
+                // never produces it.
+                CaptureAccess::MutableCell => {}
+                CaptureAccess::Param => unreachable!("filtered by needs_cell above"),
             }
         }
 
@@ -3827,7 +3731,76 @@ impl BytecodeCompiler {
             closure_destructure_facts,
         )
         .map(|facts| std::mem::replace(&mut self.inference_facts, facts));
+        // ADR-009 C1 slice 4 / #53: hand the recursive function compile the
+        // outer pack's structural descriptor evidence in capture-parameter
+        // order. The function compiler consumes this one-shot vector and
+        // records every synthetic parameter by compiler-issued local slot so
+        // lineage and frozen semantic type survive move/immutable/Shared
+        // forwarding alike. Shared entries additionally preserve the raw-cell
+        // carrier that ordinary parameter semantics would erase.
+        let capture_parameter_evidence = pack
+            .descriptors
+            .iter()
+            .map(|descriptor| {
+                debug_assert!(
+                    !descriptor.inherited_shared_cell
+                        || descriptor.access == CaptureAccess::SharedCell,
+                    "inherited SharedCell evidence reached a non-Shared capture descriptor"
+                );
+                CaptureParameterEvidence {
+                    access: descriptor.access,
+                    binding_span: descriptor.binding_span,
+                    binding_lineage: descriptor.binding_lineage.clone(),
+                    semantic_type: descriptor.semantic_type.clone(),
+                }
+            })
+            .collect();
+        let saved_pending_capture_parameter_evidence = self
+            .pending_closure_capture_parameter_evidence
+            .replace(capture_parameter_evidence);
+        let generated_node = generated_origin.map(GeneratedNodeKey::from_origin);
+        if let Some(node) = generated_node.as_ref() {
+            self.active_generated_node_stack.push(node.clone());
+        }
         let compile_result = self.compile_function(&closure_def);
+        let compile_result = if let Some(expected) = generated_node {
+            match self.active_generated_node_stack.pop() {
+                Some(observed) if observed == expected => compile_result,
+                observed => {
+                    self.active_generated_node_stack.clear();
+                    Err(ShapeError::RuntimeError {
+                        message: format!(
+                            "internal compiler error: generated closure {} left a mismatched semantic node stack frame ({observed:?})",
+                            closure_def.name
+                        ),
+                        location: None,
+                    })
+                }
+            }
+        } else {
+            compile_result
+        };
+        // `compile_function_inner` can reject during MIR/borrow/mutability
+        // analysis before `compile_function_body` consumes this one-shot
+        // carrier. Clear an unconsumed value on every error path and restore
+        // the enclosing pending state before propagating the named error.
+        // Successful compilation must still consume it exactly once.
+        let unconsumed_capture_parameter_evidence =
+            self.pending_closure_capture_parameter_evidence.take();
+        let compile_result = if compile_result.is_ok()
+            && unconsumed_capture_parameter_evidence.is_some()
+        {
+            Err(ShapeError::RuntimeError {
+                message: format!(
+                    "internal compiler error: closure {} compiled without consuming its capture parameter evidence",
+                    closure_def.name
+                ),
+                location: None,
+            })
+        } else {
+            compile_result
+        };
+        self.pending_closure_capture_parameter_evidence = saved_pending_capture_parameter_evidence;
         if let Some(saved) = saved_inference_facts {
             self.inference_facts = saved;
         }
@@ -3836,14 +3809,15 @@ impl BytecodeCompiler {
         }
         self.pending_callable_hint_name = saved_pending_callable_hint_name;
         self.closure_function_ids = saved_closure_ids;
-        compile_result?;
-
-        // Restore mutable_closure_captures
+        // The body-emission maps are scoped to the recursive closure compile
+        // and must be restored before either success or error is observed by
+        // the enclosing compilation.
         self.mutable_closure_captures = saved_mutable_captures;
         self.shared_closure_captures = saved_shared_captures;
         self.owned_mutable_closure_captures = saved_owned_mutable_captures;
         self.owned_mutable_capture_inner_kinds = saved_owned_mutable_capture_inner_kinds;
         self.shared_capture_inner_kinds = saved_shared_capture_inner_kinds;
+        compile_result?;
 
         // Capture boxing decisions
         // ────────────────────────
@@ -3864,20 +3838,21 @@ impl BytecodeCompiler {
         // handled separately by the escape check above. In the future, the
         // planner may introduce a dedicated "no-sharing" class to skip
         // boxing for Direct bindings.
-        for (i, captured) in captured_vars.iter().enumerate() {
+        for descriptor in &pack.descriptors {
+            let captured = &descriptor.name;
             if matches!(
                 self.binding_semantics_for_name(captured),
                 Some((_, _, semantics))
                     if semantics.ownership_class == BindingOwnershipClass::Flexible
             ) {
-                let storage = if mutable_flags.get(i).copied().unwrap_or(false) {
+                let storage = if descriptor.access.needs_cell() {
                     BindingStorageClass::SharedCow
                 } else {
                     BindingStorageClass::UniqueHeap
                 };
                 self.promote_flexible_binding_storage_for_name(captured, storage);
             }
-            if mutable_flags.get(i).copied().unwrap_or(false) {
+            if descriptor.access.needs_cell() {
                 // Consult the storage plan to decide whether boxing is needed.
                 // Currently, Direct and Deferred bindings are both boxed for
                 // mutable captures because the storage plan runs before closure
@@ -3910,7 +3885,7 @@ impl BytecodeCompiler {
                     // pointer (Shared) the enclosing `MakeClosure` needs
                     // to install into the closure's capture slot.
                     //
-                    // Dispatch by `capture_kinds[i]`:
+                    // Dispatch by the plan's access discipline:
                     //   * `Shared` (`var` binding captured mutably) →
                     //     Track A.1C.2 path. For local slots: emit
                     //     `LoadLocal + AllocSharedLocal + LoadLocal` to
@@ -3940,31 +3915,50 @@ impl BytecodeCompiler {
                         captured,
                         BindingStorageClass::SharedCow,
                     );
-                    let kind = capture_kinds
-                        .get(i)
-                        .copied()
-                        .unwrap_or(CaptureKind::Immutable);
-                    let is_shared_local_slot = matches!(kind, CaptureKind::Shared)
-                        && self.resolve_local(captured).is_some();
-                    let is_owned_mutable = matches!(kind, CaptureKind::OwnedMutable);
-                    let shared_module_binding_scoped_name =
-                        if matches!(kind, CaptureKind::Shared) && !is_shared_local_slot {
+                    // ADR-009 C1: push emission dispatches on the PACK — the
+                    // same access discipline the layout mask and the body maps
+                    // came from, and the same structural `CaptureTarget` the
+                    // selector resolved. There is no second vector to disagree
+                    // with, and no re-resolution of the capture by source name.
+                    let access = descriptor.access;
+                    let shared_local_slot = match (access, descriptor.target) {
+                        (CaptureAccess::SharedCell, Some(CaptureTarget::Local(idx))) => Some(idx),
+                        _ => None,
+                    };
+                    let owned_mutable_slot = match (access, descriptor.target) {
+                        (CaptureAccess::OwnedMutableCell, Some(CaptureTarget::Local(idx))) => {
+                            Some(idx)
+                        }
+                        _ => None,
+                    };
+                    let shared_module_binding = match (access, descriptor.target) {
+                        (CaptureAccess::SharedCell, Some(CaptureTarget::ModuleBinding(idx))) => {
+                            // The scoped NAME is still needed for the
+                            // `shared_module_bindings` promotion witness (a
+                            // name-keyed emission side-table); the SLOT comes
+                            // from the target.
                             self.resolve_scoped_module_binding_name(captured)
                                 .or_else(|| {
-                                    if self.module_bindings.contains_key(captured) {
-                                        Some(captured.clone())
-                                    } else {
-                                        None
-                                    }
+                                    self.module_bindings
+                                        .contains_key(captured)
+                                        .then(|| captured.clone())
                                 })
-                        } else {
-                            None
-                        };
-                    if is_shared_local_slot {
-                        let local_idx = self
-                            .resolve_local(captured)
-                            .expect("checked is_shared_local_slot");
-                        if !self.shared_locals.contains(captured) {
+                                .map(|scoped| (scoped, idx))
+                        }
+                        _ => None,
+                    };
+                    if let Some(local_idx) = shared_local_slot {
+                        // An inherited Shared synthetic parameter already
+                        // contains the canonical raw `*const SharedCell`
+                        // carrier installed by the closure call convention.
+                        // It must never be projected to the payload or wrapped
+                        // in a second cell. Ordinary declaring-frame locals
+                        // still allocate on first promotion.
+                        let inherited_shared = self
+                            .inherited_capture_parameter_evidence
+                            .get(&local_idx)
+                            .is_some_and(|evidence| evidence.access == CaptureAccess::SharedCell);
+                        if !inherited_shared && !self.shared_locals.contains(captured) {
                             // First promotion: push current value, alloc
                             // the Arc cell, then push the pointer bits.
                             self.emit(Instruction::new(
@@ -3988,8 +3982,7 @@ impl BytecodeCompiler {
                             OpCode::LoadLocal,
                             Some(Operand::Local(local_idx)),
                         ));
-                    } else if is_owned_mutable && let Some(local_idx) = self.resolve_local(captured)
-                    {
+                    } else if let Some(local_idx) = owned_mutable_slot {
                         // Track A.1C.2b: `let mut` outer slot is captured
                         // by move. Push the current value — op_make_closure
                         // sees the `owned_mutable_capture_mask` bit and
@@ -4009,7 +4002,7 @@ impl BytecodeCompiler {
                             OpCode::LoadLocal,
                             Some(Operand::Local(local_idx)),
                         ));
-                    } else if let Some(scoped_name) = shared_module_binding_scoped_name {
+                    } else if let Some((scoped_name, mb_idx)) = shared_module_binding {
                         // Track A.1C.3: Shared module-binding var
                         // capture. Mirrors the Shared local-slot path
                         // above with module-binding addressing:
@@ -4026,7 +4019,11 @@ impl BytecodeCompiler {
                         // not a tagged SharedCell carrier, so
                         // `LoadModuleBinding` passes them through
                         // unmodified.
-                        let mb_idx = self.get_or_create_module_binding(&scoped_name);
+                        //
+                        // ADR-009 C1: `mb_idx` is the selector's structural
+                        // `CaptureTarget::ModuleBinding` slot — not a
+                        // re-lookup by source name.
+                        debug_assert_eq!(mb_idx, self.get_or_create_module_binding(&scoped_name));
                         if !self.shared_module_bindings.contains(&scoped_name) {
                             self.emit(Instruction::new(
                                 OpCode::LoadModuleBinding,
@@ -4216,14 +4213,6 @@ impl BytecodeCompiler {
     /// slot that the layout treats as heap-refcounted. This keeps semantics
     /// conservative (no missed Drop glue) while Phase B/C/D grow the
     /// resolution coverage.
-    pub(crate) fn mint_closure_type_id(&mut self, captured_vars: &[String]) -> ClosureTypeId {
-        let mut capture_types: Vec<ConcreteType> = Vec::with_capacity(captured_vars.len());
-        for name in captured_vars {
-            capture_types.push(self.resolve_capture_concrete_type(name));
-        }
-        self.closure_registry.intern(capture_types)
-    }
-
     /// Resolve a captured variable's `ConcreteType` for closure-layout kind
     /// tracking (ADR-006 §2.7.8 / Q10).
     ///
@@ -4251,7 +4240,7 @@ impl BytecodeCompiler {
     ///    fallback for genuinely-unresolved captures. NOTE: this is still
     ///    mapped to `NativeView` downstream; it is correct only for non-
     ///    callable opaque captures and is preserved as-is (no scope creep).
-    fn resolve_capture_concrete_type(&mut self, name: &str) -> ConcreteType {
+    pub(crate) fn resolve_capture_concrete_type(&mut self, name: &str) -> ConcreteType {
         let ident = Expr::Identifier(name.to_string(), Span::DUMMY);
         if let Some(ct) = concrete_type_for_expr(self, &ident) {
             return ct;
@@ -4375,65 +4364,6 @@ impl BytecodeCompiler {
             }
             _ => None,
         }
-    }
-
-    /// Phase C — peek a closure literal's capture signature and mint (or
-    /// reuse) a [`ClosureTypeId`] WITHOUT lowering the closure to bytecode
-    /// and WITHOUT pushing to `closure_type_ids`.
-    ///
-    /// The resolver calls this during `try_monomorphize_method_call` to key
-    /// the monomorphization cache on the closure's layout. At emission time
-    /// the usual `compile_expr_closure` path runs as normal — because the
-    /// registry's `intern` is idempotent, both calls return the same
-    /// `ClosureTypeId`. The split responsibility (gotcha option **(a)** in
-    /// the Phase C plan) is:
-    ///
-    ///   - Resolver → peek + intern layout id only.
-    ///   - `compile_expr_closure` → intern layout id (no-op second time) AND
-    ///     push `(func_id, type_id)` into `closure_type_ids`.
-    ///
-    /// This keeps `closure_type_ids` free of duplicates while letting the
-    /// resolver see the id early.
-    pub(crate) fn mint_closure_type_id_peek(
-        &mut self,
-        params: &[shape_ast::ast::FunctionParameter],
-        body: &[shape_ast::ast::Statement],
-    ) -> ClosureTypeId {
-        // Run the same capture analysis as `compile_expr_closure`, but only
-        // for the purpose of reading capture names off of the AST.
-        let proto_def = FunctionDef {
-            name: "__peek_closure__".to_string(),
-            name_span: Span::DUMMY,
-            declaring_module_path: None,
-            doc_comment: None,
-            type_params: None,
-            params: params.to_vec(),
-            return_type: None,
-            body: body.to_vec(),
-            annotations: vec![],
-            where_clause: None,
-            is_async: false,
-            is_comptime: false,
-        };
-
-        let outer_vars = self.collect_outer_scope_vars();
-        let (mut captured_vars, _mutated) =
-            EnvironmentAnalyzer::analyze_function_with_mutability(&proto_def, &outer_vars);
-        captured_vars.sort();
-        let param_names: BTreeSet<String> =
-            params.iter().flat_map(|p| p.get_identifiers()).collect();
-        captured_vars.retain(|name| !param_names.contains(name));
-
-        // Mirror `compile_expr_closure`'s callee-capture classification so
-        // the peeked `ClosureTypeId` matches the real one (a callable
-        // capture stamps `ConcreteType::Function`, not `Pointer(Void)`).
-        let saved_callee_captures = std::mem::replace(
-            &mut self.current_closure_callee_captures,
-            Self::collect_callee_identifier_names(body),
-        );
-        let id = self.mint_closure_type_id(&captured_vars);
-        self.current_closure_callee_captures = saved_callee_captures;
-        id
     }
 
     /// Strict-typing-sweep (Cluster 2 extension): same body scan as the

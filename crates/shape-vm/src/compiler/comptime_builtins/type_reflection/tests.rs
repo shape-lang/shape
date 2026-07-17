@@ -10,6 +10,8 @@ use crate::compiler::BytecodeCompiler;
 use crate::compiler::comptime_builtins::semantic_freeze::{FreezeOverlay, SemanticFreeze};
 use std::sync::Arc;
 
+mod specialization_overlay;
+
 fn freeze_of(configure: impl FnOnce(&mut BytecodeCompiler)) -> Arc<SemanticFreeze> {
     let mut compiler = BytecodeCompiler::new();
     configure(&mut compiler);
@@ -211,177 +213,6 @@ fn parameter_identity_is_scoped_by_owning_function() {
 
     assert_eq!(parameter_identity("map"), parameter_identity("map"));
     assert_ne!(parameter_identity("map"), parameter_identity("filter"));
-}
-
-// ADR-009 A3 (Wave-46 gap #4): compiling (not fabricating) a specialization of
-// a generic function whose body reflects on its own declared type parameter
-// must succeed — the declared base type params reach the reflection snapshot
-// during the specialized-body compile at monomorphization time.
-#[test]
-fn specialized_generic_body_resolves_own_type_param_through_comptime() {
-    // Control: the same comptime reflection at module scope compiles with a
-    // bare BytecodeCompiler — proves any failure below is specialization-
-    // specific, not test-harness setup.
-    let control = r#"
-let control_label = comptime {
-  match type_category(type_ref(int)) {
-    FrozenTypeCategory::Primitive => "primitive"
-    _ => "other"
-  }
-}
-"#;
-    let control_program = shape_ast::parse_program(control).expect("control parses");
-    let control_compiler = crate::compiler::BytecodeCompiler::new();
-    control_compiler
-        .compile(&control_program)
-        .expect("module-scope comptime reflection compiles with a bare compiler");
-
-    let source = r#"
-fn describe<T>(value: T) -> string {
-  let label = comptime {
-    match type_category(type_ref(T)) {
-      FrozenTypeCategory::Parameter => "parameter"
-      _ => "other"
-    }
-  }
-  label
-}
-
-let result = describe(1)
-"#;
-    let program = shape_ast::parse_program(source).expect("generic program parses");
-    let compiler = crate::compiler::BytecodeCompiler::new();
-    let bytecode = compiler
-        .compile(&program)
-        .expect("specialized generic body with type_ref(T) compiles");
-    assert!(
-        bytecode
-            .functions
-            .iter()
-            .any(|function| function.name.starts_with("describe::")),
-        "expected a registered specialization of 'describe', got: {:?}",
-        bytecode
-            .functions
-            .iter()
-            .map(|function| function.name.clone())
-            .collect::<Vec<_>>()
-    );
-}
-
-// ADR-009 A3 — the specialization overlay supplies the BASE generic function's
-// declared type params to the freeze overlay when the active (mono) def
-// carries `type_params = None`, and the Parameter identity is scoped to the
-// BASE function name, never the mono key (declaration stability across
-// instantiations). Post-A1 merge this goes through the single freeze barrier
-// + `comptime_freeze_overlay` (the per-site snapshot builder is deleted).
-#[test]
-fn specialization_overlay_supplies_base_scoped_parameter_identity() {
-    let program = shape_ast::parse_program("fn describe(value: int) -> int { value }")
-        .expect("mono-shaped function parses");
-    let shape_ast::ast::Item::Function(definition, _) = &program.items[0] else {
-        panic!("expected function item");
-    };
-    // Register under a mono-key name with type_params = None, exactly like a
-    // substituted specialization.
-    let mut mono_def = definition.clone();
-    mono_def.name = "describe::i64".to_string();
-    assert!(mono_def.type_params.is_none());
-    let mut compiler = crate::compiler::BytecodeCompiler::new();
-    compiler
-        .register_function(&mono_def)
-        .expect("mono def registers");
-    compiler.current_function = compiler
-        .program
-        .functions
-        .iter()
-        .position(|function| function.name == "describe::i64");
-    compiler
-        .install_semantic_freeze()
-        .expect("registration-complete state freezes");
-
-    // Without the overlay, the mono def exposes no type params.
-    let bare = compiler
-        .comptime_freeze_overlay()
-        .expect("post-barrier site obtains the handle");
-    assert_eq!(bare.identity_of("T"), None);
-
-    // With the overlay, T resolves to a Parameter identity owned by the BASE name.
-    compiler.specialization_type_param_overlay =
-        Some(("describe".to_string(), vec!["T".to_string()]));
-    let overlay = compiler
-        .comptime_freeze_overlay()
-        .expect("post-barrier site obtains the handle");
-    let identity = overlay.identity_of("T").expect("overlay T identity");
-    assert_eq!(
-        overlay.category_of(identity),
-        Ok(FrozenTypeCategory::Parameter)
-    );
-
-    // Identity contract: the canonical descriptor is scoped to the BASE fn
-    // name, never the mono key (same `parameter:{owner}:{name}` grammar the
-    // freeze overlay interns).
-    assert_eq!(
-        identity,
-        FrozenTypeIdentity::from_canonical_descriptor("parameter:describe:T"),
-        "overlay Parameter identity must be scoped to the BASE fn name"
-    );
-    assert_ne!(
-        identity,
-        FrozenTypeIdentity::from_canonical_descriptor("parameter:describe::i64:T"),
-        "overlay Parameter identity must NOT be scoped to the mono key"
-    );
-}
-
-// ADR-009 A3 (S3): on the specialization path, the overlay-derived Parameter
-// identity is STABLE across instantiations of one base generic function
-// (identity::i64 and identity::string agree — owner is the BASE name, so two
-// mono compiles intern the same "parameter:{base}:{name}" descriptor) and
-// DISTINCT across owning functions. Never renumber existing identities — the
-// SHA-256 descriptor scheme is fixed; any red here means owner scoping in
-// cache.rs/semantic_freeze.rs state threading is wrong.
-#[test]
-fn specialization_overlay_identity_is_stable_across_instantiations() {
-    let overlay_identity = |mono_name: &str, base_name: &str| {
-        let program = shape_ast::parse_program("fn placeholder(value: int) -> int { value }")
-            .expect("mono-shaped function parses");
-        let shape_ast::ast::Item::Function(definition, _) = &program.items[0] else {
-            panic!("expected function item");
-        };
-        let mut mono_def = definition.clone();
-        mono_def.name = mono_name.to_string();
-        assert!(mono_def.type_params.is_none());
-        let mut compiler = crate::compiler::BytecodeCompiler::new();
-        compiler
-            .register_function(&mono_def)
-            .expect("mono def registers");
-        compiler.current_function = compiler
-            .program
-            .functions
-            .iter()
-            .position(|function| function.name == mono_name);
-        compiler
-            .install_semantic_freeze()
-            .expect("registration-complete state freezes");
-        compiler.specialization_type_param_overlay =
-            Some((base_name.to_string(), vec!["T".to_string()]));
-        let overlay = compiler
-            .comptime_freeze_overlay()
-            .expect("post-barrier site obtains the handle");
-        overlay.identity_of("T").expect("overlay T identity")
-    };
-
-    // Same base, different instantiations: identical identity.
-    assert_eq!(
-        overlay_identity("identity::i64", "identity"),
-        overlay_identity("identity::string", "identity"),
-        "Parameter identity must be stable across instantiations of one base fn"
-    );
-    // Different owning functions: distinct identities.
-    assert_ne!(
-        overlay_identity("identity::i64", "identity"),
-        overlay_identity("filter::i64", "filter"),
-        "Parameter identities must be distinct across owning functions"
-    );
 }
 
 #[test]
@@ -689,11 +520,11 @@ fn callable_descriptor_is_positional_and_return_significant() {
 
 /// ADR-009 B6: the callable's PRESERVED structural descriptor (the widened
 /// composite memo input) records ordered per-position params with their
-/// passing mode and name, WITHOUT those facts leaking into the identity hash.
-/// Names are identity-insignificant; passing mode is derived from the borrow
-/// wrapper and is NOT part of the descriptor string.
+/// passing mode and name. Names are identity-insignificant; passing mode is
+/// identity-significant through the borrow wrapper already present in the
+/// canonical parameter member and is not duplicated as another string field.
 #[test]
-fn callable_structural_descriptor_records_modes_and_names_off_the_identity() {
+fn callable_structural_descriptor_records_names_and_identity_significant_modes() {
     // `PassingMode` is in scope via `use super::*`.
     let overlay = module_overlay(|_| {});
 
@@ -732,8 +563,7 @@ fn callable_structural_descriptor_records_modes_and_names_off_the_identity() {
     assert_eq!(descriptor.returns, overlay.identity_of("bool").unwrap());
 
     // Renaming every parameter is identity-neutral (names insignificant) and
-    // the mode axis does not perturb the identity beyond the borrow wrapper the
-    // grammar already embeds.
+    // the mode axis is exactly the borrow wrapper the grammar already embeds.
     let renamed = TypeAnnotation::Function {
         params: vec![
             named("x", basic("int")),
@@ -1169,7 +999,7 @@ fn unresolved_leaf_names_reject_at_any_depth() {
 #[test]
 fn inference_holes_reject_with_freeze_boundary_diagnostic() {
     let overlay = module_overlay(|_| {});
-    let hole = tyvar_to_annotation(&TypeVar("T3".to_string()));
+    let hole = tyvar_to_annotation(&TypeVar::new("T3".to_string()));
 
     for annotation in [
         hole.clone(),
@@ -1457,7 +1287,7 @@ fn composite_identities_round_trip_their_canonical_descriptors() {
     let mut compiler = BytecodeCompiler::new();
     let holed = TypeAnnotation::Tuple(vec![
         basic("int"),
-        tyvar_to_annotation(&TypeVar("T9".to_string())),
+        tyvar_to_annotation(&TypeVar::new("T9".to_string())),
     ]);
     compiler
         .type_aliases
@@ -1942,7 +1772,8 @@ mod payload_query {
     /// payload from the widened composite memo — ordered params with stable
     /// type identities, optionality flags, and passing modes derived from the
     /// borrow annotation, plus the return identity. Reconstructed WITHOUT
-    /// inverting the one-way SHA-256 identity (which drops names + modes).
+    /// inverting the one-way SHA-256 identity (which drops names while modes
+    /// remain encoded by the canonical borrow wrapper).
     #[test]
     fn site_interned_callable_answers_full_payload() {
         use super::payloads::{CallableDescriptor, ParamDescriptor};
@@ -2117,18 +1948,18 @@ mod payload_query {
             vec![param(
                 None,
                 false,
-                tyvar_to_annotation(&TypeVar("P".to_string())),
+                tyvar_to_annotation(&TypeVar::new("P".to_string())),
             )],
             basic("bool"),
         );
         let holed_return = function(
             vec![param(None, false, basic("int"))],
-            tyvar_to_annotation(&TypeVar("R".to_string())),
+            tyvar_to_annotation(&TypeVar::new("R".to_string())),
         );
         let holed_nested = callable(
             vec![TypeAnnotation::Tuple(vec![
                 basic("int"),
-                tyvar_to_annotation(&TypeVar("N".to_string())),
+                tyvar_to_annotation(&TypeVar::new("N".to_string())),
             ])],
             basic("bool"),
         );

@@ -323,8 +323,8 @@ impl BytecodeCompiler {
                 }
                 self.emit(Instruction::simple(OpCode::Dup));
                 // Mutable closure captures: dispatch by CaptureKind.
-                //   * `CaptureKind::Shared`       → A.1B StoreSharedCapture.
-                //   * `CaptureKind::OwnedMutable` → A.1B StoreOwnedMutableCapture.
+                //   * `CaptureAccess::SharedCell`       → A.1B StoreSharedCapture.
+                //   * `CaptureAccess::OwnedMutableCell` → A.1B StoreOwnedMutableCapture.
                 //   * legacy SharedCell fallback  → StoreClosure.
                 if let Some(&upvalue_idx) = self.mutable_closure_captures.get(name.as_str()) {
                     // Track A.1C.2: Shared (var) captures route through the

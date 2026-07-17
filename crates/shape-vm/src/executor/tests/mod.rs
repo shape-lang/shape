@@ -41,6 +41,7 @@ mod matrix_ops;
 // passed to an array HOF) must dispatch correctly and NEVER SIGSEGV.
 mod named_fn_value;
 mod no_dynamic;
+mod declared_capture_teardown;
 // GC Phase 4 — end-of-program teardown sweep (Finding #82). Reclaims
 // module-scope closure-capture cycles at VM teardown; memory-only.
 #[cfg(feature = "gc")]

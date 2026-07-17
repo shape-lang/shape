@@ -35,6 +35,7 @@ pub mod gc_coordinator;
 #[cfg(feature = "gc")]
 pub mod gc_visit;
 pub mod heap_header;
+mod heap_kind_catalog;
 #[macro_use]
 pub mod heap_variants;
 pub mod heap_value;

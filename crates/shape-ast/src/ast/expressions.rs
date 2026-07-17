@@ -160,6 +160,39 @@ pub enum Expr {
         params: Vec<super::functions::FunctionParameter>,
         return_type: Option<TypeAnnotation>,
         body: Vec<super::statements::Statement>,
+        /// ADR-009 D2 / C1 (slice 2): node-borne generated-code provenance.
+        /// `Some` iff this closure node was produced by a comptime expansion
+        /// (stamped by `transform::generated_origin::stamp_generated_closures`
+        /// at every point where generated AST enters the program). `None` =
+        /// ordinary user source. This is the Wave-46 capture gate's predicate:
+        /// it replaces the name predicate
+        /// `generated_symbols.contains_name(current_function)`, which could not
+        /// see monomorphized bodies, `replace body` expansions, or nested
+        /// closures.
+        ///
+        /// `#[serde(default)]` so the `__emit_extend` payload round-trip is
+        /// backward-compatible; the field itself round-trips (see
+        /// `transform::generated_origin` tests).
+        /// Kept indirect because generated provenance is cold; ordinary source
+        /// carries `None` without inflating every recursive `Expr` value.
+        #[serde(default)]
+        generated_origin: Option<Box<super::provenance::GeneratedNodeOrigin>>,
+        /// ADR-009 C1 (slice 3): the DECLARED capture clause —
+        /// `|acc, item; move cfg, share total| …`.
+        ///
+        /// THE canonical carrier (one carrier, two producers): producer #1 is
+        /// the parser; producer #2 will be C2's `CheckedBody` staging, which
+        /// populates this same field. `Some(clause)` DRIVES capture emission —
+        /// inference then only validates and errors on a mismatch. `None` means
+        /// "infer" (ordinary source) or, inside generated code with a non-empty
+        /// capture set, the Wave-46 implicit-capture rejection.
+        ///
+        /// A clause on an ORDINARY SOURCE closure is `[C0903]`: the surface is
+        /// generated-code-only.
+        /// Kept indirect for the same recursive-AST stack budget; `None` still
+        /// allocates nothing and `Some(empty)` remains distinct from `None`.
+        #[serde(default)]
+        captures: Option<Box<super::captures::CaptureClause>>,
         span: Span,
     },
     /// Duration literal: 30d, 1h, 15m
@@ -389,5 +422,30 @@ impl Spanned for Expr {
             Expr::Reference { span, .. } => *span,
             Expr::TableRows(_, span) => *span,
         }
+    }
+}
+
+#[cfg(all(test, target_pointer_width = "64"))]
+mod layout_tests {
+    use super::Expr;
+    use crate::ast::{Item, Statement};
+
+    #[test]
+    fn recursive_ast_layout_stays_within_parser_stack_budget() {
+        assert!(
+            std::mem::size_of::<Expr>() <= 160,
+            "Expr grew beyond the parser stack budget: {} bytes",
+            std::mem::size_of::<Expr>()
+        );
+        assert!(
+            std::mem::size_of::<Statement>() <= 768,
+            "Statement propagated an oversized Expr: {} bytes",
+            std::mem::size_of::<Statement>()
+        );
+        assert!(
+            std::mem::size_of::<Item>() <= 768,
+            "Item propagated an oversized Expr: {} bytes",
+            std::mem::size_of::<Item>()
+        );
     }
 }

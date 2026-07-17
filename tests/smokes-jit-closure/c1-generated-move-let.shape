@@ -1,0 +1,15 @@
+// ADR-009 C1 slice 4: generated `move` over a plain local `let`.
+annotation add_answer() {
+  targets: [type]
+  comptime post(target, ctx) {
+    extend ("extend Job { method answer() -> int { let base = 40
+      let worker = |; move base| base + 2
+      worker() } }")
+  }
+}
+
+@add_answer()
+type Job { id: int }
+
+let job = Job { id: 1 }
+print(job.answer())

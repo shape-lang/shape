@@ -13,13 +13,30 @@ use shape_runtime::type_schema::FieldType;
 use shape_value::KindedSlot;
 use std::collections::{HashMap, HashSet};
 
-use super::{BytecodeCompiler, HygienicRole};
 use super::comptime_builtins::FrozenTypeIdentity;
 use super::comptime_builtins::expansion_provenance::{
     ApplicationClaim, ApplicationId, CanonicalHash, ComptimeStage, DeclarationDiscoveryFixedPoint,
     ExpansionIdentity, ExpansionSite, GeneratedNodePath, GeneratedOrigin, GeneratedSymbolTable,
     GeneratorRef, SymbolReservation, TargetIdentity,
 };
+use super::{BytecodeCompiler, HygienicRole, ParamPassMode};
+
+mod generated_closure_provenance;
+use generated_closure_provenance::anchor_generated_function_decl;
+mod declaration_discovery;
+use declaration_discovery::DeclarationDiscoveryTarget;
+mod handler_resolution;
+use handler_resolution::{ComptimeAnnotationHandlers, ComptimeHandlerHelperAuthority};
+mod original_body_shadow;
+use original_body_shadow::{PendingOriginalBodyShadow, canonical_original_callable};
+
+#[cfg(test)]
+#[path = "functions_annotations/imported_handler_resolution_tests.rs"]
+mod imported_handler_resolution_tests;
+
+#[cfg(test)]
+#[path = "functions_annotations/handler_helper_authority_tests.rs"]
+mod handler_helper_authority_tests;
 
 /// ADR-009 E3 (slice S3, legacy class U11): the TYPED capability a `replace
 /// body` replacement reaches through `ctx.original`. It replaces the deleted
@@ -36,18 +53,20 @@ use super::comptime_builtins::expansion_provenance::{
 pub(crate) struct OriginalCapability {
     /// Unspellable registry name of the shadow function holding the
     /// pre-annotation body.
-    pub(crate) shadow_name: String,
+    shadow_name: String,
     /// The shadow's frozen callable signature identity — the typed
     /// `FrozenCallable` (B6) `ctx.original` denotes.
-    pub(crate) callable: FrozenTypeIdentity,
+    callable: FrozenTypeIdentity,
 }
 
-/// Comptime handlers for one annotation, gathered by the §4.5.1 pre-pass
-/// (`materialize_computed_comptime_extends`) from the root program and the
-/// module graph.
-struct ComptimeAnnotationHandlers {
-    handlers: Vec<shape_ast::ast::AnnotationHandler>,
-    def_param_names: Vec<String>,
+impl OriginalCapability {
+    fn shadow_name(&self) -> &str {
+        &self.shadow_name
+    }
+
+    fn callable(&self) -> FrozenTypeIdentity {
+        self.callable
+    }
 }
 
 /// Canonical label for the comptime handler kind inside a generator
@@ -134,43 +153,12 @@ fn generated_free_fn_content(func_def: &FunctionDef) -> CanonicalHash {
     CanonicalHash::from_canonical_decl_encoding(&format!("fn:{func_def:?}"))
 }
 
-/// ADR-009 D1 (S3): re-base a generated declaration's DECL-LEVEL spans to
-/// the expansion's application anchor (Decision 68: no `Span::DUMMY`, no
-/// spans indexing text that is not the compiling file). Handler-emitted
-/// declarations are parsed from synthetic snippet text (`mod
-/// __module_probe__ { … }`), built from typed `__ComptimeItemFragment`s
-/// (whose scaffolding spans are `Span::default()`), or desugared from
-/// handler-body AST — none of those spans resolve inside the file being
-/// compiled, so the registered declaration anchors at the real application
-/// site instead.
-///
-/// Scope line (recorded for the wave46 D1 addendum): decl-level anchors
-/// only — the name span and synthesized type-param spans. Body-node spans
-/// keep their handler-emitted offsets until ticket D2's virtual expansion
-/// documents give generated bodies a real per-node mapping; those nodes are
-/// covered by the decl's `GeneratedOrigin.node_path` in the meantime.
-///
-/// MUST be called AFTER the row-3 content fingerprint is taken: both phases
-/// fingerprint the RAW handler-emitted AST, so anchoring before hashing in
-/// one phase only would fabricate a row-3 "conflicting output" error.
-fn anchor_generated_function_decl(func_def: &mut FunctionDef, anchor: Span) {
-    func_def.name_span = anchor;
-    if let Some(type_params) = func_def.type_params.as_mut() {
-        for type_param in type_params {
-            match type_param {
-                shape_ast::ast::TypeParam::Type { span, .. }
-                | shape_ast::ast::TypeParam::Const { span, .. } => *span = anchor,
-            }
-        }
-    }
-}
-
 impl BytecodeCompiler {
     pub(super) fn apply_function_comptime_signature_directives_for_analysis(
         &mut self,
         program: &mut shape_ast::ast::Program,
     ) -> Result<()> {
-        let handler_map = self.collect_comptime_annotation_handlers(program);
+        let handler_map = self.collect_comptime_annotation_handlers(program)?;
         if handler_map.is_empty() {
             return Ok(());
         }
@@ -247,15 +235,25 @@ impl BytecodeCompiler {
                     }
                 }
                 Item::Module(module, _) => {
-                    Self::apply_function_comptime_signature_directives_to_items(
-                        compiler,
-                        handler_map,
-                        extensions,
-                        trait_impls,
-                        known_type_symbols,
-                        ctx_module_path,
-                        ctx_file,
-                        &mut module.items,
+                    let module_path = if ctx_module_path.is_empty() {
+                        module.name.clone()
+                    } else {
+                        Self::qualify_module_symbol(ctx_module_path, &module.name)
+                    };
+                    compiler.with_comptime_annotation_module_scope(
+                        module_path.clone(),
+                        |compiler| {
+                            Self::apply_function_comptime_signature_directives_to_items(
+                                compiler,
+                                handler_map,
+                                extensions,
+                                trait_impls,
+                                known_type_symbols,
+                                &module_path,
+                                ctx_file,
+                                &mut module.items,
+                            )
+                        },
                     )?;
                 }
                 _ => {}
@@ -284,21 +282,24 @@ impl BytecodeCompiler {
         ];
         for phase in phases.iter() {
             for ann in &annotations {
-                let Some(entry) = handler_map.get(ann.name.as_str()).or_else(|| {
-                    ann.name
-                        .rsplit("::")
-                        .next()
-                        .and_then(|bare| handler_map.get(bare))
-                }) else {
+                let Some((_, entry)) = self.resolve_comptime_annotation_handlers(
+                    &handler_map,
+                    ann,
+                    (!ctx_module_path.is_empty()).then_some(ctx_module_path),
+                ) else {
                     continue;
                 };
                 for handler in entry.handlers.iter().filter(|h| &h.handler_type == phase) {
                     let target = super::comptime_target::ComptimeTarget::from_function(func_def);
                     let target_value = target.to_nanboxed()?;
-                    let mut helpers = self.collect_comptime_helpers();
-                    helpers.extend(self.collect_scoped_helpers_for_expr(&handler.body));
-                    helpers.sort_by(|a, b| a.name.cmp(&b.name));
-                    helpers.dedup_by(|a, b| a.name == b.name);
+                    let handler_module_path = entry
+                        .defining_module_path
+                        .as_deref()
+                        .unwrap_or(ctx_module_path);
+                    let helpers = self.collect_authorized_comptime_helpers(
+                        &handler.body,
+                        entry.helper_authority(),
+                    );
 
                     // S3 pre-pass freeze rule (see `s3_freeze_gate_tests`
                     // module doc): this signature-directive pre-pass runs
@@ -322,7 +323,7 @@ impl BytecodeCompiler {
                             &helpers,
                             extensions,
                             known_type_symbols.clone(),
-                            ctx_module_path,
+                            handler_module_path,
                             ctx_file,
                             trait_impls.clone(),
                             freeze,
@@ -398,8 +399,10 @@ impl BytecodeCompiler {
                     else {
                         continue;
                     };
-                    param.default_value =
-                        Some(Self::scalar_default_expr_from_kinded_slot(&param_name, &value)?);
+                    param.default_value = Some(Self::scalar_default_expr_from_kinded_slot(
+                        &param_name,
+                        &value,
+                    )?);
                 }
                 super::comptime_builtins::ComptimeDirective::SetReturnType { .. } => {}
                 _ => {}
@@ -924,8 +927,18 @@ impl BytecodeCompiler {
     /// When an annotation has a `comptime pre/post(...) { ... }` handler, self builds
     /// a ComptimeTarget from the function definition and executes the handler body
     /// at compile time with the target object bound to the handler parameter.
-    pub(super) fn execute_comptime_handlers(&mut self, func_def: &mut FunctionDef) -> Result<bool> {
+    pub(super) fn execute_comptime_handlers(
+        &mut self,
+        func_def: &mut FunctionDef,
+        inferred_reference_optimizations: &[Option<ParamPassMode>],
+    ) -> Result<bool> {
+        assert_eq!(
+            func_def.params.len(),
+            inferred_reference_optimizations.len(),
+            "comptime annotation provenance must stay slot-aligned"
+        );
         let mut removed = false;
+        let mut pending_original_body_shadow = None;
         let annotations = func_def.annotations.clone();
 
         // Phase 1: comptime pre
@@ -937,6 +950,8 @@ impl BytecodeCompiler {
                         &handler,
                         &compiled.param_names,
                         func_def,
+                        inferred_reference_optimizations,
+                        &mut pending_original_body_shadow,
                     )? {
                         removed = true;
                         break;
@@ -955,6 +970,8 @@ impl BytecodeCompiler {
                             &handler,
                             &compiled.param_names,
                             func_def,
+                            inferred_reference_optimizations,
+                            &mut pending_original_body_shadow,
                         )? {
                             removed = true;
                             break;
@@ -962,6 +979,10 @@ impl BytecodeCompiler {
                     }
                 }
             }
+        }
+
+        if !removed && let Some(pending) = pending_original_body_shadow.take() {
+            self.finalize_pending_original_body_shadow(pending)?;
         }
 
         Ok(removed)
@@ -973,6 +994,8 @@ impl BytecodeCompiler {
         handler: &shape_ast::ast::AnnotationHandler,
         annotation_def_param_names: &[String],
         func_def: &mut FunctionDef,
+        inferred_reference_optimizations: &[Option<ParamPassMode>],
+        pending_original_body_shadow: &mut Option<PendingOriginalBodyShadow>,
     ) -> Result<bool> {
         // Build the target object from the function definition
         let target = super::comptime_target::ComptimeTarget::from_function(func_def);
@@ -1019,6 +1042,8 @@ impl BytecodeCompiler {
             &target_name,
             func_def,
             &expansion_site,
+            inferred_reference_optimizations,
+            pending_original_body_shadow,
         )
         .map_err(|e| {
             // ADR-009 D1 (S4): provenance-carrying generated-decl failures
@@ -1063,26 +1088,20 @@ impl BytecodeCompiler {
             .chain(self.type_aliases.keys())
             .cloned()
             .collect();
-        let mut comptime_helpers = self.collect_comptime_helpers();
-        comptime_helpers.extend(self.collect_scoped_helpers_for_expr(&handler.body));
-        // For module-scoped helpers (e.g. "myext::schema_for"), add a bare-name
-        // alias so that handler code written inside the module can call them
-        // without qualification (e.g. "schema_for(uri)").
-        let bare_aliases: Vec<_> = comptime_helpers
-            .iter()
-            .filter_map(|def| {
-                let (_, bare) = def.name.rsplit_once("::")?;
-                let mut alias = def.clone();
-                alias.name = bare.to_string();
-                Some(alias)
-            })
-            .collect();
-        comptime_helpers.extend(bare_aliases);
-        comptime_helpers.sort_by(|a, b| a.name.cmp(&b.name));
-        comptime_helpers.dedup_by(|a, b| a.name == b.name);
+        let resolved_annotation_name = self.resolve_compiled_annotation_name(annotation);
+        let defining_module_path = resolved_annotation_name
+            .as_deref()
+            .and_then(|name| name.rsplit_once("::").map(|(module_path, _)| module_path));
+        let helper_authority =
+            ComptimeHandlerHelperAuthority::for_compiled_name(resolved_annotation_name.as_deref());
+        let comptime_helpers =
+            self.collect_authorized_comptime_helpers(&handler.body, helper_authority);
 
         // §4.4: the comptime `ctx` compile-context (module_path + source file).
-        let ctx_module_path = self.module_scope_stack.last().cloned().unwrap_or_default();
+        let ctx_module_path = defining_module_path
+            .map(str::to_string)
+            .or_else(|| self.module_scope_stack.last().cloned())
+            .unwrap_or_default();
         let ctx_file = self
             .program
             .debug_info
@@ -1120,42 +1139,6 @@ impl BytecodeCompiler {
         // §4.4: re-emit any `warning()` output anchored at this handler site.
         self.surface_comptime_warnings(&execution.warnings, handler_span);
         Ok(execution)
-    }
-
-    fn collect_scoped_helpers_for_expr(&self, expr: &Expr) -> Vec<FunctionDef> {
-        let mut pending_names = Vec::new();
-        let mut seed_names = HashSet::new();
-        Self::collect_scoped_names_in_expr(expr, &mut seed_names);
-        pending_names.extend(seed_names.into_iter());
-
-        let mut visited = HashSet::new();
-        let mut helpers = Vec::new();
-
-        while let Some(name) = pending_names.pop() {
-            if !visited.insert(name.clone()) {
-                continue;
-            }
-            let def = if let Some(d) = self.function_defs.get(&name) {
-                d.clone()
-            } else {
-                // Try module-scoped lookup: for bare names like "schema_for",
-                // check "module::schema_for" using the current module scope stack.
-                let found = self.module_scope_stack.iter().rev().find_map(|module| {
-                    let scoped = Self::qualify_module_symbol(module, &name);
-                    self.function_defs.get(&scoped).cloned()
-                });
-                let Some(d) = found else { continue };
-                d
-            };
-            helpers.push(def.clone());
-            for stmt in &def.body {
-                let mut nested = HashSet::new();
-                Self::collect_scoped_names_in_statement(stmt, &mut nested);
-                pending_names.extend(nested.into_iter().filter(|n| !visited.contains(n)));
-            }
-        }
-
-        helpers
     }
 
     fn collect_scoped_names_in_statement(stmt: &Statement, names: &mut HashSet<String>) {
@@ -1243,13 +1226,14 @@ impl BytecodeCompiler {
                 }
             }
             Expr::FunctionCall {
-                name,
+                const_args,
                 args,
                 named_args,
                 ..
             } => {
-                if name.contains("::") {
-                    names.insert(name.clone());
+                handler_resolution::seed_function_call(expr, names);
+                for arg in const_args {
+                    Self::collect_scoped_names_in_expr(arg, names);
                 }
                 for arg in args {
                     Self::collect_scoped_names_in_expr(arg, names);
@@ -1259,13 +1243,15 @@ impl BytecodeCompiler {
                 }
             }
             Expr::QualifiedFunctionCall {
-                namespace,
-                function,
+                const_args,
                 args,
                 named_args,
                 ..
             } => {
-                names.insert(format!("{}::{}", namespace, function));
+                handler_resolution::seed_function_call(expr, names);
+                for arg in const_args {
+                    Self::collect_scoped_names_in_expr(arg, names);
+                }
                 for arg in args {
                     Self::collect_scoped_names_in_expr(arg, names);
                 }
@@ -1818,6 +1804,7 @@ impl BytecodeCompiler {
                 node_path: node_path.clone(),
                 source_anchor,
             };
+            self.stamp_generated_closure_provenance(&mut func_def.body, &origin, &func_def.name);
             // §4.9.1 + D1 identity-keyed dedup: if the whole-program
             // pre-pass already reserved this identity and registered the
             // method's SIGNATURE (so it is visible to the analyzer, method
@@ -1909,47 +1896,8 @@ impl BytecodeCompiler {
     ) -> Result<Vec<shape_ast::ast::Item>> {
         use shape_ast::ast::Item;
 
-        // ADR-009 E3 (S1 parity): declaration-PRODUCING comptime attaches to two
-        // target kinds — struct/type definitions and annotated functions. A
-        // function-target annotation whose comptime handler emits
-        // `extend Type { … }` must enter the SAME declaration-discovery fixed
-        // point as a type-target one (Decision 67), so both flow through ONE
-        // worklist, ONE run-once memo, and ONE recording path — never a parallel
-        // scan. Only the target-object construction and the Dec-56 representation
-        // authority differ per kind; everything downstream (claim, execute,
-        // directive recording) is shared inline below.
-        enum DiscoveryTarget {
-            Struct(shape_ast::ast::types::StructTypeDef),
-            Function(FunctionDef),
-        }
-        impl DiscoveryTarget {
-            fn name(&self) -> &str {
-                match self {
-                    DiscoveryTarget::Struct(sd) => &sd.name,
-                    DiscoveryTarget::Function(fd) => &fd.name,
-                }
-            }
-            fn annotations(&self) -> &[shape_ast::ast::functions::Annotation] {
-                match self {
-                    DiscoveryTarget::Struct(sd) => &sd.annotations,
-                    DiscoveryTarget::Function(fd) => &fd.annotations,
-                }
-            }
-            /// ADR-009 B5 declaration shape of the target this handler extends.
-            /// A struct target is a product `NominalShape::Struct`; a function
-            /// target is not a decomposable nominal type (`Opaque`), and an
-            /// `extend <target>` against a function target has no nominal owner
-            /// to substitute anyway.
-            fn nominal_shape(&self) -> NominalShape {
-                match self {
-                    DiscoveryTarget::Struct(_) => NominalShape::Struct,
-                    DiscoveryTarget::Function(_) => NominalShape::Opaque,
-                }
-            }
-        }
-
         // annotation bare-name -> (comptime handlers, annotation-def param names)
-        let handler_map = self.collect_comptime_annotation_handlers(program);
+        let handler_map = self.collect_comptime_annotation_handlers(program)?;
         if handler_map.is_empty() {
             return Ok(Vec::new());
         }
@@ -1961,17 +1909,25 @@ impl BytecodeCompiler {
             .unwrap_or_default();
         let trait_impls = self.type_inference.env.trait_impl_keys();
 
-        // Known type symbols: local struct/type names plus every type symbol
-        // already registered (imported modules compiled in graph phase 1).
+        // Snapshot the complete source-executable v1 annotation frontier in
+        // pass-2 lexical form. The collector recurses inline modules, unwraps
+        // exported functions/structs, and lowers source Extend/Impl methods via
+        // the same compiler desugarers pass 2 uses.
+        let discovery_seed = self.collect_declaration_discovery_targets(program)?;
+
+        // Known type symbols: every discovered source struct plus every type
+        // symbol already registered (imported modules compiled in graph phase
+        // 1). Nested/exported types therefore enter handler execution under
+        // the same qualified identity pass 2 observes.
         let mut known_type_symbols: HashSet<String> = self
             .struct_types
             .keys()
             .chain(self.type_aliases.keys())
             .cloned()
             .collect();
-        for item in &program.items {
-            if let Item::StructType(sd, _) = item {
-                known_type_symbols.insert(sd.name.clone());
+        for target in &discovery_seed {
+            if matches!(target, DeclarationDiscoveryTarget::Struct { .. }) {
+                known_type_symbols.insert(target.name().to_string());
             }
         }
 
@@ -1983,27 +1939,6 @@ impl BytecodeCompiler {
             .get_file(self.current_file_id)
             .unwrap_or("")
             .to_string();
-
-        // Snapshot the discovery targets (struct/type defs + annotated
-        // functions) so we can borrow `self` mutably while running the mini-VM.
-        // Function targets carry no representation authority (Dec 56); per the
-        // v1 directive surface they never emit a new annotated type, so they are
-        // a flat one-round seed — the additions-only re-scan below still keeps
-        // multi-level discovery total for any generated annotated struct.
-        let mut discovery_seed: Vec<DiscoveryTarget> = program
-            .items
-            .iter()
-            .filter_map(|item| match item {
-                Item::StructType(sd, _) => Some(DiscoveryTarget::Struct(sd.clone())),
-                _ => None,
-            })
-            .collect();
-        discovery_seed.extend(program.items.iter().filter_map(|item| match item {
-            Item::Function(fd, _) if !fd.annotations.is_empty() => {
-                Some(DiscoveryTarget::Function(fd.clone()))
-            }
-            _ => None,
-        }));
 
         let mut generated: Vec<Item> = Vec::new();
 
@@ -2021,7 +1956,7 @@ impl BytecodeCompiler {
         // annotated type — so real programs converge in one round; the worklist
         // machinery makes multi-level discovery total and its rejections named.
         let mut discovery = DeclarationDiscoveryFixedPoint::new();
-        let mut worklist: Vec<DiscoveryTarget> = discovery_seed;
+        let mut worklist: Vec<DeclarationDiscoveryTarget> = discovery_seed;
         // Generated annotated type → the application whose expansion produced
         // it (the output-triggers edge source for cycle detection).
         let mut type_producer: HashMap<String, ExpansionIdentity> = HashMap::new();
@@ -2042,11 +1977,15 @@ impl BytecodeCompiler {
                 .map_err(|message| self.build_discovery_failure(message, None))?;
             // Types generated this round, re-scanned next round (additions-only;
             // discovered headers stay immutable through discovery).
-            let mut newly_generated_types: Vec<DiscoveryTarget> = Vec::new();
+            let mut newly_generated_types: Vec<DeclarationDiscoveryTarget> = Vec::new();
 
             for disc_target in &round_defs {
                 for ann in disc_target.annotations() {
-                    let Some(entry) = handler_map.get(ann.name.as_str()) else {
+                    let Some((_, entry)) = self.resolve_comptime_annotation_handlers(
+                        &handler_map,
+                        ann,
+                        disc_target.lexical_module_path(),
+                    ) else {
                         continue;
                     };
                     for handler in &entry.handlers {
@@ -2056,36 +1995,7 @@ impl BytecodeCompiler {
                         // FUNCTION target builds from the signature and receives no
                         // authority (`access_type_name = None`). Everything below
                         // is shared.
-                        let (target, access_type_name): (_, Option<String>) = match disc_target {
-                            DiscoveryTarget::Struct(struct_def) => {
-                                let fields: Vec<(
-                                    String,
-                                    Option<TypeAnnotation>,
-                                    Vec<shape_ast::ast::functions::Annotation>,
-                                )> = struct_def
-                                    .fields
-                                    .iter()
-                                    .map(|f| {
-                                        (
-                                            f.name.clone(),
-                                            Some(f.type_annotation.clone()),
-                                            f.annotations.clone(),
-                                        )
-                                    })
-                                    .collect();
-                                (
-                                    super::comptime_target::ComptimeTarget::from_type(
-                                        &struct_def.name,
-                                        &fields,
-                                    ),
-                                    Some(struct_def.name.clone()),
-                                )
-                            }
-                            DiscoveryTarget::Function(func_def) => (
-                                super::comptime_target::ComptimeTarget::from_function(func_def),
-                                None,
-                            ),
-                        };
+                        let (target, access_type_name) = disc_target.comptime_target();
                         // ADR-009 D1 (S2): the pre-pass builds the SAME expansion
                         // site pass-2 will build for this application (same ann
                         // node, same handler AST, same ComptimeTarget inputs), so
@@ -2124,10 +2034,15 @@ impl BytecodeCompiler {
                         // pre-pass time `function_defs` already holds every
                         // dependency-module function (graph phase 1); root helpers
                         // that are not yet registered simply fall back to pass-2.
-                        let mut helpers = self.collect_comptime_helpers();
-                        helpers.extend(self.collect_scoped_helpers_for_expr(&handler.body));
-                        helpers.sort_by(|a, b| a.name.cmp(&b.name));
-                        helpers.dedup_by(|a, b| a.name == b.name);
+                        let handler_module_path = entry
+                            .defining_module_path
+                            .as_deref()
+                            .or_else(|| disc_target.lexical_module_path())
+                            .unwrap_or(&ctx_module_path);
+                        let helpers = self.collect_authorized_comptime_helpers(
+                            &handler.body,
+                            entry.helper_authority(),
+                        );
 
                         // §4.5.1: this pre-pass run is speculative (it only
                         // materializes generated function signatures); pass-2
@@ -2169,7 +2084,7 @@ impl BytecodeCompiler {
                                 &helpers,
                                 &extensions,
                                 known_type_symbols.clone(),
-                                &ctx_module_path,
+                                handler_module_path,
                                 &ctx_file,
                                 trait_impls.clone(),
                                 freeze,
@@ -2251,10 +2166,7 @@ impl BytecodeCompiler {
                                     // `Item::Extend` and reserve one identity. The
                                     // deleted magic `TypeName == "target"` literal
                                     // substitution formerly lived here.
-                                    vec![Item::Extend(
-                                        extend,
-                                        expansion_site.application_span(),
-                                    )]
+                                    vec![Item::Extend(extend, expansion_site.application_span())]
                                 }
                                 _ => continue,
                             };
@@ -2290,6 +2202,11 @@ impl BytecodeCompiler {
                                             node_path: node_path.clone(),
                                             source_anchor,
                                         };
+                                        self.stamp_generated_closure_provenance(
+                                            &mut func_def.body,
+                                            &origin,
+                                            &func_def.name,
+                                        );
                                         match self.generated_symbols.reserve_generated_decl(
                                             &func_def.name,
                                             origin,
@@ -2391,6 +2308,13 @@ impl BytecodeCompiler {
                                                 node_path: node_path.clone(),
                                                 source_anchor,
                                             };
+                                            let owner =
+                                                format!("{extend_type_str}.{}", method.name);
+                                            self.stamp_generated_closure_provenance(
+                                                &mut func_def.body,
+                                                &origin,
+                                                &owner,
+                                            );
                                             match self.generated_symbols.reserve_generated_decl(
                                                 &func_def.name,
                                                 origin,
@@ -2441,6 +2365,12 @@ impl BytecodeCompiler {
                                             // `anchor_generated_function_decl`).
                                             for method in &mut extend.methods {
                                                 method.span = expansion_site.application_span();
+                                                self.stamp_generated_analysis_method(
+                                                    method,
+                                                    &expansion_site,
+                                                    source_anchor,
+                                                    &extend_type_str,
+                                                );
                                             }
                                             generated.push(Item::Extend(
                                                 extend,
@@ -2468,7 +2398,14 @@ impl BytecodeCompiler {
                                                 sd.name.clone(),
                                                 expansion_site.identity().clone(),
                                             );
-                                            newly_generated_types.push(DiscoveryTarget::Struct(sd));
+                                            newly_generated_types.push(
+                                                DeclarationDiscoveryTarget::Struct {
+                                                    definition: sd,
+                                                    lexical_module_path: disc_target
+                                                        .lexical_module_path()
+                                                        .map(str::to_string),
+                                                },
+                                            );
                                         }
                                     }
                                     _ => {}
@@ -2500,73 +2437,6 @@ impl BytecodeCompiler {
         // their signatures are already registered above, and their bodies are
         // compiled by pass-2 through the normal function driver.
         Ok(generated)
-    }
-
-    /// Collect comptime annotation handlers reachable at pre-pass time, keyed
-    /// by the annotation's bare name. Sources: annotation definitions in the
-    /// root program plus every dependency-module AST in the module graph
-    /// (imported annotations such as `@json_schema` are compiled in graph
-    /// phase 1, so their handler AST is already reachable through the graph).
-    fn collect_comptime_annotation_handlers(
-        &self,
-        program: &shape_ast::ast::Program,
-    ) -> HashMap<String, ComptimeAnnotationHandlers> {
-        use shape_ast::ast::{AnnotationHandlerType, ExportItem, Item};
-
-        let mut map: HashMap<String, ComptimeAnnotationHandlers> = HashMap::new();
-
-        let mut ingest = |ann_def: &shape_ast::ast::AnnotationDef| {
-            let handlers: Vec<shape_ast::ast::AnnotationHandler> = ann_def
-                .handlers
-                .iter()
-                .filter(|h| {
-                    matches!(
-                        h.handler_type,
-                        AnnotationHandlerType::ComptimePre | AnnotationHandlerType::ComptimePost
-                    )
-                })
-                .cloned()
-                .collect();
-            if handlers.is_empty() {
-                return;
-            }
-            let def_param_names: Vec<String> = ann_def
-                .params
-                .iter()
-                .flat_map(|p| p.get_identifiers())
-                .collect();
-            // Vacant-only: root/local definitions are ingested first and win.
-            map.entry(ann_def.name.clone())
-                .or_insert(ComptimeAnnotationHandlers {
-                    handlers,
-                    def_param_names,
-                });
-        };
-
-        let mut ingest_items = |items: &[Item]| {
-            for item in items {
-                match item {
-                    Item::AnnotationDef(ann_def, _) => ingest(ann_def),
-                    Item::Export(export, _) => {
-                        if let ExportItem::Annotation(ann_def) = &export.item {
-                            ingest(ann_def);
-                        }
-                    }
-                    _ => {}
-                }
-            }
-        };
-
-        ingest_items(&program.items);
-        if let Some(graph) = &self.module_graph {
-            for node in graph.nodes() {
-                if let Some(ast) = &node.ast {
-                    ingest_items(&ast.items);
-                }
-            }
-        }
-
-        map
     }
 
     pub(super) fn apply_comptime_extend_items(
@@ -2628,6 +2498,7 @@ impl BytecodeCompiler {
                 node_path: node_path.clone(),
                 source_anchor,
             };
+            self.stamp_generated_closure_provenance(&mut func_def.body, &origin, &func_def.name);
             match self.generated_symbols.reserve_generated_decl(
                 &func_def.name,
                 origin,
@@ -3016,24 +2887,7 @@ impl BytecodeCompiler {
         shadow_name: String,
     ) -> Result<OriginalCapability> {
         let overlay = self.comptime_freeze_overlay()?;
-        let mut params = Vec::with_capacity(func_def.params.len());
-        for p in &func_def.params {
-            let Some(ty) = p.type_annotation.clone() else {
-                return Err(Self::directive_error(format!(
-                    "`ctx.original` capability requires a typed parameter, but parameter '{}' of '{}' has no type annotation",
-                    p.simple_name().unwrap_or("<pattern>"),
-                    func_def.name
-                )));
-            };
-            params.push(shape_ast::ast::FunctionParam {
-                name: p.simple_name().map(str::to_string),
-                optional: p.default_value.is_some(),
-                type_annotation: ty,
-            });
-        }
-        let returns = Box::new(func_def.return_type.clone().unwrap_or(TypeAnnotation::Void));
-        let callable = overlay
-            .canonicalize_type(&TypeAnnotation::Function { params, returns })
+        let callable = canonical_original_callable(overlay.as_ref(), func_def)
             .map_err(Self::directive_error)?;
         Ok(OriginalCapability {
             shadow_name,
@@ -3041,12 +2895,14 @@ impl BytecodeCompiler {
         })
     }
 
-    pub(super) fn process_comptime_directives_for_function(
+    fn process_comptime_directives_for_function(
         &mut self,
         directives: Vec<super::comptime_builtins::ComptimeDirective>,
         target_name: &str,
         func_def: &mut FunctionDef,
         site: &ExpansionSite,
+        inferred_reference_optimizations: &[Option<ParamPassMode>],
+        pending_original_body_shadow: &mut Option<PendingOriginalBodyShadow>,
     ) -> Result<bool> {
         let mut removed = false;
         for directive in directives {
@@ -3058,6 +2914,7 @@ impl BytecodeCompiler {
                     self.apply_comptime_extend_items(items, target_name, site)?;
                 }
                 super::comptime_builtins::ComptimeDirective::RemoveTarget => {
+                    *pending_original_body_shadow = None;
                     removed = true;
                     break;
                 }
@@ -3117,47 +2974,23 @@ impl BytecodeCompiler {
                     }
                 }
                 super::comptime_builtins::ComptimeDirective::ReplaceBody { body } => {
-                    // ADR-009 E3 (S3, U11): the pre-annotation body becomes a
-                    // compiler-issued HYGIENIC shadow function, reachable ONLY
-                    // through the typed `ctx.original` capability. The shadow's
-                    // registry name is the unspellable `HygienicSymbol`
-                    // descriptor (no magic `__original__{fn}` spelling enters
-                    // the function table, rejection-matrix row 2); the nonce is
-                    // derived from the annotated function's name so the shadow
-                    // re-registers idempotently across recompiles.
-                    let shadow_name = self.original_body_shadow_name(&func_def.name);
-                    let shadow_def = FunctionDef {
-                        name: shadow_name.clone(),
-                        name_span: func_def.name_span,
-                        declaring_module_path: func_def.declaring_module_path.clone(),
-                        doc_comment: None,
-                        params: func_def.params.clone(),
-                        return_type: func_def.return_type.clone(),
-                        body: func_def.body.clone(),
-                        type_params: func_def.type_params.clone(),
-                        annotations: Vec::new(),
-                        where_clause: None,
-                        is_async: func_def.is_async,
-                        is_comptime: func_def.is_comptime,
-                    };
-                    self.register_function(&shadow_def)?;
-                    self.compile_function_body(&shadow_def)?;
-
-                    // Phase 3e: copy the original's inferred return type onto
-                    // the shadow so the pre-annotation call sees the same
-                    // return-type info. Without this, the numeric-typed call
-                    // path treats the shadow's return as Unknown and
-                    // `ctx.original() + 1` falls into trait dispatch. U4-5b:
-                    // copied STRUCTURALLY as a `ConcreteType`.
-                    if let Some(rt) = self
-                        .type_tracker
-                        .get_function_return_concrete_type(&func_def.name)
-                        .cloned()
-                    {
-                        self.type_tracker
-                            .register_function_return_concrete_type(&shadow_name, rt);
+                    if pending_original_body_shadow.is_some() {
+                        return Err(Self::directive_error(format!(
+                            "multiple `replace body` directives for function '{}' are ambiguous",
+                            func_def.name
+                        )));
                     }
-
+                    // ADR-009 E3 (S3, U11): the pre-annotation body becomes a
+                    // staged compiler-issued HYGIENIC shadow, reachable ONLY
+                    // through the typed `ctx.original` capability. Staging
+                    // preserves the untouched body and its exact parameter
+                    // provenance until every handler outcome is known.
+                    let shadow_name = self.original_body_shadow_name(&func_def.name);
+                    let effective_pass_modes = self.effective_function_like_pass_modes(
+                        Some(&func_def.name),
+                        &func_def.params,
+                        Some(&func_def.body),
+                    );
                     // Build the typed `ctx.original` capability (B6
                     // FrozenCallable via the single freeze handle — row 3
                     // NO_FREEZE_HANDLE_DIAGNOSTIC otherwise), then rewrite every
@@ -3170,8 +3003,7 @@ impl BytecodeCompiler {
                     // binding is injected into user scope, and no name-encoded
                     // alias resolves the call — the role is bound by the
                     // `.original` capability member, not a global spelling.
-                    let capability =
-                        self.build_original_capability(func_def, shadow_name)?;
+                    let capability = self.build_original_capability(func_def, shadow_name)?;
                     // Seed the receiver-scope with every identifier the target's
                     // parameters bind — including destructuring params (`fn f({x,
                     // y}: P)`), whose binders `simple_name()` would drop. Body-local
@@ -3182,12 +3014,23 @@ impl BytecodeCompiler {
                         .flat_map(|p| p.get_identifiers())
                         .collect();
                     bound_receivers.insert("self".to_string());
-                    func_def.body =
+                    let mut replacement = func_def.clone();
+                    replacement.body =
                         super::original_body_rewrite::rewrite_original_calls_in_statements(
                             &body,
                             &bound_receivers,
-                            &capability.shadow_name,
+                            capability.shadow_name(),
                         );
+
+                    self.stamp_generated_replacement_body(&mut replacement, site)?;
+                    let pending = PendingOriginalBodyShadow::new(
+                        func_def,
+                        capability,
+                        inferred_reference_optimizations,
+                        &effective_pass_modes,
+                    )?;
+                    *func_def = replacement;
+                    *pending_original_body_shadow = Some(pending);
                 }
                 super::comptime_builtins::ComptimeDirective::ReplaceModule { .. } => {
                     return Err(Self::directive_error(
@@ -3328,7 +3171,19 @@ impl BytecodeCompiler {
         &mut self,
         func_def: &FunctionDef,
         annotations: Vec<crate::bytecode::CompiledAnnotation>,
+        inferred_reference_optimizations: &[Option<ParamPassMode>],
+        effective_pass_modes: &[ParamPassMode],
     ) -> Result<()> {
+        assert_eq!(
+            func_def.params.len(),
+            inferred_reference_optimizations.len(),
+            "runtime annotation provenance must stay slot-aligned"
+        );
+        assert_eq!(
+            func_def.params.len(),
+            effective_pass_modes.len(),
+            "runtime annotation pass modes must stay slot-aligned"
+        );
         // Step 1: Compile the raw function body as a hygienic impl-body slot
         // (former user-spellable `{name}___impl`, ADR-009 E3 S4/U11).
         let impl_name = self.annotation_hook_impl_name(&func_def.name);
@@ -3342,19 +3197,31 @@ impl BytecodeCompiler {
             body: func_def.body.clone(),
             type_params: func_def.type_params.clone(),
             annotations: Vec::new(),
-            where_clause: None,
+            where_clause: func_def.where_clause.clone(),
             is_async: func_def.is_async,
             is_comptime: func_def.is_comptime,
         };
         self.register_function(&impl_def)?;
-        self.compile_function_body(&impl_def)?;
+        let impl_idx = self
+            .find_function(&impl_name)
+            .ok_or_else(|| ShapeError::RuntimeError {
+                message: format!("Impl function '{}' not found after registration", impl_name),
+                location: None,
+            })?;
+        self.refresh_authoritative_emission_metadata(
+            impl_idx,
+            &impl_def,
+            &func_def.name,
+            effective_pass_modes,
+        )?;
+        self.with_body_analysis_authority(impl_idx, func_def, &impl_def, |compiler| {
+            compiler.compile_function_body_with_inferred_reference_optimizations(
+                &impl_def,
+                inferred_reference_optimizations,
+            )
+        })?;
 
-        let mut current_impl_idx =
-            self.find_function(&impl_name)
-                .ok_or_else(|| ShapeError::RuntimeError {
-                    message: format!("Impl function '{}' not found after compilation", impl_name),
-                    location: None,
-                })? as u16;
+        let mut current_impl_idx = impl_idx as u16;
 
         // Step 2: Apply annotations inside-out (last annotation wraps first)
         // For @a @b @c: wrap order is c(impl) -> b(c_wrapper) -> a(b_wrapper)
@@ -3427,7 +3294,19 @@ impl BytecodeCompiler {
         &mut self,
         func_def: &FunctionDef,
         compiled_ann: crate::bytecode::CompiledAnnotation,
+        inferred_reference_optimizations: &[Option<ParamPassMode>],
+        effective_pass_modes: &[ParamPassMode],
     ) -> Result<()> {
+        assert_eq!(
+            func_def.params.len(),
+            inferred_reference_optimizations.len(),
+            "runtime annotation provenance must stay slot-aligned"
+        );
+        assert_eq!(
+            func_def.params.len(),
+            effective_pass_modes.len(),
+            "runtime annotation pass modes must stay slot-aligned"
+        );
         // Find the annotation on the function to get the arg expressions
         let ann = func_def
             .annotations
@@ -3452,19 +3331,29 @@ impl BytecodeCompiler {
             body: func_def.body.clone(),
             type_params: func_def.type_params.clone(),
             annotations: Vec::new(),
-            where_clause: None,
+            where_clause: func_def.where_clause.clone(),
             is_async: func_def.is_async,
             is_comptime: func_def.is_comptime,
         };
         self.register_function(&impl_def)?;
-        self.compile_function_body(&impl_def)?;
-
         let impl_idx = self
             .find_function(&impl_name)
             .ok_or_else(|| ShapeError::RuntimeError {
-                message: format!("Impl function '{}' not found after compilation", impl_name),
+                message: format!("Impl function '{}' not found after registration", impl_name),
                 location: None,
-            })? as u16;
+            })?;
+        self.refresh_authoritative_emission_metadata(
+            impl_idx,
+            &impl_def,
+            &func_def.name,
+            effective_pass_modes,
+        )?;
+        self.with_body_analysis_authority(impl_idx, func_def, &impl_def, |compiler| {
+            compiler.compile_function_body_with_inferred_reference_optimizations(
+                &impl_def,
+                inferred_reference_optimizations,
+            )
+        })?;
 
         // Step 2: Compile the wrapper
         let func_idx =
@@ -3474,7 +3363,13 @@ impl BytecodeCompiler {
                     location: None,
                 })?;
 
-        self.compile_annotation_wrapper(func_def, func_idx, impl_idx, &compiled_ann, &ann_arg_exprs)
+        self.compile_annotation_wrapper(
+            func_def,
+            func_idx,
+            impl_idx as u16,
+            &compiled_ann,
+            &ann_arg_exprs,
+        )
     }
 
     /// §4.1.5 runtime-hook `ctx` type. Field order MUST match the ctx object
@@ -4363,7 +4258,7 @@ fn probe() -> int { 2 }
                 type_params: Vec::new(),
                 runtime_field_types: [(
                     "min".to_string(),
-                    tyvar_to_annotation(&TypeVar("T3".to_string())),
+                    tyvar_to_annotation(&TypeVar::new("T3".to_string())),
                 )]
                 .into_iter()
                 .collect::<std::collections::HashMap<String, TypeAnnotation>>(),
@@ -4453,9 +4348,9 @@ type Probe { id: int }
         let capability = compiler
             .build_original_capability(&func_def, "\u{1}shadow".to_string())
             .expect("post-barrier capability builds");
-        assert_eq!(capability.shadow_name, "\u{1}shadow");
+        assert_eq!(capability.shadow_name(), "\u{1}shadow");
         assert_ne!(
-            capability.callable,
+            capability.callable(),
             FrozenTypeIdentity::INVALID,
             "ctx.original must be a real typed FrozenCallable identity"
         );
@@ -4758,11 +4653,7 @@ mod s4_target_owner_tests {
             "extend target { method m() -> int { 1 } }",
         )];
         let owner = TargetOwner::new("Alpha", NominalShape::Struct);
-        BytecodeCompiler::resolve_extend_owner_placeholder(
-            &mut directives,
-            &owner,
-            Some("target"),
-        );
+        BytecodeCompiler::resolve_extend_owner_placeholder(&mut directives, &owner, Some("target"));
         assert_eq!(
             extend_head(&directives[0]),
             "Alpha",
@@ -5050,7 +4941,8 @@ let out = work(2)
             .function_defs
             .iter()
             .find(|(name, wrapper)| {
-                name.starts_with('\u{1}') && resolved_line(&compiler, wrapper.name_span) == handler_line
+                name.starts_with('\u{1}')
+                    && resolved_line(&compiler, wrapper.name_span) == handler_line
             })
             .expect("before-handler wrapper is registered under a hygienic name");
         assert!(
@@ -5440,10 +5332,7 @@ mod e3_function_target_discovery_tests {
 
     /// The generated method names an executed-discovery `extend` block records
     /// for `type_name` (across all generated extend items).
-    fn discovered_extend_methods(
-        items: &[shape_ast::ast::Item],
-        type_name: &str,
-    ) -> Vec<String> {
+    fn discovered_extend_methods(items: &[shape_ast::ast::Item], type_name: &str) -> Vec<String> {
         let mut methods = Vec::new();
         for item in items {
             if let shape_ast::ast::Item::Extend(extend, _) = item {

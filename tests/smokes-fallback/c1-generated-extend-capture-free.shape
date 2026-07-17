@@ -1,0 +1,30 @@
+// ADR-009 C1 (#12) SLICE 0 — JIT-nativity preflight for the FLAGSHIP path.
+//
+// An annotation-generated `extend Type { method ... }` whose method body
+// contains a closure. This fixture is the POSITIVE control: it proves that
+// `program_declares_user_trait_or_impl` (crates/shape-jit/src/executor.rs:39-46)
+// does NOT fire for annotation-generated `extend` — generated `extend` is
+// `Item::Extend` (shape-ast parser/statements.rs:68), never `Item::Impl`, so the
+// Wave-20A whole-program trait/impl deopt is not reachable from this shape.
+//
+// Expected: VM and JIT both print 42, exit 0, and JIT emits ZERO
+// `[jit-fallback]` lines — i.e. the generated extend method AND its closure
+// run under native JIT code.
+//
+// The closure remains deliberately CAPTURE-FREE so this fixture isolates the
+// generated-extend deopt question. C1's generated-only declared-capture clause
+// now covers capturing closures; its `move` / `share` native proofs belong to
+// the separate Slice-4 battery.
+
+annotation add_answer() {
+  targets: [type]
+  comptime post(target, ctx) {
+    extend (f"extend {target.name} \{ method answer() -> int \{ let worker = || 42; worker() \} \}")
+  }
+}
+
+@add_answer()
+type Job { id: int }
+
+let job = Job { id: 1 }
+print(job.answer())

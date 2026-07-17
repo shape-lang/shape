@@ -339,11 +339,18 @@ let value = apply(gen)
 #[test]
 fn test_generic_zero_arg_callable_return_binds_named_annotation_proof() {
     use shape_ast::ast::TypeAnnotation;
-    use std::collections::HashSet;
 
     let mut engine = TypeInferenceEngine::new();
-    let mut generic_params = HashSet::new();
-    generic_params.insert("T".to_string());
+    let declared_t = TypeVar::declared(engine.type_var_gen.fresh_declared_owner(), 0, "T");
+    let declaration = TypeScheme::poly(
+        vec![declared_t.clone()],
+        Type::Function {
+            params: vec![],
+            returns: Box::new(Type::Variable(declared_t)),
+        },
+    );
+    let generic_params = TypeInferenceEngine::declared_parameter_tokens(&declaration)
+        .expect("declared scheme should expose its exact parameter capability");
 
     let instance = Type::Function {
         params: vec![],

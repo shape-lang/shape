@@ -213,7 +213,7 @@ pub(super) fn type_display_name(ty: &Type) -> String {
             Type::Concrete(TypeAnnotation::Basic(name)) => name.clone(),
             _ => format!("{:?}", ty),
         },
-        Type::Variable(v) => format!("?T{}", v.0),
+        Type::Variable(v) => format!("?{}", v.presentation_name()),
         _ => format!("{:?}", ty),
     }
 }

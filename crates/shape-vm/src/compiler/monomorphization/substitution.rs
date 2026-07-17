@@ -33,7 +33,7 @@ use shape_ast::ast::expr_helpers::{
     MatchExpr, QueryClause, WhileExpr,
 };
 use shape_ast::ast::expressions::{EnumConstructorPayload, Expr, ObjectEntry};
-use shape_ast::ast::functions::{FunctionDef, FunctionParameter};
+use shape_ast::ast::functions::FunctionDef;
 use shape_ast::ast::patterns::{
     DecompositionBinding, DestructurePattern, ObjectPatternField, Pattern, PatternConstructorFields,
 };
@@ -46,6 +46,9 @@ use shape_value::v2::ConcreteType;
 use std::collections::HashMap;
 
 use crate::compiler::monomorphization::type_resolution::ComptimeConstValue;
+
+mod parameters;
+use parameters::substitute_function_parameter;
 
 // ---------------------------------------------------------------------------
 // Legacy placeholder symbol — kept so the meta integration test in
@@ -1052,8 +1055,12 @@ fn substitute_const_in_expr(expr: &Expr, const_subs: &HashMap<String, ComptimeCo
             params,
             return_type,
             body,
+            generated_origin,
+            captures,
             span,
         } => Expr::FunctionExpr {
+            generated_origin: generated_origin.clone(),
+            captures: captures.clone(),
             // Closure params may have default-value exprs that reference
             // const generics; walk those but leave patterns/annotations alone.
             params: params
@@ -1401,24 +1408,6 @@ fn const_value_to_literal(value: &ComptimeConstValue, span: shape_ast::ast::Span
 // ---------------------------------------------------------------------------
 // Helpers — walk every AST node that can carry a TypeAnnotation
 // ---------------------------------------------------------------------------
-
-fn substitute_function_parameter(
-    p: &FunctionParameter,
-    subs: &HashMap<String, ConcreteType>,
-) -> FunctionParameter {
-    FunctionParameter {
-        pattern: substitute_destructure_pattern(&p.pattern, subs),
-        is_const: p.is_const,
-        is_reference: p.is_reference,
-        is_mut_reference: p.is_mut_reference,
-        is_out: p.is_out,
-        type_annotation: p
-            .type_annotation
-            .as_ref()
-            .map(|t| substitute_type_annotation(t, subs)),
-        default_value: p.default_value.as_ref().map(|e| substitute_expr(e, subs)),
-    }
-}
 
 fn substitute_destructure_pattern(
     pat: &DestructurePattern,
@@ -1962,8 +1951,12 @@ fn substitute_expr(expr: &Expr, subs: &HashMap<String, ConcreteType>) -> Expr {
             params,
             return_type,
             body,
+            generated_origin,
+            captures,
             span,
         } => Expr::FunctionExpr {
+            generated_origin: generated_origin.clone(),
+            captures: captures.clone(),
             params: params
                 .iter()
                 .map(|p| substitute_function_parameter(p, subs))
@@ -4109,6 +4102,8 @@ mod tests {
                 }),
                 Span::default(),
             )],
+            generated_origin: None,
+            captures: None,
             span: Span::default(),
         };
         let stmt = Statement::Expression(closure, Span::default());
@@ -4196,3 +4191,6 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+mod generated_origin_tests;

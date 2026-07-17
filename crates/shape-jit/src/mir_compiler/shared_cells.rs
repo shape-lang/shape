@@ -11,7 +11,6 @@ use std::sync::Arc;
 use cranelift::prelude::*;
 use shape_value::NativeKind;
 use shape_value::v2::closure_layout::{CaptureKind, ClosureLayout};
-use shape_value::v2::struct_layout::FieldKind;
 use shape_vm::bytecode::MirFunctionData;
 use shape_vm::mir::types::{Operand, Place, SlotId, StatementKind};
 use shape_vm::type_tracking::{BindingStorageClass, EscapeStatus};
@@ -51,10 +50,19 @@ pub(crate) enum SharedCellCarrierOrigin {
     InheritedCapture,
 }
 
+impl SharedCellCarrierOrigin {
+    fn diagnostic_name(self) -> &'static str {
+        match self {
+            Self::DeclaringFrameLocal => "declaring-frame Shared local",
+            Self::InheritedCapture => "inherited Shared capture parameter",
+        }
+    }
+}
+
 pub(crate) fn classify_shared_capture_operand(
     operand: &Operand,
     shared_local_slots: &HashMap<SlotId, SharedLocalKindEvidence>,
-    shared_capture_slots: &HashMap<SlotId, FieldKind>,
+    shared_capture_slots: &HashMap<SlotId, NativeKind>,
 ) -> SharedCaptureOperandLowering {
     let slot = match operand {
         Operand::Move(Place::Local(slot))
@@ -118,6 +126,44 @@ impl SharedLocalKindEvidence {
                  is forbidden. Whole-function JIT bail before cell allocation."
             )),
         }
+    }
+}
+
+/// Prove that the compact JIT ABI can recover this exact SharedCell kind.
+///
+/// This check runs for every declaring-frame Shared local and inherited Shared
+/// capture parameter before the first body instruction or allocation is
+/// emitted. An encoding/catalog defect therefore produces a whole-function JIT
+/// refusal instead of calling the defensive FFI branch that returns null.
+fn validated_shared_cell_kind_code(
+    slot: SlotId,
+    kind: NativeKind,
+    origin: SharedCellCarrierOrigin,
+) -> Result<u8, String> {
+    let origin = origin.diagnostic_name();
+    if matches!(kind, NativeKind::Ptr(heap_kind) if !heap_kind.has_kinded_slot_carrier()) {
+        return Err(format!(
+            "INTERNAL SharedCell kind invariant: {origin} slot {slot} resolved to \
+             unsupported {kind:?}. The exhaustive ConcreteType capture-kind issuer cannot \
+             produce a carrier-less kind; forged or external layout metadata must be \
+             rejected before JIT emission or allocation."
+        ));
+    }
+    let code = crate::ffi::stack_kind_code::encode(kind);
+    match crate::ffi::stack_kind_code::decode(code) {
+        Some(decoded) if decoded == kind => Ok(code),
+        Some(decoded) => Err(format!(
+            "SURFACE (ADR-006 §2.7.7 / Q9 + §2.7.8 / Q10): SharedCell for {origin} \
+             slot {slot} encodes payload kind {kind:?} as byte {code}, but the canonical \
+             JIT kind catalog decodes it as {decoded:?}. Whole-function JIT bail before \
+             cell allocation or code emission."
+        )),
+        None => Err(format!(
+            "SURFACE (ADR-006 §2.7.7 / Q9 + §2.7.8 / Q10): SharedCell for {origin} \
+             slot {slot} encodes payload kind {kind:?} as byte {code}, but that byte is \
+             absent from the canonical JIT kind catalog. Whole-function JIT bail before \
+             cell allocation or code emission."
+        )),
     }
 }
 
@@ -196,6 +242,27 @@ pub(crate) fn discover_shared_local_slots(
 }
 
 impl<'a, 'b> MirToIR<'a, 'b> {
+    /// Reject forged Shared payload metadata before any Cranelift instruction
+    /// or allocation is emitted. Semantic capture issuers cannot hit this.
+    pub(crate) fn validate_shared_cell_kinds(&self) -> Result<(), String> {
+        for (slot, evidence) in &self.shared_local_slots {
+            let kind = evidence.validated(*slot)?;
+            validated_shared_cell_kind_code(
+                *slot,
+                kind,
+                SharedCellCarrierOrigin::DeclaringFrameLocal,
+            )?;
+        }
+        for (slot, kind) in &self.shared_capture_slots {
+            validated_shared_cell_kind_code(
+                *slot,
+                *kind,
+                SharedCellCarrierOrigin::InheritedCapture,
+            )?;
+        }
+        Ok(())
+    }
+
     /// Return the same validated payload kind used for allocation, reads,
     /// writes, and eventual SharedCell drop.
     pub(crate) fn validated_shared_local_kind(&self, slot: SlotId) -> Result<NativeKind, String> {
@@ -211,42 +278,114 @@ impl<'a, 'b> MirToIR<'a, 'b> {
             .validated(slot)
     }
 
-    /// Allocate every validated scalar SharedCell before compiling the body.
-    /// All refusal checks run before the first allocation is emitted.
+    /// Read one projected value while preserving the cell's payload share.
+    ///
+    /// Scalar payloads retain the existing inline lock/CAS hot path. A
+    /// refcounted payload must mint a new typed share while the cell is locked,
+    /// because the cell continues to own its original share. The Ptr FFI reads
+    /// the immutable `SharedCell::kind()` companion and clones through the
+    /// canonical GC-aware kinded dispatch; it never treats payload bits as the
+    /// cell pointer or reconstructs ownership from `FieldKind::Ptr`.
+    pub(crate) fn emit_shared_payload_read(
+        &mut self,
+        cell_pointer: Value,
+        kind: NativeKind,
+    ) -> Value {
+        if kind.is_refcounted() {
+            let call = self
+                .builder
+                .ins()
+                .call(self.ffi.read_shared_cell_ptr, &[cell_pointer]);
+            let payload = self.builder.inst_results(call)[0];
+            return self.ensure_kind(payload, kind);
+        }
+
+        use shape_value::v2::closure_layout::SHARED_CELL_VALUE_OFFSET;
+        self.emit_shared_lock(cell_pointer);
+        let payload = self.builder.ins().load(
+            types::I64,
+            MemFlags::trusted(),
+            cell_pointer,
+            SHARED_CELL_VALUE_OFFSET,
+        );
+        self.emit_shared_unlock(cell_pointer);
+        self.ensure_kind(payload, kind)
+    }
+
+    /// Replace one projected value, transferring the incoming share to the cell.
+    ///
+    /// The refcounted Ptr FFI swaps under the cell lock and retires the previous
+    /// `(bits, kind)` through the canonical GC-aware kinded drop dispatch.
+    /// Scalar payloads keep the inline lock/store/unlock sequence.
+    pub(crate) fn emit_shared_payload_write(
+        &mut self,
+        cell_pointer: Value,
+        value: Value,
+        kind: NativeKind,
+    ) {
+        let typed_value = self.ensure_kind(value, kind);
+        let bits = self.coerce_value_to_i64_bits(typed_value);
+        if kind.is_refcounted() {
+            self.builder
+                .ins()
+                .call(self.ffi.write_shared_cell_ptr, &[cell_pointer, bits]);
+            return;
+        }
+
+        use shape_value::v2::closure_layout::SHARED_CELL_VALUE_OFFSET;
+        self.emit_shared_lock(cell_pointer);
+        self.builder.ins().store(
+            MemFlags::trusted(),
+            bits,
+            cell_pointer,
+            SHARED_CELL_VALUE_OFFSET,
+        );
+        self.emit_shared_unlock(cell_pointer);
+    }
+
+    /// Allocate every validated SharedCell before compiling the body.
+    /// All kind-source checks run before the first allocation is emitted.
     pub(crate) fn initialize_shared_local_slots(&mut self) -> Result<(), String> {
         let mut slots = self
             .shared_local_slots
             .iter()
-            .map(|(slot, evidence)| evidence.validated(*slot).map(|kind| (*slot, kind)))
-            .collect::<Result<Vec<_>, _>>()?;
+            .map(|(slot, evidence)| {
+                let kind = evidence.validated(*slot)?;
+                let kind_code = validated_shared_cell_kind_code(
+                    *slot,
+                    kind,
+                    SharedCellCarrierOrigin::DeclaringFrameLocal,
+                )?;
+                Ok((*slot, kind_code))
+            })
+            .collect::<Result<Vec<_>, String>>()?;
         slots.sort_by_key(|(slot, _)| slot.0);
 
-        for (slot, kind) in &slots {
-            if kind.is_refcounted() {
-                return Err(format!(
-                    "SURFACE (ADR-006 §2.7.8 / Q10): SharedCell for local slot {slot} has a \
-                     REFCOUNTED payload kind ({kind:?}). The JIT shared-cell store lowering \
-                     writes raw bits without retaining the new value or releasing the previous \
-                     value. Whole-function JIT bail before cell allocation."
-                ));
-            }
-        }
-
-        for (slot, kind) in slots {
+        for (slot, kind_code) in slots {
             let Some(&variable) = self.locals.get(&slot) else {
                 continue;
             };
-            let initial = self
-                .builder
-                .ins()
-                .iconst(types::I64, crate::ffi::value_ffi::TAG_NULL as i64);
-            let kind_code = crate::ffi::stack_kind_code::encode(kind);
+            // Zero is the canonical empty payload for every typed carrier:
+            // `SharedCell::Drop` and the canonical
+            // `clone_with_kind`/`drop_with_kind` helpers return before dispatch
+            // when bits == 0. In particular, this is a valid empty value for
+            // every `NativeKind::is_refcounted()` arm, unlike the old non-zero
+            // TAG_NULL bit pattern (which would be an invalid raw pointer under
+            // a refcounted kind). The first source assignment transfers the
+            // real payload share into the cell.
+            let initial = self.builder.ins().iconst(types::I64, 0);
             let kind_value = self.builder.ins().iconst(types::I8, kind_code as i64);
             let call = self
                 .builder
                 .ins()
                 .call(self.ffi.alloc_shared_cell, &[initial, kind_value]);
             let cell_pointer = self.builder.inst_results(call)[0];
+            // `kind_code` was proven decodable before this loop emitted any
+            // allocation. The accepted FFI branch is exactly
+            // `Arc::new(SharedCell) -> Arc::into_raw`: it either aborts on
+            // allocation failure or returns a non-null pointer. Its null
+            // sentinel is reserved for malformed external codes and cannot
+            // reach this generated store.
             self.builder.def_var(variable, cell_pointer);
         }
         Ok(())
@@ -254,88 +393,4 @@ impl<'a, 'b> MirToIR<'a, 'b> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn kind_source_disagreement_is_a_codegen_error() {
-        let evidence = SharedLocalKindEvidence {
-            layout: Some(NativeKind::Bool),
-            inferred: Some(NativeKind::Float64),
-            layout_conflict: None,
-        };
-
-        let error = evidence
-            .validated(SlotId(7))
-            .expect_err("disagreeing producer evidence must never select a kind");
-        assert!(error.contains("kind-source disagreement"));
-        assert!(error.contains("before cell allocation"));
-    }
-
-    #[test]
-    fn agreeing_sources_resolve_to_the_layout_kind() {
-        let evidence = SharedLocalKindEvidence {
-            layout: Some(NativeKind::Bool),
-            inferred: Some(NativeKind::Bool),
-            layout_conflict: None,
-        };
-
-        assert_eq!(evidence.validated(SlotId(7)), Ok(NativeKind::Bool));
-    }
-
-    /// Lower-level D1 proof for the inherited-carrier branch.
-    ///
-    /// A public source proof is intentionally deferred to ADR-009 C1 slice 4:
-    /// today the VM compiler rewrites a synthetic Shared capture parameter as
-    /// OwnedMutable, so Shape source cannot honestly construct this layout.
-    /// Once `share` preserves the descriptor, the CLI matrix can cover the
-    /// same decision end to end. This unit keeps the JIT side honest meanwhile:
-    /// payload `42` is not a valid Arc carrier and must never reach retain.
-    #[test]
-    fn inherited_shared_capture_retains_raw_cell_carrier_not_projected_payload() {
-        use crate::ffi::object::{
-            jit_alloc_shared_cell, jit_arc_shared_release, jit_arc_shared_retain,
-        };
-
-        let slot = SlotId(9);
-        let operand = Operand::Copy(Place::Local(slot));
-        let shared_local_slots = HashMap::new();
-        let shared_capture_slots = HashMap::from([(slot, FieldKind::I64)]);
-
-        let lowering =
-            classify_shared_capture_operand(&operand, &shared_local_slots, &shared_capture_slots);
-        assert_eq!(
-            lowering,
-            SharedCaptureOperandLowering::RawCarrier {
-                slot,
-                origin: SharedCellCarrierOrigin::InheritedCapture,
-            },
-            "an inherited Shared parameter must bypass the lock-gated payload read"
-        );
-
-        let payload_bits = 42_u64;
-        let cell_bits = unsafe {
-            jit_alloc_shared_cell(
-                payload_bits,
-                crate::ffi::stack_kind_code::encode(NativeKind::Int64),
-            )
-        };
-        assert_ne!(cell_bits, 0);
-        assert_ne!(cell_bits, payload_bits);
-
-        let selected_bits = match lowering {
-            SharedCaptureOperandLowering::RawCarrier { .. } => cell_bits,
-            SharedCaptureOperandLowering::ProjectedPayload => payload_bits,
-        };
-        let retained_bits = unsafe { jit_arc_shared_retain(selected_bits) };
-        assert_eq!(
-            retained_bits, cell_bits,
-            "the nested closure must retain the cell identity, not payload bits"
-        );
-
-        unsafe {
-            jit_arc_shared_release(retained_bits);
-            jit_arc_shared_release(cell_bits);
-        }
-    }
-}
+mod tests;

@@ -1,131 +1,67 @@
-//! Core Type Definitions
-//!
-//! Defines the fundamental types used in the type system:
-//! - `Type`: The main type representation
-//! - `TypeVar`: Type variables for inference
-//! - `TypeScheme`: Polymorphic type schemes
+//! Inference types, variables, and polymorphic schemes.
 
 use shape_ast::ast::TypeAnnotation;
 use std::collections::HashMap;
 
 use super::builtins::BuiltinTypes;
 use super::constraints::TypeConstraint;
-use crate::type_system::semantic::{SemanticType, TypeVarId};
+pub use super::type_var::{
+    DeclaredTypeVarOwner, DeclaredTypeVarProvenance, TYVAR_ANNOTATION_PREFIX, TypeVar, TypeVarGen,
+    annotation_as_tyvar, annotation_contains_reserved_type_var_carrier, tyvar_to_annotation,
+};
+use crate::type_system::semantic::SemanticType;
 
-/// Per-inference-run generator for fresh type variables.
-///
-/// Each `TypeInferenceEngine` owns one of these so type-variable IDs are
-/// scoped to a single inference run rather than shared across the entire
-/// process. This prevents cross-test ID collisions when tests assert on
-/// specific `TypeVar(N)` values.
-#[derive(Debug, Clone, Default)]
-pub struct TypeVarGen {
-    next_id: u32,
-}
-
-impl TypeVarGen {
-    /// Create a new counter starting at T0.
-    pub fn new() -> Self {
-        TypeVarGen { next_id: 0 }
-    }
-
-    /// Allocate a fresh type variable with a unique, stable name.
-    pub fn fresh_var(&mut self) -> TypeVar {
-        let id = self.next_id;
-        self.next_id = self.next_id.checked_add(1).expect("TypeVarGen overflow");
-        TypeVar(format!("T{}", id))
-    }
-
-    /// Allocate a fresh type variable wrapped in `Type::Variable`.
-    pub fn fresh_type(&mut self) -> Type {
-        Type::Variable(self.fresh_var())
-    }
-}
-
-/// Type variable for inference
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct TypeVar(pub String);
-
-impl TypeVar {
-    pub fn new(name: String) -> Self {
-        TypeVar(name)
-    }
-}
-
-/// Prefix marking a `TypeAnnotation::Basic` string as a deferred inference
-/// type variable rather than a user-facing type name.
-///
-/// `TypeAnnotation` has no type-variable variant, so an object-literal field
-/// whose value is an as-yet-unresolved parameter variable (e.g. `{min: lo}`
-/// inside `fn aabb(lo, hi) { {min: lo, max: hi} }`) cannot carry that
-/// variable structurally. Freezing the field to `Basic("unknown")` is lossy:
-/// once a caller `aabb(1, 5)` resolves the parameter to `int`, there is no
-/// variable left in the object type for callsite substitution to update.
-///
-/// Encoding the variable as `Basic("\u{1}tyvar:T7")` keeps it recoverable.
-/// The `\u{1}` (SOH control character) cannot occur in any identifier or
-/// user type name, so the marker can never collide with a real type. The
-/// substitution functions (`apply_substitutions_to_type`,
-/// `Unifier::apply_to_annotation`) decode the marker, resolve the variable,
-/// and re-encode if still unresolved. A marker that survives to the final
-/// type map is an honestly-unresolved field and projects to the same
-/// `unknown` it would have frozen to.
-pub const TYVAR_ANNOTATION_PREFIX: &str = "\u{1}tyvar:";
-
-/// Encode a type variable as a `TypeAnnotation::Basic` marker string.
-pub fn tyvar_to_annotation(var: &TypeVar) -> TypeAnnotation {
-    TypeAnnotation::Basic(format!("{}{}", TYVAR_ANNOTATION_PREFIX, var.0))
-}
-
-/// Decode a `TypeAnnotation::Basic` marker string back into a `TypeVar`.
-/// Returns `None` for any annotation that is not a type-variable marker.
-pub fn annotation_as_tyvar(ann: &TypeAnnotation) -> Option<TypeVar> {
-    match ann {
-        TypeAnnotation::Basic(name) => name
-            .strip_prefix(TYVAR_ANNOTATION_PREFIX)
-            .map(|rest| TypeVar(rest.to_string())),
-        _ => None,
-    }
-}
-
-/// Inferred type representation
 #[derive(Debug, Clone, PartialEq)]
 pub enum Type {
-    /// Concrete type
     Concrete(TypeAnnotation),
-    /// Type variable (unknown type to be inferred)
     Variable(TypeVar),
-    /// Generic type instantiation
-    Generic { base: Box<Type>, args: Vec<Type> },
-    /// Constrained type variable
+    Generic {
+        base: Box<Type>,
+        args: Vec<Type>,
+    },
     Constrained {
         var: TypeVar,
         constraint: Box<TypeConstraint>,
     },
-    /// Function type with inference-level params and return type.
-    /// Unlike Concrete(TypeAnnotation::Function), this can hold Type::Variable
-    /// for params/returns, enabling type variable propagation through function calls.
     Function {
         params: Vec<Type>,
         returns: Box<Type>,
     },
 }
 
-/// Type scheme for polymorphic types
 #[derive(Debug, Clone)]
 pub struct TypeScheme {
-    /// Quantified type variables
     pub quantified: Vec<TypeVar>,
-    /// The actual type
     pub ty: Type,
-    /// Trait bounds for quantified type variables: var_name → list of trait names
-    pub trait_bounds: HashMap<String, Vec<String>>,
-    /// Default types for quantified type variables: var_name → default type
-    pub default_types: HashMap<String, Type>,
+    pub trait_bounds: HashMap<TypeVar, Vec<String>>,
+    pub default_types: HashMap<TypeVar, Type>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct DeclaredTypeVarInstantiation {
+    declared: TypeVar,
+    instantiated: TypeVar,
+}
+
+impl DeclaredTypeVarInstantiation {
+    pub fn declared(&self) -> &TypeVar {
+        &self.declared
+    }
+
+    pub fn instantiated(&self) -> &TypeVar {
+        &self.instantiated
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct TypeSchemeInstantiation {
+    pub ty: Type,
+    pub bound_constraints: Vec<(Type, Type)>,
+    pub default_substitutions: HashMap<TypeVar, Type>,
+    pub declared_instantiations: Vec<DeclaredTypeVarInstantiation>,
 }
 
 impl TypeScheme {
-    /// Create a monomorphic type scheme
     pub fn mono(ty: Type) -> Self {
         TypeScheme {
             quantified: vec![],
@@ -135,7 +71,6 @@ impl TypeScheme {
         }
     }
 
-    /// Create a polymorphic type scheme with quantified type variables
     pub fn poly(quantified: Vec<TypeVar>, ty: Type) -> Self {
         TypeScheme {
             quantified,
@@ -145,12 +80,12 @@ impl TypeScheme {
         }
     }
 
-    /// Create a polymorphic type scheme with trait bounds
     pub fn poly_bounded(
         quantified: Vec<TypeVar>,
         ty: Type,
         trait_bounds: HashMap<String, Vec<String>>,
     ) -> Self {
+        let trait_bounds = Self::bind_named_metadata(&quantified, trait_bounds);
         TypeScheme {
             quantified,
             ty,
@@ -159,12 +94,27 @@ impl TypeScheme {
         }
     }
 
-    /// Create a polymorphic type scheme with trait bounds and default types
     pub fn poly_bounded_with_defaults(
         quantified: Vec<TypeVar>,
         ty: Type,
         trait_bounds: HashMap<String, Vec<String>>,
         default_types: HashMap<String, Type>,
+    ) -> Self {
+        let trait_bounds = Self::bind_named_metadata(&quantified, trait_bounds);
+        let default_types = Self::bind_named_metadata(&quantified, default_types);
+        TypeScheme {
+            quantified,
+            ty,
+            trait_bounds,
+            default_types,
+        }
+    }
+
+    pub fn poly_bounded_with_exact_defaults(
+        quantified: Vec<TypeVar>,
+        ty: Type,
+        trait_bounds: HashMap<TypeVar, Vec<String>>,
+        default_types: HashMap<TypeVar, Type>,
     ) -> Self {
         TypeScheme {
             quantified,
@@ -174,30 +124,58 @@ impl TypeScheme {
         }
     }
 
-    /// Instantiate a type scheme with fresh type variables sourced from a
-    /// per-engine `TypeVarGen`.
-    ///
-    /// Returns the instantiated type, any ImplementsTrait constraints that
-    /// need to be emitted for the fresh variables, and fallback default
-    /// substitutions.
+    fn bind_named_metadata<T>(
+        quantified: &[TypeVar],
+        mut metadata: HashMap<String, T>,
+    ) -> HashMap<TypeVar, T> {
+        quantified
+            .iter()
+            .filter_map(|var| {
+                metadata
+                    .remove(var.presentation_name().as_ref())
+                    .map(|value| (var.clone(), value))
+            })
+            .collect()
+    }
+
     pub fn instantiate_with_bounds(
         &self,
         var_gen: &mut TypeVarGen,
     ) -> (Type, Vec<(Type, Type)>, HashMap<TypeVar, Type>) {
+        let instance = self.instantiate_with_metadata(var_gen);
+        (
+            instance.ty,
+            instance.bound_constraints,
+            instance.default_substitutions,
+        )
+    }
+
+    pub fn instantiate_with_metadata(&self, var_gen: &mut TypeVarGen) -> TypeSchemeInstantiation {
         if self.quantified.is_empty() {
-            return (self.ty.clone(), Vec::new(), HashMap::new());
+            return TypeSchemeInstantiation {
+                ty: self.ty.clone(),
+                bound_constraints: Vec::new(),
+                default_substitutions: HashMap::new(),
+                declared_instantiations: Vec::new(),
+            };
         }
 
         let mut subst = HashMap::new();
         let mut constraints = Vec::new();
         let mut defaults = HashMap::new();
+        let mut declared_instantiations = Vec::new();
 
         for var in &self.quantified {
             let fresh = var_gen.fresh_var();
             subst.insert(var.clone(), Type::Variable(fresh.clone()));
+            if var.declared_provenance().is_some() {
+                declared_instantiations.push(DeclaredTypeVarInstantiation {
+                    declared: var.clone(),
+                    instantiated: fresh.clone(),
+                });
+            }
 
-            // Emit ImplementsTrait constraints for trait bounds
-            if let Some(bounds) = self.trait_bounds.get(&var.0) {
+            if let Some(bounds) = self.trait_bounds.get(var) {
                 for trait_name in bounds {
                     let bound_var = var_gen.fresh_var();
                     constraints.push((
@@ -219,15 +197,19 @@ impl TypeScheme {
             let Some(Type::Variable(fresh_var)) = subst.get(var) else {
                 continue;
             };
-            if let Some(default_ty) = self.default_types.get(&var.0) {
+            if let Some(default_ty) = self.default_types.get(var) {
                 defaults.insert(fresh_var.clone(), substitute(default_ty, &subst));
             }
         }
 
-        (substitute(&self.ty, &subst), constraints, defaults)
+        TypeSchemeInstantiation {
+            ty: substitute(&self.ty, &subst),
+            bound_constraints: constraints,
+            default_substitutions: defaults,
+            declared_instantiations,
+        }
     }
 
-    /// Instantiate a type scheme using a per-engine type-variable generator.
     pub fn instantiate(&self, var_gen: &mut TypeVarGen) -> Type {
         if self.quantified.is_empty() {
             return self.ty.clone();
@@ -241,18 +223,15 @@ impl TypeScheme {
         substitute(&self.ty, &subst)
     }
 
-    /// Check if this scheme is polymorphic (has quantified type variables)
     pub fn is_polymorphic(&self) -> bool {
         !self.quantified.is_empty()
     }
 
-    /// Get the quantified type variables
     pub fn type_params(&self) -> &[TypeVar] {
         &self.quantified
     }
 }
 
-/// Substitute type variables in a type
 pub fn substitute(ty: &Type, subst: &HashMap<TypeVar, Type>) -> Type {
     match ty {
         Type::Variable(var) => subst.get(var).cloned().unwrap_or_else(|| ty.clone()),
@@ -279,21 +258,14 @@ pub fn substitute(ty: &Type, subst: &HashMap<TypeVar, Type>) -> Type {
 }
 
 impl Type {
-    /// U1 (canonical-Type unification): normalize any residual encoding of a
-    /// parametric collection / generic to the SINGLE canonical form
-    /// `Type::Generic { base: Reference(name), args }`.
-    ///
-    /// The historical split-brain (STRUCTURAL-AUDIT SB-4) admitted three
-    /// encodings of `Array<T>`: the var-preserving `Generic{Array}`, the
-    /// `Concrete(TypeAnnotation::Array(..))` synthesised by `BuiltinTypes::array`,
-    /// and the `Concrete(TypeAnnotation::Generic{name:"Array"})` parsed from
-    /// annotations. `canonicalize` folds the two `Concrete(..)` forms into the
-    /// `Generic{..}` form so every comparison/constraint sees one representation.
-    /// Run it at the entry of the single equality relation and the constraint
-    /// solver; there is no parallel "patch the encodings pairwise" path anymore.
-    ///
-    /// `Array` is normalised to the base name `"Array"` and `Vec` is treated as
-    /// its alias (both already accepted by `is_array_or_vec_base`).
+    pub fn declared_type_var_provenance(&self) -> Option<DeclaredTypeVarProvenance<'_>> {
+        match self {
+            Self::Variable(var) => var.declared_provenance(),
+            _ => None,
+        }
+    }
+
+    /// Normalize collections and functions to the inference-level carrier.
     pub fn canonicalize(&self) -> Type {
         match self {
             Type::Concrete(ann) => Self::canonicalize_annotation(ann),
@@ -310,10 +282,7 @@ impl Type {
         }
     }
 
-    /// Normalize a `Generic` base so the `Vec` collection alias collapses to the
-    /// single canonical `Array` name (U1: `Array`/`Vec` are one type; `Vec` is
-    /// the SemanticType spelling, `Array` the inference spelling). Other bases
-    /// canonicalize structurally.
+    /// Collapse the `Vec` alias to the canonical inference spelling `Array`.
     fn canonicalize_collection_base(base: &Type) -> Type {
         if let Type::Concrete(TypeAnnotation::Reference(tp)) = base {
             if tp.to_string() == "Vec" {
@@ -323,8 +292,6 @@ impl Type {
         base.canonicalize()
     }
 
-    /// Canonicalize a `TypeAnnotation`-backed type, folding the collection /
-    /// generic annotation shapes into `Type::Generic`.
     fn canonicalize_annotation(ann: &TypeAnnotation) -> Type {
         match ann {
             TypeAnnotation::Array(elem) => Type::Generic {
@@ -337,13 +304,6 @@ impl Type {
                 ))),
                 args: args.iter().map(Self::canonicalize_annotation).collect(),
             },
-            // SB-2: fold the `Concrete(TypeAnnotation::Function{..})` encoding
-            // into the canonical `Type::Function{..}` carrier — exactly as the
-            // Array/Generic arms fold their collection annotations. Both Function
-            // encodings (the `Type::Function` from inference and the
-            // `Concrete(Function)` parsed/synthesised from annotations) therefore
-            // become `Type::Function` BEFORE any comparison, so the solver no
-            // longer needs a cross-form `Function ~ Concrete(Function)` patch arm.
             TypeAnnotation::Function { params, returns } => Type::Function {
                 params: params
                     .iter()
@@ -351,31 +311,20 @@ impl Type {
                     .collect(),
                 returns: Box::new(Self::canonicalize_annotation(returns)),
             },
-            // All other annotations stay concrete (Basic/Reference/Object/etc.).
-            // A `tyvar` marker stays as-is here; it is decoded by the
-            // substitution store, not by structural canonicalization.
             other => Type::Concrete(other.clone()),
         }
     }
 
-    /// Convert Type back to TypeAnnotation for AST
     pub fn to_annotation(&self) -> Option<TypeAnnotation> {
         match self {
             Type::Concrete(ann) => Some(ann.clone()),
             Type::Variable(_) => None, // Cannot convert unresolved type var
             Type::Generic { base, args } => {
-                // Try to reconstruct generic type annotation
                 if let Type::Concrete(TypeAnnotation::Reference(name)) = base.as_ref() {
                     let arg_annotations: Option<Vec<_>> =
                         args.iter().map(|arg| arg.to_annotation()).collect();
 
                     arg_annotations.map(|args| {
-                        // U1: the canonical collection carrier is
-                        // `Generic{Array/Vec, [elem]}`. Round-trip the
-                        // single-arg Array/Vec form back to
-                        // `TypeAnnotation::Array` so downstream annotation
-                        // consumers (string rendering, compiler element re-read)
-                        // see the legacy array shape they already understand.
                         if (name.as_str() == "Array" || name.as_str() == "Vec") && args.len() == 1 {
                             TypeAnnotation::Array(Box::new(args.into_iter().next().unwrap()))
                         } else {
@@ -412,24 +361,15 @@ impl Type {
         }
     }
 
-    /// Convert inference Type to SemanticType
-    ///
-    /// This bridges the inference engine (Type) with the user-facing type system (SemanticType).
-    /// Returns None for unresolved type variables.
     pub fn to_semantic(&self) -> Option<SemanticType> {
         match self {
+            Type::Concrete(ann) if annotation_contains_reserved_type_var_carrier(ann) => None,
             Type::Concrete(ann) => Some(super::annotations::annotation_to_semantic(ann)),
-            Type::Variable(var) => {
-                // Extract numeric ID from type variable name (e.g., "T42" -> 42)
-                let id_str = var.0.trim_start_matches('T');
-                let id = id_str.parse::<u32>().unwrap_or(0);
-                Some(SemanticType::TypeVar(TypeVarId(id)))
-            }
+            Type::Variable(var) => Some(SemanticType::TypeVar(var.legacy_semantic_id()?)),
             Type::Generic { base, args } => {
-                // Handle known generic types
                 if let Type::Concrete(TypeAnnotation::Reference(name)) = base.as_ref() {
                     let semantic_args: Vec<_> =
-                        args.iter().filter_map(|arg| arg.to_semantic()).collect();
+                        args.iter().map(Type::to_semantic).collect::<Option<_>>()?;
 
                     match name.as_str() {
                         "Option" if semantic_args.len() == 1 => {
@@ -439,8 +379,6 @@ impl Type {
                             ok_type: Box::new(semantic_args[0].clone()),
                             err_type: semantic_args.get(1).cloned().map(Box::new),
                         }),
-                        // U1: "Array" is the canonical collection base name;
-                        // "Vec" is its alias. Both map to SemanticType::Array.
                         "Vec" | "Array" if semantic_args.len() == 1 => {
                             Some(SemanticType::Array(Box::new(semantic_args[0].clone())))
                         }
@@ -453,16 +391,11 @@ impl Type {
                     None
                 }
             }
-            Type::Constrained { var, .. } => {
-                // For constrained types, return the variable
-                let id_str = var.0.trim_start_matches('T');
-                let id = id_str.parse::<u32>().unwrap_or(0);
-                Some(SemanticType::TypeVar(TypeVarId(id)))
-            }
+            Type::Constrained { var, .. } => Some(SemanticType::TypeVar(var.legacy_semantic_id()?)),
             Type::Function { params, returns } => {
                 let semantic_params: Vec<_> = params
                     .iter()
-                    .filter_map(|p| {
+                    .map(|p| {
                         p.to_semantic()
                             .map(|st| crate::type_system::semantic::FunctionParam {
                                 name: None,
@@ -470,8 +403,8 @@ impl Type {
                                 optional: false,
                             })
                     })
-                    .collect();
-                let return_type = returns.to_semantic().unwrap_or(SemanticType::Void);
+                    .collect::<Option<_>>()?;
+                let return_type = returns.to_semantic()?;
                 Some(SemanticType::Function(Box::new(
                     crate::type_system::semantic::FunctionSignature {
                         params: semantic_params,
@@ -485,9 +418,6 @@ impl Type {
 }
 
 impl SemanticType {
-    /// Convert SemanticType to inference Type
-    ///
-    /// This allows using semantic types in the inference engine.
     pub fn to_inference_type(&self) -> Type {
         match self {
             SemanticType::Number => Type::Concrete(TypeAnnotation::Basic("number".to_string())),
@@ -512,7 +442,7 @@ impl SemanticType {
                 base: Box::new(Type::Concrete(TypeAnnotation::Reference("Vec".into()))),
                 args: vec![elem.to_inference_type()],
             },
-            SemanticType::TypeVar(id) => Type::Variable(TypeVar(format!("T{}", id.0))),
+            SemanticType::TypeVar(id) => Type::Variable(TypeVar::new(format!("T{}", id.0))),
             SemanticType::Named(name) => {
                 if BuiltinTypes::is_number_type_name(name)
                     || BuiltinTypes::is_integer_type_name(name)
@@ -562,8 +492,6 @@ impl SemanticType {
             SemanticType::Enum { name, .. } => {
                 Type::Concrete(TypeAnnotation::Reference(name.as_str().into()))
             }
-            // References: convert to the inner type for inference purposes.
-            // The reference wrapper is tracked separately by the compiler.
             SemanticType::Ref(inner) | SemanticType::RefMut(inner) => inner.to_inference_type(),
         }
     }

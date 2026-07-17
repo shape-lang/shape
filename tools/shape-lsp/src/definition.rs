@@ -6,7 +6,7 @@ use crate::annotation_discovery::AnnotationDiscovery;
 use crate::document::DocumentManager;
 use crate::module_cache::ModuleCache;
 use crate::type_inference::infer_variable_type;
-use crate::util::{get_word_at_position, offset_to_line_col, position_to_offset};
+use crate::util::{get_word_at_position, offset_to_line_col, parser_source, position_to_offset};
 use shape_ast::ast::{
     ImportItems, Item, Program, Span, Statement, TraitMember, TraitMemberSignature, TypeName,
 };
@@ -16,6 +16,8 @@ use tower_lsp_server::ls_types::{
     DocumentHighlight, DocumentHighlightKind, GotoDefinitionResponse, Location, Position, Range,
     Uri,
 };
+
+mod generated_queries;
 
 /// Find the definition of a symbol at the given position.
 ///
@@ -32,28 +34,42 @@ pub fn get_definition(
     // Get the word at cursor
     let word = get_word_at_position(text, position)?;
 
-    // Parse the current file, falling back to cached program or resilient parser
-    let program = match parse_program(text) {
-        Ok(p) => p,
+    // Parse the current file, falling back to cached program or resilient
+    // parser. Generated capture navigation is enabled only for the exact
+    // parse; a fallback AST can carry stale offsets.
+    let parse_src = parser_source(text);
+    let (program, has_exact_source_ast) = match parse_program(parse_src.as_ref()) {
+        Ok(p) => (p, true),
         Err(_) => {
             if let Some(cached) = cached_program {
-                cached.clone()
+                (cached.clone(), false)
             } else {
                 // Fall back to resilient parser — always succeeds with partial results
-                let partial = shape_ast::parser::resilient::parse_program_resilient(text);
+                let partial =
+                    shape_ast::parser::resilient::parse_program_resilient(parse_src.as_ref());
                 if partial.items.is_empty() {
                     return None;
                 }
-                partial.into_program()
+                (partial.into_program(), false)
             }
         }
     };
+
+    if has_exact_source_ast && let Some(offset) = position_to_offset(text, position) {
+        match generated_queries::definition(&program, text, &word, offset, uri, module_cache) {
+            crate::generated_captures::GeneratedCaptureLookup::Found(response) => {
+                return Some(response);
+            }
+            crate::generated_captures::GeneratedCaptureLookup::Unavailable => return None,
+            crate::generated_captures::GeneratedCaptureLookup::NotCapture => {}
+        }
+    }
 
     // ADR-009 D1 (S5): generated declarations are answered from the
     // compiler's SymbolId/provenance query surface FIRST (Decision 66) —
     // the text/scope providers below cannot see generated symbols and must
     // never answer for them. Ordinary symbols fall through untouched.
-    if let Some(offset) = position_to_offset(text, position) {
+    if !has_exact_source_ast && let Some(offset) = position_to_offset(text, position) {
         if let Some(response) =
             crate::generated_symbols::generated_definition(&program, text, &word, offset, uri)
         {
@@ -103,8 +119,9 @@ pub fn get_expansion_view(
     uri: &Uri,
 ) -> Option<crate::expansion_views::ExpansionView> {
     let word = get_word_at_position(text, position)?;
-    let program = parse_program(text).ok().or_else(|| {
-        let partial = shape_ast::parser::resilient::parse_program_resilient(text);
+    let parse_src = parser_source(text);
+    let program = parse_program(parse_src.as_ref()).ok().or_else(|| {
+        let partial = shape_ast::parser::resilient::parse_program_resilient(parse_src.as_ref());
         (!partial.items.is_empty()).then(|| partial.into_program())
     })?;
     let offset = position_to_offset(text, position)?;
@@ -144,9 +161,34 @@ pub fn get_references_cross_file(
     module_cache: Option<&ModuleCache>,
     workspace_root: Option<&Path>,
 ) -> Option<Vec<Location>> {
+    // A generated capture is already resolved by compiler-issued structural
+    // identity. Return that closed graph directly: the generic cross-file
+    // path below is name-based and must not append same-spelling symbols from
+    // other files or owners.
+    let parse_src = parser_source(text);
+    let generated_session = match generated_queries::cross_file_references(
+        parse_src.as_ref(),
+        text,
+        position,
+        uri,
+        module_cache,
+        workspace_root,
+    ) {
+        generated_queries::CrossFileReferences::Found(locations) => return Some(locations),
+        generated_queries::CrossFileReferences::Unavailable => return None,
+        generated_queries::CrossFileReferences::Continue(session) => session,
+    };
+
     // Local file references via ScopeTree (and text-search fallback).
-    let mut locations =
-        get_references_with_fallback(text, position, uri, cached_program).unwrap_or_default();
+    let mut locations = generated_queries::references_with_fallback(
+        text,
+        position,
+        uri,
+        cached_program,
+        false,
+        generated_session.as_ref(),
+    )
+    .unwrap_or_default();
 
     // Determine the symbol name + whether it's module-scope-visible.
     let Some(word) = get_word_at_position(text, position) else {
@@ -158,7 +200,7 @@ pub fn get_references_cross_file(
     };
 
     // Parse to inspect the binding kind. If parse fails, skip cross-file.
-    let program = match parse_program(text) {
+    let program = match parse_program(parse_src.as_ref()) {
         Ok(p) => p,
         Err(_) => match cached_program {
             Some(p) => p.clone(),
@@ -294,10 +336,11 @@ fn is_module_scope_symbol(program: &Program, name: &str) -> bool {
 /// references) is considered — locally-shadowing inner bindings are
 /// excluded by `ScopeTree::references_of` semantics.
 fn collect_module_scope_refs_in_file(text: &str, uri: &Uri, name: &str, out: &mut Vec<Location>) {
-    let program = match parse_program(text) {
+    let parse_src = parser_source(text);
+    let program = match parse_program(parse_src.as_ref()) {
         Ok(p) => p,
         Err(_) => {
-            let partial = shape_ast::parse_program_resilient(text);
+            let partial = shape_ast::parse_program_resilient(parse_src.as_ref());
             if partial.items.is_empty() {
                 return;
             }
@@ -351,75 +394,7 @@ pub fn get_references_with_fallback(
     uri: &Uri,
     cached_program: Option<&Program>,
 ) -> Option<Vec<Location>> {
-    // Get the byte offset of the cursor
-    let offset = position_to_offset(text, position)?;
-
-    // Parse, falling back to cached program or resilient parser
-    let program = match parse_program(text) {
-        Ok(p) => p,
-        Err(_) => {
-            if let Some(cached) = cached_program {
-                cached.clone()
-            } else {
-                let partial = shape_ast::parse_program_resilient(text);
-                if partial.items.is_empty() {
-                    return None;
-                }
-                partial.into_program()
-            }
-        }
-    };
-    // ADR-009 D1 (S5): references on a generated declaration are answered
-    // from the compiler's SymbolId/provenance query surface (Decision 66):
-    // every AST call site + the application site. The scope/text providers
-    // below never serve generated symbols (rejection row 6 — the text-scan
-    // fallback would return decoy occurrences in comments/strings).
-    if let Some(word) = get_word_at_position(text, position) {
-        if let Some(locations) =
-            crate::generated_symbols::generated_references(&program, text, &word, offset, uri)
-        {
-            return Some(locations);
-        }
-    }
-
-    let tree = crate::scope::ScopeTree::build(&program, text);
-
-    // Find all references (def + uses) via scope-aware resolution
-    let spans = tree.references_of(offset)?;
-
-    let locations: Vec<Location> = spans
-        .into_iter()
-        .map(|(start, end)| {
-            let (start_line, start_col) = offset_to_line_col(text, start);
-            let (end_line, end_col) = offset_to_line_col(text, end);
-            Location {
-                uri: uri.clone(),
-                range: Range {
-                    start: Position {
-                        line: start_line,
-                        character: start_col,
-                    },
-                    end: Position {
-                        line: end_line,
-                        character: end_col,
-                    },
-                },
-            }
-        })
-        .collect();
-
-    if locations.is_empty() {
-        // Fallback to text-based search if scope tree didn't find anything
-        let word = get_word_at_position(text, position)?;
-        let fallback = find_all_references(&program, &word, uri, text);
-        if fallback.is_empty() {
-            None
-        } else {
-            Some(fallback)
-        }
-    } else {
-        Some(locations)
-    }
+    generated_queries::references_with_fallback(text, position, uri, cached_program, true, None)
 }
 
 /// Find the definition site of the *type* of the symbol at the cursor.
@@ -449,13 +424,15 @@ pub fn get_type_definition(
 ) -> Option<GotoDefinitionResponse> {
     let word = get_word_at_position(text, position)?;
 
-    let program = match parse_program(text) {
+    let parse_src = parser_source(text);
+    let program = match parse_program(parse_src.as_ref()) {
         Ok(p) => p,
         Err(_) => {
             if let Some(cached) = cached_program {
                 cached.clone()
             } else {
-                let partial = shape_ast::parser::resilient::parse_program_resilient(text);
+                let partial =
+                    shape_ast::parser::resilient::parse_program_resilient(parse_src.as_ref());
                 if partial.items.is_empty() {
                     return None;
                 }
@@ -507,13 +484,15 @@ pub fn get_implementations(
 ) -> Option<Vec<Location>> {
     let word = get_word_at_position(text, position)?;
 
-    let program = match parse_program(text) {
+    let parse_src = parser_source(text);
+    let program = match parse_program(parse_src.as_ref()) {
         Ok(p) => p,
         Err(_) => {
             if let Some(cached) = cached_program {
                 cached.clone()
             } else {
-                let partial = shape_ast::parser::resilient::parse_program_resilient(text);
+                let partial =
+                    shape_ast::parser::resilient::parse_program_resilient(parse_src.as_ref());
                 if partial.items.is_empty() {
                     return None;
                 }
@@ -670,13 +649,14 @@ pub fn get_document_highlights(
 ) -> Option<Vec<DocumentHighlight>> {
     let offset = position_to_offset(text, position)?;
 
-    let program = match parse_program(text) {
+    let parse_src = parser_source(text);
+    let program = match parse_program(parse_src.as_ref()) {
         Ok(p) => p,
         Err(_) => {
             if let Some(cached) = cached_program {
                 cached.clone()
             } else {
-                let partial = shape_ast::parse_program_resilient(text);
+                let partial = shape_ast::parse_program_resilient(parse_src.as_ref());
                 if partial.items.is_empty() {
                     return None;
                 }

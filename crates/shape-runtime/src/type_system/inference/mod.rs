@@ -36,12 +36,22 @@ mod access;
 mod bidirectional;
 mod expressions;
 mod extend_methods;
+mod facts;
+mod generated_callable_facts;
 mod hoisting;
 mod items;
 mod operators;
 mod statements;
 
 pub use bidirectional::CheckMode;
+pub use facts::{BindingFact, InferenceFacts};
+pub use generated_callable_facts::{
+    ExactSemanticCallSiteFact, GeneratedCallableFact, GeneratedCaptureFact, GeneratedCaptureKey,
+    GeneratedNodeKey, GeneratedSemanticFactIssue, RecursiveCallableShape, SemanticCallSiteFact,
+    SemanticCallSiteKey, SemanticCallableNodeShape, SemanticCallableParameterShape,
+    SemanticCalleeDeclaration, SemanticDeclaredParameter, SemanticPassingMode,
+    SemanticTypeArgument, SemanticTypeCandidate, SemanticTypePathSegment,
+};
 pub use hoisting::{PropertyAssignment, PropertyAssignmentCollector};
 
 use super::checking::MethodTable;
@@ -53,131 +63,6 @@ use std::collections::HashMap;
 
 use crate::type_system::semantic::{EnumVariant, SemanticType};
 use std::collections::HashSet;
-
-/// Finalized type fact for one source binding.
-///
-/// The key in `InferenceFacts::binding_facts` is the binder/name span. The
-/// duplicated `binder_span` keeps the record self-describing for consumers that
-/// collect facts by name.
-#[derive(Debug, Clone, PartialEq)]
-pub struct BindingFact {
-    pub name: String,
-    pub binder_span: Span,
-    pub initializer_span: Option<Span>,
-    pub ty: Type,
-}
-
-/// Canonical type-inference facts produced by one best-effort program pass.
-///
-/// This is the named handoff for downstream compiler consumers that need both
-/// top-level inferred signatures and the finalized per-expression span table.
-/// Both maps come from the same `infer_program_best_effort` run; constructing
-/// this carrier must not trigger a second inference pass.
-#[derive(Debug, Clone, Default)]
-pub struct InferenceFacts {
-    top_level_types: HashMap<String, Type>,
-    expression_types: HashMap<Span, Type>,
-    binding_facts: HashMap<Span, BindingFact>,
-}
-
-impl InferenceFacts {
-    pub fn new(
-        top_level_types: HashMap<String, Type>,
-        expression_types: HashMap<Span, Type>,
-    ) -> Self {
-        Self {
-            top_level_types,
-            expression_types,
-            binding_facts: HashMap::new(),
-        }
-    }
-
-    pub fn with_binding_facts(
-        top_level_types: HashMap<String, Type>,
-        expression_types: HashMap<Span, Type>,
-        binding_facts: HashMap<Span, BindingFact>,
-    ) -> Self {
-        Self {
-            top_level_types,
-            expression_types,
-            binding_facts,
-        }
-    }
-
-    /// Lookup a finalized expression type by source span.
-    pub fn expression_type(&self, span: Span) -> Option<&Type> {
-        if span.is_dummy() {
-            return None;
-        }
-        self.expression_types.get(&span)
-    }
-
-    /// Lookup a top-level function signature inferred for `name`.
-    pub fn function_signature(&self, name: &str) -> Option<&Type> {
-        match self.top_level_types.get(name) {
-            Some(ty @ Type::Function { .. }) => Some(ty),
-            _ => None,
-        }
-    }
-
-    /// Lookup any top-level inferred type by symbol name.
-    pub fn top_level_type(&self, name: &str) -> Option<&Type> {
-        self.top_level_types.get(name)
-    }
-
-    pub fn top_level_types(&self) -> &HashMap<String, Type> {
-        &self.top_level_types
-    }
-
-    pub fn expression_types(&self) -> &HashMap<Span, Type> {
-        &self.expression_types
-    }
-
-    /// Lookup a finalized binding fact by binder/name span.
-    pub fn binding_fact(&self, span: Span) -> Option<&BindingFact> {
-        if span.is_dummy() {
-            return None;
-        }
-        self.binding_facts.get(&span)
-    }
-
-    /// Lookup a finalized binding type by binder/name span.
-    pub fn binding_type(&self, span: Span) -> Option<&Type> {
-        self.binding_fact(span).map(|fact| &fact.ty)
-    }
-
-    pub fn binding_facts(&self) -> &HashMap<Span, BindingFact> {
-        &self.binding_facts
-    }
-
-    pub fn bindings_named<'a>(&'a self, name: &'a str) -> impl Iterator<Item = &'a BindingFact> {
-        self.binding_facts
-            .values()
-            .filter(move |fact| fact.name == name)
-    }
-
-    pub fn into_expression_types(self) -> HashMap<Span, Type> {
-        self.expression_types
-    }
-
-    pub fn into_parts(self) -> (HashMap<String, Type>, HashMap<Span, Type>) {
-        (self.top_level_types, self.expression_types)
-    }
-
-    pub fn into_parts_with_bindings(
-        self,
-    ) -> (
-        HashMap<String, Type>,
-        HashMap<Span, Type>,
-        HashMap<Span, BindingFact>,
-    ) {
-        (
-            self.top_level_types,
-            self.expression_types,
-            self.binding_facts,
-        )
-    }
-}
 
 /// ADR-009 B3 (Dec 51) — one active `comptime for some<W...>` witness opening.
 /// See [`TypeInferenceEngine::comptime_witness_frames`].
@@ -440,6 +325,10 @@ pub struct TypeInferenceEngine {
     /// pre-solve type from `infer_variable_decl`, then finalized through the
     /// same substitution/drop policy as `expr_type_table`.
     pub(crate) binding_fact_table: HashMap<Span, BindingFact>,
+    /// Structural generated-node, binding, declaration, and call-site facts
+    /// for one inference run. Kept out of this legacy root so all lifecycle
+    /// state is initialized and cleared as one cohesive capability.
+    generated_inference: generated_callable_facts::GeneratedInferenceState,
     /// Array/object parameter destructure links created while binding function
     /// parameter patterns. Once the whole parameter resolves to a statically
     /// known array/object/struct type, these links bind child binder variables
@@ -530,6 +419,7 @@ impl TypeInferenceEngine {
             unannotated_let_binding_origins: HashMap::new(),
             expr_type_table: HashMap::new(),
             binding_fact_table: HashMap::new(),
+            generated_inference: Default::default(),
             param_destructure_array_element_links: Vec::new(),
             param_destructure_field_links: Vec::new(),
             module_qualified_scalar_returns: HashMap::new(),
@@ -1141,11 +1031,16 @@ impl TypeInferenceEngine {
             if !Self::type_is_fully_resolved(&resolved_return) {
                 continue;
             }
-            let proven_generic_params: HashSet<String> = self
-                .env
-                .lookup(&function_name)
-                .map(|scheme| scheme.quantified.iter().map(|var| var.0.clone()).collect())
-                .unwrap_or_default();
+            let proven_generic_params = match self.env.lookup(&function_name) {
+                Some(scheme) => match Self::declared_parameter_tokens(scheme) {
+                    Ok(parameters) => parameters,
+                    Err(error) => {
+                        errors.push(error);
+                        continue;
+                    }
+                },
+                None => HashMap::new(),
+            };
             for call_return in &call_returns {
                 if let Err(err) = self.bind_callsite_return_to_proven_shape_with_params(
                     call_return,
@@ -1165,14 +1060,14 @@ impl TypeInferenceEngine {
         instance: &Type,
         proven: &Type,
     ) -> TypeResult<()> {
-        self.bind_callsite_return_to_proven_shape_with_params(instance, proven, &HashSet::new())
+        self.bind_callsite_return_to_proven_shape_with_params(instance, proven, &HashMap::new())
     }
 
     fn bind_callsite_return_to_proven_shape_with_params(
         &mut self,
         instance: &Type,
         proven: &Type,
-        proven_generic_params: &HashSet<String>,
+        proven_generic_params: &HashMap<String, TypeVar>,
     ) -> TypeResult<()> {
         let instance = self
             .solver
@@ -1197,7 +1092,7 @@ impl TypeInferenceEngine {
         &mut self,
         instance: &Type,
         proven: &Type,
-        proven_generic_params: &HashSet<String>,
+        proven_generic_params: &HashMap<String, TypeVar>,
         proven_return_bindings: &mut HashMap<TypeVar, Type>,
     ) -> TypeResult<()> {
         match (instance, proven) {
@@ -1224,11 +1119,16 @@ impl TypeInferenceEngine {
                 Type::Concrete(ann @ (TypeAnnotation::Basic(_) | TypeAnnotation::Reference(_))),
             ) if ann
                 .as_type_name_str()
-                .is_some_and(|name| proven_generic_params.contains(name)) =>
+                .is_some_and(|name| proven_generic_params.contains_key(name)) =>
             {
-                let name = ann.as_type_name_str().unwrap();
+                let name = ann
+                    .as_type_name_str()
+                    .expect("guarded declared parameter name");
+                let declared = proven_generic_params
+                    .get(name)
+                    .expect("guarded declared parameter token");
                 self.bind_proven_callsite_return_var(
-                    &TypeVar::new(name.to_string()),
+                    declared,
                     ty,
                     proven_generic_params,
                     proven_return_bindings,
@@ -1304,7 +1204,7 @@ impl TypeInferenceEngine {
         &mut self,
         var: &TypeVar,
         proven: &Type,
-        proven_generic_params: &HashSet<String>,
+        proven_generic_params: &HashMap<String, TypeVar>,
         proven_return_bindings: &mut HashMap<TypeVar, Type>,
     ) -> TypeResult<()> {
         match self.solver.unifier().lookup(var).cloned() {
@@ -1328,7 +1228,7 @@ impl TypeInferenceEngine {
         &mut self,
         var: &TypeVar,
         instance: &Type,
-        proven_generic_params: &HashSet<String>,
+        proven_generic_params: &HashMap<String, TypeVar>,
         proven_return_bindings: &mut HashMap<TypeVar, Type>,
     ) -> TypeResult<()> {
         if let Some(existing) = self.solver.unifier().lookup(var).cloned() {
@@ -1374,10 +1274,13 @@ impl TypeInferenceEngine {
     }
 
     fn is_self_named_type_param_annotation(var: &TypeVar, ty: &Type) -> bool {
+        let Some(provenance) = var.declared_provenance() else {
+            return false;
+        };
         matches!(
             ty,
             Type::Concrete(ann @ (TypeAnnotation::Basic(_) | TypeAnnotation::Reference(_)))
-                if ann.as_type_name_str() == Some(var.0.as_str())
+                if ann.as_type_name_str() == Some(provenance.source_name())
         )
     }
 
@@ -2312,6 +2215,7 @@ impl TypeInferenceEngine {
         self.unannotated_let_binding_origins.clear();
         self.expr_type_table.clear();
         self.binding_fact_table.clear();
+        self.clear_generated_callable_facts();
         self.param_destructure_array_element_links.clear();
         self.param_destructure_field_links.clear();
 
@@ -2373,6 +2277,9 @@ impl TypeInferenceEngine {
         // substitution and drop un-inferable entries (parity with production).
         self.finalize_expr_type_table();
         self.finalize_binding_fact_table();
+        self.finalize_semantic_callee_declarations();
+        self.finalize_generated_callable_facts();
+        self.finalize_semantic_callsite_facts();
 
         (types, errors)
     }
@@ -2412,6 +2319,7 @@ impl TypeInferenceEngine {
         self.unannotated_let_binding_origins.clear();
         self.expr_type_table.clear();
         self.binding_fact_table.clear();
+        self.clear_generated_callable_facts();
         self.param_destructure_array_element_links.clear();
         self.param_destructure_field_links.clear();
         // Run hoisting pre-pass first
@@ -2547,7 +2455,10 @@ impl TypeInferenceEngine {
         // CONFLICTING observed pair still produces the genuine union mismatch.
         self.apply_callsite_unions(&mut types);
         errors.extend(self.propagate_param_destructure_field_links());
-        self.rewalk_resolved_function_bodies(program, &mut types);
+        let rewalk_errors = self.with_isolated_semantic_callsite_replay(|engine| {
+            engine.rewalk_resolved_function_bodies(program, &mut types)
+        });
+        errors.extend(rewalk_errors);
 
         // HOF return-type soundness re-check (the sg2 root, int/number guard).
         //
@@ -2636,6 +2547,9 @@ impl TypeInferenceEngine {
         // the final substitution and drop entries that remain un-inferable.
         self.finalize_expr_type_table();
         self.finalize_binding_fact_table();
+        self.finalize_semantic_callee_declarations();
+        self.finalize_generated_callable_facts();
+        self.finalize_semantic_callsite_facts();
 
         (types, errors)
     }
@@ -2648,8 +2562,20 @@ impl TypeInferenceEngine {
         let (types, errors) = self.infer_program_best_effort(program);
         let expression_types = self.take_expr_type_table();
         let binding_facts = self.take_binding_fact_table();
+        let generated_callable_facts = self.take_generated_callable_facts();
+        let generated_capture_facts = self.take_generated_capture_facts();
+        let semantic_callsite_facts = self.take_semantic_callsite_facts();
+        let semantic_callee_declarations = self.take_semantic_callee_declarations();
         (
-            InferenceFacts::with_binding_facts(types, expression_types, binding_facts),
+            InferenceFacts::with_all_facts(
+                types,
+                expression_types,
+                binding_facts,
+                generated_callable_facts,
+                generated_capture_facts,
+                semantic_callsite_facts,
+                semantic_callee_declarations,
+            ),
             errors,
         )
     }
@@ -3380,16 +3306,24 @@ impl TypeInferenceEngine {
                     if index >= widened_params.len() {
                         break;
                     }
+                    // Definition-wide callsite widening belongs only to the
+                    // inference hole minted for an unannotated parameter. An
+                    // annotated slot (including an explicit generic `T`) has
+                    // no source hole and must retain its declared signature;
+                    // each call's fresh instantiation carries specialization.
+                    let Some(source_var) = param_source_vars
+                        .get(index)
+                        .and_then(|variable| variable.clone())
+                    else {
+                        continue;
+                    };
                     let Some(widened_type) =
                         self.union_from_observed_types_with_resolved(observed_types, &resolved)
                     else {
                         continue;
                     };
 
-                    let source_var = param_source_vars.get(index).and_then(|var| var.clone());
-                    if let Some(var) = source_var.clone() {
-                        substitutions.insert(var, widened_type.clone());
-                    }
+                    substitutions.insert(source_var, widened_type.clone());
 
                     let current_param = widened_params[index].clone();
                     match current_param {
@@ -3397,10 +3331,9 @@ impl TypeInferenceEngine {
                             widened_params[index] = widened_type.clone();
                             substitutions.insert(var, widened_type);
                         }
-                        _ if source_var.is_some() => {
+                        _ => {
                             widened_params[index] = widened_type;
                         }
-                        _ => {}
                     }
                 }
 

@@ -116,9 +116,18 @@ use crate::compiler::BytecodeCompiler;
 use shape_ast::ast::{TypeAnnotation, TypeParam};
 use shape_ast::error::{Result, ShapeError};
 use shape_runtime::comptime_reflection::ParamKind;
-use shape_runtime::type_system::annotation_as_tyvar;
+use shape_runtime::type_system::{TypeVar, annotation_contains_reserved_type_var_carrier};
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
+
+mod closed_semantic_type;
+mod lexical_parameters;
+mod projection;
+mod specialization_overlay;
+pub(crate) use closed_semantic_type::ClosedSemanticType;
+use lexical_parameters::LexicalParameters;
+pub(crate) use projection::{FrozenSemanticTypeProjection, annotation_has_lossy_unknown_sentinel};
+pub(crate) use specialization_overlay::SpecializationTypeOverlay;
 
 /// Rejection-matrix row 3 (ticket A1): a comptime site that cannot obtain
 /// the per-compilation-unit freeze handle is a compile error — never an
@@ -290,6 +299,7 @@ impl FrozenImplEvidenceSet {
 
     /// Evidence for named impls (`impl Trait for Type as Name`), sorted by
     /// impl name for deterministic enumeration.
+    #[cfg(test)]
     pub(crate) fn named_impls(&self) -> &[FrozenImplEvidence] {
         &self.named_impls
     }
@@ -848,7 +858,8 @@ impl SemanticFreeze {
 #[derive(Debug)]
 pub(crate) struct FreezeOverlay {
     base: Arc<SemanticFreeze>,
-    parameters: HashMap<String, FrozenTypeIdentity>,
+    lexical_parameters: LexicalParameters,
+    exact_semantic_arguments: HashMap<TypeVar, ClosedSemanticType>,
     /// ADR-009 B3 (S2): hidden witnesses opened by
     /// [`FreezeOverlay::open_witnesses`] for one `comptime for some<W...>`
     /// site (`parameter:{some_site}:{witness}` identities). A DISTINCT binder
@@ -864,8 +875,10 @@ pub(crate) struct FreezeOverlay {
     /// ADR-009 B6 (Dec 63): the value is WIDENED from a bare category to
     /// [`CompositeMemoEntry`] so a `Callable` composite carries its ordered
     /// structural descriptor (param name/type-identity/optionality/passing-mode
-    /// + return). The one-way SHA-256 identity drops names and modes by design;
-    /// widening the memo value (rather than a parallel identity-keyed
+    /// + return). Parameter names are identity-insignificant; passing modes are
+    /// identity-significant through the canonical outer borrow wrapper and are
+    /// also projected explicitly in the descriptor. Widening the memo value
+    /// (rather than a parallel identity-keyed
     /// side-table) is the load-bearing B6 change — a second table would drift
     /// from this one. See `docs/defections.md` for the rejected side-table
     /// alternative.
@@ -921,81 +934,55 @@ impl FreezeOverlay {
     /// Overlay `type_params` scoped to `parameter_owner` (the enclosing
     /// function name; module scope uses `"<module>"`, matching the S1
     /// builder's default owner).
+    #[cfg(test)]
     pub(crate) fn new(
         base: Arc<SemanticFreeze>,
         parameter_owner: &str,
         type_params: &[String],
     ) -> Self {
-        let mut parameters = HashMap::new();
-        for name in type_params {
-            // Interning-order parity with `intern_identity`'s name-keyed early
-            // return: a name already frozen in the base (primitive, builtin
-            // nominal, user nominal, alias) wins over a same-named parameter.
-            if base.identity_of(name).is_some() {
-                continue;
-            }
-            let identity = FrozenTypeIdentity::from_canonical_descriptor(&format!(
-                "parameter:{parameter_owner}:{name}"
-            ));
-            parameters.insert(name.clone(), identity);
-        }
+        Self::new_with_parameter_scopes(base, [(parameter_owner.to_string(), type_params.to_vec())])
+    }
+
+    /// Construct an overlay over ordered lexical Parameter scopes. Outer
+    /// scopes come first; later (inner) scopes shadow the same source name.
+    /// Base identities retain precedence over every Parameter spelling.
+    fn new_with_parameter_scopes(
+        base: Arc<SemanticFreeze>,
+        parameter_scopes: impl IntoIterator<Item = (String, Vec<String>)>,
+    ) -> Self {
+        let lexical_parameters = LexicalParameters::new(&base, parameter_scopes);
         Self {
             base,
-            parameters,
+            lexical_parameters,
+            exact_semantic_arguments: HashMap::new(),
             witnesses: HashMap::new(),
             composites: Mutex::new(HashMap::new()),
         }
     }
 
-    /// ADR-009 A2 (slice S2): canonicalize a resolved type expression through
-    /// THE single canonicalizer
-    /// ([`super::type_reflection::canonicalize_type_annotation`], slice S1 —
-    /// leaves resolve back through this overlay's own query API) and intern
-    /// the resulting identity so the EXISTING [`FreezeOverlay::category_of`]
-    /// query answers it structurally. Failure is always the canonicalizer's
-    /// named error — nothing is interned on error, and
-    /// [`FrozenTypeIdentity::INVALID`] is never produced here.
-    pub(crate) fn canonicalize_type(
+    fn with_exact_semantic_arguments(
+        mut self,
+        exact_semantic_arguments: HashMap<TypeVar, ClosedSemanticType>,
+    ) -> Self {
+        self.exact_semantic_arguments = exact_semantic_arguments;
+        self
+    }
+
+    pub(crate) fn exact_semantic_argument(
         &self,
-        annotation: &TypeAnnotation,
-    ) -> std::result::Result<FrozenTypeIdentity, String> {
-        let canonical = canonicalize_type_annotation(annotation, self)?;
-        let entry = CompositeMemoEntry {
-            category: canonical.category,
-            // ADR-009 B6: preserve the callable's ordered structural descriptor
-            // (name/type-identity/optionality/passing-mode + return) so
-            // `payload_of` reconstructs the `FrozenCallable` without inverting
-            // the identity hash.
-            callable: canonical.callable.clone(),
-            // ADR-009 B5 (Dec 55): preserve the refined head + argument
-            // identities of a genuine `applied:` form so `payload_of` can
-            // substitute the head's declared parameters before issuing
-            // descriptors. `None` for every non-applied descriptor (refine
-            // round-trips only over genuine applications).
-            applied_nominal: super::type_reflection::canonical_refine(&canonical.descriptor),
-            // ADR-009 B7: preserve the four composite structural descriptors so
-            // `payload_of` reconstructs the composite payload without inverting
-            // the identity hash. Each is `Some` iff the canonical is that
-            // composite category (canonicalizer invariant).
-            tuple: canonical.tuple.clone(),
-            record: canonical.record.clone(),
-            reference: canonical.reference,
-            union: canonical.union.clone(),
-        };
-        let mut composites = self
-            .composites
-            .lock()
-            .expect("freeze-overlay composite memo lock poisoned");
-        if let Some(previous) = composites.insert(canonical.identity, entry) {
-            // Same collision discipline as `intern_identity`: one identity,
-            // one category — a cross-category descriptor collision is an
-            // internal-invariant violation, never silent.
-            assert_eq!(
-                previous.category, canonical.category,
-                "canonical type identity collision across semantic categories"
-            );
-        }
-        Ok(canonical.identity)
+        declared: &TypeVar,
+    ) -> Option<&ClosedSemanticType> {
+        self.exact_semantic_arguments.get(declared)
+    }
+
+    /// Freeze-issued lexical Parameter context in outer-to-inner scope order.
+    ///
+    /// The identities are semantic cache material only; callers never rebuild
+    /// them from owner/name strings. Shadowed outer identities are retained
+    /// conservatively, while base-shadowed spellings are absent because they
+    /// never classified as Parameters in this overlay.
+    pub(crate) fn lexical_parameter_identities(&self) -> &[FrozenTypeIdentity] {
+        self.lexical_parameters.ordered_identities()
     }
 
     /// Shared query API: opened hidden witnesses shadow first (S2 — a witness
@@ -1007,7 +994,7 @@ impl FreezeOverlay {
         }
         self.base
             .identity_of(name)
-            .or_else(|| self.parameters.get(name).copied())
+            .or_else(|| self.lexical_parameters.identity_of(name))
     }
 
     /// Shared query API: overlay parameters classify as
@@ -1019,10 +1006,7 @@ impl FreezeOverlay {
         identity: FrozenTypeIdentity,
     ) -> std::result::Result<FrozenTypeCategory, String> {
         if self.witnesses.values().any(|&witness| witness == identity)
-            || self
-                .parameters
-                .values()
-                .any(|&parameter| parameter == identity)
+            || self.lexical_parameters.contains_identity(identity)
         {
             return Ok(FrozenTypeCategory::Parameter);
         }
@@ -1060,10 +1044,7 @@ impl FreezeOverlay {
     ) -> std::result::Result<super::type_reflection::payloads::FrozenPayloadDescriptor, String>
     {
         if self.witnesses.values().any(|&witness| witness == identity)
-            || self
-                .parameters
-                .values()
-                .any(|&parameter| parameter == identity)
+            || self.lexical_parameters.contains_identity(identity)
         {
             // ADR-009 B7 Slice 2 (Dec 50/94): a scoped generic parameter (or an
             // opened existential witness — a fresh opaque parameter-like type)
@@ -1237,7 +1218,7 @@ impl FreezeOverlay {
     /// (i.e. it resolves to [`FrozenTypeCategory::Parameter`] here and is
     /// not shadowed by a base identity).
     pub(crate) fn is_scoped_parameter(&self, name: &str) -> bool {
-        self.witnesses.contains_key(name) || self.parameters.contains_key(name)
+        self.witnesses.contains_key(name) || self.lexical_parameters.contains_name(name)
     }
 
     /// ADR-009 B3 (slice S2): open an existential descriptor package's hidden
@@ -1266,7 +1247,8 @@ impl FreezeOverlay {
         }
         Self {
             base: Arc::clone(&self.base),
-            parameters: self.parameters.clone(),
+            lexical_parameters: self.lexical_parameters.clone(),
+            exact_semantic_arguments: self.exact_semantic_arguments.clone(),
             witnesses: opened,
             composites: Mutex::new(HashMap::new()),
         }
@@ -1274,50 +1256,15 @@ impl FreezeOverlay {
 }
 
 /// Freeze-boundary predicate for rejection-matrix row 4: true when the
-/// annotation structurally contains the analyzer's canonical unresolved
-/// inference-variable marker. Exhaustive over `TypeAnnotation` so a new
-/// variant forces this walk to be revisited.
+/// annotation structurally contains any reserved inference-variable carrier,
+/// authenticated or tampered. The exhaustive walk is runtime-owned beside
+/// carrier issuance and recovery; this VM seam only names freeze semantics.
 ///
 /// `pub(super)`: the A2 composite canonicalizer (`type_reflection`) reuses
 /// this exact predicate for its inference-hole rejection — one detector, no
 /// second derivation.
 pub(super) fn annotation_has_unresolved_inference_variable(annotation: &TypeAnnotation) -> bool {
-    if annotation_as_tyvar(annotation).is_some() {
-        return true;
-    }
-    match annotation {
-        TypeAnnotation::Basic(_) => false,
-        TypeAnnotation::Array(inner) => annotation_has_unresolved_inference_variable(inner),
-        TypeAnnotation::Tuple(items)
-        | TypeAnnotation::Union(items)
-        | TypeAnnotation::Intersection(items) => items
-            .iter()
-            .any(annotation_has_unresolved_inference_variable),
-        TypeAnnotation::Object(fields) => fields
-            .iter()
-            .any(|field| annotation_has_unresolved_inference_variable(&field.type_annotation)),
-        TypeAnnotation::Function { params, returns } => {
-            params
-                .iter()
-                .any(|param| annotation_has_unresolved_inference_variable(&param.type_annotation))
-                || annotation_has_unresolved_inference_variable(returns)
-        }
-        TypeAnnotation::Generic { args, .. } => args
-            .iter()
-            .any(annotation_has_unresolved_inference_variable),
-        TypeAnnotation::Borrow { inner, .. } => annotation_has_unresolved_inference_variable(inner),
-        // ADR-009 B3 (S1): existential descriptor package — an inference hole can
-        // hide inside the inner descriptor; witnesses are bound names, not tyvars.
-        TypeAnnotation::Existential { inner, .. } => {
-            annotation_has_unresolved_inference_variable(inner)
-        }
-        TypeAnnotation::Reference(_)
-        | TypeAnnotation::Void
-        | TypeAnnotation::Never
-        | TypeAnnotation::Null
-        | TypeAnnotation::Undefined => false,
-        TypeAnnotation::Dyn(_) => false,
-    }
+    annotation_contains_reserved_type_var_carrier(annotation)
 }
 
 impl BytecodeCompiler {
@@ -1361,10 +1308,12 @@ impl BytecodeCompiler {
     ///
     /// Returns the installed per-compilation-unit freeze, scoped by a
     /// [`FreezeOverlay`] over the enclosing function's declared type
-    /// parameters when `current_function` is generic (module scope uses the
-    /// `"<module>"` owner with no parameters). This replaces the deleted
-    /// per-site `build_type_reflection_snapshot` rebuild: the base index is
-    /// shared (`Arc`), never rebuilt.
+    /// parameters when `current_function` is generic. A closure-aware
+    /// specialization that explicitly splices caller AST may carry ordered
+    /// outer lexical Parameter scopes as well; ordinary recursive compilation
+    /// remains isolated. Module scope carries no parameter scope. This replaces
+    /// the deleted per-site `build_type_reflection_snapshot` rebuild: the base
+    /// index is shared (`Arc`), never rebuilt.
     ///
     /// A comptime site reached without an installed freeze is a compile
     /// error (rejection-matrix row 3, [`NO_FREEZE_HANDLE_DIAGNOSTIC`]) —
@@ -1375,20 +1324,20 @@ impl BytecodeCompiler {
                 NO_FREEZE_HANDLE_DIAGNOSTIC.to_string(),
             ));
         };
-        let mut parameter_owner = "<module>".to_string();
-        let mut type_params: Vec<String> = Vec::new();
+        let mut parameter_scopes: Vec<(String, Vec<String>)> = Vec::new();
         if let Some(function) = self
             .current_function
             .and_then(|index| self.program.functions.get(index))
             && let Some(definition) = self.function_defs.get(&function.name)
+            && let Some(parameters) = &definition.type_params
         {
-            parameter_owner = function.name.clone();
-            if let Some(parameters) = &definition.type_params {
-                type_params = parameters
+            parameter_scopes.push((
+                function.name.clone(),
+                parameters
                     .iter()
                     .map(|parameter| parameter.name().to_string())
-                    .collect();
-            }
+                    .collect(),
+            ));
         }
         // ADR-009 A3 — specialization overlay: while a monomorphized body
         // compiles, the registered def carries `type_params = None`
@@ -1398,16 +1347,26 @@ impl BytecodeCompiler {
         // declared type-param names, with the owner scoped to the BASE name
         // (never the mono key) so Parameter identities are declaration-stable
         // across instantiations (ADR-009 §Semantic Freeze, Decision 52
-        // pre-substitution identities).
-        if let Some((base_name, parameters)) = &self.specialization_type_param_overlay {
-            parameter_owner = base_name.clone();
-            type_params.extend(parameters.iter().cloned());
+        // pre-substitution identities). The stack itself composes outer
+        // lexical scopes only through its explicit closure-inline entry point;
+        // an ordinary nested specialization exposes only its own scope.
+        let specialization = self.specialization_type_overlays.current();
+        if let Some(specialization) = specialization.as_ref() {
+            parameter_scopes.extend(
+                specialization
+                    .parameter_scopes()
+                    .map(|(owner, names)| (owner.to_string(), names.to_vec())),
+            );
         }
-        Ok(Arc::new(FreezeOverlay::new(
-            Arc::clone(freeze),
-            &parameter_owner,
-            &type_params,
-        )))
+        let mut overlay =
+            FreezeOverlay::new_with_parameter_scopes(Arc::clone(freeze), parameter_scopes);
+        if let Some(specialization) = specialization
+            && specialization.has_exact_arguments()
+        {
+            overlay =
+                overlay.with_exact_semantic_arguments(specialization.exact_arguments().clone());
+        }
+        Ok(Arc::new(overlay))
     }
 }
 
@@ -1467,7 +1426,7 @@ pub(crate) mod barrier_env_truth_for_tests {
 mod tests {
     use super::*;
     use shape_runtime::type_schema::EnumVariantInfo;
-    use shape_runtime::type_system::{TypeVar, tyvar_to_annotation};
+    use shape_runtime::type_system::{TypeVarGen, annotation_as_tyvar, tyvar_to_annotation};
 
     fn compiler_with_module_scope_types() -> BytecodeCompiler {
         let mut compiler = BytecodeCompiler::new();
@@ -1724,6 +1683,7 @@ mod tests {
     #[test]
     fn unresolved_inference_variable_cannot_be_frozen() {
         let mut compiler = BytecodeCompiler::new();
+        let unresolved = TypeVarGen::new().fresh_var();
         compiler.struct_types.insert(
             "Aabb".to_string(),
             (vec!["min".to_string()], shape_ast::ast::Span::DUMMY),
@@ -1732,12 +1692,9 @@ mod tests {
             "Aabb".to_string(),
             crate::compiler::StructGenericInfo {
                 type_params: Vec::new(),
-                runtime_field_types: [(
-                    "min".to_string(),
-                    tyvar_to_annotation(&TypeVar("T7".to_string())),
-                )]
-                .into_iter()
-                .collect(),
+                runtime_field_types: [("min".to_string(), tyvar_to_annotation(&unresolved))]
+                    .into_iter()
+                    .collect(),
             },
         );
 
@@ -1763,6 +1720,7 @@ mod tests {
     #[test]
     fn nested_unresolved_inference_variable_cannot_be_frozen() {
         let mut compiler = BytecodeCompiler::new();
+        let unresolved = TypeVarGen::new().fresh_var();
         compiler.struct_types.insert(
             "Holder".to_string(),
             (vec!["items".to_string()], shape_ast::ast::Span::DUMMY),
@@ -1773,9 +1731,7 @@ mod tests {
                 type_params: Vec::new(),
                 runtime_field_types: [(
                     "items".to_string(),
-                    TypeAnnotation::Array(Box::new(tyvar_to_annotation(&TypeVar(
-                        "T9".to_string(),
-                    )))),
+                    TypeAnnotation::Array(Box::new(tyvar_to_annotation(&unresolved))),
                 )]
                 .into_iter()
                 .collect(),
@@ -1785,6 +1741,39 @@ mod tests {
         let error = SemanticFreeze::freeze(&compiler)
             .expect_err("nested partial semantic state must not freeze");
         assert!(error.diagnostic().contains("unresolved inference variable"));
+    }
+
+    #[test]
+    fn tampered_reserved_type_variable_carrier_fails_closed_at_freeze() {
+        let mut compiler = BytecodeCompiler::new();
+        let unresolved = TypeVarGen::new().fresh_var();
+        let TypeAnnotation::Basic(mut tampered) = tyvar_to_annotation(&unresolved) else {
+            panic!("type-variable carrier must use the Basic annotation form")
+        };
+        tampered.push('0');
+        let tampered_leaf = TypeAnnotation::Basic(tampered);
+        assert!(
+            annotation_as_tyvar(&tampered_leaf).is_none(),
+            "tampered carrier must not recover TypeVar authority"
+        );
+        let tampered = TypeAnnotation::Array(Box::new(tampered_leaf));
+        compiler.struct_types.insert(
+            "TamperedHolder".to_string(),
+            (vec!["item".to_string()], shape_ast::ast::Span::DUMMY),
+        );
+        compiler.struct_generic_info.insert(
+            "TamperedHolder".to_string(),
+            crate::compiler::StructGenericInfo {
+                type_params: Vec::new(),
+                runtime_field_types: [("item".to_string(), tampered)].into_iter().collect(),
+            },
+        );
+
+        let error = SemanticFreeze::freeze(&compiler)
+            .expect_err("reserved carrier with an invalid MAC must fail closed");
+        let diagnostic = error.diagnostic();
+        assert!(diagnostic.contains("unresolved inference variable"));
+        assert!(diagnostic.contains("TamperedHolder") && diagnostic.contains("item"));
     }
 
     // ========================================================================
@@ -2513,8 +2502,9 @@ x
         compiler
             .install_semantic_freeze()
             .expect("registration-complete state freezes");
-        compiler.specialization_type_param_overlay =
-            Some(("map".to_string(), vec!["T".to_string()]));
+        let _specialization = compiler.specialization_type_overlays.enter(
+            SpecializationTypeOverlay::declaration_only("map", vec!["T".to_string()]),
+        );
 
         let overlay = compiler
             .comptime_freeze_overlay()

@@ -36,6 +36,7 @@
 //! expressions with no captures) share `ClosureTypeId(0)`. See
 //! `docs/v2-closure-specialization.md` §1.2.
 
+pub use super::capture_native_kind::native_kind_from_concrete_type;
 use super::concrete_type::{ClosureTypeId, ConcreteType};
 use super::struct_layout::{FieldInfo, FieldKind};
 use crate::heap_value::{
@@ -948,87 +949,6 @@ pub struct ClosureLayout {
     pub captures_align: usize,
 }
 
-/// Map a `ConcreteType` to the matching `NativeKind` for closure-capture
-/// kind tracking (ADR-006 §2.7.8 / Q10).
-///
-/// This is the default derivation used by [`ClosureLayout::from_capture_types`].
-/// Callers that need a finer-grained kind (e.g. distinguishing
-/// `Ptr(HeapKind::TypedArray)` from `Ptr(HeapKind::TypedObject)` when both
-/// would map through `ConcreteType::Pointer(_)`) should use
-/// [`ClosureLayout::from_capture_types_with_native_kinds`] and pass the
-/// explicit per-capture kinds.
-///
-/// The mapping is total and post-proof per §2.7.5.1 — every `ConcreteType`
-/// resolves to a concrete `NativeKind`. There is NO `NativeKind::Unknown` /
-/// `Pending` / `Dynamic` fallback (those variants are deleted from the enum)
-/// and there is NO Bool-default fallback (forbidden #9 per §2.7.7).
-pub fn native_kind_from_concrete_type(ty: &ConcreteType) -> NativeKind {
-    match ty {
-        ConcreteType::F64 => NativeKind::Float64,
-        ConcreteType::I64 => NativeKind::Int64,
-        ConcreteType::I32 => NativeKind::Int32,
-        ConcreteType::I16 => NativeKind::Int16,
-        ConcreteType::I8 => NativeKind::Int8,
-        ConcreteType::U64 => NativeKind::UInt64,
-        ConcreteType::U32 => NativeKind::UInt32,
-        ConcreteType::U16 => NativeKind::UInt16,
-        ConcreteType::U8 => NativeKind::UInt8,
-        ConcreteType::Bool => NativeKind::Bool,
-        ConcreteType::String => NativeKind::String,
-        ConcreteType::Array(_) => NativeKind::Ptr(HeapKind::TypedArray),
-        ConcreteType::HashMap(_, _) => NativeKind::Ptr(HeapKind::HashMap),
-        ConcreteType::Struct(_) => NativeKind::Ptr(HeapKind::TypedObject),
-        ConcreteType::Enum(_) => NativeKind::Ptr(HeapKind::TypedObject),
-        ConcreteType::Closure(_) => NativeKind::Ptr(HeapKind::Closure),
-        ConcreteType::Function(_) => NativeKind::Ptr(HeapKind::Closure),
-        ConcreteType::Pointer(_) => NativeKind::Ptr(HeapKind::NativeView),
-        ConcreteType::Tuple(_) => NativeKind::Ptr(HeapKind::TypedObject),
-        ConcreteType::Decimal => NativeKind::Ptr(HeapKind::Decimal),
-        ConcreteType::BigInt => NativeKind::Ptr(HeapKind::BigInt),
-        ConcreteType::DateTime => NativeKind::Ptr(HeapKind::Temporal),
-        // `Option<T>` / `Result<T, E>` are heap-typed wrappers in the v2
-        // runtime; the Ptr-side payload is the underlying typed object.
-        ConcreteType::Option(_) => NativeKind::Ptr(HeapKind::TypedObject),
-        ConcreteType::Result(_, _) => NativeKind::Ptr(HeapKind::TypedObject),
-        // ── Phase 3 cluster-0 Round 11-trinity 11E (2026-05-13) ─────────
-        // Collection / concurrency carriers from §2.7.15 / §2.7.17 /
-        // §2.7.18 / §2.7.20 / §2.7.25. Each ConcreteType arm maps to its
-        // own dedicated `HeapKind` ordinal — the kind label drives
-        // refcount discipline through `clone_with_kind` / `drop_with_kind`
-        // (§2.7.7 / §2.7.8) which dispatch each ordinal to the matching
-        // `Arc::increment/decrement_strong_count::<XData>`. A
-        // `Ptr(HeapKind::TypedObject)`-labeled slot would route through
-        // the wrong `Arc<TypedObjectStorage>` retain/release on these
-        // carriers — the same wrong-carrier defect Round 9's
-        // `retain_func_for_place` / `release_func_for_place` 8-arm
-        // extension specifically corrects.
-        ConcreteType::HashSet(_) => NativeKind::Ptr(HeapKind::HashSet),
-        ConcreteType::Deque(_) => NativeKind::Ptr(HeapKind::Deque),
-        ConcreteType::PriorityQueue => NativeKind::Ptr(HeapKind::PriorityQueue),
-        ConcreteType::Channel(_) => NativeKind::Ptr(HeapKind::Channel),
-        ConcreteType::Mutex(_) => NativeKind::Ptr(HeapKind::Mutex),
-        ConcreteType::Atomic => NativeKind::Ptr(HeapKind::Atomic),
-        ConcreteType::Lazy(_) => NativeKind::Ptr(HeapKind::Lazy),
-        // ── Round 19 S1.5 W12-nativekind-scalar-additions ──────────
-        // (2026-05-14) — ADR-006 §2.7.5 amendment adds F32 + Char as
-        // 4-byte scalar concrete types. Each maps to its matching
-        // scalar `NativeKind` variant per the §Q8 carrier-API bound.
-        ConcreteType::F32 => NativeKind::Float32,
-        ConcreteType::Char => NativeKind::Char,
-        // `Void` captures are not a well-formed bytecode shape — a void
-        // value has no bits to capture. Reaching this arm signals a
-        // construction-side bug upstream. We refuse to map `Void` to a
-        // sentinel kind (a Bool-default fallback would be forbidden #9
-        // per §2.7.7) and panic instead so the construction-side
-        // discipline holds.
-        ConcreteType::Void => panic!(
-            "ClosureLayout: ConcreteType::Void is not a well-formed capture type \
-             (ADR-006 §2.7.8 / Q10 — kinds must be concrete at construction; \
-             no Bool-default fallback)"
-        ),
-    }
-}
-
 impl ClosureLayout {
     /// Build a layout from parallel lists of capture types and storage
     /// kinds.
@@ -1112,6 +1032,14 @@ impl ClosureLayout {
             panic!(
                 "closure has {} captures; capture masks are limited to 64 captures",
                 capture_types.len()
+            );
+        }
+        for (index, &native_kind) in native_kinds.iter().enumerate() {
+            assert!(
+                !matches!(native_kind, NativeKind::Ptr(kind) if !kind.has_kinded_slot_carrier()),
+                "internal compiler error: closure capture {index} uses unsupported \
+                 {native_kind:?}; layout publication requires a nonzero 8-byte \
+                 KindedSlot carrier"
             );
         }
 
@@ -1365,6 +1293,13 @@ impl ClosureRegistry {
         }
         let id = ClosureTypeId(self.layouts.len() as u32);
         let layout = ClosureLayout::from_capture_types(&key.0, &key.1);
+        assert!(
+            layout.capture_native_kinds.iter().all(|kind| {
+                !matches!(kind, NativeKind::Ptr(heap_kind) if !heap_kind.has_kinded_slot_carrier())
+            }),
+            "internal compiler error: ClosureRegistry refused a layout with an \
+             unsupported kinded carrier before publication"
+        );
         self.layouts.push(layout);
         self.signature_to_id.insert(key, id);
         id
@@ -1836,6 +1771,25 @@ mod tests {
         let kinds = vec![CaptureKind::Immutable, CaptureKind::Immutable];
         let native_kinds = vec![NativeKind::Float64]; // wrong length
         let _ = ClosureLayout::from_capture_types_with_native_kinds(&types, &kinds, &native_kinds);
+    }
+
+    #[test]
+    #[should_panic(expected = "uses unsupported Ptr(NativeScalar)")]
+    fn explicit_layout_rejects_carrierless_native_scalar_before_publication() {
+        let _ = ClosureLayout::from_capture_types_with_native_kinds(
+            &[ConcreteType::Pointer(Box::new(ConcreteType::Void))],
+            &[CaptureKind::Shared],
+            &[NativeKind::Ptr(HeapKind::NativeScalar)],
+        );
+    }
+
+    #[test]
+    fn shared_registry_issues_width_specific_scalar_kind_not_native_scalar() {
+        let mut registry = ClosureRegistry::new();
+        let id = registry.intern_with_kinds(vec![ConcreteType::I32], vec![CaptureKind::Shared]);
+        let layout = registry.get(id).expect("newly interned layout must exist");
+        assert_eq!(layout.capture_storage_kind(0), CaptureKind::Shared);
+        assert_eq!(layout.capture_native_kind(0), NativeKind::Int32);
     }
 
     #[test]

@@ -359,16 +359,36 @@ ShapeTest (`tools/shape-test/tests/comptime/typed_constructor.rs`) and LSP
 (`tools/shape-test/tests/lsp/typed_comptime.rs`); book-chapter examples land in
 stage F1 per the program spec.
 
-**CURRENT / compiler - generated implicit capture rejection**
+**CURRENT / C1 branch - generated captures and exact semantic evidence
+(declared capture clause LANDED on `adr009/c1-rework`).** The generated-only
+capture clause is carried by `captures: Option<CaptureClause>` on
+`Expr::FunctionExpr` — one carrier, which C2 `CheckedBody` staging will populate
+through the same field rather than a second capture mechanism. One selector,
+`comptime_builtins::capture_plan`, maps the declared mode to the emitted
+`CaptureKind`; DECLARED == EMITTED is enforced mechanically by emission-time
+validation (a rejected declared mode reaching emission is a hard error) plus the
+K1 sentinel — `CaptureKind` variants may be named in exactly one compiler file,
+with `scripts/check-no-dynamic.sh` and a unit test failing the build on any
+second producer. The strict four-mode mapping, the C0901-C0912 capture
+diagnostic family (clause validation C0901-C0909; generated-capture tooling
+query C0910/C0911; exact reference-flow conflict C0912), opaque semantic/cache
+authority, native scalar and refcounted Shared lifecycle, and compiler-query
+hover/definition/references/descriptor-authoritative rename are committed; the
+whole capture surface is generated-code-only (an explicit clause in ordinary
+source is `[C0903]`). String has authored exact zero-fallback proofs; the
+complete `HeapKind::ALL` path includes direct Matrix/MatrixSlice lifecycle
+proofs.
 
-Annotation-generated functions are marked before body compilation. A closure
-inside generated code that would implicitly capture a local fails compilation
-instead of producing an incomplete environment and later `Null`. Ordinary
-source closures retain their current capture inference. Explicit generated
-capture packs are not yet implemented. Focused VM/JIT controls cover generated
-free functions and methods with capture-free closures, closure parameters,
-ordinary source captures, and deterministic rejection of local, parameter,
-multiple, and `self` captures.
+Known blocked cell: `share` over a module binding has no zero-fallback JIT
+proof — it stays blocked on the W39 F1 module-binding function-body SURFACE
+(ADR-006 §2.7.14), so module-binding `share` cannot yet claim native zero
+fallback. Open debt: the presentation renderer is context-free — it cannot yet
+spell trait-context members or existential witnesses and falls back to the
+already-computed canonical identity (spelling is a diagnostic-only consistency
+check, never semantic identity). Final supervisor execution gates and whole-C1
+ratification remain pending. See the [detailed C1
+status](typed-comptime/c1-generated-captures.md) and [rejected-design
+record](typed-comptime/c1-capture-defections.md).
 
 **CURRENT / VM+JIT - applied type annotation generation**
 
@@ -877,7 +897,7 @@ examples, rejection requirements, and implementation implications.
 | `FieldInitialization<Owner, F, T>` | comptime | Required or typed-default construction policy | accepted algebra; CURRENT sealed enum (`Required`/`Defaulted`) via B5 S1 — the freeze struct input carries no per-field default flag yet, so all fields are `Required` today (Dec 59 total records; `Defaulted` population is a later slice, see `docs/defections.md`) |
 | `DefaultInitializer<Owner, F, T, Effects>` | comptime code | Closed checked runtime default initializer | accepted |
 | `AnnotationDescriptor<A, Target, Args, Multiplicity>` | comptime | Typed applied annotation and target proof | accepted |
-| `CaptureDescriptor<Sig, I, T, Mode>` | comptime | Typed closure capture identity | accepted through Decision 95 |
+| `CaptureDescriptor<Sig, I, T, Mode>` | comptime | Typed closure capture identity | accepted through Decision 95; compiler model + generated-only `FunctionExpr.captures` clause CURRENT on the C1 branch (supervisor gates pending) with four declared modes (`Move`, `Share`, `SharedBorrow`, `ExclusiveBorrow`), structural slot/lineage identity, exact `SemanticFreeze` capture types, and one declared plan driving layout/opcodes; borrow modes are named rejections until regions. Compiler-query hover/definition/references and descriptor-authoritative rename are committed; unavailable/conflicting evidence never falls through to name-based rename. Public `CheckedBody` construction remains TARGET C2 |
 | `HygienicSymbol<T>` | comptime | Scope-safe generated binding identity | accepted |
 | `PatternBinder<T, Mode>` | comptime code | Hygienic projected binding with stable ownership mode | accepted |
 | `GuardView<T, FinalMode>` | comptime code/capability | Read-only pre-commit binder view for arm guards | accepted |
@@ -890,7 +910,7 @@ examples, rejection requirements, and implementation implications.
 | `CheckedArm<T, R, Effects>` | comptime code | Lexically scoped pattern, guard, and result body | accepted |
 | `MatchPlan<T, R, Effects>` | comptime transform | Atomic exhaustive generated match | accepted |
 | `CheckedStmt<Effects, Flow>` | comptime code | Typed statement fragment; binding scopes cannot leak from detached fragments | accepted |
-| `CheckedBody<Sig, Captures>` | comptime code | Callable body matching one signature and complete capture set | accepted through Decision 95 |
+| `CheckedBody<Sig, Captures>` | comptime code | Callable body matching one signature and complete capture set | accepted through Decision 95; TARGET C2 staging populates the canonical `Expr::FunctionExpr.captures` carrier introduced by C1 — no parallel capture representation |
 | `CheckedItem<Decl>` | comptime code | Typed declaration/item fragment | accepted |
 | `CheckedModule<Exports>` | comptime code | Typed module fragment | accepted |
 | `CheckedTemplate<Sig, Captures>` | comptime code | Typed placeholder/template binding and complete capture set | accepted through Decision 95 |

@@ -73,7 +73,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
     /// closure keeps the allocation alive for the duration of any
     /// JIT'd call that uses this slot, so the state byte read/write is
     /// always in-bounds.
-    fn emit_shared_lock(&mut self, cell_ptr: Value) {
+    pub(super) fn emit_shared_lock(&mut self, cell_ptr: Value) {
         use shape_value::v2::closure_layout::{
             SHARED_CELL_LOCKED, SHARED_CELL_STATE_OFFSET, SHARED_CELL_UNLOCKED,
         };
@@ -128,7 +128,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
     /// implementation always uses a release store (no PARKED_BIT to
     /// check for); the "contended" branch is vestigial but kept for
     /// ABI parity with the lock side.
-    fn emit_shared_unlock(&mut self, cell_ptr: Value) {
+    pub(super) fn emit_shared_unlock(&mut self, cell_ptr: Value) {
         use shape_value::v2::closure_layout::{
             SHARED_CELL_LOCKED, SHARED_CELL_STATE_OFFSET, SHARED_CELL_UNLOCKED,
         };
@@ -187,7 +187,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
     // loads — A.1D.2 always reads back with `load.i64` in `read_place`,
     // so zero-extension is safe since the high bits get re-examined
     // only by the MIR level's subsequent `ireduce` via `ensure_kind`).
-    fn coerce_value_to_i64_bits(&mut self, val: Value) -> Value {
+    pub(super) fn coerce_value_to_i64_bits(&mut self, val: Value) -> Value {
         let val_type = self.builder.func.dfg.value_type(val);
         if val_type == types::F64 {
             self.builder.ins().bitcast(types::I64, MemFlags::new(), val)
@@ -984,10 +984,11 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                 // lock-gate through the state byte at offset 0.
                 //
                 // Matches the interpreter's `op_load_shared_capture`
-                // handler semantics exactly: acquire the mutex, copy
-                // the inner ValueWord bits, release the mutex. No
-                // retain/release on the Arc strong share — the closure
-                // owns one share for the lifetime of the frame.
+                // semantics: acquire the cell lock and project its value.
+                // Scalar bits copy directly; a refcounted payload is cloned
+                // through its exact NativeKind while locked, because the cell
+                // keeps owning the original payload share. The closure's Arc
+                // share owns only the cell pointer for the frame lifetime.
                 //
                 // SAFETY: the pointer is non-null and 8-aligned (Rust
                 // `Arc::<SharedCell>` allocator + `SharedCell`'s
@@ -997,44 +998,17 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                 // `Arc::from_raw` in `release_typed_closure`) only
                 // runs after the closure's refcount hits zero, which
                 // is strictly after the JIT body returns.
-                if self.shared_capture_slots.contains_key(slot) {
-                    // Wave C.2 note: SharedCells are read/written by BOTH
-                    // the outer-scope SharedCow paths (`shared_local_slots`)
-                    // and the closure-body Shared-capture paths
-                    // (`shared_capture_slots`) on the SAME cell. Until
-                    // both ends migrate to per-FieldKind native
-                    // encoding, the cell payload encoding has to stay
-                    // uniform: legacy NaN-boxed I64 bits at offset 8.
-                    // The kind side-table entry is populated for the
-                    // capture slot (see `register_owned_mutable_capture_slots`)
-                    // and ready for the follow-up wave; the codegen
-                    // here intentionally stays legacy for now.
-                    use shape_value::v2::closure_layout::SHARED_CELL_VALUE_OFFSET;
+                if let Some(kind) = self.shared_capture_slots.get(slot).copied() {
                     let cell_ptr = self.builder.use_var(*var);
-                    self.emit_shared_lock(cell_ptr);
-                    let value = self.builder.ins().load(
-                        types::I64,
-                        MemFlags::trusted(),
-                        cell_ptr,
-                        SHARED_CELL_VALUE_OFFSET,
-                    );
-                    self.emit_shared_unlock(cell_ptr);
-                    let value = match super::types::slot_kind_for_local(&self.slot_kinds, slot.0) {
-                        Some(kind) => self.ensure_kind(value, kind),
-                        None => value,
-                    };
-                    return Ok(value);
+                    return Ok(self.emit_shared_payload_read(cell_ptr, kind));
                 }
                 // Session 1 Commit 3: outer-scope Shared local slot.
                 // Structurally parallel to the A.1E `shared_capture_slots`
                 // branch above but backed by the slot's own
                 // `Arc<SharedCell>` pointer (materialised at function
                 // entry by `initialize_shared_local_slots`) instead of
-                // an inherited closure-capture share. The lock-gated
-                // load matches the interpreter's `op_load_shared_local`
-                // exactly: acquire the mutex, copy the payload bits
-                // from `[cell_ptr + SHARED_CELL_VALUE_OFFSET]`, drop
-                // the guard.
+                // an inherited closure-capture share. Both paths consume the
+                // same exact payload kind and ownership-aware projection.
                 //
                 // SAFETY: see `read_place`'s shared_capture_slots branch.
                 // The outer-scope lifecycle (alloc at entry, release
@@ -1042,18 +1016,9 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                 // null and lives for at least the duration of any
                 // JIT'd read/write on the slot.
                 if self.shared_local_slots.contains_key(slot) {
-                    use shape_value::v2::closure_layout::SHARED_CELL_VALUE_OFFSET;
                     let kind = self.validated_shared_local_kind(*slot)?;
                     let cell_ptr = self.builder.use_var(*var);
-                    self.emit_shared_lock(cell_ptr);
-                    let value = self.builder.ins().load(
-                        types::I64,
-                        MemFlags::trusted(),
-                        cell_ptr,
-                        SHARED_CELL_VALUE_OFFSET,
-                    );
-                    self.emit_shared_unlock(cell_ptr);
-                    return Ok(self.ensure_kind(value, kind));
+                    return Ok(self.emit_shared_payload_read(cell_ptr, kind));
                 }
                 Ok(self.builder.use_var(*var))
             }
@@ -1286,64 +1251,36 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                     self.builder.ins().call(write_func, &[cell_ptr, native]);
                     return Ok(());
                 }
-                // Track A.1E: Shared capture slot write — lock-gated
-                // store through the SharedCell. Mirrors the interpreter's
-                // `op_store_shared_capture`: take the mutex, overwrite
-                // the inner ValueWord payload, drop the guard. The Arc
-                // pointer bits in the slot are NOT modified (the closure
-                // still owns its one strong share for frame lifetime).
+                // Track A.1E: Shared capture slot write. Scalars store under
+                // the inline lock; refcounted values transfer the incoming
+                // share into the cell and retire the previous typed share.
+                // The Arc pointer bits in the slot are never modified.
                 //
                 // SAFETY: see `read_place` Shared branch.
-                if self.shared_capture_slots.contains_key(slot) {
-                    // Wave C.2 note: see `read_place`'s shared_capture_slots
-                    // branch. The cell encoding stays legacy NaN-boxed I64
-                    // until both ends (outer SharedCow + closure-body
-                    // Shared captures) migrate together.
-                    use shape_value::v2::closure_layout::SHARED_CELL_VALUE_OFFSET;
+                if let Some(kind) = self.shared_capture_slots.get(slot).copied() {
                     let var = *self
                         .locals
                         .get(slot)
                         .ok_or_else(|| format!("MirToIR: unknown local slot {}", slot))?;
                     let cell_ptr = self.builder.use_var(var);
-                    let bits = self.coerce_value_to_i64_bits(val);
-                    self.emit_shared_lock(cell_ptr);
-                    self.builder.ins().store(
-                        MemFlags::trusted(),
-                        bits,
-                        cell_ptr,
-                        SHARED_CELL_VALUE_OFFSET,
-                    );
-                    self.emit_shared_unlock(cell_ptr);
+                    self.emit_shared_payload_write(cell_ptr, val, kind);
                     return Ok(());
                 }
                 // Session 1 Commit 3: outer-scope Shared local slot
                 // write — structurally parallel to the
                 // `shared_capture_slots` branch above but the cell
                 // pointer lives in the slot's own Cranelift variable
-                // (set by `initialize_shared_local_slots` at entry).
-                // The lock-gated store matches
-                // `op_store_shared_local`: take the mutex, write the
-                // payload bits at
-                // `[cell_ptr + SHARED_CELL_VALUE_OFFSET]`, drop the
-                // guard.
+                // (set by `initialize_shared_local_slots` at entry). It uses
+                // the same typed ownership-aware replacement as closure-body
+                // Shared captures.
                 if self.shared_local_slots.contains_key(slot) {
-                    use shape_value::v2::closure_layout::SHARED_CELL_VALUE_OFFSET;
                     let kind = self.validated_shared_local_kind(*slot)?;
                     let var = *self
                         .locals
                         .get(slot)
                         .ok_or_else(|| format!("MirToIR: unknown local slot {}", slot))?;
                     let cell_ptr = self.builder.use_var(var);
-                    let typed_value = self.ensure_kind(val, kind);
-                    let bits = self.coerce_value_to_i64_bits(typed_value);
-                    self.emit_shared_lock(cell_ptr);
-                    self.builder.ins().store(
-                        MemFlags::trusted(),
-                        bits,
-                        cell_ptr,
-                        SHARED_CELL_VALUE_OFFSET,
-                    );
-                    self.emit_shared_unlock(cell_ptr);
+                    self.emit_shared_payload_write(cell_ptr, val, kind);
                     return Ok(());
                 }
 

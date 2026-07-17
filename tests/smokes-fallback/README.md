@@ -42,6 +42,36 @@ JIT matches VM, AND the `[jit-fallback]` diagnostic emits exactly once.
 | `f3-preflight-closure-capture.shape` | Preflight rejection — `AllocSharedModuleBinding` in main code (`JitPreflightReport { vm_only_opcodes: [AllocSharedModuleBinding], unsupported_builtins: [] }`) | `(100, 0, 0)` | `(100, 0, 1)` |
 | `f4-kind-source-gap-print.shape` | Kind-source gap on `print` operand (Route A — distinct producer site from f1) | `(<VM output>, 0, 0)` | `(<VM output>, 0, 1)` |
 | `f6-struct-move-then-read.shape` | Move-then-read divergence — struct `let q = p` `Move`-sources `p`, projected later read `p.x` reads the JIT-nulled slot (ADR-006 §2.7.14) | `(1, 0, 0)` | `(1, 0, 1)` |
+| `c1-generated-extend-capture-free.shape` | NONE — positive control (ADR-009 C1 Slice 0): annotation-generated `extend Type { method }` with a closure is JIT-NATIVE | `(42, 0, 0)` | `(42, 0, 0)` |
+
+### ADR-009 C1 Slice-0 preflight (2026-07-14)
+
+`c1-generated-extend-capture-free.shape` is the only ZERO-fallback row in this
+matrix: it exists to prove the negative — that
+`program_declares_user_trait_or_impl` (`crates/shape-jit/src/executor.rs:39-46`)
+does **not** fire for an annotation-generated `extend` (which is `Item::Extend`,
+never `Item::Impl`), so the generated method and the closure inside it run as
+native JIT code.
+
+The companion finding from Slice 0 is now historical. The integrated native
+closure-lowering prerequisite removed the capture double-count and typed the
+Shared-cell allocator: ordinary-source immutable, owned-mutable, and scalar
+Shared captures now have exact VM/JIT stdout and ZERO-fallback coverage in
+`jit_closure_capture_native.rs`. `f3` remains a module-binding/W39 negative
+control; it must not be read as evidence that capturing closures generally
+deopt. C1's separate `move` / `share` zero-fallback battery is authored in
+`jit_generated_capture_native.rs` over five `c1-generated-*` fixtures plus the
+ordinary inferred scalar and String nested-share #53 controls. Refcounted
+Shared is now an authored native path: N9 in `jit_closure_capture_native.rs`
+requires exact String output and zero fallback. The generated 36-entry
+`HeapKind::ALL` catalog proves compact-route classification; the exhaustive
+nonzero matrix in `shared_cell_ownership_matrix.rs` constructs every accepted
+carrier, balances retained reads/replacements/final drops, and pins
+`Ptr(NativeScalar)` as the sole typed refusal. These tests are committed on the
+C1 branch but have not run under the supervisor lane against the final head;
+they are not verified capability claims until that gate passes.
+Module-binding capture inside a JIT-compiled function remains blocked by W39
+F1.
 
 `f1` is the canonical baseline preserved verbatim from the W12 close
 (`docs/cluster-audits/v0.3-w12-jit-mode-semantics-close.md` §3.2) — its

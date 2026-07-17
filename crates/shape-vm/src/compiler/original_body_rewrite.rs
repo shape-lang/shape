@@ -35,6 +35,8 @@ use shape_ast::ast::expressions::{EnumConstructorPayload, Expr, ObjectEntry};
 use shape_ast::ast::patterns::Pattern;
 use shape_ast::ast::statements::{ForInit, IfStatement, Statement, WhileLoop};
 
+mod function_expr;
+
 /// True when a `MethodCall` receiver names the annotation handler's `ctx`
 /// capability (any bare identifier that is NOT a real binding in the
 /// replacement body's own scope) and the member is `original`. The role is
@@ -519,34 +521,7 @@ fn rewrite_in_expr(expr: &Expr, bound: &HashSet<String>, shadow: &str) -> Expr {
             span: *span,
         },
 
-        Expr::FunctionExpr {
-            params,
-            return_type,
-            body,
-            span,
-        } => {
-            // Closure parameters are real bindings inside the closure body.
-            // Default-value initializers are evaluated in the enclosing scope,
-            // before the params bind.
-            let body_scope =
-                extended(bound, params.iter().flat_map(|p| p.get_identifiers()));
-            Expr::FunctionExpr {
-                params: params
-                    .iter()
-                    .map(|p| {
-                        let mut np = p.clone();
-                        np.default_value = p
-                            .default_value
-                            .as_ref()
-                            .map(|e| rewrite_in_expr(e, bound, shadow));
-                        np
-                    })
-                    .collect(),
-                return_type: return_type.clone(),
-                body: rewrite_statement_seq(body, &body_scope, shadow),
-                span: *span,
-            }
-        }
+        Expr::FunctionExpr { .. } => function_expr::rewrite(expr, bound, shadow),
 
         Expr::Spread(inner, span) => {
             Expr::Spread(Box::new(rewrite_in_expr(inner, bound, shadow)), *span)
@@ -1094,3 +1069,6 @@ mod tests {
         assert!(debug_has_shadow_call(&out, "\u{1}shadow"));
     }
 }
+
+#[cfg(test)]
+mod generated_origin_tests;

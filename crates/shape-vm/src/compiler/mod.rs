@@ -64,21 +64,33 @@ pub(crate) mod comptime_builtins;
 // provenance ({SymbolId, checked-decl, application, generator locations})
 // and to list them for workspace symbols. Consumed via
 // `BytecodeCompiler::generated_symbol_query()`.
+pub use comptime_builtins::capture_plan::{
+    CaptureSiteRole, GENERATED_CAPTURE_ARTIFACT_CONFLICT_CODE,
+    GENERATED_CAPTURE_SOURCE_UNAVAILABLE_CODE, GeneratedCaptureBindingIdentity,
+    GeneratedCaptureDescriptorView, GeneratedCaptureOccurrenceIdentity, GeneratedCapturePosition,
+    GeneratedCaptureQuery, GeneratedCaptureQueryIssue, GeneratedCaptureSemanticType,
+    GeneratedCaptureSite, GeneratedCaptureSlot, GeneratedCaptureSourceMap,
+    GeneratedCaptureSpecialization, GeneratedCaptureSpecializationIdentity, GeneratedCaptureStage,
+};
 pub use comptime_builtins::expansion_provenance::{
     GeneratedNodePath, GeneratedSymbolProvenance, GeneratedSymbolTable, HygienicRole,
     HygienicSymbol, SourceAnchor, SymbolId,
 };
+pub use generation_reachability::program_may_generate;
 pub(crate) mod comptime_concrete;
 pub(crate) mod comptime_diagnostics;
 pub(crate) mod comptime_target;
 mod control_flow;
+mod body_analysis_authority;
 mod expressions;
 mod functions;
 mod functions_annotations;
 mod functions_foreign;
+mod generation_reachability;
 mod helpers;
 mod helpers_binding;
 mod helpers_reference;
+mod import_permissions;
 pub(crate) mod literal_widen;
 mod literals;
 mod loops;
@@ -91,6 +103,7 @@ pub(crate) mod monomorphization;
 mod original_body_rewrite;
 pub(crate) mod patterns;
 pub(crate) mod post_inference_verify;
+mod reference_flow;
 mod statements;
 pub mod string_interpolation;
 mod trait_object_emission;
@@ -664,6 +677,11 @@ pub struct BytecodeCompiler {
     /// Current function being compiled
     pub(crate) current_function: Option<usize>,
 
+    /// Scoped authority for compiling a byte-identical generated function body
+    /// under a distinct emission identity. The owned semantic-owner key may be
+    /// consulted only while `current_function` is the exact emission id.
+    active_body_analysis_authority: Option<body_analysis_authority::ActiveBodyAnalysisAuthority>,
+
     /// Local variable mappings (name -> index)
     pub(crate) locals: Vec<HashMap<String, u16>>,
 
@@ -707,19 +725,23 @@ pub struct BytecodeCompiler {
     /// lowered. Phase C reads this to key monomorphization on the closure type.
     pub(crate) closure_type_ids: Vec<(u16, shape_value::v2::concrete_type::ClosureTypeId)>,
 
-    /// Track A.1C — per-closure `CaptureKind` vector, one entry per capture
-    /// in declaration order. Populated alongside `closure_type_ids` so that
-    /// `compiler_impl_reference_model::build_closure_function_layouts` can
-    /// construct the per-function `ClosureLayout` with the correct
-    /// `CaptureKind` per capture (rather than defaulting to the
-    /// `ClosureRegistry::intern`'d all-`Immutable` shape). A missing entry
-    /// (closure registered via the legacy path, e.g. test helpers) falls
-    /// back to all-`Immutable`, matching the pre-A.1C layout.
-    pub(crate) closure_capture_kinds: Vec<(u16, Vec<shape_value::v2::closure_layout::CaptureKind>)>,
+    /// ADR-009 C1 — per-closure [`CapturePack`], one entry per closure literal,
+    /// keyed by the closure's `func_idx` (`CapturePack::closure`). Produced by
+    /// the ONE selector (`comptime_builtins::capture_plan`) and consumed by
+    /// `compiler_impl_reference_model` to build the per-function
+    /// `ClosureLayout`. Replaces the former `closure_capture_kinds` vector:
+    /// the pack carries the emitted capture kind AND the body's access
+    /// discipline together, so the two can no longer disagree. A closure with
+    /// no pack (registered via a legacy/test path) falls back to the
+    /// registry's all-immutable layout, matching the pre-fusion behaviour.
+    ///
+    /// [`CapturePack`]: crate::compiler::comptime_builtins::capture_plan::CapturePack
+    pub(crate) closure_capture_packs:
+        Vec<crate::compiler::comptime_builtins::capture_plan::CapturePack>,
 
     /// Distributed §4.4 — per-closure captured *variable names*, in declaration
     /// order, keyed by closure function index. Populated alongside
-    /// `closure_capture_kinds` (same `captured_vars` source). Stamped into the
+    /// `closure_capture_packs` (same `captured_vars` source). Stamped into the
     /// non-hash `FunctionBlob.capture_names` so the remote-capture-refusal path
     /// can name the offending variable. A missing entry yields empty names (the
     /// refusal message falls back to `capture #i`).
@@ -1079,6 +1101,9 @@ pub struct BytecodeCompiler {
     pub(crate) imported_names: HashMap<String, ImportedSymbol>,
     /// Imported annotations: local_name -> ImportedAnnotationSymbol
     pub(crate) imported_annotations: HashMap<String, ImportedAnnotationSymbol>,
+    /// Opaque evidence that annotation declaration installation completed.
+    annotation_declarations:
+        statements::annotation_declarations::AnnotationDeclarationState,
     /// R8 W8 Cluster A (2026-05-24): imported `pub const NAME = expr`
     /// initializers, keyed by the local binding name (alias-respecting).
     /// At identifier-load time, references to these names compile to an
@@ -1571,7 +1596,7 @@ pub struct BytecodeCompiler {
     pub(crate) mutable_closure_captures: HashMap<String, u16>,
 
     /// Track A.1C.2: subset of `mutable_closure_captures` whose source
-    /// binding classifies as `CaptureKind::Shared` (a `var` binding
+    /// binding classifies as `CaptureAccess::SharedCell` (a `var` binding
     /// mutably captured through a closure). Maps captured variable name
     /// → capture index. When the identifier lookup finds a name in this
     /// map, the closure body emits `LoadSharedCapture` /
@@ -1580,7 +1605,7 @@ pub struct BytecodeCompiler {
     pub(crate) shared_closure_captures: HashMap<String, u16>,
 
     /// Track A.1C.2b: subset of `mutable_closure_captures` whose source
-    /// binding classifies as `CaptureKind::OwnedMutable` (a `let mut`
+    /// binding classifies as `CaptureAccess::OwnedMutableCell` (a `let mut`
     /// binding captured by move into a single closure). Maps captured
     /// variable name → capture index. When the identifier lookup finds
     /// a name in this map, the closure body emits
@@ -1616,6 +1641,24 @@ pub struct BytecodeCompiler {
     pub(crate) shared_capture_inner_kinds:
         HashMap<String, shape_value::v2::struct_layout::FieldKind>,
 
+    /// ADR-009 C1 slice 4: one-shot structural capture evidence for the next
+    /// recursively compiled closure body. The vector is in capture-parameter
+    /// order and comes directly from that closure's [`CapturePack`].
+    /// `compile_function` consumes it before compiling the body; it is never
+    /// reconstructed from a parameter name or runtime bits.
+    ///
+    /// [`CapturePack`]: crate::compiler::comptime_builtins::capture_plan::CapturePack
+    pub(crate) pending_closure_capture_parameter_evidence:
+        Option<Vec<crate::compiler::comptime_builtins::capture_plan::CaptureParameterEvidence>>,
+
+    /// Structural evidence for every synthetic capture parameter in the
+    /// current closure body, keyed by compiler-issued local slot. Every entry
+    /// preserves the original binding lineage and exact semantic type through
+    /// nested forwarding; `CaptureAccess::SharedCell` additionally proves that
+    /// the slot carries the canonical raw `*const SharedCell` carrier.
+    pub(crate) inherited_capture_parameter_evidence:
+        HashMap<u16, crate::compiler::comptime_builtins::capture_plan::CaptureParameterEvidence>,
+
     /// Variables in the current scope that have been boxed into SharedCells
     /// by a mutable closure capture. When a subsequent closure captures one
     /// of these variables (even immutably), it must use the SharedCell path
@@ -1634,11 +1677,11 @@ pub struct BytecodeCompiler {
     ///
     /// Keyed by the binding *name* (mirroring `boxed_locals`). Populated
     /// by `compile_expr_closure` when a `var` capture escapes into a
-    /// closure and gets classified as `CaptureKind::Shared`.
+    /// closure and gets classified as `CaptureAccess::SharedCell`.
     pub(crate) shared_locals: HashSet<String>,
 
     /// Track A.1C.3: local names that have been classified as
-    /// `CaptureKind::OwnedMutable` by at least one closure in the
+    /// `CaptureAccess::OwnedMutableCell` by at least one closure in the
     /// current function scope. Needed because `binding_semantics_for_name`
     /// can return `None` after an inner closure's `compile_function`
     /// wipes the type-tracker local semantics, and we need the
@@ -1650,7 +1693,7 @@ pub struct BytecodeCompiler {
 
     /// Session 1 (Rust-move semantics for `let mut`): names of `let mut`
     /// local bindings that have been **moved by value into a closure
-    /// capture** (i.e. classified as `CaptureKind::OwnedMutable` and
+    /// capture** (i.e. classified as `CaptureAccess::OwnedMutableCell` and
     /// emitted at `op_make_closure` time as `Box::into_raw(Box::new(bits))`).
     /// After the move, the outer slot holds only a stale snapshot of the
     /// initial value — every subsequent outer-scope read or write of the
@@ -1691,6 +1734,8 @@ pub struct BytecodeCompiler {
     ///
     /// `None` means no checking (backwards-compatible default).
     pub(crate) permission_set: Option<shape_abi_v1::PermissionSet>,
+    /// Typed ownership for graph-module import authorization and carriers.
+    graph_permission_state: import_permissions::GraphPermissionState,
 
     // -- Content-addressed blob tracking --
     /// Active blob builder (set while compiling a function body).
@@ -1830,35 +1875,35 @@ pub struct BytecodeCompiler {
 
     /// BUG3 — cycle detector for generic method / free-function monomorphization.
     ///
-    /// Holds the set of `mono_key`s whose specialization is currently being
-    /// compiled further down the call stack. If `ensure_monomorphic_function`
-    /// is (re-)entered for a key that is already in-progress, it means the
-    /// specialized body is transitively trying to resolve itself before its
-    /// own `compile_function` has finished — without the guard this would
-    /// overflow the compiler stack or cache the wrong index. The entry is
-    /// inserted BEFORE the inner `compile_function` call and removed right
-    /// after, whether compilation succeeded or failed.
+    /// Holds typed exact-or-legacy keys whose specialization is currently
+    /// being compiled. The domain tag prevents an ABI-only attempt from
+    /// blocking or borrowing a semantically exact attempt with the same
+    /// physical ABI key.
     ///
     /// Note: direct self-recursion in the body is already handled by the
     /// cache-insert-before-compile behaviour; this guard only fires on the
     /// pathological transitive-resolution cycle.
-    pub(crate) monomorphization_in_progress: std::collections::HashSet<String>,
+    pub(crate) monomorphization_in_progress: std::collections::HashSet<
+        monomorphization::semantic_specialization::SpecializationProgressKey,
+    >,
 
-    /// ADR-009 A3 — `(base generic fn name, declared type-param names)` for
-    /// the specialization whose body is currently being compiled. Set/restored
-    /// (Err-safe, save-then-restore) around the `compile_function` calls in
-    /// `monomorphization/cache.rs` and consumed by
-    /// `build_type_reflection_snapshot` as an explicit overlay extending the
-    /// existing discovery path (spec §4.1 — one derivation, no second
-    /// parameter table). A specialized def is registered with
-    /// `type_params = None` (substitution strips them), so without this
-    /// overlay `type_ref(T)` inside a generic body freezes to an INVALID
-    /// identity when the mono body compiles. The owner is the BASE function
-    /// name, never the mono key, so Parameter identities stay
-    /// declaration-stable across instantiations (ADR-009 §Semantic Freeze,
-    /// Decision 52 pre-substitution identities). `None` outside a
-    /// specialized-body compile.
-    pub(crate) specialization_type_param_overlay: Option<(String, Vec<String>)>,
+    /// Drop-restored semantic overlays for nested specialized-body compiles.
+    /// Declaration-only frames preserve existing generic reflection while
+    /// refusing instantiated capture evidence; exact frames additionally map
+    /// declared TypeVar capabilities to closed semantic candidates.
+    pub(crate) specialization_type_overlays:
+        monomorphization::semantic_specialization::SpecializationTypeOverlayStack,
+
+    /// Structural generated-function nesting used to address inference-owned
+    /// semantic call-site facts. Source offsets alone are not unique across
+    /// generated nodes.
+    pub(crate) active_generated_node_stack: Vec<shape_runtime::type_system::GeneratedNodeKey>,
+
+    /// ADR-009 C1: compilation-instance capability for generated AST nodes.
+    /// A provenance carrier is trusted only when this exact issuer recognizes
+    /// its non-serialized token. Foreign construction and serde round-trips
+    /// therefore cannot turn ordinary source into generated code.
+    pub(crate) generated_node_issuer: shape_ast::ast::GeneratedNodeIssuer,
 
     /// ADR-009 D1 (Decision 68) — compiler-owned registry of
     /// generated-symbol identities: the single source of truth for which
@@ -1960,23 +2005,16 @@ pub fn infer_reference_model(
 /// helpers, the `expand-comptime` CLI) obtain them here, from the executed
 /// result, never from a parallel scan.
 ///
-/// A structural fast path returns no items for programs that cannot generate
-/// (no annotation applications and no `comptime` blocks), avoiding a compile
-/// for the common case. The compile runs in RecoverAll modes and tolerates
-/// errors — the executed authority still records every declaration reserved
-/// before a failure.
+/// A structural fast path returns no items only when the complete inline item
+/// tree proves that no semantic compilation stage can generate, avoiding a
+/// compile for the common case. Module annotations and raw module `comptime`
+/// blocks conservatively force compilation through their separate pass-2
+/// topology-mutating APIs, although their output is not represented by this
+/// fixed-point query. The compile runs in RecoverAll modes and tolerates errors
+/// — the executed authority still records every declaration reserved before a
+/// failure.
 pub fn executed_generated_items(program: &Program) -> Vec<Item> {
-    let may_generate = program.items.iter().any(|item| match item {
-        Item::Comptime(..) => true,
-        Item::Function(def, _) => !def.annotations.is_empty(),
-        Item::ForeignFunction(def, _) => !def.annotations.is_empty(),
-        Item::StructType(def, _) => !def.annotations.is_empty(),
-        Item::Enum(def, _) => !def.annotations.is_empty(),
-        Item::Trait(def, _) => !def.annotations.is_empty(),
-        Item::Module(def, _) => !def.annotations.is_empty(),
-        _ => false,
-    });
-    if !may_generate {
+    if !program_may_generate(program) {
         return Vec::new();
     }
     let mut compiler = BytecodeCompiler::new();

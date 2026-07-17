@@ -1,0 +1,19 @@
+// ADR-009 C1 / #53: generated nested `share` preserves one refcounted cell.
+annotation add_label() {
+  targets: [type]
+  comptime post(target, ctx) {
+    extend ("extend Job { method label() -> string { var text = \"a\"
+      let outer = |; share text| {
+        let inner = |suffix: string; share text| { text = text + suffix
+          text }
+        inner(\"bb\")
+        text }
+      outer() } }")
+  }
+}
+
+@add_label()
+type Job { id: int }
+
+let job = Job { id: 1 }
+print(job.label())

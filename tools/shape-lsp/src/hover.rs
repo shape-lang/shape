@@ -90,6 +90,17 @@ fn get_hover_inner(
     // Get the word at the cursor position
     let word = get_word_at_position(text, position)?;
 
+    match crate::generated_captures::generated_capture_hover_from_source(
+        text,
+        position,
+        module_cache,
+        current_file,
+    ) {
+        crate::generated_captures::GeneratedCaptureLookup::Found(hover) => return Some(hover),
+        crate::generated_captures::GeneratedCaptureLookup::Unavailable => return None,
+        crate::generated_captures::GeneratedCaptureLookup::NotCapture => {}
+    }
+
     // First, check if we're hovering on a property access (e.g., instr.symbol)
     if let Some(hover) = get_property_access_hover(text, &word, position) {
         return Some(hover);

@@ -374,6 +374,7 @@ impl JITCompiler {
                         );
                     }
                 }
+                mir_compiler.validate_shared_cell_kinds()?;
                 // Set up blocks and locals, then store function parameters.
                 mir_compiler.create_blocks();
                 mir_compiler.declare_locals();

@@ -124,10 +124,7 @@ impl BytecodeCompiler {
     /// Access the storage plan for the function currently being compiled.
     /// Returns `None` if no MIR storage plan exists for the current function.
     pub(super) fn current_storage_plan(&self) -> Option<&crate::mir::StoragePlan> {
-        let func_name = self
-            .current_function
-            .and_then(|idx| self.program.functions.get(idx))
-            .map(|f| f.name.as_str())?;
+        let func_name = self.current_body_semantic_owner_key()?;
         self.mir_storage_plans.get(func_name)
     }
 
@@ -179,11 +176,7 @@ impl BytecodeCompiler {
     /// it comes from the `non_function_mir_context_stack`.
     pub(super) fn current_mir_context_name(&self) -> Option<&str> {
         // Try function context first (most common)
-        if let Some(name) = self
-            .current_function
-            .and_then(|idx| self.program.functions.get(idx))
-            .map(|f| f.name.as_str())
-        {
+        if let Some(name) = self.current_body_semantic_owner_key() {
             return Some(name);
         }
         // Fall back to non-function MIR context (top-level code)

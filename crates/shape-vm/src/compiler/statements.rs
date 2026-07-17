@@ -10,8 +10,8 @@ use shape_ast::error::{Result, ShapeError};
 use shape_runtime::type_schema::{EnumVariantInfo, FieldType};
 
 use super::{
-    BytecodeCompiler, DropKind, ImportedAnnotationSymbol, ImportedSymbol, ModuleBuiltinFunction,
-    ParamPassMode, StructGenericInfo,
+    BytecodeCompiler, DropKind, ImportedSymbol, ModuleBuiltinFunction, ParamPassMode,
+    StructGenericInfo,
 };
 
 #[derive(Debug, Clone)]
@@ -41,6 +41,11 @@ struct ModuleDirectiveOutcome {
     removed: bool,
     replaced: bool,
 }
+
+pub(super) mod annotation_declarations;
+mod annotation_imports;
+mod graph_imports;
+mod imported_items;
 
 impl BytecodeCompiler {
     fn comptime_field_slot_from_literal(
@@ -823,9 +828,7 @@ impl BytecodeCompiler {
                     self.type_inference.env.define_trait(trait_def);
                     Ok(())
                 }
-                ExportItem::Annotation(annotation_def) => {
-                    self.compile_annotation_def(annotation_def)
-                }
+                ExportItem::Annotation(_) => Ok(()),
                 ExportItem::ForeignFunction(def) => {
                     // Same registration as Item::ForeignFunction
                     let caller_visible = def.params.iter().filter(|p| !p.is_out).count();
@@ -1915,7 +1918,7 @@ impl BytecodeCompiler {
                 match &export.item {
                     ExportItem::Function(func_def) => self.compile_function(func_def)?,
                     ExportItem::Annotation(annotation_def) => {
-                        self.compile_annotation_def(annotation_def)?;
+                        self.require_prepared_annotation(annotation_def)?;
                     }
                     ExportItem::Enum(enum_def) => self.register_enum(enum_def)?,
                     ExportItem::Struct(struct_def) => {
@@ -2090,7 +2093,7 @@ impl BytecodeCompiler {
                 }
             }
             Item::AnnotationDef(ann_def, _) => {
-                self.compile_annotation_def(ann_def)?;
+                self.require_prepared_annotation(ann_def)?;
             }
             Item::Comptime(stmts, span) => {
                 // Execute comptime block at compile time (side-effects only; result discarded)
@@ -2166,30 +2169,24 @@ impl BytecodeCompiler {
     fn register_import_names(&mut self, import_stmt: &shape_ast::ast::ImportStmt) -> Result<()> {
         use shape_ast::ast::ImportItems;
 
-        // Check permissions before registering imports.
-        // Clone to avoid borrow conflict with &mut self in check_import_permissions.
+        // Authorization ran before comptime declaration discovery for any
+        // annotation-bearing root import. Re-check here for ordinary imports,
+        // then record permission metadata exactly once while `__main__` exists.
         if let Some(pset) = self.permission_set.clone() {
-            self.check_import_permissions(import_stmt, &pset)?;
+            self.authorize_import_permissions(import_stmt, &pset)?;
+            self.record_import_permissions(import_stmt);
         }
 
         match &import_stmt.items {
             ImportItems::Named(specs) => {
                 for spec in specs {
                     if spec.is_annotation {
-                        // W9: register against the canonical module path so the
-                        // use-site lookup matches `compiled_annotations`'s
-                        // qualified key produced by the dep module's qualify pass.
-                        self.module_scope_sources
-                            .entry(import_stmt.from.clone())
-                            .or_insert_with(|| import_stmt.from.clone());
-                        self.imported_annotations.insert(
-                            spec.name.clone(),
-                            ImportedAnnotationSymbol {
-                                original_name: spec.name.clone(),
-                                _module_path: import_stmt.from.clone(),
-                                hidden_module_name: import_stmt.from.clone(),
-                            },
-                        );
+                        let local_name = spec.alias.clone().unwrap_or_else(|| spec.name.clone());
+                        self.consume_staged_annotation_import_binding(
+                            &local_name,
+                            &spec.name,
+                            &import_stmt.from,
+                        )?;
                         continue;
                     }
                     let local_name = spec.alias.as_ref().unwrap_or(&spec.name);
@@ -2242,13 +2239,12 @@ impl BytecodeCompiler {
     ///
     /// For named imports (`from std::core::file use { read_text }`), checks each function
     /// individually. For namespace imports (`use std::core::http`), checks the whole module.
-    fn check_import_permissions(
-        &mut self,
+    pub(super) fn authorize_import_permissions(
+        &self,
         import_stmt: &shape_ast::ast::ImportStmt,
         pset: &shape_abi_v1::PermissionSet,
     ) -> Result<()> {
         use shape_ast::ast::ImportItems;
-        use shape_runtime::stdlib::capability_tags;
 
         // Pass the full canonical path (e.g. "std::core::file") to capability tags.
         let module_name = &import_stmt.from as &str;
@@ -2256,251 +2252,87 @@ impl BytecodeCompiler {
         match &import_stmt.items {
             ImportItems::Named(specs) => {
                 for spec in specs {
-                    let required = capability_tags::required_permissions(module_name, &spec.name);
-                    if !required.is_empty() && !required.is_subset(pset) {
-                        let missing = required.difference(pset);
-                        let missing_names: Vec<&str> = missing.iter().map(|p| p.name()).collect();
-                        return Err(ShapeError::SemanticError {
-                            message: format!(
-                                "Permission denied: {module_name}::{} requires {} capability, \
-                                 but the active permission set does not include it. \
-                                 Add the permission to [permissions] in shape.toml or use a less \
-                                 restrictive preset.",
-                                spec.name,
-                                missing_names.join(", "),
-                            ),
-                            location: None,
-                        });
-                    }
-                    self.record_blob_permissions(module_name, &spec.name);
+                    self.authorize_import_symbol_permissions(module_name, &spec.name, pset)?;
                 }
             }
             ImportItems::Namespace { .. } => {
-                // For namespace imports, check the entire module's permission envelope.
-                // If the module requires any permissions not granted, deny the import.
-                let required = capability_tags::module_permissions(module_name);
-                if !required.is_empty() && !required.is_subset(pset) {
-                    let missing = required.difference(pset);
-                    let missing_names: Vec<&str> = missing.iter().map(|p| p.name()).collect();
-                    return Err(ShapeError::SemanticError {
-                        message: format!(
-                            "Permission denied: module '{module_name}' requires {} capabilities, \
-                             but the active permission set does not include them. \
-                             Add the permissions to [permissions] in shape.toml or use a less \
-                             restrictive preset.",
-                            missing_names.join(", "),
-                        ),
-                        location: None,
-                    });
-                }
-                // Record module-level permissions for namespace imports in the current blob
-                if let Some(ref mut blob) = self.current_blob_builder {
-                    let module_perms = capability_tags::module_permissions(module_name);
-                    blob.record_permissions(&module_perms);
-                }
+                self.authorize_import_module_permissions(module_name, pset)?;
             }
         }
         Ok(())
     }
 
-    /// Register imports for a module from the module graph.
-    ///
-    /// This is the graph-driven replacement for `register_import_names`.
-    /// For each `ResolvedImport` on the node:
-    /// - Namespace: creates canonical + alias bindings, registers schemas
-    /// - Named: populates `imported_names`, `imported_annotations`, `module_builtin_functions`
-    pub(super) fn register_graph_imports_for_module(
-        &mut self,
-        module_id: crate::module_graph::ModuleId,
-        graph: &crate::module_graph::ModuleGraph,
+    pub(super) fn authorize_import_symbol_permissions(
+        &self,
+        module_name: &str,
+        symbol_name: &str,
+        pset: &shape_abi_v1::PermissionSet,
     ) -> Result<()> {
-        use crate::module_graph::{ModuleSourceKind, ResolvedImport};
+        let required =
+            shape_runtime::stdlib::capability_tags::required_permissions(module_name, symbol_name);
+        if required.is_empty() || required.is_subset(pset) {
+            return Ok(());
+        }
 
-        let node = graph.node(module_id);
-        let resolved_imports = node.resolved_imports.clone();
+        let missing = required.difference(pset);
+        let missing_names: Vec<&str> = missing.iter().map(|permission| permission.name()).collect();
+        Err(ShapeError::SemanticError {
+            message: format!(
+                "Permission denied: {module_name}::{symbol_name} requires {} capability, \
+                 but the active permission set does not include it. \
+                 Add the permission to [permissions] in shape.toml or use a less \
+                 restrictive preset.",
+                missing_names.join(", "),
+            ),
+            location: None,
+        })
+    }
 
-        for ri in &resolved_imports {
-            match ri {
-                ResolvedImport::Namespace {
-                    local_name,
-                    canonical_path,
-                    module_id: dep_id,
-                } => {
-                    let dep_node = graph.node(*dep_id);
+    pub(super) fn authorize_import_module_permissions(
+        &self,
+        module_name: &str,
+        pset: &shape_abi_v1::PermissionSet,
+    ) -> Result<()> {
+        let required = shape_runtime::stdlib::capability_tags::module_permissions(module_name);
+        if required.is_empty() || required.is_subset(pset) {
+            return Ok(());
+        }
 
-                    // 1. Ensure canonical binding exists
-                    let canonical_idx = self.get_or_create_module_binding(canonical_path);
+        let missing = required.difference(pset);
+        let missing_names: Vec<&str> = missing.iter().map(|permission| permission.name()).collect();
+        Err(ShapeError::SemanticError {
+            message: format!(
+                "Permission denied: module '{module_name}' requires {} capabilities, \
+                 but the active permission set does not include them. \
+                 Add the permissions to [permissions] in shape.toml or use a less \
+                 restrictive preset.",
+                missing_names.join(", "),
+            ),
+            location: None,
+        })
+    }
 
-                    // Register native schema on canonical binding for NativeModule/Hybrid
-                    if matches!(
-                        dep_node.source_kind,
-                        ModuleSourceKind::NativeModule | ModuleSourceKind::Hybrid
-                    ) {
-                        self.register_extension_module_schema(canonical_path);
-                        let module_schema_name = format!("__mod_{}", canonical_path);
-                        if self
-                            .type_tracker
-                            .schema_registry()
-                            .get(&module_schema_name)
-                            .is_some()
-                        {
-                            self.set_module_binding_type_info(canonical_idx, &module_schema_name);
-                        }
-                    }
+    /// Record already-authorized import capabilities on the current blob.
+    /// Kept separate from authorization so the early annotation-alias pass
+    /// cannot emit duplicate semantic metadata before `__main__` exists.
+    fn record_import_permissions(&mut self, import_stmt: &shape_ast::ast::ImportStmt) {
+        use shape_ast::ast::ImportItems;
 
-                    // 2. Create alias binding if local_name != canonical_path
-                    if local_name != canonical_path {
-                        let alias_idx = self.get_or_create_module_binding(local_name);
-
-                        // Copy type info from canonical to alias. Shape-source
-                        // modules get their object schema when the dependency
-                        // module is compiled; native modules use the synthetic
-                        // __mod_* schema registered above.
-                        if let Some(type_info) =
-                            self.type_tracker.get_binding_type(canonical_idx).cloned()
-                        {
-                            self.type_tracker.set_binding_type(alias_idx, type_info);
-                        } else {
-                            let module_schema_name = format!("__mod_{}", canonical_path);
-                            if self
-                                .type_tracker
-                                .schema_registry()
-                                .get(&module_schema_name)
-                                .is_some()
-                            {
-                                self.set_module_binding_type_info(alias_idx, &module_schema_name);
-                            }
-                        }
-
-                        // Emit runtime binding copy: alias = canonical
-                        self.emit(Instruction::new(
-                            OpCode::LoadModuleBinding,
-                            Some(Operand::ModuleBinding(canonical_idx)),
-                        ));
-                        self.emit(Instruction::new(
-                            OpCode::StoreModuleBinding,
-                            Some(Operand::ModuleBinding(alias_idx)),
-                        ));
-                    }
-
-                    // 3. Register namespace
-                    self.module_namespace_bindings.insert(local_name.clone());
-                    self.graph_namespace_map
-                        .insert(local_name.clone(), canonical_path.clone());
-
-                    // 4. W9: Register annotation defs from imported module so
-                    // bare `@ann` and qualified `@local::ann` resolve at use-site.
-                    // The compiled annotation lives in `compiled_annotations` under
-                    // its qualified name `canonical_path::ann_name` (set during the
-                    // dep module's own compile via `qualify_module_item`).
-                    for (export_name, exp) in &dep_node.interface.exports {
-                        if matches!(
-                            exp.kind,
-                            shape_ast::module_utils::ModuleExportKind::Annotation
-                        ) {
-                            self.imported_annotations
-                                .entry(export_name.clone())
-                                .or_insert_with(|| ImportedAnnotationSymbol {
-                                    original_name: export_name.clone(),
-                                    _module_path: canonical_path.clone(),
-                                    hidden_module_name: canonical_path.clone(),
-                                });
-                        }
-                    }
+        match &import_stmt.items {
+            ImportItems::Named(specs) => {
+                for spec in specs {
+                    self.record_blob_permissions(&import_stmt.from, &spec.name);
                 }
-                ResolvedImport::Named {
-                    canonical_path,
-                    module_id: dep_id,
-                    symbols,
-                } => {
-                    let dep_node = graph.node(*dep_id);
-
-                    for sym in symbols {
-                        if sym.is_annotation {
-                            // W9: register annotation symbol against the canonical
-                            // module path. The compiled annotation is stored in
-                            // `compiled_annotations` under `canonical_path::name`
-                            // (the dep module's own qualify_module_item pass
-                            // produces that qualified key), so use-site resolution
-                            // just looks up `canonical_path::original_name`.
-                            self.module_scope_sources
-                                .entry(canonical_path.clone())
-                                .or_insert_with(|| canonical_path.clone());
-                            // Vacant-only: explicit imports win over prelude
-                            self.imported_annotations
-                                .entry(sym.local_name.clone())
-                                .or_insert_with(|| ImportedAnnotationSymbol {
-                                    original_name: sym.original_name.clone(),
-                                    _module_path: canonical_path.clone(),
-                                    hidden_module_name: canonical_path.clone(),
-                                });
-                            continue;
-                        }
-
-                        // Register as imported name (vacant-only: explicit imports
-                        // are processed first and win over prelude entries)
-                        self.imported_names
-                            .entry(sym.local_name.clone())
-                            .or_insert_with(|| ImportedSymbol {
-                                original_name: sym.original_name.clone(),
-                                module_path: canonical_path.clone(),
-                                kind: Some(sym.kind),
-                            });
-
-                        // For native exports, register as module builtin function
-                        if matches!(
-                            dep_node.source_kind,
-                            ModuleSourceKind::NativeModule | ModuleSourceKind::Hybrid
-                        ) && matches!(
-                            sym.kind,
-                            shape_ast::module_utils::ModuleExportKind::Function
-                                | shape_ast::module_utils::ModuleExportKind::BuiltinFunction
-                        ) {
-                            self.module_builtin_functions
-                                .entry(sym.local_name.clone())
-                                .or_insert_with(|| ModuleBuiltinFunction {
-                                    export_name: sym.original_name.clone(),
-                                    source_module_path: canonical_path.clone(),
-                                });
-                        }
-
-                        // R8 W8 Cluster A: imported `pub const NAME = expr` —
-                        // capture the initializer expression so the consumer-
-                        // side identifier-load path can emit it inline as
-                        // `PushConst(<comptime-value>)`. ADR-006 §2.7.5
-                        // stamp-at-compile-time invariant preserved: the
-                        // constant's kind is stamped from the literal at
-                        // compile time when the compiler reaches the
-                        // identifier reference.
-                        if matches!(sym.kind, shape_ast::module_utils::ModuleExportKind::Value) {
-                            if let Some(ref dep_ast) = dep_node.ast {
-                                for item in &dep_ast.items {
-                                    if let shape_ast::ast::Item::Export(export, _) = item {
-                                        if let Some(ref decl) = export.source_decl {
-                                            if decl.kind == shape_ast::ast::VarKind::Const {
-                                                if let Some(decl_name) =
-                                                    decl.pattern.as_identifier()
-                                                {
-                                                    if decl_name == sym.original_name {
-                                                        if let Some(ref init) = decl.value {
-                                                            self.imported_consts
-                                                                .entry(sym.local_name.clone())
-                                                                .or_insert_with(|| init.clone());
-                                                        }
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
+            }
+            ImportItems::Namespace { .. } => {
+                if let Some(ref mut blob) = self.current_blob_builder {
+                    let module_perms = shape_runtime::stdlib::capability_tags::module_permissions(
+                        &import_stmt.from,
+                    );
+                    blob.record_permissions(&module_perms);
                 }
             }
         }
-
-        Ok(())
     }
 
     pub(super) fn register_extension_module_schema(&mut self, module_path: &str) {
@@ -2725,37 +2557,6 @@ impl BytecodeCompiler {
         Ok(())
     }
 
-    /// Pre-register items from an imported module (enums, struct types, functions).
-    ///
-    /// Called by the LSP before compilation to make imported enums/types known
-    /// to the compiler's type tracker. Reuses `register_enum` as single source of truth.
-    pub fn register_imported_items(&mut self, items: &[Item]) {
-        for item in items {
-            match item {
-                Item::Export(export, _) => {
-                    match &export.item {
-                        ExportItem::Enum(enum_def) => {
-                            let _ = self.register_enum(enum_def);
-                        }
-                        ExportItem::Struct(struct_def) => {
-                            // Register struct type fields so the compiler knows about them
-                            let _ = self.register_struct_type(struct_def, Span::DUMMY);
-                        }
-                        ExportItem::Function(func_def) => {
-                            // Register function so it's known during compilation
-                            let _ = self.register_function(func_def);
-                        }
-                        _ => {}
-                    }
-                }
-                Item::Enum(enum_def, _) => {
-                    let _ = self.register_enum(enum_def);
-                }
-                _ => {}
-            }
-        }
-    }
-
     /// Register a meta definition in the format registry
     ///
     // Meta compilation methods removed — formatting now uses Display trait
@@ -2908,7 +2709,7 @@ impl BytecodeCompiler {
     /// This is in-compiler source-side completion of contract information
     /// that already exists in source code — trait declarations carry the
     /// return type, the compiler just wasn't propagating it.
-    fn desugar_impl_method(
+    pub(super) fn desugar_impl_method(
         &self,
         method: &shape_ast::ast::types::MethodDef,
         trait_name: &str,
@@ -3479,292 +3280,6 @@ impl BytecodeCompiler {
                 }
             }
         }
-    }
-
-    /// Compile an annotation definition.
-    ///
-    /// Each handler is compiled as an internal function:
-    /// - before(args, ctx) → `{name}___before(self, period, args, ctx)`
-    /// - after(args, result, ctx) → `{name}___after(self, period, args, result, ctx)`
-    ///
-    /// `self` is the annotated item (function/method/property).
-    /// Annotation params (e.g., `period`) are prepended after `self`.
-    fn compile_annotation_def(&mut self, ann_def: &shape_ast::ast::AnnotationDef) -> Result<()> {
-        use crate::bytecode::CompiledAnnotation;
-        use shape_ast::ast::AnnotationHandlerType;
-
-        let mut compiled = CompiledAnnotation {
-            name: ann_def.name.clone(),
-            param_names: ann_def
-                .params
-                .iter()
-                .flat_map(|p| p.get_identifiers())
-                .collect(),
-            param_defs: ann_def.params.clone(),
-            before_handler: None,
-            after_handler: None,
-            on_define_handler: None,
-            metadata_handler: None,
-            comptime_pre_handler: None,
-            comptime_post_handler: None,
-            before_handler_template: None,
-            after_handler_template: None,
-            allowed_targets: Vec::new(),
-        };
-
-        for handler in &ann_def.handlers {
-            // Comptime handlers are stored as AST (not compiled to bytecode).
-            // They are executed at compile time when the annotation is applied.
-            match handler.handler_type {
-                AnnotationHandlerType::ComptimePre => {
-                    compiled.comptime_pre_handler = Some(handler.clone());
-                    continue;
-                }
-                AnnotationHandlerType::ComptimePost => {
-                    compiled.comptime_post_handler = Some(handler.clone());
-                    continue;
-                }
-                _ => {}
-            }
-
-            if handler.params.iter().any(|p| p.is_variadic) {
-                return Err(ShapeError::SemanticError {
-                    message:
-                        "Variadic annotation handler params (`...args`) are only supported on comptime handlers"
-                            .to_string(),
-                    location: Some(self.span_to_source_location(handler.span)),
-                });
-            }
-
-            let handler_type_str = match handler.handler_type {
-                AnnotationHandlerType::Before => "before",
-                AnnotationHandlerType::After => "after",
-                AnnotationHandlerType::OnDefine => "on_define",
-                AnnotationHandlerType::Metadata => "metadata",
-                AnnotationHandlerType::ComptimePre => unreachable!(),
-                AnnotationHandlerType::ComptimePost => unreachable!(),
-            };
-
-            let func_name = format!("{}___{}", ann_def.name, handler_type_str);
-
-            if matches!(
-                handler.handler_type,
-                AnnotationHandlerType::Before | AnnotationHandlerType::After
-            ) {
-                let placeholder = FunctionDef {
-                    name: func_name.clone(),
-                    name_span: Span::DUMMY,
-                    declaring_module_path: None,
-                    doc_comment: None,
-                    params: Vec::new(),
-                    return_type: handler.return_type.clone(),
-                    body: Vec::new(),
-                    type_params: Some(Vec::new()),
-                    annotations: Vec::new(),
-                    is_async: false,
-                    is_comptime: false,
-                    where_clause: None,
-                };
-                self.register_function(&placeholder)?;
-                let func_id = self.find_function(&func_name).ok_or_else(|| {
-                    ShapeError::RuntimeError {
-                        message: format!(
-                            "Internal error: annotation handler function '{}' was not registered",
-                            func_name
-                        ),
-                        location: None,
-                    }
-                })? as u16;
-                match handler.handler_type {
-                    AnnotationHandlerType::Before => {
-                        compiled.before_handler = Some(func_id);
-                        compiled.before_handler_template = Some(handler.clone());
-                    }
-                    AnnotationHandlerType::After => {
-                        compiled.after_handler = Some(func_id);
-                        compiled.after_handler_template = Some(handler.clone());
-                    }
-                    _ => unreachable!(),
-                }
-                continue;
-            }
-
-            // Build function params: self + annotation_params + handler_params
-            let mut params = vec![FunctionParameter {
-                pattern: shape_ast::ast::DestructurePattern::Identifier(
-                    "self".to_string(),
-                    Span::DUMMY,
-                ),
-                is_const: false,
-                is_reference: false,
-                is_mut_reference: false,
-                is_out: false,
-                type_annotation: None,
-                default_value: None,
-            }];
-            // Add annotation params (e.g., period)
-            for ann_param in &ann_def.params {
-                params.push(ann_param.clone());
-            }
-            // Add handler params (e.g., args, ctx)
-            for param in &handler.params {
-                let inferred_type = if param.name == "ctx" {
-                    Some(TypeAnnotation::Object(vec![
-                        shape_ast::ast::ObjectTypeField {
-                            name: "state".to_string(),
-                            optional: false,
-                            type_annotation: TypeAnnotation::Basic("unknown".to_string()),
-                            annotations: vec![],
-                        },
-                        shape_ast::ast::ObjectTypeField {
-                            name: "event_log".to_string(),
-                            optional: false,
-                            type_annotation: TypeAnnotation::Array(Box::new(
-                                TypeAnnotation::Basic("unknown".to_string()),
-                            )),
-                            annotations: vec![],
-                        },
-                    ]))
-                } else if matches!(
-                    handler.handler_type,
-                    AnnotationHandlerType::OnDefine | AnnotationHandlerType::Metadata
-                ) && (param.name == "fn" || param.name == "target")
-                {
-                    Some(TypeAnnotation::Object(vec![
-                        shape_ast::ast::ObjectTypeField {
-                            name: "name".to_string(),
-                            optional: false,
-                            type_annotation: TypeAnnotation::Basic("string".to_string()),
-                            annotations: vec![],
-                        },
-                        shape_ast::ast::ObjectTypeField {
-                            name: "kind".to_string(),
-                            optional: false,
-                            type_annotation: TypeAnnotation::Basic("string".to_string()),
-                            annotations: vec![],
-                        },
-                        shape_ast::ast::ObjectTypeField {
-                            name: "id".to_string(),
-                            optional: false,
-                            type_annotation: TypeAnnotation::Basic("int".to_string()),
-                            annotations: vec![],
-                        },
-                    ]))
-                } else {
-                    None
-                };
-
-                params.push(FunctionParameter {
-                    pattern: shape_ast::ast::DestructurePattern::Identifier(
-                        param.name.clone(),
-                        Span::DUMMY,
-                    ),
-                    is_const: false,
-                    is_reference: false,
-                    is_mut_reference: false,
-                    is_out: false,
-                    type_annotation: inferred_type,
-                    default_value: None,
-                });
-            }
-
-            // Convert handler body (Expr) to function body (Vec<Statement>)
-            let body = vec![Statement::Return(Some(handler.body.clone()), Span::DUMMY)];
-
-            let func_def = FunctionDef {
-                name: func_name,
-                name_span: Span::DUMMY,
-                declaring_module_path: None,
-                doc_comment: None,
-                params,
-                return_type: handler.return_type.clone(),
-                body,
-                type_params: Some(Vec::new()),
-                annotations: Vec::new(),
-                is_async: false,
-                is_comptime: false,
-                where_clause: None,
-            };
-
-            self.register_function(&func_def)?;
-            self.compile_function(&func_def)?;
-
-            // Capture frame descriptor for the annotation handler function.
-            // Mirrors functions.rs:1750 — required for v2 typed opcode verification
-            // (ADR-006 §2.7.5.1) and JIT deoptimization map construction. Without
-            // this, v2 typed opcodes emitted in the handler body (e.g. NewTypedArrayI64,
-            // TypedArrayPushI64 from CoW array mutations) fail verification and the
-            // JIT SEGFAULTs on deopt paths.
-            let func_idx = self.program.functions.len() - 1;
-            self.program.functions[func_idx].locals_count = self.next_local;
-            self.capture_function_local_storage_hints(func_idx);
-
-            let func_id = (self.program.functions.len() - 1) as u16;
-
-            match handler.handler_type {
-                AnnotationHandlerType::Before => compiled.before_handler = Some(func_id),
-                AnnotationHandlerType::After => compiled.after_handler = Some(func_id),
-                AnnotationHandlerType::OnDefine => compiled.on_define_handler = Some(func_id),
-                AnnotationHandlerType::Metadata => compiled.metadata_handler = Some(func_id),
-                AnnotationHandlerType::ComptimePre => {} // handled above
-                AnnotationHandlerType::ComptimePost => {} // handled above
-            }
-        }
-
-        // Resolve allowed target kinds.
-        // Explicit `targets: [...]` in the annotation definition has priority.
-        // Otherwise infer from handlers:
-        // before/after handlers only make sense on functions (they wrap calls),
-        // lifecycle handlers (on_define/metadata) are definition-time only.
-        if let Some(explicit) = &ann_def.allowed_targets {
-            compiled.allowed_targets = explicit.clone();
-        } else if compiled.before_handler.is_some()
-            || compiled.after_handler.is_some()
-            || compiled.comptime_pre_handler.is_some()
-            || compiled.comptime_post_handler.is_some()
-        {
-            compiled.allowed_targets =
-                vec![shape_ast::ast::functions::AnnotationTargetKind::Function];
-        } else if compiled.on_define_handler.is_some() || compiled.metadata_handler.is_some() {
-            compiled.allowed_targets = vec![
-                shape_ast::ast::functions::AnnotationTargetKind::Function,
-                shape_ast::ast::functions::AnnotationTargetKind::Type,
-                shape_ast::ast::functions::AnnotationTargetKind::Module,
-            ];
-        }
-
-        // Enforce that definition-time lifecycle hooks only target definition
-        // sites (`function` / `type`).
-        if compiled.on_define_handler.is_some() || compiled.metadata_handler.is_some() {
-            if compiled.allowed_targets.is_empty() {
-                return Err(ShapeError::SemanticError {
-                    message: format!(
-                        "Annotation '{}' uses `on_define`/`metadata` and cannot have unrestricted targets. Allowed targets are: function, type, module",
-                        ann_def.name
-                    ),
-                    location: Some(self.span_to_source_location(ann_def.span)),
-                });
-            }
-            if let Some(invalid) = compiled
-                .allowed_targets
-                .iter()
-                .find(|kind| !Self::is_definition_annotation_target(**kind))
-            {
-                let invalid_label = format!("{:?}", invalid).to_lowercase();
-                return Err(ShapeError::SemanticError {
-                    message: format!(
-                        "Annotation '{}' uses `on_define`/`metadata`, but target '{}' is not a definition target. Allowed targets are: function, type, module",
-                        ann_def.name, invalid_label
-                    ),
-                    location: Some(self.span_to_source_location(ann_def.span)),
-                });
-            }
-        }
-
-        self.program
-            .compiled_annotations
-            .insert(ann_def.name.clone(), compiled);
-        Ok(())
     }
 
     /// Register ONLY a struct's runtime `TypeSchema` into the compiler's
@@ -6385,6 +5900,7 @@ impl BytecodeCompiler {
         for qualified in &qualified_items {
             self.register_missing_module_items(qualified)?;
         }
+        self.prepare_annotation_scope(&qualified_items)?;
 
         self.non_function_mir_context_stack
             .push(module_path.clone());
@@ -8324,6 +7840,14 @@ impl BytecodeCompiler {
         Ok(())
     }
 }
+
+#[cfg(test)]
+#[path = "statements/annotation_import_binding_tests.rs"]
+mod annotation_import_binding_tests;
+
+#[cfg(test)]
+#[path = "statements/annotation_import_pipeline_tests.rs"]
+mod annotation_import_pipeline_tests;
 
 #[cfg(test)]
 mod tests {

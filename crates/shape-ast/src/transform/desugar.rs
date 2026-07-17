@@ -824,6 +824,8 @@ fn make_lambda(param: &str, body: &Expr, span: Span) -> Expr {
         }],
         return_type: None,
         body: vec![Statement::Return(Some(body.clone()), span)],
+        generated_origin: None,
+        captures: None,
         span,
     }
 }
@@ -853,6 +855,8 @@ fn make_binary_lambda(param1: &str, param2: &str, body: &Expr, span: Span) -> Ex
         ],
         return_type: None,
         body: vec![Statement::Return(Some(body.clone()), span)],
+        generated_origin: None,
+        captures: None,
         span,
     }
 }

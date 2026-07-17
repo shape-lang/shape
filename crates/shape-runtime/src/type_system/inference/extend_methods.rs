@@ -8,6 +8,8 @@ use shape_ast::ast::{
     TypeAnnotation, TypeName, TypeParam,
 };
 
+mod declared_type_parameters;
+
 impl TypeInferenceEngine {
     /// Register extend block methods in the method table.
     ///
@@ -21,8 +23,9 @@ impl TypeInferenceEngine {
         // Extract receiver type param names from generic extend blocks.
         // e.g., `extend Vec<T>` -> receiver_type_params = ["T"]
         // e.g., `extend HashMap<K, V>` -> receiver_type_params = ["K", "V"]
-        let mut receiver_type_params =
+        let implicit_receiver_type_params =
             Self::implicit_extend_receiver_type_params(&extend.type_name);
+        let mut receiver_type_params = implicit_receiver_type_params.clone();
         let explicit_receiver_type_params: Vec<String> = match &extend.type_name {
             TypeName::Generic { type_args, .. } => type_args
                 .iter()
@@ -59,9 +62,29 @@ impl TypeInferenceEngine {
                 .map(|tps| tps.iter().map(|tp| tp.name().to_string()).collect())
                 .unwrap_or_default();
 
+            // A scalar/collection extend synthesizes an implicit receiver type
+            // param (Number's `N`, bare Array/Vec's `T`). That name is a
+            // compiler artifact, not a user binder: when a method declares its
+            // own type param of the same name, the explicit method binder
+            // shadows the synthetic receiver, so drop the redeclared implicit
+            // name before provenance registration counts it a second time.
+            // Explicit user-written receiver params (e.g. `extend Vec<T>`) stay
+            // intact and still collide as genuine shadows.
+            let mut receiver_type_params = receiver_type_params.clone();
+            receiver_type_params.retain(|name| {
+                !(method_type_params.contains(name)
+                    && implicit_receiver_type_params.contains(name))
+            });
+
             let is_generic = has_receiver_params || !method_type_params.is_empty();
 
             if is_generic {
+                self.register_extend_declared_type_parameters(
+                    &targets,
+                    method,
+                    &receiver_type_params,
+                    &method_type_params,
+                )?;
                 // Build TypeParamExpr-based signature for generic method resolution.
                 let param_exprs: Vec<TypeParamExpr> = method
                     .params
@@ -164,15 +187,12 @@ impl TypeInferenceEngine {
                 &self_ann,
                 &receiver_type_params,
             );
-            let func_type = self.infer_function(&func)?;
-            if method.return_type.is_none() && !receiver_param_names.is_empty() {
-                self.refresh_extend_method_return_from_body(
-                    &type_name,
-                    method,
-                    &receiver_param_names,
-                    &func_type,
-                );
-            }
+            self.infer_extend_method_with_declared_parameters(
+                method,
+                &type_name,
+                &receiver_param_names,
+                &func,
+            )?;
         }
 
         Ok(())
@@ -372,110 +392,6 @@ impl TypeInferenceEngine {
 
     fn number_family_extend(type_name: &TypeName) -> bool {
         matches!(type_name, TypeName::Simple(name) if matches!(name.as_str(), "Number" | "number"))
-    }
-
-    fn refresh_extend_method_return_from_body(
-        &mut self,
-        type_name: &str,
-        method: &MethodDef,
-        receiver_type_params: &[String],
-        func_type: &Type,
-    ) {
-        let Type::Function { returns, .. } = func_type else {
-            return;
-        };
-        let method_type_params: Vec<String> = method
-            .type_params
-            .as_ref()
-            .map(|tps| tps.iter().map(|tp| tp.name().to_string()).collect())
-            .unwrap_or_default();
-        let Some(return_expr) = Self::type_to_extend_type_param_expr(
-            returns,
-            receiver_type_params,
-            &method_type_params,
-        ) else {
-            return;
-        };
-        let param_exprs: Vec<TypeParamExpr> = method
-            .params
-            .iter()
-            .map(|p| match &p.type_annotation {
-                Some(ann) => Self::annotation_to_type_param_expr(
-                    ann,
-                    receiver_type_params,
-                    &method_type_params,
-                ),
-                None => TypeParamExpr::Concrete(self.fresh_type_var()),
-            })
-            .collect();
-
-        for target in Self::extend_target_names(type_name) {
-            self.method_table.register_user_generic_method(
-                &target,
-                &method.name,
-                method_type_params.len(),
-                param_exprs.clone(),
-                return_expr.clone(),
-                vec![],
-            );
-        }
-    }
-
-    fn type_to_extend_type_param_expr(
-        ty: &Type,
-        receiver_params: &[String],
-        method_params: &[String],
-    ) -> Option<TypeParamExpr> {
-        match ty {
-            Type::Variable(var) | Type::Constrained { var, .. } => {
-                if let Some(idx) = receiver_params.iter().position(|name| name == &var.0) {
-                    Some(TypeParamExpr::ReceiverParam(idx))
-                } else {
-                    method_params
-                        .iter()
-                        .position(|name| name == &var.0)
-                        .map(TypeParamExpr::MethodParam)
-                }
-            }
-            Type::Concrete(ann) => Some(Self::annotation_to_type_param_expr(
-                ann,
-                receiver_params,
-                method_params,
-            )),
-            Type::Generic { base, args } => {
-                let name = match base.as_ref() {
-                    Type::Concrete(TypeAnnotation::Reference(path)) => path.to_string(),
-                    Type::Concrete(TypeAnnotation::Basic(name)) => name.clone(),
-                    _ => return Some(TypeParamExpr::Concrete(ty.clone())),
-                };
-                Some(TypeParamExpr::GenericContainer {
-                    name,
-                    args: args
-                        .iter()
-                        .map(|arg| {
-                            Self::type_to_extend_type_param_expr(
-                                arg,
-                                receiver_params,
-                                method_params,
-                            )
-                        })
-                        .collect::<Option<Vec<_>>>()?,
-                })
-            }
-            Type::Function { params, returns } => Some(TypeParamExpr::Function {
-                params: params
-                    .iter()
-                    .map(|param| {
-                        Self::type_to_extend_type_param_expr(param, receiver_params, method_params)
-                    })
-                    .collect::<Option<Vec<_>>>()?,
-                returns: Box::new(Self::type_to_extend_type_param_expr(
-                    returns,
-                    receiver_params,
-                    method_params,
-                )?),
-            }),
-        }
     }
 
     fn extend_target_names(type_name: &str) -> Vec<String> {

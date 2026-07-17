@@ -17,6 +17,7 @@ const DEFAULT_TRAIT_IMPL_SELECTOR: &str = "__default__";
 mod closure_layout_fallback;
 mod content_addressed;
 mod core_types;
+pub(crate) mod function_instructions;
 mod opcode_defs;
 mod program_impl;
 pub mod verifier;

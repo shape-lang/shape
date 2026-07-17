@@ -47,6 +47,57 @@ while IFS=$'\t' read -r limit pattern note; do
   fi
 done < "$baseline"
 
+# ─────────────────────────────────────────────────────────────────────────────
+# ADR-009 ticket C1 — K1: ONE CAPTURE SELECTOR.
+#
+# `CaptureKind::{Immutable,OwnedMutable,Shared}` may be named in EXACTLY ONE
+# bytecode-compiler file: comptime_builtins/capture_plan.rs. Every other site
+# reads the plan (`CapturePlan::kind()` / `CapturePlan::access()`) or the pack.
+#
+# Why this is a build failure and not a review norm: closure-capture emission
+# used to be driven by two coupled vectors (`mutable_flags` + `capture_kinds`).
+# A second producer is exactly how a DECLARED capture mode gets validated and
+# then discarded while inference stays authoritative — the defect that got C1
+# rejected once already, and the same shape as the ValueWord walk-back this
+# script exists to prevent. One selector, or the build stops.
+capture_kind_offenders=$(
+  rg --no-heading -l -P 'CaptureKind::(Immutable|OwnedMutable|Shared)\b' \
+    crates/shape-vm/src/compiler 2>/dev/null \
+    | grep -v 'capture_plan\.rs' \
+    | grep -v '/capture_plan/.*tests' || true
+)
+if [[ -n "$capture_kind_offenders" ]]; then
+  echo "FAIL  ADR-009 C1 K1: a SECOND CaptureKind producer exists."
+  echo "      Only crates/shape-vm/src/compiler/comptime_builtins/capture_plan.rs may"
+  echo "      name a CaptureKind variant. Offending files:"
+  while IFS= read -r f; do echo "        $f"; done <<< "$capture_kind_offenders"
+  fail=1
+fi
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ADR-009 ticket C1 — K1b: COMPILER-INSTANCE PROVENANCE AUTHORITY.
+#
+# `GeneratedNodeOrigin` is the Wave-46 capture gate's predicate: a closure node
+# carrying one is generated code ONLY when the current compiler instance's
+# `GeneratedNodeIssuer` recognizes its non-serialized token. The issuer itself
+# is allocated exactly once in `BytecodeCompiler::new`; expansion provenance
+# receives it by reference. A foreign issuer and a serde round-trip both fail
+# the live compiler check, so constructor visibility is not the trust boundary.
+node_origin_offenders=$(
+  rg --no-heading -l -P 'GeneratedNodeIssuer::new\b' \
+    crates/shape-vm/src crates/shape-runtime/src tools 2>/dev/null \
+    | grep -v 'compiler_impl_initialization\.rs' \
+    | grep -v 'expansion_provenance\.rs' \
+    | grep -v '/capture_plan/.*tests' || true
+)
+if [[ -n "$node_origin_offenders" ]]; then
+  echo "FAIL  ADR-009 C1 K1b: a SECOND compiler GeneratedNodeIssuer exists."
+  echo "      Only BytecodeCompiler initialization may allocate the live issuer;"
+  echo "      expansion_provenance.rs may allocate test-only issuers. Offending files:"
+  while IFS= read -r f; do echo "        $f"; done <<< "$node_origin_offenders"
+  fail=1
+fi
+
 if (( fail )); then
   echo
   echo "Forbidden symbols regressed. See CLAUDE.md 'Forbidden Patterns' and the strict-typing plan."

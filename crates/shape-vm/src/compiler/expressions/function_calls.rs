@@ -1,8 +1,10 @@
 //! Function and method call expression compilation
 
 use crate::bytecode::{BuiltinFunction, Constant, Instruction, OpCode, Operand};
+use crate::compiler::comptime_builtins::semantic_freeze::SpecializationTypeOverlay;
 use crate::compiler::monomorphization::cache::ClosureDefPeek;
 use crate::compiler::monomorphization::call_site_consts;
+use crate::compiler::monomorphization::semantic_specialization::SemanticSpecializationRequest;
 use crate::compiler::monomorphization::type_resolution::{
     concrete_type_for_expr, extract_arg_concrete_types, resolve_call_site_type_args,
     resolve_call_site_type_args_from_expected_return, resolve_call_site_type_args_with_closures,
@@ -1064,8 +1066,7 @@ impl BytecodeCompiler {
         param_name: &str,
         arg_count: Option<usize>,
     ) -> Option<Type> {
-        let current_idx = self.current_function?;
-        let function_name = self.program.functions.get(current_idx)?.name.as_str();
+        let function_name = self.current_body_semantic_owner_key()?;
         let Type::Function { params, .. } = self
             .inference_facts
             .function_signature(function_name)?
@@ -1676,20 +1677,16 @@ impl BytecodeCompiler {
         self.const_specializations
             .insert(specialization_key.clone(), specialized_idx);
 
-        // ADR-009 A3 (review round 1) — scope the specialization type-param
-        // overlay to THIS const-specialized body. The const-specialized def
-        // keeps the base declaration's `type_params`, but the overlay must
-        // still be INSTALLED (owner = BASE name for declaration-stable
-        // Parameter identities when the base is also generic; `None`
-        // otherwise) so an ENCLOSING specialization's overlay does not leak
-        // into this nested body (spec §3.1 surface-and-stop). Restored
-        // unconditionally below so the Err path restores too.
-        let saved_type_param_overlay = std::mem::replace(
-            &mut self.specialization_type_param_overlay,
-            Self::call_site_specialization_overlay(name, &specialized_def),
-        );
+        // This value-const specialization introduces no new semantic type
+        // arguments. Push a declaration-only frame so an enclosing exact
+        // specialization cannot leak into its body.
+        let specialization_overlay =
+            Self::declaration_only_specialization_overlay(name, &specialized_def);
+        let specialization_overlay_guard = self
+            .specialization_type_overlays
+            .enter(specialization_overlay);
         let compile_result = self.compile_function(&specialized_def);
-        self.specialization_type_param_overlay = saved_type_param_overlay;
+        drop(specialization_overlay_guard);
 
         if let Err(err) = compile_result {
             self.specialization_const_bindings.remove(&specialized_name);
@@ -5913,17 +5910,11 @@ impl BytecodeCompiler {
         // sets). Only the real capability modules (`std::core::file` -> FsWrite,
         // `std::core::http` -> NetConnect, `std::core::env` -> Env, …) contribute.
         //
-        // Restricted to user-space main compilation (`module_scope_stack`
-        // empty) — the SAME restriction the w17 flag above carries for the SAME
-        // reason (see its comment): re-stamping permissions on stdlib
-        // dep-module-internal blobs during bootstrap changes their content
-        // hashes and desyncs the precomputed content-addressed blob graph
-        // (missing-dependency-blob link panic). @remote-transferred functions
-        // are user-space, so the writer blob (which calls `file::write_text`)
-        // is still stamped; only stdlib-internal blobs are left untouched.
-        if self.module_scope_stack.is_empty() {
-            self.record_blob_permissions(&canonical_module, method);
-        }
+        // Graph dependencies stamp the function that actually issues the call.
+        // Only a module whose graph identity carries embedded-stdlib resolver
+        // provenance receives the tightly scoped bootstrap exception; neither
+        // module nesting nor a user-chosen `std::...` path grants authority.
+        self.record_owned_capability_call_permissions(&canonical_module, method);
 
         // For native module exports, use a hidden binding so that the native
         // module object is not clobbered when a Shape artifact module with the
@@ -6774,13 +6765,19 @@ impl BytecodeCompiler {
         //    (ADR-009 A3 S2, surface-and-stop).
         let caller_function = self.current_function;
         let saved_expected_call_return_type = self.pending_expected_call_return_type.take();
+        let semantic_request = self.semantic_specialization_request(func_name, call_site_span);
         let specialization_result = if explicit_const_args.is_empty() {
-            self.ensure_monomorphic_function(func_name, &resolution.type_args)
+            self.ensure_monomorphic_function_for_callsite(
+                func_name,
+                &resolution.type_args,
+                semantic_request,
+            )
         } else {
-            self.ensure_monomorphic_function_with_consts(
+            self.ensure_monomorphic_function_with_consts_for_callsite(
                 func_name,
                 &resolution.type_args,
                 &const_args,
+                semantic_request,
             )
         };
         self.pending_expected_call_return_type = saved_expected_call_return_type;
@@ -6917,16 +6914,15 @@ impl BytecodeCompiler {
         let saved_local_concrete_facts =
             std::mem::take(&mut self.current_function_local_concrete_facts);
         let saved_local_binding_spans = std::mem::take(&mut self.local_binding_spans);
-        // ADR-009 A3 (review round 1) — an implicit generic declares NO named
-        // type params (that is the predicate gating this path), so the overlay
-        // for its specialized body is `None` — but it must still be INSTALLED
-        // via `mem::take` so an ENCLOSING specialization's overlay does not
-        // leak into this nested body (comptime `type_ref(T)` naming the outer
-        // fn's parameter must fail the freeze, not falsely resolve —
-        // spec §3.1 surface-and-stop). Restored unconditionally below.
-        let saved_type_param_overlay = std::mem::take(&mut self.specialization_type_param_overlay);
+        // Implicit generics have no declared TypeVar capabilities. An empty
+        // declaration-only frame masks any enclosing exact specialization.
+        let specialization_overlay =
+            SpecializationTypeOverlay::declaration_only(func_name, Vec::new());
+        let specialization_overlay_guard = self
+            .specialization_type_overlays
+            .enter(specialization_overlay);
         let compile_result = self.compile_function(&specialized_def);
-        self.specialization_type_param_overlay = saved_type_param_overlay;
+        drop(specialization_overlay_guard);
         self.closure_function_ids = saved_closure_function_ids;
         self.current_function_local_concrete_facts = saved_local_concrete_facts;
         self.local_binding_spans = saved_local_binding_spans;
@@ -7751,8 +7747,18 @@ impl BytecodeCompiler {
             call_site_span.end
         )];
         name_parts.extend(call_arg_cts.iter().map(concrete_type_cache_key));
-        specialized_def.name = name_parts.join("_");
+        let abi_specialization_name = name_parts.join("_");
+        let declared_type_params = Self::specialization_type_param_names(&original_def);
+        let semantic_request = self.semantic_specialization_request(func_name, call_site_span);
+        let semantic = self.prepare_semantic_specialization(
+            func_name,
+            abi_specialization_name.clone(),
+            declared_type_params.len(),
+            semantic_request,
+        )?;
+        specialized_def.name = semantic.specialized_symbol(abi_specialization_name);
         specialized_def.type_params = Some(Vec::new());
+        let specialization_overlay = semantic.overlay(func_name, &declared_type_params)?;
 
         if let Some(idx) = self.find_function(&specialized_def.name) {
             // ADR-009 A3 (review round 1) — a registered specialization whose
@@ -7793,25 +7799,14 @@ impl BytecodeCompiler {
         let saved_local_concrete_facts =
             std::mem::take(&mut self.current_function_local_concrete_facts);
         let saved_local_binding_spans = std::mem::take(&mut self.local_binding_spans);
-        // ADR-009 A3 (review round 1) — scope the specialization type-param
-        // overlay to THIS body: the specialized def carries
-        // `type_params = Some(vec![])` (substitution strips them), so comptime
-        // `type_ref(N)` inside the BASE generic method's body needs the base
-        // declaration's type-param names re-supplied, with the owner scoped to
-        // the BASE name (declaration-stable identities, ADR-009 Decision 52) —
-        // exactly the discipline of the three `monomorphization/cache.rs`
-        // compile sites. `mem::replace` also MASKS any ENCLOSING
-        // specialization's overlay: a call-site-nested specialization
-        // compiling inside a generic body must not resolve the outer
-        // function's parameters (false accept vs the semantic freeze,
-        // spec §3.1 surface-and-stop). Restored unconditionally below so the
-        // Err path restores too.
-        let saved_type_param_overlay = std::mem::replace(
-            &mut self.specialization_type_param_overlay,
-            Self::call_site_specialization_overlay(func_name, &original_def),
-        );
+        // Exact facts install declared-token mappings; legacy facts install
+        // declaration-only reflection and cannot become query-visible exact
+        // capture evidence.
+        let specialization_overlay_guard = self
+            .specialization_type_overlays
+            .enter(specialization_overlay);
         let compile_result = self.compile_function(&specialized_def);
-        self.specialization_type_param_overlay = saved_type_param_overlay;
+        drop(specialization_overlay_guard);
         self.closure_function_ids = saved_closure_function_ids;
         self.current_function_local_concrete_facts = saved_local_concrete_facts;
         self.local_binding_spans = saved_local_binding_spans;
@@ -7830,31 +7825,6 @@ impl BytecodeCompiler {
             .insert((call_site_span, self.current_function), specialized_idx);
 
         Ok(Some(specialized_idx))
-    }
-
-    /// ADR-009 A3 (review round 1) — the `specialization_type_param_overlay`
-    /// value for a call-site specialization (`__w24_method_*`,
-    /// `__w27_implicit_*`, `__const_*`) of `base_def`: the BASE declaration's
-    /// non-const type-param names owned by the BASE name when the base is
-    /// generic, `None` otherwise. Mirrors the derivation in
-    /// `monomorphization/cache.rs` (one derivation shape, spec §4.1). Always
-    /// installed via `mem::replace` so an ENCLOSING specialization's overlay
-    /// never leaks into a nested call-site-specialized body.
-    fn call_site_specialization_overlay(
-        base_name: &str,
-        base_def: &shape_ast::ast::FunctionDef,
-    ) -> Option<(String, Vec<String>)> {
-        let declared: Vec<String> = base_def
-            .type_params
-            .as_ref()?
-            .iter()
-            .filter(|tp| !tp.is_const())
-            .map(|tp| tp.name().to_string())
-            .collect();
-        if declared.is_empty() {
-            return None;
-        }
-        Some((base_name.to_string(), declared))
     }
 
     fn concrete_user_method_body_return_type(
@@ -7974,13 +7944,15 @@ impl BytecodeCompiler {
         //    closure's layout + inferred return type. Otherwise fall through
         //    to the type-only path (byte-for-byte compatible with pre-C).
         let has_closure_arg = args.iter().any(|a| matches!(a, Expr::FunctionExpr { .. }));
+        let semantic_request = self.semantic_specialization_request(func_name, call_site_span);
 
         if has_closure_arg {
             if let Some(idx) = self.try_monomorphize_method_call_with_closures(
                 func_name,
                 &combined_args,
                 call_site_span,
-            ) {
+                semantic_request.clone(),
+            )? {
                 return Ok(Some(idx));
             }
             // Fall-through: either resolution bailed, inlining failed, or the
@@ -8009,7 +7981,11 @@ impl BytecodeCompiler {
         //    returns Ok(None) to fall back to the generic version; a HARD
         //    failure (the specialized body itself failed to compile)
         //    propagates the user's real diagnostic.
-        match self.ensure_monomorphic_function(func_name, &resolution.type_args) {
+        match self.ensure_monomorphic_function_for_callsite(
+            func_name,
+            &resolution.type_args,
+            semantic_request,
+        ) {
             Ok(specialized_idx) => {
                 let idx = specialized_idx as usize;
                 // Self-call guard: if the monomorphized specialization is the
@@ -8052,9 +8028,8 @@ impl BytecodeCompiler {
     /// layout and so the substitution pass can inline the closure body into
     /// the specialized stdlib template.
     ///
-    /// Returns `None` on any failure — the caller then falls back to the
-    /// type-only path (still producing a direct `Call(fn_id)` dispatch,
-    /// never `CallValue`).
+    /// Returns `Ok(None)` for an ordinary inlining refusal. Exact semantic
+    /// preparation failures remain `Err` and never silently downgrade.
     fn try_monomorphize_method_call_with_closures(
         &mut self,
         func_name: &str,
@@ -8065,7 +8040,8 @@ impl BytecodeCompiler {
         // populates `monomorphized_method_call_sites` on the closure-
         // aware specialization's success branch with the same shape.
         call_site_span: Span,
-    ) -> Option<usize> {
+        semantic_request: SemanticSpecializationRequest,
+    ) -> Result<Option<usize>> {
         // W20 closures_hof guard (2026-06-27): Phase-C inlining is only
         // sound for closure literals with no captures. The inliner rewrites
         // `f(item)` inside the specialized stdlib template, but it does not
@@ -8077,7 +8053,7 @@ impl BytecodeCompiler {
         // metadata and call-site bytecode, route captured closures through
         // the existing kinded closure value-call path.
         if self.any_closure_arg_captures_outer_binding(combined_args) {
-            return None;
+            return Ok(None);
         }
 
         // SOUNDNESS GUARD (F1 mutating-capture-closure HOF segfault, 2026-06-18):
@@ -8103,17 +8079,21 @@ impl BytecodeCompiler {
         // read-only-capture closures (`map`/`filter`/`forEach` with no outer
         // mutation) keep the inline fast path.
         if self.any_closure_arg_mutates_outer_binding(combined_args) {
-            return None;
+            return Ok(None);
         }
 
         // Only type-kind generics participate in call-site annotation
         // unification. Const-kind generics (B.3) are bound separately via
         // declaration defaults.
         let type_params: Vec<String> = {
-            let def = self.function_defs.get(func_name)?;
-            let tps = def.type_params.as_ref()?;
+            let Some(def) = self.function_defs.get(func_name) else {
+                return Ok(None);
+            };
+            let Some(tps) = def.type_params.as_ref() else {
+                return Ok(None);
+            };
             if tps.is_empty() {
-                return None;
+                return Ok(None);
             }
             tps.iter()
                 .filter(|tp| !tp.is_const())
@@ -8125,19 +8105,21 @@ impl BytecodeCompiler {
         // Function/Closure tag, same as the type-only path).
         let arg_types = extract_arg_concrete_types(self, combined_args);
 
-        let resolution = resolve_call_site_type_args_with_closures(
+        let Some(resolution) = resolve_call_site_type_args_with_closures(
             self,
             func_name,
             combined_args,
             &arg_types,
             &type_params,
-        )?;
+        ) else {
+            return Ok(None);
+        };
         if resolution.type_args.is_empty() {
-            return None;
+            return Ok(None);
         }
         if resolution.closure_specs.is_empty() {
             // No closure arg after all — bounce to the type-only path.
-            return None;
+            return Ok(None);
         }
 
         // Gather the peeked closure def info (params, body, captures) and
@@ -8154,31 +8136,36 @@ impl BytecodeCompiler {
             .collect();
 
         // Pull the formal closure-param names from the callee def.
-        let def = self.function_defs.get(func_name)?.clone();
+        let Some(def) = self.function_defs.get(func_name).cloned() else {
+            return Ok(None);
+        };
         let mut callee_closure_param_names: Vec<String> = Vec::new();
         for (i, a) in combined_args.iter().enumerate() {
             if matches!(a, Expr::FunctionExpr { .. }) {
-                let param = def.params.get(i)?;
+                let Some(param) = def.params.get(i) else {
+                    return Ok(None);
+                };
                 let ids = param.get_identifiers();
                 if ids.len() != 1 {
                     // Destructured closure param — not supported.
-                    return None;
+                    return Ok(None);
                 }
                 callee_closure_param_names.push(ids[0].clone());
             }
         }
 
-        match self.ensure_monomorphic_function_with_closures(
+        match self.ensure_monomorphic_function_with_closures_for_callsite(
             func_name,
             &resolution.type_args,
             &resolution.closure_specs,
             &closure_defs,
             &callee_closure_param_names,
+            semantic_request,
         ) {
             Ok(Some(specialized_idx)) => {
                 let idx = specialized_idx as usize;
                 if self.current_function == Some(idx) {
-                    return None;
+                    return Ok(None);
                 }
                 // ADR-006 §2.7.5 V3-S6b conduit population (mirror of the
                 // type-only path). Stamps the `(call_site_span,
@@ -8191,9 +8178,10 @@ impl BytecodeCompiler {
                 self.program
                     .monomorphized_method_call_sites
                     .insert((call_site_span, self.current_function), idx);
-                Some(idx)
+                Ok(Some(idx))
             }
-            _ => None,
+            Ok(None) => Ok(None),
+            Err(error) => Err(error),
         }
     }
 

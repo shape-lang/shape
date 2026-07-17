@@ -1,0 +1,20 @@
+// ADR-009 C1 slice 4: single-level generated `share` over a local `var`.
+// One closure shares the local `var total`, mutates it, and the method body
+// reads `total` AFTER the closure ran — so the read observes the closure's
+// mutation, proving `share` is a real shared cell (not a by-value copy).
+annotation add_answer() {
+  targets: [type]
+  comptime post(target, ctx) {
+    extend ("extend Job { method answer() -> int { var total = 40
+      let worker = |; share total| { total = total + 2
+        total }
+      worker()
+      total } }")
+  }
+}
+
+@add_answer()
+type Job { id: int }
+
+let job = Job { id: 1 }
+print(job.answer())

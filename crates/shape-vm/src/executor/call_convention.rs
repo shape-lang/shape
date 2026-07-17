@@ -874,20 +874,22 @@ impl VirtualMachine {
             closure_heap_kind,
         });
 
-        // Install `Immutable` captures into their leading-param LOCAL
-        // slots. `read_capture_kinded(idx)` returns `(bits, kind)` directly
-        // — the kind comes from `layout.capture_native_kinds[idx]`, set at
-        // closure construction by the producing `MakeClosure` opcode. No
-        // fabrication, no Bool-default fallback (§2.7.8 #4 forbidden).
+        // Install the capture carriers needed as leading-param LOCAL slots.
+        // `read_capture_kinded(idx)` returns `(bits, kind)` directly — for an
+        // Immutable capture that is its value carrier; for a Shared capture
+        // the bits are the raw `*const SharedCell`, while the returned kind is
+        // the cell INTERIOR kind and therefore must not be used to retain the
+        // pointer. No tag decode or Bool-default fallback (§2.7.8 #4).
         //
-        // `OwnedMutable` / `Shared` captures are SKIPPED here: they are
-        // accessed through `frame.upvalues` (wired above), never as
-        // locals, and their `read_capture_kinded` kind classifies the cell
-        // INTERIOR (closure_raw.rs:138-146) — `clone_with_kind` on the
-        // cell-pointer bits with a heap-bearing interior kind (e.g.
-        // `String`) would retain the cell pointer as if it were the heap
-        // payload, a refcount-corruption bug. The leading-param slot stays
-        // the `(NONE_BITS, Bool)` sentinel (Drop-no-op at teardown).
+        // `OwnedMutable` captures remain skipped: the unique Box cell is
+        // accessible only through `frame.upvalues` and cannot be installed as
+        // a second owner. Shared captures are different. ADR-009 C1 slice 4
+        // permits a nested closure to recapture the same shared cell, so its
+        // synthetic parameter local must carry a separately retained raw-cell
+        // share. Body reads/writes remain upvalue-based; the local exists only
+        // as the canonical carrier source for nested recapture. Frame teardown
+        // releases exactly this one installed share through the parallel kind
+        // `Ptr(HeapKind::SharedCell)`.
         //
         // cluster-1.5 v2-raw-empirical-isolation-and-fix (2026-05-17):
         // `read_capture_kinded` is a raw bit read — does NOT bump the
@@ -903,17 +905,21 @@ impl VirtualMachine {
         // the callee carrier.
         use shape_value::v2::closure_layout::CaptureKind;
         for capture_idx in 0..capture_count {
-            if !matches!(
-                layout.capture_storage_kind(capture_idx),
-                CaptureKind::Immutable
-            ) {
-                continue;
-            }
             // SAFETY: see the upvalue-table loop above — same construction
             // invariant and live-block borrow.
             let (bits, kind) = unsafe { closure_block.read_capture_kinded(capture_idx) };
-            crate::executor::vm_impl::stack::clone_with_kind(bits, kind);
-            self.stack_write_kinded(base_pointer + capture_idx, bits, kind);
+            match layout.capture_storage_kind(capture_idx) {
+                CaptureKind::Immutable => {
+                    crate::executor::vm_impl::stack::clone_with_kind(bits, kind);
+                    self.stack_write_kinded(base_pointer + capture_idx, bits, kind);
+                }
+                CaptureKind::Shared => {
+                    let carrier_kind = NativeKind::Ptr(HeapKind::SharedCell);
+                    crate::executor::vm_impl::stack::clone_with_kind(bits, carrier_kind);
+                    self.stack_write_kinded(base_pointer + capture_idx, bits, carrier_kind);
+                }
+                CaptureKind::OwnedMutable => {}
+            }
         }
 
         // Walk args and thread each into the local slot following the

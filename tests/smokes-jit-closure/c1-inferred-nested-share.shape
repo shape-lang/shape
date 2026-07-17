@@ -1,0 +1,14 @@
+fn answer() -> int {
+  var total = 40
+  let outer = || {
+    let inner = || {
+      total = total + 2
+      total
+    }
+    inner()
+    total
+  }
+  outer()
+}
+
+print(answer())

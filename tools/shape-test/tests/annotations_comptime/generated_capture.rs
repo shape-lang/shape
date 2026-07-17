@@ -1,5 +1,9 @@
 use shape_test::shape_test::ShapeTest;
 
+mod declared_capture;
+mod gate_totality;
+mod slice4;
+
 fn expect_vm_and_jit_number(source: &str, expected: f64) {
     ShapeTest::new(source).expect_number(expected);
     ShapeTest::new(source).with_jit().expect_number(expected);
@@ -93,24 +97,6 @@ print(job.read())
     .expect_run_err_contains(
         "generated closure implicitly captures 'self'; generated captures must be explicit",
     );
-}
-
-#[test]
-fn generated_function_allows_capture_free_closure() {
-    let source = r#"
-annotation generate_constant() {
-  targets: [type]
-  comptime post(target, ctx) {
-    extend ("fn generated_constant() -> int { let worker = || 42; worker() }")
-  }
-}
-
-@generate_constant()
-type Job { id: int }
-
-generated_constant()
-"#;
-    expect_vm_and_jit_number(source, 42.0);
 }
 
 #[test]

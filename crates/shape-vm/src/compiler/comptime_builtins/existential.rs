@@ -47,11 +47,9 @@ pub(crate) const WITNESS_ERASED_TO_ANY_DIAGNOSTIC: &str = "heterogeneous witness
 /// inference tier and the freeze tier speak one string (re-export, not copy).
 pub(crate) use shape_runtime::comptime_reflection::NON_EXISTENTIAL_ITERABLE_DIAGNOSTIC;
 
-/// Rejection-matrix rows 2 & 3 (ADR-009 B3, Dec 51): witness escape + second
-/// reflection protocol. Single-sourced in shape-runtime (see above).
-pub(crate) use shape_runtime::comptime_reflection::{
-    SECOND_REFLECTION_PROTOCOL_DIAGNOSTIC, WITNESS_ESCAPES_SCOPE_DIAGNOSTIC,
-};
+/// Rejection-matrix row 2 (ADR-009 B3, Dec 51): witness escape.
+/// Single-sourced in shape-runtime (see above).
+pub(crate) use shape_runtime::comptime_reflection::WITNESS_ESCAPES_SCOPE_DIAGNOSTIC;
 
 /// True when the annotation structurally mentions the compiler-internal `Any`
 /// top type (rejection-matrix row 1). Exhaustive over `TypeAnnotation` so a new
@@ -393,12 +391,10 @@ mod tests {
     /// its single-sourced text.
     #[test]
     fn second_reflection_protocol_is_a_named_surface_and_stop_refusal() {
-        assert_eq!(
-            SECOND_REFLECTION_PROTOCOL_DIAGNOSTIC,
-            shape_runtime::comptime_reflection::SECOND_REFLECTION_PROTOCOL_DIAGNOSTIC,
-            "the row-3 diagnostic must be single-sourced in shape-runtime"
+        assert!(
+            shape_runtime::comptime_reflection::SECOND_REFLECTION_PROTOCOL_DIAGNOSTIC
+                .contains("second reflection")
         );
-        assert!(SECOND_REFLECTION_PROTOCOL_DIAGNOSTIC.contains("second reflection"));
     }
 
     /// A witness always shadows: a base type of the same spelling never

@@ -4,16 +4,19 @@
 //! in different scopes during type inference and checking.
 
 mod evolution;
+mod lexical_bindings;
 mod registry;
 
 // Re-export public types
 pub use evolution::{
     CanonicalField, CanonicalType, ControlFlowContext, EvolvedField, TypeEvolution,
 };
+pub use lexical_bindings::BindingToken;
 pub use registry::{BlanketImplEntry, RecordField, RecordSchema, TraitImplEntry, TypeAliasEntry};
 
 use super::*;
 use evolution::EvolutionRegistry;
+use lexical_bindings::LexicalBindingTokens;
 use registry::TypeRegistry;
 use shape_ast::ast::{EnumDef, Expr, ObjectTypeField, Span, TraitDef, TypeAnnotation};
 use std::collections::{HashMap, HashSet};
@@ -31,6 +34,7 @@ pub struct HoistedField {
 pub struct TypeEnvironment {
     /// Stack of scopes, each containing variable bindings
     scopes: Vec<HashMap<String, TypeScheme>>,
+    lexical_binding_tokens: LexicalBindingTokens,
     /// Built-in function types
     builtins: HashMap<String, TypeScheme>,
     /// Type registry (aliases, interfaces, enums)
@@ -57,6 +61,7 @@ impl TypeEnvironment {
     pub fn new() -> Self {
         let mut env = TypeEnvironment {
             scopes: vec![HashMap::new()],
+            lexical_binding_tokens: LexicalBindingTokens::new(),
             builtins: HashMap::new(),
             type_registry: TypeRegistry::new(),
             evolution_registry: EvolutionRegistry::new(),
@@ -93,7 +98,10 @@ impl TypeEnvironment {
         // (acos/pow comment's "accept-then-crash" hazard).
         let min_max_t = TypeVar::new("T".to_string());
         let mut min_max_bounds = HashMap::new();
-        min_max_bounds.insert(min_max_t.0.clone(), vec!["Numeric".to_string()]);
+        min_max_bounds.insert(
+            min_max_t.presentation_name().into_owned(),
+            vec!["Numeric".to_string()],
+        );
         let min_max_ty = BuiltinTypes::function(
             vec![
                 Type::Variable(min_max_t.clone()),
@@ -1230,7 +1238,7 @@ impl TypeEnvironment {
         };
         let mut ok_defaults = std::collections::HashMap::new();
         ok_defaults.insert(
-            ok_e.0.clone(),
+            ok_e.presentation_name().into_owned(),
             Type::Concrete(TypeAnnotation::Reference("AnyError".into())),
         );
         self.builtins.insert(
@@ -1430,13 +1438,6 @@ impl TypeEnvironment {
         // Note: top-level map/filter/reduce removed — use method syntax: arr.map(fn).
     }
 
-    /// Define a variable in the current scope
-    pub fn define(&mut self, name: &str, scheme: TypeScheme) {
-        if let Some(scope) = self.scopes.last_mut() {
-            scope.insert(name.to_string(), scheme);
-        }
-    }
-
     /// Look up a variable type
     pub fn lookup(&self, name: &str) -> Option<&TypeScheme> {
         // Search from innermost to outermost scope
@@ -1448,34 +1449,6 @@ impl TypeEnvironment {
 
         // Check built-ins
         self.builtins.get(name)
-    }
-
-    /// Push a new scope
-    pub fn push_scope(&mut self) {
-        self.scopes.push(HashMap::new());
-    }
-
-    /// Number of live scopes (1 = module scope). ADR-009 B3: used to compare
-    /// the declaring depth of an assignment target against a `some`-loop body
-    /// depth for witness-escape detection.
-    pub fn scope_depth(&self) -> usize {
-        self.scopes.len()
-    }
-
-    /// Depth (1-based, innermost wins) of the scope that declares `name`, or
-    /// `None` if unbound. ADR-009 B3 witness-escape check.
-    pub fn declaring_scope_depth(&self, name: &str) -> Option<usize> {
-        self.scopes
-            .iter()
-            .rposition(|scope| scope.contains_key(name))
-            .map(|idx| idx + 1)
-    }
-
-    /// Pop the current scope
-    pub fn pop_scope(&mut self) {
-        if self.scopes.len() > 1 {
-            self.scopes.pop();
-        }
     }
 
     /// Define a type alias with optional meta parameter overrides

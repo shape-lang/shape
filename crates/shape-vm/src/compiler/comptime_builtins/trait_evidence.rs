@@ -53,6 +53,7 @@ pub(crate) const FORGED_TRAIT_REF_DIAGNOSTIC: &str = "TraitRef identity was not 
 /// Rejection R7 (evidence half): implementation evidence cannot be forged —
 /// an ImplRef whose identities the semantic freeze never issued as evidence
 /// is a named compile-stage error.
+#[cfg(test)]
 pub(crate) const FORGED_IMPL_EVIDENCE_DIAGNOSTIC: &str = "ImplRef evidence was not issued by the semantic freeze: implementation \
      evidence cannot be forged — only find_impl over frozen barrier truth \
      issues ImplRef values";
@@ -87,6 +88,7 @@ pub(crate) const FIND_IMPL_NAMED_IMPLS_ONLY_DIAGNOSTIC: &str = "find_impl resolv
 
 /// The three canonical identities an `ImplRef` carrier certifies: the exact
 /// `(trait, type)` pair plus the exact (possibly named) impl.
+#[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct ImplRefIdentities {
     pub(crate) trait_identity: FrozenTypeIdentity,
@@ -167,6 +169,7 @@ pub(crate) fn build_impl_ref_heap_value(
 /// Schema-name-checked opaque decode of an `ImplRef` carrier back to its
 /// three freeze-issued identities. Identities that do not correspond to
 /// evidence the freeze actually issued are the named R7 rejection.
+#[cfg(test)]
 pub(crate) fn impl_ref_identities_from_evidence_slot(
     slot: &KindedSlot,
     freeze: &FreezeOverlay,

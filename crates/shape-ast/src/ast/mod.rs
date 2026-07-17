@@ -4,6 +4,7 @@
 //! supporting all features from the language specification.
 
 // Declare submodules
+pub mod captures;
 pub mod data_refs;
 pub mod data_sources;
 pub mod docs;
@@ -16,6 +17,7 @@ pub mod modules;
 pub mod operators;
 pub mod patterns;
 pub mod program;
+pub mod provenance;
 pub mod queries;
 pub mod span;
 pub mod statements;
@@ -31,6 +33,15 @@ pub mod windows;
 
 // From span.rs
 pub use span::{Span, Spanned};
+
+// From provenance.rs (ADR-009 D2 / C1 slice 2)
+pub use provenance::{
+    GeneratedExpansionFingerprint, GeneratedNodeIdentity, GeneratedNodeIssuer, GeneratedNodeOrigin,
+    GeneratedNodePath, GeneratedNodePathSegment, InvalidGeneratedNodePathSegment,
+};
+
+// From captures.rs (ADR-009 C1 slice 3) — the declared capture clause.
+pub use captures::{CaptureClause, CaptureEntry, CaptureMode};
 
 // From literals.rs
 pub use literals::{Duration, DurationUnit, InterpolationMode, Literal};

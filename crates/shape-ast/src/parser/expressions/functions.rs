@@ -9,10 +9,73 @@
 //! - Type annotations
 
 use super::super::pair_span;
-use crate::ast::{Expr, FunctionParameter, Span, Statement, TypeAnnotation};
+use crate::ast::{
+    CaptureClause, CaptureEntry, CaptureMode, Expr, FunctionParameter, Span, Statement,
+    TypeAnnotation,
+};
 use crate::error::Result;
 use crate::parser::Rule;
 use pest::iterators::Pair;
+
+/// ADR-009 C1 (slice 3) — parse the declared capture clause
+/// `; move cfg, share total` from a closure's parameter pipe.
+///
+/// The clause is the PARSER's half of the "one carrier, two producers"
+/// layering: it populates `Expr::FunctionExpr::captures`, the same field C2's
+/// `CheckedBody` staging will populate. There is no second carrier.
+fn parse_capture_clause(pair: Pair<Rule>) -> Result<CaptureClause> {
+    let span = pair_span(&pair);
+    let mut entries = Vec::new();
+    for entry_pair in pair.into_inner() {
+        if entry_pair.as_rule() != Rule::capture_entry {
+            continue;
+        }
+        let entry_span = pair_span(&entry_pair);
+        let mut mode: Option<CaptureMode> = None;
+        let mut name: Option<(String, Span)> = None;
+        for part in entry_pair.into_inner() {
+            match part.as_rule() {
+                Rule::capture_mode => {
+                    // `&` / `&mut` / `move` / `share`. The reference spellings
+                    // parse — and are then a TOTAL named rejection at the gate
+                    // ([C0902]); they are spellable so the diagnostic can be a
+                    // sentence about regions rather than a parse error.
+                    let text = part.as_str();
+                    let has_mut = part
+                        .into_inner()
+                        .any(|inner| inner.as_rule() == Rule::param_mut_keyword);
+                    mode = Some(if text.starts_with('&') {
+                        if has_mut {
+                            CaptureMode::ExclusiveBorrow
+                        } else {
+                            CaptureMode::SharedBorrow
+                        }
+                    } else if text.starts_with("share") {
+                        CaptureMode::Share
+                    } else {
+                        CaptureMode::Move
+                    });
+                }
+                Rule::ident => {
+                    name = Some((part.as_str().to_string(), pair_span(&part)));
+                }
+                _ => {}
+            }
+        }
+        // The grammar (`capture_entry = capture_mode ~ ident`) makes both parts
+        // mandatory, so a missing half is a parser bug, not a user error.
+        let (Some(mode), Some((name, name_span))) = (mode, name) else {
+            continue;
+        };
+        entries.push(CaptureEntry {
+            mode,
+            name,
+            span: entry_span,
+            name_span,
+        });
+    }
+    Ok(CaptureClause { entries, span })
+}
 
 /// Parse function expression (anonymous function)
 pub fn parse_function_expr(pair: Pair<Rule>) -> Result<Expr> {
@@ -38,6 +101,7 @@ pub fn parse_pipe_lambda(pair: Pair<Rule>) -> Result<Expr> {
     let span = pair_span(&pair);
     let inner = pair.into_inner();
     let mut params = vec![];
+    let mut captures = None;
     let mut body_expr = None;
     let mut body_stmts = vec![];
 
@@ -49,6 +113,9 @@ pub fn parse_pipe_lambda(pair: Pair<Rule>) -> Result<Expr> {
                         params.push(crate::parser::functions::parse_function_param(param_pair)?);
                     }
                 }
+            }
+            Rule::capture_clause => {
+                captures = Some(Box::new(parse_capture_clause(part)?));
             }
             Rule::expression => {
                 body_expr = Some(super::parse_expression(part)?);
@@ -70,6 +137,10 @@ pub fn parse_pipe_lambda(pair: Pair<Rule>) -> Result<Expr> {
         params,
         return_type: None,
         body,
+        // ADR-009 C1 (slice 2): ordinary user source — never a generated node.
+        generated_origin: None,
+        // ADR-009 C1 (slice 3): producer #1 of the declared-capture carrier.
+        captures,
         span,
     })
 }
@@ -141,6 +212,11 @@ pub fn parse_arrow_function(pair: Pair<Rule>) -> Result<Expr> {
         params,
         return_type,
         body,
+        // ADR-009 C1 (slice 2): ordinary user source — never a generated node.
+        generated_origin: None,
+        // Arrow-function syntax has no capture clause (the form is retired for
+        // new code; the grammar reaches it only through legacy paths).
+        captures: None,
         span,
     })
 }
@@ -154,6 +230,7 @@ pub fn parse_regular_function_expr(pair: Pair<Rule>) -> Result<Expr> {
         vec![pair]
     };
     let mut params = vec![];
+    let mut captures = None;
     let mut return_type: Option<TypeAnnotation> = None;
     let mut body = vec![];
 
@@ -169,6 +246,9 @@ pub fn parse_regular_function_expr(pair: Pair<Rule>) -> Result<Expr> {
                         params.push(crate::parser::functions::parse_function_param(param_pair)?);
                     }
                 }
+            }
+            Rule::capture_clause => {
+                captures = Some(Box::new(parse_capture_clause(part)?));
             }
             Rule::return_type => {
                 return_type = Some(crate::parser::parse_type_annotation(
@@ -191,6 +271,10 @@ pub fn parse_regular_function_expr(pair: Pair<Rule>) -> Result<Expr> {
         params,
         return_type,
         body,
+        // ADR-009 C1 (slice 2): ordinary user source — never a generated node.
+        generated_origin: None,
+        // ADR-009 C1 (slice 3): producer #1 of the declared-capture carrier.
+        captures,
         span,
     })
 }

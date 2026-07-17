@@ -19,8 +19,18 @@
 //! identity is the recurring schema-id collision root).
 
 use sha2::{Digest, Sha256};
+pub use shape_ast::ast::GeneratedNodePath;
 use shape_ast::ast::Span;
 use std::collections::HashMap;
+
+mod node_origin;
+#[cfg(test)]
+mod test_support;
+
+#[cfg(test)]
+fn new_test_node_issuer() -> shape_ast::ast::GeneratedNodeIssuer {
+    shape_ast::ast::GeneratedNodeIssuer::new()
+}
 
 /// Rejection-matrix row 1 (ticket D1): a generated node without a compiler
 /// symbol identity and expansion provenance — including any attempt to anchor
@@ -459,9 +469,7 @@ impl HygienicRole {
             Self::AnnotationBeforeResult => "role:annotation-before-result".to_string(),
             Self::ComptimeBlockWrapper => "role:comptime-block-wrapper".to_string(),
             Self::ComptimeHandlerWrapper => "role:comptime-handler-wrapper".to_string(),
-            Self::SpecializedAnnotationHandler => {
-                "role:specialized-annotation-handler".to_string()
-            }
+            Self::SpecializedAnnotationHandler => "role:specialized-annotation-handler".to_string(),
             Self::ForeignAnnotationWrapper => "role:foreign-annotation-wrapper".to_string(),
             Self::OriginalBodyShadow => "role:original-body-shadow".to_string(),
             Self::AnnotationHookImplBody => "role:annotation-hook-impl-body".to_string(),
@@ -494,7 +502,10 @@ impl HygienicSymbol {
         let nonce_descriptor = nonce.to_string();
         let hash = CanonicalHash::over_framed(
             HYGIENIC_SYMBOL_DOMAIN,
-            [role.canonical_descriptor().as_str(), nonce_descriptor.as_str()],
+            [
+                role.canonical_descriptor().as_str(),
+                nonce_descriptor.as_str(),
+            ],
         );
         Self {
             high: hash.high,
@@ -514,42 +525,6 @@ impl HygienicSymbol {
             "\u{1}hygienic:{:016x}{:016x}",
             self.high as u64, self.low as u64
         )
-    }
-}
-
-/// Structured path from a generated declaration's root to one generated
-/// node. Non-empty by construction: a path always starts at a declaration
-/// root segment.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct GeneratedNodePath {
-    segments: Vec<String>,
-}
-
-impl GeneratedNodePath {
-    /// Start a path at the generated declaration's root segment.
-    pub(crate) fn decl_root(segment: impl Into<String>) -> Self {
-        Self {
-            segments: vec![segment.into()],
-        }
-    }
-
-    /// Extend the path with a child node segment.
-    pub(crate) fn child(&self, segment: impl Into<String>) -> Self {
-        let mut segments = self.segments.clone();
-        segments.push(segment.into());
-        Self { segments }
-    }
-
-    pub fn segments(&self) -> &[String] {
-        &self.segments
-    }
-
-    /// Canonical `root/child/…` rendering for diagnostics (S4 row 7: the
-    /// generated-node note names the node path so a body error inside a
-    /// generated declaration is attributable without virtual documents,
-    /// which are ticket D2).
-    pub fn render(&self) -> String {
-        self.segments.join("/")
     }
 }
 
@@ -1395,8 +1370,14 @@ mod tests {
         // former synthetic spelling is a plain identifier and can never equal
         // this rendering.
         let desc = a.unspellable_descriptor();
-        assert!(desc.starts_with('\u{1}'), "descriptor must be SOH-prefixed: {desc:?}");
-        assert_ne!(desc, "__ann_args", "unspellable descriptor never equals the former spelling");
+        assert!(
+            desc.starts_with('\u{1}'),
+            "descriptor must be SOH-prefixed: {desc:?}"
+        );
+        assert_ne!(
+            desc, "__ann_args",
+            "unspellable descriptor never equals the former spelling"
+        );
         assert!(
             !desc.chars().next().unwrap().is_alphabetic(),
             "descriptor cannot start like a Shape identifier"
@@ -1435,8 +1416,7 @@ mod tests {
 
         // Outer-registry wrappers are disambiguated by the compiler nonce so
         // before/after and every application register distinct slots.
-        let specialized_next =
-            HygienicSymbol::mint(HygienicRole::SpecializedAnnotationHandler, 1);
+        let specialized_next = HygienicSymbol::mint(HygienicRole::SpecializedAnnotationHandler, 1);
         assert_ne!(
             specialized, specialized_next,
             "distinct nonces mint distinct specialized-handler slots"
@@ -1452,8 +1432,14 @@ mod tests {
             (foreign, "work___ann_wrapper"),
         ] {
             let desc = id.unspellable_descriptor();
-            assert!(desc.starts_with('\u{1}'), "descriptor must be SOH-prefixed: {desc:?}");
-            assert_ne!(desc, former, "unspellable descriptor never equals the former spelling");
+            assert!(
+                desc.starts_with('\u{1}'),
+                "descriptor must be SOH-prefixed: {desc:?}"
+            );
+            assert_ne!(
+                desc, former,
+                "unspellable descriptor never equals the former spelling"
+            );
         }
     }
 

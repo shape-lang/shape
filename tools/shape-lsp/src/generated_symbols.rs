@@ -22,42 +22,24 @@ use tower_lsp_server::ls_types::{
 
 use crate::util::offset_to_line_col;
 
-/// Structural pre-filter: a document can only hold generated declarations
-/// when some item carries an annotation application or a top-level
-/// `comptime { }` block exists (the only producers on the existing
-/// extend/materialization path). Purely AST-shape based — NOT a text scan —
-/// and only a compile-avoidance gate: a `false` skips the compiler query
-/// for documents that cannot generate.
-pub(crate) fn program_may_generate_symbols(program: &Program) -> bool {
-    program.items.iter().any(|item| match item {
-        Item::Comptime(..) => true,
-        Item::Function(def, _) => !def.annotations.is_empty(),
-        Item::ForeignFunction(def, _) => !def.annotations.is_empty(),
-        Item::StructType(def, _) => !def.annotations.is_empty(),
-        Item::Enum(def, _) => !def.annotations.is_empty(),
-        Item::Trait(def, _) => !def.annotations.is_empty(),
-        Item::Module(def, _) => !def.annotations.is_empty(),
-        _ => false,
-    })
-}
+mod compiler_queries;
+pub(crate) use compiler_queries::{
+    classify_generated_rename_from_compiler, compile_for_generated_capture_queries,
+    compile_for_generated_symbol_queries, generated_definition_from_compiler,
+    generated_references_from_compiler,
+};
+#[cfg(test)]
+pub(crate) use compiler_queries::{
+    generated_capture_compile_count, reset_generated_capture_compile_count,
+};
 
-/// Compile the document through the SAME compiler pipeline the diagnostics
-/// path uses (`analysis.rs`, RecoverAll modes) and return the compiler:
-/// its `generated_symbol_query()` table then answers every navigation
-/// query of this module. Compile errors are tolerated — the table holds
-/// every reservation made before a failure, and navigation must keep
-/// working on broken documents.
-pub(crate) fn compile_for_generated_symbol_queries(
-    program: &Program,
-    text: &str,
-) -> shape_vm::BytecodeCompiler {
-    let mut compiler = shape_vm::BytecodeCompiler::new();
-    compiler.set_type_diagnostic_mode(shape_vm::compiler::TypeDiagnosticMode::RecoverAll);
-    compiler.set_compile_diagnostic_mode(shape_vm::compiler::CompileDiagnosticMode::RecoverAll);
-    compiler.set_source(text);
-    let _ = compiler.compile_in_place(program);
-    compiler
-}
+/// Compiler-owned structural prefilter shared by generation discovery and
+/// tooling query sessions. False is proof over the complete inline item tree;
+/// true delegates the semantic decision to the compiler.
+pub(crate) use shape_vm::compiler::program_may_generate as program_may_generate_symbols;
+
+#[cfg(test)]
+mod import_context_tests;
 
 /// The syntactic kind of a callable use-site or declaration. A generated
 /// METHOD (`Point.answer`) is only reachable through method-call syntax
@@ -280,7 +262,18 @@ pub fn generated_definition(
     }
     let sites = call_site_name_spans(program, text, word);
     let cursor_kind = call_site_kind_at(&sites, offset)?;
-    let compiler = compile_for_generated_symbol_queries(program, text);
+    let compiler = compile_for_generated_symbol_queries(program, text)?;
+    generated_definition_for_kind(program, text, word, uri, &compiler, cursor_kind)
+}
+
+fn generated_definition_for_kind(
+    program: &Program,
+    text: &str,
+    word: &str,
+    uri: &Uri,
+    compiler: &shape_vm::BytecodeCompiler,
+    cursor_kind: CallableKind,
+) -> Option<GotoDefinitionResponse> {
     let matches: Vec<_> = compiler
         .generated_symbol_query()
         .symbols_named(word)
@@ -334,7 +327,19 @@ pub fn generated_references(
     }
     let sites = call_site_name_spans(program, text, word);
     let cursor_kind = call_site_kind_at(&sites, offset)?;
-    let compiler = compile_for_generated_symbol_queries(program, text);
+    let compiler = compile_for_generated_symbol_queries(program, text)?;
+    generated_references_for_kind(program, text, word, uri, &compiler, &sites, cursor_kind)
+}
+
+fn generated_references_for_kind(
+    program: &Program,
+    text: &str,
+    word: &str,
+    uri: &Uri,
+    compiler: &shape_vm::BytecodeCompiler,
+    sites: &[(Span, CallableKind)],
+    cursor_kind: CallableKind,
+) -> Option<Vec<Location>> {
     let matches: Vec<_> = compiler
         .generated_symbol_query()
         .symbols_named(word)
@@ -348,7 +353,7 @@ pub fn generated_references(
         return None;
     }
     let mut locations: Vec<Location> = Vec::new();
-    for (span, kind) in &sites {
+    for (span, kind) in sites {
         if *kind == cursor_kind {
             push_unique(&mut locations, location_from_span(uri, text, *span));
         }
@@ -528,16 +533,9 @@ fn binder_token_spans_in(
     spans
 }
 
-/// Classify a rename request over a generated symbol (Decision 68
-/// identity-controlled rename). `None` = the position does not target a
-/// generated symbol — ordinary rename applies. The classification is
-/// derived from the compiler-issued provenance: a name whose token appears
-/// inside the expansion's generator or application anchor is an explicit
-/// source binder (renaming it there recomputes the expansion); a name whose
-/// token appears in NO source anchor is generator-controlled. When several
-/// generated symbols answer to one name, every one must be source-bound for
-/// a text rename — otherwise the coarse-but-sound answer is
-/// generator-controlled (a partial text edit would desynchronize the rest).
+/// Classify generated-symbol rename from compiler provenance. A source-bound
+/// name renames by recomputation; wholly or partly generator-controlled sets
+/// refuse text edits. `None` leaves an ordinary symbol to the scope provider.
 pub fn classify_generated_rename(
     program: &Program,
     text: &str,
@@ -547,73 +545,8 @@ pub fn classify_generated_rename(
     if !program_may_generate_symbols(program) {
         return None;
     }
-    let sites = call_site_name_spans(program, text, word);
-    let cursor_kind = call_site_kind_at(&sites, offset)?;
-    let compiler = compile_for_generated_symbol_queries(program, text);
-    let matches: Vec<_> = compiler
-        .generated_symbol_query()
-        .symbols_named(word)
-        .into_iter()
-        .filter(|provenance| generated_decl_kind(provenance.decl_name) == cursor_kind)
-        .collect();
-    if matches.is_empty() {
-        return None;
-    }
-    // A hand-written declaration of the SAME callable kind shares the bare
-    // name: without receiver-type resolution the call sites are ambiguous
-    // between the generated and the hand-written symbol — a text edit over
-    // that set would corrupt one of them (round-1 review finding). The
-    // generated classification abstains; ordinary rename applies.
-    if !ordinary_declaration_spans(program, word, cursor_kind).is_empty() {
-        return None;
-    }
-    let comment_spans = comment_ranges(text);
-    let mut binder_spans: Vec<Span> = Vec::new();
-    let mut every_match_is_source_bound = true;
-    for provenance in &matches {
-        let mut spans =
-            binder_token_spans_in(text, provenance.generator.span(), word, &comment_spans);
-        spans.extend(binder_token_spans_in(
-            text,
-            provenance.application.span(),
-            word,
-            &comment_spans,
-        ));
-        if spans.is_empty() {
-            every_match_is_source_bound = false;
-        }
-        binder_spans.extend(spans);
-    }
-    let generated_ranges: Vec<Span> = matches
-        .iter()
-        .map(|provenance| provenance.checked_decl.span())
-        .collect();
-    if every_match_is_source_bound {
-        binder_spans.sort_by_key(|span| span.start);
-        binder_spans.dedup();
-        // Only KIND-COMPATIBLE call sites belong to the generated symbol:
-        // a plain/qualified `answer()` call next to a generated METHOD
-        // `Point.answer` references a different (hand-written) symbol and
-        // must never receive a rename edit.
-        let call_site_spans: Vec<Span> = sites
-            .iter()
-            .filter(|(_, kind)| *kind == cursor_kind)
-            .map(|(span, _)| *span)
-            .collect();
-        Some(GeneratedRenameClassification::SourceBinder {
-            binder_spans,
-            call_site_spans,
-            generated_ranges,
-        })
-    } else {
-        Some(GeneratedRenameClassification::GeneratorControlled {
-            decl_names: matches
-                .iter()
-                .map(|provenance| provenance.decl_name.to_string())
-                .collect(),
-            generator_span: matches[0].generator.span(),
-        })
-    }
+    let compiler = compile_for_generated_symbol_queries(program, text)?;
+    classify_generated_rename_from_compiler(program, text, word, offset, &compiler)
 }
 
 /// The source ranges where generated declarations anchor (checked-decl
@@ -624,7 +557,9 @@ pub fn generated_decl_ranges(program: &Program, text: &str) -> Vec<Span> {
     if !program_may_generate_symbols(program) {
         return Vec::new();
     }
-    let compiler = compile_for_generated_symbol_queries(program, text);
+    let Some(compiler) = compile_for_generated_symbol_queries(program, text) else {
+        return Vec::new();
+    };
     compiler
         .generated_symbol_query()
         .generated_symbols()
@@ -653,7 +588,9 @@ pub(crate) fn generated_workspace_symbols(
     if !program_may_generate_symbols(program) {
         return Vec::new();
     }
-    let compiler = compile_for_generated_symbol_queries(program, text);
+    let Some(compiler) = compile_for_generated_symbol_queries(program, text) else {
+        return Vec::new();
+    };
     let query_lower = query.to_lowercase();
     compiler
         .generated_symbol_query()
@@ -694,7 +631,9 @@ pub(crate) fn generated_symbol_completions(program: &Program, text: &str) -> Vec
     if !program_may_generate_symbols(program) {
         return Vec::new();
     }
-    let compiler = compile_for_generated_symbol_queries(program, text);
+    let Some(compiler) = compile_for_generated_symbol_queries(program, text) else {
+        return Vec::new();
+    };
     compiler
         .generated_symbol_query()
         .generated_symbols()
@@ -753,7 +692,7 @@ pub(crate) fn generated_render_inputs_at(
     }
     let sites = call_site_name_spans(program, text, word);
     let cursor_kind = call_site_kind_at(&sites, offset)?;
-    let compiler = compile_for_generated_symbol_queries(program, text);
+    let compiler = compile_for_generated_symbol_queries(program, text)?;
     let inputs: Vec<GeneratedSymbolRenderInputs> = compiler
         .generated_symbol_query()
         .symbols_named(word)
@@ -785,7 +724,9 @@ pub(crate) fn generated_render_inputs_all(
     if !program_may_generate_symbols(program) {
         return Vec::new();
     }
-    let compiler = compile_for_generated_symbol_queries(program, text);
+    let Some(compiler) = compile_for_generated_symbol_queries(program, text) else {
+        return Vec::new();
+    };
     compiler
         .generated_symbol_query()
         .generated_symbols()
@@ -1412,7 +1353,8 @@ let a = p.answer()
     #[test]
     fn compiled_document_answers_generated_symbol_names() {
         let program = parse_program(GENERATING_PROGRAM).expect("parses");
-        let compiler = compile_for_generated_symbol_queries(&program, GENERATING_PROGRAM);
+        let compiler = compile_for_generated_symbol_queries(&program, GENERATING_PROGRAM)
+            .expect("query compiler remains available");
         let names: Vec<String> = compiler
             .generated_symbol_query()
             .symbols_named("answer")
@@ -1429,7 +1371,9 @@ pub(crate) fn generated_document_symbols(program: &Program, text: &str) -> Vec<D
     if !program_may_generate_symbols(program) {
         return Vec::new();
     }
-    let compiler = compile_for_generated_symbol_queries(program, text);
+    let Some(compiler) = compile_for_generated_symbol_queries(program, text) else {
+        return Vec::new();
+    };
     compiler
         .generated_symbol_query()
         .generated_symbols()

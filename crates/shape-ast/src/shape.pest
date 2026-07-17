@@ -512,7 +512,7 @@ return_type = { "->" ~ type_annotation }
 // Lambdas use exclusively pipe syntax: |x| expr, |x, y| x + y, || 42
 // The => operator is reserved for match arms.
 function_expr = {
-    function_keyword ~ "(" ~ function_params? ~ ")" ~ return_type? ~ "{" ~ function_body ~ "}"
+    function_keyword ~ "(" ~ function_params? ~ capture_clause? ~ ")" ~ return_type? ~ "{" ~ function_body ~ "}"
     | pipe_lambda
 }
 
@@ -520,8 +520,33 @@ function_expr = {
 // Unambiguous with bitwise OR because | followed by ident (or |) at primary_expr
 // position cannot be a binary operator (no left operand).
 pipe_lambda = {
-    "|" ~ closure_params? ~ "|" ~ (expression | "{" ~ function_body ~ "}")
+    "|" ~ closure_params? ~ capture_clause? ~ "|" ~ (expression | "{" ~ function_body ~ "}")
 }
+
+// ADR-009 C1 — the DECLARED CAPTURE CLAUSE.
+//
+//   |acc, item; move cfg, share total| acc + item * cfg
+//   |; move handle| handle.close()
+//   |x;|                                  (declares: captures nothing)
+//
+// A `;`-introduced tail inside the parameter pipe. No new reserved word at
+// statement position, no `primary_expr` reorder: the `;` cannot begin a
+// closure param, so the clause is unambiguous where it appears.
+//
+// `capture_entry = capture_mode ~ ident` makes the string form
+// (`capture("x")`) UNSPELLABLE — a capture is a binding reference, never a
+// string.
+//
+// The clause is a GENERATED-CODE-ONLY surface: the grammar accepts it
+// everywhere a closure is legal, and the compiler rejects it in ordinary
+// source with a named diagnostic ([C0903]). Grammar cannot see the
+// distinction — a builder-only field is impossible on main because generated
+// closures come out of this same parser.
+capture_clause = { ";" ~ (capture_entry ~ ("," ~ capture_entry)*)? }
+capture_entry = { capture_mode ~ ident }
+capture_mode = { ("&" ~ param_mut_keyword?) | capture_move_keyword | capture_share_keyword }
+capture_move_keyword = @{ "move" ~ !(ASCII_ALPHANUMERIC | "_") }
+capture_share_keyword = @{ "share" ~ !(ASCII_ALPHANUMERIC | "_") }
 
 // ===== Statements =====
 statement = {

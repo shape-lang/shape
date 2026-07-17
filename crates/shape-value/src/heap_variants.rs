@@ -29,13 +29,11 @@
 /// referenced by tokens captured from a different call site), we define both
 /// the variant table AND the dispatch expressions in the SAME macro.
 ///
-/// `define_heap_types!` takes no arguments — the variant table is embedded.
-/// The public types and `impl` blocks are generated inside the expansion.
-///
 /// Callers import this via `crate::define_heap_types!()`.
 #[macro_export]
 macro_rules! define_heap_types {
     () => {
+        $crate::define_heap_kind_and_catalog! {
         /// Discriminator for HeapValue variants, usable without full pattern match.
         ///
         /// One variant per surviving `HeapValue` arm — no dead variants
@@ -399,6 +397,7 @@ macro_rules! define_heap_types {
             // `HeapValue::MatrixSlice(Arc<MatrixSliceData>)` arm for the
             // ADR-005 §1 / ADR-006 §2.3 symmetry property).
             MatrixSlice, // 35  (Round 18 S3 W12-matrix-floatslice-heapkind-exit, 2026-05-13)
+        }
         }
 
         /// Compact heap-allocated value. Strict-typed variants only — every

@@ -37,6 +37,7 @@ impl BytecodeCompiler {
         Self {
             program: BytecodeProgram::new(),
             current_function: None,
+            active_body_analysis_authority: None,
             locals: vec![HashMap::new()],
             hygienic_local_nonce: 0,
             module_bindings: HashMap::new(),
@@ -47,7 +48,7 @@ impl BytecodeCompiler {
             closure_function_ids: Vec::new(),
             closure_registry: shape_value::v2::closure_layout::ClosureRegistry::new(),
             closure_type_ids: Vec::new(),
-            closure_capture_kinds: Vec::new(),
+            closure_capture_packs: Vec::new(),
             closure_capture_names: Vec::new(),
             function_type_registry:
                 shape_value::v2::function_type_registry::FunctionTypeRegistry::new(),
@@ -99,6 +100,8 @@ impl BytecodeCompiler {
             source_lines: Vec::new(),
             imported_names: HashMap::new(),
             imported_annotations: HashMap::new(),
+            annotation_declarations:
+                statements::annotation_declarations::AnnotationDeclarationState::default(),
             imported_consts: HashMap::new(),
             module_builtin_functions: HashMap::new(),
             module_namespace_bindings: HashSet::new(),
@@ -184,6 +187,8 @@ impl BytecodeCompiler {
             owned_mutable_closure_captures: HashMap::new(),
             owned_mutable_capture_inner_kinds: HashMap::new(),
             shared_capture_inner_kinds: HashMap::new(),
+            pending_closure_capture_parameter_evidence: None,
+            inherited_capture_parameter_evidence: HashMap::new(),
             boxed_locals: HashSet::new(),
             shared_locals: HashSet::new(),
             owned_mutable_locals: HashSet::new(),
@@ -191,6 +196,7 @@ impl BytecodeCompiler {
             shared_module_bindings: HashSet::new(),
             shared_drop_locals: Vec::new(),
             permission_set: None,
+            graph_permission_state: Default::default(),
             current_blob_builder: None,
             completed_blobs: Vec::new(),
             blob_name_to_hash: HashMap::new(),
@@ -220,7 +226,9 @@ impl BytecodeCompiler {
             monomorphization_cache:
                 crate::compiler::monomorphization::cache::MonomorphizationCache::new(),
             monomorphization_in_progress: std::collections::HashSet::new(),
-            specialization_type_param_overlay: None,
+            specialization_type_overlays: Default::default(),
+            active_generated_node_stack: Vec::new(),
+            generated_node_issuer: shape_ast::ast::GeneratedNodeIssuer::new(),
             generated_symbols:
                 crate::compiler::comptime_builtins::expansion_provenance::GeneratedSymbolTable::new(
                 ),

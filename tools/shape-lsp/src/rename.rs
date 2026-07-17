@@ -10,160 +10,17 @@ use shape_ast::parser::parse_program;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use tower_lsp_server::ls_types::{
-    Location, Position, PrepareRenameResponse, Range, TextEdit, Uri, WorkspaceEdit,
+    Position, PrepareRenameResponse, Range, TextEdit, Uri, WorkspaceEdit,
 };
 
-/// ADR-009 D1 (S6, Decision 68, rejection row 4): the named report returned
-/// when a rename request targets a WHOLLY GENERATOR-CONTROLLED generated
-/// name (a name the generator computes; it never appears as a source binder
-/// token in the generator or application). Such a name is NEVER renamed by
-/// text edit — the response reports generator control and links the
-/// generator definition.
-pub const GENERATOR_CONTROLLED_NAME_RENAME_REPORT: &str = "this generated name is generator-controlled: it is computed by its \
-     generator and is never renamed by text edit; change the generator \
-     definition instead (ADR-009 Decision 68)";
-
-/// The generator-controlled rename report: the named message plus the
-/// generator-definition location (from the compiler's provenance query
-/// surface) the editor navigates to.
-#[derive(Debug, Clone, PartialEq)]
-pub struct GeneratorControlledRename {
-    pub message: String,
-    pub generator: Location,
-}
-
-/// Outcome of a rename request that targets a GENERATED symbol (answered
-/// from the compiler's SymbolId/provenance query surface — Decision 66:
-/// never a text scan). `None` from [`generated_rename`] = not a
-/// generated-symbol rename; the caller falls through to ordinary rename.
-#[derive(Debug, Clone, PartialEq)]
-pub enum GeneratedRename {
-    /// The name is an explicit source binder: edits cover ONLY the source
-    /// binder occurrences (generator/application binder token + call
-    /// sites); the expansion recomputes. Call-site edits never land inside
-    /// generated ranges (binder tokens live inside compiler-resolved
-    /// source anchors, which in D1 coincide with the checked-decl anchors).
-    Edits(WorkspaceEdit),
-    /// The name is wholly generator-controlled: never a text edit.
-    GeneratorControlled(GeneratorControlledRename),
-}
-
-/// Classify and answer a rename request over a generated symbol from the
-/// compiler query surface. `None` = the position does not target a
-/// generated symbol (ordinary rename applies).
-///
-/// Source-binder names (the expansion takes them from source) rename by
-/// RECOMPUTATION: the edits cover only the source binder occurrences
-/// (generator/application binder token + AST call sites); call-site edits
-/// never land inside generated ranges. Generator-controlled names are
-/// never a text edit.
-pub fn generated_rename(
-    text: &str,
-    uri: &Uri,
-    position: Position,
-    new_name: &str,
-    cached_program: Option<&Program>,
-) -> Option<GeneratedRename> {
-    if !is_valid_identifier(new_name) {
-        return None;
-    }
-    let old_name = get_word_at_position(text, position)?;
-    if is_keyword(&old_name) || is_builtin_function(&old_name) {
-        return None;
-    }
-    let offset = position_to_offset(text, position)?;
-    let program = match parse_program(text) {
-        Ok(p) => p,
-        Err(_) => cached_program?.clone(),
-    };
-    match crate::generated_symbols::classify_generated_rename(&program, text, &old_name, offset)? {
-        crate::generated_symbols::GeneratedRenameClassification::SourceBinder {
-            binder_spans,
-            call_site_spans,
-            generated_ranges,
-        } => {
-            // Rejection row 5 enforcement: a CALL-SITE edit may never land
-            // inside a generated range (the generated declaration
-            // recomputes). BINDER spans are exempt by construction: they
-            // are name tokens found inside compiler-resolved SOURCE anchors
-            // (generator definition / application site), and in D1 the
-            // checked-decl anchor COINCIDES with the application anchor —
-            // guarding binders too would cancel exactly the
-            // application-anchored source binders (`@gen("answer")`),
-            // leaving a partial, corrupting rename: call sites renamed,
-            // expansion still generating the old name (round-2 review
-            // finding 1).
-            let mut spans: Vec<_> = call_site_spans;
-            spans.retain(|span| {
-                !generated_ranges
-                    .iter()
-                    .any(|generated| span.start < generated.end && generated.start < span.end)
-            });
-            spans.extend(binder_spans);
-            spans.sort_by_key(|span| span.start);
-            spans.dedup();
-            if spans.is_empty() {
-                return None;
-            }
-            let edits: Vec<TextEdit> = spans
-                .into_iter()
-                .map(|span| {
-                    let (start_line, start_col) = offset_to_line_col(text, span.start);
-                    let (end_line, end_col) = offset_to_line_col(text, span.end);
-                    TextEdit {
-                        range: Range {
-                            start: Position {
-                                line: start_line,
-                                character: start_col,
-                            },
-                            end: Position {
-                                line: end_line,
-                                character: end_col,
-                            },
-                        },
-                        new_text: new_name.to_string(),
-                    }
-                })
-                .collect();
-            let mut changes = HashMap::new();
-            changes.insert(uri.clone(), edits);
-            Some(GeneratedRename::Edits(WorkspaceEdit {
-                changes: Some(changes),
-                document_changes: None,
-                change_annotations: None,
-            }))
-        }
-        crate::generated_symbols::GeneratedRenameClassification::GeneratorControlled {
-            decl_names,
-            generator_span,
-        } => {
-            let (start_line, start_col) = offset_to_line_col(text, generator_span.start);
-            let (end_line, end_col) = offset_to_line_col(text, generator_span.end);
-            let generator = Location {
-                uri: uri.clone(),
-                range: Range {
-                    start: Position {
-                        line: start_line,
-                        character: start_col,
-                    },
-                    end: Position {
-                        line: end_line,
-                        character: end_col,
-                    },
-                },
-            };
-            let message = format!(
-                "{GENERATOR_CONTROLLED_NAME_RENAME_REPORT}: `{}` is named by the \
-                 generator defined at line {}",
-                decl_names.join("`, `"),
-                start_line + 1,
-            );
-            Some(GeneratedRename::GeneratorControlled(
-                GeneratorControlledRename { message, generator },
-            ))
-        }
-    }
-}
+mod generated;
+pub use generated::{
+    GENERATOR_CONTROLLED_NAME_RENAME_REPORT, GeneratedRename, GeneratorControlledRename,
+    generated_rename,
+};
+#[cfg(test)]
+pub(crate) use generated::generated_rename_from_compiler;
+pub(crate) use generated::{GeneratedRenameRequest, generated_rename_request};
 
 /// Prepare for rename - check if the symbol at the position can be renamed
 pub fn prepare_rename(text: &str, position: Position) -> Option<PrepareRenameResponse> {
@@ -223,6 +80,21 @@ pub fn rename(
         None => {}
     }
 
+    rename_after_generated_query(text, uri, position, new_name, cached_program)
+}
+
+/// Ordinary scope-aware rename after the request has conclusively classified
+/// both generated captures and generated symbols from its shared compiler.
+pub(crate) fn rename_after_generated_query(
+    text: &str,
+    uri: &Uri,
+    position: Position,
+    new_name: &str,
+    cached_program: Option<&Program>,
+) -> Option<WorkspaceEdit> {
+    if !is_valid_identifier(new_name) {
+        return None;
+    }
     // Get the current name
     let old_name = get_word_at_position(text, position)?;
 
@@ -307,8 +179,63 @@ pub fn rename_cross_file(
     module_cache: Option<&ModuleCache>,
     workspace_root: Option<&Path>,
 ) -> Option<WorkspaceEdit> {
+    rename_cross_file_impl(
+        text,
+        uri,
+        position,
+        new_name,
+        cached_program,
+        documents,
+        module_cache,
+        workspace_root,
+        false,
+    )
+}
+
+/// Cross-file rename after the request's generated query has already returned
+/// `NotCapture` and generated-symbol classification has also abstained.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn rename_cross_file_after_generated_query(
+    text: &str,
+    uri: &Uri,
+    position: Position,
+    new_name: &str,
+    cached_program: Option<&Program>,
+    documents: Option<&DocumentManager>,
+    module_cache: Option<&ModuleCache>,
+    workspace_root: Option<&Path>,
+) -> Option<WorkspaceEdit> {
+    rename_cross_file_impl(
+        text,
+        uri,
+        position,
+        new_name,
+        cached_program,
+        documents,
+        module_cache,
+        workspace_root,
+        true,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn rename_cross_file_impl(
+    text: &str,
+    uri: &Uri,
+    position: Position,
+    new_name: &str,
+    cached_program: Option<&Program>,
+    documents: Option<&DocumentManager>,
+    module_cache: Option<&ModuleCache>,
+    workspace_root: Option<&Path>,
+    generated_query_complete: bool,
+) -> Option<WorkspaceEdit> {
     // Same-file edits via the existing scope-aware path.
-    let mut workspace_edit = rename(text, uri, position, new_name, cached_program)?;
+    let mut workspace_edit = if generated_query_complete {
+        rename_after_generated_query(text, uri, position, new_name, cached_program)?
+    } else {
+        rename(text, uri, position, new_name, cached_program)?
+    };
 
     // Determine the symbol name for cross-file scan.
     let Some(old_name) = get_word_at_position(text, position) else {
@@ -568,7 +495,7 @@ fn is_identifier_char(c: char) -> bool {
 }
 
 /// Check if a string is a valid identifier
-fn is_valid_identifier(name: &str) -> bool {
+pub(crate) fn is_valid_identifier(name: &str) -> bool {
     if name.is_empty() {
         return false;
     }

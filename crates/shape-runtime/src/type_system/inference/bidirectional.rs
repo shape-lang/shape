@@ -77,6 +77,8 @@ impl TypeInferenceEngine {
                 params,
                 return_type,
                 body,
+                generated_origin: _,
+                captures: _,
                 span: _span,
             } => self.check_function_expr_against(params, return_type.as_ref(), body, expected),
 
