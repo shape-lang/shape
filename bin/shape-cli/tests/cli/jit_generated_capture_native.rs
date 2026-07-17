@@ -83,6 +83,11 @@ fn c1_generated_move_heap_capture_is_native() {
 }
 
 #[test]
+fn c1_generated_single_level_share_over_var_is_native() {
+    assert_closure_fixture_reaches_native_jit("c1-generated-share-var.shape", "42\n");
+}
+
+#[test]
 fn c1_generated_nested_share_is_native() {
     assert_closure_fixture_reaches_native_jit("c1-generated-nested-share.shape", "42\n");
 }
