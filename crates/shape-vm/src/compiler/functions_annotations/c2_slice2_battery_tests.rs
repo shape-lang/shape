@@ -280,7 +280,7 @@ impl Drop for Conn {{
     method drop() {{ }}
 }}
 type Pool {{ n: int }}
-extend Pool {{ method acquire(self) -> Conn {{ Conn {{ id: 1 }} }} }}
+extend Pool {{ method acquire() -> Conn {{ Conn {{ id: 1 }} }} }}
 async fn tick() -> int {{ 0 }}
 
 annotation gen10b() {{
