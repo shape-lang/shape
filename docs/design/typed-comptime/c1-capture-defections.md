@@ -127,6 +127,71 @@ remote, or persisted specialization must persist or reissue the opaque callee
 capability and ordered semantic arguments. Rebuilding owner/ordinal authority
 from public parameter names would reopen the cache-confusion defect.
 
+## 9. Declared-capture mode rulings (user, 2026-07-14) and the rejected mismatch carrier
+
+Two user rulings closed the declared-capture mode mapping, and both were chosen
+to buy one invariant: the DECLARED WORD equals the EMITTED `CaptureKind`, always.
+
+- **Ruling 1 — `move` never lies.** `move` on a module-level binding is a total
+  `[C0906]` rejection. There is no `Move -> Shared` arm: `move` never silently
+  becomes `Shared`, so a reader can trust that the word `move` always emits an
+  owning capture (`Immutable` or `OwnedMutable`) or is refused outright.
+- **Ruling 2 — the fourth mode `share`.** `share` is the ONLY spelling for a
+  shared-ownership capture. It admits a `var`, an existing `SharedCell`, or a
+  module binding and emits `CaptureKind::Shared`; `share` on a plain local
+  `let` / `let mut` is `[C0908]`; `&` and `&mut` stay total
+  `[C0902] ReferenceEscapeIntoClosure` until regions exist.
+
+**CONSIDERED AND REJECTED: a `lowered != declared` mismatch field.** An earlier
+option accepted the declared word but surfaced a carrier recording that the
+lowered kind differed from the declaration. REFUSED, because a mismatch carrier
+IS the defection this ticket exists to close. §1 records that the first C1
+attempt validated the declared mode and then discarded it (the inference
+selector still chose the emitted kind), so a declared mode could change with no
+bytecode change; rework finding 6 was that this deviation from a posted ruling
+went unrecorded. The chosen shape has one producer (§2/§4): the declared word
+either emits the matching `CaptureKind` or is a named rejection — a mismatch is
+unrepresentable, so it cannot be silently tolerated by a field.
+
+## 10. Scope-growth disclosure (user-dispositioned 2026-07-16): import-permission and transactional annotation-import machinery
+
+DISCLOSED and MERGED as C1-necessary collateral. The C1 delta grew beyond the
+capture carrier to carry two adjacent subsystems:
+
+- A capability-permission-authentication subsystem —
+  `compiler/import_permissions.rs` (~415 LOC) plus a rewrite of the
+  blob-permission recording gate in `expressions/function_calls.rs`
+  (`record_blob_permissions`, deriving `required_permissions` from the callee's
+  actual native-stdlib call rather than from the import statement).
+- The transactional annotation-import / alias machinery: staged aliases,
+  local-shadow tombstones, and per-module graph snapshots.
+
+**Why it is C1-necessary rather than scope creep.** C1's flagship rejection
+surface is imported-annotation generated bodies; a generated body that calls an
+imported annotation must resolve and authenticate that import's permissions and
+aliases for the rejection to be TOTAL rather than a hole. Totality of the
+flagship surface demanded the import machinery.
+
+**Evidence supporting the disposition.** Piecewise Standards/Spec review cycles
+recorded in the `AGENTS.md` registry, focused gates (import_permissions 8/8,
+pipeline 5/5, binding 6/6), and a full-battery differential green vs main.
+
+## 11. CHECK-14: a branch-new `Ptr(_)` wildcard made exhaustive, not cataloged (2026-07-17)
+
+The transferred-closure reconstruction path
+(`bytecode/closure_layout_fallback.rs`) matched `NativeKind::Ptr(_)` with a
+single wildcard accept-arm, so any future `HeapKind` would silently transfer as
+an opaque pointer instead of forcing a decision. This wildcard was BRANCH-NEW
+(introduced on `adr009/c1-rework`, commit `f1a47eac`), so the temptation was to
+catalog it as a known pattern.
+
+REFUSED — cataloging a branch-new wildcard would be gate-dodging. The arm was
+made EXHAUSTIVE instead: every `HeapKind` is enumerated, the six
+non-transferable kinds keep erroring, all current others keep the
+opaque-pointer mapping, and a newly added `HeapKind` now fails to compile at
+this arm. `verify-merge` CHECK 14 (branch-new wildcard detection) passes on the
+exhaustive form.
+
 ## Current and target boundary
 
 CURRENT on the C1 branch: canonical `FunctionExpr` carrier, four-mode catalog,

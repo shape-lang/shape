@@ -60,6 +60,14 @@ Their semantic identity is owner + ordinal; source spelling is presentation and
 an independent active-declaration consistency check, not an identity. The
 transient annotation carrier is authenticated and fails closed.
 
+Open debt: the presentation renderer is context-free. It re-canonicalizes
+sub-annotations without their enclosing context, so it cannot yet spell
+trait-context members or existential witnesses and falls back to the
+already-computed canonical identity rather than failing. Because spelling is
+diagnostic-only and never gates the authoritative identity or category, this is
+a rendering-fidelity gap, not a soundness gap; a context-carrying renderer is
+future work.
+
 Before every exact cache lookup, the exact call-site fact must match the active,
 inference-issued `SemanticCalleeDeclaration` by opaque parameter token, ordinal,
 and current spelling. An asserted exact fact with a missing, foreign, stale,
