@@ -42,28 +42,53 @@
 //!   removing a non-last entry would shift every later `FunctionId`, corrupting
 //!   already-emitted `Operand::Function` operands in other bodies.
 //! - the `analyze_function_body` fact bundle keyed by function name.
+//! - the closure-index cluster derived from `program.functions` position (see
+//!   next section).
 //! - `generated_symbols` reservations.
 //!
-//! ## Rollback-set correction: `closure_capture_packs` is NEVER rolled back
+//! ## Completing the truncation over the closure-index cluster
 //!
-//! `closure_capture_packs` was initially listed here but is DELIBERATELY not
-//! rolled back. It is one member of a ~7-way parallel closure-registry cluster
-//! (`closure_type_ids`, `closure_function_ids`, `closure_capture_names`,
-//! `function_type_ids` are `Vec`s; `closure_registry`, `function_type_registry`
-//! are registry structs). The cluster must stay mutually consistent: truncating
-//! only the packs desynchronises it, so a REUSED compiler that re-registers a
-//! closure index trips the `closure N has more than one ClosureTypeId entry`
-//! uniqueness check (`compiler_impl_reference_model/closure_layouts.rs`). The
-//! packs are per-function closure state populated by ALL closures (user and
-//! generated), which the per-function reference-flow transaction intentionally
-//! leaves as a consistent, harmless ghost — this install-level transaction must
-//! not reach into it. Rolling back the whole cluster instead would couple into
-//! the registry structs (no truncate API), so the packs are treated as query
-//! metadata, not an executable publication, and are never rolled back. A
-//! rejected generated closure never reaches the pack push anyway (the capture
-//! rejection precedes the push), so no generated ghost pack is produced. (Slice
-//! review: the claim "a ghost pack is unreachable from any executable or
-//! observable surface post-reject" is the one to attack.)
+//! Closures ARE `program.functions` entries, and a cluster of tables is keyed
+//! by that function index — `closure_type_ids`, `closure_function_ids`,
+//! `closure_capture_names`, `function_type_ids`, and `closure_capture_packs`
+//! (`finalize_closure_function_layouts` keys packs by `pack.closure` and
+//! iterates `closure_type_ids` by function index,
+//! `compiler_impl_reference_model/closure_layouts.rs`). Because these are
+//! DERIVED from the function-table position, truncating `program.functions`
+//! leaves them dangling: a REUSED compiler re-registers a closure at the freed
+//! index and then holds two cluster entries for that index, tripping the
+//! "closure N has more than one ClosureTypeId entry" / "more than one capture
+//! pack" uniqueness checks. (At base ff715e61 there was NO clearing — a failed
+//! compile simply leaked its closure function entry, keeping the index space
+//! monotonic across reuse; the leak is the very ghost C2 removes, so completing
+//! the truncation is how reuse-consistency is preserved without the leak.) So
+//! the truncation is completed over these function-index-keyed derivatives,
+//! dropping entries at index >= watermark. The interned-identity registries
+//! (`closure_registry`, `function_type_registry`) are keyed by `ClosureTypeId`,
+//! never duplicate, and are looked up (never enumerated for uniqueness) by
+//! finalize, so they need no rollback. `closure_capture_packs` is completed
+//! batch-only (it is the cluster's query-metadata member — the LSP capture
+//! query reads it; see below).
+//!
+//! ### Why these five tables are the complete set
+//!
+//! A table re-hides this bug iff it is APPEND-accumulated across compiles AND
+//! keyed by function index. Every append of a function-index entry in the whole
+//! compiler is the one closure-registration block (`expressions/closures.rs`,
+//! the five `.push((func_idx as u16, …))` / `.push((…, func_idx as u16))` at
+//! lines 3539/3542/3547/3563/3576) — exactly these five tables. The other
+//! function-index-shaped fields are self-healing and correctly excluded:
+//! `function_hashes_by_id` is index-ASSIGNED (overwrite, not append) and
+//! reconciled to `program.functions.len()` at compile end
+//! (`compiler_impl_reference_model.rs`), so a reused index overwrites rather
+//! than duplicates; `program.closure_function_layouts` is REBUILT wholesale each
+//! `finalize` (never accumulated); the two registries are `ClosureTypeId`-keyed,
+//! not function-index-keyed. Every other `u16`-keyed compiler table is keyed by
+//! a LOCAL slot or MODULE-BINDING index, not a function index. The per-function
+//! capture EVIDENCE (`mutable_closure_captures`, `shared_closure_captures`,
+//! `owned_mutable_closure_captures`, `pending_closure_capture_parameter_evidence`)
+//! is already restored by the reference-flow transaction on the reject path
+//! (the test's earlier asserts pin exactly that).
 //!
 //! # Query-session retain mode
 //!
@@ -75,11 +100,30 @@
 //! `generated_symbols`, the capture query reads `closure_capture_packs`
 //! (`capture_plan/query.rs`). A query session never executes and never ships a
 //! program, so it still rolls back every truly-executable publication
-//! (`program.functions`, the name-keyed side tables, the fact bundle). The mode
-//! gates exactly ONE table — `generated_symbols` — so it survives for post-`Err`
-//! queryability (the tolerance commit `4dce9471` relies on); `closure_capture_packs`
-//! survives everywhere by never being rolled back at all (above). Ordinary
-//! (batch/install) compilation leaves the mode off and rolls back `generated_symbols`.
+//! (`program.functions`, the name-keyed side tables, the fact bundle, and the
+//! EXECUTABLE closure-index members `closure_type_ids` / `closure_function_ids`
+//! / `closure_capture_names` / `function_type_ids`, which no query reads). The
+//! mode gates the two tables the LSP DOES read — `generated_symbols` and
+//! `closure_capture_packs` — so they survive for post-`Err` queryability (the
+//! tolerance commit `4dce9471` relies on). Ordinary (batch/install) compilation
+//! leaves the mode off and rolls back both.
+//!
+//! ## The query-mode asymmetry and why it is safe
+//!
+//! In query mode this retains `closure_capture_packs` while its executable
+//! cluster siblings (`closure_type_ids` etc.) are truncated — a deliberate
+//! asymmetry that would be a cluster desync on the BATCH reuse path but is safe
+//! here. A generated-symbol/capture query runs on a FRESH compiler per request
+//! (`generated_query_compiler`); it never reuses a compiler across compiles, so
+//! the reuse pattern that turns dangling entries into duplicates never occurs.
+//! `finalize_closure_function_layouts` — the only consumer that joins packs to
+//! `closure_type_ids` / `program.functions` — runs during compilation, before
+//! this rollback, and does not run again on the query path. The capture query
+//! (`capture_plan/query.rs`) reads only `pack.origin` / `pack.descriptors`,
+//! never `pack.closure` as an index into `program.functions` or the siblings,
+//! so a retained pack whose function index was truncated still answers
+//! correctly. The batch path rolls back all cluster members together and stays
+//! fully consistent.
 
 use crate::compiler::BytecodeCompiler;
 
@@ -117,18 +161,19 @@ impl BytecodeCompiler {
     /// Failure path: restore the compiler to the pre-install baseline so no
     /// partial generated install is observable.
     ///
-    /// Every truly-executable publication rolls back unconditionally. The
-    /// `generated_symbols` reservation table rolls back too UNLESS the named
-    /// query-session retain mode is set, in which case it survives for
-    /// post-`Err` queryability. `closure_capture_packs` is never rolled back in
-    /// either mode (see the module docs).
+    /// Every truly-executable publication rolls back unconditionally (including
+    /// the executable members of the closure-index cluster). The reservation
+    /// tables the LSP queries read — `generated_symbols` and
+    /// `closure_capture_packs` — roll back too UNLESS the named query-session
+    /// retain mode is set, in which case they survive for post-`Err`
+    /// queryability (see the module docs).
     pub(in crate::compiler) fn rollback_checked_body_install(
         &mut self,
         transaction: InstallTransaction,
     ) {
         self.rollback_executable_publications(&transaction);
         if !self.retain_generated_reservations_for_query_session {
-            self.rollback_generated_symbol_reservations(&transaction);
+            self.rollback_query_retained_reservations(&transaction);
         }
     }
 }

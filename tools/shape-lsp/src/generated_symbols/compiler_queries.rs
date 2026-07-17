@@ -102,13 +102,12 @@ fn generated_query_compiler(text: &str) -> shape_vm::BytecodeCompiler {
     compiler.set_compile_diagnostic_mode(shape_vm::compiler::CompileDiagnosticMode::RecoverAll);
     // ADR-009 C2 #13 (slice 1): this is a query session, not an install. It
     // never executes or ships a program, so the atomic install transaction
-    // still discards every executable publication on a recoverable `Err`; the
-    // retain mode keeps the `generated_symbols` reservation table so
-    // `query_authority_or_none` (and the symbol query) can keep answering from
-    // it (the tolerance this file relies on). `closure_capture_packs` — read by
-    // the capture query — survives everywhere because the transaction never
-    // rolls it back (it is a closure-registry consistency-cluster member, not an
-    // executable publication).
+    // still discards every executable publication on a recoverable `Err`
+    // (including the executable closure-index cluster members). The retain mode
+    // keeps exactly the two tables the LSP queries read — `generated_symbols`
+    // (symbol query / `query_authority_or_none`) and `closure_capture_packs`
+    // (capture query) — so they survive a recoverable `Err` (the tolerance this
+    // file relies on). Ordinary batch compilation rolls both back.
     compiler.set_retain_generated_reservations_for_query_session(true);
     compiler.set_source(text);
     compiler
