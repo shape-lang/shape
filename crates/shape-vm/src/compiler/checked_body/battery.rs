@@ -63,8 +63,8 @@
 //! | 3 | ownership (use-after-move) | D4 reuse — solver `UseAfterMove` | `B0005` | `[B0005]` | `battery_row3_*` |
 //! | 4 | borrow (shared/exclusive conflict) | D4 reuse — solver `ConflictSharedExclusive` | `B0001` | `[B0001]` | `battery_row4_*` |
 //! | 5 | lifetime (ref-escape-into-closure) | D4 reuse — **C1 layer** `ReferenceEscapeIntoClosure` (a generated closure DECLARES captures; a declared ref capture is total) — NOT solver B0003 | `C0902` | `[C0902]` | `battery_row5_*` |
-//! | 6 | suspension (excl ref across task boundary) | D4 reuse — solver `ExclusiveRefAcrossTaskBoundary` (well-typed re-typing; else BLOCKED-BY-INFERENCE) | `B0006` | `[B0006]` | `battery_row6_*` |
-//! | 7 | Send (non-sendable across detached boundary) | D4 reuse — solver `NonSendableAcrossTaskBoundary` (well-typed re-typing; else BLOCKED-BY-INFERENCE) | `B0014` | `[B0014]` | `battery_row7_*` |
+//! | 6 | suspension (excl ref across task boundary) | D4 reuse — solver `ExclusiveRefAcrossTaskBoundary` (well-typed re-typing, GREEN) | `B0006` | `[B0006]` | `battery_row6_*` |
+//! | 7 | Send (non-sendable across detached boundary) | **BLOCKED-BY-INFERENCE** — the closure-valued `async let` block fails Future unification before the borrow check (intended: solver `NonSendableAcrossTaskBoundary` → B0014) | *(inference)* | `is not compatible with` | `battery_row7_*` |
 //! | 8 | cleanup | not generated-reachable-as-rejection (finding) | — | — | — |
 //! | 9 + 10a | sync `Drop` / async-cleanup-in-sync-context | NEW — `statements.rs`'s `AsyncOnly`-in-sync gate had no code | **`C0923`** | `[C0923]` | `battery_row9_and_10a_*` |
 //! | 10b | async-drop-context ex.1 (D6, greenfield) | NEW — reached via D6's CONSERVATIVE over-rejection (drop discharged before await). The headline live-across case is emission-preempted until wave40 (see "Row 10b reachability") | **`C0922`** | `[C0922]` (2 conservative pins) / `not available in compile-time code` (1 headline pin) | `battery_row10b_*` |
@@ -76,11 +76,18 @@
 //! the solver (rows 3/4/9-10a), but a GENERATED closure's capture/reference
 //! checks are enforced at the **C1 surface layer** (C0902 / the C0003
 //! "captures must be explicit" envelope), NOT the solver (so row 5's
-//! reference-escape is C0902, not B0003); (2) `async let` shapes carrying a
-//! reference or a closure value fail **type-inference** (Future-unification)
-//! before any borrow check — rows 6/7 are re-typed to well-typed `Future<int>`
-//! blocks, and if a grounded-well-typed shape still fails they are
-//! BLOCKED-BY-INFERENCE, a named production candidate, not not-generated-reachable.
+//! reference-escape is C0902, not B0003); (2) some `async let` shapes fail
+//! **type-inference** (Future-unification) before any borrow check. Re-typing to
+//! a well-typed `Future<int>` block resolved this for **row 6** (an `&mut x`
+//! borrow, NO closure — GREEN, reaches B0006), proving `async let` DOES
+//! type-check in comptime-generated bodies. **Row 7** did NOT resolve: the
+//! discriminating variable is a CLOSURE inside the block — a closure-valued
+//! `async let` block still fails Future unification while row 6's non-closure
+//! block unifies. Row 7 is therefore BLOCKED-BY-INFERENCE (a named production
+//! candidate — "async-let blocks containing closures fail Future unification in
+//! comptime-generated bodies" — routed to the C2 close report), NOT
+//! not-generated-reachable; its pin asserts the current inference error so it
+//! flips loudly when inference is fixed.
 //!
 //! ## Code-block allocation (D2, verified empirically)
 //!

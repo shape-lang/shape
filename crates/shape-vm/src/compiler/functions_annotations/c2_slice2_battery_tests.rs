@@ -28,8 +28,8 @@
 //! | 3 | ownership | `battery_row3_ownership_use_after_move_rejects_atomically` |
 //! | 4 | borrow | `battery_row4_borrow_conflict_rejects_atomically` |
 //! | 5 | lifetime | `battery_row5_lifetime_reference_escape_rejects_atomically` (C1-layer [C0902], not solver B0003 — see note) |
-//! | 6 | suspension | `battery_row6_suspension_exclusive_ref_across_task_boundary_rejects_atomically` (well-typed re-typing — see note) |
-//! | 7 | Send (task-boundary) | `battery_row7_send_nonsendable_across_task_boundary_rejects_atomically` (well-typed re-typing — see note) |
+//! | 6 | suspension | `battery_row6_suspension_exclusive_ref_across_task_boundary_rejects_atomically` (well-typed re-typing → [B0006]) |
+//! | 7 | Send (task-boundary) | `battery_row7_send_nonsendable_across_task_boundary_rejects_atomically` (**BLOCKED-BY-INFERENCE** — see note) |
 //! | 8 | cleanup | **NOT-GENERATED-REACHABLE-AS-REJECTION** — see below |
 //! | 9 + 10a | sync `Drop` / async-cleanup-in-sync-context | `battery_row9_and_10a_async_only_drop_in_sync_context_rejects_atomically` |
 //! | 10b | async-drop-context (D6) | TWO conservative firing pins (drop discharged before await → [C0922]) + ONE headline-case truth pin (drop LIVE across await → emission-preempted) + two controls — see note |
@@ -64,9 +64,13 @@
 //! structural findings in `checked_body/battery.rs` "Gate correction" and "Row
 //! 10b reachability"): **row 5** is a C1-layer `[C0902]` (a generated closure
 //! DECLARES captures; a declared ref capture is total), not the solver's B0003;
-//! **rows 6, 7** were re-typed (their `async let` shapes failed Future
-//! type-inference before any borrow check — else BLOCKED-BY-INFERENCE); **row
-//! 10b**'s D6 headline case (drop LIVE across `await`) is emission-preempted
+//! **row 6**'s re-typed well-typed `async let` block unifies and reaches
+//! `[B0006]`; **row 7** is BLOCKED-BY-INFERENCE — the discriminating variable is
+//! the CLOSURE inside its `async let` block (row 6's non-closure block unifies,
+//! row 7's closure-valued block fails Future unification), so its pin asserts the
+//! current inference error as a live tripwire (named candidate: "async-let blocks
+//! containing closures fail Future unification in comptime-generated bodies");
+//! **row 10b**'s D6 headline case (drop LIVE across `await`) is emission-preempted
 //! until wave40, so D6 is reached via its CONSERVATIVE over-rejection (drop
 //! discharged before the await). Each pin's docstring carries its own argument.
 
@@ -274,25 +278,26 @@ type Widget { id: int }
 
 // ── Row 7: Send (non-sendable across a detached task boundary) ──────────────
 
-/// B0014 (Send / non-sendable across a detached boundary). A generated ASYNC
-/// body spawns an `async let` task whose block builds a `move`-capture closure
-/// over a REASSIGNED outer local `x` and calls it. `x` is closure-captured AND
-/// assigned more than once, so it is a `mutable_capture` slot
-/// (`collect_closure_captures`, `assign_counts > 1`); crossing the detached
-/// boundary trips the loan-independent sendability path
-/// (`solver.rs:394-406`) → `NonSendableAcrossTaskBoundary` (B0014).
+/// BLOCKED-BY-INFERENCE (slice-3 gate finding). This is the Send / non-sendable
+/// (B0014) fixture — a generated ASYNC body whose `async let` task builds a
+/// `move`-capture closure over a reassigned local and calls it — but it does NOT
+/// reach the B0014 borrow check: it fails TYPE INFERENCE first, the constraint
+/// solver emitting Future-unification garbage ("… is not compatible with …")
+/// over the closure-valued block.
 ///
-/// RE-TYPING (slice-3, one attempt per the ruling): the slice-2 shape
-/// `async let fut = || x` never reached B0014 — it failed TYPE INFERENCE first
-/// ("Future<() -> unknown> is not compatible with () -> unknown", the future's
-/// value type being a closure). This shape makes the async-let value a
-/// well-typed `Future<int>` (a block that builds the closure, CALLS it, and
-/// yields an int), so unification succeeds and the borrow check runs. The
-/// explicit `|; move x|` clause is required because a generated closure must
-/// DECLARE its captures (an implicit `|| x` dies on the C0003 "captures must be
-/// explicit" gate); `move` over a `let mut` local lowers to `OwnedMutable` (no
-/// C0902/C0908). If the constraint solver STILL cannot unify this well-typed
-/// shape, the row is BLOCKED-BY-INFERENCE (same named candidate as row 6).
+/// This is a NARROWED production finding, NOT not-generated-reachable: row 6's
+/// analogous well-typed `async let` block (an `&mut x` borrow, NO closure)
+/// UNIFIES and reaches B0006 green — so `async let` DOES type-check in
+/// comptime-generated bodies. The discriminating variable is the CLOSURE inside
+/// the block. Named candidate: "async-let blocks containing closures fail Future
+/// unification in comptime-generated bodies" (see battery.rs "Gate correction").
+///
+/// The pin asserts the CURRENT inference error, as a live tripwire: when
+/// inference is fixed the closure-bearing block will unify, this fixture will
+/// reach the B0014 borrow check (or another later gate), the "is not compatible
+/// with" text will vanish, and this assertion FLIPS LOUDLY — surfacing the fix
+/// and demanding the row be re-classified to its real code. The fixture is kept
+/// exactly as the closure-bearing shape that is the finding's evidence.
 #[test]
 fn battery_row7_send_nonsendable_across_task_boundary_rejects_atomically() {
     assert_generated_install_rejected(
@@ -307,8 +312,11 @@ annotation gen7() {
 @gen7()
 type Widget { id: int }
 "#,
-        // Row 7 D4-reuse: solver `NonSendableAcrossTaskBoundary` → B0014.
-        "[B0014]",
+        // Row 7 BLOCKED-BY-INFERENCE: the current constraint-solver Future-
+        // unification failure over the closure-valued async-let block. NOT the
+        // intended B0014 — the fixture never reaches the borrow check. Flips loudly
+        // when inference is fixed (the text vanishes; re-classify then).
+        "is not compatible with",
     );
 }
 
