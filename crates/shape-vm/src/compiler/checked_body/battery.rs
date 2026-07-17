@@ -80,13 +80,26 @@
 //! `extend` body that VIOLATES one check through the real install path and
 //! asserts a rejection with nothing published (generic, code-free; slice 3
 //! attaches the code). Rows 1, 3, 4, 5, 6, 7, 9/10a, and 10b have firing pins;
-//! 10b carries a MASK-BREAKING second firing pin over an inferred drop local
-//! initialized by a METHOD CALL (`let x = pool.acquire()` returning a `Drop`
-//! type — the route `initializer_call_return_drop_type` misses, caught only by
-//! the emission authority; guards the soundness fix) plus two controls
-//! (drop-local-without-suspension and suspension-without-drop-local both
-//! install) so the D6 rejection is attributable to the COMBINATION. Two rows
-//! are NOT-GENERATED-REACHABLE — a
+//! 10b carries a second firing pin over an inferred drop local initialized by a
+//! METHOD CALL (`let x = pool.acquire()` returning a `Drop` type), plus two
+//! controls (drop-local-without-suspension and suspension-without-drop-local
+//! both install) so the D6 rejection is attributable to the COMBINATION.
+//!
+//! **The method-call pin is `#[ignore]`'d — it exposed a pre-existing RAII
+//! EMISSION HOLE, not a D6 gap (traced 2026-07-17, surfaced to the supervisor).**
+//! Neither `initializer_call_return_drop_type` (statements.rs:7238, `_ => None`
+//! for MethodCall) nor `concrete_type_for_expr`'s MethodCall arm resolves a user
+//! method's declared return, so `x`'s type never stamps; the drop-plan emits an
+//! UNTYPED `DropCall` and `dispatch_user_drop` (trait_object_ops.rs:766) runs no
+//! `drop()` — `Conn::drop` NEVER RUNS for `let x = p.acquire()`, in USER code
+//! identically to generated. The D6 flag (`local_drop_kind`) faithfully mirrors
+//! that leaking emission (single-authority parity holds; it did not
+//! under-detect a discharged obligation). The single-authority fix — extend
+//! `initializer_call_return_drop_type` to resolve a MethodCall's declared
+//! return — closes emission AND un-ignores this pin; it changes runtime drop
+//! behavior, so it is the supervisor's call, not a D6 patch.
+//!
+//! Two rows are NOT-GENERATED-REACHABLE — a
 //! finding, not a gap:
 //!
 //! - **Row 2 (effect, D5): NOT-GENERATED-REACHABLE.**
