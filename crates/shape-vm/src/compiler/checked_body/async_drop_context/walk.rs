@@ -101,7 +101,11 @@ fn expr_has_suspension(expr: &Expr) -> bool {
         | Expr::Duration(_, _)
         | Expr::Continue(_)
         | Expr::Unit(_) => false,
-        // Generated closures: descend (conservative, whole-body).
+        // Generated closures: descend FRAME-AGNOSTICALLY — a suspension anywhere
+        // in the generated body, including inside a nested closure that is its
+        // own call frame, counts. This is a deliberate conservative over-reject
+        // (D6 intent: precision, incl. which frame a suspension belongs to, is
+        // wave40's), never an under-detect.
         Expr::FunctionExpr { params, body, .. } => {
             params
                 .iter()

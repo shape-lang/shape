@@ -80,8 +80,10 @@
 //! `extend` body that VIOLATES one check through the real install path and
 //! asserts a rejection with nothing published (generic, code-free; slice 3
 //! attaches the code). Rows 1, 3, 4, 5, 6, 7, 9/10a, and 10b have firing pins;
-//! 10b carries a second firing pin over an INFERRED (unannotated) drop local
-//! (guarding the emission-authority soundness fix) plus two controls
+//! 10b carries a MASK-BREAKING second firing pin over an inferred drop local
+//! initialized by a METHOD CALL (`let x = pool.acquire()` returning a `Drop`
+//! type — the route `initializer_call_return_drop_type` misses, caught only by
+//! the emission authority; guards the soundness fix) plus two controls
 //! (drop-local-without-suspension and suspension-without-drop-local both
 //! install) so the D6 rejection is attributable to the COMBINATION. Two rows
 //! are NOT-GENERATED-REACHABLE — a
@@ -92,10 +94,12 @@
 //!   (transaction.rs:58-92) fires only on a MODULE binding's
 //!   reference/storage-projection change across a callable; under D5
 //!   (shipped-semantics only, no interprocedural effect summary) no Shape
-//!   statement in a generated method body can synthesize that transition. The
-//!   only tests that trip it call `set_reference_flow_class` /
-//!   `set_binding_storage_class` directly. No firing pin is possible from a
-//!   generated body.
+//!   statement in a generated method body can synthesize that transition — a
+//!   module-binding REASSIGNMENT inside a body reads/writes the binding but does
+//!   not change its `ReferenceClass` / `BindingStorageClass` projection, which
+//!   is what the conflict compares. The only tests that trip it call
+//!   `set_reference_flow_class` / `set_binding_storage_class` directly. No
+//!   firing pin is possible from a generated body.
 //! - **Row 8 (cleanup): NOT-GENERATED-REACHABLE-AS-REJECTION.**
 //!   `emit_drops_for_early_exit` (`helpers.rs:6283-6423`) is EMISSION-only:
 //!   every path emits a drop opcode or skips, ends `Ok(())`, and never builds a
@@ -104,6 +108,9 @@
 //!
 //! Rows 9 and 10a are the SAME site (statements.rs:7246-7247), so one fixture
 //! covers both (not fabricated as two distinct trips). Row 7's exact
-//! `NonSendableAcrossTaskBoundary` code has no existing green source fixture;
-//! its pin authors the detached-mutable-capture-closure shape and asserts
-//! generic rejection (a sibling task-boundary rejection also passes).
+//! `NonSendableAcrossTaskBoundary` (B0014) code has no existing green source
+//! fixture; its pin authors the detached-mutable-capture-closure shape and
+//! asserts generic rejection (a sibling task-boundary rejection also passes).
+//! The exact B0014-ISOLATION fixture (asserting that specific code, not a
+//! sibling) is slice-3's obligation — it lands with the C09xx code assignment,
+//! not here.
