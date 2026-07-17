@@ -1803,6 +1803,46 @@ fn render_shape_string_literal(s: &str) -> String {
 // `ModuleExports::invoke_export` which is part of the deleted comptime
 // dispatch ABI; restoration requires the kinded comptime invocation
 // surface (Phase-2c reentry per ADR-006 §2.7.4).
+/// ADR-009 E2-D9 flip-condition tripwire (accepted addition to the slice-2
+/// round). The typed MODULE-replacement producer is `item_fn` — the sole typed
+/// producer today — and it yields a CLOSURE-FREE function: its body is a bare
+/// literal, never an `Expr::FunctionExpr`. So a `replace module (item_fn(...))`
+/// replacement carries no closure, and [C0911] (a generated closure whose
+/// inference fact was never published) CANNOT fire for module scope — the
+/// E2-D9 mootness, pinned on the real producer path.
+///
+/// When a closure-capable producer (`quote module`) lands, the typed module
+/// route's item will be able to carry a closure and this assertion FLIPS. The
+/// flip is the signal to write the module closure-capture C0911 pin FIRST and
+/// decide the discovery-worklist question per E2-D9's flip condition — NOT to
+/// relax this pin. Runs in the default tier (not deep-tests) so the gate trips.
+#[cfg(test)]
+mod e2_d9_closure_free_tripwire {
+    use super::*;
+    use shape_ast::ast::{Expr, Item, Statement};
+
+    #[test]
+    fn typed_module_producer_item_fn_is_closure_free() {
+        let item = build_function_item("answer", &nb_str("int"), &KindedSlot::from_int(42))
+            .expect("item_fn's typed producer builds a literal function");
+        let Item::Function(func_def, _) = item else {
+            panic!("item_fn must produce a function item");
+        };
+        assert_eq!(
+            func_def.body.len(),
+            1,
+            "a closure-free literal producer emits a single-statement body"
+        );
+        assert!(
+            matches!(&func_def.body[0], Statement::Expression(Expr::Literal(..), _)),
+            "the typed module producer's body is a bare literal — NO closure. If this flips, \
+             a closure-capable producer landed: write the module C0911 closure-capture pin \
+             FIRST (E2-D9 flip condition), do not relax this pin. Got: {:?}",
+            func_def.body[0]
+        );
+    }
+}
+
 #[cfg(all(test, feature = "deep-tests"))]
 mod tests {
     use super::*;
