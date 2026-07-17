@@ -28,7 +28,7 @@
 //! | 7 | Send (task-boundary) | `battery_row7_send_nonsendable_across_task_boundary_rejects_atomically` (see confidence note) |
 //! | 8 | cleanup | **NOT-GENERATED-REACHABLE-AS-REJECTION** — see below |
 //! | 9 + 10a | sync `Drop` / async-cleanup-in-sync-context | `battery_row9_and_10a_async_only_drop_in_sync_context_rejects_atomically` |
-//! | 10b | async-drop-context (D6) | `battery_row10b_d6_drop_obligated_across_suspension_rejects_atomically` (+ two controls) |
+//! | 10b | async-drop-context (D6) | `battery_row10b_d6_drop_obligated_across_suspension_rejects_atomically` (+ an inferred-local firing pin + two controls) |
 //!
 //! ## NOT-GENERATED-REACHABLE rows (a finding, not a gap)
 //!
@@ -264,10 +264,11 @@ type Widget { id: int }
 
 // ── Row 10b: async-drop-context (D6, the greenfield check) ──────────────────
 
-/// The shared preamble for the D6 firing pin + its two controls: a Drop-bearing
-/// type (`Conn`, sync drop) and an async callee to `await`. The three fixtures
-/// differ ONLY in the generated method body, so the firing rejection is
-/// attributable to the drop-obligated-local + suspension COMBINATION.
+/// The shared preamble for the D6 firing pins + controls: a Drop-bearing type
+/// (`Conn`, sync drop), a factory `make_conn` (for the inferred-local firing
+/// pin), and an async callee to `await`. The fixtures differ ONLY in the
+/// generated method body, so a firing rejection is attributable to the
+/// drop-obligated-value + suspension COMBINATION.
 fn d6_program(method_body: &str) -> String {
     format!(
         r#"
@@ -275,6 +276,7 @@ type Conn {{ id: int }}
 impl Drop for Conn {{
     method drop() {{ }}
 }}
+fn make_conn() -> Conn {{ Conn {{ id: 1 }} }}
 async fn tick() -> int {{ 0 }}
 
 annotation gen10b() {{
@@ -292,12 +294,28 @@ type Widget {{ id: int }}
 
 /// FIRING — a generated ASYNC body holds a drop-obligated `Conn` local across an
 /// `await`. No shipped check combines drop-obligation with suspension; the D6
-/// guard rejects it at install, rolled back atomically (same pass-2-reject path
-/// the preflight `..._pass2_failure_leaves_nothing` pin proves).
+/// guard rejects it at `compile_function`'s end and the driver-level install
+/// transaction rolls it back atomically (nothing published — the same
+/// nothing-survives guarantee the preflight `..._pass2_failure_leaves_nothing`
+/// pin proves for an in-span rejection).
 #[test]
 fn battery_row10b_d6_drop_obligated_across_suspension_rejects_atomically() {
     assert_generated_install_rejected(&d6_program(
         r#"async method run() -> int \{ let c: Conn = Conn \{ id: 1 \}; await tick(); c.id \}"#,
+    ));
+}
+
+/// FIRING (INFERRED local type) — the drop-obligated local is UNANNOTATED
+/// (`let c = make_conn()`); its `Conn` type is resolved by the compiler, not a
+/// visible annotation on the binding. This is the case an AST annotation scan
+/// UNDER-detects: the gate reads the drop obligation from the RAII drop-plan's
+/// emission authority (`local_drop_kind` / the initializer-call-return re-arm),
+/// so it fires exactly when the drop-plan drops `c`. Guards the soundness fix
+/// (an under-detection here would install what wave40 must not inherit).
+#[test]
+fn battery_row10b_d6_inferred_drop_local_across_suspension_rejects_atomically() {
+    assert_generated_install_rejected(&d6_program(
+        r#"async method run() -> int \{ let c = make_conn(); await tick(); c.id \}"#,
     ));
 }
 

@@ -1588,6 +1588,23 @@ pub struct BytecodeCompiler {
     /// Per-type drop kind: tracks whether each type has sync, async, or both drop impls.
     /// Populated during the first-pass registration of impl blocks.
     pub(crate) drop_type_info: HashMap<String, DropKind>,
+    /// ADR-009 C2 #13 (slice 2, D6): set true during `compile_function` whenever
+    /// the RAII drop-plan resolves a drop-obligated LOCAL (`local_drop_kind` /
+    /// annotation / initializer-call-return — the emission authority, so an
+    /// INFERRED drop type is caught, not under-detected). `compile_function`
+    /// save/restores it around the body compile (re-entrancy under
+    /// monomorphization) and reads THIS function's value for the async-drop-context
+    /// gate. See `checked_body::async_drop_context`.
+    pub(crate) current_function_saw_drop_obligated_local: bool,
+    /// ADR-009 C2 #13 (slice 2, D6): the AUTHENTICATED generated-body provenance
+    /// for the function `compile_function` is ABOUT to compile, set by a
+    /// fresh-body install site (`apply_comptime_extend` /
+    /// `apply_comptime_extend_items`) immediately before the call and TAKEN at
+    /// `compile_function` start (so nested monomorphization compiles see `None`).
+    /// Gates the D6 async-drop-context check on a generated body only, via the
+    /// issuer-recognition capability — never a name heuristic.
+    pub(crate) pending_generated_body_origin:
+        Option<crate::compiler::comptime_builtins::expansion_provenance::GeneratedOrigin>,
     /// Module bindings that need Drop calls at program exit.
     /// Each entry is (binding_index, is_async).
     pub(crate) drop_module_bindings: Vec<(u16, bool)>,

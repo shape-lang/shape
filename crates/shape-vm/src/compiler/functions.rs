@@ -773,6 +773,14 @@ impl BytecodeCompiler {
     }
 
     pub(super) fn compile_function(&mut self, func_def: &FunctionDef) -> Result<()> {
+        // ADR-009 C2 #13 (slice 2, D6): consume the pending generated-body
+        // provenance FIRST — before any early-return guard below and before the
+        // body compile can nest another `compile_function` (monomorphization) —
+        // so exactly this call owns it and nested compiles see None. Only a
+        // fresh-body install site (`apply_comptime_extend` /
+        // `apply_comptime_extend_items`) sets it.
+        let generated_body_origin = self.pending_generated_body_origin.take();
+
         // Validate annotation target kinds before compilation
         self.validate_annotation_targets(func_def)?;
 
@@ -838,6 +846,12 @@ impl BytecodeCompiler {
         // into a later compilation that reuses the same local ordinal.
         let saved_inherited_capture_parameter_evidence =
             self.inherited_capture_parameter_evidence.clone();
+        // ADR-009 C2 #13 (slice 2, D6): save/reset the drop-obligated-local flag
+        // around the body compile so a nested monomorphization compile cannot
+        // bleed its drops into this function's async-drop-context decision; the
+        // flag is set by the RAII drop-plan (statements.rs) during the inner.
+        let saved_saw_drop_obligated_local =
+            std::mem::replace(&mut self.current_function_saw_drop_obligated_local, false);
         // Reference-flow state has the same all-exit requirement. The
         // transaction also refuses successful module representation effects
         // until callable effect summaries exist.
@@ -846,10 +860,24 @@ impl BytecodeCompiler {
             func_def.name_span,
             |compiler| compiler.compile_function_inner(func_def),
         );
+        let this_function_saw_drop_obligated_local =
+            self.current_function_saw_drop_obligated_local;
+        self.current_function_saw_drop_obligated_local = saved_saw_drop_obligated_local;
         self.inherited_capture_parameter_evidence =
             saved_inherited_capture_parameter_evidence;
         self.deferring_uninstantiated_template_body = saved_deferring_template;
-        result
+        // The D6 async-drop-context gate runs only on a body that compiled
+        // successfully AND carries authenticated generated provenance; a
+        // rejection rides the driver-level install transaction's atomic
+        // no-publish (the span brackets the whole compile), so no per-site
+        // rollback is needed.
+        result.and_then(|()| {
+            self.reject_generated_drop_obligated_across_suspension(
+                func_def,
+                generated_body_origin.as_ref(),
+                this_function_saw_drop_obligated_local,
+            )
+        })
     }
 
     fn compile_function_inner(&mut self, func_def: &FunctionDef) -> Result<()> {

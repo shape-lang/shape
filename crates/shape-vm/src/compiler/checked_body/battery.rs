@@ -59,14 +59,19 @@
 //! # D6 async-drop-context (the one new check): shape and boundary
 //!
 //! CONSERVATIVE and fail-closed (D6): a generated body that has BOTH a
-//! drop-obligated value (a local whose type carries a `DropKind`, i.e.
-//! `drop_type_info` names it) AND a suspension point is REJECTED at install —
-//! without proving the value is provably live ACROSS the point (that precision
-//! is wave40's). This over-rejects, never installs unsoundly (C2-R6): nothing
-//! installed here can become retroactively unsound when wave40's AsyncDrop
-//! protocol licenses these cases. It is a NAMED installation rejection (slice 3
-//! assigns the code), never a soft-fail or runtime fallback. Wired in
-//! [`super::async_drop_context`] at the pass-2 generated-body compile site.
+//! drop-obligated value (a local resolved by the RAII drop-plan's EMISSION
+//! AUTHORITY `local_drop_kind` — so an INFERRED drop type is caught, not
+//! under-detected by an AST annotation scan — or a drop-typed parameter) AND a
+//! suspension point is REJECTED at install — without proving the value is
+//! provably live ACROSS the point (that precision is wave40's). This
+//! over-rejects, never installs unsoundly (C2-R6): nothing installed here can
+//! become retroactively unsound when wave40's AsyncDrop protocol licenses these
+//! cases. It is a NAMED installation rejection (slice 3 assigns the code), never
+//! a soft-fail or runtime fallback. Wired in [`super::async_drop_context`],
+//! evaluated at `compile_function`'s end on an authenticated generated body, so
+//! it covers every generated body that reaches `compile_function` uniformly
+//! (extend methods + generated free functions; ReplaceBody replacements are a
+//! separate compile-timing coupling tracked as a slice-4 follow-up).
 //!
 //! # Slice-2 pin coverage (one firing fixture per check)
 //!
@@ -75,9 +80,11 @@
 //! `extend` body that VIOLATES one check through the real install path and
 //! asserts a rejection with nothing published (generic, code-free; slice 3
 //! attaches the code). Rows 1, 3, 4, 5, 6, 7, 9/10a, and 10b have firing pins;
-//! 10b additionally carries two controls (drop-local-without-suspension and
-//! suspension-without-drop-local both install) so the D6 rejection is
-//! attributable to the COMBINATION. Two rows are NOT-GENERATED-REACHABLE — a
+//! 10b carries a second firing pin over an INFERRED (unannotated) drop local
+//! (guarding the emission-authority soundness fix) plus two controls
+//! (drop-local-without-suspension and suspension-without-drop-local both
+//! install) so the D6 rejection is attributable to the COMBINATION. Two rows
+//! are NOT-GENERATED-REACHABLE — a
 //! finding, not a gap:
 //!
 //! - **Row 2 (effect, D5): NOT-GENERATED-REACHABLE.**

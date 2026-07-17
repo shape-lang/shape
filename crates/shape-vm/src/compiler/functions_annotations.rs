@@ -1838,16 +1838,14 @@ impl BytecodeCompiler {
                 Ok(SymbolReservation::Reissued(_)) => {}
                 Err(message) => return Err(self.expansion_rejection(message, site)),
             }
-            // ADR-009 C2 #13 (slice 2, battery row 10b): the D6 conservative
-            // async-drop-context guard. Runs on the AUTHENTICATED generated
-            // body just before its pass-2 compile, so a rejection rolls back
-            // atomically through the install transaction (the same path the
-            // pass-2 reject pin exercises). A sync body or a non-Drop program
-            // is a structural no-op.
-            self.reject_generated_drop_obligated_across_suspension(&func_def, &origin)
-                .map_err(|e| {
-                    self.build_generated_decl_failure(&e, &func_def.name, &node_path, site)
-                })?;
+            // ADR-009 C2 #13 (slice 2, battery row 10b): arm the D6
+            // async-drop-context gate for this generated body. `compile_function`
+            // consumes the provenance at its start and evaluates the gate at its
+            // end (on the authenticated body, using the RAII drop-plan's
+            // emission-authority drop signal), so a rejection surfaces through
+            // the same `build_generated_decl_failure` wrap as any body error and
+            // rolls back atomically in the driver-level install transaction.
+            self.pending_generated_body_origin = Some(origin);
             // Wave-38F generated-method JIT parity: hand-written `extend`
             // methods compile through the full driver (`compile_function`),
             // which lowers MIR and back-patches `Function.mir_data` for the
@@ -2557,8 +2555,11 @@ impl BytecodeCompiler {
                 node_path: node_path.clone(),
                 source_anchor,
             };
-            self.reject_generated_drop_obligated_across_suspension(func_def, &origin)
-                .map_err(|e| self.build_generated_decl_failure(&e, &func_def.name, &node_path, site))?;
+            // ADR-009 C2 #13 (slice 2, D6): arm the async-drop-context gate for
+            // this generated free function; `compile_function` consumes the
+            // provenance and evaluates the gate at its end (emission-authority
+            // drop signal + suspension scan on the authenticated body).
+            self.pending_generated_body_origin = Some(origin);
             // ADR-009 D1 (S4), rejection row 7: a body error inside the
             // generated free function surfaces with full expansion
             // provenance (generated-node + application + generator
