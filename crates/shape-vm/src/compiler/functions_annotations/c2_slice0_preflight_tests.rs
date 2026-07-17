@@ -116,7 +116,14 @@ fn parse_fn(source: &str) -> FunctionDef {
 /// survive: the function-table entry, every side table `register_function`
 /// touches, and the `analyze_function_body` fact bundle. Shared by both reject
 /// pins so the atomic guarantee is asserted identically in both phases.
-fn assert_no_install_publication_survives(compiler: &BytecodeCompiler, method_name: &str) {
+///
+/// `pub(super)` so the slice-2 validation-battery pins
+/// (`c2_slice2_battery_tests`) assert the SAME nothing-survives guarantee for
+/// every §4.2 check's rejection through this one helper.
+pub(super) fn assert_no_install_publication_survives(
+    compiler: &BytecodeCompiler,
+    method_name: &str,
+) {
     assert!(
         !compiler
             .program

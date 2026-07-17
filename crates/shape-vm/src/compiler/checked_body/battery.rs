@@ -65,4 +65,38 @@
 //! is wave40's). This over-rejects, never installs unsoundly (C2-R6): nothing
 //! installed here can become retroactively unsound when wave40's AsyncDrop
 //! protocol licenses these cases. It is a NAMED installation rejection (slice 3
-//! assigns the code), never a soft-fail or runtime fallback.
+//! assigns the code), never a soft-fail or runtime fallback. Wired in
+//! [`super::async_drop_context`] at the pass-2 generated-body compile site.
+//!
+//! # Slice-2 pin coverage (one firing fixture per check)
+//!
+//! The pins live in
+//! `functions_annotations/c2_slice2_battery_tests.rs`. Each routes a generated
+//! `extend` body that VIOLATES one check through the real install path and
+//! asserts a rejection with nothing published (generic, code-free; slice 3
+//! attaches the code). Rows 1, 3, 4, 5, 6, 7, 9/10a, and 10b have firing pins;
+//! 10b additionally carries two controls (drop-local-without-suspension and
+//! suspension-without-drop-local both install) so the D6 rejection is
+//! attributable to the COMBINATION. Two rows are NOT-GENERATED-REACHABLE — a
+//! finding, not a gap:
+//!
+//! - **Row 2 (effect, D5): NOT-GENERATED-REACHABLE.**
+//!   `reference_flow/transaction.rs::callable_module_transition_conflict`
+//!   (transaction.rs:58-92) fires only on a MODULE binding's
+//!   reference/storage-projection change across a callable; under D5
+//!   (shipped-semantics only, no interprocedural effect summary) no Shape
+//!   statement in a generated method body can synthesize that transition. The
+//!   only tests that trip it call `set_reference_flow_class` /
+//!   `set_binding_storage_class` directly. No firing pin is possible from a
+//!   generated body.
+//! - **Row 8 (cleanup): NOT-GENERATED-REACHABLE-AS-REJECTION.**
+//!   `emit_drops_for_early_exit` (`helpers.rs:6283-6423`) is EMISSION-only:
+//!   every path emits a drop opcode or skips, ends `Ok(())`, and never builds a
+//!   `ShapeError`. Cleanup discharge is not a rejection; any drop-related
+//!   REJECTION surfaces at the binding site (row 9). No firing pin exists.
+//!
+//! Rows 9 and 10a are the SAME site (statements.rs:7246-7247), so one fixture
+//! covers both (not fabricated as two distinct trips). Row 7's exact
+//! `NonSendableAcrossTaskBoundary` code has no existing green source fixture;
+//! its pin authors the detached-mutable-capture-closure shape and asserts
+//! generic rejection (a sibling task-boundary rejection also passes).
