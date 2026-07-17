@@ -58,16 +58,29 @@
 //!
 //! | Row | Check | Disposition | Code | Distinguisher | Firing pin |
 //! |---|---|---|---|---|---|
-//! | 1 | type | D4 reuse — analyzer `TypeError::TypeMismatch` (`error_bridge` → `SemanticError`) | *(TypeError)* | `Type mismatch` | `battery_row1_*` |
+//! | 1 | type | D4 reuse — analyzer constraint solver (`error_bridge` → `SemanticError`) | *(analyzer)* | `is not compatible with` | `battery_row1_*` |
 //! | 2 | effect (D5) | not generated-reachable (finding, not a gap) | — | — | — |
 //! | 3 | ownership (use-after-move) | D4 reuse — solver `UseAfterMove` | `B0005` | `[B0005]` | `battery_row3_*` |
 //! | 4 | borrow (shared/exclusive conflict) | D4 reuse — solver `ConflictSharedExclusive` | `B0001` | `[B0001]` | `battery_row4_*` |
-//! | 5 | lifetime (ref-escape-into-closure) | D4 reuse — solver `ReferenceEscapeIntoClosure` | `B0003` | `[B0003]` | `battery_row5_*` |
-//! | 6 | suspension (excl ref across task boundary) | D4 reuse — solver `ExclusiveRefAcrossTaskBoundary` | `B0006` | `[B0006]` | `battery_row6_*` |
-//! | 7 | Send (non-sendable across detached boundary) | D4 reuse — solver `NonSendableAcrossTaskBoundary` | `B0014` | `[B0014]` | `battery_row7_*` (B0014-isolation fixture — see below) |
+//! | 5 | lifetime (ref-escape-into-closure) | D4 reuse — **C1 layer** `ReferenceEscapeIntoClosure` (a generated closure DECLARES captures; a declared ref capture is total) — NOT solver B0003 | `C0902` | `[C0902]` | `battery_row5_*` |
+//! | 6 | suspension (excl ref across task boundary) | D4 reuse — solver `ExclusiveRefAcrossTaskBoundary` (well-typed re-typing; else BLOCKED-BY-INFERENCE) | `B0006` | `[B0006]` | `battery_row6_*` |
+//! | 7 | Send (non-sendable across detached boundary) | D4 reuse — solver `NonSendableAcrossTaskBoundary` (well-typed re-typing; else BLOCKED-BY-INFERENCE) | `B0014` | `[B0014]` | `battery_row7_*` |
 //! | 8 | cleanup | not generated-reachable-as-rejection (finding) | — | — | — |
 //! | 9 + 10a | sync `Drop` / async-cleanup-in-sync-context | NEW — `statements.rs`'s `AsyncOnly`-in-sync gate had no code | **`C0923`** | `[C0923]` | `battery_row9_and_10a_*` |
-//! | 10b | async-drop-context ex.1 (D6, greenfield) | NEW — no shipped check combines drop-obligation with suspension | **`C0922`** | `[C0922]` | `battery_row10b_*` (+ the method-call pin that surfaced & drove the inherited RAII repair, now asserting `[C0922]`) |
+//! | 10b | async-drop-context ex.1 (D6, greenfield) | NEW — reached via D6's CONSERVATIVE over-rejection (drop discharged before await). The headline live-across case is emission-preempted until wave40 (see "Row 10b reachability") | **`C0922`** | `[C0922]` (2 conservative pins) / `not available in compile-time code` (1 headline pin) | `battery_row10b_*` |
+//!
+//! **Gate correction (slice-3 distinguishers exposed vacuity).** Attaching an
+//! exact code per row proved several slice-2 fixtures were rejecting via an
+//! EARLIER gate than they claimed (the generic asserts were vacuous). Two
+//! structural facts drove the corrections above: (1) SYNC generated bodies reach
+//! the solver (rows 3/4/9-10a), but a GENERATED closure's capture/reference
+//! checks are enforced at the **C1 surface layer** (C0902 / the C0003
+//! "captures must be explicit" envelope), NOT the solver (so row 5's
+//! reference-escape is C0902, not B0003); (2) `async let` shapes carrying a
+//! reference or a closure value fail **type-inference** (Future-unification)
+//! before any borrow check — rows 6/7 are re-typed to well-typed `Future<int>`
+//! blocks, and if a grounded-well-typed shape still fails they are
+//! BLOCKED-BY-INFERENCE, a named production candidate, not not-generated-reachable.
 //!
 //! ## Code-block allocation (D2, verified empirically)
 //!
@@ -169,29 +182,34 @@
 //! Rows 9 and 10a are the SAME site (statements.rs:7246-7247), so one fixture
 //! covers both (not fabricated as two distinct trips), now named `C0923`.
 //!
-//! # Row 7 B0014 isolation (slice-3 obligation, discharged)
+//! # Row 10b reachability (D6's headline case is emission-preempted)
 //!
-//! Slice 2 left row 7's pin asserting GENERIC rejection because no green source
-//! fixture pinned `NonSendableAcrossTaskBoundary` (B0014) specifically and a
-//! sibling task-boundary code might also fire. Slice 3 replaces the fixture body
-//! with a B0014-ISOLATING shape and asserts `[B0014]` exactly. The isolation is
-//! grounded in the solver's two DISTINCT detached-boundary paths
-//! (`solver.rs:364-406` / `1333-1367`):
+//! D6 (`super::async_drop_context`) is CONSERVATIVE by ruling: any
+//! drop-obligated local + any suspension point in a generated body ⇒ reject,
+//! without liveness analysis (precision is wave40's). It runs at
+//! `compile_function`'s END, after body emission. That placement has a
+//! consequence the slice-3 gate surfaced:
 //!
-//! - **B0006/B0012 (loan path)** needs a reference LOAN (`&`/`&mut`) to cross
-//!   the boundary — `local_loans_from_operands` over the `TaskBoundary` operands,
-//!   mapped by the loan's `BorrowKind` (Exclusive → B0006, Shared → B0012).
-//! - **B0014 (sendability path)** is loan-independent: it fires when a boundary
-//!   operand slot is in `closure_capture_slots` == `mutable_captures` (a slot
-//!   that is closure-captured AND assigned more than once —
-//!   `storage_planning::collect_closure_captures`).
-//!
-//! So a **read-only** closure capture of a REASSIGNED local isolates B0014: the
-//! read-only capture crosses as a by-value `Copy` operand (no reference loan ⇒
-//! the loan path is empty ⇒ no B0006/B0012), while the local's second assignment
-//! puts it in `mutable_captures` ⇒ the sendability path fires B0014 as the sole
-//! error (the loan-sink loop runs first and emits nothing, so `first_borrow_error`
-//! is the B0014 non-sendable record). The fixture reassigns the local twice so
-//! `assign_counts > 1` holds regardless of whether the initial binding counts as
-//! an `Assign`. This is a clean separation, not the "both codes accepted"
-//! fallback; the checks CAN be separated at this site.
+//! - **The headline case — a drop value LIVE across an `await` — never reaches
+//!   D6.** Emitting a drop across a suspension point is UNIMPLEMENTED (wave40's
+//!   AsyncDrop protocol); the emission path raises a SURFACE / NotImplemented
+//!   stub DURING `compile_function`, which `sanitize_comptime_internal`
+//!   firewalls into the generated-declaration envelope "[C0003] … not available
+//!   in compile-time code". `compile_function` returns `Err` there, BEFORE its
+//!   end-of-function D6 gate — so D6 does not run for this shape. This is
+//!   fail-closed and atomic (nothing installs), and the ordering is already
+//!   correct for the future: when wave40 lands the emission, the stub goes away,
+//!   the body compiles, and D6's end gate becomes the named catcher. The
+//!   `battery_row10b_d6_headline_case_is_emission_preempted` pin records exactly
+//!   this — asserting today's emission-preemption message, flipping to `[C0922]`
+//!   when wave40 lands. No escalation: only the diagnostic LABEL is wrong today;
+//!   nothing unsound installs, by construction.
+//! - **D6 is reachable via its CONSERVATIVE over-rejection.** When the
+//!   drop-obligated local is DISCHARGED before the suspension (scoped to an inner
+//!   block that ends before the `await`), emission stays on the shipped sync-drop
+//!   path and `compile_function` reaches its end gate; D6 then rejects on the
+//!   (drop-local + suspension) combination alone → `[C0922]`. That is a genuine
+//!   test of D6's ruled behavior, and the two `battery_row10b_d6_*` firing pins
+//!   use it. This is the shipped-semantics-correct thing to prove: the dangerous
+//!   live-across case is already fail-closed by emission; D6 adds the named,
+//!   atomic install-rejection that wave40 will later relax with precision.
