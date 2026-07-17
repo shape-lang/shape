@@ -33,46 +33,52 @@
 //!
 //! # Placement and provenance gate
 //!
-//! The gate runs at `compile_function`'s end (functions.rs), on a body that
-//! compiled successfully AND carries AUTHENTICATED generated provenance, so it
-//! covers every generated body that reaches `compile_function` uniformly
-//! (fresh-body extend methods + generated free functions). Authentication is
-//! the issuer-recognition capability (`GeneratedNodeIssuer::recognizes`, the
-//! `capture_plan/surface.rs` pattern), never a name heuristic. A rejection
+//! The gate runs at the END of `compile_function_inner` (functions.rs), on the
+//! EFFECTIVE definition (`effective_def`) that actually compiled — the fresh
+//! generated body for extend methods / free functions, and the REPLACEMENT body
+//! for a `replace body` edit (whose swap lands on `effective_def` mid-compile,
+//! never on the outer `func_def`). Evaluating over `effective_def` is what gives
+//! `ReplaceBody` edits real coverage: the suspension scan reads the body that
+//! ships, not the pre-edit user body. It runs on a body that compiled
+//! successfully AND carries AUTHENTICATED generated provenance, so it covers
+//! every generated body uniformly. Authentication is the issuer-recognition
+//! capability (`GeneratedNodeIssuer::recognizes`, the `capture_plan/surface.rs`
+//! pattern), never a name heuristic — the origin is a node-borne
+//! `GeneratedNodeOrigin` projected at the generation site (extend/free-fn call
+//! site) or at the `replace body` stamp, never re-derived here. A rejection
 //! rides the driver-level install transaction's atomic no-publish. A non-async
 //! body has no suspension point, so the scan short-circuits it.
 
-use shape_ast::ast::FunctionDef;
+use shape_ast::ast::{FunctionDef, GeneratedNodeOrigin};
 use shape_ast::error::{Result, ShapeError};
 
 use crate::compiler::BytecodeCompiler;
-use crate::compiler::comptime_builtins::expansion_provenance::GeneratedOrigin;
 
 mod walk;
 use walk::body_has_suspension_point;
 
 impl BytecodeCompiler {
-    /// The D6 async-drop-context install guard, called at `compile_function`'s
-    /// end (see module docs). `origin` is the provenance of the body just
-    /// compiled (`None` ⇒ not a generated body); `saw_drop_obligated_local` is
-    /// the emission-authority signal the RAII drop-plan set during this compile.
+    /// The D6 async-drop-context install guard, called at the end of
+    /// `compile_function_inner` over the EFFECTIVE definition (see module docs).
+    /// `origin` is the node-borne provenance of the body just compiled (`None`
+    /// ⇒ not a generated body); `saw_drop_obligated_local` is the
+    /// emission-authority signal the RAII drop-plan set during this compile.
     /// `Ok(())` ⇒ not this check's concern; `Err` ⇒ the named installation
     /// rejection.
     pub(in crate::compiler) fn reject_generated_drop_obligated_across_suspension(
         &self,
         func_def: &FunctionDef,
-        origin: Option<&GeneratedOrigin>,
+        origin: Option<&GeneratedNodeOrigin>,
         saw_drop_obligated_local: bool,
     ) -> Result<()> {
         // Not a generated body → not policed here.
-        let Some(origin) = origin else {
+        let Some(node_origin) = origin else {
             return Ok(());
         };
         // Provenance authentication (surface.rs pattern): only an origin THIS
         // compiler instance issued is a generated body we own. A foreign or
         // serialized origin is not recognized and is left alone.
-        let node_origin = origin.to_node_origin(&self.generated_node_issuer, &func_def.name);
-        if !self.generated_node_issuer.recognizes(&node_origin) {
+        if !self.generated_node_issuer.recognizes(node_origin) {
             return Ok(());
         }
 

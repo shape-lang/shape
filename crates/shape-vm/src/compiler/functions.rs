@@ -1,7 +1,9 @@
 //! Function and closure compilation
 
 use crate::bytecode::{Instruction, OpCode, Operand};
-use shape_ast::ast::{Expr, FunctionDef, FunctionParameter, Item, Span, Spanned, Statement};
+use shape_ast::ast::{
+    Expr, FunctionDef, FunctionParameter, GeneratedNodeOrigin, Item, Span, Spanned, Statement,
+};
 use shape_ast::error::{ErrorNote, Result, ShapeError, SourceLocation};
 use std::collections::{HashMap, HashSet};
 
@@ -773,14 +775,31 @@ impl BytecodeCompiler {
     }
 
     pub(super) fn compile_function(&mut self, func_def: &FunctionDef) -> Result<()> {
-        // ADR-009 C2 #13 (slice 2, D6): consume the pending generated-body
-        // provenance FIRST — before any early-return guard below and before the
-        // body compile can nest another `compile_function` (monomorphization) —
-        // so exactly this call owns it and nested compiles see None. Only a
-        // fresh-body install site (`apply_comptime_extend` /
-        // `apply_comptime_extend_items`) sets it.
-        let generated_body_origin = self.pending_generated_body_origin.take();
+        // A hand-written (non-generated) body carries no generated provenance;
+        // the two fresh-body install sites pass `Some(origin)` through
+        // `compile_function_with_generated_origin`.
+        self.compile_function_with_generated_origin(func_def, None)
+    }
 
+    /// Compile `func_def`, arming the D6 async-drop-context gate with the
+    /// generated body's node-borne provenance (ADR-009 C2 #13 slice 4). The two
+    /// fresh-body install sites (`apply_comptime_extend` /
+    /// `apply_comptime_extend_items`) pass `Some(origin)`; everyone else reaches
+    /// this through the `compile_function` delegate with `None`.
+    ///
+    /// The origin is threaded as a PARAMETER — not a shared compiler field — so
+    /// a nested monomorphization compile can never steal it, and an early-return
+    /// guard below simply drops the local (leak-safe by construction; this
+    /// replaces the old `pending_generated_body_origin` take-at-start). A
+    /// `replace body` edit's provenance is discovered mid-compile (the swap
+    /// lands on `effective_def`, not `func_def`) and is armed separately inside
+    /// `compile_function_inner`, which is why the gate now runs there — over the
+    /// EFFECTIVE definition — rather than over this outer `func_def`.
+    pub(super) fn compile_function_with_generated_origin(
+        &mut self,
+        func_def: &FunctionDef,
+        generated_origin: Option<GeneratedNodeOrigin>,
+    ) -> Result<()> {
         // Validate annotation target kinds before compilation
         self.validate_annotation_targets(func_def)?;
 
@@ -855,32 +874,30 @@ impl BytecodeCompiler {
         // Reference-flow state has the same all-exit requirement. The
         // transaction also refuses successful module representation effects
         // until callable effect summaries exist.
+        // The D6 async-drop-context gate now runs at the END of
+        // `compile_function_inner`, over the EFFECTIVE definition (see its
+        // module docs) — that is the only place the `replace body` replacement
+        // body is visible. `generated_origin` is moved in so the inner compile
+        // can authenticate the fresh-body case; the `replace body` case is armed
+        // from provenance discovered during that inner compile. A rejection
+        // rides the driver-level install transaction's atomic no-publish.
         let result = self.with_callable_reference_flow_transaction(
             &func_def.name,
             func_def.name_span,
-            |compiler| compiler.compile_function_inner(func_def),
+            |compiler| compiler.compile_function_inner(func_def, generated_origin),
         );
-        let this_function_saw_drop_obligated_local =
-            self.current_function_saw_drop_obligated_local;
         self.current_function_saw_drop_obligated_local = saved_saw_drop_obligated_local;
         self.inherited_capture_parameter_evidence =
             saved_inherited_capture_parameter_evidence;
         self.deferring_uninstantiated_template_body = saved_deferring_template;
-        // The D6 async-drop-context gate runs only on a body that compiled
-        // successfully AND carries authenticated generated provenance; a
-        // rejection rides the driver-level install transaction's atomic
-        // no-publish (the span brackets the whole compile), so no per-site
-        // rollback is needed.
-        result.and_then(|()| {
-            self.reject_generated_drop_obligated_across_suspension(
-                func_def,
-                generated_body_origin.as_ref(),
-                this_function_saw_drop_obligated_local,
-            )
-        })
+        result
     }
 
-    fn compile_function_inner(&mut self, func_def: &FunctionDef) -> Result<()> {
+    fn compile_function_inner(
+        &mut self,
+        func_def: &FunctionDef,
+        generated_origin: Option<GeneratedNodeOrigin>,
+    ) -> Result<()> {
         let mut effective_def = func_def.clone();
         let effective_pass_modes = self.effective_function_like_pass_modes(
             Some(&effective_def.name),
@@ -915,6 +932,14 @@ impl BytecodeCompiler {
             .specialization_const_bindings
             .contains_key(&effective_def.name);
 
+        // ADR-009 C2 #13 (slice 4): a `replace body` directive stamps the
+        // REPLACEMENT with node-borne generated provenance mid-handler and
+        // reports it here, so the D6 gate at the end of this function can
+        // authenticate the swapped body (which compiles under the user function
+        // name and so cannot be recovered by name). It overrides the fresh-body
+        // `generated_origin` for the effective definition.
+        let mut replacement_body_origin: Option<GeneratedNodeOrigin> = None;
+
         // Execute comptime annotation handlers before compilation.
         // These run at compile time and can inspect/modify the target.
         // Template bases (functions with const parameters) skip comptime handler
@@ -928,6 +953,7 @@ impl BytecodeCompiler {
             if self.execute_comptime_handlers(
                 &mut effective_def,
                 &inferred_reference_optimizations,
+                &mut replacement_body_origin,
             )? {
                 // Track removed functions so call sites produce a clear error
                 // instead of jumping to an invalid entry point (stack overflow).
@@ -1114,7 +1140,24 @@ impl BytecodeCompiler {
 
         // Runtime lifecycle hooks (`on_define`, `metadata`) are invoked at
         // definition time by emitting top-level calls after function compilation.
-        self.emit_annotation_lifecycle_calls(&effective_def)
+        self.emit_annotation_lifecycle_calls(&effective_def)?;
+
+        // ADR-009 C2 #13 (slice 2, D6; slice 4 placement): the async-drop-context
+        // install gate, evaluated over the EFFECTIVE definition — the fresh
+        // generated body for extend methods / free functions, and the REPLACEMENT
+        // body for a `replace body` edit (whose swap landed on `effective_def`
+        // above). A `replace body`'s provenance overrides the fresh-body origin;
+        // the emission-authority drop signal is read from the flag the RAII
+        // drop-plan set during THIS compile. Only a body that compiled
+        // successfully AND carries authenticated generated provenance reaches a
+        // rejection, which rides the driver-level install transaction's atomic
+        // no-publish.
+        let effective_origin = replacement_body_origin.as_ref().or(generated_origin.as_ref());
+        self.reject_generated_drop_obligated_across_suspension(
+            &effective_def,
+            effective_origin,
+            self.current_function_saw_drop_obligated_local,
+        )
     }
 
     /// Return the (message_body, hint) pair for a MIR borrow error kind.

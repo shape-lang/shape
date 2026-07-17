@@ -1596,15 +1596,13 @@ pub struct BytecodeCompiler {
     /// monomorphization) and reads THIS function's value for the async-drop-context
     /// gate. See `checked_body::async_drop_context`.
     pub(crate) current_function_saw_drop_obligated_local: bool,
-    /// ADR-009 C2 #13 (slice 2, D6): the AUTHENTICATED generated-body provenance
-    /// for the function `compile_function` is ABOUT to compile, set by a
-    /// fresh-body install site (`apply_comptime_extend` /
-    /// `apply_comptime_extend_items`) immediately before the call and TAKEN at
-    /// `compile_function` start (so nested monomorphization compiles see `None`).
-    /// Gates the D6 async-drop-context check on a generated body only, via the
-    /// issuer-recognition capability — never a name heuristic.
-    pub(crate) pending_generated_body_origin:
-        Option<crate::compiler::comptime_builtins::expansion_provenance::GeneratedOrigin>,
+    // ADR-009 C2 #13 (slice 4): the former `pending_generated_body_origin`
+    // shared field was DELETED. Generated-body provenance for the D6
+    // async-drop-context gate is now threaded as a PARAMETER through
+    // `compile_function_with_generated_origin` → `compile_function_inner`, so a
+    // nested monomorphization compile can never steal it and the gate evaluates
+    // over the EFFECTIVE definition (covering `replace body` edits, whose swap
+    // never reaches the outer `func_def`).
     /// Module bindings that need Drop calls at program exit.
     /// Each entry is (binding_index, is_async).
     pub(crate) drop_module_bindings: Vec<(u16, bool)>,

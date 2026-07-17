@@ -182,7 +182,6 @@ impl BytecodeCompiler {
             ownership_drop_locals: Vec::new(),
             drop_type_info: HashMap::new(),
             current_function_saw_drop_obligated_local: false,
-            pending_generated_body_origin: None,
             drop_module_bindings: Vec::new(),
             mutable_closure_captures: HashMap::new(),
             shared_closure_captures: HashMap::new(),

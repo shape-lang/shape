@@ -221,3 +221,31 @@
 //!   that). Wave40's AsyncDrop/MustSettle program relaxes that over-rejection
 //!   with liveness analysis; it does not change WHICH code fires or WHETHER D6 is
 //!   reached. Fail-closed throughout; nothing unsound installs.
+//!
+//! # Slice 4 — `replace body` D6 closure (design (a) superseded)
+//!
+//! Slice 2's row 10b covered the FRESH-body generated paths (extend methods +
+//! generated free functions), but noted `replace body` replacements as "a
+//! separate compile-timing coupling tracked as a slice-4 follow-up" (see the D6
+//! "shape and boundary" section above). Slice 4 CLOSES that gap.
+//!
+//! The obligation was surfaced as design (a): carry generated provenance on a
+//! new `FunctionDef::generated_origin` AST field. That design was SUPERSEDED —
+//! it both exceeded the change budget (a `FunctionDef` field ripples to 31 files
+//! / 78 struct-literal construction sites, no `Default`/constructor to absorb
+//! it) AND bought the WRONG thing: the field rides `func_def`, but a `replace
+//! body` swap lands on `effective_def` (the clone inside
+//! `compile_function_inner`) mid-compile, so a field-on-`func_def` gate would
+//! have scanned the PRE-EDIT user body, not the replacement that ships.
+//!
+//! The landed fix moves the D6 gate to the END of `compile_function_inner`,
+//! where it reads the EFFECTIVE definition (the replacement for an edit, the
+//! fresh body otherwise), and threads the node-borne `GeneratedNodeOrigin` as a
+//! PARAMETER (`compile_function_with_generated_origin` → `compile_function_inner`;
+//! the `replace body` origin is reported up through the handler plumbing). The
+//! shared `pending_generated_body_origin` compiler field is DELETED — a
+//! parameter can never be stolen by a nested monomorphization compile. The
+//! inverse-control pair (`c2_slice4_edit_tests::replace_body_edit_*`) proves the
+//! gate reads the new body and ONLY the new body; the fresh-body regression net
+//! is `battery_row10b_*` (unchanged), which the parameter-threaded origin keeps
+//! arming after the field deletion.
