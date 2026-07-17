@@ -125,6 +125,18 @@
 //! correctly. The batch path rolls back all cluster members together and stays
 //! fully consistent.
 //!
+//! ## Existing-body edits need no query-retain extension (C2 #13 slice 6)
+//!
+//! A `replace body` EDIT (slice 4) publishes its provenance and its
+//! replacement's closure captures through the SAME two tables this retain mode
+//! preserves — `generated_symbols` (the shadow + any generated reservations)
+//! and `closure_capture_packs` (the replacement's declared-capture packs) — so
+//! the LSP capture/symbol query answers over an edited body's post-install truth
+//! on the recoverable-`Err` path with NO edit-specific retain logic. The edit is
+//! not a second query surface: it lands in the C1 carrier and the C1 tables, and
+//! this mode gates exactly those. Verified by
+//! `generated_captures::semantic_tests::replace_body_edit_capture_is_queryable_post_install`.
+//!
 //! # Caveat: rollback restores to COMPILE-START, not a partial-recovery point
 //!
 //! On `Err` this restores every rolled-back table to its value when the

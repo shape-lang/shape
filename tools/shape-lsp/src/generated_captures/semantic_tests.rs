@@ -155,6 +155,44 @@ fn unrelated_earlier_callable_registration_cannot_change_specialization_identity
     assert_has_no_abi_identity(&base_identity.canonical_descriptor());
 }
 
+/// ADR-009 C2 #13 slice 6 — a replace-body EDIT's generated capture is queryable
+/// post-install through the SAME C1 capture query surface (spec §7 "LSP driven by
+/// the shared query surface"). The edited function compiles under its user name,
+/// but its REPLACEMENT body carries a `move base` closure capture that the pre-edit
+/// body (`7`, no closure) does not — so resolving `base` proves the capture query
+/// reflects the installed POST-edit body, not the pre-edit one, and `compile_query`
+/// asserts it is not quarantined (exact semantics). C2 adds no second query
+/// surface: the edit's closures publish to the same `closure_capture_packs` table
+/// the C1 capture query already reads.
+const REPLACE_BODY_EDIT_CAPTURE: &str = r#"
+annotation edit_worker() {
+  targets: [function]
+  comptime post(target, ctx) {
+    replace body {
+      let base = 40
+      let worker = |; move base| base + 2
+      return worker()
+    }
+  }
+}
+
+@edit_worker()
+fn answer() -> int { 7 }
+
+answer()
+"#;
+
+#[test]
+fn replace_body_edit_capture_is_queryable_post_install() {
+    let captures = compile_query(REPLACE_BODY_EDIT_CAPTURE);
+    let base = capture(&captures, "base");
+    assert!(
+        !base.specializations().is_empty(),
+        "the post-edit `move base` capture must resolve at least one specialization \
+         through the shared C1 capture query surface",
+    );
+}
+
 fn compile_query(source: &str) -> GeneratedCaptureQuery {
     let program = parse_program(source).expect("semantic capture fixture parses");
     let captures = query(&program, source);
