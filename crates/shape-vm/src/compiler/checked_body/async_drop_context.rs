@@ -1,6 +1,6 @@
 //! ADR-009 C2 #13 (slice 2) — the D6 conservative async-drop-context install
-//! rejection (validation-battery row 10b; slice 3 assigns the `C0922` code).
-//! Full rationale + the forward-soundness argument live in [`super::battery`]
+//! rejection (validation-battery row 10b; `C0922`, assigned slice 3). Full
+//! rationale + the forward-soundness argument live in [`super::battery`]
 //! (row 10b); this file is the gate, and [`walk`] is its suspension scan.
 //!
 //! CONSERVATIVE, no liveness precision (D6, supervisor-ruled): a GENERATED body
@@ -90,14 +90,18 @@ impl BytecodeCompiler {
         Err(self.async_drop_context_rejection())
     }
 
-    /// The named (code-free this slice; slice 3 assigns `C0922`) rejection,
-    /// naming BOTH facts and stating the conservatism so the wave40 relaxation
-    /// is documented at the point of refusal.
+    /// The named `C0922` rejection (ADR-009 C2 slice 3), naming BOTH facts and
+    /// stating the conservatism so the wave40 relaxation is documented at the
+    /// point of refusal. The `[C0922]` prefix follows the C1 C09xx convention
+    /// (bracketed code at the head of the message, as in `capture_plan.rs`'s
+    /// `[C0906]`/`surface.rs`'s `[C0903]`). This is a genuinely NEW install
+    /// class (D4): no shipped check combines drop-obligation with suspension, so
+    /// there is no underlying analyzer/solver code to reuse.
     fn async_drop_context_rejection(&self) -> ShapeError {
         ShapeError::SemanticError {
-            message: "generated body holds a drop-obligated value across a suspension point; \
-                      installation is rejected pending the AsyncDrop protocol (wave40). This is \
-                      a CONSERVATIVE, fail-closed rejection: any drop-obligated local or \
+            message: "[C0922] generated body holds a drop-obligated value across a suspension \
+                      point; installation is rejected pending the AsyncDrop protocol (wave40). \
+                      This is a CONSERVATIVE, fail-closed rejection: any drop-obligated local or \
                       parameter plus any suspension point (await / async scope / async let / \
                       join / for-await) in the same generated body is refused, without liveness \
                       precision — the precise across-suspension analysis is wave40's."

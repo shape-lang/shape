@@ -7262,9 +7262,18 @@ impl BytecodeCompiler {
                                             .get_local_type(local_idx)
                                             .and_then(|info| info.type_name.clone())
                                             .unwrap_or_else(|| name.to_string());
+                                        // ADR-009 C2 #13 (slice 3): this async-drop-in-sync-context
+                                        // rejection is validation-battery rows 9 + 10a (§4.2 async-
+                                        // drop-context example 2: "async cleanup required in a sync
+                                        // context"). It had no named code; slice 3 assigns `C0923`
+                                        // and prefixes the message per the C1 C09xx convention
+                                        // (bracketed head, as in `capture_plan.rs`'s `[C0906]`). The
+                                        // check is general (it fires for any sync body, not only a
+                                        // generated one); the code names the class wherever it
+                                        // fires, and a generated body reaches it identically.
                                         return Err(ShapeError::SemanticError {
                                             message: format!(
-                                                "type '{}' has only an async drop() and cannot be used in a sync context; \
+                                                "[C0923] type '{}' has only an async drop() and cannot be used in a sync context; \
                                                  add a sync method drop(self) or use it inside an async function",
                                                 tn
                                             ),

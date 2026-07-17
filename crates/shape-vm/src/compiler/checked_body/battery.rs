@@ -4,10 +4,13 @@
 //! generated-body install ([`super`]). Slice 2's obligation is that EVERY
 //! §4.2-listed check provably EXECUTES for a generated body, over body + its
 //! COMPLETE capture environment, INSIDE that transaction span — so a rejection
-//! is a clean, atomic no-publish and slice 3 can attach a named rejection
-//! (C0913+) per check. This file is the manifest: for each of the ten checks it
-//! names the code path that runs it for generated bodies and its coverage
-//! status. It mints no diagnostic codes (slice 3) and builds no public
+//! is a clean, atomic no-publish and slice 3 can attach a named rejection per
+//! check (the § "Slice-3 named rejection matrix" below). This file is the
+//! manifest: for each of the ten checks it names the code path that runs it for
+//! generated bodies and its coverage status. It mints no diagnostic codes
+//! itself (the two new codes are minted at their firing sites —
+//! [`super::async_drop_context`] and `statements.rs`; the reused codes stay at
+//! their analyzer/solver source) and builds no public
 //! `CheckedBody<Sig, Captures>` surface (a later slice).
 //!
 //! # Why the battery already runs for generated bodies
@@ -42,6 +45,52 @@
 //! | 10a | async-drop-context ex.2 (async cleanup required in a sync context) | SAME site as #9: statements.rs:7246 already rejects a `drop_async`-only type used where `!current_function_is_async` | ALREADY-COVERED |
 //! | 10b | async-drop-context ex.1 (drop-obligated value live across a suspension point in a generated body) | GREENFIELD — the D6 CONSERVATIVE check: any drop-obligated value + any suspension point in the generated body ⇒ reject (fail-closed; precision is wave40's). No existing check combines drop-obligation with suspension | NEWLY-WIRED (slice 2) |
 //!
+//! # Slice-3 named rejection matrix (row → code → distinguisher → pin)
+//!
+//! Slice 3 attaches the named code per firing check. **D4 reuse ruling**: where
+//! an install-time rejection IS the same semantic failure as an existing
+//! analyzer type error or solver B-code, that EXISTING code stays authoritative
+//! and this matrix DOCUMENTS the mapping — C2 mints no vaguer wrapper (wrapping
+//! a precise `[B0005]` in a generic `C09xx` would LOSE information the analyzer /
+//! solver already carries). Only genuinely new install classes — the two
+//! async-drop-context examples, which no shipped analyzer/solver code covers —
+//! get a fresh C09xx.
+//!
+//! | Row | Check | Disposition | Code | Distinguisher | Firing pin |
+//! |---|---|---|---|---|---|
+//! | 1 | type | D4 reuse — analyzer `TypeError::TypeMismatch` (`error_bridge` → `SemanticError`) | *(TypeError)* | `Type mismatch` | `battery_row1_*` |
+//! | 2 | effect (D5) | not generated-reachable (finding, not a gap) | — | — | — |
+//! | 3 | ownership (use-after-move) | D4 reuse — solver `UseAfterMove` | `B0005` | `[B0005]` | `battery_row3_*` |
+//! | 4 | borrow (shared/exclusive conflict) | D4 reuse — solver `ConflictSharedExclusive` | `B0001` | `[B0001]` | `battery_row4_*` |
+//! | 5 | lifetime (ref-escape-into-closure) | D4 reuse — solver `ReferenceEscapeIntoClosure` | `B0003` | `[B0003]` | `battery_row5_*` |
+//! | 6 | suspension (excl ref across task boundary) | D4 reuse — solver `ExclusiveRefAcrossTaskBoundary` | `B0006` | `[B0006]` | `battery_row6_*` |
+//! | 7 | Send (non-sendable across detached boundary) | D4 reuse — solver `NonSendableAcrossTaskBoundary` | `B0014` | `[B0014]` | `battery_row7_*` (B0014-isolation fixture — see below) |
+//! | 8 | cleanup | not generated-reachable-as-rejection (finding) | — | — | — |
+//! | 9 + 10a | sync `Drop` / async-cleanup-in-sync-context | NEW — `statements.rs`'s `AsyncOnly`-in-sync gate had no code | **`C0923`** | `[C0923]` | `battery_row9_and_10a_*` |
+//! | 10b | async-drop-context ex.1 (D6, greenfield) | NEW — no shipped check combines drop-obligation with suspension | **`C0922`** | `[C0922]` | `battery_row10b_*` (+ the `#[ignore]`'d method-call pin, asserting the same `[C0922]` for when the RAII hole is fixed) |
+//!
+//! ## Code-block allocation (D2, verified empirically)
+//!
+//! C2 owns the contiguous block **C0913–C0925** (C3 starts at C0926). Verified
+//! next-free at implementation time (`rg 'C09[0-9][0-9]' crates/`): C0901–C0912
+//! are C1's (taken); every C0913+ hit was a forward-reference doc mention, with
+//! no landed message-string allocation. **Minted by slice 3: `C0922`, `C0923`.**
+//! **C0913–C0921 are deliberately NOT minted** — the D4 reuse ruling makes the
+//! per-check wrapper codes the spec-distiller originally proposed (C0913–C0921)
+//! unnecessary and information-losing; they stay reserved in C2's block for a
+//! future genuinely-new install class, not assigned here. This gap is
+//! intentional, not an oversight.
+//!
+//! ## Reserved, allocated-not-wired (slice-4 existing-body-edit territory)
+//!
+//! - **`C0924`** — split/partial rewrite transaction (C2-R7): a capture-set
+//!   change and body change that did not share ONE rewrite transaction, or that
+//!   arrived under two expansion identities. The transaction/identity guard is
+//!   slice-4 edit-path work; the code is reserved here and wired NOWHERE.
+//! - **`C0925`** — incomplete environment at install (C2-R8): an install
+//!   attempted without the COMPLETE current capture pack (a partial
+//!   environment). Also slice-4; reserved, wired NOWHERE.
+//!
 //! # Captures → loan set (the "don't assume" verification)
 //!
 //! The borrow check (#4) is load-bearing on the generated body's captures
@@ -66,8 +115,8 @@
 //! provably live ACROSS the point (that precision is wave40's). This
 //! over-rejects, never installs unsoundly (C2-R6): nothing installed here can
 //! become retroactively unsound when wave40's AsyncDrop protocol licenses these
-//! cases. It is a NAMED installation rejection (slice 3 assigns the code), never
-//! a soft-fail or runtime fallback. Wired in [`super::async_drop_context`],
+//! cases. It is the NAMED `C0922` installation rejection (assigned slice 3),
+//! never a soft-fail or runtime fallback. Wired in [`super::async_drop_context`],
 //! evaluated at `compile_function`'s end on an authenticated generated body, so
 //! it covers every generated body that reaches `compile_function` uniformly
 //! (extend methods + generated free functions; ReplaceBody replacements are a
@@ -78,12 +127,16 @@
 //! The pins live in
 //! `functions_annotations/c2_slice2_battery_tests.rs`. Each routes a generated
 //! `extend` body that VIOLATES one check through the real install path and
-//! asserts a rejection with nothing published (generic, code-free; slice 3
-//! attaches the code). Rows 1, 3, 4, 5, 6, 7, 9/10a, and 10b have firing pins;
-//! 10b carries a second firing pin over an inferred drop local initialized by a
-//! METHOD CALL (`let x = pool.acquire()` returning a `Drop` type), plus two
-//! controls (drop-local-without-suspension and suspension-without-drop-local
-//! both install) so the D6 rejection is attributable to the COMBINATION.
+//! asserts a rejection with nothing published. Slice 3 UPGRADED every firing
+//! pin's assertion from generic (install fails) to code-specific: the pin now
+//! asserts the rendered error contains its row's exact distinguisher (the reused
+//! `[B00xx]` / `Type mismatch`, or the new `[C0922]` / `[C0923]`) per the
+//! § "Slice-3 named rejection matrix" above and the C1 pin convention. Rows 1, 3,
+//! 4, 5, 6, 7, 9/10a, and 10b have firing pins; 10b carries a second firing pin
+//! over an inferred drop local initialized by a METHOD CALL (`let x =
+//! pool.acquire()` returning a `Drop` type), plus two controls
+//! (drop-local-without-suspension and suspension-without-drop-local both install)
+//! so the D6 rejection is attributable to the COMBINATION.
 //!
 //! **The method-call pin is `#[ignore]`'d — it exposed a pre-existing RAII
 //! EMISSION HOLE, not a D6 gap (traced 2026-07-17, surfaced to the supervisor).**
@@ -120,10 +173,31 @@
 //!   REJECTION surfaces at the binding site (row 9). No firing pin exists.
 //!
 //! Rows 9 and 10a are the SAME site (statements.rs:7246-7247), so one fixture
-//! covers both (not fabricated as two distinct trips). Row 7's exact
-//! `NonSendableAcrossTaskBoundary` (B0014) code has no existing green source
-//! fixture; its pin authors the detached-mutable-capture-closure shape and
-//! asserts generic rejection (a sibling task-boundary rejection also passes).
-//! The exact B0014-ISOLATION fixture (asserting that specific code, not a
-//! sibling) is slice-3's obligation — it lands with the C09xx code assignment,
-//! not here.
+//! covers both (not fabricated as two distinct trips), now named `C0923`.
+//!
+//! # Row 7 B0014 isolation (slice-3 obligation, discharged)
+//!
+//! Slice 2 left row 7's pin asserting GENERIC rejection because no green source
+//! fixture pinned `NonSendableAcrossTaskBoundary` (B0014) specifically and a
+//! sibling task-boundary code might also fire. Slice 3 replaces the fixture body
+//! with a B0014-ISOLATING shape and asserts `[B0014]` exactly. The isolation is
+//! grounded in the solver's two DISTINCT detached-boundary paths
+//! (`solver.rs:364-406` / `1333-1367`):
+//!
+//! - **B0006/B0012 (loan path)** needs a reference LOAN (`&`/`&mut`) to cross
+//!   the boundary — `local_loans_from_operands` over the `TaskBoundary` operands,
+//!   mapped by the loan's `BorrowKind` (Exclusive → B0006, Shared → B0012).
+//! - **B0014 (sendability path)** is loan-independent: it fires when a boundary
+//!   operand slot is in `closure_capture_slots` == `mutable_captures` (a slot
+//!   that is closure-captured AND assigned more than once —
+//!   `storage_planning::collect_closure_captures`).
+//!
+//! So a **read-only** closure capture of a REASSIGNED local isolates B0014: the
+//! read-only capture crosses as a by-value `Copy` operand (no reference loan ⇒
+//! the loan path is empty ⇒ no B0006/B0012), while the local's second assignment
+//! puts it in `mutable_captures` ⇒ the sendability path fires B0014 as the sole
+//! error (the loan-sink loop runs first and emits nothing, so `first_borrow_error`
+//! is the B0014 non-sendable record). The fixture reassigns the local twice so
+//! `assign_counts > 1` holds regardless of whether the initial binding counts as
+//! an `Assign`. This is a clean separation, not the "both codes accepted"
+//! fallback; the checks CAN be separated at this site.
