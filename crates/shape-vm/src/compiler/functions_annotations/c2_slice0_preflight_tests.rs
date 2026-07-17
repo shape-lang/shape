@@ -319,6 +319,181 @@ fn failed_install_after_a_successful_one_preserves_the_earlier_reservation() {
     );
 }
 
+/// H1 — a failed install RESTORES a displaced pre-existing `function_defs`
+/// entry rather than deleting the shared key.
+///
+/// `register_function` skips dedup for `.`-qualified names, so a generated
+/// `Ghost.answer` OVERWRITES a prelude/dependency `Ghost.answer` registered
+/// below the watermark. The pre-journal `remove(key)` deleted the shared key
+/// and lost the pre-existing definition; the undo journal restores the displaced
+/// value. Simulated by registering a distinguishable pre-existing `Ghost.answer`
+/// (return type `string`, no params) before the genfail install (whose generated
+/// `Ghost.answer` returns `int` and carries a receiver param).
+#[test]
+fn failed_install_restores_a_displaced_preexisting_function_def() {
+    let mut compiler = BytecodeCompiler::new();
+
+    let mut preexisting = parse_fn("fn placeholder() -> string { \"prelude\" }");
+    preexisting.name = ANALYSIS_METHOD_NAME.to_string();
+    compiler
+        .register_function(&preexisting)
+        .expect("register the simulated below-watermark prelude method");
+    let functions_before = compiler.program.functions.len();
+
+    let program =
+        shape_ast::parse_program(FAILING_ANALYSIS_BODY_PROGRAM).expect("fixture parses");
+    assert!(
+        compiler.compile_in_place(&program).is_err(),
+        "the generated install rejects"
+    );
+
+    let restored = compiler
+        .function_defs
+        .get(ANALYSIS_METHOD_NAME)
+        .expect("H1: the displaced pre-existing function_defs entry must be restored");
+    assert_eq!(
+        format!("{:?}", restored.return_type),
+        format!("{:?}", preexisting.return_type),
+        "H1: the restored entry is the pre-existing one (return `string`), not the generated ghost (`int`)"
+    );
+    assert_eq!(
+        compiler
+            .program
+            .functions
+            .iter()
+            .filter(|f| f.name == ANALYSIS_METHOD_NAME)
+            .count(),
+        1,
+        "H1: the function table holds exactly the pre-existing entry after rollback"
+    );
+    assert_eq!(compiler.program.functions.len(), functions_before);
+}
+
+/// A generated extend whose FIRST method is valid and writes the
+/// `owned_mutable_locals` witness (a `let mut` local, statements.rs), and whose
+/// SECOND method passes analysis but fails pass-2 body compile (an immutable
+/// reassignment). The install fails AFTER the witness is written — the M3 ghost.
+const FAILING_PASS2_M3_PROGRAM: &str = r#"
+annotation genm3() {
+  targets: [type]
+  comptime post(target, ctx) {
+    extend (f"extend {target.name} \{ method witness() -> int \{ let mut ghost_local = 0; ghost_local \} method fail() -> int \{ let z = 1; z = 2; z \} \}")
+  }
+}
+
+@genm3()
+type M3 { id: int }
+"#;
+
+/// The same generated extend WITHOUT the failing second method — the control
+/// proving the witness IS written on a successful install (so the reject
+/// assertion below is non-vacuous).
+const SUCCEEDING_M3_PROGRAM: &str = r#"
+annotation genm3ok() {
+  targets: [type]
+  comptime post(target, ctx) {
+    extend (f"extend {target.name} \{ method witness() -> int \{ let mut ghost_local = 0; ghost_local \} \}")
+  }
+}
+
+@genm3ok()
+type M3ok { id: int }
+"#;
+
+/// M3 — a failed install rolls back the `owned_mutable_locals` witness.
+#[test]
+fn failed_install_rolls_back_owned_mutable_locals_witness() {
+    // Control: the witness IS written on a successful install.
+    let mut control = BytecodeCompiler::new();
+    control
+        .compile_in_place(&shape_ast::parse_program(SUCCEEDING_M3_PROGRAM).expect("parses"))
+        .expect("control install compiles");
+    assert!(
+        control.owned_mutable_locals.contains("ghost_local"),
+        "control: a `let mut` in a generated body writes the owned_mutable_locals witness (guards vacuity)"
+    );
+
+    // The failing install writes the witness (first method) then rejects at
+    // pass-2 (second method); rollback removes the ghost.
+    let mut compiler = BytecodeCompiler::new();
+    assert!(
+        compiler
+            .compile_in_place(&shape_ast::parse_program(FAILING_PASS2_M3_PROGRAM).expect("parses"))
+            .is_err(),
+        "the generated install rejects at pass-2"
+    );
+    assert!(
+        !compiler.owned_mutable_locals.contains("ghost_local"),
+        "M3: the rejected install's owned_mutable_locals witness is rolled back"
+    );
+}
+
+/// A program with a top-level property assignment that writes `hoisted_fields`
+/// (compiler_impl_reference_model.rs pre-pass, which runs AFTER analysis) plus a
+/// generated install that passes analysis but fails pass-2 — so the hoist is
+/// written before the failure (the M4 ghost).
+const FAILING_PASS2_M4_PROGRAM: &str = r#"
+annotation genm4() {
+  targets: [type]
+  comptime post(target, ctx) {
+    extend (f"extend {target.name} \{ method answer() -> int \{ let z = 1; z = 2; z \} \}")
+  }
+}
+
+@genm4()
+type M4 { id: int }
+
+let ghost_obj = M4 { id: 0 }
+ghost_obj.extra = 5
+ghost_obj.extra
+"#;
+
+/// The same program with a VALID generated body — the control proving the hoist
+/// IS written on a successful compile.
+const SUCCEEDING_M4_PROGRAM: &str = r#"
+annotation genm4ok() {
+  targets: [type]
+  comptime post(target, ctx) {
+    extend (f"extend {target.name} \{ method answer() -> int \{ 42 \} \}")
+  }
+}
+
+@genm4ok()
+type M4ok { id: int }
+
+let ghost_obj = M4ok { id: 0 }
+ghost_obj.extra = 5
+ghost_obj.extra
+"#;
+
+/// M4 — a failed install rolls back a `hoisted_fields` entry.
+#[test]
+fn failed_install_rolls_back_hoisted_fields() {
+    // Control: the hoist IS written on a successful compile.
+    let mut control = BytecodeCompiler::new();
+    control
+        .compile_in_place(&shape_ast::parse_program(SUCCEEDING_M4_PROGRAM).expect("parses"))
+        .expect("control compiles");
+    assert!(
+        control.hoisted_fields.contains_key("ghost_obj"),
+        "control: a top-level property assignment writes hoisted_fields (guards vacuity)"
+    );
+
+    // The failing compile writes the hoist (top-level pre-pass) then rejects at
+    // pass-2; rollback removes the ghost.
+    let mut compiler = BytecodeCompiler::new();
+    assert!(
+        compiler
+            .compile_in_place(&shape_ast::parse_program(FAILING_PASS2_M4_PROGRAM).expect("parses"))
+            .is_err(),
+        "the generated install rejects at pass-2"
+    );
+    assert!(
+        !compiler.hoisted_fields.contains_key("ghost_obj"),
+        "M4: the rejected compile's hoisted_fields entry is rolled back"
+    );
+}
+
 /// PIN #2 (slice 0, UNCHANGED) — per-function body analysis is re-entrant and
 /// idempotent.
 ///
@@ -369,6 +544,16 @@ fn solver_reentry_is_idempotent_over_same_semantic_identity() {
     assert!(
         after_first_functions > base_functions,
         "first analysis must publish exactly one new function-fact entry"
+    );
+    // The borrow and storage maps grow from their captured baselines too — the
+    // baselines were captured but previously never compared.
+    assert!(
+        after_first_borrows > base_borrows,
+        "first analysis must publish a new borrow-analysis entry"
+    );
+    assert!(
+        after_first_storage > base_storage,
+        "first analysis must publish a new storage-plan entry"
     );
 
     // Run 2 — SAME FunctionDef, SAME name = SAME semantic identity.

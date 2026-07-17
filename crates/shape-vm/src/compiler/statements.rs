@@ -7008,7 +7008,7 @@ impl BytecodeCompiler {
                                 // ADR-009 C2 #13 (M3): a rollback removes this
                                 // witness so it can't misclassify a later
                                 // same-named binding on a reused compiler.
-                                self.journal_record_owned_mutable_local(binding_name);
+                                self.journal_record_owned_mutable_local(&binding_name);
                                 self.owned_mutable_locals.insert(binding_name.clone());
                             }
                         }
