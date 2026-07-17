@@ -984,6 +984,15 @@ impl BytecodeCompiler {
             for ann in &annotations {
                 if let Some((_, compiled)) = self.lookup_compiled_annotation(ann) {
                     if let Some(handler) = compiled.comptime_post_handler {
+                        // Propagate the SAME `replace body` provenance out-param as
+                        // phase 1: both handler phases route through the one shared
+                        // `process_comptime_directives_for_function`, which is where
+                        // a `replace body` directive is processed and its
+                        // replacement origin recorded. A `replace body` is a
+                        // post-handler directive today, but the directive processor
+                        // is shared, so both phases must surface it uniformly — a
+                        // discard here would silently drop the D6 gate's provenance
+                        // for the one phase that actually emits it.
                         if self.execute_function_comptime_handler(
                             ann,
                             &handler,
@@ -991,6 +1000,7 @@ impl BytecodeCompiler {
                             func_def,
                             inferred_reference_optimizations,
                             &mut pending_original_body_shadow,
+                            replacement_body_origin,
                         )? {
                             removed = true;
                             break;
