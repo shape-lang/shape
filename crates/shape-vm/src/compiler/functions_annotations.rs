@@ -1819,7 +1819,7 @@ impl BytecodeCompiler {
             // once through the identical path.
             match self.reserve_generated_decl_journaled(
                 &func_def.name,
-                origin,
+                origin.clone(),
                 content,
                 generator_anchor,
             ) {
@@ -1834,6 +1834,16 @@ impl BytecodeCompiler {
                 Ok(SymbolReservation::Reissued(_)) => {}
                 Err(message) => return Err(self.expansion_rejection(message, site)),
             }
+            // ADR-009 C2 #13 (slice 2, battery row 10b): the D6 conservative
+            // async-drop-context guard. Runs on the AUTHENTICATED generated
+            // body just before its pass-2 compile, so a rejection rolls back
+            // atomically through the install transaction (the same path the
+            // pass-2 reject pin exercises). A sync body or a non-Drop program
+            // is a structural no-op.
+            self.reject_generated_drop_obligated_across_suspension(&func_def, &origin)
+                .map_err(|e| {
+                    self.build_generated_decl_failure(&e, &func_def.name, &node_path, site)
+                })?;
             // Wave-38F generated-method JIT parity: hand-written `extend`
             // methods compile through the full driver (`compile_function`),
             // which lowers MIR and back-patches `Function.mir_data` for the
@@ -2530,12 +2540,26 @@ impl BytecodeCompiler {
             // goes through `compile_function`; routing the generated one through
             // the same path gives it native JIT codegen and VM == JIT.
             //
+            // ADR-009 C2 #13 (slice 2, battery row 10b): the D6 conservative
+            // async-drop-context guard, on the AUTHENTICATED generated free
+            // function just before its pass-2 compile — same install-span
+            // rollback guarantee as the extend-method site. The origin is
+            // rebuilt here exactly as the registration loop above minted it
+            // (`site` + `fn:<name>`); the issuer capability, not the path,
+            // authenticates it.
+            let node_path = GeneratedNodePath::decl_root(format!("fn:{}", func_def.name));
+            let origin = GeneratedOrigin {
+                expansion: site.identity().clone(),
+                node_path: node_path.clone(),
+                source_anchor,
+            };
+            self.reject_generated_drop_obligated_across_suspension(func_def, &origin)
+                .map_err(|e| self.build_generated_decl_failure(&e, &func_def.name, &node_path, site))?;
             // ADR-009 D1 (S4), rejection row 7: a body error inside the
             // generated free function surfaces with full expansion
             // provenance (generated-node + application + generator
             // locations).
             self.compile_function(func_def).map_err(|e| {
-                let node_path = GeneratedNodePath::decl_root(format!("fn:{}", func_def.name));
                 self.build_generated_decl_failure(&e, &func_def.name, &node_path, site)
             })?;
         }
