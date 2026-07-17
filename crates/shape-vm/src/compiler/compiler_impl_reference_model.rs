@@ -1968,18 +1968,43 @@ impl BytecodeCompiler {
         Ok(std::mem::take(&mut self.program))
     }
 
-    /// The full `compile` driver, borrowing the compiler so post-compile
+    /// Compile `program` into `self` under the ADR-009 C2 #13 (slice 1) atomic
+    /// generated-body install transaction.
+    ///
+    /// The install of a comptime-generated body spans this driver: the
+    /// whole-program pre-pass registers generated signatures before the shared
+    /// analyzer runs, and pass-2 compiles the bodies after it, so a rejection
+    /// can surface at analysis time OR in pass-2 body compile. This wrapper
+    /// records a pre-install watermark, runs the whole driver, and on ANY `Err`
+    /// restores the compiler to that baseline so no partial generated install
+    /// is observable; on success every publication stays exactly as compiled.
+    /// See [`checked_body`](crate::compiler::checked_body) for the rollback set
+    /// and the query-session retain mode.
+    pub fn compile_in_place(&mut self, program: &Program) -> Result<()> {
+        let transaction = self.begin_checked_body_install();
+        let result = self.compile_in_place_inner(program);
+        if result.is_err() {
+            self.rollback_checked_body_install(transaction);
+        }
+        // Success commits by dropping `transaction` here — every publication stays.
+        result
+    }
+
+    /// The full `compile` driver body, borrowing the compiler so post-compile
     /// state (e.g. the ADR-009 D1 `generated_symbols` provenance table)
     /// remains inspectable — the compiler-owned surface the tooling queries
     /// (Decision 66) and unit tests assert against. `compile` is the thin
     /// consuming wrapper above; the compiled program lands in
     /// `self.program`.
     ///
-    /// `pub` since D1 slice S5: the LSP compiles the document through this
-    /// entry and then answers generated-symbol navigation from
-    /// `generated_symbol_query()` — the ONE query API of spec §4.1, never a
-    /// second evaluator.
-    pub fn compile_in_place(&mut self, program: &Program) -> Result<()> {
+    /// Since D1 slice S5 the LSP compiles the document through the public
+    /// [`compile_in_place`](Self::compile_in_place) wrapper (which additionally
+    /// runs the ADR-009 C2 #13 atomic install transaction) and then answers
+    /// generated-symbol navigation from `generated_symbol_query()` — the ONE
+    /// query API of spec §4.1, never a second evaluator. This inner driver holds
+    /// the compilation body; it must be reached only through that wrapper so the
+    /// install transaction always brackets it.
+    pub(crate) fn compile_in_place_inner(&mut self, program: &Program) -> Result<()> {
         self.ensure_annotation_compiler_usable()?;
 
         // First: desugar the program (converts FromQuery to method chains, etc.)

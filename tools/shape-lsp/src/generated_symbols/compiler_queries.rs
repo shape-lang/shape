@@ -100,6 +100,14 @@ fn generated_query_compiler(text: &str) -> shape_vm::BytecodeCompiler {
     let mut compiler = shape_vm::BytecodeCompiler::new();
     compiler.set_type_diagnostic_mode(shape_vm::compiler::TypeDiagnosticMode::RecoverAll);
     compiler.set_compile_diagnostic_mode(shape_vm::compiler::CompileDiagnosticMode::RecoverAll);
+    // ADR-009 C2 #13 (slice 1): this is a query session, not an install. It
+    // never executes or ships a program, so the atomic install transaction
+    // still discards every executable publication on a recoverable `Err`; the
+    // retain mode keeps only the generated-query reservation tables
+    // (`generated_symbols`, `closure_capture_packs`) so
+    // `query_authority_or_none` can keep answering from them (the tolerance
+    // this file relies on).
+    compiler.set_retain_generated_reservations_for_query_session(true);
     compiler.set_source(text);
     compiler
 }

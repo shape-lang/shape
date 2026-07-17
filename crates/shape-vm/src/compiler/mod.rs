@@ -82,6 +82,7 @@ pub(crate) mod comptime_diagnostics;
 pub(crate) mod comptime_target;
 mod control_flow;
 mod body_analysis_authority;
+mod checked_body;
 mod expressions;
 mod functions;
 mod functions_annotations;
@@ -1916,6 +1917,15 @@ pub struct BytecodeCompiler {
     /// former name-keyed `materialized_comptime_fns` set is deleted — name
     /// membership is the table's derived `contains_name` view.
     pub(crate) generated_symbols: comptime_builtins::expansion_provenance::GeneratedSymbolTable,
+
+    /// ADR-009 C2 #13 (slice 1) — when set, a rolled-back generated-body
+    /// install (see [`checked_body`]) retains the generated-query reservation
+    /// tables (`generated_symbols`, `closure_capture_packs`) after a recoverable
+    /// compile `Err`, so the LSP generated-symbol/capture query entries can keep
+    /// answering from them. Off for ordinary (batch/install) compilation, which
+    /// rolls back every publication. A named query-session mode, not a
+    /// soft-fail: executable publications still roll back in both modes.
+    pub(crate) retain_generated_reservations_for_query_session: bool,
 
     /// ADR-009 E3 (slice S1) — the generated analysis items materialized by
     /// the executed declaration-discovery pre-pass

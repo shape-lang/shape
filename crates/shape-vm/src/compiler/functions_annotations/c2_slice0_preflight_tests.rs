@@ -1,34 +1,50 @@
-//! ADR-009 C2 #13 — slice-0 preflight PINS (execute-the-assumption, not reason).
+//! ADR-009 C2 #13 — install-atomicity pins.
 //!
-//! These tests do not change any production behavior. They EXECUTE the two
-//! riskiest assumptions the C2 slice plan rests on and pin the observed reality
-//! as committed evidence, exactly as C1's slice-0 preflight earned its keep.
+//! Slice 0 wrote these as EXECUTE-the-assumption pins that DOCUMENTED the debt:
+//! the generated-body install path was non-atomic, so a rejected install left a
+//! registered ghost function plus a live generated-symbol reservation behind.
+//! Slice 1 lands the atomic install transaction
+//! ([`checked_body`](crate::compiler::checked_body)) and FLIPS those pins to the
+//! atomic assertion they were designed to detect: a rejected generated install
+//! now publishes NOTHING.
 //!
-//! 1. `install_is_non_atomic_*` pins that the CURRENT generated-body install
-//!    path is NON-ATOMIC: a generated `extend` method whose body fails pass-2
-//!    body compilation leaves a registered ghost function in the program's
-//!    function table AND a surviving reservation in the generated-symbol table,
-//!    even though `compile_in_place` returned `Err`. The `// C2 SLICE-0 PIN`
-//!    assertions document the debt slice 1 must flip: when the atomic
-//!    staging/commit transaction lands, a rejected install publishes NOTHING
-//!    and these assertions go RED — that flip is the intended detector.
+//! Both reject modes are pinned, because the install spans the whole driver and
+//! a rejection can surface in either phase (see `checked_body` module docs):
 //!
-//! 2. `solver_reentry_*` pins the slice plan's secondary assumption: the
-//!    per-function body-analysis bundle (`analyze_function_body`, which drives
-//!    the MIR borrow solver over one body) can re-run over the SAME semantic
-//!    identity idempotently — no double-publication side effect, stable facts —
-//!    so slice 2 can route it through the transaction without a whole-program
-//!    recompile.
+//! 1. `install_is_atomic_generated_extend_body_failure_leaves_nothing` — the
+//!    ANALYSIS-time reject. The generated body calls an undefined function; the
+//!    shared analyzer (`analyze_program_full`, `FailFast`/`Strict`) infers it
+//!    and rejects BEFORE pass-2 runs. The surviving ghost was the pre-pass
+//!    registration; the transaction rolls it back.
+//! 2. `install_is_atomic_generated_extend_body_pass2_failure_leaves_nothing` —
+//!    the PASS-2 reject. The generated body reassigns an immutable binding: it
+//!    passes analysis (a mutability violation is not a type error) but
+//!    `analyze_function_body` rejects it during pass-2 body compile, AFTER it
+//!    has already published the MIR fact bundle. The transaction rolls back the
+//!    registration AND that fact bundle.
+//! 3. `successful_generated_install_publishes_and_runs` — the success-path
+//!    invariance: a generated install that succeeds still publishes everything
+//!    exactly as before (compiled body, reservation, fact bundle), so the
+//!    transaction's commit is a no-op on the happy path.
+//!
+//! The query-session retain mode (a rolled-back install keeps the generated-
+//! query reservation tables for LSP tooling) is exercised by the lsp-lib suite,
+//! not here — those tests are its arbiter (commit `4dce9471`).
+//!
+//! `solver_reentry_is_idempotent_over_same_semantic_identity` is unchanged from
+//! slice 0: the per-function body-analysis bundle re-runs over the same semantic
+//! identity idempotently, the property slice 2 depends on.
 
 use super::BytecodeCompiler;
 use shape_ast::ast::{FunctionDef, Item};
 
 /// The known-good generated-extend fixture shape (mirrors the S2 provenance
 /// test at this file's parent module), but the generated method body calls an
-/// undefined function so pass-2 body compilation FAILS. The annotation handler
-/// itself succeeds (it only emits source text); the pre-pass registers the
-/// method SIGNATURE; only the pass-2 body compile trips, after registration.
-const FAILING_GENERATED_BODY_PROGRAM: &str = r#"
+/// undefined function so it is REJECTED at analysis time. The annotation
+/// handler itself succeeds (it only emits source text); the pre-pass registers
+/// the method SIGNATURE; the shared analyzer then infers the generated body and
+/// rejects the undefined callee before pass-2 body compile.
+const FAILING_ANALYSIS_BODY_PROGRAM: &str = r#"
 annotation genfail() {
   targets: [type]
   comptime post(target, ctx) {
@@ -40,9 +56,49 @@ annotation genfail() {
 type Ghost { id: int }
 "#;
 
-/// The generated method's derived name (Type.method), the key under which both
-/// the function table and the generated-symbol table record it.
-const GENERATED_METHOD_NAME: &str = "Ghost.answer";
+/// The analysis-time fixture's generated method name (Type.method), the key
+/// under which the function table and the generated-symbol table record it.
+const ANALYSIS_METHOD_NAME: &str = "Ghost.answer";
+
+/// A generated-extend fixture whose body PASSES analysis but is REJECTED during
+/// pass-2 body compile: reassigning the immutable `let x` is a mutability
+/// violation, which the shared analyzer does not flag (it is not a type error)
+/// but `analyze_function_body` rejects — AFTER publishing the MIR fact bundle
+/// (see `functions.rs`'s `mir_borrow_analyses` retention on a reassignment
+/// error). This drives the pass-2 branch of the install transaction, including
+/// fact-bundle rollback.
+const FAILING_PASS2_BODY_PROGRAM: &str = r#"
+annotation genmut() {
+  targets: [type]
+  comptime post(target, ctx) {
+    extend (f"extend {target.name} \{ method answer() -> int \{ let x = 1; x = 2; x \} \}")
+  }
+}
+
+@genmut()
+type Mut { id: int }
+"#;
+
+/// The pass-2 fixture's generated method name.
+const PASS2_METHOD_NAME: &str = "Mut.answer";
+
+/// A generated-extend fixture that installs SUCCESSFULLY (mirrors the S2
+/// provenance sibling test): the generated method returns a literal, passing
+/// both phases, so the transaction commits and every publication survives.
+const SUCCEEDING_BODY_PROGRAM: &str = r#"
+annotation gen() {
+  targets: [type]
+  comptime post(target, ctx) {
+    extend (f"extend {target.name} \{ method answer() -> int \{ 42 \} \}")
+  }
+}
+
+@gen()
+type Point { id: int }
+"#;
+
+/// The success fixture's generated method name.
+const SUCCESS_METHOD_NAME: &str = "Point.answer";
 
 fn parse_fn(source: &str) -> FunctionDef {
     shape_ast::parse_program(source)
@@ -56,82 +112,156 @@ fn parse_fn(source: &str) -> FunctionDef {
         .expect("probe source contains a function")
 }
 
-/// PIN #1 — the non-atomicity of the generated-body install path.
+/// Assert that NONE of the name-keyed install publications for `method_name`
+/// survive: the function-table entry, every side table `register_function`
+/// touches, and the `analyze_function_body` fact bundle. Shared by both reject
+/// pins so the atomic guarantee is asserted identically in both phases.
+fn assert_no_install_publication_survives(compiler: &BytecodeCompiler, method_name: &str) {
+    assert!(
+        !compiler
+            .program
+            .functions
+            .iter()
+            .any(|f| f.name == method_name),
+        "rejected generated install must leave NO function-table entry (was a registered ghost before slice 1)"
+    );
+    assert!(
+        !compiler.generated_symbols.contains_name(method_name),
+        "rejected generated install must leave NO generated-symbol reservation"
+    );
+    // Side tables `register_function` publishes.
+    assert!(
+        !compiler.function_defs.contains_key(method_name),
+        "rejected generated install must leave NO function_defs entry"
+    );
+    assert!(
+        !compiler.function_arity_bounds.contains_key(method_name),
+        "rejected generated install must leave NO function_arity_bounds entry"
+    );
+    assert!(
+        !compiler.function_const_params.contains_key(method_name),
+        "rejected generated install must leave NO function_const_params entry"
+    );
+    assert!(
+        compiler
+            .type_tracker
+            .get_function_return_concrete_type(method_name)
+            .is_none(),
+        "rejected generated install must leave NO type_tracker return type"
+    );
+    // The `analyze_function_body` fact bundle, keyed by function name.
+    assert!(
+        !compiler.mir_functions.contains_key(method_name),
+        "rejected generated install must leave NO mir_functions fact"
+    );
+    assert!(
+        !compiler.mir_borrow_analyses.contains_key(method_name),
+        "rejected generated install must leave NO mir_borrow_analyses fact"
+    );
+    assert!(
+        !compiler.mir_storage_plans.contains_key(method_name),
+        "rejected generated install must leave NO mir_storage_plans fact"
+    );
+}
+
+/// FLIP OF THE SLICE-0 PIN — the ANALYSIS-time reject is atomic.
 ///
-/// Routes a generated `extend` method with a failing body through the REAL
-/// install path (`compile_in_place` → `materialize_computed_comptime_extends`
-/// pre-pass register + pass-2 `apply_comptime_extend` body compile). The
-/// compile fails; we then inventory exactly what ghost state survives.
+/// Routes a generated `extend` method with an undefined-callee body through the
+/// REAL install path (`compile_in_place`, now the atomic-transaction wrapper).
+/// The compile rejects at analysis time. Slice 0 pinned that the pre-pass
+/// registration + generated-symbol reservation SURVIVED; slice 1's transaction
+/// rolls them back, so nothing is observable. This is the documented
+/// true-positive flip slice 0 was designed to trip.
 #[test]
-fn install_is_non_atomic_generated_extend_body_failure_leaves_ghost_registration() {
+fn install_is_atomic_generated_extend_body_failure_leaves_nothing() {
     let program =
-        shape_ast::parse_program(FAILING_GENERATED_BODY_PROGRAM).expect("fixture parses");
+        shape_ast::parse_program(FAILING_ANALYSIS_BODY_PROGRAM).expect("fixture parses");
     let mut compiler = BytecodeCompiler::new();
 
-    // The install must be REJECTED (undefined-function body error surfaced with
-    // generated-decl provenance). If this ever returns Ok, the fixture stopped
-    // exercising a rejection and the rest of the pin is meaningless.
+    // The install must be REJECTED (undefined-function body error). If this ever
+    // returns Ok, the fixture stopped exercising a rejection.
     let outcome = compiler.compile_in_place(&program);
     assert!(
         outcome.is_err(),
         "generated body calling an undefined function must reject at install"
     );
 
-    // C2 SLICE-0 PIN: current install is non-atomic — the pre-pass registered
-    // the generated method SIGNATURE into the program function table (positional
-    // push, no rollback), so the rejected install leaves a GHOST function behind.
-    // Slice 1's atomic commit flips this to `!any(...)`.
-    let ghost = compiler
-        .program
-        .functions
-        .iter()
-        .find(|f| f.name == GENERATED_METHOD_NAME);
-    assert!(
-        ghost.is_some(),
-        "PIN: rejected generated body still leaves its registered function index in program.functions"
-    );
+    // ATOMIC: the rejected install published NOTHING (was a ghost before slice 1).
+    assert_no_install_publication_survives(&compiler, ANALYSIS_METHOD_NAME);
 
-    // C2 SLICE-0 PIN: the ghost is a registered-but-never-compiled ZERO-length
-    // body (the exact hazard the mod.rs:1932 doc names — dispatching a
-    // zero-instruction body). `register_function` seeds body_length = 0 and the
-    // pass-2 body compile fails before the emission back-patch runs.
-    assert_eq!(
-        ghost.expect("ghost present").body_length,
-        0,
-        "PIN: rejected generated body is registered with an uncompiled (zero-length) body"
-    );
-
-    // C2 SLICE-0 PIN: the generated-symbol reservation ALSO survives. C1's
-    // poison machinery (`poison_annotation_compiler`) fires only on the
-    // annotation-DECLARATION install transaction, never on this generated-extend
-    // body-compile path — so the reservation is not cleaned. Slice 1 must fold
-    // this reservation into the same atomic rollback.
-    assert!(
-        compiler
-            .generated_symbols
-            .contains_name(GENERATED_METHOD_NAME),
-        "PIN: rejected generated body still leaves its generated-symbol reservation"
-    );
-
-    // C2 SLICE-0 PIN: unlike the call-site-specialization path
-    // (`__w24_method_*` / `__w27_implicit_*`), the annotation-generated install
-    // path has NO soft-fail guard at all — `failed_call_site_specializations`
-    // is never touched here, so a second consumer has zero signal that the
-    // ghost body is uncompiled. This documents that the annotation path is even
-    // LESS protected than the documented call-site hole.
-    assert!(
-        !compiler
-            .failed_call_site_specializations
-            .contains(GENERATED_METHOD_NAME),
-        "PIN: annotation-generated install path does not record the failure in the call-site soft-fail set"
-    );
+    // The call-site soft-fail set is not this path's mechanism and stays empty
+    // (the transaction, not the soft-fail counter, is what makes the install
+    // atomic — see CLAUDE.md §Forbidden "soft-fail counter for now").
     assert!(
         compiler.failed_call_site_specializations.is_empty(),
-        "PIN: the call-site soft-fail set stays empty for the annotation-generated path"
+        "the annotation-generated path records nothing in the call-site soft-fail set"
     );
 }
 
-/// PIN #2 — per-function body analysis is re-entrant and idempotent.
+/// The PASS-2 reject is atomic, INCLUDING the fact bundle.
+///
+/// The generated body passes analysis but reassigns an immutable binding, which
+/// `analyze_function_body` rejects during pass-2 body compile — after it has
+/// already published the MIR fact bundle for the generated method. The
+/// transaction must roll back the registration AND that fact bundle, so the
+/// same nothing-survives set holds as for the analysis-time reject. This is the
+/// mode a pass-2-only wrapper would have missed (C2 slice-1 supervisor ruling,
+/// requirement 2).
+#[test]
+fn install_is_atomic_generated_extend_body_pass2_failure_leaves_nothing() {
+    let program = shape_ast::parse_program(FAILING_PASS2_BODY_PROGRAM).expect("fixture parses");
+    let mut compiler = BytecodeCompiler::new();
+
+    let outcome = compiler.compile_in_place(&program);
+    assert!(
+        outcome.is_err(),
+        "generated body reassigning an immutable binding must reject at pass-2 body compile"
+    );
+
+    // ATOMIC: nothing survives — crucially, the `analyze_function_body` fact
+    // bundle that DID publish before the pass-2 mutability error is rolled back.
+    assert_no_install_publication_survives(&compiler, PASS2_METHOD_NAME);
+}
+
+/// SUCCESS-PATH INVARIANCE — a successful generated install still publishes
+/// everything exactly as before the transaction existed.
+///
+/// The transaction's commit is a no-op: on the happy path every publication
+/// stays. The generated method is present in the function table with a COMPILED
+/// (non-ghost, `body_length > 0`) body — the direct contrast to the reject pins,
+/// where a zero-length ghost must be gone — plus its reservation and fact
+/// bundle. Mirrors the S2 provenance sibling test's publication assertions.
+#[test]
+fn successful_generated_install_publishes_and_runs() {
+    let program = shape_ast::parse_program(SUCCEEDING_BODY_PROGRAM).expect("fixture parses");
+    let mut compiler = BytecodeCompiler::new();
+
+    compiler
+        .compile_in_place(&program)
+        .expect("generated extend method compiles through both phases");
+
+    let installed = compiler
+        .program
+        .functions
+        .iter()
+        .find(|f| f.name == SUCCESS_METHOD_NAME)
+        .expect("successful install publishes the generated method into the function table");
+    assert!(
+        installed.body_length > 0,
+        "successful install compiles a real (runnable) body, not a zero-length ghost"
+    );
+    assert!(
+        compiler.generated_symbols.contains_name(SUCCESS_METHOD_NAME),
+        "successful install keeps its generated-symbol reservation"
+    );
+    assert!(
+        compiler.mir_functions.contains_key(SUCCESS_METHOD_NAME),
+        "successful install keeps its analyze_function_body fact bundle"
+    );
+}
+
+/// PIN #2 (slice 0, UNCHANGED) — per-function body analysis is re-entrant and
+/// idempotent.
 ///
 /// Runs the body-analysis bundle (`analyze_function_body`, which lowers to MIR
 /// and drives the borrow solver, publishing the fact bundle keyed by the
