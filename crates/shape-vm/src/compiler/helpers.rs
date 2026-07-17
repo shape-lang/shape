@@ -6254,11 +6254,56 @@ impl BytecodeCompiler {
                 let scoped = format!("{}::{}", namespace, function);
                 self.function_defs.get(&scoped)?.return_type.as_ref()?
             }
+            // Inherited RAII repair (ADR-009 C2 #13, 2026-07-17): a Drop value
+            // returned by a METHOD call and bound to an unannotated local was
+            // silently leaked — the `FunctionCall` sibling above IS re-armed and
+            // dropped, but a `MethodCall` fell through the old `_ => None`, so its
+            // `Drop::drop` never ran (untyped `DropCall`). Resolve the receiver's
+            // tracked type NAME the way method dispatch does
+            // (`resolve_receiver_extend_type` step 3, helpers.rs:4747 — the SAME
+            // `type_tracker` read `local_drop_kind` uses, so the drop-plan keeps a
+            // single authority), then read the extend method `Type.method`'s
+            // declared return. Bounded to a receiver whose type name is directly
+            // tracked (`receiver_local_tracked_type_name` — covers `p.acquire()` /
+            // `self.acquire()`); a chained-method-call / module-binding /
+            // otherwise-unresolvable receiver stays `None`, conservative exactly
+            // as before this arm existed (no name heuristic, no new authority).
+            Expr::MethodCall {
+                receiver, method, ..
+            } => {
+                let type_name = self.receiver_local_tracked_type_name(receiver)?;
+                let qualified = format!("{}.{}", type_name, method);
+                self.function_defs.get(&qualified)?.return_type.as_ref()?
+            }
             _ => return None,
         };
         let type_name = Self::tracked_type_name_from_annotation(ret_ann)?;
         let drop_kind = self.drop_type_info.get(&type_name).copied()?;
         Some((type_name, drop_kind))
+    }
+
+    /// Resolve a method-call RECEIVER's tracked type NAME for the drop-plan's
+    /// [`initializer_call_return_drop_type`] MethodCall arm. Mirrors
+    /// [`resolve_receiver_extend_type`](Self::resolve_receiver_extend_type)
+    /// step 3 (the TypedObject-name case) using the SAME `type_tracker` read
+    /// `local_drop_kind` consults, so the drop-plan stays single-authority.
+    /// Bounded to a bare-identifier receiver bound to a local whose type name is
+    /// tracked (the sound, name-heuristic-free case); everything else is `None`.
+    fn receiver_local_tracked_type_name(
+        &self,
+        receiver: &shape_ast::ast::Expr,
+    ) -> Option<String> {
+        let shape_ast::ast::Expr::Identifier(name, _) = receiver else {
+            return None;
+        };
+        let local_idx = self.resolve_local(name)?;
+        let type_name = self
+            .type_tracker
+            .get_local_type(local_idx)?
+            .type_name
+            .as_deref()?;
+        // Strip generic params ("Vec<int>" -> "Vec"), mirroring step 3.
+        Some(type_name.split('<').next().unwrap_or(type_name).to_string())
     }
 
     /// Emit drops for all scopes being exited (used by return/break/continue).

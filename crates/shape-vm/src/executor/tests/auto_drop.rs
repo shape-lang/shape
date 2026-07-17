@@ -759,3 +759,81 @@ scope()
         vm.drop_errors()
     );
 }
+
+/// Inherited RAII repair (ADR-009 C2 #13, 2026-07-17): a Drop value returned by
+/// a METHOD call and bound to an UNANNOTATED local must run `Drop::drop` at
+/// scope exit. Before the `initializer_call_return_drop_type` MethodCall arm
+/// (helpers.rs), `x`'s type never stamped for `let x = p.acquire()`, so an
+/// UNTYPED `DropCall` was emitted and `Conn::drop` never ran — while the
+/// `FunctionCall` sibling (`let x = make()`) WAS dropped. That asymmetry (a
+/// pre-existing runtime soundness gap with no prior test) is what the D6
+/// mask-breaker exposed. Pins the runtime half of the repair: exactly one TYPED
+/// `DropCall(Conn)` is emitted, which invokes `Conn::drop` at scope exit.
+#[test]
+fn test_method_call_returned_drop_value_runs_drop_at_scope_exit() {
+    let bytecode = compile(
+        r#"
+        type Conn { id: int }
+        impl Drop for Conn { method drop() { } }
+        type Pool { n: int }
+        extend Pool { method acquire() -> Conn { Conn { id: 1 } } }
+        function test_fn() -> int {
+            let p: Pool = Pool { n: 0 }
+            let x = p.acquire()
+            return 0
+        }
+        test_fn()
+    "#,
+    );
+    assert_eq!(
+        drop_call_type_name_count(&bytecode, "Conn"),
+        1,
+        "an unannotated local bound to a method-call-returned Drop value must emit \
+         exactly one TYPED DropCall(Conn) at scope exit (the RAII MethodCall-arm repair); \
+         an untyped DropCall (the pre-repair behavior) never runs Conn::drop"
+    );
+
+    // Runs without error (Conn::drop is empty); the drop executes at scope exit.
+    let result = eval(
+        r#"
+        type Conn { id: int }
+        impl Drop for Conn { method drop() { } }
+        type Pool { n: int }
+        extend Pool { method acquire() -> Conn { Conn { id: 1 } } }
+        function test_fn() -> int {
+            let p: Pool = Pool { n: 0 }
+            let x = p.acquire()
+            return 0
+        }
+        test_fn()
+    "#,
+    );
+    assert_eq!(result.as_i64(), Some(0));
+}
+
+/// Control for the repair: the SAME shape with a NON-Drop method return
+/// (`get_id() -> int`) emits NO typed `Conn` drop — the method-call-return drop
+/// obligation is specific to a Drop return type, so the arm stays conservative
+/// (no over-drop of a plain `int`).
+#[test]
+fn test_method_call_returned_non_drop_value_emits_no_typed_drop() {
+    let bytecode = compile(
+        r#"
+        type Conn { id: int }
+        impl Drop for Conn { method drop() { } }
+        type Pool { n: int }
+        extend Pool { method get_id() -> int { 7 } }
+        function test_fn() -> int {
+            let p: Pool = Pool { n: 0 }
+            let x = p.get_id()
+            return x
+        }
+        test_fn()
+    "#,
+    );
+    assert_eq!(
+        drop_call_type_name_count(&bytecode, "Conn"),
+        0,
+        "a method-call return of a NON-Drop type must emit no typed Conn drop"
+    );
+}
