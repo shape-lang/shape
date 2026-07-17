@@ -128,14 +128,25 @@
 //! ## Existing-body edits need no query-retain extension (C2 #13 slice 6)
 //!
 //! A `replace body` EDIT (slice 4) publishes its provenance and its
-//! replacement's closure captures through the SAME two tables this retain mode
-//! preserves — `generated_symbols` (the shadow + any generated reservations)
-//! and `closure_capture_packs` (the replacement's declared-capture packs) — so
-//! the LSP capture/symbol query answers over an edited body's post-install truth
-//! on the recoverable-`Err` path with NO edit-specific retain logic. The edit is
-//! not a second query surface: it lands in the C1 carrier and the C1 tables, and
-//! this mode gates exactly those. Verified by
-//! `generated_captures::semantic_tests::replace_body_edit_capture_is_queryable_post_install`.
+//! replacement's closure capture PACKS through the SAME two tables this retain
+//! mode preserves — `generated_symbols` (the shadow + any generated
+//! reservations) and `closure_capture_packs` (the replacement's declared-capture
+//! packs) — so the shared LSP capture/symbol query OBSERVES an edited body's
+//! captures on the recoverable-`Err` path with NO edit-specific retain logic. The
+//! edit is not a second query surface: it lands in the C1 carrier and the C1
+//! tables, and this mode gates exactly those.
+//!
+//! Named finding (E2 candidate, reported for the C2 close): an edited closure's
+//! capture RESOLVES to a `[C0911]` MissingInferenceFact quarantine rather than an
+//! exact semantic identity, because the structural inference facts that back
+//! specialization identity are recorded by the inference engine at ANALYSIS time
+//! and a `replace body` replacement is swapped at PASS-2 — so the analyzer never
+//! sees the replacement's closure and no fact is published. This is orthogonal to
+//! the retain mode (the pack IS retained) and to codegen (the `CaptureKind`
+//! lowering is declared-mode-driven, unaffected); the fix is pre-analysis
+//! materialization of directive-edited bodies (E2), not a bounded C2 patch.
+//! Pinned by
+//! `generated_captures::semantic_tests::replace_body_edit_capture_is_observed_but_specialization_quarantined`.
 //!
 //! # Caveat: rollback restores to COMPILE-START, not a partial-recovery point
 //!

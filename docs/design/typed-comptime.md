@@ -414,9 +414,11 @@ on the REPLACEMENT it ships, and the D7 shape guards `[C0924]`
 (split/two-identity) / `[C0925]` (incomplete environment) are wired as
 defense-in-depth. VM+JIT install-success is proven by serialized-subprocess
 zero-fallback proofs (`jit_c2_install_native`: a replace-body edit and a
-generated `move`-capture method both run natively in both tiers). LSP
-capture/symbol queries answer over an edited body's post-install truth through
-the same C1 shared query surface (no second surface).
+generated `move`-capture method both run natively in both tiers). The shared C1
+LSP capture/symbol query surface OBSERVES an edited body's captures (no second
+surface) — a `replace body` edit's closure capture is provenance-chained on the
+same surface — with the exact specialization identity of an EDITED closure's
+capture quarantined `[C0911]` (see the deferred cells).
 
 Findings ledger: (1) a GENERATED closure's capture/reference checks are enforced
 at the C1 surface layer (`[C0902]` reference-escape, the C0003 "captures must be
@@ -443,7 +445,14 @@ unsound. The `[C0924]`/`[C0925]` end-to-end NEGATIVES are not constructible from
 a real program without production sabotage today (structurally: one transaction,
 one identity, a C1-validated discovered environment), so their guards are wired
 but their e2e pins are marked not-constructible; the constructors are exercised
-directly for jargon-cleanliness. The public typed-builder surface
+directly for jargon-cleanliness. An EDITED (replace-body) closure's capture is
+OBSERVED on the shared LSP query surface but quarantines `[C0911]
+MissingInferenceFact` on specialization identity — the structural inference facts
+are recorded at ANALYSIS time and a `replace body` replacement is materialized at
+PASS-2, so the analyzer never publishes a fact for the replacement's closure;
+codegen/install is unaffected (declared-mode lowering), and publishing the fact is
+pre-analysis materialization of directive-edited bodies (E2, blocked by C2/D1),
+not a bounded C2 patch. The public typed-builder surface
 (`ctx.rewrite.replace_body(quote …)` producing a `CheckedBody`) is E-track
 (E1/E2, blocked BY C2), not C2: C2's public surface is the shipped
 annotation/`extend`/`replace body` pathway now routing through the validator. See
