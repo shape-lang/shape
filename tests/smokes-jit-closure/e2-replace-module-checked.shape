@@ -1,0 +1,22 @@
+// ADR-009 E2 #18 slice 1 — a TYPED `replace module` installs and runs natively
+// in both tiers. The comptime `post` handler replaces module `demo`'s body via
+// a typed `__ComptimeItemFragment` (`item_fn("answer", "int", 42)`): the
+// replacement reaches the directive WITHOUT any source/JSON string, is built
+// into a `CheckedModule` (generated provenance stamped, hygienic export symbol
+// reserved), and the generated `answer` runs. Printing 42 — not the pre-replace
+// 0 — proves the typed replacement shipped. The runtime program is a plain int
+// function + a module-qualified call; no async, trait/impl, closure, or
+// top-level comptime, so JIT == VM natively (zero [jit-fallback]).
+annotation synth_module() {
+  targets: [module]
+  comptime post(target, ctx) {
+    replace module (item_fn("answer", "int", 42))
+  }
+}
+
+@synth_module()
+mod demo {
+  fn answer() -> int { 0 }
+}
+
+print(demo::answer())

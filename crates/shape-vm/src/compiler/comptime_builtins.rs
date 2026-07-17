@@ -106,6 +106,18 @@ pub(crate) enum ComptimeDirective {
     ReplaceModule {
         items: Vec<shape_ast::ast::Item>,
     },
+    /// ADR-009 E2 #18 (slice 1): the TYPED `replace module` route. Same effect
+    /// as `ReplaceModule` (replace a module target's body), but the items
+    /// arrived from a typed `__ComptimeItemFragment` — no source/JSON string
+    /// ever existed — and the module-target consumer routes them through
+    /// `build_checked_module` (generated-provenance stamp + hygienic export
+    /// reservation), producing a `comptime_fragments::CheckedModule`. Carried as
+    /// a DISTINCT variant so the legacy string route stays byte-for-byte
+    /// unchanged until the slice-5 deletion removes it whole (E2-D8 staging;
+    /// NOT a bridge — the two paths never convert into one another).
+    ReplaceModuleChecked {
+        items: Vec<shape_ast::ast::Item>,
+    },
     /// §4.5.7: ADD generated items at the annotated item's module scope. Unlike
     /// `ReplaceModule` (which is only valid on a module target and replaces its
     /// body), `ExtendItems` is additive and valid on type/function/module
@@ -1052,18 +1064,47 @@ fn comptime_builtins_module_base(trait_impl_keys: HashSet<String>) -> ModuleExpo
         },
     );
 
-    // Internal comptime directive: replace module items from source payload.
-    // __emit_replace_module(module_payload: string)
-    register_typed_fn_1::<_, Arc<String>>(
+    // Internal comptime directive: replace module items. TWO complete paths
+    // (E2-D8 staging, ADR-009 E2 #18 slice 1). Slot-typed (`unknown`) so both
+    // reach it; the arm is selected by the slot's RUNTIME kind, never by a
+    // string round-trip:
+    //   - a legacy source/JSON `string` -> `parse_module_items_payload` ->
+    //     `ReplaceModule` (retained UNCHANGED until the slice-5 deletion);
+    //   - a typed `__ComptimeItemFragment` (e.g. `item_fn(...)`) ->
+    //     `ReplaceModuleChecked`. No source/JSON string ever materializes on
+    //     this path — the typed transport this slice adds.
+    // __emit_replace_module(module_payload)
+    register_typed_function(
         &mut module,
         "__emit_replace_module",
-        "Internal: replace module items from source payload",
-        "module_payload",
-        "string",
+        "Internal: replace module items from a source/JSON payload (legacy) or a typed ItemFragment",
+        vec![shape_runtime::module_exports::ModuleParam {
+            name: "module_payload".to_string(),
+            type_name: "unknown".to_string(),
+            required: true,
+            ..Default::default()
+        }],
         ConcreteType::Unit,
-        |payload, _ctx| {
-            let items = parse_module_items_payload(payload.as_str())?;
-            push_comptime_directive(ComptimeDirective::ReplaceModule { items })?;
+        |slots, _ctx| {
+            if slots.len() != 1 {
+                return Err(format!(
+                    "__emit_replace_module expects 1 argument, got {}",
+                    slots.len()
+                ));
+            }
+            let slot = &slots[0];
+            if let Some(payload) = slot.as_str() {
+                // LEGACY (U03) source/JSON reparse — unchanged until slice 5.
+                let items = parse_module_items_payload(payload)?;
+                push_comptime_directive(ComptimeDirective::ReplaceModule { items })?;
+            } else {
+                // TYPED route: a `__ComptimeItemFragment`. `parse_extend_items_slot`
+                // here takes ONLY its fragment branch (the string branch is
+                // excluded above), converting the fragment directly to AST items
+                // with no source/JSON string in between.
+                let items = parse_extend_items_slot(slot)?;
+                push_comptime_directive(ComptimeDirective::ReplaceModuleChecked { items })?;
+            }
             Ok(TypedReturn::Concrete(ConcreteReturn::Unit))
         },
     );

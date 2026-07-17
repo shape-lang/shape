@@ -5337,7 +5337,19 @@ impl BytecodeCompiler {
                     break;
                 }
                 super::comptime_builtins::ComptimeDirective::ReplaceModule { items } => {
+                    // LEGACY (U03) route: raw source/JSON-reparsed items applied
+                    // directly. Unchanged until the slice-5 deletion.
                     *module_items = items;
+                    outcome.replaced = true;
+                }
+                super::comptime_builtins::ComptimeDirective::ReplaceModuleChecked { items } => {
+                    // ADR-009 E2 #18 (slice 1) TYPED route: build the
+                    // `CheckedModule` internal representation (generated
+                    // provenance stamped, hygienic export symbols reserved — no
+                    // source/JSON string ever existed) and apply its items. The
+                    // module-compile flow qualifies + registers them as usual.
+                    let checked = self.build_checked_module(items, site)?;
+                    *module_items = checked.into_items();
                     outcome.replaced = true;
                 }
                 super::comptime_builtins::ComptimeDirective::SetParamType { .. }

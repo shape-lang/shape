@@ -259,3 +259,53 @@ print(demo::answer())
     )
     .expect_run_err_contains("invalid replacement module payload");
 }
+
+// ADR-009 E2 #18 (slice 1) — the TYPED `replace module` route: a
+// `__ComptimeItemFragment` (from `item_fn`) reaches the directive WITHOUT a
+// source/JSON string, is built into a `CheckedModule` (provenance-stamped,
+// hygienic exports), and installs + runs identically to the legacy
+// source-string route above (`replace_module_from_source_string_replaces_items`
+// — the D6 parity control that must stay green).
+
+#[test]
+fn replace_module_typed_fragment_installs_and_runs() {
+    ShapeTest::new(
+        r#"
+annotation synth_module() {
+  targets: [module]
+  comptime post(target, ctx) {
+    replace module (item_fn("answer", "int", 42))
+  }
+}
+
+@synth_module()
+mod demo {
+  fn answer() -> int { 0 }
+}
+
+print(demo::answer())
+"#,
+    )
+    .expect_run_ok()
+    .expect_output("42");
+}
+
+#[test]
+fn replace_module_typed_fragment_rejected_on_function_target() {
+    ShapeTest::new(
+        r#"
+annotation bad_typed_replace() {
+  targets: [function]
+  comptime post(target, ctx) {
+    replace module (item_fn("answer", "int", 42))
+  }
+}
+
+@bad_typed_replace()
+fn answer() -> int { 0 }
+
+print(answer())
+"#,
+    )
+    .expect_run_err_contains("only valid when compiling module targets");
+}

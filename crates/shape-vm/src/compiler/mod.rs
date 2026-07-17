@@ -83,6 +83,7 @@ pub(crate) mod comptime_target;
 mod control_flow;
 mod body_analysis_authority;
 mod checked_body;
+mod comptime_fragments;
 mod expressions;
 mod functions;
 mod functions_annotations;

@@ -2855,6 +2855,80 @@ impl BytecodeCompiler {
         matches!(expr, Expr::Identifier(name, _) if name == expected)
     }
 
+    /// ADR-009 E2 #18 (slice 1): build the typed `CheckedModule` for a
+    /// `ReplaceModuleChecked` directive (the module-target consumer,
+    /// `process_comptime_directives_for_module`). Each generated item is
+    /// anchored, stamped with generated closure provenance
+    /// (`stamp_generated_closure_provenance` / `GeneratedNodeIssuer`), and its
+    /// declaration reserves a hygienic export symbol (`SymbolId`) — the SAME
+    /// per-item sequence the fresh-generated declaration-discovery pre-pass runs
+    /// in `materialize_computed_comptime_extends`, MINUS `register_function`
+    /// (the module-compile flow qualifies + registers the replacement items
+    /// itself; double-registration would collide). No source/JSON string
+    /// participates. The reservation is JOURNALED, so a failed install rolls it
+    /// back with the rest of the transaction.
+    ///
+    /// Non-function items (none are producible by the slice-1 typed producer
+    /// `item_fn`, which mints only a single function) pass through unstamped —
+    /// the typed producer's reach grows with the fragment schema, not here.
+    pub(super) fn build_checked_module(
+        &mut self,
+        items: Vec<shape_ast::ast::Item>,
+        site: &ExpansionSite,
+    ) -> Result<super::comptime_fragments::CheckedModule> {
+        use shape_ast::ast::Item;
+
+        // Validated once and reused across items (both anchors are `Copy`), the
+        // same way the discovery pre-pass reuses them across a round's decls.
+        let source_anchor = site
+            .source_anchor()
+            .map_err(|message| self.expansion_rejection(message, site))?;
+        let generator_anchor = site
+            .generator_anchor()
+            .map_err(|message| self.expansion_rejection(message, site))?;
+
+        let mut stamped: Vec<Item> = Vec::with_capacity(items.len());
+        let mut exports = Vec::new();
+        for item in items {
+            match item {
+                Item::Function(mut func_def, span) => {
+                    // Fingerprint BEFORE anchoring so pass-2's raw hash agrees
+                    // (ADR-009 D1 S3), then re-base decl spans to the anchor.
+                    let content = generated_free_fn_content(&func_def);
+                    anchor_generated_function_decl(&mut func_def, site.application_span());
+                    let node_path =
+                        GeneratedNodePath::decl_root(format!("module_fn:{}", func_def.name));
+                    let origin = GeneratedOrigin {
+                        expansion: site.identity().clone(),
+                        node_path,
+                        source_anchor,
+                    };
+                    self.stamp_generated_closure_provenance(
+                        &mut func_def.body,
+                        &origin,
+                        &func_def.name,
+                    );
+                    match self.reserve_generated_decl_journaled(
+                        &func_def.name,
+                        origin,
+                        content,
+                        generator_anchor,
+                    ) {
+                        Ok(SymbolReservation::Fresh(id)) | Ok(SymbolReservation::Reissued(id)) => {
+                            exports.push(id);
+                        }
+                        Err(message) => {
+                            return Err(self.expansion_rejection(message, site));
+                        }
+                    }
+                    stamped.push(Item::Function(func_def, span));
+                }
+                other => stamped.push(other),
+            }
+        }
+        Ok(super::comptime_fragments::CheckedModule::new(stamped, exports))
+    }
+
     pub(super) fn process_comptime_directives(
         &mut self,
         directives: Vec<super::comptime_builtins::ComptimeDirective>,
@@ -2890,7 +2964,8 @@ impl BytecodeCompiler {
                         "`replace body` directives are only valid when compiling function targets",
                     ));
                 }
-                super::comptime_builtins::ComptimeDirective::ReplaceModule { .. } => {
+                super::comptime_builtins::ComptimeDirective::ReplaceModule { .. }
+                | super::comptime_builtins::ComptimeDirective::ReplaceModuleChecked { .. } => {
                     return Err(Self::directive_error(
                         "`replace module` directives are only valid when compiling module targets",
                     ));
@@ -3124,7 +3199,8 @@ impl BytecodeCompiler {
                     *pending_original_body_shadow = Some(pending);
                     *replacement_body_origin = Some(replacement_origin);
                 }
-                super::comptime_builtins::ComptimeDirective::ReplaceModule { .. } => {
+                super::comptime_builtins::ComptimeDirective::ReplaceModule { .. }
+                | super::comptime_builtins::ComptimeDirective::ReplaceModuleChecked { .. } => {
                     return Err(Self::directive_error(
                         "`replace module` directives are only valid when compiling module targets",
                     ));
