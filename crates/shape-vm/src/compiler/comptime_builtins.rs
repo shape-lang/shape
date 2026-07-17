@@ -21,6 +21,8 @@ use shape_runtime::typed_module_exports::{
 };
 use shape_value::heap_value::{HeapKind, HeapValue, TypedObjectStorage};
 use shape_value::{KindedSlot, NativeKind};
+// ADR-009 E2 #18 (slice 2): the typed `item_fn` carrier (E2-D10).
+use super::comptime_fragments::CheckedItem;
 use std::cell::RefCell;
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -141,6 +143,17 @@ pub(crate) struct ComptimeDiagnostic {
 thread_local! {
     static COMPTIME_DIRECTIVES: RefCell<Vec<ComptimeDirective>> = const { RefCell::new(Vec::new()) };
     static COMPTIME_DIAGNOSTICS: RefCell<Vec<ComptimeDiagnostic>> = const { RefCell::new(Vec::new()) };
+    /// ADR-009 E2 #18 (slice 2): the `item_fn` typed-carrier store (E2-D10). A
+    /// comptime builtin has no `&mut` compiler access, so `item_fn` cannot hand
+    /// the driver an AST `Item` through a compiler table — it stashes the built
+    /// `CheckedItem` here and returns a `__CheckedItem` handle carrying its
+    /// INDEX; the consumer (`parse_extend_items_slot`, running inside
+    /// `__emit_extend_items` / `__emit_replace_module` in the SAME comptime
+    /// execution) resolves the index back to the item. Cleared before each
+    /// handler run alongside `COMPTIME_DIRECTIVES` (`comptime.rs`), so indices
+    /// start fresh per execution and never leak across runs; the read clones,
+    /// leaving the store intact until that clear.
+    static COMPTIME_CHECKED_ITEMS: RefCell<Vec<CheckedItem>> = const { RefCell::new(Vec::new()) };
     /// True while the §4.5.1 whole-program pre-pass speculatively runs a
     /// type-target comptime handler to materialize generated function
     /// signatures. The pre-pass is not the authoritative run — pass-2 re-runs
@@ -200,6 +213,31 @@ fn push_comptime_directive(directive: ComptimeDirective) -> Result<(), String> {
         directives.push(directive);
     });
     Ok(())
+}
+
+/// ADR-009 E2 #18 (slice 2): clear the `item_fn` carrier store before a comptime
+/// run (called from `comptime.rs` alongside `clear_comptime_directives`), so
+/// each execution's handles index a fresh store.
+pub(crate) fn clear_comptime_checked_items() {
+    COMPTIME_CHECKED_ITEMS.with(|items| items.borrow_mut().clear());
+}
+
+/// Stash a built `CheckedItem` and return the index the `__CheckedItem` handle
+/// carries. The index refers to the CURRENT execution's store (cleared per run),
+/// and the returned index is exactly the just-pushed slot, so the handle and the
+/// item stay consistent regardless of how many `item_fn` calls precede it.
+fn push_comptime_checked_item(item: CheckedItem) -> usize {
+    COMPTIME_CHECKED_ITEMS.with(|items| {
+        let mut items = items.borrow_mut();
+        items.push(item);
+        items.len() - 1
+    })
+}
+
+/// Resolve a `__CheckedItem` handle's index back to its `CheckedItem` (cloned;
+/// the store stays intact until the next per-run clear).
+fn comptime_checked_item_at(index: usize) -> Option<CheckedItem> {
+    COMPTIME_CHECKED_ITEMS.with(|items| items.borrow().get(index).cloned())
 }
 
 fn parse_type_annotation_payload(payload: &str) -> Result<shape_ast::ast::TypeAnnotation, String> {
@@ -293,6 +331,7 @@ fn type_annotation_from_string_or_type_ref_slot(
     parse_type_annotation_payload(&source)
 }
 
+#[allow(dead_code)] // E2-D10 staging: dead until the slice-5 U07 deletion.
 fn type_source_from_string_or_type_ref_slot(
     slot: &KindedSlot,
     builtin_name: &str,
@@ -428,6 +467,7 @@ fn is_valid_generated_function_name(name: &str) -> bool {
         && chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
 }
 
+#[allow(dead_code)] // E2-D10 staging: dead until the slice-5 U07 deletion.
 fn literal_fragment_fields_from_slot(
     slot: &KindedSlot,
     builtin_name: &str,
@@ -509,6 +549,81 @@ fn literal_expr_from_fragment(
     Ok(Expr::Literal(literal, Span::default()))
 }
 
+/// ADR-009 E2 #18 (slice 2): a literal value slot -> an `Expr::Literal`,
+/// DIRECTLY — the typed replacement for the `__ComptimeItemFragment` sentinel
+/// encode/decode (`literal_fragment_fields_from_slot` +
+/// `literal_expr_from_fragment`). No `literal_kind` discriminator, no parallel
+/// sentinel fields: the slot's runtime kind selects the literal.
+fn literal_expr_from_slot(slot: &KindedSlot, builtin_name: &str) -> Result<shape_ast::ast::Expr, String> {
+    use shape_ast::ast::{Expr, Literal, Span};
+
+    let literal = if let Some(value) = slot.as_str() {
+        Literal::String(value.to_string())
+    } else if let Some(value) = slot.as_i64() {
+        Literal::Int(value)
+    } else if let Some(value) = slot.as_f64() {
+        if !value.is_finite() {
+            return Err(format!(
+                "{builtin_name} only supports finite numeric literal return values"
+            ));
+        }
+        Literal::Number(value)
+    } else if let Some(value) = slot.as_bool() {
+        Literal::Bool(value)
+    } else {
+        return Err(format!(
+            "{builtin_name} only supports string, int, number, or bool literal return values; got {:?}",
+            slot.kind()
+        ));
+    };
+    Ok(Expr::Literal(literal, Span::default()))
+}
+
+/// ADR-009 E2 #18 (slice 2): build the generated free-function `Item` DIRECTLY
+/// from `item_fn`'s raw args (E2-D10) — the typed replacement for the
+/// `build_function_item_fragment` -> `function_item_from_fragment` sentinel
+/// round-trip (both retained, dead-but-present, until the slice-5 U07 deletion).
+/// The typed return comes from the raw return-type slot and the body from the
+/// value slot; no sentinel fields and no source/JSON string participate. Spans
+/// are `Span::default()` scaffolding — the directive consumer's shared check
+/// sequence (`check_generated_function_item`) re-bases them to the real
+/// application anchor before the decl is reserved.
+fn build_function_item(
+    name: &str,
+    return_type_slot: &KindedSlot,
+    value_slot: &KindedSlot,
+) -> Result<shape_ast::ast::Item, String> {
+    use shape_ast::ast::{FunctionDef, Item, Span, Statement};
+
+    if !is_valid_generated_function_name(name) {
+        return Err(format!(
+            "item_fn expected a valid generated free-function name, got '{}'",
+            name
+        ));
+    }
+    let return_type = type_annotation_from_string_or_type_ref_slot(return_type_slot, "item_fn")?;
+    let body_expr = literal_expr_from_slot(value_slot, "item_fn")?;
+
+    Ok(Item::Function(
+        FunctionDef {
+            name: name.to_string(),
+            name_span: Span::default(),
+            declaring_module_path: None,
+            doc_comment: None,
+            type_params: None,
+            params: Vec::new(),
+            return_type: Some(return_type),
+            where_clause: None,
+            body: vec![Statement::Expression(body_expr, Span::default())],
+            annotations: Vec::new(),
+            is_async: false,
+            is_comptime: false,
+        },
+        Span::default(),
+    ))
+}
+
+#[allow(dead_code)] // E2-D10 staging: dead until the slice-5 U07 deletion.
 fn type_ref_slot_from_string_or_type_ref_slot(
     slot: &KindedSlot,
     builtin_name: &str,
@@ -523,6 +638,12 @@ fn type_ref_slot_from_string_or_type_ref_slot(
     Ok(slot.clone())
 }
 
+// ADR-009 E2-D10 / E2-D8 staging: `item_fn` moved to the typed `CheckedItem`
+// carrier (`build_function_item`), so the `__ComptimeItemFragment` sentinel
+// builder + its exclusive callees below are now unreached. They are RETAINED
+// byte-unchanged and marked dead until the slice-5 U07 deletion removes them
+// whole; `#[allow(dead_code)]` is the staging annotation, not a rename.
+#[allow(dead_code)]
 fn build_function_item_fragment(
     name: &str,
     return_type_slot: &KindedSlot,
@@ -608,7 +729,7 @@ fn parse_extend_items_slot(slot: &KindedSlot) -> Result<Vec<shape_ast::ast::Item
 
     let storage = slot.as_typed_object_storage().ok_or_else(|| {
         format!(
-            "__emit_extend_items expects a source string or __ComptimeItemFragment, got {:?}",
+            "__emit_extend_items expects a source string, __CheckedItem, or __ComptimeItemFragment, got {:?}",
             slot.kind()
         )
     })?;
@@ -619,9 +740,25 @@ fn parse_extend_items_slot(slot: &KindedSlot) -> Result<Vec<shape_ast::ast::Item
             storage.schema_id
         )
     })?;
+    // ADR-009 E2 #18 (slice 2): the TYPED route — a `__CheckedItem` handle
+    // `item_fn` produced. Resolve its index back to the driver-side `CheckedItem`
+    // built during THIS comptime run, with no sentinel decode and no source/JSON
+    // string.
+    if schema.name == "__CheckedItem" {
+        let index = field_slot_from_typed_object(storage, &schema, "index")?
+            .as_i64()
+            .ok_or_else(|| "__CheckedItem.index is not an int".to_string())?;
+        let checked = comptime_checked_item_at(index as usize).ok_or_else(|| {
+            format!("__CheckedItem index {index} is not live in this comptime execution")
+        })?;
+        return Ok(vec![checked.into_item()]);
+    }
+    // LEGACY (U07 — dies WHOLE in slice 5): the `__ComptimeItemFragment` sentinel
+    // map. Byte-unchanged and now unreached (item_fn moved to CheckedItem); it
+    // survives beside the typed route per the E2-D8 staging until the deletion.
     if schema.name != "__ComptimeItemFragment" {
         return Err(format!(
-            "__emit_extend_items expects a source string or __ComptimeItemFragment, got '{}'",
+            "__emit_extend_items expects a source string, __CheckedItem, or __ComptimeItemFragment, got '{}'",
             schema.name
         ));
     }
@@ -876,7 +1013,10 @@ fn comptime_builtins_module_base(trait_impl_keys: HashSet<String>) -> ModuleExpo
     register_typed_function(
         &mut module,
         "item_fn",
-        "Build a typed ItemFragment for a zero-arg generated free function",
+        // E2-D10: this SURFACE (name + signature) survives E2 as the CheckedItem
+        // constructor; its INTERNALS (the __ComptimeItemFragment schema + sentinel
+        // machinery) die in the slice-5 U07 deletion.
+        "Build a typed CheckedItem for a zero-arg generated free function",
         vec![
             shape_runtime::module_exports::ModuleParam {
                 name: "name".to_string(),
@@ -897,7 +1037,14 @@ fn comptime_builtins_module_base(trait_impl_keys: HashSet<String>) -> ModuleExpo
                 ..Default::default()
             },
         ],
-        ConcreteType::OpaqueTypedObject("__ComptimeItemFragment".to_string()),
+        // ADR-009 E2 #18 (slice 2, E2-D10): `item_fn` now yields the typed
+        // `__CheckedItem` carrier — a handle to a driver-side `CheckedItem` —
+        // instead of the `__ComptimeItemFragment` sentinel map. The builtin
+        // builds the AST `Item` directly (no sentinel fields, no source/JSON
+        // string), stashes it in the per-run `CheckedItem` store, and returns a
+        // handle carrying its index. The legacy fragment builders survive
+        // (dead-but-present) until the slice-5 U07 deletion.
+        ConcreteType::OpaqueTypedObject("__CheckedItem".to_string()),
         |slots, _ctx| {
             if slots.len() != 3 {
                 return Err(format!("item_fn expects 3 arguments, got {}", slots.len()));
@@ -905,9 +1052,14 @@ fn comptime_builtins_module_base(trait_impl_keys: HashSet<String>) -> ModuleExpo
             let name = slots[0]
                 .as_str()
                 .ok_or_else(|| "item_fn expects a string function name".to_string())?;
-            let fragment = build_function_item_fragment(name, &slots[1], &slots[2])?;
+            let item = build_function_item(name, &slots[1], &slots[2])?;
+            let index = push_comptime_checked_item(CheckedItem::new(item));
+            let handle = typed_object_for_named_schema(
+                "__CheckedItem",
+                &[("index", KindedSlot::from_int(index as i64))],
+            );
             Ok(TypedReturn::Concrete(ConcreteReturn::OpaqueTypedObject(
-                Arc::new(fragment),
+                Arc::new(heap_value_from_typed_object_slot(handle)),
             )))
         },
     );

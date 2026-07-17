@@ -174,3 +174,12 @@ fn c2_generated_move_capture_still_native_post_c2() {
 fn e2_typed_replace_module_runs_natively_both_tiers() {
     assert_c2_fixture_reaches_native_jit("e2-replace-module-checked.shape", "42\n");
 }
+
+/// ADR-009 E2 #18 slice 2 — the typed `item_fn` CheckedItem carrier: additive
+/// generation via extend-items installs and runs natively in both tiers, adding
+/// the JIT proof the D10 matrix row never had (it was VM-only). The generated
+/// free function is a plain int function, so JIT == VM with zero fallback.
+#[test]
+fn e2_item_fn_checked_extend_runs_natively_both_tiers() {
+    assert_c2_fixture_reaches_native_jit("e2-item-fn-checked.shape", "7\n");
+}

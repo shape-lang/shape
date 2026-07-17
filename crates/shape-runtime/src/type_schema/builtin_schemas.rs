@@ -858,6 +858,18 @@ pub fn register_builtin_schemas(registry: &mut TypeSchemaRegistry) -> BuiltinSch
         .bool_field("literal_bool")
         .register(registry);
 
+    // ADR-009 E2 #18 (slice 2): the typed `item_fn` carrier (E2-D10). Unlike
+    // `__ComptimeItemFragment` (which encodes the whole declaration into
+    // `kind`/`name`/`return_type`/sentinel `literal_*` fields), this schema
+    // carries ONLY an opaque `index` handle into the driver's thread-local
+    // `CheckedItem` store — the built AST `Item` lives compiler-side, never
+    // re-encoded into fields (the FrozenTypeRef opaque-identity pattern). The
+    // legacy fragment schema above stays byte-unchanged beside it until the
+    // slice-5 U07 deletion removes it whole.
+    let _comptime_checked_item = TypeSchemaBuilder::new("__CheckedItem")
+        .int_field("index")
+        .register(registry);
+
     let _comptime_field_descriptor = TypeSchemaBuilder::new("__ComptimeFieldDescriptor")
         .string_field("name")
         .string_field("type")

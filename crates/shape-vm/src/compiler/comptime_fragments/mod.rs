@@ -90,6 +90,44 @@ impl CheckedModule {
     }
 }
 
+/// A single comptime-generated declaration produced by `item_fn` (slice 2) —
+/// the typed carrier that replaces the `__ComptimeItemFragment` sentinel map
+/// (E2-D10). It wraps a fully-formed AST `Item` built directly at construction
+/// (typed return + literal body, no sentinel `literal_kind`/parallel fields, no
+/// source/JSON string). `item_fn` yields a `__CheckedItem` handle across the
+/// comptime VM; this is the compiler-side item that handle resolves to.
+///
+/// Provenance-READY, not yet reserved: a comptime builtin has no `&mut` compiler
+/// access, so the driver's shared check sequence
+/// (`BytecodeCompiler::check_generated_function_item`) is what stamps the
+/// closures and reserves the hygienic export `SymbolId` — at the extend-items /
+/// replace-module consumer, where that access exists. `<Decl>` is the single
+/// declaration carried; `item_fn` mints exactly one function, so a
+/// multi-declaration item is a later slice (`quote item`), a `Vec` extension of
+/// this carrier — no shape change here.
+#[derive(Clone)]
+pub(in crate::compiler) struct CheckedItem {
+    item: Item,
+}
+
+impl CheckedItem {
+    /// Carry a freshly-built, provenance-ready generated declaration. Never a
+    /// sentinel map or a source/JSON string — the `item` is already an AST node.
+    pub(in crate::compiler) fn new(item: Item) -> Self {
+        Self { item }
+    }
+
+    /// The carried declaration.
+    pub(in crate::compiler) fn item(&self) -> &Item {
+        &self.item
+    }
+
+    /// Consume into the declaration for the consumer's check sequence.
+    pub(in crate::compiler) fn into_item(self) -> Item {
+        self.item
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -122,5 +160,13 @@ mod tests {
         // set faithfully.
         let checked = CheckedModule::new(vec![one_function_item()], Vec::new());
         assert!(checked.exports().is_empty());
+    }
+
+    #[test]
+    fn checked_item_carries_and_yields_its_declaration() {
+        let checked = CheckedItem::new(one_function_item());
+        assert!(matches!(checked.item(), Item::Function(..)));
+        let item = checked.into_item();
+        assert!(matches!(item, Item::Function(..)));
     }
 }

@@ -2636,6 +2636,9 @@ fn execute_in_runtime_with_module_bindings(
 
         super::comptime_builtins::clear_comptime_directives();
         super::comptime_builtins::clear_comptime_diagnostics();
+        // ADR-009 E2 #18 (slice 2): reset the `item_fn` carrier store so this
+        // run's `__CheckedItem` handles index a fresh store.
+        super::comptime_builtins::clear_comptime_checked_items();
         let value = vm.execute(None).map_err(|e| ShapeError::RuntimeError {
             message: format!("Comptime handler execution failed: {}", e),
             location: None,
