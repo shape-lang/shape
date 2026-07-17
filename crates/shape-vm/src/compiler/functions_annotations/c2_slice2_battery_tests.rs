@@ -32,7 +32,7 @@
 //! | 7 | Send (task-boundary) | `battery_row7_send_nonsendable_across_task_boundary_rejects_atomically` (**BLOCKED-BY-INFERENCE** — see note) |
 //! | 8 | cleanup | **NOT-GENERATED-REACHABLE-AS-REJECTION** — see below |
 //! | 9 + 10a | sync `Drop` / async-cleanup-in-sync-context | `battery_row9_and_10a_async_only_drop_in_sync_context_rejects_atomically` |
-//! | 10b | async-drop-context (D6) | TWO conservative firing pins (drop discharged before await → [C0922]) + ONE headline-case truth pin (drop LIVE across await → emission-preempted) + two controls — see note |
+//! | 10b | async-drop-context (D6) | THREE firing pins all → [C0922]: two conservative (drop discharged before await) + one headline (drop LIVE across await, D6 now catches it) + two controls — see note |
 //!
 //! ## NOT-GENERATED-REACHABLE rows (a finding, not a gap)
 //!
@@ -70,9 +70,11 @@
 //! row 7's closure-valued block fails Future unification), so its pin asserts the
 //! current inference error as a live tripwire (named candidate: "async-let blocks
 //! containing closures fail Future unification in comptime-generated bodies");
-//! **row 10b**'s D6 headline case (drop LIVE across `await`) is emission-preempted
-//! until wave40, so D6 is reached via its CONSERVATIVE over-rejection (drop
-//! discharged before the await). Each pin's docstring carries its own argument.
+//! **row 10b**'s D6 rejects BOTH the drop-LIVE-across-await headline case and the
+//! drop-discharged-before-await conservative case with `[C0922]` (the D6-author
+//! chokepoint + marker-free-message fix made D6's end gate the catcher for the
+//! headline case, ahead of wave40, which now only owns liveness PRECISION here).
+//! Each pin's docstring carries its own argument.
 
 use super::BytecodeCompiler;
 use super::c2_slice0_preflight_tests::assert_no_install_publication_survives;
@@ -359,10 +361,10 @@ type Widget { id: int }
 /// method-call mask-breaker — the route the inherited RAII repair drops via the
 /// `initializer_call_return_drop_type` MethodCall arm), and an async callee to
 /// `await`. All pins differ ONLY in the generated method body, so an outcome is
-/// attributable to that body. Row 10b splits into THREE pins: two D6 conservative
-/// firing pins (drop discharged BEFORE the await → reach D6 → [C0922]) and one
-/// headline-case truth pin (drop LIVE across the await → emission-preempted
-/// today, see its docstring), plus two controls (drop-without-suspension and
+/// attributable to that body. Row 10b splits into THREE firing pins, all → D6's
+/// [C0922]: two conservative (drop discharged BEFORE the await) and one headline
+/// (drop LIVE across the await, now caught by D6 — see its docstring for the
+/// tripwire-flip history), plus two controls (drop-without-suspension and
 /// suspension-without-drop both install).
 fn d6_program(method_body: &str) -> String {
     format!(
@@ -396,13 +398,15 @@ type Widget {{ id: int }}
 /// analysis; precision is wave40's). The guard fires at `compile_function`'s end
 /// and the install transaction rolls it back atomically → [C0922].
 ///
-/// Why drop-BEFORE-await, not across: the drop-LIVE-across-await shape (the
-/// headline case) does NOT reach D6 — the drop-across-suspension EMISSION is
-/// unimplemented (wave40) and raises a SURFACE stub before `compile_function`'s
-/// end gate, so D6 never runs. That case is pinned separately below
-/// (`..._headline_case_is_emission_preempted`). Discharging the drop before the
-/// await keeps emission on the shipped sync-drop path, so the body compiles and
-/// D6's conservative check is the rejecting authority.
+/// This pin isolates D6's CONSERVATIVE over-rejection specifically: the drop is
+/// NOT live across the suspension (discharged in the inner block before the
+/// `await`), so emission stays on the shipped sync-drop path and never touches
+/// the drop-across-suspension machinery — yet D6 still rejects on the
+/// (drop-local + suspension) combination alone. The drop-LIVE-across-await
+/// headline case ALSO reaches D6 with [C0922] now (see
+/// `battery_row10b_d6_headline_case_live_across_await_rejects_with_c0922`); this
+/// pin proves the over-rejection fires even when the value is provably NOT live
+/// across — the behavior wave40 will later relax with liveness precision.
 #[test]
 fn battery_row10b_d6_drop_obligated_across_suspension_rejects_atomically() {
     assert_generated_install_rejected(
@@ -442,36 +446,31 @@ fn battery_row10b_d6_inferred_method_call_drop_local_across_suspension_rejects_a
     );
 }
 
-/// HEADLINE-CASE TRUTH PIN (drop LIVE across the await) — the §4.2 example-1
+/// HEADLINE-CASE FIRING PIN (drop LIVE across the await) — the §4.2 example-1
 /// scenario D6 is NAMED for: a drop-obligated `Conn` held ACROSS the suspension.
-/// This pin records WHAT ACTUALLY REJECTS it today, and why D6 is not the catcher.
+/// D6 now catches it with its proper named code → [C0922].
 ///
-/// The drop-across-suspension EMISSION is unimplemented (wave40's AsyncDrop
-/// protocol). Compiling a Drop value live across an `await` raises a SURFACE /
-/// NotImplemented stub DURING `compile_function` — before its end-of-function D6
-/// gate — which `sanitize_comptime_internal` firewalls into the
-/// generated-declaration envelope "[C0003] … not available in compile-time code".
-/// So D6 never runs for this shape; emission preemption is the rejecting authority.
-///
-/// Fail-closed and CORRECT today: the rejection is atomic (inside the install
-/// transaction, nothing published) and the dangerous case is refused — only the
-/// diagnostic LABEL is wrong (it reads as a comptime restriction, not an
-/// async-drop one). The ordering is already right for the future: when wave40
-/// lands drop-across-suspension emission, this stub goes away, the body compiles,
-/// and D6's end-of-`compile_function` gate becomes the named catcher — flipping
-/// this pin's distinguisher to `[C0922]`. No escalation: nothing unsound
-/// installs; the named code is simply unreachable until wave40 by construction.
-/// (See battery.rs "Row 10b reachability".)
+/// History (a tripwire that FLIPPED): at gate round 2 this shape did NOT reach
+/// D6 — the unimplemented drop-across-suspension emission raised a SURFACE stub
+/// firewalled to "[C0003] … not available in compile-time code" before
+/// `compile_function`'s end gate, and the pin asserted that interim message. The
+/// D6-author fix (install chokepoint flag + marker-free rejection message) made
+/// D6's end gate catch the live-across case BEFORE the stub, so it now rejects
+/// with the full named code — the tripwire flipped as designed, ahead of wave40.
+/// BOTH D6 cases now reject `[C0922]` (live-across here, discharged-before-await
+/// in the two sibling pins); wave40's remaining work here is liveness PRECISION,
+/// not reachability. Fail-closed throughout. (See battery.rs "Row 10b reachability".)
 #[test]
-fn battery_row10b_d6_headline_case_is_emission_preempted() {
+fn battery_row10b_d6_headline_case_live_across_await_rejects_with_c0922() {
     assert_generated_install_rejected(
         &d6_program(
             r#"async method run() -> int \{ let c: Conn = Conn \{ id: 1 \}; await tick(); c.id \}"#,
         ),
-        // Fail-closed via emission preemption, NOT D6 (see docstring): the SURFACE
-        // stub's firewalled message. Flips to [C0922] once wave40 lands
-        // async-drop emission and D6's end gate becomes the catcher.
-        "not available in compile-time code",
+        // D6 catches the headline live-across case with its named code. (Was the
+        // emission-preemption envelope "not available in compile-time code" at
+        // gate round 2; the chokepoint-flag + marker-free-message fix made D6's
+        // end gate the catcher, ahead of wave40.)
+        "[C0922]",
     );
 }
 
