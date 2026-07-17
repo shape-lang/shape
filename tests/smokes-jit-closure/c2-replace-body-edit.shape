@@ -1,0 +1,18 @@
+// ADR-009 C2 slice 5 — a replace-body EDIT installs and runs natively in both
+// tiers. The comptime `post` handler replaces `answer`'s body; the POST-edit
+// body (42) is what executes, while the pre-edit body (7) is preserved as the
+// hygienic `ctx.original` shadow. Printing 42 — not 7 — proves the edited body
+// runs. The runtime program is a plain int function + its dead shadow + a call;
+// no async, trait/impl, closure, or top-level comptime, so JIT == VM natively
+// (zero [jit-fallback]).
+annotation edit_answer() {
+  targets: [function]
+  comptime post(target, ctx) {
+    replace body { return 42 }
+  }
+}
+
+@edit_answer()
+fn answer() -> int { 7 }
+
+print(answer())

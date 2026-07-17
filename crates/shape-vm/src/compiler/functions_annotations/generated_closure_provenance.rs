@@ -13,7 +13,7 @@ use super::super::BytecodeCompiler;
 use super::super::comptime_builtins::expansion_provenance::{
     ExpansionSite, GeneratedNodePath, GeneratedOrigin, SourceAnchor,
 };
-use shape_ast::ast::{FunctionDef, Span, Statement};
+use shape_ast::ast::{FunctionDef, GeneratedNodeOrigin, Span, Statement};
 use shape_ast::error::Result;
 
 /// Re-base a generated declaration's declaration-level spans to its real
@@ -67,11 +67,17 @@ impl BytecodeCompiler {
         self.stamp_generated_closure_provenance(&mut method.body, &origin, &owner);
     }
 
+    /// Stamp a `replace body` replacement's closures with generated provenance
+    /// AND return the node-borne declaration origin so the caller can arm the D6
+    /// async-drop-context gate over the REPLACEMENT (the swapped body compiles
+    /// under the user function name, so the gate cannot recover its provenance
+    /// from a name — ADR-009 C2 #13 slice 4). The returned origin carries this
+    /// compiler instance's issuer capability, so `recognizes` authenticates it.
     pub(super) fn stamp_generated_replacement_body(
         &self,
         function: &mut FunctionDef,
         site: &ExpansionSite,
-    ) -> Result<()> {
+    ) -> Result<GeneratedNodeOrigin> {
         let source_anchor = site
             .source_anchor()
             .map_err(|message| self.expansion_rejection(message, site))?;
@@ -83,6 +89,6 @@ impl BytecodeCompiler {
         };
         let owner = function.name.clone();
         self.stamp_generated_closure_provenance(&mut function.body, &origin, &owner);
-        Ok(())
+        Ok(origin.to_node_origin(&self.generated_node_issuer, &owner))
     }
 }

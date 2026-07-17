@@ -390,6 +390,74 @@ ratification remain pending. See the [detailed C1
 status](typed-comptime/c1-generated-captures.md) and [rejected-design
 record](typed-comptime/c1-capture-defections.md).
 
+**CURRENT / VM+JIT - single installation chokepoint with atomic commit (C2
+`CheckedBody` validator LANDED on `adr009/c2`, ticket ADR009-C2 #13).** Every
+comptime-generated body (annotation `extend` methods, generated free functions,
+and `replace body` edits) now publishes through ONE atomic install transaction
+(`checked_body::InstallTransaction`): a watermark + a displaced-entry undo
+journal bracket the whole `compile_in_place` driver, so a rejection at analysis
+OR at pass-2 body compile rolls back every publication (function table, the
+name-keyed side tables, the `analyze_function_body` fact bundle, the closure
+index cluster, capture packs, generated-symbol reservations) — no partial
+generated body is ever observable (proven by the `c2_slice0_preflight_tests`
+atomicity pins + H1/H2/M3/M4 displaced-entry pins). The §4.2 ten-check battery
+(type, effect, ownership, borrow-with-capture-loans, lifetime, suspension,
+`Send`, cleanup, sync `Drop`, async-drop-context) provably executes over body +
+complete environment inside that span (`checked_body::battery`), reusing the
+shipped analyzer/solver codes (D4) and minting new codes only for the two
+genuinely new install classes: `[C0922]` (a drop-obligated value across a
+suspension point in a generated body, D6 conservative/fail-closed) and `[C0923]`
+(async cleanup required in a sync context). Existing-body edits (`replace body`)
+run inside that one transaction under one expansion identity (D7): the
+async-drop gate is evaluated over the EFFECTIVE definition, so an edit is policed
+on the REPLACEMENT it ships, and the D7 shape guards `[C0924]`
+(split/two-identity) / `[C0925]` (incomplete environment) are wired as
+defense-in-depth. VM+JIT install-success is proven by serialized-subprocess
+zero-fallback proofs (`jit_c2_install_native`: a replace-body edit and a
+generated `move`-capture method both run natively in both tiers). The shared C1
+LSP capture/symbol query surface OBSERVES an edited body's captures (no second
+surface) — a `replace body` edit's closure capture is provenance-chained on the
+same surface — with the exact specialization identity of an EDITED closure's
+capture quarantined `[C0911]` (see the deferred cells).
+
+Findings ledger: (1) a GENERATED closure's capture/reference checks are enforced
+at the C1 surface layer (`[C0902]` reference-escape, the C0003 "captures must be
+explicit" envelope), NOT the solver — so the battery's row-5 lifetime rejection
+is `[C0902]`, not solver `[B0003]`. (2) Async-`let` blocks containing a closure
+fail Future unification before the borrow check (battery row 7 is
+BLOCKED-BY-INFERENCE, a named production candidate). (3) The comptime-diagnostics
+firewall (`sanitize_comptime_internal`) strips any `COMPTIME_JARGON_MARKERS`
+token, so every install-rejection message is marker-free ("rejected", never
+"refused"); the D6 message survives the firewall by that discipline. (4) The D6
+headline drop-live-across-await case was a tripwire that FLIPPED: an
+install-chokepoint flag + marker-free message made D6's end gate catch it ahead
+of wave40. (5) An inherited RAII emission hole (a `MethodCall`-returned `Drop`
+value bound to an unannotated local never ran `drop()`) was exposed and REPAIRED
+via the `initializer_call_return_drop_type` MethodCall arm. (6) The
+D6-effective-def move superseded the originally-surfaced `FunctionDef` AST field
+(31 files / 78 sites) — the field would have left the gate scanning the pre-edit
+body; see the defections record.
+
+Deferred cells: D6 over-rejects on liveness (any drop-obligated local + any
+suspension), and wave40's AsyncDrop/MustSettle program supplies the liveness
+PRECISION that relaxes it — nothing installed under C2 can become retroactively
+unsound. The `[C0924]`/`[C0925]` end-to-end NEGATIVES are not constructible from
+a real program without production sabotage today (structurally: one transaction,
+one identity, a C1-validated discovered environment), so their guards are wired
+but their e2e pins are marked not-constructible; the constructors are exercised
+directly for jargon-cleanliness. An EDITED (replace-body) closure's capture is
+OBSERVED on the shared LSP query surface but quarantines `[C0911]
+MissingInferenceFact` on specialization identity — the structural inference facts
+are recorded at ANALYSIS time and a `replace body` replacement is materialized at
+PASS-2, so the analyzer never publishes a fact for the replacement's closure;
+codegen/install is unaffected (declared-mode lowering), and publishing the fact is
+pre-analysis materialization of directive-edited bodies (E2, blocked by C2/D1),
+not a bounded C2 patch. The public typed-builder surface
+(`ctx.rewrite.replace_body(quote …)` producing a `CheckedBody`) is E-track
+(E1/E2, blocked BY C2), not C2: C2's public surface is the shipped
+annotation/`extend`/`replace body` pathway now routing through the validator. See
+the [rejected-design record](../defections.md).
+
 **CURRENT / VM+JIT - applied type annotation generation**
 
 ```shape
@@ -897,7 +965,7 @@ examples, rejection requirements, and implementation implications.
 | `FieldInitialization<Owner, F, T>` | comptime | Required or typed-default construction policy | accepted algebra; CURRENT sealed enum (`Required`/`Defaulted`) via B5 S1 — the freeze struct input carries no per-field default flag yet, so all fields are `Required` today (Dec 59 total records; `Defaulted` population is a later slice, see `docs/defections.md`) |
 | `DefaultInitializer<Owner, F, T, Effects>` | comptime code | Closed checked runtime default initializer | accepted |
 | `AnnotationDescriptor<A, Target, Args, Multiplicity>` | comptime | Typed applied annotation and target proof | accepted |
-| `CaptureDescriptor<Sig, I, T, Mode>` | comptime | Typed closure capture identity | accepted through Decision 95; compiler model + generated-only `FunctionExpr.captures` clause CURRENT on the C1 branch (supervisor gates pending) with four declared modes (`Move`, `Share`, `SharedBorrow`, `ExclusiveBorrow`), structural slot/lineage identity, exact `SemanticFreeze` capture types, and one declared plan driving layout/opcodes; borrow modes are named rejections until regions. Compiler-query hover/definition/references and descriptor-authoritative rename are committed; unavailable/conflicting evidence never falls through to name-based rename. Public `CheckedBody` construction remains TARGET C2 |
+| `CaptureDescriptor<Sig, I, T, Mode>` | comptime | Typed closure capture identity | accepted through Decision 95; compiler model + generated-only `FunctionExpr.captures` clause CURRENT on the C1 branch (supervisor gates pending) with four declared modes (`Move`, `Share`, `SharedBorrow`, `ExclusiveBorrow`), structural slot/lineage identity, exact `SemanticFreeze` capture types, and one declared plan driving layout/opcodes; borrow modes are named rejections until regions. Compiler-query hover/definition/references and descriptor-authoritative rename are committed; unavailable/conflicting evidence never falls through to name-based rename. C2 shipped the installation validator/chokepoint (CURRENT) that consumes this carrier; the public `CheckedBody` builder + `finish()` → E-track per the user-ratified D1 amendment 2026-07-17, tracked on #13/E1 |
 | `HygienicSymbol<T>` | comptime | Scope-safe generated binding identity | accepted |
 | `PatternBinder<T, Mode>` | comptime code | Hygienic projected binding with stable ownership mode | accepted |
 | `GuardView<T, FinalMode>` | comptime code/capability | Read-only pre-commit binder view for arm guards | accepted |
@@ -910,7 +978,7 @@ examples, rejection requirements, and implementation implications.
 | `CheckedArm<T, R, Effects>` | comptime code | Lexically scoped pattern, guard, and result body | accepted |
 | `MatchPlan<T, R, Effects>` | comptime transform | Atomic exhaustive generated match | accepted |
 | `CheckedStmt<Effects, Flow>` | comptime code | Typed statement fragment; binding scopes cannot leak from detached fragments | accepted |
-| `CheckedBody<Sig, Captures>` | comptime code | Callable body matching one signature and complete capture set | accepted through Decision 95; TARGET C2 staging populates the canonical `Expr::FunctionExpr.captures` carrier introduced by C1 — no parallel capture representation |
+| `CheckedBody<Sig, Captures>` | comptime code | Callable body matching one signature and complete capture set | accepted through Decision 95; C2 shipped the installation validator/chokepoint (CURRENT — single atomic install transaction + §4.2 battery + named rejection matrix + D7 edit transactions) that consumes the canonical `Expr::FunctionExpr.captures` carrier introduced by C1 (no parallel capture representation); the public `CheckedBody` builder + `finish()` → E-track (E1/E2, where its consumers exist) per the user-ratified D1 amendment 2026-07-17, tracked on #13/E1 |
 | `CheckedItem<Decl>` | comptime code | Typed declaration/item fragment | accepted |
 | `CheckedModule<Exports>` | comptime code | Typed module fragment | accepted |
 | `CheckedTemplate<Sig, Captures>` | comptime code | Typed placeholder/template binding and complete capture set | accepted through Decision 95 |

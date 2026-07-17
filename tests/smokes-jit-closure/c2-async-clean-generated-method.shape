@@ -1,0 +1,24 @@
+// ADR-009 C2 slice 5 — a D6-CLEAN async generated method (an `await`, NO
+// drop-obligated local) INSTALLS (C2 accepts it; D6 rejects only a
+// drop-obligated local live with a suspension) and RUNS to 1. Because `main`
+// awaits it, `main`'s bytecode carries the async `Await` opcode, which the JIT
+// preflight marks VM-only (async lowering is not yet kinded), so `--mode jit`
+// falls through to the interpreter with one [jit-fallback] line and runs the
+// SAME body — VM == JIT by fall-through. This is the NAMED EXPECTED-FALLBACK
+// cell: install-success is real in both tiers; native codegen of `await` is a
+// pre-existing JIT gap, not a C2 regression.
+async fn tick() -> int { 0 }
+
+annotation add_run() {
+  targets: [type]
+  comptime post(target, ctx) {
+    extend (f"extend {target.name} \{ async method run() -> int \{ let c: int = 1; await tick(); c \} \}")
+  }
+}
+
+@add_run()
+type Job { id: int }
+
+let job = Job { id: 1 }
+let result = await job.run()
+print(result)

@@ -142,6 +142,17 @@ fn compile_stamped_probe(
     let mut program = shape_ast::parse_program(&route.source(parameter)).expect("fixture parses");
     let mut compiler = BytecodeCompiler::new();
 
+    // Inherited repair: commit 295a66a5 ("refactor(vm): prepare annotation
+    // declarations before bodies", an ancestor of the C2 base ff715e61) made the
+    // `Item::AnnotationDef` compile arm require prior declaration preparation but
+    // did NOT update this helper, so these tests were red on main base ff715e61.
+    // Prepare the annotation declarations (pass 1) before compiling each
+    // definition through the pass-2 registration path, exactly as
+    // `compile_in_place` does.
+    compiler
+        .prepare_annotation_scope(&program.items)
+        .expect("annotation declarations prepare before pass-2 registration");
+
     for item in &program.items {
         if matches!(item, Item::AnnotationDef(..)) {
             compiler

@@ -83,6 +83,13 @@ pub fn analyze_program_semantics_for_document(
     let mut compiler = shape_vm::BytecodeCompiler::new();
     compiler.set_type_diagnostic_mode(shape_vm::compiler::TypeDiagnosticMode::RecoverAll);
     compiler.set_compile_diagnostic_mode(shape_vm::compiler::CompileDiagnosticMode::RecoverAll);
+    // ADR-009 C2 #13 (slice 1): this is a query/diagnostics session, not an
+    // install. Without the retain mode a tolerated compile `Err` (e.g. one
+    // unrelated type error elsewhere in the file) rolls back `closure_capture_packs`
+    // and `capture_query_diagnostics` below goes silent for the WHOLE document.
+    // Retain the LSP-read reservation tables so generated-capture diagnostics
+    // still emit alongside the recovered error.
+    compiler.set_retain_generated_reservations_for_query_session(true);
 
     let has_imports = program
         .items
@@ -367,6 +374,66 @@ print(f, g)
                 .iter()
                 .all(|diag| !diag.message.contains("Undefined variable: 'g'")),
             "unexpected diagnostics: {:?}",
+            diagnostics
+                .iter()
+                .map(|d| d.message.as_str())
+                .collect::<Vec<_>>()
+        );
+    }
+
+    /// ADR-009 C2 #13 (slice 1) — generated-capture diagnostics survive an
+    /// unrelated recovered error in the document.
+    ///
+    /// The document generates a reparsed capturing closure (no source map ->
+    /// a [C0910] capture diagnostic) and ALSO carries one unrelated type error.
+    /// The type error accumulates and the terminal error gate returns `Err`
+    /// (compiler_impl_reference_model.rs), so the install transaction rolls back;
+    /// without the diagnostics compiler opting into the retain mode that rollback
+    /// empties `closure_capture_packs` and the capture diagnostic goes silent for
+    /// the whole file. The control run (no unrelated error) proves the fixture
+    /// emits the capture diagnostic at all, so the with-error assertion is not
+    /// vacuous. R2's green suite structurally misses this (its fixtures have no
+    /// second, unrelated error).
+    #[test]
+    fn generated_capture_diagnostics_survive_an_unrelated_recovered_error() {
+        const GENERATES_A_REPARSED_CAPTURE: &str = r#"
+annotation add_reader() {
+  targets: [type]
+  comptime post(target, ctx) {
+    extend ("extend Job { method read() -> int { let base = 40
+      let worker = |; move base| base + 2
+      worker() } }")
+  }
+}
+
+@add_reader()
+type Job { id: int }
+
+let job = Job { id: 1 }
+job.read()
+"#;
+        let control_source = GENERATES_A_REPARSED_CAPTURE.to_string();
+        let control = parse_program(&control_source).expect("control parses");
+        let control_diagnostics =
+            analyze_program_semantics(&control, &control_source, None, None, None);
+        assert!(
+            control_diagnostics
+                .iter()
+                .any(|d| d.message.contains("C0910")),
+            "control: the generated reparsed capture emits a [C0910] diagnostic (guards vacuity): {:?}",
+            control_diagnostics
+                .iter()
+                .map(|d| d.message.as_str())
+                .collect::<Vec<_>>()
+        );
+
+        let with_error_source = format!("{GENERATES_A_REPARSED_CAPTURE}let bad: int = \"not an int\"\n");
+        let with_error = parse_program(&with_error_source).expect("fixture parses");
+        let diagnostics =
+            analyze_program_semantics(&with_error, &with_error_source, None, None, None);
+        assert!(
+            diagnostics.iter().any(|d| d.message.contains("C0910")),
+            "the generated-capture diagnostic must survive the unrelated recovered error: {:?}",
             diagnostics
                 .iter()
                 .map(|d| d.message.as_str())

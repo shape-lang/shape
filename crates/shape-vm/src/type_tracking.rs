@@ -903,6 +903,13 @@ impl TypeTracker {
         self.function_return_concrete_types.get(func_name)
     }
 
+    /// ADR-009 C2 #13 (slice 1): drop a function's registered return
+    /// `ConcreteType` when a generated-body install rolls back (see
+    /// `compiler::checked_body`).
+    pub fn remove_function_return_concrete_type(&mut self, func_name: &str) {
+        self.function_return_concrete_types.remove(func_name);
+    }
+
     /// Register compile-time field type contracts for an object schema id.
     pub fn register_object_field_contracts(
         &mut self,

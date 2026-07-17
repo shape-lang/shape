@@ -3,8 +3,8 @@
 use crate::bytecode::{Constant, Instruction, OpCode, Operand};
 use crate::executor::typed_object_ops::field_type_to_tag;
 use shape_ast::ast::{
-    DestructurePattern, Expr, FunctionDef, Literal, ObjectEntry, Span, Spanned, Statement,
-    TypeAnnotation,
+    DestructurePattern, Expr, FunctionDef, GeneratedNodeOrigin, Literal, ObjectEntry, Span,
+    Spanned, Statement, TypeAnnotation,
 };
 use shape_ast::error::{Result, ShapeError};
 use shape_runtime::annotation_context::TargetOwner;
@@ -37,6 +37,18 @@ mod imported_handler_resolution_tests;
 #[cfg(test)]
 #[path = "functions_annotations/handler_helper_authority_tests.rs"]
 mod handler_helper_authority_tests;
+
+#[cfg(test)]
+#[path = "functions_annotations/c2_slice0_preflight_tests.rs"]
+mod c2_slice0_preflight_tests;
+
+#[cfg(test)]
+#[path = "functions_annotations/c2_slice2_battery_tests.rs"]
+mod c2_slice2_battery_tests;
+
+#[cfg(test)]
+#[path = "functions_annotations/c2_slice4_edit_tests.rs"]
+mod c2_slice4_edit_tests;
 
 /// ADR-009 E3 (slice S3, legacy class U11): the TYPED capability a `replace
 /// body` replacement reaches through `ctx.original`. It replaces the deleted
@@ -931,6 +943,12 @@ impl BytecodeCompiler {
         &mut self,
         func_def: &mut FunctionDef,
         inferred_reference_optimizations: &[Option<ParamPassMode>],
+        // ADR-009 C2 #13 (slice 4): out-parameter set to the node-borne
+        // provenance of a `replace body` REPLACEMENT (if any handler emitted
+        // one), so the D6 async-drop-context gate can authenticate the swapped
+        // body it compiles under the user function name. Left `None` when no
+        // `replace body` directive fired.
+        replacement_body_origin: &mut Option<GeneratedNodeOrigin>,
     ) -> Result<bool> {
         assert_eq!(
             func_def.params.len(),
@@ -952,6 +970,7 @@ impl BytecodeCompiler {
                         func_def,
                         inferred_reference_optimizations,
                         &mut pending_original_body_shadow,
+                        replacement_body_origin,
                     )? {
                         removed = true;
                         break;
@@ -965,6 +984,15 @@ impl BytecodeCompiler {
             for ann in &annotations {
                 if let Some((_, compiled)) = self.lookup_compiled_annotation(ann) {
                     if let Some(handler) = compiled.comptime_post_handler {
+                        // Propagate the SAME `replace body` provenance out-param as
+                        // phase 1: both handler phases route through the one shared
+                        // `process_comptime_directives_for_function`, which is where
+                        // a `replace body` directive is processed and its
+                        // replacement origin recorded. A `replace body` is a
+                        // post-handler directive today, but the directive processor
+                        // is shared, so both phases must surface it uniformly — a
+                        // discard here would silently drop the D6 gate's provenance
+                        // for the one phase that actually emits it.
                         if self.execute_function_comptime_handler(
                             ann,
                             &handler,
@@ -972,6 +1000,7 @@ impl BytecodeCompiler {
                             func_def,
                             inferred_reference_optimizations,
                             &mut pending_original_body_shadow,
+                            replacement_body_origin,
                         )? {
                             removed = true;
                             break;
@@ -996,6 +1025,10 @@ impl BytecodeCompiler {
         func_def: &mut FunctionDef,
         inferred_reference_optimizations: &[Option<ParamPassMode>],
         pending_original_body_shadow: &mut Option<PendingOriginalBodyShadow>,
+        // ADR-009 C2 #13 (slice 4): threaded to the `replace body` directive
+        // arm, which records the REPLACEMENT's node-borne provenance for the D6
+        // gate (see `execute_comptime_handlers`).
+        replacement_body_origin: &mut Option<GeneratedNodeOrigin>,
     ) -> Result<bool> {
         // Build the target object from the function definition
         let target = super::comptime_target::ComptimeTarget::from_function(func_def);
@@ -1044,6 +1077,7 @@ impl BytecodeCompiler {
             &expansion_site,
             inferred_reference_optimizations,
             pending_original_body_shadow,
+            replacement_body_origin,
         )
         .map_err(|e| {
             // ADR-009 D1 (S4): provenance-carrying generated-decl failures
@@ -1813,9 +1847,9 @@ impl BytecodeCompiler {
             // a duplicate slot). The body is still compiled below, filling
             // the pre-registered slot, so the method is compiled exactly
             // once through the identical path.
-            match self.generated_symbols.reserve_generated_decl(
+            match self.reserve_generated_decl_journaled(
                 &func_def.name,
-                origin,
+                origin.clone(),
                 content,
                 generator_anchor,
             ) {
@@ -1830,6 +1864,16 @@ impl BytecodeCompiler {
                 Ok(SymbolReservation::Reissued(_)) => {}
                 Err(message) => return Err(self.expansion_rejection(message, site)),
             }
+            // ADR-009 C2 #13 (slice 2, battery row 10b; slice 4 threading): arm
+            // the D6 async-drop-context gate for this generated body by handing
+            // its node-borne provenance to the compile as a PARAMETER (no shared
+            // compiler field — a nested monomorphization compile can never steal
+            // it). The gate is evaluated at the end of the inner compile on the
+            // authenticated body, using the RAII drop-plan's emission-authority
+            // drop signal, so a rejection surfaces through the same
+            // `build_generated_decl_failure` wrap as any body error and rolls
+            // back atomically in the driver-level install transaction.
+            let node_origin = origin.to_node_origin(&self.generated_node_issuer, &func_def.name);
             // Wave-38F generated-method JIT parity: hand-written `extend`
             // methods compile through the full driver (`compile_function`),
             // which lowers MIR and back-patches `Function.mir_data` for the
@@ -1842,9 +1886,10 @@ impl BytecodeCompiler {
             // generated-node + application-site + generator-definition
             // locations — never as a bare error pointing at handler-emitted
             // offsets.
-            self.compile_function(&func_def).map_err(|e| {
-                self.build_generated_decl_failure(&e, &func_def.name, &node_path, site)
-            })?;
+            self.compile_function_with_generated_origin(&func_def, Some(node_origin))
+                .map_err(|e| {
+                    self.build_generated_decl_failure(&e, &func_def.name, &node_path, site)
+                })?;
         }
         Ok(())
     }
@@ -2207,7 +2252,7 @@ impl BytecodeCompiler {
                                             &origin,
                                             &func_def.name,
                                         );
-                                        match self.generated_symbols.reserve_generated_decl(
+                                        match self.reserve_generated_decl_journaled(
                                             &func_def.name,
                                             origin,
                                             content,
@@ -2315,7 +2360,7 @@ impl BytecodeCompiler {
                                                 &origin,
                                                 &owner,
                                             );
-                                            match self.generated_symbols.reserve_generated_decl(
+                                            match self.reserve_generated_decl_journaled(
                                                 &func_def.name,
                                                 origin,
                                                 content,
@@ -2499,7 +2544,7 @@ impl BytecodeCompiler {
                 source_anchor,
             };
             self.stamp_generated_closure_provenance(&mut func_def.body, &origin, &func_def.name);
-            match self.generated_symbols.reserve_generated_decl(
+            match self.reserve_generated_decl_journaled(
                 &func_def.name,
                 origin,
                 content,
@@ -2526,14 +2571,34 @@ impl BytecodeCompiler {
             // goes through `compile_function`; routing the generated one through
             // the same path gives it native JIT codegen and VM == JIT.
             //
+            // ADR-009 C2 #13 (slice 2, battery row 10b): the D6 conservative
+            // async-drop-context guard, on the AUTHENTICATED generated free
+            // function just before its pass-2 compile — same install-span
+            // rollback guarantee as the extend-method site. The origin is
+            // rebuilt here exactly as the registration loop above minted it
+            // (`site` + `fn:<name>`); the issuer capability, not the path,
+            // authenticates it.
+            let node_path = GeneratedNodePath::decl_root(format!("fn:{}", func_def.name));
+            let origin = GeneratedOrigin {
+                expansion: site.identity().clone(),
+                node_path: node_path.clone(),
+                source_anchor,
+            };
+            // ADR-009 C2 #13 (slice 2, D6; slice 4 threading): arm the
+            // async-drop-context gate for this generated free function by
+            // passing its node-borne provenance as a parameter (no shared
+            // field); the gate runs at the end of the inner compile
+            // (emission-authority drop signal + suspension scan on the
+            // authenticated body).
+            let node_origin = origin.to_node_origin(&self.generated_node_issuer, &func_def.name);
             // ADR-009 D1 (S4), rejection row 7: a body error inside the
             // generated free function surfaces with full expansion
             // provenance (generated-node + application + generator
             // locations).
-            self.compile_function(func_def).map_err(|e| {
-                let node_path = GeneratedNodePath::decl_root(format!("fn:{}", func_def.name));
-                self.build_generated_decl_failure(&e, &func_def.name, &node_path, site)
-            })?;
+            self.compile_function_with_generated_origin(func_def, Some(node_origin))
+                .map_err(|e| {
+                    self.build_generated_decl_failure(&e, &func_def.name, &node_path, site)
+                })?;
         }
         for extend in extends {
             self.apply_comptime_extend(extend, target_name, site)?;
@@ -2903,6 +2968,10 @@ impl BytecodeCompiler {
         site: &ExpansionSite,
         inferred_reference_optimizations: &[Option<ParamPassMode>],
         pending_original_body_shadow: &mut Option<PendingOriginalBodyShadow>,
+        // ADR-009 C2 #13 (slice 4): set by the `replace body` arm to the
+        // REPLACEMENT's node-borne provenance so the D6 gate authenticates the
+        // swapped body (see `execute_comptime_handlers`).
+        replacement_body_origin: &mut Option<GeneratedNodeOrigin>,
     ) -> Result<bool> {
         let mut removed = false;
         for directive in directives {
@@ -2915,6 +2984,10 @@ impl BytecodeCompiler {
                 }
                 super::comptime_builtins::ComptimeDirective::RemoveTarget => {
                     *pending_original_body_shadow = None;
+                    // A removed target installs no body, so discard any staged
+                    // `replace body` provenance too (the D6 gate is skipped for
+                    // removed functions, but keep the out-param consistent).
+                    *replacement_body_origin = None;
                     removed = true;
                     break;
                 }
@@ -3022,7 +3095,21 @@ impl BytecodeCompiler {
                             capability.shadow_name(),
                         );
 
-                    self.stamp_generated_replacement_body(&mut replacement, site)?;
+                    // ADR-009 C2 #13 (slice 4): stamp the replacement's closures
+                    // AND capture its node-borne declaration origin, so the D6
+                    // async-drop-context gate at the end of `compile_function_inner`
+                    // authenticates the swapped body (which compiles under the
+                    // user function name and so has no name-recoverable
+                    // provenance).
+                    let replacement_origin =
+                        self.stamp_generated_replacement_body(&mut replacement, site)?;
+                    // ADR-009 C2 #13 (slice 4, D7): assert the edit-transaction
+                    // shape — one expansion identity ([C0924]) over a complete
+                    // current environment ([C0925]). Defense-in-depth: both hold
+                    // by construction here (the origin was minted from `site`),
+                    // so this surfaces a named rejection only if a future refactor
+                    // splits the identity or installs from a partial environment.
+                    self.guard_edit_transaction_shape(&replacement_origin, site)?;
                     let pending = PendingOriginalBodyShadow::new(
                         func_def,
                         capability,
@@ -3031,6 +3118,7 @@ impl BytecodeCompiler {
                     )?;
                     *func_def = replacement;
                     *pending_original_body_shadow = Some(pending);
+                    *replacement_body_origin = Some(replacement_origin);
                 }
                 super::comptime_builtins::ComptimeDirective::ReplaceModule { .. } => {
                     return Err(Self::directive_error(

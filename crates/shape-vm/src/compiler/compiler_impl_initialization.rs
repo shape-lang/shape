@@ -181,6 +181,7 @@ impl BytecodeCompiler {
             drop_locals: Vec::new(),
             ownership_drop_locals: Vec::new(),
             drop_type_info: HashMap::new(),
+            current_function_saw_drop_obligated_local: false,
             drop_module_bindings: Vec::new(),
             mutable_closure_captures: HashMap::new(),
             shared_closure_captures: HashMap::new(),
@@ -232,6 +233,8 @@ impl BytecodeCompiler {
             generated_symbols:
                 crate::compiler::comptime_builtins::expansion_provenance::GeneratedSymbolTable::new(
                 ),
+            retain_generated_reservations_for_query_session: false,
+            install_journal: None,
             generated_analysis_items: Vec::new(),
             failed_call_site_specializations: std::collections::HashSet::new(),
             next_monomorphization_id: 0,
@@ -967,6 +970,16 @@ impl BytecodeCompiler {
     /// Configure expression-compilation error recovery behavior.
     pub fn set_compile_diagnostic_mode(&mut self, mode: CompileDiagnosticMode) {
         self.compile_diagnostic_mode = mode;
+    }
+
+    /// ADR-009 C2 #13 (slice 1) — opt this compiler into the generated-body
+    /// install's query-session retain mode: after a recoverable compile `Err`,
+    /// keep the generated-query reservation tables (`generated_symbols`,
+    /// `closure_capture_packs`) so the LSP generated-symbol/capture query
+    /// entries can still answer from them. Ordinary compilation leaves this off
+    /// and rolls back every publication. See [`checked_body`](crate::compiler::checked_body).
+    pub fn set_retain_generated_reservations_for_query_session(&mut self, retain: bool) {
+        self.retain_generated_reservations_for_query_session = retain;
     }
 
     /// Set the active permission set for compile-time capability checking.

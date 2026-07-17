@@ -14,6 +14,11 @@ impl BytecodeCompiler {
         &mut self,
         function: &FunctionDef,
     ) -> Result<()> {
+        // ADR-009 C2 #13: record the pre-install fact-bundle values keyed by
+        // this function name so an install rollback restores a displaced
+        // prelude/dependency analysis rather than deleting the shared key (H1).
+        self.journal_record_analyze_function_body(&function.name);
+
         let fn_return_types = self.build_fn_return_type_seed();
         let unit_variant_names = self.build_unit_variant_name_seed();
         let lowering = crate::mir::lowering::lower_function_detailed_with_returns_and_variants(
@@ -125,6 +130,10 @@ impl BytecodeCompiler {
                     .cloned()
                     .collect();
                 if !field_names.is_empty() {
+                    // ADR-009 C2 #13 (M4): a rollback restores the prior hoist
+                    // for this binding name so a later same-named binding on a
+                    // reused compiler does not read a ghost hoist.
+                    self.journal_record_hoisted_field(&binding.name);
                     self.hoisted_fields
                         .insert(binding.name.clone(), field_names);
                 }

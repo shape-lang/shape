@@ -759,3 +759,121 @@ scope()
         vm.drop_errors()
     );
 }
+
+/// Inherited RAII repair (ADR-009 C2 #13, 2026-07-17): a Drop value returned by
+/// a METHOD call and bound to an UNANNOTATED local must run `Drop::drop` at
+/// scope exit. Before the `initializer_call_return_drop_type` MethodCall arm
+/// (helpers.rs), `x`'s type never stamped for `let x = p.acquire()`, so an
+/// UNTYPED `DropCall` was emitted and `Conn::drop` never ran — while the
+/// `FunctionCall` sibling (`let x = make()`) WAS dropped. That asymmetry (a
+/// pre-existing runtime soundness gap with no prior test) is what the D6
+/// mask-breaker exposed. Pins the runtime half of the repair: exactly one TYPED
+/// `DropCall(Conn)` is emitted, which invokes `Conn::drop` at scope exit.
+///
+/// SINGLE-EXIT TAIL-EXPRESSION body (`… x.id`) on purpose. `track_drop_local`
+/// registers `x` exactly ONCE (verified: the method-call compile registers no
+/// drop for its result; the re-arm sets `drop_kind` once), so the typed-DropCall
+/// COUNT equals the number of scope-exit paths. An explicit-`return` body would
+/// statically emit TWO `DropCall(Conn)` — the return-path drop PLUS the dead
+/// fall-through epilogue (`functions.rs`: the `Statement::Return` arm ~2413-2425
+/// falls through to the epilogue ~2460-2464; the 2nd is unreachable after the
+/// terminal return, so exactly one still EXECUTES). That is a pre-existing shape
+/// artifact of explicit returns, NOT a MethodCall-specific double-registration
+/// — the FunctionCall sibling below shows the identical single count under the
+/// same shape.
+#[test]
+fn test_method_call_returned_drop_value_runs_drop_at_scope_exit() {
+    let bytecode = compile(
+        r#"
+        type Conn { id: int }
+        impl Drop for Conn { method drop() { } }
+        type Pool { n: int }
+        extend Pool { method acquire() -> Conn { Conn { id: 1 } } }
+        function test_fn() -> int {
+            let p: Pool = Pool { n: 0 }
+            let x = p.acquire()
+            x.id
+        }
+        test_fn()
+    "#,
+    );
+    assert_eq!(
+        drop_call_type_name_count(&bytecode, "Conn"),
+        1,
+        "an unannotated local bound to a method-call-returned Drop value must emit \
+         exactly one TYPED DropCall(Conn) at scope exit (the RAII MethodCall-arm repair); \
+         an untyped DropCall (the pre-repair behavior) never runs Conn::drop"
+    );
+
+    // Runs without error (Conn::drop is empty); the drop executes at scope exit.
+    let result = eval(
+        r#"
+        type Conn { id: int }
+        impl Drop for Conn { method drop() { } }
+        type Pool { n: int }
+        extend Pool { method acquire() -> Conn { Conn { id: 1 } } }
+        function test_fn() -> int {
+            let p: Pool = Pool { n: 0 }
+            let x = p.acquire()
+            x.id
+        }
+        test_fn()
+    "#,
+    );
+    assert_eq!(result.as_i64(), Some(1));
+}
+
+/// Parity sibling — the `FunctionCall` factory route (`let x = make_conn()`)
+/// that the re-arm ALREADY covered emits the SAME single typed `DropCall(Conn)`
+/// under the identical single-exit shape. Two things at once: the MethodCall arm
+/// did NOT change the FunctionCall path (no regression), and the earlier
+/// method-call "double" was purely the explicit-`return` shape artifact — a
+/// same-shape FunctionCall body counts 1 too, not 2.
+#[test]
+fn test_function_call_returned_drop_value_runs_drop_at_scope_exit() {
+    let bytecode = compile(
+        r#"
+        type Conn { id: int }
+        impl Drop for Conn { method drop() { } }
+        fn make_conn() -> Conn { Conn { id: 1 } }
+        function test_fn() -> int {
+            let x = make_conn()
+            x.id
+        }
+        test_fn()
+    "#,
+    );
+    assert_eq!(
+        drop_call_type_name_count(&bytecode, "Conn"),
+        1,
+        "the FunctionCall factory route (the sibling the re-arm already covered) emits \
+         exactly one typed DropCall(Conn) — symmetric with the MethodCall route"
+    );
+}
+
+/// Control for the repair: the SAME shape with a NON-Drop method return
+/// (`get_id() -> int`) emits NO typed `Conn` drop — the method-call-return drop
+/// obligation is specific to a Drop return type, so the arm stays conservative
+/// (no over-drop of a plain `int`).
+#[test]
+fn test_method_call_returned_non_drop_value_emits_no_typed_drop() {
+    let bytecode = compile(
+        r#"
+        type Conn { id: int }
+        impl Drop for Conn { method drop() { } }
+        type Pool { n: int }
+        extend Pool { method get_id() -> int { 7 } }
+        function test_fn() -> int {
+            let p: Pool = Pool { n: 0 }
+            let x = p.get_id()
+            x
+        }
+        test_fn()
+    "#,
+    );
+    assert_eq!(
+        drop_call_type_name_count(&bytecode, "Conn"),
+        0,
+        "a method-call return of a NON-Drop type must emit no typed Conn drop"
+    );
+}

@@ -6185,6 +6185,43 @@ impl BytecodeCompiler {
 
     /// Track a local variable as needing Drop at scope exit.
     pub(super) fn track_drop_local(&mut self, local_idx: u16, is_async: bool) {
+        // ADR-009 C2 #13 (slice 2, D6): the emission authority for the
+        // async-drop-context gate lives HERE — `track_drop_local` is the ONE
+        // universal scope-exit drop registration point. Every drop-plan copy
+        // funnels through it (the `Statement::VariableDecl` path in statements.rs
+        // and the block-expression `BlockItem::VariableDecl` path in
+        // expressions/misc.rs are its only two callers), and
+        // `emit_drop_call_for_local` drives EVERY typed scope-exit `DropCall`
+        // from `drop_locals`, which only this function populates. So a
+        // per-function flag set here mirrors emission for a drop-obligated local
+        // in the SAME function's frame — function body, block expression, or
+        // loop/if body — by construction, with no per-copy flag site (those
+        // copies would otherwise silently under-detect).
+        //
+        // NESTED-CLOSURE CAVEAT (ADR-009 C2 #13, D6 review finding): a drop
+        // local living inside a NESTED CLOSURE does NOT reach the ENCLOSING
+        // generated function's flag. A closure body compiles in its OWN
+        // `compile_function` frame, whose save/restore of
+        // `current_function_saw_drop_obligated_local` (functions.rs, added to
+        // stop monomorphization bleed) also ISOLATES the closure's drop flag —
+        // so a generated body whose drop obligation AND suspension both live
+        // inside a nested closure would install unrejected by the enclosing
+        // function's D6 gate. This is LATENT: the construct (a closure-valued
+        // `async let` / a closure holding drop+await) cannot currently compile —
+        // it fails Future unification before the borrow check (battery row 7,
+        // BLOCKED-BY-INFERENCE). The bounded full fix, available when row 7
+        // flips, is to run D6 over the closure itself by threading the closure's
+        // generated origin at its compile seam (`expressions/closures.rs`, which
+        // already holds `generated_origin`). When row 7 flips, THIS case must be
+        // re-verified. Gated on
+        // the drop obligation ACTUALLY resolving: `local_drop_kind` is `Some`
+        // iff the local's stamped type carries a `Drop` impl — exactly the shape
+        // `emit_drop_call_for_local` emits a TYPED `DropCall` for (a non-Drop
+        // local is tracked too, for the runtime-skipped generic `DropCall`, but
+        // it is not a drop obligation and must not set the flag).
+        if self.local_drop_kind(local_idx).is_some() {
+            self.current_function_saw_drop_obligated_local = true;
+        }
         if let Some(scope) = self.drop_locals.last_mut() {
             scope.push((local_idx, is_async));
         }
@@ -6254,11 +6291,56 @@ impl BytecodeCompiler {
                 let scoped = format!("{}::{}", namespace, function);
                 self.function_defs.get(&scoped)?.return_type.as_ref()?
             }
+            // Inherited RAII repair (ADR-009 C2 #13, 2026-07-17): a Drop value
+            // returned by a METHOD call and bound to an unannotated local was
+            // silently leaked — the `FunctionCall` sibling above IS re-armed and
+            // dropped, but a `MethodCall` fell through the old `_ => None`, so its
+            // `Drop::drop` never ran (untyped `DropCall`). Resolve the receiver's
+            // tracked type NAME the way method dispatch does
+            // (`resolve_receiver_extend_type` step 3, helpers.rs:4747 — the SAME
+            // `type_tracker` read `local_drop_kind` uses, so the drop-plan keeps a
+            // single authority), then read the extend method `Type.method`'s
+            // declared return. Bounded to a receiver whose type name is directly
+            // tracked (`receiver_local_tracked_type_name` — covers `p.acquire()` /
+            // `self.acquire()`); a chained-method-call / module-binding /
+            // otherwise-unresolvable receiver stays `None`, conservative exactly
+            // as before this arm existed (no name heuristic, no new authority).
+            Expr::MethodCall {
+                receiver, method, ..
+            } => {
+                let type_name = self.receiver_local_tracked_type_name(receiver)?;
+                let qualified = format!("{}.{}", type_name, method);
+                self.function_defs.get(&qualified)?.return_type.as_ref()?
+            }
             _ => return None,
         };
         let type_name = Self::tracked_type_name_from_annotation(ret_ann)?;
         let drop_kind = self.drop_type_info.get(&type_name).copied()?;
         Some((type_name, drop_kind))
+    }
+
+    /// Resolve a method-call RECEIVER's tracked type NAME for the drop-plan's
+    /// [`initializer_call_return_drop_type`] MethodCall arm. Mirrors
+    /// [`resolve_receiver_extend_type`](Self::resolve_receiver_extend_type)
+    /// step 3 (the TypedObject-name case) using the SAME `type_tracker` read
+    /// `local_drop_kind` consults, so the drop-plan stays single-authority.
+    /// Bounded to a bare-identifier receiver bound to a local whose type name is
+    /// tracked (the sound, name-heuristic-free case); everything else is `None`.
+    fn receiver_local_tracked_type_name(
+        &self,
+        receiver: &shape_ast::ast::Expr,
+    ) -> Option<String> {
+        let shape_ast::ast::Expr::Identifier(name, _) = receiver else {
+            return None;
+        };
+        let local_idx = self.resolve_local(name)?;
+        let type_name = self
+            .type_tracker
+            .get_local_type(local_idx)?
+            .type_name
+            .as_deref()?;
+        // Strip generic params ("Vec<int>" -> "Vec"), mirroring step 3.
+        Some(type_name.split('<').next().unwrap_or(type_name).to_string())
     }
 
     /// Emit drops for all scopes being exited (used by return/break/continue).

@@ -1,3 +1,4 @@
+mod jit_c2_install_native;
 mod jit_closure_capture_native;
 mod jit_fallback_diagnostic_matrix;
 mod jit_fstring_format;

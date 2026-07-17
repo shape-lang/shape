@@ -1372,6 +1372,10 @@ impl BytecodeCompiler {
             }
         }
 
+        // ADR-009 C2 #13: record the pre-install values of every table keyed by
+        // this name so an install rollback restores a displaced prelude/
+        // dependency entry rather than deleting the shared key (H1).
+        self.journal_record_register_function(&func_def.name);
         self.function_defs
             .insert(func_def.name.clone(), func_def.clone());
 
@@ -1479,6 +1483,10 @@ impl BytecodeCompiler {
         &mut self,
         func_def: &FunctionDef,
     ) -> Result<()> {
+        // ADR-009 C2 #13: record the pre-install values of every table keyed by
+        // this name so an install rollback restores a displaced prelude/
+        // dependency entry rather than deleting the shared key (H1).
+        self.journal_record_register_function(&func_def.name);
         self.function_defs
             .insert(func_def.name.clone(), func_def.clone());
 
@@ -6997,6 +7005,10 @@ impl BytecodeCompiler {
                             // tracker local semantics get wiped by a
                             // sibling closure's `compile_function`.
                             if var_decl.kind == VarKind::Let && var_decl.is_mut {
+                                // ADR-009 C2 #13 (M3): a rollback removes this
+                                // witness so it can't misclassify a later
+                                // same-named binding on a reused compiler.
+                                self.journal_record_owned_mutable_local(&binding_name);
                                 self.owned_mutable_locals.insert(binding_name.clone());
                             }
                         }
@@ -7230,6 +7242,13 @@ impl BytecodeCompiler {
                                 }
                             }
 
+                            // ADR-009 C2 #13 (slice 2, D6): the per-function
+                            // drop-obligation flag is set at the single chokepoint
+                            // `track_drop_local` (helpers.rs) below — the ONE
+                            // universal scope-exit drop registration point — so
+                            // block/loop/closure-body scoped drop locals are covered
+                            // by the same authority. No per-copy flag site here.
+
                             let is_async = match drop_kind {
                                 Some(DropKind::AsyncOnly) => {
                                     if !self.current_function_is_async {
@@ -7238,9 +7257,18 @@ impl BytecodeCompiler {
                                             .get_local_type(local_idx)
                                             .and_then(|info| info.type_name.clone())
                                             .unwrap_or_else(|| name.to_string());
+                                        // ADR-009 C2 #13 (slice 3): this async-drop-in-sync-context
+                                        // rejection is validation-battery rows 9 + 10a (§4.2 async-
+                                        // drop-context example 2: "async cleanup required in a sync
+                                        // context"). It had no named code; slice 3 assigns `C0923`
+                                        // and prefixes the message per the C1 C09xx convention
+                                        // (bracketed head, as in `capture_plan.rs`'s `[C0906]`). The
+                                        // check is general (it fires for any sync body, not only a
+                                        // generated one); the code names the class wherever it
+                                        // fires, and a generated body reaches it identically.
                                         return Err(ShapeError::SemanticError {
                                             message: format!(
-                                                "type '{}' has only an async drop() and cannot be used in a sync context; \
+                                                "[C0923] type '{}' has only an async drop() and cannot be used in a sync context; \
                                                  add a sync method drop(self) or use it inside an async function",
                                                 tn
                                             ),

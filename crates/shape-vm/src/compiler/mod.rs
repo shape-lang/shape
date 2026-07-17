@@ -82,6 +82,7 @@ pub(crate) mod comptime_diagnostics;
 pub(crate) mod comptime_target;
 mod control_flow;
 mod body_analysis_authority;
+mod checked_body;
 mod expressions;
 mod functions;
 mod functions_annotations;
@@ -1587,6 +1588,21 @@ pub struct BytecodeCompiler {
     /// Per-type drop kind: tracks whether each type has sync, async, or both drop impls.
     /// Populated during the first-pass registration of impl blocks.
     pub(crate) drop_type_info: HashMap<String, DropKind>,
+    /// ADR-009 C2 #13 (slice 2, D6): set true during `compile_function` whenever
+    /// the RAII drop-plan resolves a drop-obligated LOCAL (`local_drop_kind` /
+    /// annotation / initializer-call-return — the emission authority, so an
+    /// INFERRED drop type is caught, not under-detected). `compile_function`
+    /// save/restores it around the body compile (re-entrancy under
+    /// monomorphization) and reads THIS function's value for the async-drop-context
+    /// gate. See `checked_body::async_drop_context`.
+    pub(crate) current_function_saw_drop_obligated_local: bool,
+    // ADR-009 C2 #13 (slice 4): the former `pending_generated_body_origin`
+    // shared field was DELETED. Generated-body provenance for the D6
+    // async-drop-context gate is now threaded as a PARAMETER through
+    // `compile_function_with_generated_origin` → `compile_function_inner`, so a
+    // nested monomorphization compile can never steal it and the gate evaluates
+    // over the EFFECTIVE definition (covering `replace body` edits, whose swap
+    // never reaches the outer `func_def`).
     /// Module bindings that need Drop calls at program exit.
     /// Each entry is (binding_index, is_async).
     pub(crate) drop_module_bindings: Vec<(u16, bool)>,
@@ -1916,6 +1932,23 @@ pub struct BytecodeCompiler {
     /// former name-keyed `materialized_comptime_fns` set is deleted — name
     /// membership is the table's derived `contains_name` view.
     pub(crate) generated_symbols: comptime_builtins::expansion_provenance::GeneratedSymbolTable,
+
+    /// ADR-009 C2 #13 (slice 1) — when set, a rolled-back generated-body
+    /// install (see [`checked_body`]) retains the generated-query reservation
+    /// tables (`generated_symbols`, `closure_capture_packs`) after a recoverable
+    /// compile `Err`, so the LSP generated-symbol/capture query entries can keep
+    /// answering from them. Off for ordinary (batch/install) compilation, which
+    /// rolls back every publication. A named query-session mode, not a
+    /// soft-fail: executable publications still roll back in both modes.
+    pub(crate) retain_generated_reservations_for_query_session: bool,
+
+    /// ADR-009 C2 #13 (slice 1) — the install transaction's displaced-entry undo
+    /// journal (see [`checked_body::journal`]). `Some` only while a generated-body
+    /// install transaction is live (opened in `begin_checked_body_install`,
+    /// cleared on commit or consumed on rollback); every keyed install write
+    /// records its displaced prior here so a rollback restores it rather than
+    /// deleting a shared prelude/dependency key.
+    pub(in crate::compiler) install_journal: Option<checked_body::InstallJournal>,
 
     /// ADR-009 E3 (slice S1) — the generated analysis items materialized by
     /// the executed declaration-discovery pre-pass
