@@ -101,15 +101,27 @@
 //! future genuinely-new install class, not assigned here. This gap is
 //! intentional, not an oversight.
 //!
-//! ## Reserved, allocated-not-wired (slice-4 existing-body-edit territory)
+//! ## Wired — the D7 edit-transaction shape guards (slice 4, defense-in-depth)
 //!
 //! - **`C0924`** — split/partial rewrite transaction (C2-R7): a capture-set
 //!   change and body change that did not share ONE rewrite transaction, or that
-//!   arrived under two expansion identities. The transaction/identity guard is
-//!   slice-4 edit-path work; the code is reserved here and wired NOWHERE.
+//!   arrived under two expansion identities. WIRED at the `replace body` commit
+//!   seam (`edit_transaction_guards::guard_edit_transaction_shape`), which
+//!   asserts the replacement's expansion identity matches its application site's.
 //! - **`C0925`** — incomplete environment at install (C2-R8): an install
 //!   attempted without the COMPLETE current capture pack (a partial
-//!   environment). Also slice-4; reserved, wired NOWHERE.
+//!   environment). WIRED at the SAME seam, asserting the edit's environment
+//!   provenance is issued by THIS compilation and carries a rooted anchor.
+//!
+//! Both are DEFENSE-IN-DEPTH: a shipped `replace body` edit is one
+//! `compile_in_place` transaction, its replacement is stamped with a single
+//! identity, and its environment is discovered from the replacement body and
+//! C1-validated — so neither failure branch is constructible from a real program
+//! without production sabotage (the `c2_slice4_edit_tests` guard pins are marked
+//! not-constructible with that reason, and exercise the constructors directly so
+//! the messages stay well-formed + jargon-clean). The guards surface their named
+//! code only if a FUTURE refactor splits the identity or supplies a partial /
+//! foreign environment.
 //!
 //! # Captures → loan set (the "don't assume" verification)
 //!

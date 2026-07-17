@@ -3093,6 +3093,13 @@ impl BytecodeCompiler {
                     // provenance).
                     let replacement_origin =
                         self.stamp_generated_replacement_body(&mut replacement, site)?;
+                    // ADR-009 C2 #13 (slice 4, D7): assert the edit-transaction
+                    // shape — one expansion identity ([C0924]) over a complete
+                    // current environment ([C0925]). Defense-in-depth: both hold
+                    // by construction here (the origin was minted from `site`),
+                    // so this surfaces a named rejection only if a future refactor
+                    // splits the identity or installs from a partial environment.
+                    self.guard_edit_transaction_shape(&replacement_origin, site)?;
                     let pending = PendingOriginalBodyShadow::new(
                         func_def,
                         capability,

@@ -358,3 +358,30 @@ fn replace_body_edit_capture_set_and_body_roll_back_together() {
          rolls back WITH the body)"
     );
 }
+
+// ── Deliverable C — the D7 shape guards [C0924] / [C0925] (not-constructible) ─
+//
+// [C0924] (split/two-identity rewrite) and [C0925] (incomplete environment) are
+// WIRED at the `replace body` commit seam
+// (`checked_body::edit_transaction_guards::guard_edit_transaction_shape`) as
+// DEFENSE-IN-DEPTH. Neither has a firing pin here because neither failure branch
+// is constructible from a real program without production sabotage:
+//
+//   - A `replace body` edit is ONE `compile_in_place` install transaction; its
+//     replacement is stamped with a SINGLE expansion identity derived from the
+//     application site (`stamp_generated_replacement_body`). There is no seam by
+//     which a body change and a capture-set change acquire two identities /
+//     transactions — so the [C0924] branch cannot be reached without editing the
+//     stamp to mint a divergent identity (sabotage).
+//   - The edit's capture environment is DISCOVERED from the replacement body and
+//     validated by the C1 capture-plan gates (a foreign origin is already
+//     rejected upstream by [C0909] at the C1 surface); there is no partial-pack
+//     input at install to trip [C0925].
+//
+// The guard CODE is exercised directly (message carries the bracketed code and
+// is free of `COMPTIME_JARGON_MARKERS`) by the constructor unit tests in
+// `checked_body::edit_transaction_guards::tests`
+// (`c0924_message_is_well_formed_and_marker_free` /
+// `c0925_message_is_well_formed_and_marker_free`). If a future refactor ever
+// makes either branch reachable, the guard converts it into its named
+// installation rejection rather than a silent split/partial publication.
