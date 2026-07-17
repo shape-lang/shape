@@ -33,9 +33,9 @@ fn any_named(named: &[(String, Expr)]) -> bool {
 
 fn statement_has_suspension(statement: &Statement) -> bool {
     match statement {
-        Statement::Return(value, _) => value.as_ref().is_some_and(expr_has_suspension),
+        Statement::Return(value, _) => value.as_ref().is_some_and(|e| expr_has_suspension(e)),
         Statement::Break(_) | Statement::Continue(_) | Statement::RemoveTarget(_) => false,
-        Statement::VariableDecl(decl, _) => decl.value.as_ref().is_some_and(expr_has_suspension),
+        Statement::VariableDecl(decl, _) => decl.value.as_ref().is_some_and(|e| expr_has_suspension(e)),
         Statement::Assignment(assign, _) => expr_has_suspension(&assign.value),
         Statement::Expression(expr, _) => expr_has_suspension(expr),
         Statement::For(for_loop, _) => {
@@ -70,8 +70,8 @@ fn statement_has_suspension(statement: &Statement) -> bool {
             method
                 .params
                 .iter()
-                .any(|param| param.default_value.as_ref().is_some_and(expr_has_suspension))
-                || method.when_clause.as_ref().is_some_and(expr_has_suspension)
+                .any(|param| param.default_value.as_ref().is_some_and(|e| expr_has_suspension(e)))
+                || method.when_clause.as_ref().is_some_and(|e| expr_has_suspension(e))
                 || body_has_suspension_point(&method.body)
         }),
         Statement::SetParamType { .. } | Statement::SetReturnType { .. } => false,
@@ -105,12 +105,12 @@ fn expr_has_suspension(expr: &Expr) -> bool {
         Expr::FunctionExpr { params, body, .. } => {
             params
                 .iter()
-                .any(|param| param.default_value.as_ref().is_some_and(expr_has_suspension))
+                .any(|param| param.default_value.as_ref().is_some_and(|e| expr_has_suspension(e)))
                 || body_has_suspension_point(body)
         }
         // Binding carrier.
         Expr::Let(let_expr, _) => {
-            let_expr.value.as_deref().is_some_and(expr_has_suspension)
+            let_expr.value.as_deref().is_some_and(|e| expr_has_suspension(e))
                 || expr_has_suspension(&let_expr.body)
         }
         // Single-child carriers.
@@ -137,7 +137,7 @@ fn expr_has_suspension(expr: &Expr) -> bool {
             annotation, target, ..
         } => any_expr(&annotation.args) || expr_has_suspension(target),
         Expr::Break(value, _) | Expr::Return(value, _) => {
-            value.as_ref().is_some_and(expr_has_suspension)
+            value.as_ref().is_some_and(|e| expr_has_suspension(e))
         }
         // Multi-child carriers.
         Expr::IndexAccess {
@@ -208,7 +208,7 @@ fn expr_has_suspension(expr: &Expr) -> bool {
                 )
         }
         Expr::Block(block, _) => block.items.iter().any(|item| match item {
-            BlockItem::VariableDecl(decl) => decl.value.as_ref().is_some_and(expr_has_suspension),
+            BlockItem::VariableDecl(decl) => decl.value.as_ref().is_some_and(|e| expr_has_suspension(e)),
             BlockItem::Assignment(assign) => expr_has_suspension(&assign.value),
             BlockItem::Statement(statement) => statement_has_suspension(statement),
             BlockItem::Expression(expr) => expr_has_suspension(expr),
@@ -236,7 +236,7 @@ fn expr_has_suspension(expr: &Expr) -> bool {
         Expr::Match(match_expr, _) => {
             expr_has_suspension(&match_expr.scrutinee)
                 || match_expr.arms.iter().any(|arm| {
-                    arm.guard.as_ref().is_some_and(expr_has_suspension)
+                    arm.guard.as_ref().is_some_and(|e| expr_has_suspension(e))
                         || expr_has_suspension(&arm.body)
                 })
         }
