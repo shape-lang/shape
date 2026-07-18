@@ -24,9 +24,11 @@
 annotation add_scaler() {
   targets: [type]
   comptime post(target, ctx) {
-    extend (f"extend {target.name} \{ method scale(f: int) -> int \{ let mut hits = 3
-      let worker = |x: int; move hits| x * hits
-      worker(f) \} \}")
+    extend target {
+      method scale(f: int) -> int { let mut hits = 3
+        let worker = |x: int; move hits| x * hits
+        worker(f) }
+    }
   }
 }
 
@@ -199,9 +201,11 @@ scale(2)
 annotation add_reader() {
   targets: [type]
   comptime post(target, ctx) {
-    extend (f"extend {target.name} \{ method read(x: int) -> int \{ var total = 5
-      let worker = |y: int; share total| y + total
-      worker(x) \} \}")
+    extend target {
+      method read(x: int) -> int { var total = 5
+        let worker = |y: int; share total| y + total
+        worker(x) }
+    }
   }
 }
 
@@ -251,13 +255,15 @@ job.read(2)
 annotation add_reader() {
   targets: [type]
   comptime post(target, ctx) {
-    extend ("extend Job { method read() -> int { var total = 40
-      let outer = |; share total| { let inner = |; share total| {
-        total = total + 2
-        total }
-        inner()
-        total }
-      outer() } }")
+    extend target {
+      method read() -> int { var total = 40
+        let outer = |; share total| { let inner = |; share total| {
+          total = total + 2
+          total }
+          inner()
+          total }
+        outer() }
+    }
   }
 }
 
@@ -342,9 +348,11 @@ job.read()
 annotation add_reader() {
   targets: [type]
   comptime post(target, ctx) {
-    extend ("extend Job { method read() -> string { let tag = \"hi\"
-      let worker = |; move tag| tag
-      worker() } }")
+    extend target {
+      method read() -> string { let tag = "hi"
+        let worker = |; move tag| tag
+        worker() }
+    }
   }
 }
 
@@ -382,9 +390,11 @@ job.read()
 annotation add_scaler() {
   targets: [type]
   comptime post(target, ctx) {
-    extend (f"extend {target.name} \{ method scale<T>(f: T) -> int \{ let mut hits = 3
-      let worker = |x: T; move hits| hits
-      worker(f) \} \}")
+    extend target {
+      method scale<T>(f: T) -> int { let mut hits = 3
+        let worker = |x: T; move hits| hits
+        worker(f) }
+    }
   }
 }
 
