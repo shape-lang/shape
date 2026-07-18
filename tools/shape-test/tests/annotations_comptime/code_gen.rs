@@ -80,6 +80,38 @@ print(fetch_data())
     .expect_output("stubbed");
 }
 
+/// ADR-009 E2 #18 (slice 3) — a CLOSURE-BEARING `replace body` edit compiles and
+/// runs correctly after slice-3's pre-analysis materialization of the
+/// replacement. The replacement carries an explicit `move`-capture closure (the
+/// C0911 shape); slice-3 makes the analyzer see it pre-analysis (publishing its
+/// structural fact — the LSP flip), and this pin guards that the same
+/// materialization leaves RUNTIME behavior intact: VM and JIT both produce 42
+/// (the JIT deopts on the capturing closure but must not diverge). Pass-2 still
+/// performs the authoritative body swap, so the replacement — not the pre-edit
+/// `7` — is what runs.
+#[test]
+fn closure_bearing_replace_body_edit_runs_identically_in_vm_and_jit() {
+    let program = r#"
+annotation edit_answer() {
+  targets: [function]
+  comptime post(target, ctx) {
+    replace body {
+      let base = 40
+      let worker = |; move base| base + 2
+      return worker()
+    }
+  }
+}
+
+@edit_answer()
+fn answer() -> int { 7 }
+
+print(answer())
+"#;
+    ShapeTest::new(program).expect_output("42");
+    ShapeTest::new(program).with_jit().expect_output("42");
+}
+
 #[test]
 fn annotation_extends_type_with_equality_check() {
     ShapeTest::new(
