@@ -88,30 +88,14 @@ print(n.diff())
     );
 }
 
-/// D12 — the COMPUTED snippet directive `extend (f"extend {target.name} …")`
-/// has NO literal `extend` statement in the handler body, so the deleted
-/// static AST scan could never have found it: it materializes exclusively
-/// through the executed pre-pass. This is the load-bearing parity row.
-#[test]
-fn d12_computed_snippet_extend_only_materializes_via_executed_prepass() {
-    expect_vm_and_jit_output(
-        r#"
-annotation gen() {
-  targets: [type]
-  comptime post(target, ctx) {
-    extend (f"extend {target.name} \{ method answer() -> int \{ 42 \} \}")
-  }
-}
-
-@gen()
-type Widget { id: int }
-
-let w = Widget { id: 1 }
-print(w.answer())
-"#,
-        "42",
-    );
-}
+// ADR-009 E2 #18 slice 5b Part B (companion A) — `d12_computed_snippet_extend_
+// only_materializes_via_executed_prepass` RETIRED. Its subject (a COMPUTED
+// source-string `extend (f"…")` materializing via the executed pre-pass) IS the
+// deleted U03 route. Its deletion-boundary SUCCESSOR —
+// `computed_snippet_extend_is_rejected_with_named_alternative`, asserting the
+// [C0929] rejection + the named typed alternatives — is added in companion B
+// (post-deletion, where C0929 actually fires). Expected-FAILED baseline: old-d12
+// leaves the set on retirement.
 
 /// R6 — `ctx.target`/`target` resolution: the `target` head of a direct
 /// `extend target { … }` resolves to the annotated type through the executed
@@ -254,7 +238,7 @@ fn u10_target_delivered_by_position_after_hygienic_rename() {
 annotation named() {
   targets: [type]
   comptime post(target, ctx) {
-    extend (f"extend {target.name} \{ method who() -> string \{ \"{target.name}\" \} \}")
+    extend (extend_method_literal(target.name, "who", "string", target.name))
   }
 }
 
