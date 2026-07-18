@@ -5,8 +5,8 @@
 /// (`target.fields`) and generates a `{TypeName}_json_schema()` function that
 /// returns the type's JSON Schema as a string. No runtime reflection and no
 /// drift between the type and its schema — the schema is a pure function of the
-/// type declaration, computed once at compile time and emitted as ordinary
-/// Shape source via the `extend (...)` code-generation directive.
+/// type declaration, computed once at compile time and emitted as a typed
+/// checked item via the `extend (item_fn(...))` code-generation directive.
 ///
 /// # Example
 ///
@@ -89,9 +89,12 @@ pub annotation json_schema() {
         }
 
         let schema = f"\{\"type\": \"object\", \"title\": \"{target.name}\", \"properties\": \{{props}\}, \"required\": [{required}]\}"
-        // Emit `fn {TypeName}_json_schema() -> string { "<schema>" }`. `string_lit`
-        // renders the computed schema as a safely-escaped Shape string literal;
-        // `\{` / `\}` are literal braces in the generated source.
-        extend (f"fn {target.name}_json_schema() -> string \{ {string_lit(schema)} \}")
+        // Emit `fn {TypeName}_json_schema() -> string { "<schema>" }` via the
+        // TYPED checked-item route (ADR-009 E2 #18 slice 4): `item_fn` builds the
+        // AST function directly — the computed `schema` becomes the returned
+        // string LITERAL with no source text and no `string_lit` escape
+        // round-trip. Byte-identical output to the retired
+        // `extend (f"fn ... { string_lit(schema) } ")` source-string form.
+        extend (item_fn(f"{target.name}_json_schema", "string", schema))
     }
 }
