@@ -116,7 +116,7 @@ type Probe { id: int }
 annotation read_text() {
   targets: [type]
   comptime post(target, ctx) {
-    extend ("fn forbidden_generated() -> int { 1 }")
+    extend (item_fn("forbidden_generated", "int", 1))
   }
 }
 "#,
