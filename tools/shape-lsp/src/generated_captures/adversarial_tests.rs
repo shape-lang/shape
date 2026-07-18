@@ -1,7 +1,7 @@
 use std::collections::BTreeSet;
 
 use shape_ast::parser::parse_program;
-use shape_vm::compiler::{GENERATED_CAPTURE_SOURCE_UNAVAILABLE_CODE, GeneratedCapturePosition};
+use shape_vm::compiler::GeneratedCapturePosition;
 use tower_lsp_server::ls_types::{HoverContents, Position, Range, Uri};
 
 use super::{
@@ -56,45 +56,15 @@ annotation add_reader() {
 type Job { id: int }
 "#;
 
-#[test]
-fn colliding_reparsed_offsets_never_acquire_the_direct_decoys_source_map() {
-    let direct = "extend Target { method fake() -> int { let base = 40\n      let worker = |; move base| base + 2\n      worker() } }";
-    let skeleton = format!(
-        "annotation add_collision() {{\n  targets: [type]\n  comptime post(target, ctx) {{\n    {direct}\n    extend (\"__PAYLOAD__\")\n  }}\n}}\n\n@add_collision()\ntype Target {{ id: int }}\n"
-    );
-    let direct_offset = skeleton
-        .find("extend Target")
-        .expect("fixture has direct decoy");
-    let payload = format!(
-        "{}{}",
-        " ".repeat(direct_offset),
-        direct.replacen("fake", "read", 1),
-    );
-    let source = skeleton.replace("__PAYLOAD__", &payload);
-    let program = parse_program(&source).expect("collision fixture parses");
-    let captures = query(&program, &source);
-
-    let direct_capture = captures
-        .captures()
-        .iter()
-        .find(|capture| capture.owner_display().contains("Target.fake"))
-        .expect("direct decoy capture");
-    assert!(direct_capture.source_map().is_some());
-
-    let reparsed_capture = captures
-        .captures()
-        .iter()
-        .find(|capture| capture.owner_display().contains("Target.read"))
-        .expect("reparsed capture remains available to compiler query");
-    assert!(
-        reparsed_capture.source_map().is_none(),
-        "equal `(name, mode, Span)` evidence must not defeat structural provenance",
-    );
-    assert!(captures.issues().iter().any(|issue| {
-        issue.code() == GENERATED_CAPTURE_SOURCE_UNAVAILABLE_CODE
-            && issue.message().contains("method:read")
-    }));
-}
+// ADR-009 E2 #18 5b Part B (companion A): `colliding_reparsed_offsets_never_
+// acquire_the_direct_decoys_source_map` RETIRED, closed-under-callers (its inline
+// `extend ("__PAYLOAD__")` reparse skeleton + payload machinery go with it). Its
+// subject is an adversarial property OF the deleted U03 reparse route (a reparsed
+// capture at colliding offsets must not steal a direct decoy's source_map, and
+// must carry GENERATED_CAPTURE_SOURCE_UNAVAILABLE_CODE) — post-deletion the
+// reparsed half is unconstructible. The surviving half (direct captures get
+// correct source maps) is carried by the direct-route fixtures + the no-C0910
+// asserts the reachability agent cited.
 
 #[test]
 fn one_template_position_returns_every_application_without_conflict() {

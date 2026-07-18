@@ -59,22 +59,9 @@ let worker = |y: int| y + total
 worker(2)
 "#;
 
-const REPARSED_GENERATED_CAPTURE: &str = r#"
-annotation add_reader() {
-  targets: [type]
-  comptime post(target, ctx) {
-    extend ("extend Job { method read() -> int { let base = 40
-      let worker = |; move base| base + 2
-      worker() } }")
-  }
-}
-
-@add_reader()
-type Job { id: int }
-
-let job = Job { id: 1 }
-job.read()
-"#;
+// REPARSED_GENERATED_CAPTURE fixture RETIRED with its C0910 test (see note below,
+// at the retired reparsed_generated_capture test) — the U03 reparse route it fed
+// is deleted this slice.
 
 const INVALID_IMPLICIT_GENERATED_CAPTURE: &str = r#"
 annotation add_reader() {
@@ -207,14 +194,11 @@ fn ordinary_source_closure_capture_remains_inference_only() {
         .expect_no_semantic_diagnostic_contains("[C0911]");
 }
 
-#[test]
-fn reparsed_generated_capture_reports_honest_source_unavailable_diagnostic() {
-    ShapeTest::new(REPARSED_GENERATED_CAPTURE)
-        .expect_semantic_diagnostic_contains("[C0910]")
-        .expect_semantic_diagnostic_contains("compiler capture query")
-        .expect_semantic_diagnostic_contains("source hover and navigation are unavailable")
-        .expect_no_semantic_diagnostic_contains("expansion view");
-}
+// ADR-009 E2 #18 5b Part B (companion A): `reparsed_generated_capture_reports_
+// honest_source_unavailable_diagnostic` RETIRED — subject = the [C0910]
+// source-unavailable diagnostic of the deleted U03 reparse route (deletion
+// replaces the emission with a loud invariant error). Surviving capture-query
+// coverage stays in the ordinary/generic/invalid fixtures around it.
 
 #[test]
 fn generic_capture_hover_lists_every_exact_specialization_without_picking_one() {
