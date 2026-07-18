@@ -281,7 +281,7 @@ annotation derive_field_count() {
       }
       _ => 0
     }
-    extend (f"fn user_field_count() -> int \{ {count} \}")
+    extend (item_fn("user_field_count", "int", count))
   }
 }
 
@@ -361,7 +361,7 @@ annotation check_agreement() {
       _ => -4
     }
     let agree = if public_count == complete_count { 1 } else { 0 }
-    extend (f"fn reflect_agreement() -> int \{ {agree} \}")
+    extend (item_fn("reflect_agreement", "int", agree))
   }
 }
 
