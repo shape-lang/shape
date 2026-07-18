@@ -259,11 +259,46 @@ native literal, not a directive transport.
 
 ---
 
-## 6. Open question for sign-off
+## 6. Resolution — Candidate B ratified (supervisor sign-off 2026-07-18, E2-Q2/B)
 
-One ruling decides implementation: **is Candidate B's residual native f-string
-hole-parse (producer-generated `{self.<field>}` resolved by the language's own
-`parse_expression_str`) acceptable, or is Candidate C (pure concatenation Expr,
-with a replicated-formatter byte-parity gate) required?** Everything else
-(single-builtin blast radius, zero grammar, reused provenance, the parity
-arbiter) is settled and feasible.
+**RULED: Candidate B** (typed template builder → native f-string). Both reshaping
+facts were independently verified (FormattedString flat + compile-time hole parse
+at `string_interpolation.rs:277`; generic `Item::Extend` consumer arms at
+`functions_annotations.rs:2304/2401/2510`).
+
+**Distinguishing reason (why C is NOT the purist option — it is the WORSE
+forbidden shape).** Candidate C replicates the interpolation formatter, creating a
+SECOND formatter authority that WILL drift from `emit_interpolation_format_call` —
+the parallel-implementation defection-attractor this repo's single-authority
+discipline (ADR-005 §1 spirit; CLAUDE.md §Parallel-implementation) exists to
+prevent. Candidate B preserves the single formatter authority, and its residual
+parse is the language's own universal f-string compile path over
+producer-GENERATED content — not handler-authored source, not the U03 transport
+(no `parse_program`, no directive payload). Parse-purity does not outrank
+single-authority.
+
+**Four binding conditions on B (carried into implementation):**
+
+1. **BOUNDED HOLE GRAMMAR.** The builtin generates holes ONLY of the form
+   `{self.<identifier>}` from ConstLift'd field-name data, and ASSERTS
+   identifier-ness at the builtin boundary — anything else is rejected loudly
+   with a named diagnostic (a fresh code is C0927+ per E2-D5, verified next-free
+   at implementation). The template channel is structurally incapable of
+   carrying an arbitrary handler expression (segments are literal text; splices
+   are field-name identifiers, never expressions).
+2. **HONEST NAMING.** The builtin's doc and this design state the residual
+   verbatim: *"producer-generated `self.<ident>` holes resolve through the
+   language's native f-string compile parse (`parse_expression_str`), the same
+   path as every user-authored f-string; this is NOT the U03 directive transport
+   and NOT body-as-text"* — with a pointer to this ruling (E2-Q2/B, 2026-07-18).
+   This forecloses both a future reviewer mistaking it for hidden reparse and
+   anyone citing it as precedent for real body-as-text.
+3. **NEGATIVE INJECTION PIN.** A test proves handler-supplied text cannot reach
+   the template as code: a field-name-shaped value carrying non-identifier
+   content (e.g. `a} + evil() + {b`, backticks, braces) is REJECTED at the
+   builtin boundary, never assembled into the template.
+4. **INVENTORY UNAFFECTED.** Slice-5's U03 deletion inventory
+   (`parse_function_body_payload`, `parse_module_items_payload`, `__body_probe`,
+   the fragment reparse machinery) dies whole and unchanged;
+   `string_interpolation`'s `parse_expression_str` is NOT in that inventory and
+   never becomes a carve-out argument.
