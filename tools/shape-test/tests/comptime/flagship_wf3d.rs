@@ -42,7 +42,7 @@ const F1_PROGRAM: &str = r#"
 annotation schema_of() {
     targets: [type]
     comptime post(target, ctx) {
-        extend (f"fn {target.name}_label() -> string \{ {string_lit("User schema")} \}")
+        extend (item_fn(f"{target.name}_label", "string", "User schema"))
     }
 }
 
@@ -130,7 +130,7 @@ const F4_PROGRAM: &str = r#"
 annotation add_label() {
     targets: [type]
     comptime post(target, ctx) {
-        extend (f"extend {target.name} \{ method label() -> string \{ {string_lit("lbl-emitted")} \} \}")
+        extend (extend_method_literal(target.name, "label", "string", "lbl-emitted"))
     }
 }
 
