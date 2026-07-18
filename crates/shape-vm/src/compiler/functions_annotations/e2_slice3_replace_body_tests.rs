@@ -52,6 +52,53 @@ answer()
     )
 }
 
+/// ADR-009 E2 #18 (slice 5, Part A): a block-form replace-body program with
+/// caller-chosen annotation + function names, so two can compile on ONE compiler
+/// without a name re-registration clash.
+fn named_replace_body_program(ann: &str, func: &str, replacement_body: &str) -> String {
+    format!(
+        r#"
+annotation {ann}() {{
+  targets: [function]
+  comptime post(target, ctx) {{
+    replace body {{ {replacement_body} }}
+  }}
+}}
+
+@{ann}()
+fn {func}() -> int {{ 0 }}
+
+{func}()
+"#
+    )
+}
+
+/// ADR-009 E2 #18 (slice 5, Part A) — the block-form typed carrier survives
+/// compiling TWO programs on ONE compiler instance: each program's replace-body
+/// installs its OWN function with no stale carrier state leaking from the prior
+/// compile (the per-run clear at execute_comptime_with_annotation_handler entry).
+/// The definitive store-level no-stale-leak proof is
+/// `comptime_builtins::replace_body_carrier_tests::replace_body_carrier_index_restarts_per_run_no_stale_leak`;
+/// this corroborates it through the full compile path on a reused compiler.
+#[test]
+fn replace_body_carrier_two_programs_one_compiler_no_leak() {
+    let prog_a = shape_ast::parse_program(&named_replace_body_program("ea", "fa", "return 42"))
+        .expect("program A parses");
+    let prog_b = shape_ast::parse_program(&named_replace_body_program("eb", "fb", "return 99"))
+        .expect("program B parses");
+    let mut compiler = BytecodeCompiler::new();
+    compiler
+        .compile_in_place(&prog_a)
+        .expect("A installs through the typed carrier");
+    compiler
+        .compile_in_place(&prog_b)
+        .expect("B installs on the SAME compiler with no stale carrier state");
+    assert!(
+        compiler.program.functions.iter().any(|f| f.name == "fb"),
+        "B's replace-body installed its function on the reused compiler"
+    );
+}
+
 /// A CLOSURE-BEARING replacement (mirrors the C0911 LSP fixture): an explicit
 /// `move`-capture closure whose call yields 42. This is the case slice-3
 /// materializes pre-analysis.

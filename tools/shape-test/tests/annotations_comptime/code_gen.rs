@@ -121,6 +121,31 @@ print(answer())
     ShapeTest::new(program).expect_output("42");
 }
 
+/// ADR-009 E2 #18 slice 5 (Part A, Q1 ruling) — the `replace body (expr)` form is
+/// REJECTED at compile time with [C0928] (E2-D7: its ruled end-state; the block
+/// form `replace body { ... }` is the supported typed carrier). The AST variant
+/// and grammar are unchanged (E2-D4) — only the emit rejects, so the diagnostic
+/// stays clean rather than degrading to a parse error.
+#[test]
+fn replace_body_expr_form_is_rejected_c0928() {
+    ShapeTest::new(
+        r#"
+annotation edit_expr() {
+  targets: [function]
+  comptime post(target, ctx) {
+    replace body (target)
+  }
+}
+
+@edit_expr()
+fn answer() -> int { 7 }
+
+print(answer())
+"#,
+    )
+    .expect_run_err_contains("C0928");
+}
+
 #[test]
 fn annotation_extends_type_with_equality_check() {
     ShapeTest::new(

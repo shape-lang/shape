@@ -2331,6 +2331,54 @@ mod extend_method_producer_tests {
     }
 }
 
+// ADR-009 E2 #18 (slice 5, Part A) — the block-form replace-body carrier's
+// per-run-clear no-stale-leak property, pinned DIRECTLY at the store level (the
+// definitive proof the supervisor's "double-compile, no stale item across runs"
+// asks for: the pre-pass/pass-2 double-compile clears the store per handler run,
+// so index 0 of run N never resolves to run N-1's body). The full compile-path
+// exercise is the existing lsp/vm replace-body suites, which now flow through
+// this carrier (transport-parity arbiter).
+#[cfg(test)]
+mod replace_body_carrier_tests {
+    use super::*;
+
+    fn body_of(src: &str) -> Vec<shape_ast::ast::Statement> {
+        shape_ast::parse_program(src)
+            .expect("carrier fixture parses")
+            .items
+            .into_iter()
+            .find_map(|item| match item {
+                shape_ast::ast::Item::Function(func, _) => Some(func.body),
+                _ => None,
+            })
+            .expect("fixture has one function")
+    }
+
+    #[test]
+    fn replace_body_carrier_index_restarts_per_run_no_stale_leak() {
+        let body_a = body_of("fn a() -> int { return 1 }");
+        let body_b = body_of("fn b() -> int { return 2 }");
+        assert_ne!(body_a, body_b, "fixtures are distinct");
+
+        // Run 1: clear (handler entry), stash A at index 0.
+        clear_comptime_replace_bodies();
+        assert_eq!(push_comptime_replace_body(body_a.clone()), 0);
+        assert_eq!(comptime_replace_body_at(0).as_ref(), Some(&body_a));
+
+        // Run 2: clear (next handler entry), stash a DIFFERENT body — index
+        // restarts at 0, and index 0 now resolves to B, never the stale A.
+        clear_comptime_replace_bodies();
+        assert_eq!(
+            push_comptime_replace_body(body_b.clone()),
+            0,
+            "index restarts per run"
+        );
+        let resolved = comptime_replace_body_at(0).expect("live in this run");
+        assert_eq!(resolved, body_b, "index 0 resolves to THIS run's body");
+        assert_ne!(resolved, body_a, "no stale body leaks across the per-run clear");
+    }
+}
+
 #[cfg(all(test, feature = "deep-tests"))]
 mod tests {
     use super::*;
