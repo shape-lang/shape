@@ -787,7 +787,12 @@ fn build_extend_method_item(
 
     Ok(Item::Extend(
         ExtendStatement {
-            type_name: TypeName::Simple(type_name.to_string()),
+            // `TypeName::Simple` carries a `TypePath`; `.into()` builds it via
+            // `TypePath::from_qualified` — byte-identical to the legacy extend
+            // parse route (`TypeName::Simple(name.into())`, parser/extensions.rs),
+            // so the generated extend keys the target type exactly as a parsed
+            // `extend Type { … }` would.
+            type_name: TypeName::Simple(type_name.into()),
             methods: vec![method],
         },
         Span::default(),
