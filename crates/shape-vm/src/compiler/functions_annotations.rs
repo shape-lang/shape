@@ -4821,7 +4821,7 @@ mod s2_expansion_provenance_tests {
 annotation gen() {
   targets: [type]
   comptime post(target, ctx) {
-    extend (f"extend {target.name} \{ method answer() -> int \{ 42 \} \}")
+    extend (extend_method_literal(target.name, "answer", "int", 42))
   }
 }
 
@@ -4882,7 +4882,7 @@ type Point { id: int }
 annotation gen2() {
   targets: [type]
   comptime post(target, ctx) {
-    extend ("fn generated_flag() -> int { 7 }")
+    extend (item_fn("generated_flag", "int", 7))
   }
 }
 
@@ -4918,7 +4918,7 @@ fn main() -> int { generated_flag() }
 annotation dup() {
   targets: [type]
   comptime post(target, ctx) {
-    extend ("fn clash() -> int { 1 }")
+    extend (item_fn("clash", "int", 1))
   }
 }
 
@@ -5186,16 +5186,19 @@ type Point { id: int }
         );
     }
 
-    /// A generated method parsed from a SNIPPET (`extend (f"extend …")`) has
-    /// snippet-relative spans; the registered declaration must be re-based to
-    /// the application span, not left pointing into synthetic snippet text.
+    /// ADR-009 E2 #18 5b Part B — producer-route METHOD span pin (replaces the
+    /// retired snippet-span test whose subject was the deleted `extend (f"…")`
+    /// route). A generated method from the TYPED producer (extend_method_literal)
+    /// carries Span::default() scaffolding that the shared check sequence re-bases
+    /// to the application span; the registered declaration must anchor there. This
+    /// is the surviving-route residual required to retire the deleted snippet test.
     #[test]
-    fn generated_snippet_extend_method_name_span_anchors_at_the_application_site() {
+    fn generated_producer_extend_method_name_span_anchors_at_the_application_site() {
         let source = r#"
 annotation gen() {
   targets: [type]
   comptime post(target, ctx) {
-    extend (f"extend {target.name} \{ method answer() -> int \{ 42 \} \}")
+    extend (extend_method_literal(target.name, "answer", "int", 42))
   }
 }
 
@@ -5215,17 +5218,20 @@ type Point { id: int }
         );
     }
 
-    /// A generated FREE function parsed from the `mod __module_probe__`
-    /// snippet anchors at the application site, and its `GeneratedOrigin`
-    /// source anchor resolves to the SAME location — the identity table and
-    /// the registered declaration agree on one real anchor.
+    /// ADR-009 E2 #18 5b Part B — producer-route FREE-FUNCTION span pin (replaces
+    /// the retired snippet-span test whose subject was the deleted
+    /// `mod __module_probe__` reparse route). A generated free function from the
+    /// TYPED producer (item_fn) anchors at the application site, and its
+    /// `GeneratedOrigin` source anchor resolves to the SAME location — the identity
+    /// table and the registered declaration agree on one real anchor. The
+    /// surviving-route residual required to retire the deleted snippet test.
     #[test]
-    fn generated_free_function_anchors_at_the_application_site_not_the_snippet() {
+    fn generated_producer_free_function_anchors_at_the_application_site() {
         let source = r#"
 annotation gen2() {
   targets: [type]
   comptime post(target, ctx) {
-    extend ("fn generated_flag() -> int { 7 }")
+    extend (item_fn("generated_flag", "int", 7))
   }
 }
 
