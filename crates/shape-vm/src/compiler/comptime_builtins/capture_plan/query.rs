@@ -403,25 +403,18 @@ impl GeneratedCaptureQuery {
                         continue;
                     }
                 };
-                if source_map.is_none() {
-                    // ADR-009 E2 #18 slice 5 (Part B): post-U03 deletion, the
-                    // source-string reparse route was the SOLE producer of a
-                    // validated capture with no structural source map. A missing
-                    // source map here is now an INVARIANT VIOLATION, not an honest
-                    // degraded-mode state — surface it LOUDLY through the same
-                    // poison path the sibling evidence-gap failures above use (a
-                    // [C0911] conflict quarantine that stops tooling from treating
-                    // the capture as an ordinary rename), NEVER a silent
-                    // pass-through and NEVER a degraded descriptor view.
-                    accumulator.poison(
-                        occurrence_identity,
-                        source_map,
-                        application,
-                        "generated capture with no source map post-U03: structural source-map validation failed"
-                            .to_string(),
-                    );
-                    continue;
-                }
+                // ADR-009 E2 #18 slice 5 (Part B, fix-round): a generated capture
+                // with no structural source map is the NORMAL state for a non-extend
+                // route — a callable/closure capture or a `replace body` edit has no
+                // `extend Type { method }` statement for `source_map_for` to map to
+                // (`unique_direct_method` -> None). Such a capture is LISTED with full
+                // semantics; only its source hover/navigation is unavailable. The
+                // deleted U03 reparse route was NOT the sole producer of
+                // source_map==None (that reachability verdict was extend-route-scoped
+                // — REFUTED-in-part), so the earlier poison quarantine here wrongly
+                // dropped these legitimate captures. No issue is emitted (the [C0910]
+                // degraded-navigation code was removed with the U03 route); the
+                // view below carries source_map: None honestly.
                 let view = GeneratedCaptureDescriptorView {
                     identity: identity.clone(),
                     occurrence_identity: occurrence_identity.clone(),
