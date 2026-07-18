@@ -2489,7 +2489,7 @@ mod extend_method_producer_tests {
         )
         .expect("valid int literal body assembles");
         assert!(matches!(extend_method_literal_body(&item), Literal::Int(42)));
-        let Item::Extend(extend, _) = &item else {
+        let shape_ast::ast::Item::Extend(extend, _) = &item else {
             unreachable!("checked in helper");
         };
         assert!(matches!(&extend.type_name, TypeName::Simple(n) if n == "Answer"));
