@@ -33,36 +33,73 @@ pub annotation to_json() {
         // native f-string body `{ "f": {self.f}, ... }` and the extend-method AST
         // directly — no source string, no reparse. Strict interleave invariant:
         // segments.len() == field_splices.len() + 1.
-        let mut segments: Array<string> = []
-        let mut field_splices: Array<string> = []
-        let mut seg = "{ "
-        let mut first = true
+        //
+        // An EMPTY typed-array literal init (`let x: Array<string> = []`) is not
+        // available in comptime ([C0001]); non-empty-init + `.push()` is. So both
+        // arrays are SEEDED non-empty from the FIRST field's REAL data (captured
+        // by iteration, no indexing) before the append loop — no placeholder ever
+        // reaches `extend_method`. A 0-field type would need an empty
+        // field_splices array and is rejected below (see the slice report; the
+        // retired string-concat serializer produced `{  }` for it).
+        let mut first_name = ""
+        let mut first_type = ""
+        let mut have_first = false
         for field in target.fields {
             let is_string = field.type == "string"
             if !is_string && field.type != "int" && field.type != "number" && field.type != "bool" {
                 error(f"@to_json: field '{field.name}' has type '{field.type}', which has no JSON representation")
             }
-            // Punctuation BEFORE this field's splice: a `, ` separator (except
-            // the first field), then `"name": ` and, for a string field, an
-            // opening quote around the interpolated value.
-            if !first {
+            if !have_first {
+                first_name = field.name
+                first_type = field.type
+                have_first = true
+            }
+        }
+        if !have_first {
+            error(f"@to_json on '{target.name}' requires at least one field")
+        }
+
+        // Seed from the first field's real data (never a sentinel): its leading
+        // punctuation segment + its name splice.
+        let first_is_string = first_type == "string"
+        let mut seg = "{ "
+        if first_is_string {
+            seg = f"{seg}\"{first_name}\": \""
+        } else {
+            seg = f"{seg}\"{first_name}\": "
+        }
+        let mut segments = [seg]
+        let mut field_splices = [first_name]
+        // Punctuation AFTER the first splice starts the next segment.
+        if first_is_string {
+            seg = "\""
+        } else {
+            seg = ""
+        }
+
+        // Append every field AFTER the first (skipped by the flag, not by
+        // indexing). Each contributes a `, ` separator + `"name": ` (+ opening
+        // quote for a string), its name splice, then a closing quote or empty.
+        let mut is_first = true
+        for field in target.fields {
+            if is_first {
+                is_first = false
+            } else {
+                let is_string = field.type == "string"
                 seg = f"{seg}, "
+                if is_string {
+                    seg = f"{seg}\"{field.name}\": \""
+                } else {
+                    seg = f"{seg}\"{field.name}\": "
+                }
+                segments.push(seg)
+                field_splices.push(field.name)
+                if is_string {
+                    seg = "\""
+                } else {
+                    seg = ""
+                }
             }
-            if is_string {
-                seg = f"{seg}\"{field.name}\": \""
-            } else {
-                seg = f"{seg}\"{field.name}\": "
-            }
-            segments.push(seg)
-            field_splices.push(field.name)
-            // Punctuation AFTER the splice starts the next segment: a closing
-            // quote for a string field, else empty.
-            if is_string {
-                seg = "\""
-            } else {
-                seg = ""
-            }
-            first = false
         }
         // Trailing segment: close the object.
         seg = f"{seg} \}"
