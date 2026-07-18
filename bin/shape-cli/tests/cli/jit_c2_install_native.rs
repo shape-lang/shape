@@ -185,62 +185,23 @@ fn e2_item_fn_checked_extend_runs_natively_both_tiers() {
 }
 
 /// ADR-009 E2 #18 slice 3 — a CLOSURE-BEARING `replace body` edit installs and
-/// runs under `--mode jit`, printing 42 (the post-edit replacement, not the
-/// pre-edit 7). This is the JIT-side proof for slice-3's pre-analysis
-/// materialization, run where the harness WORKS (the CLI subprocess), because the
-/// shape-test harness JITExecutor leg captures empty output for
-/// annotation-generated programs (a pre-existing main-side harness hole, family:
-/// the `generated_method_runtime` baseline names).
+/// runs NATIVELY in both tiers under `--mode jit`, printing 42 (the post-edit
+/// replacement, not the pre-edit 7). The replacement's explicit `move`-capture
+/// closure runs native post-C1 #12 (1f0127a3): C1's slice-4 zero-fallback matrix
+/// (9/9) already proved declared-capture closures — move/let, move/heap,
+/// move/let-mut, share/local-var — JIT natively, and this `|; move base|` is
+/// exactly that class. So JIT == VM with zero `[jit-fallback]` — the standard
+/// `assert_c2_fixture_reaches_native_jit` proof, same as the e2 sibling rows and
+/// the C1 matrix. (An earlier version of this pin asserted a `>= 1` deopt on a
+/// STALE "capturing closures always deopt" prior measured 2026-07-14, before C1
+/// merged; the re-gate proved it native.)
 ///
-/// NAMED EXPECTED-FALLBACK (modeled on `c2_async_clean_generated_method_...`, not
-/// zero-fallback): the replacement's explicit `move`-capture closure deopts on a
-/// pre-existing Cranelift capturing-closure gap, so `--mode jit` falls through to
-/// the interpreter. Install + run + output are real in both tiers; the
-/// fall-through is the honest state. A custom assertion (not the shared
-/// `..._named_fallback` helper) because the fallback names the closure-bearing
-/// generated function, not `main`, and the count is asserted `>= 1` (honest
-/// deopt), never zero. VM==JIT stdout via fall-through; the supervisor's 4-way
-/// CLI differential (2026-07-18) cross-checked the 42 on both tiers.
+/// This proof lives in the CLI subprocess harness because the shape-test harness
+/// `JITExecutor` leg captures EMPTY output for annotation-generated programs (a
+/// pre-existing main-side hole, family: the `generated_method_runtime` baseline
+/// names) — so the shape-test runtime pin for this fixture is VM-only, and the
+/// JIT-side truth is proven here, where the harness works.
 #[test]
-fn e2_closure_bearing_replace_body_installs_and_runs_under_jit_named_fallback() {
-    let fixture = "e2-replace-body-closure.shape";
-    assert_fixture_has_no_top_level_comptime(fixture);
-
-    let vm = run_workspace_fixture("vm", "smokes-jit-closure", fixture);
-    let jit = run_workspace_fixture("jit", "smokes-jit-closure", fixture);
-
-    assert_eq!(
-        vm.exit_code,
-        Some(0),
-        "{fixture}: VM must exit 0 (install-success is real); stderr={}",
-        vm.stderr
-    );
-    assert_eq!(
-        vm.stdout, "42\n",
-        "{fixture}: exact VM stdout — the post-edit replacement, not the pre-edit 7"
-    );
-    assert_eq!(
-        jit.exit_code,
-        Some(0),
-        "{fixture}: JIT must exit 0 (install + run real, then clean fall-through); stderr={}",
-        jit.stderr
-    );
-    assert_eq!(
-        jit.stdout, vm.stdout,
-        "{fixture}: JIT stdout must match VM via fall-through; stderr={}",
-        jit.stderr
-    );
-    assert_eq!(
-        count_fallback_lines(&vm.stderr),
-        0,
-        "{fixture}: VM mode must not emit [jit-fallback]; stderr={}",
-        vm.stderr
-    );
-    assert!(
-        count_fallback_lines(&jit.stderr) >= 1,
-        "{fixture}: the capturing closure must deopt — `--mode jit` falls through with at least \
-         one [jit-fallback] line (honest named fallback, NOT a zero-fallback native claim); \
-         stderr={}",
-        jit.stderr
-    );
+fn e2_closure_bearing_replace_body_runs_natively_both_tiers() {
+    assert_c2_fixture_reaches_native_jit("e2-replace-body-closure.shape", "42\n");
 }

@@ -97,8 +97,8 @@ print(fetch_data())
 /// hole, not on any real defect. The JIT-side truth for this exact fixture — it
 /// installs, runs, and prints 42 under `--mode jit` — is proven where the harness
 /// works, by the CLI native proof
-/// (`bin/shape-cli/tests/cli/jit_c2_install_native.rs::e2_closure_bearing_replace_body_installs_and_runs_under_jit_named_fallback`)
-/// and the supervisor's 4-way CLI differential (2026-07-18).
+/// (`bin/shape-cli/tests/cli/jit_c2_install_native.rs::e2_closure_bearing_replace_body_runs_natively_both_tiers`,
+/// zero-fallback) and the supervisor's 4-way CLI differential (2026-07-18).
 #[test]
 fn closure_bearing_replace_body_edit_runs_in_vm() {
     let program = r#"

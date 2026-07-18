@@ -1,15 +1,14 @@
 // ADR-009 E2 #18 slice 3 — a CLOSURE-BEARING replace-body EDIT installs and runs
-// under `--mode jit`, printing 42 (the POST-edit replacement, not the pre-edit
-// 7). The replacement carries an explicit `move`-capture closure — the C0911
-// shape slice-3 materializes pre-analysis so the analyzer publishes its
-// structural fact (the LSP flip); pass-2 performs the authoritative body swap.
-// The capturing closure deopts (a PRE-EXISTING Cranelift capturing-closure gap),
-// so `--mode jit` falls through to the interpreter: install + run + output are
-// real in both tiers, and the fall-through is the honest state (named-fallback,
-// NOT zero-fallback). No async, trait/impl, or top-level comptime block (an
+// NATIVELY in both tiers under `--mode jit`, printing 42 (the POST-edit
+// replacement, not the pre-edit 7). The replacement carries an explicit
+// `move`-capture closure — the C0911 shape slice-3 materializes pre-analysis so
+// the analyzer publishes its structural fact (the LSP flip); pass-2 performs the
+// authoritative body swap. The `move base` closure runs NATIVE post-C1 #12
+// (1f0127a3): C1's slice-4 zero-fallback matrix (9/9) proved declared-capture
+// closures JIT natively, and this is exactly that class — so JIT == VM with zero
+// [jit-fallback]. No async, trait/impl, or top-level comptime block (an
 // annotation `comptime post` handler is not a top-level comptime block), so the
-// fixture is not silently excluded from native JIT — the fallback is the
-// closure's, and it is real.
+// fixture is not silently excluded from native JIT — the zero-fallback is real.
 annotation edit_answer() {
   targets: [function]
   comptime post(target, ctx) {
