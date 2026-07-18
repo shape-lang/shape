@@ -20,6 +20,8 @@ use shape_runtime::typed_module_exports::{
     ConcreteReturn, ConcreteType, TypedReturn, register_typed_function,
 };
 use shape_value::heap_value::{HeapKind, HeapValue, TypedObjectStorage};
+use shape_value::v2::string_obj::StringObj;
+use shape_value::v2::typed_array::{ELEM_TYPE_STRING, TypedArray, read_elem_type};
 use shape_value::{KindedSlot, NativeKind};
 // ADR-009 E2 #18 (slice 2): the typed `item_fn` carrier (E2-D10).
 use super::comptime_fragments::CheckedItem;
@@ -623,6 +625,175 @@ fn build_function_item(
     ))
 }
 
+/// ADR-009 E2 #18 (slice 4.5): read an `Array<string>` comptime-builtin argument
+/// into `Vec<String>`. Mirrors the established v2-raw string-array read
+/// (`comptime_target.rs`): kind witness + non-null + element-type stamp guard,
+/// then `TypedArray::as_slice` over `*const StringObj`. Used by `extend_method`
+/// to read the template's literal segments and self-field splices.
+fn read_comptime_string_array_slot(slot: &KindedSlot, arg_name: &str) -> Result<Vec<String>, String> {
+    if slot.kind() != NativeKind::Ptr(HeapKind::TypedArray) {
+        return Err(format!(
+            "extend_method expects {arg_name} as an Array<string>, got {:?}",
+            slot.kind()
+        ));
+    }
+    let ptr = slot.raw() as *const TypedArray<*const StringObj>;
+    if ptr.is_null() {
+        return Err(format!("extend_method received a null {arg_name} array"));
+    }
+    // SAFETY: kind witness (Ptr(TypedArray)) + non-null + ELEM_TYPE_STRING stamp
+    // prove this is a live `Array<string>`; each element is a borrowed
+    // `*const StringObj` (no ownership taken); we copy each into an owned String.
+    unsafe {
+        if read_elem_type(ptr as *const u8) != ELEM_TYPE_STRING {
+            return Err(format!(
+                "extend_method expects {arg_name} to be an Array<string> (element type mismatch)"
+            ));
+        }
+        let slice = TypedArray::<*const StringObj>::as_slice(ptr);
+        let mut out = Vec::with_capacity(slice.len());
+        for &elem in slice {
+            if elem.is_null() {
+                return Err(format!("extend_method received a null string in {arg_name}"));
+            }
+            out.push(StringObj::as_str(elem).to_string());
+        }
+        Ok(out)
+    }
+}
+
+/// ADR-009 E2 #18 (slice 4.5, condition 1 — BOUNDED HOLE GRAMMAR): a self-field
+/// splice must be a bare identifier, so the assembled `{self.<ident>}` hole is
+/// structurally incapable of carrying an arbitrary handler expression. Anything
+/// else is rejected at the builtin boundary with the named `[C0927]` diagnostic
+/// (E2-D5: E2's diagnostic block is C0927+). This is the injection guard the
+/// negative pin exercises (`a} + evil() + {b` etc. are rejected, never assembled).
+fn is_valid_self_field_identifier(name: &str) -> bool {
+    let mut chars = name.chars();
+    match chars.next() {
+        Some(c) if c == '_' || c.is_ascii_alphabetic() => {}
+        _ => return false,
+    }
+    chars.all(|c| c == '_' || c.is_ascii_alphanumeric())
+}
+
+/// ADR-009 E2 #18 (slice 4.5): escape a literal template segment for the
+/// `Literal::FormattedString` value form. Only braces need escaping so the
+/// interpolation parser (`parse_interpolation_with_mode`) reads them as LITERAL
+/// braces (`\{`/`\}`), not interpolation delimiters; quotes and other bytes are
+/// already in post-string-unescape form in a FormattedString value and pass
+/// through literally. This reproduces byte-for-byte the value the retired
+/// `extend (f"…")` source route produced after string-literal parsing (verified
+/// against showcases `TO_JSON_EXPECTED`).
+fn escape_fstring_literal_segment(segment: &str) -> String {
+    let mut out = String::with_capacity(segment.len());
+    for ch in segment.chars() {
+        match ch {
+            '{' => out.push_str("\\{"),
+            '}' => out.push_str("\\}"),
+            other => out.push(other),
+        }
+    }
+    out
+}
+
+/// ADR-009 E2 #18 (slice 4.5, E2-Q2/B): build the generated `Item::Extend { Type
+/// { method <name>() -> <ret> { <f-string> } } }` DIRECTLY from a typed template
+/// (E2-D8/§4.5 typed producer; the serialize-shaped minimal subset). The body is
+/// a NATIVE f-string literal the builtin assembles from the template:
+///
+/// - `segments` are literal text (ConstLift'd JSON punctuation / field names),
+///   escaped for the FormattedString value (`escape_fstring_literal_segment`);
+/// - `field_splices` are field-name identifiers, ASSERTED (condition 1) and
+///   emitted ONLY as producer-generated `{self.<ident>}` holes.
+///
+/// Invariant: `segments.len() == field_splices.len() + 1` (strict interleave
+/// `seg[0] {self.f[0]} seg[1] … {self.f[n-1]} seg[n]`). The producer-generated
+/// holes resolve through the language's native f-string compile parse
+/// (`parse_expression_str`) — the SAME path as every user-authored f-string;
+/// this is NOT the U03 directive transport and NOT body-as-text (E2-Q2/B ruling,
+/// 2026-07-18). No source text, no `parse_program`, no directive payload.
+fn build_extend_method_item(
+    type_name: &str,
+    method_name: &str,
+    return_type_slot: &KindedSlot,
+    segments: &[String],
+    field_splices: &[String],
+) -> Result<shape_ast::ast::Item, String> {
+    use shape_ast::ast::{
+        Expr, ExtendStatement, InterpolationMode, Item, Literal, MethodDef, Span, Statement,
+        TypeName,
+    };
+
+    if !is_valid_self_field_identifier(method_name) {
+        return Err(format!(
+            "extend_method expected a valid method name, got '{method_name}'"
+        ));
+    }
+    if !is_valid_self_field_identifier(type_name) {
+        return Err(format!(
+            "extend_method expected a valid type name, got '{type_name}'"
+        ));
+    }
+    if segments.len() != field_splices.len() + 1 {
+        return Err(format!(
+            "extend_method template mismatch: {} segments require {} field splices, got {}",
+            segments.len(),
+            segments.len().saturating_sub(1),
+            field_splices.len()
+        ));
+    }
+
+    let return_type = type_annotation_from_string_or_type_ref_slot(return_type_slot, "extend_method")?;
+
+    // Assemble the native f-string VALUE: escaped literal segments interleaved
+    // with producer-generated `{self.<ident>}` holes (each field asserted).
+    let mut value = String::new();
+    for (i, field) in field_splices.iter().enumerate() {
+        if !is_valid_self_field_identifier(field) {
+            return Err(format!(
+                "[C0927] extend_method: field splice '{field}' is not a valid identifier; the \
+                 template channel only carries `self.<identifier>` holes, never an expression"
+            ));
+        }
+        value.push_str(&escape_fstring_literal_segment(&segments[i]));
+        value.push_str("{self.");
+        value.push_str(field);
+        value.push('}');
+    }
+    value.push_str(&escape_fstring_literal_segment(&segments[field_splices.len()]));
+
+    let body_expr = Expr::Literal(
+        Literal::FormattedString {
+            value,
+            mode: InterpolationMode::Braces,
+        },
+        Span::default(),
+    );
+
+    let method = MethodDef {
+        name: method_name.to_string(),
+        span: Span::default(),
+        declaring_module_path: None,
+        doc_comment: None,
+        annotations: Vec::new(),
+        type_params: None,
+        params: Vec::new(),
+        when_clause: None,
+        return_type: Some(return_type),
+        body: vec![Statement::Expression(body_expr, Span::default())],
+        is_async: false,
+    };
+
+    Ok(Item::Extend(
+        ExtendStatement {
+            type_name: TypeName::Simple(type_name.to_string()),
+            methods: vec![method],
+        },
+        Span::default(),
+    ))
+}
+
 #[allow(dead_code)] // E2-D10 staging: dead until the slice-5 U07 deletion.
 fn type_ref_slot_from_string_or_type_ref_slot(
     slot: &KindedSlot,
@@ -1053,6 +1224,93 @@ fn comptime_builtins_module_base(trait_impl_keys: HashSet<String>) -> ModuleExpo
                 .as_str()
                 .ok_or_else(|| "item_fn expects a string function name".to_string())?;
             let item = build_function_item(name, &slots[1], &slots[2])?;
+            let index = push_comptime_checked_item(CheckedItem::new(item));
+            let handle = typed_object_for_named_schema(
+                "__CheckedItem",
+                &[("index", KindedSlot::from_int(index as i64))],
+            );
+            Ok(TypedReturn::Concrete(ConcreteReturn::OpaqueTypedObject(
+                Arc::new(heap_value_from_typed_object_slot(handle)),
+            )))
+        },
+    );
+
+    // ADR-009 E2 #18 (slice 4.5, E2-Q2/B USER-RATIFIED 2026-07-18): the typed
+    // producer for a SINGLE generated extend-method with a computed body — the
+    // serialize-shaped minimal subset that closes the `@to_json` gap (item_fn is
+    // free-function + literal-body only). The body is a NATIVE f-string assembled
+    // by the builtin from a typed template: literal `segments` (ConstLift'd
+    // punctuation) interleaved with `field_splices` (field-name identifiers,
+    // asserted — condition 1 BOUNDED HOLE GRAMMAR). The producer-generated
+    // `{self.<ident>}` holes resolve through the language's OWN native f-string
+    // compile parse (`parse_expression_str`, `string_interpolation.rs`), the same
+    // path as every user-authored f-string — this is NOT the U03 directive
+    // transport and NOT body-as-text (E2-Q2/B ruling). No source string, no
+    // `parse_program`. Yields the `__CheckedItem` carrier (Item-general, slice 2)
+    // wrapping an `Item::Extend`, which flows through `parse_extend_items_slot` ->
+    // ExtendItems -> the existing generic Item::Extend materialization (stamp /
+    // reserve / register), so there is zero consumer change. `extend_method` is
+    // an INTERNAL builtin (stdlib-consumed like item_fn), not a public
+    // quote/builder surface (that stays E1's per the C2 D1 amendment).
+    register_typed_function(
+        &mut module,
+        "extend_method",
+        "Build a typed CheckedItem for one generated extend-method whose body is a computed self-field f-string template",
+        vec![
+            shape_runtime::module_exports::ModuleParam {
+                name: "type_name".to_string(),
+                type_name: "string".to_string(),
+                required: true,
+                ..Default::default()
+            },
+            shape_runtime::module_exports::ModuleParam {
+                name: "method_name".to_string(),
+                type_name: "string".to_string(),
+                required: true,
+                ..Default::default()
+            },
+            shape_runtime::module_exports::ModuleParam {
+                name: "return_type".to_string(),
+                type_name: "unknown".to_string(),
+                required: true,
+                ..Default::default()
+            },
+            shape_runtime::module_exports::ModuleParam {
+                name: "segments".to_string(),
+                type_name: "Array".to_string(),
+                required: true,
+                ..Default::default()
+            },
+            shape_runtime::module_exports::ModuleParam {
+                name: "field_splices".to_string(),
+                type_name: "Array".to_string(),
+                required: true,
+                ..Default::default()
+            },
+        ],
+        ConcreteType::OpaqueTypedObject("__CheckedItem".to_string()),
+        |slots, _ctx| {
+            if slots.len() != 5 {
+                return Err(format!(
+                    "extend_method expects 5 arguments, got {}",
+                    slots.len()
+                ));
+            }
+            let type_name = slots[0]
+                .as_str()
+                .ok_or_else(|| "extend_method expects a string type name".to_string())?;
+            let method_name = slots[1]
+                .as_str()
+                .ok_or_else(|| "extend_method expects a string method name".to_string())?;
+            let segments = read_comptime_string_array_slot(&slots[3], "segments")?;
+            let field_splices = read_comptime_string_array_slot(&slots[4], "field_splices")?;
+            let item = build_extend_method_item(
+                type_name,
+                method_name,
+                &slots[2],
+                &segments,
+                &field_splices,
+            )?;
             let index = push_comptime_checked_item(CheckedItem::new(item));
             let handle = typed_object_for_named_schema(
                 "__CheckedItem",
