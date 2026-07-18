@@ -66,9 +66,11 @@ fn c0901_declared_but_unused_is_rejected_in_a_generated_extend_method() {
 annotation add_reader() {
   targets: [type]
   comptime post(target, ctx) {
-    extend ("extend Job { method read(x: int) -> int { let unused = 7
-      let worker = |y: int; move unused| y + 1
-      worker(x) } }")
+    extend target {
+      method read(x: int) -> int { let unused = 7
+        let worker = |y: int; move unused| y + 1
+        worker(x) }
+    }
   }
 }
 
@@ -95,9 +97,11 @@ fn c0902_borrow_capture_is_rejected_in_a_generated_extend_method() {
 annotation add_reader() {
   targets: [type]
   comptime post(target, ctx) {
-    extend ("extend Job { method read(x: int) -> int { let base = 7
-      let worker = |y: int; &base| y + base
-      worker(x) } }")
+    extend target {
+      method read(x: int) -> int { let base = 7
+        let worker = |y: int; &base| y + base
+        worker(x) }
+    }
   }
 }
 
@@ -120,10 +124,12 @@ fn c0902_exclusive_borrow_is_rejected_in_a_nested_generated_closure() {
 annotation add_reader() {
   targets: [type]
   comptime post(target, ctx) {
-    extend ("extend Job { method read(x: int) -> int { let outer = |; | { let base = 7
-      let inner = |; &mut base| base + 1
-      inner() }
-      outer() } }")
+    extend target {
+      method read(x: int) -> int { let outer = |; | { let base = 7
+        let inner = |; &mut base| base + 1
+        inner() }
+        outer() }
+    }
   }
 }
 
@@ -146,9 +152,11 @@ fn c0904_move_cannot_unshare_a_var_in_a_generated_extend_method() {
 annotation add_reader() {
   targets: [type]
   comptime post(target, ctx) {
-    extend ("extend Job { method read(x: int) -> int { var total = 5
-      let worker = |y: int; move total| y + total
-      worker(x) } }")
+    extend target {
+      method read(x: int) -> int { var total = 5
+        let worker = |y: int; move total| y + total
+        worker(x) }
+    }
   }
 }
 
@@ -174,9 +182,11 @@ fn c0905_unresolvable_declared_capture_is_rejected() {
 annotation add_reader() {
   targets: [type]
   comptime post(target, ctx) {
-    extend ("extend Job { method read(x: int) -> int { let base = 7
-      let worker = |y: int; move base, move ghost| y + base
-      worker(x) } }")
+    extend target {
+      method read(x: int) -> int { let base = 7
+        let worker = |y: int; move base, move ghost| y + base
+        worker(x) }
+    }
   }
 }
 
@@ -204,9 +214,11 @@ fn c0908_share_on_a_plain_local_is_rejected_through_monomorphization() {
 annotation add_reader() {
   targets: [type]
   comptime post(target, ctx) {
-    extend ("extend Job { method read<T>(f: T) -> int { let base = 7
-      let worker = |t: T; share base| base + 1
-      worker(f) } }")
+    extend target {
+      method read<T>(f: T) -> int { let base = 7
+        let worker = |t: T; share base| base + 1
+        worker(f) }
+    }
   }
 }
 
@@ -228,9 +240,11 @@ fn c0907_duplicate_capture_declaration_is_rejected() {
 annotation add_reader() {
   targets: [type]
   comptime post(target, ctx) {
-    extend ("extend Job { method read(x: int) -> int { let base = 7
-      let worker = |y: int; move base, move base| y + base
-      worker(x) } }")
+    extend target {
+      method read(x: int) -> int { let base = 7
+        let worker = |y: int; move base, move base| y + base
+        worker(x) }
+    }
   }
 }
 
@@ -257,10 +271,12 @@ fn used_but_undeclared_raises_the_wave46_message_verbatim() {
 annotation add_reader() {
   targets: [type]
   comptime post(target, ctx) {
-    extend ("extend Job { method read(x: int) -> int { let base = 7
-      let other = 5
-      let worker = |y: int; move base| y + base + other
-      worker(x) } }")
+    extend target {
+      method read(x: int) -> int { let base = 7
+        let other = 5
+        let worker = |y: int; move base| y + base + other
+        worker(x) }
+    }
   }
 }
 
@@ -285,10 +301,12 @@ fn b0005_is_not_widened_by_a_declared_move() {
 annotation add_reader() {
   targets: [type]
   comptime post(target, ctx) {
-    extend ("extend Job { method read(x: int) -> int { let base = 7
-      let worker = |y: int; move base| { base = base + y
-        base }
-      worker(x) } }")
+    extend target {
+      method read(x: int) -> int { let base = 7
+        let worker = |y: int; move base| { base = base + y
+          base }
+        worker(x) }
+    }
   }
 }
 
@@ -345,7 +363,9 @@ annotation add_reader() {
   targets: [type]
   comptime post(target, ctx) {
     ctx.capture("base")
-    extend ("extend Job { method read() -> int { 1 } }")
+    extend target {
+      method read() -> int { 1 }
+    }
   }
 }
 
@@ -368,9 +388,11 @@ fn declared_move_over_a_read_only_let_mut_runs_in_both_tiers() {
 annotation add_scaler() {
   targets: [type]
   comptime post(target, ctx) {
-    extend ("extend Job { method scale(f: int) -> int { let mut hits = 3
-      let worker = |x: int; move hits| x * hits
-      worker(f) } }")
+    extend target {
+      method scale(f: int) -> int { let mut hits = 3
+        let worker = |x: int; move hits| x * hits
+        worker(f) }
+    }
   }
 }
 
@@ -395,9 +417,11 @@ fn declared_share_over_a_var_runs_on_the_interpreter() {
 annotation add_reader() {
   targets: [type]
   comptime post(target, ctx) {
-    extend ("extend Job { method read(x: int) -> int { var total = 40
-      let worker = |y: int; share total| y + total
-      worker(x) } }")
+    extend target {
+      method read(x: int) -> int { var total = 40
+        let worker = |y: int; share total| y + total
+        worker(x) }
+    }
   }
 }
 
