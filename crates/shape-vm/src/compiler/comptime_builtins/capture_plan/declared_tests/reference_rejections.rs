@@ -61,10 +61,12 @@ fn generated_direct_reference_is_rejected() {
 annotation add_reader() {
   targets: [type]
   comptime post(target, ctx) {
-    extend ("extend Job { method read(x: int) -> int { let value = 7
-      let r = &value
-      let worker = |y: int; move r| y + r
-      worker(x) } }")
+    extend target {
+      method read(x: int) -> int { let value = 7
+        let r = &value
+        let worker = |y: int; move r| y + r
+        worker(x) }
+    }
   }
 }
 @add_reader()
@@ -83,11 +85,13 @@ fn generated_straight_line_reference_alias_is_rejected() {
 annotation add_reader() {
   targets: [type]
   comptime post(target, ctx) {
-    extend ("extend Job { method read(x: int) -> int { let value = 7
-      let r = &value
-      let alias = r
-      let worker = |y: int; move alias| y + alias
-      worker(x) } }")
+    extend target {
+      method read(x: int) -> int { let value = 7
+        let r = &value
+        let alias = r
+        let worker = |y: int; move alias| y + alias
+        worker(x) }
+    }
   }
 }
 @add_reader()
@@ -106,9 +110,11 @@ fn generated_owned_binding_is_not_falsely_rejected() {
 annotation add_reader() {
   targets: [type]
   comptime post(target, ctx) {
-    extend ("extend Job { method read(x: int) -> int { let owned = 7
-      let worker = |y: int; move owned| y + owned
-      worker(x) } }")
+    extend target {
+      method read(x: int) -> int { let owned = 7
+        let worker = |y: int; move owned| y + owned
+        worker(x) }
+    }
   }
 }
 @add_reader()
