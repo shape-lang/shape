@@ -1281,14 +1281,21 @@ fn comptime_builtins_module_base(trait_impl_keys: HashSet<String>) -> ModuleExpo
                 ..Default::default()
             },
             shape_runtime::module_exports::ModuleParam {
+                // Parameterized `Array<string>` — a bare `Array` is an invalid
+                // unparameterized generic at a strict-checked direct call site
+                // (the intrinsics' bare `"Array"` works only because they are
+                // SOH-gated / method-rewrite-called, not directly). A user-called
+                // comptime builtin (like this one and item_fn) must declare a
+                // valid param type, or the handler's `extend_method(...)` call
+                // fails to type-check.
                 name: "segments".to_string(),
-                type_name: "Array".to_string(),
+                type_name: "Array<string>".to_string(),
                 required: true,
                 ..Default::default()
             },
             shape_runtime::module_exports::ModuleParam {
                 name: "field_splices".to_string(),
-                type_name: "Array".to_string(),
+                type_name: "Array<string>".to_string(),
                 required: true,
                 ..Default::default()
             },
@@ -2106,35 +2113,18 @@ mod e2_d9_closure_free_tripwire {
     }
 }
 
-#[cfg(all(test, feature = "deep-tests"))]
-mod tests {
+// ADR-009 E2 #18 (slice 4.5, E2-Q2/B) — producer-tier pins for `extend_method`'s
+// body assembly + the condition-1 BOUNDED HOLE GRAMMAR boundary. Plain
+// `#[cfg(test)]` (NOT deep-tests-gated) so they run in the standard gate — the
+// first version of these lived in the deep-tests `mod tests` below and never ran
+// (disclosed defect, slice 4.5 fix round). They exercise `build_extend_method_item`
+// directly (no VM / no array-slot reading), pinning the AST shape, the byte-exact
+// FormattedString value, and the identifier assertion in isolation; the
+// end-to-end byte-parity arbiter is the shape-test
+// `to_json_serializes_via_stdlib_import_*` rows.
+#[cfg(test)]
+mod extend_method_producer_tests {
     use super::*;
-    use shape_runtime::type_schema::TypeSchemaRegistry;
-
-    fn test_ctx() -> shape_runtime::module_exports::ModuleContext<'static> {
-        // Leak a registry so we get a &'static reference for tests
-        let registry = Box::leak(Box::new(TypeSchemaRegistry::new()));
-        shape_runtime::module_exports::ModuleContext {
-            schemas: registry,
-            invoke_callable: None,
-            raw_invoker: None,
-            function_hashes: None,
-            vm_state: None,
-            granted_permissions: None,
-            scope_constraints: None,
-            set_pending_resume: None,
-            set_pending_frame_resume: None,
-            remote_dispatch: None,
-        }
-    }
-
-    // ADR-009 E2 #18 (slice 4.5, E2-Q2/B) — producer-tier pins for
-    // `extend_method`'s body assembly + the condition-1 BOUNDED HOLE GRAMMAR
-    // boundary. These exercise `build_extend_method_item` directly (no VM / no
-    // array-slot reading), so the AST shape, the byte-exact FormattedString
-    // value, and the identifier assertion are pinned in isolation; the end-to-end
-    // byte-parity arbiter is the shape-test `to_json_serializes_via_stdlib_import_*`
-    // rows.
 
     fn extract_extend_method_body_value(item: &shape_ast::ast::Item) -> String {
         use shape_ast::ast::{Expr, Item, Literal, Statement};
@@ -2220,6 +2210,29 @@ mod tests {
             err.contains("template mismatch"),
             "rejection must name the interleave-invariant violation: {err}"
         );
+    }
+}
+
+#[cfg(all(test, feature = "deep-tests"))]
+mod tests {
+    use super::*;
+    use shape_runtime::type_schema::TypeSchemaRegistry;
+
+    fn test_ctx() -> shape_runtime::module_exports::ModuleContext<'static> {
+        // Leak a registry so we get a &'static reference for tests
+        let registry = Box::leak(Box::new(TypeSchemaRegistry::new()));
+        shape_runtime::module_exports::ModuleContext {
+            schemas: registry,
+            invoke_callable: None,
+            raw_invoker: None,
+            function_hashes: None,
+            vm_state: None,
+            granted_permissions: None,
+            scope_constraints: None,
+            set_pending_resume: None,
+            set_pending_frame_resume: None,
+            remote_dispatch: None,
+        }
     }
 
     #[test]
