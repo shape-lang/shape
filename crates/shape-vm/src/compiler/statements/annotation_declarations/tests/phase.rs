@@ -101,20 +101,11 @@ fn repeated_validated_scope_is_an_exact_no_op() {
     );
 }
 
-#[test]
-fn transformed_nested_module_prepares_final_effective_items() {
-    let program = parse(
-        r#"
-mod generated {
-  comptime {
-    replace module ("@late() type Probe { id: int } annotation late() { targets: [type] }")
-  }
-}
-0
-"#,
-    );
-    let bytecode = BytecodeCompiler::new()
-        .compile(&program)
-        .expect("replacement annotations prepare after the final header loop");
-    assert!(bytecode.compiled_annotations.contains_key("generated::late"));
-}
+// ADR-009 E2 #18 5b Part B (companion A-part-3): `transformed_nested_module_
+// prepares_final_effective_items` RETIRED — its `replace module ("…")` fixture
+// declared an ANNOTATION through the source-string route, which the slice-5 U03
+// deletion removes. No typed generation carrier can express a generated
+// annotation today (`item_fn` mints a free function, `extend_method*` a method) —
+// a CAPABILITY GAP in the same class as the generated free-function gap, returning
+// with the `quote module` producer (E-track). Nothing to rebaseline onto; the
+// source-string replacement path this test exercised is gone.

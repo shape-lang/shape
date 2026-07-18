@@ -7989,103 +7989,14 @@ mod tests {
         );
     }
 
-    #[cfg(any())]
-    #[test]
-    fn test_module_annotation_can_replace_module_items() {
-        let code = r#"
-            annotation synth_module() {
-                targets: [module]
-                comptime post(target, ctx) {
-                    replace module ("const ANSWER = 40; fn plus_two() { ANSWER + 2 }")
-                }
-            }
-
-            @synth_module()
-            mod demo {}
-
-            demo::plus_two()
-        "#;
-
-        let program = parse_program(code).expect("Failed to parse");
-        let bytecode = BytecodeCompiler::new()
-            .compile(&program)
-            .expect("Failed to compile");
-
-        let mut vm = VirtualMachine::new(VMConfig::default());
-        vm.load_program(bytecode);
-        vm.populate_module_objects();
-        let result = vm.execute(None).expect("Failed to execute");
-        assert_eq!(
-            result
-                .as_number_coerce()
-                .expect("module call should return number"),
-            42.0
-        );
-    }
-
-    #[cfg(any())]
-    #[test]
-    fn test_module_inline_comptime_can_replace_module_items() {
-        let code = r#"
-            mod demo {
-                comptime {
-                    replace module ("const ANSWER = 40; fn plus_two() { ANSWER + 2 }")
-                }
-            }
-
-            demo::plus_two()
-        "#;
-
-        let program = parse_program(code).expect("Failed to parse");
-        let bytecode = BytecodeCompiler::new()
-            .compile(&program)
-            .expect("Failed to compile");
-
-        let mut vm = VirtualMachine::new(VMConfig::default());
-        vm.load_program(bytecode);
-        vm.populate_module_objects();
-        let result = vm.execute(None).expect("Failed to execute");
-        assert_eq!(
-            result
-                .as_number_coerce()
-                .expect("module call should return number"),
-            42.0
-        );
-    }
-
-    #[cfg(any())]
-    #[test]
-    fn test_module_inline_comptime_can_use_module_local_comptime_helper() {
-        let code = r#"
-            mod demo {
-                comptime fn synth() {
-                    "const ANSWER = 40; fn plus_two() { ANSWER + 2 }"
-                }
-
-                comptime {
-                    replace module (synth())
-                }
-            }
-
-            demo::plus_two()
-        "#;
-
-        let program = parse_program(code).expect("Failed to parse");
-        let bytecode = BytecodeCompiler::new()
-            .compile(&program)
-            .expect("Failed to compile");
-
-        let mut vm = VirtualMachine::new(VMConfig::default());
-        vm.load_program(bytecode);
-        vm.populate_module_objects();
-        let result = vm.execute(None).expect("Failed to execute");
-        assert_eq!(
-            result
-                .as_number_coerce()
-                .expect("module call should return number"),
-            42.0
-        );
-    }
+    // ADR-009 E2 #18 5b Part B (companion A-part-3): three `#[cfg(any())]`
+    // (permanently disabled, never-compiled) unit tests DELETED —
+    // `test_module_annotation_can_replace_module_items`,
+    // `test_module_inline_comptime_can_replace_module_items`, and
+    // `test_module_inline_comptime_can_use_module_local_comptime_helper`. All three
+    // drove the source-string `replace module ("…")` / `replace module (synth())`
+    // route removed by the slice-5 U03 deletion; the typed `replace module
+    // (item_fn(...))` route is covered in the shape-test directives suite.
 
     #[test]
     fn test_type_annotated_variable_no_wrapping() {

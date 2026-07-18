@@ -143,37 +143,26 @@ print(over_limit(3.0))
     .expect_output("true");
 }
 
+// ADR-009 E2 #18 5b Part B (companion A-part-3): `replace_module_from_source_
+// string_replaces_items` RETIRED — its subject (a source-string `replace module
+// ("…")` that installs and runs) IS the deleted U03 route. The surviving typed
+// coverage is `replace_module_typed_fragment_installs_and_runs` below (item_fn ->
+// CheckedModule, install+run).
+
+// ADR-009 E2 #18 5b Part B (companion A-part-3): REBASELINED off the deleted
+// source-string route onto the typed `item_fn` carrier. `item_fn("answer", "int",
+// "not an int")` mints `fn answer() -> int { "not an int" }` — a string body in an
+// int-returning function — so the driver's check sequence still reports the
+// int/string mismatch. Preserves the "typed-generated bodies ARE type-checked"
+// coverage; the U03 source string is gone.
 #[test]
-fn replace_module_from_source_string_replaces_items() {
-    ShapeTest::new(
-        r#"
-annotation synth_module() {
-  targets: [module]
-  comptime post(target, ctx) {
-    replace module ("fn answer() -> int { 42 }")
-  }
-}
-
-@synth_module()
-mod demo {
-  fn answer() -> int { 0 }
-}
-
-print(demo::answer())
-"#,
-    )
-    .expect_run_ok()
-    .expect_output("42");
-}
-
-#[test]
-fn replace_module_generated_source_type_errors_are_reported() {
+fn replace_module_typed_fragment_body_type_errors_are_reported() {
     ShapeTest::new(
         r#"
 annotation bad_module() {
   targets: [module]
   comptime post(target, ctx) {
-    replace module ("fn answer() -> int { \"not an int\" }")
+    replace module (item_fn("answer", "int", "not an int"))
   }
 }
 
@@ -193,29 +182,12 @@ print(demo::answer())
     ]);
 }
 
-#[test]
-fn replace_module_rejected_on_function_target() {
-    ShapeTest::new(
-        r#"
-annotation bad_replace() {
-  targets: [function]
-  comptime post(target, ctx) {
-    replace module ("fn answer() -> int { 42 }")
-  }
-}
-
-@bad_replace()
-fn answer() -> int {
-  0
-}
-
-print(answer())
-"#,
-    )
-    .expect_run_err_contains(
-        "`replace module` directives are only valid when compiling module targets",
-    );
-}
+// ADR-009 E2 #18 5b Part B (companion A-part-3): `replace_module_rejected_on_
+// function_target` RETIRED — its source-string arg feeds the deleted U03 route,
+// and its subject (a `replace module` on a function target is rejected) is carried
+// identically by the typed sibling `replace_module_typed_fragment_rejected_on_
+// function_target` below (item_fn carrier, same "only valid when compiling module
+// targets" rejection).
 
 #[test]
 fn extend_item_fragment_generates_free_function_without_source_string() {
@@ -238,27 +210,12 @@ print(Widget_label())
     .expect_output("typed fragment");
 }
 
-#[test]
-fn replace_module_payload_is_still_source_text() {
-    ShapeTest::new(
-        r#"
-annotation malformed_module() {
-  targets: [module]
-  comptime post(target, ctx) {
-    replace module ("fn broken( {")
-  }
-}
-
-@malformed_module()
-mod demo {
-  fn answer() -> int { 0 }
-}
-
-print(demo::answer())
-"#,
-    )
-    .expect_run_err_contains("invalid replacement module payload");
-}
+// ADR-009 E2 #18 5b Part B (companion A-part-3): `replace_module_payload_is_still_
+// source_text` RETIRED — its subject (a source-string `replace module ("…")`
+// payload reparsed as module source) IS the deleted U03 route. Its deletion-
+// boundary SUCCESSOR — a [C0929] rejection pin for the replace-module side —
+// lands in companion B (post-deletion, where C0929 actually fires), the
+// replace-module twin of the extend-side d12 successor.
 
 // ADR-009 E2 #18 (slice 1) — the TYPED `replace module` route: a
 // `__ComptimeItemFragment` (from `item_fn`) reaches the directive WITHOUT a
