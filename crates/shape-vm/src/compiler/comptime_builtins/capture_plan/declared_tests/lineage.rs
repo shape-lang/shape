@@ -7,10 +7,12 @@ fn nested_move_preserves_original_lineage_and_semantic_type_by_ordinal() {
 annotation add_reader() {
   targets: [type]
   comptime post(target, ctx) {
-    extend ("extend Job { method read() -> int { let total = 40
-      let outer = |; move total| { let inner = |; move total| total + 2
-        inner() }
-      outer() } }")
+    extend target {
+      method read() -> int { let total = 40
+        let outer = |; move total| { let inner = |; move total| total + 2
+          inner() }
+        outer() }
+    }
   }
 }
 
