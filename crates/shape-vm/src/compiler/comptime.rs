@@ -310,6 +310,15 @@ const COMPTIME_BUILTIN_FORWARDERS: &[(
     // surface a comptime builtin needs, or `extend_method(...)` is `[C0001]
     // Undefined function` in a handler.
     ("extend_method", 5, "extend_method", None, None, None),
+    // ADR-009 E2 #18 (slice 5b-1): `extend_method_literal(...)` — the literal-body
+    // sibling of `extend_method` (arity 4: type_name, method_name, return_type,
+    // value). Same carrier shape (returns the `__CheckedItem` OpaqueTypedObject
+    // accepted by `extend (expr)`); its `value` literal is decoded by the same
+    // `literal_expr_from_slot` authority item_fn uses. Handler-scope resolution
+    // needs this forwarder row IN ADDITION to `comptime_builtins_module_base`
+    // registration, or `extend_method_literal(...)` is `[C0001] Undefined function`
+    // in a handler.
+    ("extend_method_literal", 4, "extend_method_literal", None, None, None),
     // Comptime-excellence §4.5.7.4 — `string_lit(s)` renders a computed string
     // as a Shape source literal for embedding into `extend (expr)` output.
     ("string_lit", 1, "string_lit", None, None, None),

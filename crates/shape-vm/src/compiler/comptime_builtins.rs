@@ -774,21 +774,8 @@ fn build_extend_method_item(
     segments: &[String],
     field_splices: &[String],
 ) -> Result<shape_ast::ast::Item, String> {
-    use shape_ast::ast::{
-        Expr, ExtendStatement, InterpolationMode, Item, Literal, MethodDef, Span, Statement,
-        TypeName,
-    };
+    use shape_ast::ast::{Expr, InterpolationMode, Literal, Span};
 
-    if !is_valid_self_field_identifier(method_name) {
-        return Err(format!(
-            "extend_method expected a valid method name, got '{method_name}'"
-        ));
-    }
-    if !is_valid_self_field_identifier(type_name) {
-        return Err(format!(
-            "extend_method expected a valid type name, got '{type_name}'"
-        ));
-    }
     if segments.len() != field_splices.len() + 1 {
         return Err(format!(
             "extend_method template mismatch: {} segments require {} field splices, got {}",
@@ -797,8 +784,6 @@ fn build_extend_method_item(
             field_splices.len()
         ));
     }
-
-    let return_type = type_annotation_from_string_or_type_ref_slot(return_type_slot, "extend_method")?;
 
     // Assemble the native f-string VALUE: escaped literal segments interleaved
     // with producer-generated `{self.<ident>}` holes (each field asserted).
@@ -824,6 +809,73 @@ fn build_extend_method_item(
         },
         Span::default(),
     );
+
+    build_extend_item_with_method_body(
+        "extend_method",
+        type_name,
+        method_name,
+        return_type_slot,
+        body_expr,
+    )
+}
+
+/// ADR-009 E2 #18 (slice 5b-1): build the generated `Item::Extend { Type { method
+/// <name>() -> <ret> { <literal> } } }` whose method body is a typed LITERAL value
+/// (int / number / bool / string), DIRECTLY from the value slot. The literal is
+/// decoded by the SAME `literal_expr_from_slot` authority `item_fn` uses (slice 2)
+/// — no second literal decoder, no source text, no f-string template. This is the
+/// literal-body sibling of `build_extend_method_item`: it closes the migration gap
+/// for the `extend (f"…{ <literal> }…")` fixtures that generate a CONSTANT method
+/// body (e.g. `method answer() -> int { 42 }`), which the template producer
+/// (self-field interpolation only) cannot express. Both producers share the method
+/// + `Item::Extend` assembly (`build_extend_item_with_method_body`) and both flow
+/// to the same generic `Item::Extend` materialization; the body expr is the only
+/// axis of difference.
+fn build_extend_method_literal_item(
+    type_name: &str,
+    method_name: &str,
+    return_type_slot: &KindedSlot,
+    value_slot: &KindedSlot,
+) -> Result<shape_ast::ast::Item, String> {
+    let body_expr = literal_expr_from_slot(value_slot, "extend_method_literal")?;
+    build_extend_item_with_method_body(
+        "extend_method_literal",
+        type_name,
+        method_name,
+        return_type_slot,
+        body_expr,
+    )
+}
+
+/// ADR-009 E2 #18 (slice 5b-1): the SHARED method + `Item::Extend` assembly for
+/// both `extend_method` (computed self-field f-string body) and
+/// `extend_method_literal` (typed literal body). Validates the type/method
+/// identifiers, resolves the typed return annotation, and wraps the caller-built
+/// `body_expr` in a single-method `Item::Extend`. The `body_expr` is the ONLY axis
+/// of difference between the two producers — neither materializes source text.
+/// `builtin_name` labels the identifier / return diagnostics with the calling
+/// producer.
+fn build_extend_item_with_method_body(
+    builtin_name: &str,
+    type_name: &str,
+    method_name: &str,
+    return_type_slot: &KindedSlot,
+    body_expr: shape_ast::ast::Expr,
+) -> Result<shape_ast::ast::Item, String> {
+    use shape_ast::ast::{ExtendStatement, Item, MethodDef, Span, Statement, TypeName};
+
+    if !is_valid_self_field_identifier(method_name) {
+        return Err(format!(
+            "{builtin_name} expected a valid method name, got '{method_name}'"
+        ));
+    }
+    if !is_valid_self_field_identifier(type_name) {
+        return Err(format!(
+            "{builtin_name} expected a valid type name, got '{type_name}'"
+        ));
+    }
+
+    let return_type = type_annotation_from_string_or_type_ref_slot(return_type_slot, builtin_name)?;
 
     let method = MethodDef {
         name: method_name.to_string(),
@@ -1376,6 +1428,81 @@ fn comptime_builtins_module_base(trait_impl_keys: HashSet<String>) -> ModuleExpo
                 &slots[2],
                 &segments,
                 &field_splices,
+            )?;
+            let index = push_comptime_checked_item(CheckedItem::new(item));
+            let handle = typed_object_for_named_schema(
+                "__CheckedItem",
+                &[("index", KindedSlot::from_int(index as i64))],
+            );
+            Ok(TypedReturn::Concrete(ConcreteReturn::OpaqueTypedObject(
+                Arc::new(heap_value_from_typed_object_slot(handle)),
+            )))
+        },
+    );
+
+    // ADR-009 E2 #18 (slice 5b-1): the typed producer for a SINGLE generated
+    // extend-method whose body is a typed LITERAL value (int / number / bool /
+    // string) — the literal-body sibling of `extend_method` (which carries a
+    // computed self-field f-string template only). It closes the migration gap for
+    // the retired `extend (f"…{ <literal> }…")` fixtures that generate a CONSTANT
+    // method body (e.g. `method answer() -> int { 42 }`). Same carrier shape as
+    // item_fn / extend_method (returns the `__CheckedItem` OpaqueTypedObject
+    // accepted by `extend (expr)`); the `value` literal is decoded by the SAME
+    // `literal_expr_from_slot` authority item_fn uses (single literal decoder). Like
+    // extend_method, handler-scope resolution requires the paired forwarder row in
+    // `COMPTIME_BUILTIN_FORWARDERS` IN ADDITION to this registration, or
+    // `extend_method_literal(...)` is `[C0001] Undefined function` in a handler.
+    register_typed_function(
+        &mut module,
+        "extend_method_literal",
+        "Build a typed CheckedItem for one generated extend-method whose body is a typed literal value",
+        vec![
+            shape_runtime::module_exports::ModuleParam {
+                name: "type_name".to_string(),
+                type_name: "string".to_string(),
+                required: true,
+                ..Default::default()
+            },
+            shape_runtime::module_exports::ModuleParam {
+                name: "method_name".to_string(),
+                type_name: "string".to_string(),
+                required: true,
+                ..Default::default()
+            },
+            shape_runtime::module_exports::ModuleParam {
+                name: "return_type".to_string(),
+                type_name: "unknown".to_string(),
+                required: true,
+                ..Default::default()
+            },
+            shape_runtime::module_exports::ModuleParam {
+                // The literal method body; the slot's runtime kind selects the
+                // literal (string / int / number / bool) — inferred from the caller.
+                name: "value".to_string(),
+                type_name: "unknown".to_string(),
+                required: true,
+                ..Default::default()
+            },
+        ],
+        ConcreteType::OpaqueTypedObject("__CheckedItem".to_string()),
+        |slots, _ctx| {
+            if slots.len() != 4 {
+                return Err(format!(
+                    "extend_method_literal expects 4 arguments, got {}",
+                    slots.len()
+                ));
+            }
+            let type_name = slots[0]
+                .as_str()
+                .ok_or_else(|| "extend_method_literal expects a string type name".to_string())?;
+            let method_name = slots[1]
+                .as_str()
+                .ok_or_else(|| "extend_method_literal expects a string method name".to_string())?;
+            let item = build_extend_method_literal_item(
+                type_name,
+                method_name,
+                &slots[2],
+                &slots[3],
             )?;
             let index = push_comptime_checked_item(CheckedItem::new(item));
             let handle = typed_object_for_named_schema(
@@ -2327,6 +2454,119 @@ mod extend_method_producer_tests {
         assert!(
             err.contains("template mismatch"),
             "rejection must name the interleave-invariant violation: {err}"
+        );
+    }
+
+    // ADR-009 E2 #18 (slice 5b-1) — producer-tier pins for `extend_method_literal`'s
+    // literal-body assembly. They exercise `build_extend_method_literal_item`
+    // directly (no VM), pinning the AST shape and the byte-exact literal for each of
+    // the four literal kinds `literal_expr_from_slot` decodes (int / number / bool /
+    // string). The literal decoder is the SAME authority item_fn uses (slice 2), so
+    // these pin the extend-method WRAPPING around it, not a second decoder.
+    fn extend_method_literal_body(item: &shape_ast::ast::Item) -> shape_ast::ast::Literal {
+        use shape_ast::ast::{Expr, Item, Statement};
+        let Item::Extend(extend, _) = item else {
+            panic!("expected Item::Extend, got a different item kind");
+        };
+        assert_eq!(extend.methods.len(), 1, "exactly one generated method");
+        let method = &extend.methods[0];
+        assert_eq!(method.body.len(), 1, "single-statement generated body");
+        let Statement::Expression(Expr::Literal(lit, _), _) = &method.body[0] else {
+            panic!("generated method body must be a single literal expression");
+        };
+        lit.clone()
+    }
+
+    #[test]
+    fn extend_method_literal_builds_int_body_byte_exact() {
+        use shape_ast::ast::{Literal, TypeName};
+        // The generated_method_runtime `method answer() -> int { 42 }` shape.
+        let item = build_extend_method_literal_item(
+            "Answer",
+            "answer",
+            &KindedSlot::from_string("int"),
+            &KindedSlot::from_int(42),
+        )
+        .expect("valid int literal body assembles");
+        assert!(matches!(extend_method_literal_body(&item), Literal::Int(42)));
+        let Item::Extend(extend, _) = &item else {
+            unreachable!("checked in helper");
+        };
+        assert!(matches!(&extend.type_name, TypeName::Simple(n) if n == "Answer"));
+        assert_eq!(extend.methods[0].name, "answer");
+    }
+
+    #[test]
+    fn extend_method_literal_builds_number_body_byte_exact() {
+        use shape_ast::ast::Literal;
+        let item = build_extend_method_literal_item(
+            "Metric",
+            "ratio",
+            &KindedSlot::from_string("number"),
+            &KindedSlot::from_number(3.5),
+        )
+        .expect("valid number literal body assembles");
+        assert!(matches!(extend_method_literal_body(&item), Literal::Number(n) if n == 3.5));
+    }
+
+    #[test]
+    fn extend_method_literal_builds_bool_body_byte_exact() {
+        use shape_ast::ast::Literal;
+        let item = build_extend_method_literal_item(
+            "Flag",
+            "enabled",
+            &KindedSlot::from_string("bool"),
+            &KindedSlot::from_bool(true),
+        )
+        .expect("valid bool literal body assembles");
+        assert!(matches!(extend_method_literal_body(&item), Literal::Bool(true)));
+    }
+
+    #[test]
+    fn extend_method_literal_builds_string_body_byte_exact() {
+        use shape_ast::ast::Literal;
+        let item = build_extend_method_literal_item(
+            "Greeter",
+            "greeting",
+            &KindedSlot::from_string("string"),
+            &KindedSlot::from_string("hello"),
+        )
+        .expect("valid string literal body assembles");
+        assert!(matches!(extend_method_literal_body(&item), Literal::String(s) if s == "hello"));
+    }
+
+    #[test]
+    fn extend_method_literal_rejects_non_identifier_method_name() {
+        // The shared assembly labels its identifier diagnostics with the calling
+        // producer — a bad method name reports `extend_method_literal`, not
+        // `extend_method`.
+        let err = build_extend_method_literal_item(
+            "Answer",
+            "not a method",
+            &KindedSlot::from_string("int"),
+            &KindedSlot::from_int(42),
+        )
+        .expect_err("a non-identifier method name must reject");
+        assert!(
+            err.contains("extend_method_literal") && err.contains("valid method name"),
+            "rejection must name the calling producer: {err}"
+        );
+    }
+
+    #[test]
+    fn extend_method_literal_rejects_non_finite_number_body() {
+        // `literal_expr_from_slot` (the shared literal decoder) rejects non-finite
+        // numbers; the wrapper surfaces that unchanged.
+        let err = build_extend_method_literal_item(
+            "Metric",
+            "ratio",
+            &KindedSlot::from_string("number"),
+            &KindedSlot::from_number(f64::INFINITY),
+        )
+        .expect_err("a non-finite number literal must reject");
+        assert!(
+            err.contains("finite"),
+            "rejection must name the finiteness constraint: {err}"
         );
     }
 }
