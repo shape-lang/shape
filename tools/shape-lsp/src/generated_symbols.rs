@@ -878,7 +878,7 @@ let x = p.answer()
 annotation schema_of() {
     targets: [type]
     comptime post(target, ctx) {
-        extend (f"fn {target.name}_label() -> string \{ {string_lit("User schema")} \}")
+        extend (item_fn(f"{target.name}_label", "string", "User schema"))
     }
 }
 
