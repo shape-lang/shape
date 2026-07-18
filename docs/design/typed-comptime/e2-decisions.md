@@ -74,6 +74,29 @@ is restated here; anything deeper is re-derived from the repo directly.
   fragment; the legacy fragment machinery stays byte-unchanged (dead-but-
   present) beside it until slice 5 deletes it whole (E2-D8 staging).
   Documented at the builtin.
+- **E2-Q2 (serialize producer): USER-RATIFIED 2026-07-18 — PULL-INTO-E2.**
+  serialize.shape's `@to_json` emits `extend {Type} { method to_json() ->
+  string { <body> } }` where `<body>` is a comptime-COMPUTED f-string that
+  interpolates `self.{field}` at RUNTIME. The slice-4 typed surface CANNOT
+  express it — TWO gaps: (1) `item_fn` + `parse_extend_items_slot` yield only
+  `Item::Function` (free functions); there is no typed `extend`-method /
+  `Item::Extend` producer; (2) `item_fn` bodies are literal-only
+  (`literal_expr_from_slot`: string/int/number/bool), whereas this body is a
+  runtime-self-interpolating f-string template. A "body-as-text" producer would
+  be source-reparse under a new name — a refused rename (CLAUDE.md §Forbidden
+  rationalizations). So a NEW minimal typed producer (a single extend-method
+  with a computed body, in the Dec-73 checked-splice form) is PULLED INTO E2 as
+  review-mandatory **slice 4.5** — NOT deferred to the E-track future — which
+  keeps E2-Q1-A totality intact (no surviving reparse arm, no carve-out, no
+  deferral). Constraints: Dec-73 splice form (NO `$` sigil, per E2-D3),
+  hygienic, ConstLift only; it is NOT a public builder API (that surface stays
+  E1's per the user-ratified C2 D1 amendment); if implementation STOPs on
+  grammar (the >10-file rule), it returns to the user as a designed feature
+  slice. **Slice-4 scope correction:** serde/serialize.shape stays UNTOUCHED in
+  slice 4 (only serde/derive.shape + llm/tools.shape migrate there); its
+  migration lands in slice 4.5. **Ordering (binding):** slice-5's TOTAL U03
+  deletion is BLOCKED on slice 4.5 completing — the deletion must not orphan
+  serialize.shape's source-string emit.
 
 ## Slice plan (phase-1, condensed)
 
@@ -84,8 +107,13 @@ is restated here; anything deeper is re-derived from the repo directly.
 2. CheckedItem / item_fn replacement (D10 parity + NEW JIT proof).
 3. Replace-body via C2 CheckedBody — flips the C0911 quarantine tripwire.
    Review-mandatory.
-4. Stdlib migration (Q1-A): serde/derive, serde/serialize, llm/tools.
-5. TOTAL deletion, one commit. Review-mandatory.
+4. Stdlib migration (Q1-A): serde/derive + llm/tools onto `item_fn`
+   (serde/serialize deferred to 4.5 per E2-Q2).
+4.5. Serialize producer (E2-Q2, USER-RATIFIED): the minimal Dec-73 checked
+   extend-method / computed-body splice producer, then migrate serde/serialize
+   onto it. Review-mandatory; design-first (proposed minimal surface →
+   supervisor sign-off → implement); grammar STOP escalates to the user.
+5. TOTAL deletion, one commit. Review-mandatory. BLOCKED on 4.5 completing.
 6. Battery + final independent review → verify-merge → merge → close #18.
 
 ## Key territory anchors (from phase-1, verified at 52fc13f8)
