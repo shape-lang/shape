@@ -187,10 +187,16 @@ clusters**:
    QUARANTINED them, breaking slice-3's C0911 flip test + 3 callable-capture
    tests). Fixed at `6ab0f9db`: remove the poison — `source_map == None` routes
    to the LISTED full-semantics view, no issue. The capstone proved
-   `ValidationFailed` unconstructible post-deletion, and the reviewer confirmed
-   `capture_at` ALREADY skipped source-map-less captures at base
-   (`query.rs:302-306` at `d804cde4`) — so the net effect is one fewer
-   informational issue.
+   `ValidationFailed` unconstructible post-deletion (so the poison never had a
+   legitimate cause to fire), which is why the distinction-variant fix was
+   declined in favor of removing the poison outright. The net-behavior-delta is
+   tightly bounded by the reviewer's clarifying find: `capture_at` ALREADY
+   skipped source-map-less captures at base (`query.rs:302-306`, supervisor-
+   confirmed at `d804cde4`), so removing the poison does **not** re-expose those
+   captures anywhere downstream — the **only** observable change is that the old
+   non-poison path used to LIST one informational issue for a source-map-less
+   capture and the new path does not. **Net effect: one fewer informational
+   issue**, nothing more.
 2. **cli natives** — generated/edited methods not materializing end-to-end
    (`Method not found on type 'Job'`). Fixed at `45ebd6bc` via option (d): all 9
    C1/C2 `.shape` CLI fixtures rewritten to the direct `extend target { }` form
