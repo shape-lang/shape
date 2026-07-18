@@ -702,20 +702,40 @@ impl BytecodeCompiler {
         body: &[Statement],
         span: Span,
     ) -> Result<()> {
-        let payload = self.serialize_directive_payload(body, "replace-body", span)?;
+        // ADR-009 E2 #18 (slice 5, Part A): a block-form `replace body { ... }`
+        // body is known at COMPILE time — stash it in the per-run carrier store
+        // and emit its typed INDEX (`__emit_replace_body_checked(index)`) instead
+        // of `serialize_directive_payload` -> a JSON source string. No reparse; the
+        // U03 JSON transport is deleted in Part B.
+        let index = super::comptime_builtins::push_comptime_replace_body(body.to_vec());
         self.emit_comptime_internal_call(
-            "__emit_replace_body",
-            vec![Expr::Literal(Literal::String(payload), span)],
+            "__emit_replace_body_checked",
+            vec![Expr::Literal(Literal::Int(index as i64), span)],
             span,
         )
     }
 
     fn emit_comptime_replace_body_expr_directive(
         &mut self,
-        expression: &Expr,
+        _expression: &Expr,
         span: Span,
     ) -> Result<()> {
-        self.emit_comptime_internal_call("__emit_replace_body", vec![expression.clone()], span)
+        // ADR-009 E2 #18 (slice 5, Q1 ruling): `replace body (expr)` is the
+        // source-string transport (formerly `__emit_replace_body(<string>)` ->
+        // `parse_function_body_payload`). E2-D7 rules its end-state REJECTION
+        // (the ignored D5 test), and E2-D4 forbids a grammar change — so it is
+        // rejected cleanly at COMPILE time here rather than deleted at the parser
+        // (which would degrade the diagnostic). Use the block form
+        // `replace body { ... }` (the typed carrier). `[C0928]` is an uncoded
+        // string tag in the message (next-free after C0927; same pre-existing
+        // infra caveat as C0927 — comptime/compile errors here are string-tagged,
+        // not registered codes).
+        Err(ShapeError::SemanticError {
+            message: "[C0928] `replace body (expr)` is not supported; use the block form \
+                      `replace body { ... }`"
+                .to_string(),
+            location: Some(self.span_to_source_location(span)),
+        })
     }
 
     fn emit_comptime_replace_module_expr_directive(

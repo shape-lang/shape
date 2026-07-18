@@ -2338,6 +2338,16 @@ pub(crate) fn execute_comptime_with_annotation_handler(
         }
     }
 
+    // ADR-009 E2 #18 (slice 5, Part A): clear the block-form `replace body`
+    // carrier store at handler-run ENTRY — BEFORE this handler is compiled below
+    // (its `replace body { ... }` statements stash into the store during that
+    // compile) and thus before its VM run reads them by index. Distinct from the
+    // pre-execute `clear_comptime_checked_items` (which clears item_fn's
+    // execute-populated store): the body stash is compile-populated, so a
+    // pre-execute clear would wipe it. Per-run clear ⇒ pre-pass and pass-2 each
+    // index a fresh store, no stale body leaks across the double compile.
+    super::comptime_builtins::clear_comptime_replace_bodies();
+
     let params: Vec<FunctionParameter> = handler_params
         .iter()
         .enumerate()

@@ -156,6 +156,22 @@ thread_local! {
     /// start fresh per execution and never leak across runs; the read clones,
     /// leaving the store intact until that clear.
     static COMPTIME_CHECKED_ITEMS: RefCell<Vec<CheckedItem>> = const { RefCell::new(Vec::new()) };
+    /// ADR-009 E2 #18 (slice 5, Part A): the block-form `replace body { ... }`
+    /// typed-carrier store. Unlike `COMPTIME_CHECKED_ITEMS` (populated during VM
+    /// EXECUTE by `item_fn`), a block-form body's statements are known at handler
+    /// COMPILE time — `emit_comptime_replace_body_directive` stashes the
+    /// `Vec<Statement>` here and emits `__emit_replace_body_checked(index)` (an
+    /// int handle) instead of a JSON source string. So this store is CLEARED at
+    /// `execute_comptime_with_annotation_handler` ENTRY (BEFORE the inner compile
+    /// at `comptime.rs`), NOT at the pre-execute clear point where
+    /// `COMPTIME_CHECKED_ITEMS` clears — clearing there would wipe the
+    /// compile-populated stash before the VM reads it. Indices start fresh per
+    /// handler run, so the pre-pass/pass-2 double-compile never leaks a stale
+    /// body across runs; the read clones, leaving the store intact until the next
+    /// per-run clear. Replaces the U03 JSON transport (`serialize_directive_payload`
+    /// -> `parse_function_body_payload`), deleted in Part B.
+    static COMPTIME_REPLACE_BODIES: RefCell<Vec<Vec<shape_ast::ast::Statement>>> =
+        const { RefCell::new(Vec::new()) };
     /// True while the §4.5.1 whole-program pre-pass speculatively runs a
     /// type-target comptime handler to materialize generated function
     /// signatures. The pre-pass is not the authoritative run — pass-2 re-runs
@@ -240,6 +256,36 @@ fn push_comptime_checked_item(item: CheckedItem) -> usize {
 /// the store stays intact until the next per-run clear).
 fn comptime_checked_item_at(index: usize) -> Option<CheckedItem> {
     COMPTIME_CHECKED_ITEMS.with(|items| items.borrow().get(index).cloned())
+}
+
+/// ADR-009 E2 #18 (slice 5, Part A): clear the block-form `replace body` carrier
+/// store at `execute_comptime_with_annotation_handler` ENTRY — BEFORE the handler
+/// is compiled (its `replace body { ... }` statements stash here during that
+/// compile) and thus BEFORE its VM run reads them. This is deliberately NOT the
+/// pre-execute clear point where `clear_comptime_checked_items` runs (see the
+/// store's declaration): the body stash is compile-populated, so clearing it
+/// pre-execute would wipe it before the read.
+pub(crate) fn clear_comptime_replace_bodies() {
+    COMPTIME_REPLACE_BODIES.with(|bodies| bodies.borrow_mut().clear());
+}
+
+/// Stash a block-form replacement body and return the index the
+/// `__emit_replace_body_checked(index)` call carries. Called from the emit side
+/// (`emit_comptime_replace_body_directive`) at handler-compile. The index refers
+/// to the CURRENT handler run's store (cleared at that run's entry), so pre-pass
+/// and pass-2 each index a fresh store and never read a stale body.
+pub(crate) fn push_comptime_replace_body(body: Vec<shape_ast::ast::Statement>) -> usize {
+    COMPTIME_REPLACE_BODIES.with(|bodies| {
+        let mut bodies = bodies.borrow_mut();
+        bodies.push(body);
+        bodies.len() - 1
+    })
+}
+
+/// Resolve a `__emit_replace_body_checked` index back to its stashed body
+/// (cloned; the store stays intact until the next per-run clear).
+fn comptime_replace_body_at(index: usize) -> Option<Vec<shape_ast::ast::Statement>> {
+    COMPTIME_REPLACE_BODIES.with(|bodies| bodies.borrow().get(index).cloned())
 }
 
 fn parse_type_annotation_payload(payload: &str) -> Result<shape_ast::ast::TypeAnnotation, String> {
@@ -1489,6 +1535,43 @@ fn comptime_builtins_module_base(trait_impl_keys: HashSet<String>) -> ModuleExpo
         ConcreteType::Unit,
         |payload, _ctx| {
             let body = parse_function_body_payload(payload.as_str())?;
+            push_comptime_directive(ComptimeDirective::ReplaceBody { body })?;
+            Ok(TypedReturn::Concrete(ConcreteReturn::Unit))
+        },
+    );
+
+    // ADR-009 E2 #18 (slice 5, Part A): the TYPED block-form `replace body { ... }`
+    // carrier. The block-form emit stashes the Vec<Statement> at handler-COMPILE
+    // (COMPTIME_REPLACE_BODIES) and passes its INDEX here — no source/JSON string,
+    // no reparse. A SEPARATE builtin from `__emit_replace_body` (string) so a bare
+    // int index cannot collide with the expr-form's arbitrary payload; the legacy
+    // string builtin above + `parse_function_body_payload` die in Part B (they
+    // lose all callers once the block form routes here and the expr form rejects).
+    // __emit_replace_body_checked(index: int)
+    register_typed_function(
+        &mut module,
+        "__emit_replace_body_checked",
+        "Internal: replace function body from a typed block-form carrier index",
+        vec![shape_runtime::module_exports::ModuleParam {
+            name: "index".to_string(),
+            type_name: "int".to_string(),
+            required: true,
+            ..Default::default()
+        }],
+        ConcreteType::Unit,
+        |slots, _ctx| {
+            if slots.len() != 1 {
+                return Err(format!(
+                    "__emit_replace_body_checked expects 1 argument, got {}",
+                    slots.len()
+                ));
+            }
+            let index = slots[0]
+                .as_i64()
+                .ok_or_else(|| "__emit_replace_body_checked expects an int index".to_string())?;
+            let body = comptime_replace_body_at(index as usize).ok_or_else(|| {
+                format!("__emit_replace_body_checked index {index} is not live in this comptime execution")
+            })?;
             push_comptime_directive(ComptimeDirective::ReplaceBody { body })?;
             Ok(TypedReturn::Concrete(ConcreteReturn::Unit))
         },
