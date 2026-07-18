@@ -155,29 +155,36 @@ fn unrelated_earlier_callable_registration_cannot_change_specialization_identity
     assert_has_no_abi_identity(&base_identity.canonical_descriptor());
 }
 
-/// ADR-009 C2 #13 slice 6 — the shared C1 capture query surface OBSERVES a
-/// replace-body EDIT's closure capture (spec §7 "LSP driven by the shared query
-/// surface"), pinning the honest current truth: the edit's `move base` capture
-/// (present only in the REPLACEMENT body — the pre-edit `7` has no closure) is
-/// seen and provenance-chained to the replacement's node path, but it is
-/// QUARANTINED on specialization identity with a `[C0911]` MissingInferenceFact,
-/// NOT resolved to an exact Active capture.
+/// ADR-009 E2 #18 slice 3 — the C0911 quarantine FLIP. A `replace body` edit's
+/// closure capture is now not merely OBSERVED on the shared C1 query surface but
+/// RESOLVED to an exact specialization identity, exactly like the fresh-generated
+/// `extend` fixtures above.
 ///
-/// NAMED FINDING (E2 candidate — reported for the C2 close, not a bounded C2
-/// patch): the structural inference facts that back a capture's specialization
-/// identity are recorded by the type-inference engine at ANALYSIS time
-/// (`enter_generated_function_fact_scope`, keyed by closure origin + ordinal) and
-/// handed off once, immutably, to the compiler. A FRESH generated `extend`
-/// method is materialized PRE-analysis (the D2 pre-pass + `infer_extend_method_bodies`),
-/// so its closures get facts and resolve exactly (the `compile_query` fixtures
-/// above). A `replace body` REPLACEMENT is swapped at PASS-2, after analysis and
-/// after the fact handoff, so the analyzer never sees its closure and no fact is
-/// published (NOT mis-keyed — not published). CODEGEN/install is UNAFFECTED: the
-/// `CaptureKind` lowering is declared-mode-driven, proven by the slice-4 install
-/// pin + the slice-5 native proof; only the semantic specialization identity is
-/// quarantined, pending pre-analysis materialization of directive-edited bodies
-/// (E2, blocked by C2/D1). The shared-surface FLOW-THROUGH still holds — the edit
-/// is observed on the same surface — which is what this test guards.
+/// The C2 #13 named finding was: the structural inference facts that back a
+/// capture's specialization identity are recorded by the type-inference engine at
+/// ANALYSIS time (`enter_generated_function_fact_scope`, keyed by closure origin +
+/// ordinal) and handed off once, immutably, to the compiler. A FRESH generated
+/// `extend` method is materialized PRE-analysis, so its closures get facts and
+/// resolve exactly. A `replace body` REPLACEMENT used to be swapped at PASS-2,
+/// after that handoff — so the analyzer never saw its closure, no fact was
+/// published, and the capture resolved to a `[C0911]` MissingInferenceFact
+/// quarantine.
+///
+/// E2 slice 3 closes that seam: it materializes a const-free, top-level,
+/// closure-bearing replacement through the SAME pre-analysis window (the executed
+/// declaration-discovery pre-pass), stamping the replacement closures with the
+/// SAME `ExpansionSite` pass-2 uses. So the analyzer now infers the replacement's
+/// `move base` closure and publishes its structural fact, keyed identically to the
+/// capture descriptor pass-2 builds — the key equality that IS the flip. The
+/// `move base` capture (present only in the REPLACEMENT — the pre-edit `7` has no
+/// closure) therefore resolves to an exact Active capture, no longer a `[C0911]`.
+///
+/// This test was `replace_body_edit_capture_is_observed_but_specialization_quarantined`
+/// (a tripwire pinning the pre-E2 quarantine); slice-3 rebases it — a documented
+/// true-positive rebaseline — to the observed-AND-resolved truth. The
+/// still-meaningful inverse companion is the EXTEND-method quarantine in
+/// `generation_reachability_tests` (a distinct directive path E2 does not touch),
+/// which must keep firing `[C0911]`.
 const REPLACE_BODY_EDIT_CAPTURE: &str = r#"
 annotation edit_worker() {
   targets: [function]
@@ -197,39 +204,19 @@ answer()
 "#;
 
 #[test]
-fn replace_body_edit_capture_is_observed_but_specialization_quarantined() {
-    let program = parse_program(REPLACE_BODY_EDIT_CAPTURE).expect("replace-body fixture parses");
-    let captures = query(&program, REPLACE_BODY_EDIT_CAPTURE);
+fn replace_body_edit_capture_is_observed_and_resolved() {
+    // `compile_query` asserts NO `[C0911]` quarantine appears — that assertion IS
+    // the flip (pre-E2 this fixture quarantined `base`; post-E2 it resolves).
+    let captures = compile_query(REPLACE_BODY_EDIT_CAPTURE);
 
-    // The shared C1 capture query surface OBSERVES the edit's closure capture: a
-    // provenance-chained `[C0911]` for `base` (only the REPLACEMENT body has a
-    // closure) — proving C2's edited-body captures flow through the same surface.
-    let quarantine = captures
-        .issues()
-        .iter()
-        .find(|issue| issue.code() == "C0911" && issue.message().contains("base"))
-        .expect(
-            "the shared surface must observe the replace-body edit's `base` capture as a \
-             provenance-chained [C0911]",
-        );
+    // And the resolved capture is an exact Active capture with a real
+    // specialization identity — observed AND resolved, like the extend fixtures.
+    let base = capture(&captures, "base");
     assert!(
-        quarantine.message().contains("structural")
-            && quarantine.message().contains("specialization identity"),
-        "the [C0911] must name the missing structural specialization identity for `base`: {}",
-        quarantine.message(),
-    );
-
-    // Named finding: the capture is quarantined, NOT resolved to an exact Active
-    // capture, because the structural inference fact is recorded at analysis time
-    // over the pre-edit body and the replacement is swapped at pass-2. Codegen is
-    // unaffected (declared-mode lowering); publishing the fact needs pre-analysis
-    // materialization of directive-edited bodies (E2), beyond a bounded C2 seam.
-    assert!(
-        !captures
-            .captures()
-            .iter()
-            .any(|capture| capture.display_name() == "base"),
-        "the quarantined capture is the [C0911] above, not an exact Active capture",
+        !base.specializations().is_empty(),
+        "the replace-body edit's `move base` capture now resolves to an exact specialization \
+         identity (pre-analysis materialization published its structural fact), not a [C0911] \
+         MissingInferenceFact quarantine",
     );
 }
 
