@@ -197,22 +197,14 @@ let job = Job { id: 1 }
 job.read(2)
 "#;
 
-    const REPARSED_GENERATED_CAPTURE: &str = r#"
-annotation add_reader() {
-  targets: [type]
-  comptime post(target, ctx) {
-    extend ("extend Job { method read() -> int { let base = 40
-      let worker = |; move base| base + 2
-      worker() } }")
-  }
-}
-
-@add_reader()
-type Job { id: int }
-
-let job = Job { id: 1 }
-job.read()
-"#;
+    // ADR-009 E2 #18 5b Part B (companion A): REPARSED_GENERATED_CAPTURE fixture +
+    // its `reparsed_capture_reports_honest_source_unavailable_contract` test
+    // RETIRED. Subject = the [C0910] source-unavailable contract of the deleted
+    // U03 reparse route (the sole live constructor of source_map==None). Post-
+    // deletion no capture is source-unavailable via reparse; the emission is
+    // replaced by a loud invariant error in the deletion commit. The surviving
+    // direct-route + typed-producer capture-query cases stay covered by the
+    // GENERIC/NESTED/INVALID fixtures below.
 
     const GENERIC_GENERATED_CAPTURE: &str = r#"
 annotation add_echo() {
@@ -364,24 +356,8 @@ type Job { id: int }
         );
     }
 
-    #[test]
-    fn reparsed_capture_reports_honest_source_unavailable_contract() {
-        let program = parse_program(REPARSED_GENERATED_CAPTURE).expect("fixture parses");
-        let captures = query(&program, REPARSED_GENERATED_CAPTURE);
-        let issue = captures
-            .issues()
-            .iter()
-            .find(|issue| issue.code() == "C0910")
-            .expect("reparsed generated capture has no exact authored source map");
-
-        assert!(issue.message().contains("compiler capture query"));
-        assert!(
-            issue
-                .message()
-                .contains("source hover and navigation are unavailable"),
-        );
-        assert!(!issue.message().contains("expansion view"));
-    }
+    // reparsed_capture_reports_honest_source_unavailable_contract RETIRED — see
+    // the fixture-retirement note above (C0910 source-unavailable = deleted route).
 
     #[test]
     fn generic_occurrence_aggregates_exact_specializations_deterministically() {
