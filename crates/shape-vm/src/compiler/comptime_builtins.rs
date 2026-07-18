@@ -668,6 +668,14 @@ fn read_comptime_string_array_slot(slot: &KindedSlot, arg_name: &str) -> Result<
 /// else is rejected at the builtin boundary with the named `[C0927]` diagnostic
 /// (E2-D5: E2's diagnostic block is C0927+). This is the injection guard the
 /// negative pin exercises (`a} + evil() + {b` etc. are rejected, never assembled).
+///
+/// HONEST-NAMING caveat (E2-Q2/B condition 2, review F3): `[C0927]` here is an
+/// UNCODED STRING TAG prefixed into the builtin's `Err(String)` message — NOT a
+/// registered diagnostic code. This is a PRE-EXISTING infra gap: every comptime
+/// builtin surfaces failures as `Err(String)` (there is no path for a comptime
+/// builtin to emit a coded diagnostic), so no E2 builtin can mint a real code
+/// today. Minting `C0927` as a genuine registered diagnostic is a follow-up on
+/// record; the pin asserts `contains("C0927")`, which passes on the substring.
 fn is_valid_self_field_identifier(name: &str) -> bool {
     let mut chars = name.chars();
     match chars.next() {
@@ -2175,6 +2183,33 @@ mod extend_method_producer_tests {
             matches!(&extend.type_name, shape_ast::ast::TypeName::Simple(n) if n == "User")
         );
         assert_eq!(extend.methods[0].name, "to_json");
+    }
+
+    #[test]
+    fn extend_method_assembles_number_and_bool_fields_byte_exact() {
+        // Design §4 scalar coverage (review F1): int+string are pinned above;
+        // number+bool here. `number`/`bool` fields are NON-string like `int` — the
+        // handler encodes their BARE (unquoted) shape into the segments, so the
+        // producer emits a bare `{self.<f>}` hole (no surrounding quote segment).
+        // A `type Metric { ratio: number, ok: bool }` template.
+        let segments = vec![
+            "{ \"ratio\": ".to_string(),
+            ", \"ok\": ".to_string(),
+            " }".to_string(),
+        ];
+        let field_splices = vec!["ratio".to_string(), "ok".to_string()];
+        let item = build_extend_method_item(
+            "Metric",
+            "to_json",
+            &KindedSlot::from_string("string"),
+            &segments,
+            &field_splices,
+        )
+        .expect("valid non-string-scalar template assembles");
+        assert_eq!(
+            extract_extend_method_body_value(&item),
+            "\\{ \"ratio\": {self.ratio}, \"ok\": {self.ok} \\}"
+        );
     }
 
     #[test]

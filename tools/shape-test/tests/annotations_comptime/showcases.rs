@@ -131,6 +131,31 @@ print("unreachable")
     .expect_run_err_contains("C0927");
 }
 
+// ADR-009 E2 #18 slice 4.5 (review F2) — DISCLOSED behavior change, pinned so it
+// fails LOUDLY if silently "fixed". A 0-field `@to_json` type is REJECTED
+// ("requires at least one field"): the typed template's field_splices array would
+// have to be empty, and an empty typed-array literal init is not available in
+// comptime ([C0001]). The retired string-concat serializer produced `{  }` for a
+// 0-field type — this is an accepted behavior delta vs the source route (an
+// untested edge case), not a regression to fix silently. `error()` surfaces on
+// the stdlib-import path (unlike a swallowed [C0001]), so the rejection is
+// observable end-to-end.
+#[test]
+fn to_json_zero_field_type_is_rejected() {
+    ShapeTest::new(
+        r#"
+from std::serde::serialize use { @to_json }
+
+@to_json()
+type Empty {}
+
+print("unreachable")
+"#,
+    )
+    .with_stdlib()
+    .expect_run_err_contains("requires at least one field");
+}
+
 const LLM_PROGRAM: &str = r#"
 from std::llm::tools use { @llm_tool }
 
