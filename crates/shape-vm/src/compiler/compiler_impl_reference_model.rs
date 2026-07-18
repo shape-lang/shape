@@ -2156,6 +2156,49 @@ impl BytecodeCompiler {
             merged.extend(analysis_program.items.drain(..));
             analysis_program.items = merged;
         }
+        // ADR-009 E2 #18 (slice 3): apply the pre-pass-materialized const-free
+        // function-target `replace body` edits to the analysis clone BEFORE the
+        // analyzer runs. For each edit, swap the target function's body with its
+        // stamped, `ctx.original`-rewritten replacement and prepend the hygienic
+        // shadow (the pre-annotation body) so a `ctx.original(...)` call resolves
+        // at analysis time. This makes the analyzer infer the replacement's
+        // closures and publish their structural specialization facts, keyed by
+        // the same closure-origin identity pass-2's capture descriptor uses — the
+        // C0911 quarantine flip. Pass-2 still performs the authoritative body
+        // swap byte-unchanged; this edit touches only the analysis clone.
+        let replace_body_edits = std::mem::take(&mut self.pending_replace_body_analysis);
+        for edit in replace_body_edits {
+            let mut swapped = false;
+            for item in &mut analysis_program.items {
+                let target = match item {
+                    shape_ast::ast::Item::Function(func, _) => Some(func),
+                    shape_ast::ast::Item::Export(export, _) => match &mut export.item {
+                        shape_ast::ast::ExportItem::Function(func) => Some(func),
+                        _ => None,
+                    },
+                    _ => None,
+                };
+                if let Some(func) = target {
+                    if func.name == edit.target_name() {
+                        func.body = edit.replacement_body().to_vec();
+                        swapped = true;
+                        break;
+                    }
+                }
+            }
+            // Prepend the shadow only once the body swap landed (the pre-pass
+            // records edits only for discovered top-level targets, so the swap
+            // always finds its function on the real path; the guard keeps a
+            // never-swapped edit from leaving an orphan shadow in the analysis
+            // program).
+            if swapped {
+                let shadow_span = edit.shadow().name_span;
+                analysis_program
+                    .items
+                    .insert(0, shape_ast::ast::Item::Function(edit.shadow().clone(), shadow_span));
+            }
+        }
+
         let native_auto_items = Self::native_auto_conversion_analysis_items(&analysis_program);
         if !native_auto_items.is_empty() {
             let mut merged = native_auto_items;

@@ -37,7 +37,7 @@
 //! install+run, `bin/shape-cli/tests/cli/jit_c2_install_native.rs` VM+JIT), and
 //! the deletion slice deletes the legacy arm without touching it.
 
-use shape_ast::ast::Item;
+use shape_ast::ast::{FunctionDef, Item, Statement};
 
 use crate::compiler::comptime_builtins::expansion_provenance::SymbolId;
 
@@ -125,6 +125,108 @@ impl CheckedItem {
     /// Consume into the declaration for the consumer's check sequence.
     pub(in crate::compiler) fn into_item(self) -> Item {
         self.item
+    }
+}
+
+/// ADR-009 E2 #18 (slice 3) — the typed carrier for a `replace body` edit, used
+/// to materialize the replacement PRE-ANALYSIS so the analyzer sees (and
+/// publishes structural inference facts for) the replacement's closures.
+///
+/// # Why this exists — the C0911 quarantine and its flip
+///
+/// A `replace body` swaps a function's body at PASS-2, after the shared analyzer
+/// has already run and handed its closure inference facts to the compiler
+/// (immutably). So the analyzer never sees the replacement's closures and no
+/// structural specialization fact is published for them — an edited closure's
+/// capture then RESOLVES to a `[C0911]` MissingInferenceFact quarantine rather
+/// than an exact identity (the C2 #13 named finding,
+/// `checked_body/mod.rs` §"Existing-body edits"). E2 fixes this by
+/// materializing the const-free function-target edit through the same
+/// pre-analysis window the fresh-generated declaration pre-pass uses, so the
+/// analyzer infers the STAMPED replacement closure and records the fact keyed by
+/// its generated origin. The pre-pass and pass-2 both stamp with the SAME
+/// `ExpansionSite`, so both produce the same content-derived closure-origin
+/// identity (`GeneratedNodeIdentity`) — the fact the analyzer now publishes is
+/// keyed identically to the capture descriptor pass-2 builds. That key equality
+/// IS the flip.
+///
+/// # Two complete paths, not a bridge (E2-D8 staging discipline)
+///
+/// This is the TYPED route. The legacy source/JSON string transport that
+/// produces the `ReplaceBody` directive (`parse_function_body_payload` /
+/// `__body_probe`, U03) stays byte-for-byte UNCHANGED and LIVE through slices
+/// 3–4; the producer-transport swap + the reparse deletion land together in
+/// slice 5 (E2-D8). The typed route never reparses a string and the legacy
+/// transport never materializes pre-analysis — two full paths, not a bridge.
+///
+/// # Analysis-only, journaled, atomic
+///
+/// The carrier drives an ANALYSIS-program edit only (body swap + the hygienic
+/// `ctx.original` shadow), never a mutation of the shipped program — pass-2
+/// still performs the authoritative install byte-unchanged. The one persistent
+/// publication is the shadow's reserved hygienic identity (`shadow_export`),
+/// journaled through the already-open C2 `InstallTransaction`
+/// (`begin_checked_body_install` in `compile_in_place`), so a failing compile
+/// rolls it back with the rest of the transaction — the "no half-materialized
+/// edit" atomicity the rollback pin asserts.
+#[derive(Clone)]
+pub(in crate::compiler) struct CheckedReplaceBody {
+    /// The edited function's name — the driver swaps THIS function's body in the
+    /// analysis-program clone before `analyze_program_full`.
+    target_name: String,
+    /// The replacement body, `ctx.original`-rewritten and closure-stamped with
+    /// generated provenance (same `ExpansionSite` as pass-2). Never a reparsed
+    /// string.
+    replacement_body: Vec<Statement>,
+    /// The hygienic `ctx.original` shadow (the pre-annotation body under the
+    /// unspellable shadow name) — prepended to the analysis program so a
+    /// `ctx.original(...)` call in the replacement resolves at analysis time.
+    /// Its closures are deliberately NOT generated-stamped (they retain user
+    /// semantics; the capture gate follows the node stamp, not this reservation).
+    shadow: FunctionDef,
+    /// The shadow's reserved hygienic export identity, journaled through the open
+    /// `InstallTransaction`. Rolls back on a failed install.
+    shadow_export: SymbolId,
+}
+
+impl CheckedReplaceBody {
+    /// Carry an already-stamped replacement body, its hygienic shadow, and the
+    /// shadow's reserved identity. The rewrite + stamp + reservation is the
+    /// builder's responsibility
+    /// ([`BytecodeCompiler::build_checked_replace_body`](crate::compiler::BytecodeCompiler::build_checked_replace_body));
+    /// this constructor only carries the result.
+    pub(in crate::compiler) fn new(
+        target_name: String,
+        replacement_body: Vec<Statement>,
+        shadow: FunctionDef,
+        shadow_export: SymbolId,
+    ) -> Self {
+        Self {
+            target_name,
+            replacement_body,
+            shadow,
+            shadow_export,
+        }
+    }
+
+    /// The edited function's name.
+    pub(in crate::compiler) fn target_name(&self) -> &str {
+        &self.target_name
+    }
+
+    /// The stamped, `ctx.original`-rewritten replacement body.
+    pub(in crate::compiler) fn replacement_body(&self) -> &[Statement] {
+        &self.replacement_body
+    }
+
+    /// The hygienic `ctx.original` shadow function.
+    pub(in crate::compiler) fn shadow(&self) -> &FunctionDef {
+        &self.shadow
+    }
+
+    /// The shadow's reserved hygienic export identity.
+    pub(in crate::compiler) fn shadow_export(&self) -> SymbolId {
+        self.shadow_export
     }
 }
 

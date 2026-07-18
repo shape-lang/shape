@@ -1990,6 +1990,11 @@ impl BytecodeCompiler {
             .to_string();
 
         let mut generated: Vec<Item> = Vec::new();
+        // ADR-009 E2 #18 (slice 3): fresh per-run set of const-free function-target
+        // `replace body` edits materialized below (drained by the driver into the
+        // analysis-program clone). Cleared here so a reused compiler never carries
+        // a prior compile's edits.
+        self.pending_replace_body_analysis.clear();
 
         // ADR-009 D2 (Decision 67): the monotonic declaration-discovery fixed
         // point. The formerly single, unbounded speculative pass is now a
@@ -2185,6 +2190,83 @@ impl BytecodeCompiler {
                         );
 
                         for directive in execution.directives {
+                            // ADR-009 E2 #18 (slice 3): pre-analysis
+                            // materialization of a const-free FUNCTION-target
+                            // `replace body` edit. Handled BEFORE the item-
+                            // producing match below because a replacement is a
+                            // BODY EDIT of an existing function, not a new item.
+                            // The build runs inside the already-open C2
+                            // `InstallTransaction`, so the shadow reservation is
+                            // journaled; the driver applies the resulting edit to
+                            // the analysis-program clone before the analyzer runs,
+                            // which is what publishes the replacement closures'
+                            // structural facts and flips C0911. Pass-2 still does
+                            // the authoritative body swap byte-unchanged.
+                            //
+                            // A NON-function target `replace body` is left to
+                            // pass-2 to reject ("only valid when compiling function
+                            // targets"); a CONST-template target stays a pass-2
+                            // concern (slice-0 §"Scoping boundary surfaced": its
+                            // body may depend on a per-call-site const
+                            // specialization absent from this single-program
+                            // pre-analysis view).
+                            if let super::comptime_builtins::ComptimeDirective::ReplaceBody {
+                                body,
+                            } = &directive
+                            {
+                                if let Some(func_def) = disc_target.function_def() {
+                                    let const_free =
+                                        !func_def.params.iter().any(|p| p.is_const);
+                                    // Slice-3 scope: top-level function targets only.
+                                    // A module-NESTED function target would need
+                                    // module-path-aware targeting of the analysis
+                                    // clone (and module-target pre-analysis is the
+                                    // deferred E2-D9 territory), so a nested edit
+                                    // stays a pass-2 concern for now — no regression
+                                    // (its C0911 quarantine is the pre-existing
+                                    // state), just not-yet-materialized.
+                                    let top_level =
+                                        disc_target.lexical_module_path().is_none();
+                                    // Materialize ONLY closure-bearing replacements:
+                                    // pre-analysis materialization exists to publish
+                                    // a replacement closure's structural inference
+                                    // fact (the C0911 flip). A closure-FREE
+                                    // replacement has no such fact, so materializing
+                                    // it would only add analyzer exposure with no
+                                    // benefit — those edits stay pass-2-only,
+                                    // byte-identical to the legacy behavior (the
+                                    // "legacy route untouched" control). Same walk
+                                    // the stamping uses, so detection and stamping
+                                    // agree.
+                                    let carries_closure = !shape_ast::transform::
+                                        generated_closure_source_paths(body, &[])
+                                        .is_empty();
+                                    // Record ONE edit per target: a second
+                                    // `replace body` on the same function is the
+                                    // pass-2 "multiple `replace body` … ambiguous"
+                                    // rejection — materializing both would instead
+                                    // surface a duplicate-function analysis error
+                                    // and mask that authoritative message. First
+                                    // edit wins here; pass-2 emits the rejection.
+                                    let already_edited = self
+                                        .pending_replace_body_analysis
+                                        .iter()
+                                        .any(|edit| edit.target_name() == func_def.name);
+                                    if const_free
+                                        && top_level
+                                        && carries_closure
+                                        && !already_edited
+                                    {
+                                        let checked = self.build_checked_replace_body(
+                                            func_def,
+                                            body,
+                                            &expansion_site,
+                                        )?;
+                                        self.pending_replace_body_analysis.push(checked);
+                                    }
+                                }
+                                continue;
+                            }
                             // ADR-009 E3 (slice S1): the executed pre-pass is
                             // now the SINGLE authority for BOTH generated
                             // directive shapes — the computed
@@ -2955,6 +3037,118 @@ impl BytecodeCompiler {
             }
         }
         Ok(super::comptime_fragments::CheckedModule::new(stamped, exports))
+    }
+
+    /// ADR-009 E2 #18 (slice 3): build the typed `CheckedReplaceBody` for a
+    /// const-free FUNCTION-target `replace body` edit, so the driver can
+    /// materialize the replacement PRE-ANALYSIS (swap the target's body + prepend
+    /// the hygienic `ctx.original` shadow into the analysis-program clone) before
+    /// `analyze_program_full`. This is what flips the C0911 quarantine: the
+    /// analyzer then infers the STAMPED replacement closures and publishes their
+    /// structural specialization facts, keyed by the same content-derived
+    /// closure-origin identity pass-2's capture descriptor uses (both stamp with
+    /// the SAME `ExpansionSite` via `stamp_generated_replacement_body`).
+    ///
+    /// The sequence mirrors pass-2's `ReplaceBody` application
+    /// (`process_comptime_directives_for_function`) exactly — same shadow name,
+    /// same `ctx.original` capability + rewrite, same stamp — MINUS the
+    /// authoritative install (pass-2 still swaps the shipped body and registers
+    /// the shadow byte-unchanged). The ONE persistent publication here is the
+    /// shadow's reserved hygienic identity, JOURNALED through the already-open C2
+    /// `InstallTransaction`, so a failed compile rolls it back atomically. The
+    /// shadow's own closures are deliberately NOT generated-stamped — it retains
+    /// user code (the capture gate follows the node stamp, not the reservation).
+    ///
+    /// Scoping (slice-0 §"Scoping boundary surfaced"): the caller restricts this
+    /// to const-free targets. A const-template `replace body` whose emitted body
+    /// depends on a per-call-site const specialization would materialize
+    /// differently (or not at all) in this single-program pre-analysis view, so
+    /// those edits stay a pass-2 concern.
+    pub(super) fn build_checked_replace_body(
+        &mut self,
+        target: &FunctionDef,
+        replacement_body: &[Statement],
+        site: &ExpansionSite,
+    ) -> Result<super::comptime_fragments::CheckedReplaceBody> {
+        // Same hygienic shadow identity + `ctx.original` capability pass-2 builds
+        // (`original_body_shadow_name` is a stable digest of the function name).
+        let shadow_name = self.original_body_shadow_name(&target.name);
+        let capability = self.build_original_capability(target, shadow_name.clone())?;
+
+        // Rewrite every `ctx.original(args)` in the replacement into a direct
+        // typed call to the hygienic shadow, seeding scope with the target's
+        // parameter binders (incl. destructuring) and `self` — identical to the
+        // pass-2 rewrite so the analyzed body matches the shipped one.
+        let mut bound_receivers: HashSet<String> = target
+            .params
+            .iter()
+            .flat_map(|p| p.get_identifiers())
+            .collect();
+        bound_receivers.insert("self".to_string());
+        let rewritten = super::original_body_rewrite::rewrite_original_calls_in_statements(
+            replacement_body,
+            &bound_receivers,
+            capability.shadow_name(),
+        );
+
+        // Stamp the replacement's closures with generated provenance through the
+        // SAME `stamp_generated_replacement_body(site)` pass-2 calls — so the
+        // analyzer's published fact and pass-2's capture descriptor share one
+        // content-derived closure-origin identity. The annotations are dropped on
+        // the analysis copy (it is analyzed, never re-discovered).
+        let mut replacement = target.clone();
+        replacement.annotations = Vec::new();
+        replacement.body = rewritten;
+        let _replacement_origin = self.stamp_generated_replacement_body(&mut replacement, site)?;
+
+        // The hygienic shadow: the pre-annotation body under the shadow name (the
+        // `PendingOriginalBodyShadow::new` emission shape). NOT closure-stamped.
+        let shadow = FunctionDef {
+            name: shadow_name.clone(),
+            name_span: target.name_span,
+            declaring_module_path: target.declaring_module_path.clone(),
+            doc_comment: None,
+            params: target.params.clone(),
+            return_type: target.return_type.clone(),
+            body: target.body.clone(),
+            type_params: target.type_params.clone(),
+            annotations: Vec::new(),
+            where_clause: target.where_clause.clone(),
+            is_async: target.is_async,
+            is_comptime: target.is_comptime,
+        };
+
+        // Reserve the shadow's hygienic identity, JOURNALED through the open
+        // transaction (rolls back on a failed install — the atomicity pin). The
+        // node path distinguishes the shadow from the replacement stamp above.
+        let content = generated_free_fn_content(&shadow);
+        let source_anchor = site
+            .source_anchor()
+            .map_err(|message| self.expansion_rejection(message, site))?;
+        let generator_anchor = site
+            .generator_anchor()
+            .map_err(|message| self.expansion_rejection(message, site))?;
+        let origin = GeneratedOrigin {
+            expansion: site.identity().clone(),
+            node_path: GeneratedNodePath::decl_root(format!("shadow_fn:{}", target.name)),
+            source_anchor,
+        };
+        let shadow_export = match self.reserve_generated_decl_journaled(
+            &shadow_name,
+            origin,
+            content,
+            generator_anchor,
+        ) {
+            Ok(SymbolReservation::Fresh(id)) | Ok(SymbolReservation::Reissued(id)) => id,
+            Err(message) => return Err(self.expansion_rejection(message, site)),
+        };
+
+        Ok(super::comptime_fragments::CheckedReplaceBody::new(
+            target.name.clone(),
+            replacement.body,
+            shadow,
+            shadow_export,
+        ))
     }
 
     pub(super) fn process_comptime_directives(

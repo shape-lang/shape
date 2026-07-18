@@ -46,6 +46,18 @@ impl DeclarationDiscoveryTarget {
         }
     }
 
+    /// The source `FunctionDef` of a function target, for the ADR-009 E2 #18
+    /// slice-3 pre-analysis materialization of a function-target `replace body`
+    /// edit (the pre-pass needs the pre-annotation signature + body to build the
+    /// hygienic `ctx.original` shadow and the stamped replacement). `None` for a
+    /// struct target.
+    pub(super) fn function_def(&self) -> Option<&FunctionDef> {
+        match self {
+            Self::Function { definition, .. } => Some(definition),
+            Self::Struct { .. } => None,
+        }
+    }
+
     pub(super) fn lexical_module_path(&self) -> Option<&str> {
         match self {
             Self::Struct {

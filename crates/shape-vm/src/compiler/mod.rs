@@ -1963,6 +1963,19 @@ pub struct BytecodeCompiler {
     /// executed authority instead of a parallel scan.
     pub(crate) generated_analysis_items: Vec<shape_ast::ast::Item>,
 
+    /// ADR-009 E2 #18 (slice 3) — const-free function-target `replace body` edits
+    /// materialized by the executed declaration-discovery pre-pass
+    /// (`materialize_computed_comptime_extends`), for the reference-model driver
+    /// to apply to the analysis-program clone BEFORE `analyze_program_full` (swap
+    /// the target's body + prepend the hygienic `ctx.original` shadow). This
+    /// makes the analyzer see the replacement's closures and publish their
+    /// structural facts, flipping the C0911 quarantine. Populated per pre-pass
+    /// run (cleared at its start) and drained by the driver; pass-2 still
+    /// performs the authoritative install byte-unchanged. Empty on the LSP
+    /// generation-reachability / row-3 pre-pass entry points, which never edit an
+    /// analysis program.
+    pub(crate) pending_replace_body_analysis: Vec<comptime_fragments::CheckedReplaceBody>,
+
     /// ADR-009 A3 (review round 1) — names of call-site specializations
     /// (`__w24_method_*`, `__w27_implicit_*`) whose body compile FAILED after
     /// registration. `register_function` runs before `compile_function` (the
