@@ -1974,7 +1974,8 @@ pub struct BytecodeCompiler {
     /// performs the authoritative install byte-unchanged. Empty on the LSP
     /// generation-reachability / row-3 pre-pass entry points, which never edit an
     /// analysis program.
-    pub(crate) pending_replace_body_analysis: Vec<comptime_fragments::CheckedReplaceBody>,
+    pub(in crate::compiler) pending_replace_body_analysis:
+        Vec<comptime_fragments::CheckedReplaceBody>,
 
     /// ADR-009 A3 (review round 1) — names of call-site specializations
     /// (`__w24_method_*`, `__w27_implicit_*`) whose body compile FAILED after
