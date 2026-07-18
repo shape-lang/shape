@@ -2123,6 +2123,100 @@ mod tests {
         }
     }
 
+    // ADR-009 E2 #18 (slice 4.5, E2-Q2/B) — producer-tier pins for
+    // `extend_method`'s body assembly + the condition-1 BOUNDED HOLE GRAMMAR
+    // boundary. These exercise `build_extend_method_item` directly (no VM / no
+    // array-slot reading), so the AST shape, the byte-exact FormattedString
+    // value, and the identifier assertion are pinned in isolation; the end-to-end
+    // byte-parity arbiter is the shape-test `to_json_serializes_via_stdlib_import_*`
+    // rows.
+
+    fn extract_extend_method_body_value(item: &shape_ast::ast::Item) -> String {
+        use shape_ast::ast::{Expr, Item, Literal, Statement};
+        let Item::Extend(extend, _) = item else {
+            panic!("expected Item::Extend, got a different item kind");
+        };
+        assert_eq!(extend.methods.len(), 1, "exactly one generated method");
+        let method = &extend.methods[0];
+        assert_eq!(method.body.len(), 1, "single-statement generated body");
+        let Statement::Expression(Expr::Literal(Literal::FormattedString { value, .. }, _), _) =
+            &method.body[0]
+        else {
+            panic!("generated method body must be a single FormattedString expression");
+        };
+        value.clone()
+    }
+
+    #[test]
+    fn extend_method_assembles_byte_exact_fstring_body() {
+        // The serialize `type User { id: int, name: string }` template.
+        let segments = vec![
+            "{ \"id\": ".to_string(),
+            ", \"name\": \"".to_string(),
+            "\" }".to_string(),
+        ];
+        let field_splices = vec!["id".to_string(), "name".to_string()];
+        let item = build_extend_method_item(
+            "User",
+            "to_json",
+            &KindedSlot::from_string("string"),
+            &segments,
+            &field_splices,
+        )
+        .expect("valid template assembles");
+
+        // Braces in segments escape to `\{`/`\}`; splices are producer-generated
+        // `{self.<ident>}` — byte-for-byte the value the retired source route
+        // produced, so interpolation yields `{ "id": 1, "name": "Ada" }`.
+        assert_eq!(
+            extract_extend_method_body_value(&item),
+            "\\{ \"id\": {self.id}, \"name\": \"{self.name}\" \\}"
+        );
+        // Confirms the outer AST too: an extend on `User` with method `to_json`.
+        let shape_ast::ast::Item::Extend(extend, _) = &item else {
+            unreachable!("checked above");
+        };
+        assert!(
+            matches!(&extend.type_name, shape_ast::ast::TypeName::Simple(n) if n == "User")
+        );
+        assert_eq!(extend.methods[0].name, "to_json");
+    }
+
+    #[test]
+    fn extend_method_rejects_non_identifier_field_splice_c0927() {
+        // Condition-1 / condition-3: a field-name-shaped value carrying an
+        // injection payload is REJECTED at the builtin boundary, never assembled.
+        let err = build_extend_method_item(
+            "User",
+            "to_json",
+            &KindedSlot::from_string("string"),
+            &["{ ".to_string(), " }".to_string()],
+            &["a} + evil() + {b".to_string()],
+        )
+        .expect_err("a non-identifier field splice must reject");
+        assert!(
+            err.contains("[C0927]"),
+            "rejection must carry the named [C0927] diagnostic: {err}"
+        );
+    }
+
+    #[test]
+    fn extend_method_rejects_segment_splice_count_mismatch() {
+        // Strict interleave: segments.len() must be field_splices.len() + 1.
+        let err = build_extend_method_item(
+            "User",
+            "to_json",
+            &KindedSlot::from_string("string"),
+            &["only-one-segment".to_string()],
+            &["id".to_string()],
+        )
+        .expect_err("a segment/splice count mismatch must reject");
+        assert!(
+            err.contains("template mismatch"),
+            "rejection must name the interleave-invariant violation: {err}"
+        );
+    }
+
     #[test]
     fn test_comptime_builtins_module_created() {
         let module = create_comptime_builtins_module(
