@@ -138,17 +138,26 @@ fn marker() { 0 }
 /// replacement is never threaded to the analysis program, so no inference fact
 /// is published for its closures (the C0911 root).
 ///
-/// TRIPWIRE: flips to non-empty when E2 materializes the replacement
-/// pre-analysis.
+/// SLICE-3 REBASELINE (Fork A landed): this fixture's replacement is
+/// closure-FREE (`return 42`), and E2 slice-3 scopes pre-analysis
+/// materialization to CLOSURE-BEARING replacements only (a closure-free
+/// replacement has no structural inference fact to publish, so materializing it
+/// buys nothing) AND threads the edit through a dedicated
+/// `pending_replace_body_analysis` channel applied directly to the analysis
+/// clone — never through `generated_analysis_items`/`executed_generated_items`.
+/// So this authority stays empty on BOTH counts, and the pin is now a CONTROL:
+/// a closure-free `replace body` is byte-unchanged pass-2 behavior. The
+/// materialization SIGNAL for the closure-bearing case moved to the shadow
+/// reservation, pinned in `e2_slice3_replace_body_tests`.
 #[test]
 fn t1_function_target_replace_body_is_not_materialized_by_the_executed_prepass() {
     let program = parse(FUNCTION_TARGET_REPLACE_BODY);
     let generated = executed_generated_items(&program);
     assert!(
         generated.is_empty(),
-        "current reality: a function-target `replace body` contributes nothing to the \
-         executed pre-pass authority (the replacement is swapped at pass-2, after analysis); \
-         got {generated:?}"
+        "a closure-free function-target `replace body` is not pre-analysis-materialized \
+         (slice-3 scopes materialization to closure-bearing replacements, via a channel \
+         separate from the executed-generated-items authority); got {generated:?}"
     );
 }
 
@@ -180,9 +189,16 @@ fn t2_function_target_extend_is_materialized_by_the_executed_prepass() {
 /// analysis-time visibility is missing. This is precisely the timing that
 /// quarantines the replacement's closure captures to `[C0911]`.
 ///
-/// TRIPWIRE: the emptiness assertion flips when E2 materializes the replacement
-/// pre-analysis (the replacement / its shadow will then be an executed authority
-/// item the analyzer reads).
+/// SLICE-3 REBASELINE (Fork A landed): the closure-free replacement still ships
+/// via the pass-2 swap, and `generated_analysis_items` stays empty — but under
+/// the landed design that emptiness is now definitional, not the C0911 timing:
+/// slice-3 materializes CLOSURE-BEARING replacements through the dedicated
+/// `pending_replace_body_analysis` channel (applied straight to the analysis
+/// clone), never through `generated_analysis_items`. So this authority is empty
+/// for EVERY `replace body` (closure-free or not); the pin holds as a control
+/// that the executed-generated-items authority is not the replace-body channel.
+/// The closure-bearing materialization is observed via the shadow reservation in
+/// `e2_slice3_replace_body_tests`.
 #[test]
 fn t3_replace_body_replacement_ships_at_pass2_but_is_analyzer_invisible() {
     let program = parse(FUNCTION_TARGET_REPLACE_BODY);
@@ -194,8 +210,8 @@ fn t3_replace_body_replacement_ships_at_pass2_but_is_analyzer_invisible() {
 
     assert!(
         compiler.generated_analysis_items().is_empty(),
-        "the shipped replacement contributes nothing to the executed pre-analysis authority — \
-         the analyzer ran over the pre-edit body, never the replacement (the C0911 timing); \
+        "the replace-body channel is `pending_replace_body_analysis`, not \
+         `generated_analysis_items` — this authority stays empty for a `replace body` edit; \
          got {:?}",
         compiler.generated_analysis_items()
     );
