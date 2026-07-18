@@ -213,9 +213,37 @@ print(Widget_label())
 // ADR-009 E2 #18 5b Part B (companion A-part-3): `replace_module_payload_is_still_
 // source_text` RETIRED — its subject (a source-string `replace module ("…")`
 // payload reparsed as module source) IS the deleted U03 route. Its deletion-
-// boundary SUCCESSOR — a [C0929] rejection pin for the replace-module side —
-// lands in companion B (post-deletion, where C0929 actually fires), the
-// replace-module twin of the extend-side d12 successor.
+// boundary SUCCESSOR is `replace_module_source_string_is_rejected_with_named_
+// alternative` below (companion B, post-deletion, where C0929 fires).
+
+/// ADR-009 E2 #18 slice 5b Part B (companion B) — the replace-module
+/// deletion-boundary successor. Post-U03-deletion (slice 5), a source-string
+/// `replace module ("…")` payload is rejected at the builtin boundary with the
+/// named `[C0929]` diagnostic pointing at the typed producer alternatives. The
+/// replace-module twin of the extend-side d12 successor
+/// (`executed_extend_authority::computed_snippet_extend_is_rejected_with_named_alternative`).
+#[test]
+fn replace_module_source_string_is_rejected_with_named_alternative() {
+    ShapeTest::new(
+        r#"
+annotation synth_module() {
+  targets: [module]
+  comptime post(target, ctx) {
+    replace module ("fn answer() -> int { 42 }")
+  }
+}
+
+@synth_module()
+mod demo {
+  fn answer() -> int { 0 }
+}
+
+print(demo::answer())
+"#,
+    )
+    .expect_run_err_contains("[C0929]")
+    .expect_run_err_contains("item_fn");
+}
 
 // ADR-009 E2 #18 — the TYPED `replace module` route: a `__CheckedItem` (from
 // `item_fn`) reaches the directive WITHOUT a source/JSON string, is built into a

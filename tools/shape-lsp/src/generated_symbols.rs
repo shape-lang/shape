@@ -1258,14 +1258,17 @@ let x = p.answer()
     }
 
     /// Adverse-direction control for the comment filter: a name written
-    /// LITERALLY inside the extend f-string snippet in the generator IS an
-    /// explicit source binder (editing it recomputes the expansion) — the
-    /// comment filter must not swallow string content.
-    const FSTRING_BINDER_PROGRAM: &str = r#"
+    /// LITERALLY inside the typed producer call in the generator IS an explicit
+    /// source binder (editing it recomputes the expansion) — the comment filter
+    /// must not swallow producer-call arguments. (ADR-009 E2 #18 5b: rerouted off
+    /// the deleted `extend (f"…")` source-string route onto `extend_method_literal`,
+    /// where the method name `"answer"` is a literal producer argument in the
+    /// generator; the generator-span SourceBinder coverage is unchanged.)
+    const PRODUCER_LITERAL_BINDER_PROGRAM: &str = r#"
 annotation gen() {
   targets: [type]
   comptime post(target, ctx) {
-    extend (f"extend {target.name} \{ method answer() -> int \{ 42 \} \}")
+    extend (extend_method_literal(target.name, "answer", "int", 42))
   }
 }
 
@@ -1277,27 +1280,27 @@ let x = p.answer()
 "#;
 
     #[test]
-    fn fstring_snippet_binder_in_the_generator_stays_a_source_binder() {
-        let program = parse_program(FSTRING_BINDER_PROGRAM).expect("parses");
-        let offset = FSTRING_BINDER_PROGRAM
+    fn producer_literal_name_in_the_generator_stays_a_source_binder() {
+        let program = parse_program(PRODUCER_LITERAL_BINDER_PROGRAM).expect("parses");
+        let offset = PRODUCER_LITERAL_BINDER_PROGRAM
             .find("p.answer()")
             .expect("call site")
             + 2;
         let classification =
-            classify_generated_rename(&program, FSTRING_BINDER_PROGRAM, "answer", offset)
+            classify_generated_rename(&program, PRODUCER_LITERAL_BINDER_PROGRAM, "answer", offset)
                 .expect("generated symbol position classifies");
         let GeneratedRenameClassification::SourceBinder { binder_spans, .. } = classification
         else {
             panic!(
-                "a name written literally in the extend snippet is a source \
+                "a name written literally in the producer call is a source \
                  binder, got {classification:?}"
             );
         };
         assert!(
             binder_spans
                 .iter()
-                .any(|span| &FSTRING_BINDER_PROGRAM[span.start..span.end] == "answer"),
-            "the snippet binder token must be reported: {binder_spans:?}"
+                .any(|span| &PRODUCER_LITERAL_BINDER_PROGRAM[span.start..span.end] == "answer"),
+            "the producer-call binder token must be reported: {binder_spans:?}"
         );
     }
 

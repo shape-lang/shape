@@ -91,11 +91,35 @@ print(n.diff())
 // ADR-009 E2 #18 slice 5b Part B (companion A) — `d12_computed_snippet_extend_
 // only_materializes_via_executed_prepass` RETIRED. Its subject (a COMPUTED
 // source-string `extend (f"…")` materializing via the executed pre-pass) IS the
-// deleted U03 route. Its deletion-boundary SUCCESSOR —
-// `computed_snippet_extend_is_rejected_with_named_alternative`, asserting the
-// [C0929] rejection + the named typed alternatives — is added in companion B
-// (post-deletion, where C0929 actually fires). Expected-FAILED baseline: old-d12
-// leaves the set on retirement.
+// deleted U03 route. Its deletion-boundary SUCCESSOR is
+// `computed_snippet_extend_is_rejected_with_named_alternative` below.
+
+/// ADR-009 E2 #18 slice 5b Part B (companion B) — the d12 deletion-boundary
+/// successor. Post-U03-deletion (slice 5), a COMPUTED source-string `extend
+/// (f"…")` is rejected at the builtin boundary with the named `[C0929]`
+/// diagnostic pointing at the typed producer alternatives (item_fn /
+/// extend_method*), instead of materializing via the executed pre-pass. The
+/// extend-side twin of the replace-module pin
+/// (`directives::replace_module_source_string_is_rejected_with_named_alternative`).
+#[test]
+fn computed_snippet_extend_is_rejected_with_named_alternative() {
+    let source = r#"
+annotation gen() {
+  targets: [type]
+  comptime post(target, ctx) {
+    extend (f"fn {target.name}_tag() -> int \{ 7 \}")
+  }
+}
+
+@gen()
+type Widget { id: int }
+
+print(Widget { id: 1 }.id)
+"#;
+    ShapeTest::new(source)
+        .expect_run_err_contains("[C0929]")
+        .expect_run_err_contains("item_fn");
+}
 
 /// R6 — `ctx.target`/`target` resolution: the `target` head of a direct
 /// `extend target { … }` resolves to the annotated type through the executed
