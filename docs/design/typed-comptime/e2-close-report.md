@@ -110,7 +110,9 @@ debt surfaced by E2; 4–8 are E2-internal lessons and dispositions.
 6. **C0927/C0928/C0929 uncoded string tags.** All comptime builtin errors are
    `Err(String)`; the `[C0927]`/`[C0928]`/`[C0929]` tags are string-embedded, not
    routed through the coded-diagnostic path. **Shared follow-up: coded comptime
-   diagnostics** (the C092x family; also C2's L2).
+   diagnostics** (the C092x family; also C2's L2). A GitHub follow-up issue is
+   drafted in [Appendix A](#appendix-a--drafted-follow-up-issue-c092x-uncoded-comptime-diagnostics)
+   for the supervisor to file at close (mirroring C2's #59 for the D6 re-arm).
 7. **Refuted-in-part reachability verdict ([C0910]).** The reachability analysis
    verdict "[C0910] source-unavailable is DEAD post-deletion" was **refuted in
    part**: it analyzed extend-route producers only, but REPLACE-BODY and CALLABLE
@@ -172,9 +174,20 @@ territory). Surviving JSON transports handed to E1:
 - `__emit_set_param_value`.
 - `serialize_directive_payload` core.
 - The `statements.rs` :600–740 emit surface.
-- **Book snippets under `../shape-web` were never swept** — F1's inventory.
 
 `__type_probe` also lives in E1/E5 territory (see the E2-D2 correction above).
+
+### Sweep scope boundary (precise)
+
+The E2 migration sweep — the ~89 fixture sites and the 9 `.shape` CLI fixtures —
+covered **this repository only** (`crates/`, `tools/`, `bin/`, and the shipped
+`.shape` files), enforced by the binding workspace-wide both-spelling grep. It
+did **NOT** cover the **`../shape-web`** repo. Book snippets and any prose code
+fences under `../shape-web/book/` were **explicitly out of sweep scope** and are
+**F1's inventory** (Stage 7). Nothing in this close report should be read as
+claiming book-snippet coverage: a book fence that still spells a source-string
+`extend`/`replace module` generation call will hit the new `[C0929]` rejection
+and is F1's to migrate. E1 and F1 both inherit this boundary.
 
 ---
 
@@ -230,3 +243,48 @@ The structural facts all verify (11 symbols deleted with zero live refs; C0929
 minted at `comptime_builtins.rs:757`; C0928 at `statements.rs:734`; C0910 →
 accumulator-poison → removed in the fix round). This report cites the verified
 tree figures; surfaced to the supervisor for the #18 closing comment.
+
+---
+
+## Appendix A — drafted follow-up issue (C092x uncoded comptime diagnostics)
+
+The supervisor files this at close (do not file it from the E2 lane). Suggested
+label: `adr-009`. It is the shared C092x follow-up named in finding 6 and in
+C2's L2.
+
+**Title:**
+
+> Comptime builtin diagnostics are uncoded `Err(String)` tags — route C0927/C0928/C0929 (and the C092x family) through the coded-diagnostic path
+
+**Body:**
+
+> Follow-up from ADR009-E2 #18 (and C2's L2 note on #13). Every comptime builtin
+> error is an `Err(String)`; the diagnostic code is embedded in the message text
+> as a `[C09xx]` prefix rather than carried by the coded-diagnostic path the rest
+> of the compiler uses. Known instances landed by E2:
+>
+> - `[C0927]` — `extend_method`: field splice is not a valid identifier
+>   (`crates/shape-vm/src/compiler/comptime_builtins.rs:632`).
+> - `[C0928]` — expr-form `replace body (expr)` unsupported; use the block form
+>   (`crates/shape-vm/src/compiler/statements.rs:734`).
+> - `[C0929]` — the source-string `extend`/`replace module` generation route has
+>   been removed; pass a typed carrier
+>   (`crates/shape-vm/src/compiler/comptime_builtins.rs:757`).
+>
+> These read correctly to users but are not machine-addressable: they carry no
+> structured code, span, or severity through the diagnostic pipeline, so LSP
+> surfacing, `--explain`, and any code-based test assertions must string-match the
+> tag. The tests currently assert on `err.contains("[C09xx]")`
+> (e.g. `comptime_builtins.rs:2135`), which is the symptom.
+>
+> **Scope:** route the comptime-builtin error surface through the coded-diagnostic
+> path so C0927/C0928/C0929 — and the broader C092x comptime-builtin family — are
+> emitted as coded diagnostics with spans, not string-tagged `Err(String)`.
+> Preserve the exact user-facing message text (the E2 fixtures rebaselined onto
+> these strings). This is a diagnostics-plumbing change, not a behavior change.
+>
+> **Acceptance:** the three codes above emit as structured diagnostics with spans;
+> the string-match test assertions are replaced by code assertions; existing E2
+> rejection pins stay green.
+>
+> Related: #18 (E2), #13 L2 (C2).
