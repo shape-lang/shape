@@ -300,6 +300,16 @@ const COMPTIME_BUILTIN_FORWARDERS: &[(
     // First typed generation fragment surface. `item_fn(...)` returns a
     // typed fragment carrier accepted by `extend (expr)`.
     ("item_fn", 3, "item_fn", None, None, None),
+    // ADR-009 E2 #18 (slice 4.5, E2-Q2/B): `extend_method(...)` — the typed
+    // single-extend-method producer (arity 5), same carrier shape as item_fn
+    // (returns the `__CheckedItem` OpaqueTypedObject accepted by `extend (expr)`;
+    // no return-schema marker, no typed-carrier param schemas — forwarder params
+    // are unannotated and infer their type from the caller). Handler-scope
+    // resolution requires this forwarder row IN ADDITION to
+    // `comptime_builtins_module_base` registration — the second registration
+    // surface a comptime builtin needs, or `extend_method(...)` is `[C0001]
+    // Undefined function` in a handler.
+    ("extend_method", 5, "extend_method", None, None, None),
     // Comptime-excellence §4.5.7.4 — `string_lit(s)` renders a computed string
     // as a Shape source literal for embedding into `extend (expr)` output.
     ("string_lit", 1, "string_lit", None, None, None),
