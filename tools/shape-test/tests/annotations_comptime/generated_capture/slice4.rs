@@ -23,9 +23,11 @@ const MOVE_LET: &str = r#"
 annotation add_answer() {
   targets: [type]
   comptime post(target, ctx) {
-    extend ("extend Job { method answer() -> int { let base = 40
-      let worker = |; move base| base + 2
-      worker() } }")
+    extend target {
+      method answer() -> int { let base = 40
+        let worker = |; move base| base + 2
+        worker() }
+    }
   }
 }
 @add_answer()
@@ -38,10 +40,12 @@ const MOVE_LET_MUT: &str = r#"
 annotation add_answer() {
   targets: [type]
   comptime post(target, ctx) {
-    extend ("extend Job { method answer() -> int { let mut total = 40
-      let worker = |; move total| { total = total + 2
-        total }
-      worker() } }")
+    extend target {
+      method answer() -> int { let mut total = 40
+        let worker = |; move total| { total = total + 2
+          total }
+        worker() }
+    }
   }
 }
 @add_answer()
@@ -54,9 +58,11 @@ const MOVE_HEAP_LET: &str = r#"
 annotation add_label() {
   targets: [type]
   comptime post(target, ctx) {
-    extend ("extend Job { method label() -> string { let label = \"shape\"
-      let worker = |; move label| label
-      worker() } }")
+    extend target {
+      method label() -> string { let label = "shape"
+        let worker = |; move label| label
+        worker() }
+    }
   }
 }
 @add_label()
@@ -69,13 +75,15 @@ const NESTED_SHARE: &str = r#"
 annotation add_answer() {
   targets: [type]
   comptime post(target, ctx) {
-    extend ("extend Job { method answer() -> int { var total = 40
-      let outer = |; share total| {
-        let inner = |step: int; share total| { total = total + step
+    extend target {
+      method answer() -> int { var total = 40
+        let outer = |; share total| {
+          let inner = |step: int; share total| { total = total + step
+            total }
+          inner(2)
           total }
-        inner(2)
-        total }
-      outer() } }")
+        outer() }
+    }
   }
 }
 @add_answer()
