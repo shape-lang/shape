@@ -18,7 +18,7 @@
 //! both modes and diffs stdout against the `.expected` files.)
 //!
 //!   F1 — generated free function: a type-targeting `@annotation` handler emits
-//!        `extend (f"fn {T}_... () -> ...")`; the generated free function is
+//!        `extend (item_fn(...))`; the generated free function is
 //!        visible/callable from user code. WF-3D root fix: the generated free
 //!        function is compiled through the FULL driver (`compile_function`) so
 //!        it carries `Function.mir_data` and the JIT compiles it NATIVELY

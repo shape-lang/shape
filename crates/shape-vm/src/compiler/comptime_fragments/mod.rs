@@ -1,41 +1,28 @@
-//! ADR-009 E2 #18 (slice 1) — the typed comptime-fragment sink for module
-//! replacement.
+//! ADR-009 E2 #18 — the typed comptime-fragment sink for module replacement.
 //!
 //! # `CheckedModule<Exports>` — the typed transport for `replace module`
 //!
-//! A `replace module (expr)` directive reaches the compiler by TWO complete,
-//! independent paths that share only the surface spelling:
+//! A `replace module (expr)` directive reaches the compiler through ONE typed
+//! path: `expr` evaluates in the comptime VM to a typed generation carrier
+//! (`item_fn(...)` -> `__CheckedItem`). `__emit_replace_module` converts it to
+//! AST items WITHOUT a source or JSON string ever existing, and pushes
+//! [`ComptimeDirective::ReplaceModuleChecked`](crate::compiler::comptime_builtins::ComptimeDirective::ReplaceModuleChecked).
+//! The module-target consumer routes it through
+//! [`build_checked_module`](crate::compiler::BytecodeCompiler::build_checked_module),
+//! which stamps each item's closures with generated provenance
+//! (`GeneratedNodeIssuer`) and reserves a hygienic export symbol (`SymbolId`)
+//! with exactly the per-item sequence the fresh-generated declaration-discovery
+//! pre-pass runs — producing this `CheckedModule`.
 //!
-//! - **legacy (U03)** — `expr` is a `string` of module source (or AST-JSON).
-//!   `__emit_replace_module`'s string arm reparses it via
-//!   `parse_module_items_payload` and pushes
-//!   [`ComptimeDirective::ReplaceModule`](crate::compiler::comptime_builtins::ComptimeDirective::ReplaceModule).
-//!   Consumed by the raw `*module_items = items` arm. UNCHANGED until the
-//!   slice-5 deletion removes this whole path (the payload parser + the string
-//!   producer arm + the directive variant) in ONE commit.
-//! - **typed (this slice)** — `expr` is a typed `__ComptimeItemFragment` (e.g.
-//!   from `item_fn(...)`). `__emit_replace_module`'s fragment arm converts it to
-//!   AST items WITHOUT a source or JSON string ever existing, and pushes
-//!   [`ComptimeDirective::ReplaceModuleChecked`](crate::compiler::comptime_builtins::ComptimeDirective::ReplaceModuleChecked).
-//!   The module-target consumer routes it through
-//!   [`build_checked_module`](crate::compiler::BytecodeCompiler::build_checked_module),
-//!   which stamps each item's closures with generated provenance
-//!   (`GeneratedNodeIssuer`) and reserves a hygienic export symbol (`SymbolId`)
-//!   with exactly the per-item sequence the fresh-generated declaration-discovery
-//!   pre-pass runs — producing this `CheckedModule`.
+//! # One path (slice-5 deletion complete)
 //!
-//! # Two complete paths, not a bridge (E2-D8 staging discipline)
-//!
-//! The two paths never convert into one another: the typed arm never
-//! materializes a string, and the legacy arm never reserves a hygienic symbol
-//! or stamps provenance. They are two full transports carried by two directive
-//! variants, staged side by side per the user-ratified E2-D8 ruling until the
-//! slice-5 deletion removes the legacy one WHOLE. This is the ruled staging —
-//! NOT the forbidden "keep the source-reparse arm for one case" walk-back
-//! (CLAUDE.md §Forbidden rationalizations). The typed arm is self-sufficient
-//! today, pinned end-to-end (`tests/annotations_comptime/directives.rs` typed
-//! install+run, `bin/shape-cli/tests/cli/jit_c2_install_native.rs` VM+JIT), and
-//! the deletion slice deletes the legacy arm without touching it.
+//! Slice 5 deleted the legacy source-string route WHOLE — the
+//! `parse_module_items_payload` reparser, `__emit_replace_module`'s string arm,
+//! and the `ComptimeDirective::ReplaceModule` variant. A source-string `replace
+//! module` payload is now rejected at the builtin boundary with the named
+//! [C0929] diagnostic. The typed path was pinned end-to-end before the deletion
+//! (`tests/annotations_comptime/directives.rs` typed install+run,
+//! `bin/shape-cli/tests/cli/jit_c2_install_native.rs` VM+JIT).
 
 use shape_ast::ast::{FunctionDef, Item, Statement};
 
@@ -91,8 +78,9 @@ impl CheckedModule {
 }
 
 /// A single comptime-generated declaration produced by `item_fn` (slice 2) —
-/// the typed carrier that replaces the `__ComptimeItemFragment` sentinel map
-/// (E2-D10). It wraps a fully-formed AST `Item` built directly at construction
+/// the typed carrier that replaced the `__ComptimeItemFragment` sentinel map
+/// (E2-D10; the sentinel schema + machinery were deleted in slice 5). It wraps a
+/// fully-formed AST `Item` built directly at construction
 /// (typed return + literal body, no sentinel `literal_kind`/parallel fields, no
 /// source/JSON string). `item_fn` yields a `__CheckedItem` handle across the
 /// comptime VM; this is the compiler-side item that handle resolves to.
@@ -150,14 +138,15 @@ impl CheckedItem {
 /// keyed identically to the capture descriptor pass-2 builds. That key equality
 /// IS the flip.
 ///
-/// # Two complete paths, not a bridge (E2-D8 staging discipline)
+/// # The typed route (slice-5 deletion complete)
 ///
-/// This is the TYPED route. The legacy source/JSON string transport that
-/// produces the `ReplaceBody` directive (`parse_function_body_payload` /
-/// `__body_probe`, U03) stays byte-for-byte UNCHANGED and LIVE through slices
-/// 3–4; the producer-transport swap + the reparse deletion land together in
-/// slice 5 (E2-D8). The typed route never reparses a string and the legacy
-/// transport never materializes pre-analysis — two full paths, not a bridge.
+/// This is the TYPED route, now the ONLY `replace body` transport. The legacy
+/// source/JSON string transport that produced the `ReplaceBody` directive
+/// (`parse_function_body_payload` / `__body_probe`, U03) was deleted WHOLE in
+/// slice 5 (E2-D8); the block-form `replace body { ... }` stashes its statements
+/// as a typed carrier and the expr form is rejected at compile with [C0928]. The
+/// typed route never reparses a string and never materialized a pre-analysis
+/// edit from source text.
 ///
 /// # Analysis-only, journaled, atomic
 ///

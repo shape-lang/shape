@@ -58,18 +58,20 @@ pub(crate) fn generated_capture_rename(
     })
 }
 
-/// Unmapped generated strings are refusal evidence only. They never identify
-/// a capture or authorize an edit, but they must stop the generic text rename
-/// provider from treating generated source text as an ordinary identifier.
+/// Conflict-quarantined generated captures are refusal evidence only. They never
+/// identify a capture or authorize an edit, but they must stop the generic text
+/// rename provider from treating generated text as an ordinary identifier. (The
+/// [C0910] source-unavailable evidence code was removed with the U03 reparse
+/// route in slice 5 — an unmapped capture is now a [C0911] invariant conflict.)
 fn unavailable_evidence_covers(
     query: &shape_vm::compiler::GeneratedCaptureQuery,
     program: &Program,
     offset: usize,
 ) -> bool {
-    let has_unavailable_evidence = query.issues().iter().any(|issue| {
-        issue.code() == shape_vm::compiler::GENERATED_CAPTURE_SOURCE_UNAVAILABLE_CODE
-            || issue.code() == shape_vm::compiler::GENERATED_CAPTURE_ARTIFACT_CONFLICT_CODE
-    });
+    let has_unavailable_evidence = query
+        .issues()
+        .iter()
+        .any(|issue| issue.code() == shape_vm::compiler::GENERATED_CAPTURE_ARTIFACT_CONFLICT_CODE);
     if !has_unavailable_evidence {
         return false;
     }

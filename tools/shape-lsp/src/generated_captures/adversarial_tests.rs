@@ -61,7 +61,7 @@ type Job { id: int }
 // `extend ("__PAYLOAD__")` reparse skeleton + payload machinery go with it). Its
 // subject is an adversarial property OF the deleted U03 reparse route (a reparsed
 // capture at colliding offsets must not steal a direct decoy's source_map, and
-// must carry GENERATED_CAPTURE_SOURCE_UNAVAILABLE_CODE) — post-deletion the
+// must carry the former [C0910] source-unavailable code) — post-deletion the
 // reparsed half is unconstructible. The surviving half (direct captures get
 // correct source maps) is carried by the direct-route fixtures + the no-C0910
 // asserts the reachability agent cited.

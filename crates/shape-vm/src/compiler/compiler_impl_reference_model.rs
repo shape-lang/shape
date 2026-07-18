@@ -2120,7 +2120,7 @@ impl BytecodeCompiler {
         }
 
         // comptime-excellence §4.5.1 whole-program pre-pass: run type-targeting
-        // comptime handlers that emit computed `extend (f"fn ...")` free
+        // comptime handlers that emit computed `extend (item_fn(...))` free
         // functions, and hoist the generated functions into `program.items` as
         // ordinary items BEFORE the analyzer and function-registration passes.
         // Without this, a generated free function (`User_json_schema`) only
@@ -2137,7 +2137,7 @@ impl BytecodeCompiler {
         // (`shape_ast::transform::augment_program_with_generated_extends`,
         // deleted) re-derived extends WITHOUT executing the handler — it could
         // observe false-guarded edits and never saw computed
-        // `extend (f"…")` snippets — so both paths are collapsed onto the
+        // `extend (...)` directives — so both paths are collapsed onto the
         // executed result. The analysis program starts as a plain clone; the
         // executed generated items are prepended below.
         let mut analysis_program = program.clone();

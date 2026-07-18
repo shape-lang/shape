@@ -92,7 +92,7 @@ fn rename_on_extend_target_name_edits_source_only_and_recomputes() {
 ///  1  annotation gen() {
 ///  3    comptime post(target, ctx) {          <- generator definition
 ///  4      let suffix = "swer"
-///  5      extend (f"... method an{suffix}() ...")  <- computed name
+///  5      extend (extend_method_literal(target.name, f"an{suffix}", ...))  <- computed name
 ///  9  @gen()                                  <- application site
 /// 13  let x = p.answer()                      <- call site (cursor here)
 ///
@@ -234,7 +234,7 @@ fn rename_on_colliding_ordinary_call_edits_the_ordinary_declaration() {
 /// Round-2 review finding 1: the method name is bound at the APPLICATION
 /// site — `@gen("answer")` passes the name the handler splices into the
 /// extend snippet. Zero-based lines:
-///  4      extend (f"... method {mname}() ...")  <- name spliced from param
+///  4      extend (extend_method_literal(target.name, mname, ...))  <- name spliced from param
 ///  8  @gen("answer")                            <- application binder token
 /// 12  let a = p.answer()                        <- call site (cursor here)
 ///
@@ -273,7 +273,7 @@ fn rename_on_application_bound_name_edits_the_application_binder_and_call_site()
 /// but a COMMENT inside the generator mentions it. Zero-based lines:
 ///  3    comptime post(target, ctx) {            <- generator definition
 ///  4      // decoy: the computed method is called answer
-///  6      extend (f"... method an{suffix}() ...")  <- computed name
+///  6      extend (extend_method_literal(target.name, f"an{suffix}", ...))  <- computed name
 /// 14  let x = p.answer()                        <- call site (cursor here)
 ///
 /// Comments are non-semantic text — a token inside one can never be a

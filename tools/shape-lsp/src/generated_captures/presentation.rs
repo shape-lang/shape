@@ -101,7 +101,7 @@ mod tests {
     }
 
     #[test]
-    fn anchorless_source_unavailable_issue_has_no_invented_range() {
+    fn anchorless_issue_has_no_invented_range() {
         assert_eq!(issue_range(None, "let value = 1",), None,);
     }
 }

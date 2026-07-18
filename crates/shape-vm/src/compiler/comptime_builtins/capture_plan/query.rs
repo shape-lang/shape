@@ -3,9 +3,11 @@
 //! Capture identity comes only from the compiler-issued expansion origin and
 //! resolved slot carried by the compiler's capture pack. Source spans are presentation
 //! data: this module publishes them only when every span round-trips through
-//! a structural AST node in the caller's source program. Reparsed generated
-//! strings therefore remain represented as typed descriptors in the compiler
-//! query but never gain invented source locations.
+//! a structural AST node in the caller's source program. Post-U03-deletion the
+//! source-string reparse route that could produce an unmapped generated capture
+//! is gone, so a validated capture with no structural source map is an invariant
+//! violation — quarantined as a [C0911] conflict, never published with an
+//! invented source location.
 
 use crate::compiler::{BytecodeCompiler, SourceAnchor};
 use shape_ast::ast::{CaptureMode, Program};
@@ -25,10 +27,6 @@ pub use specialization::{
     GeneratedCaptureSpecializationIdentity,
 };
 use specialization::{normalize_semantic_presentations, specialization_for};
-
-/// C1 query diagnostic: a validated capture exists, but its generated AST
-/// offsets do not have an exact structural mapping into the source program.
-pub const GENERATED_CAPTURE_SOURCE_UNAVAILABLE_CODE: &str = "C0910";
 
 /// C1 query diagnostic: compiler artifacts carrying one structural capture
 /// occurrence identity disagree. Tooling must stop rather than choose one.
@@ -406,15 +404,23 @@ impl GeneratedCaptureQuery {
                     }
                 };
                 if source_map.is_none() {
-                    issues.push(GeneratedCaptureQueryIssue {
-                        code: GENERATED_CAPTURE_SOURCE_UNAVAILABLE_CODE,
-                        message: format!(
-                            "[C0910] generated capture '{}' in node {} has no exact source map; its typed descriptor remains available through the compiler capture query, but source hover and navigation are unavailable",
-                            descriptor.name,
-                            origin.render_path(),
-                        ),
-                        anchor: application,
-                    });
+                    // ADR-009 E2 #18 slice 5 (Part B): post-U03 deletion, the
+                    // source-string reparse route was the SOLE producer of a
+                    // validated capture with no structural source map. A missing
+                    // source map here is now an INVARIANT VIOLATION, not an honest
+                    // degraded-mode state — surface it LOUDLY through the same
+                    // poison path the sibling evidence-gap failures above use (a
+                    // [C0911] conflict quarantine that stops tooling from treating
+                    // the capture as an ordinary rename), NEVER a silent
+                    // pass-through and NEVER a degraded descriptor view.
+                    accumulator.poison(
+                        occurrence_identity,
+                        source_map,
+                        application,
+                        "generated capture with no source map post-U03: structural source-map validation failed"
+                            .to_string(),
+                    );
+                    continue;
                 }
                 let view = GeneratedCaptureDescriptorView {
                     identity: identity.clone(),

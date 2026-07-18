@@ -217,12 +217,11 @@ print(Widget_label())
 // lands in companion B (post-deletion, where C0929 actually fires), the
 // replace-module twin of the extend-side d12 successor.
 
-// ADR-009 E2 #18 (slice 1) — the TYPED `replace module` route: a
-// `__ComptimeItemFragment` (from `item_fn`) reaches the directive WITHOUT a
-// source/JSON string, is built into a `CheckedModule` (provenance-stamped,
-// hygienic exports), and installs + runs identically to the legacy
-// source-string route above (`replace_module_from_source_string_replaces_items`
-// — the D6 parity control that must stay green).
+// ADR-009 E2 #18 — the TYPED `replace module` route: a `__CheckedItem` (from
+// `item_fn`) reaches the directive WITHOUT a source/JSON string, is built into a
+// `CheckedModule` (provenance-stamped, hygienic exports), and installs + runs.
+// (Slice 5 deleted the legacy source-string route + its parity test; this is now
+// the only `replace module` transport.)
 
 #[test]
 fn replace_module_typed_fragment_installs_and_runs() {

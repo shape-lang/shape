@@ -705,8 +705,8 @@ impl BytecodeCompiler {
         // ADR-009 E2 #18 (slice 5, Part A): a block-form `replace body { ... }`
         // body is known at COMPILE time — stash it in the per-run carrier store
         // and emit its typed INDEX (`__emit_replace_body_checked(index)`) instead
-        // of `serialize_directive_payload` -> a JSON source string. No reparse; the
-        // U03 JSON transport is deleted in Part B.
+        // of `serialize_directive_payload` -> a JSON source string. No reparse;
+        // slice 5 deleted the U03 JSON body transport.
         let index = super::comptime_builtins::push_comptime_replace_body(body.to_vec());
         self.emit_comptime_internal_call(
             "__emit_replace_body_checked",
@@ -5355,12 +5355,6 @@ impl BytecodeCompiler {
                 super::comptime_builtins::ComptimeDirective::RemoveTarget => {
                     outcome.removed = true;
                     break;
-                }
-                super::comptime_builtins::ComptimeDirective::ReplaceModule { items } => {
-                    // LEGACY (U03) route: raw source/JSON-reparsed items applied
-                    // directly. Unchanged until the slice-5 deletion.
-                    *module_items = items;
-                    outcome.replaced = true;
                 }
                 super::comptime_builtins::ComptimeDirective::ReplaceModuleChecked { items } => {
                     // ADR-009 E2 #18 (slice 1) TYPED route: build the

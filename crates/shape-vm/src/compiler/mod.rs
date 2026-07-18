@@ -66,7 +66,7 @@ pub(crate) mod comptime_builtins;
 // `BytecodeCompiler::generated_symbol_query()`.
 pub use comptime_builtins::capture_plan::{
     CaptureSiteRole, GENERATED_CAPTURE_ARTIFACT_CONFLICT_CODE,
-    GENERATED_CAPTURE_SOURCE_UNAVAILABLE_CODE, GeneratedCaptureBindingIdentity,
+    GeneratedCaptureBindingIdentity,
     GeneratedCaptureDescriptorView, GeneratedCaptureOccurrenceIdentity, GeneratedCapturePosition,
     GeneratedCaptureQuery, GeneratedCaptureQueryIssue, GeneratedCaptureSemanticType,
     GeneratedCaptureSite, GeneratedCaptureSlot, GeneratedCaptureSourceMap,

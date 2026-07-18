@@ -107,24 +107,19 @@ pub(crate) enum ComptimeDirective {
     ReplaceBody {
         body: Vec<shape_ast::ast::Statement>,
     },
-    ReplaceModule {
-        items: Vec<shape_ast::ast::Item>,
-    },
-    /// ADR-009 E2 #18 (slice 1): the TYPED `replace module` route. Same effect
-    /// as `ReplaceModule` (replace a module target's body), but the items
-    /// arrived from a typed `__ComptimeItemFragment` — no source/JSON string
-    /// ever existed — and the module-target consumer routes them through
+    /// ADR-009 E2 #18: the `replace module` route. Its items arrive from a typed
+    /// generation carrier (`item_fn` -> `__CheckedItem`) — no source/JSON string
+    /// ever exists — and the module-target consumer routes them through
     /// `build_checked_module` (generated-provenance stamp + hygienic export
-    /// reservation), producing a `comptime_fragments::CheckedModule`. Carried as
-    /// a DISTINCT variant so the legacy string route stays byte-for-byte
-    /// unchanged until the slice-5 deletion removes it whole (E2-D8 staging;
-    /// NOT a bridge — the two paths never convert into one another).
+    /// reservation), producing a `comptime_fragments::CheckedModule`. (Slice 5
+    /// deleted the legacy source-string `ReplaceModule` sibling this staged
+    /// alongside; this is now the sole `replace module` directive.)
     ReplaceModuleChecked {
         items: Vec<shape_ast::ast::Item>,
     },
     /// §4.5.7: ADD generated items at the annotated item's module scope. Unlike
-    /// `ReplaceModule` (which is only valid on a module target and replaces its
-    /// body), `ExtendItems` is additive and valid on type/function/module
+    /// `ReplaceModuleChecked` (which is only valid on a module target and replaces
+    /// its body), `ExtendItems` is additive and valid on type/function/module
     /// targets: the parsed items are registered + compiled alongside the
     /// existing program.
     ExtendItems {
@@ -168,8 +163,8 @@ thread_local! {
     /// compile-populated stash before the VM reads it. Indices start fresh per
     /// handler run, so the pre-pass/pass-2 double-compile never leaks a stale
     /// body across runs; the read clones, leaving the store intact until the next
-    /// per-run clear. Replaces the U03 JSON transport (`serialize_directive_payload`
-    /// -> `parse_function_body_payload`), deleted in Part B.
+    /// per-run clear. Replaced the U03 JSON body transport (`parse_function_body_payload`),
+    /// which slice 5 deleted whole.
     static COMPTIME_REPLACE_BODIES: RefCell<Vec<Vec<shape_ast::ast::Statement>>> =
         const { RefCell::new(Vec::new()) };
     /// True while the §4.5.1 whole-program pre-pass speculatively runs a
@@ -379,79 +374,6 @@ fn type_annotation_from_string_or_type_ref_slot(
     parse_type_annotation_payload(&source)
 }
 
-#[allow(dead_code)] // E2-D10 staging: dead until the slice-5 U07 deletion.
-fn type_source_from_string_or_type_ref_slot(
-    slot: &KindedSlot,
-    builtin_name: &str,
-) -> Result<String, String> {
-    if let Some(payload) = slot.as_str() {
-        parse_type_annotation_payload(payload)?;
-        return Ok(payload.to_string());
-    }
-    if slot.kind() != NativeKind::Ptr(HeapKind::TypedObject) {
-        return Err(format!(
-            "{builtin_name} expects a string type payload or __ComptimeTypeRef value, got {:?}",
-            slot.kind()
-        ));
-    }
-    let storage = slot
-        .as_typed_object_storage()
-        .ok_or_else(|| format!("{builtin_name} expects a non-null __ComptimeTypeRef value"))?;
-    let schema = shape_runtime::type_schema::lookup_schema_by_id_public(storage.schema_id as u32)
-        .ok_or_else(|| {
-        format!(
-            "{builtin_name} could not resolve typed-object schema id {}",
-            storage.schema_id
-        )
-    })?;
-    if schema.name != "__ComptimeTypeRef" {
-        return Err(format!(
-            "{builtin_name} expects __ComptimeTypeRef, got '{}'",
-            schema.name
-        ));
-    }
-    let source = string_field_from_typed_object(storage, &schema, "source")?;
-    parse_type_annotation_payload(&source)?;
-    Ok(source)
-}
-
-fn parse_function_body_payload(payload: &str) -> Result<Vec<shape_ast::ast::Statement>, String> {
-    if let Ok(parsed) = serde_json::from_str::<Vec<shape_ast::ast::Statement>>(payload) {
-        return Ok(parsed);
-    }
-
-    // Fallback for older callers that still pass source text.
-    let snippet = format!("fn __body_probe() {{ {} }}", payload);
-    let program = shape_ast::parse_program(&snippet)
-        .map_err(|e| format!("invalid replacement body payload: {}", e))?;
-
-    let maybe_body = program.items.into_iter().find_map(|item| match item {
-        shape_ast::ast::Item::Function(func, _) => Some(func.body),
-        _ => None,
-    });
-
-    maybe_body.ok_or_else(|| "could not parse replacement function body payload".to_string())
-}
-
-fn parse_module_items_payload(payload: &str) -> Result<Vec<shape_ast::ast::Item>, String> {
-    if let Ok(parsed) = serde_json::from_str::<Vec<shape_ast::ast::Item>>(payload) {
-        return Ok(parsed);
-    }
-
-    let snippet = format!("mod __module_probe__ {{ {} }}", payload);
-    let program = shape_ast::parse_program(&snippet)
-        .map_err(|e| format!("invalid replacement module payload: {}", e))?;
-
-    let maybe_items = program.items.into_iter().find_map(|item| match item {
-        shape_ast::ast::Item::Module(module, _) if module.name == "__module_probe__" => {
-            Some(module.items)
-        }
-        _ => None,
-    });
-
-    maybe_items.ok_or_else(|| "could not parse replacement module payload".to_string())
-}
-
 fn heap_value_from_typed_object_slot(kinded: KindedSlot) -> HeapValue {
     let ptr = kinded.raw() as *const shape_value::heap_value::TypedObjectStorage;
     // SAFETY: `typed_object_for_named_schema` returns a live TypedObjectStorage
@@ -515,93 +437,10 @@ fn is_valid_generated_function_name(name: &str) -> bool {
         && chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
 }
 
-#[allow(dead_code)] // E2-D10 staging: dead until the slice-5 U07 deletion.
-fn literal_fragment_fields_from_slot(
-    slot: &KindedSlot,
-    builtin_name: &str,
-) -> Result<Vec<(&'static str, KindedSlot)>, String> {
-    let mut fields = vec![
-        ("literal_string", nb_str("")),
-        ("literal_int", KindedSlot::from_int(0)),
-        ("literal_number", KindedSlot::from_number(0.0)),
-        ("literal_bool", KindedSlot::from_bool(false)),
-    ];
-    let kind = if let Some(value) = slot.as_str() {
-        fields[0] = ("literal_string", nb_str(value));
-        "string"
-    } else if let Some(value) = slot.as_i64() {
-        fields[1] = ("literal_int", KindedSlot::from_int(value));
-        "int"
-    } else if let Some(value) = slot.as_f64() {
-        if !value.is_finite() {
-            return Err(format!(
-                "{builtin_name} only supports finite numeric literals in ItemFragment values"
-            ));
-        }
-        fields[2] = ("literal_number", KindedSlot::from_number(value));
-        "number"
-    } else if let Some(value) = slot.as_bool() {
-        fields[3] = ("literal_bool", KindedSlot::from_bool(value));
-        "bool"
-    } else {
-        return Err(format!(
-            "{builtin_name} only supports string, int, number, or bool literal return values; got {:?}",
-            slot.kind()
-        ));
-    };
-    fields.insert(0, ("literal_kind", nb_str(kind)));
-    Ok(fields)
-}
-
-fn literal_expr_from_fragment(
-    storage: &TypedObjectStorage,
-    schema: &shape_runtime::type_schema::TypeSchema,
-) -> Result<shape_ast::ast::Expr, String> {
-    use shape_ast::ast::{Expr, Literal, Span};
-
-    let kind = string_field_from_typed_object(storage, schema, "literal_kind")?;
-    let literal = match kind.as_str() {
-        "string" => Literal::String(string_field_from_typed_object(
-            storage,
-            schema,
-            "literal_string",
-        )?),
-        "int" => {
-            let slot = field_slot_from_typed_object(storage, schema, "literal_int")?;
-            Literal::Int(
-                slot.as_i64()
-                    .ok_or_else(|| "ItemFragment.literal_int is not an int".to_string())?,
-            )
-        }
-        "number" => {
-            let slot = field_slot_from_typed_object(storage, schema, "literal_number")?;
-            let value = slot
-                .as_f64()
-                .ok_or_else(|| "ItemFragment.literal_number is not a number".to_string())?;
-            if !value.is_finite() {
-                return Err("ItemFragment.literal_number must be finite".to_string());
-            }
-            Literal::Number(value)
-        }
-        "bool" => {
-            let slot = field_slot_from_typed_object(storage, schema, "literal_bool")?;
-            Literal::Bool(
-                slot.as_bool()
-                    .ok_or_else(|| "ItemFragment.literal_bool is not a bool".to_string())?,
-            )
-        }
-        other => {
-            return Err(format!("unsupported ItemFragment literal kind '{}'", other));
-        }
-    };
-    Ok(Expr::Literal(literal, Span::default()))
-}
-
 /// ADR-009 E2 #18 (slice 2): a literal value slot -> an `Expr::Literal`,
-/// DIRECTLY — the typed replacement for the `__ComptimeItemFragment` sentinel
-/// encode/decode (`literal_fragment_fields_from_slot` +
-/// `literal_expr_from_fragment`). No `literal_kind` discriminator, no parallel
-/// sentinel fields: the slot's runtime kind selects the literal.
+/// DIRECTLY. No `literal_kind` discriminator, no parallel sentinel fields: the
+/// slot's runtime kind selects the literal. (Slice 5 deleted the
+/// `__ComptimeItemFragment` sentinel encode/decode this superseded.)
 fn literal_expr_from_slot(slot: &KindedSlot, builtin_name: &str) -> Result<shape_ast::ast::Expr, String> {
     use shape_ast::ast::{Expr, Literal, Span};
 
@@ -628,14 +467,13 @@ fn literal_expr_from_slot(slot: &KindedSlot, builtin_name: &str) -> Result<shape
 }
 
 /// ADR-009 E2 #18 (slice 2): build the generated free-function `Item` DIRECTLY
-/// from `item_fn`'s raw args (E2-D10) — the typed replacement for the
+/// from `item_fn`'s raw args (E2-D10). The typed return comes from the raw
+/// return-type slot and the body from the value slot; no sentinel fields and no
+/// source/JSON string participate. (Slice 5 deleted the
 /// `build_function_item_fragment` -> `function_item_from_fragment` sentinel
-/// round-trip (both retained, dead-but-present, until the slice-5 U07 deletion).
-/// The typed return comes from the raw return-type slot and the body from the
-/// value slot; no sentinel fields and no source/JSON string participate. Spans
-/// are `Span::default()` scaffolding — the directive consumer's shared check
-/// sequence (`check_generated_function_item`) re-bases them to the real
-/// application anchor before the decl is reserved.
+/// round-trip this replaced.) Spans are `Span::default()` scaffolding — the
+/// directive consumer's shared check sequence (`check_generated_function_item`)
+/// re-bases them to the real application anchor before the decl is reserved.
 fn build_function_item(
     name: &str,
     return_type_slot: &KindedSlot,
@@ -825,8 +663,8 @@ fn build_extend_method_item(
 /// decoded by the SAME `literal_expr_from_slot` authority `item_fn` uses (slice 2)
 /// — no second literal decoder, no source text, no f-string template. This is the
 /// literal-body sibling of `build_extend_method_item`: it closes the migration gap
-/// for the `extend (f"…{ <literal> }…")` fixtures that generate a CONSTANT method
-/// body (e.g. `method answer() -> int { 42 }`), which the template producer
+/// for the retired `extend (f"…{ <literal> }…")` fixtures that generate a CONSTANT
+/// method body (e.g. `method answer() -> int { 42 }`), which the template producer
 /// (self-field interpolation only) cannot express. Both producers share the method
 /// + `Item::Extend` assembly (`build_extend_item_with_method_body`) and both flow
 /// to the same generic `Item::Extend` materialization; the body expr is the only
@@ -905,146 +743,37 @@ fn build_extend_item_with_method_body(
     ))
 }
 
-#[allow(dead_code)] // E2-D10 staging: dead until the slice-5 U07 deletion.
-fn type_ref_slot_from_string_or_type_ref_slot(
-    slot: &KindedSlot,
-    builtin_name: &str,
-) -> Result<KindedSlot, String> {
-    if let Some(source) = slot.as_str() {
-        parse_type_annotation_payload(source)?;
-        return Ok(super::comptime_target::build_type_ref_descriptor(
-            source, None,
-        ));
-    }
-    type_annotation_from_string_or_type_ref_slot(slot, builtin_name)?;
-    Ok(slot.clone())
-}
-
-// ADR-009 E2-D10 / E2-D8 staging: `item_fn` moved to the typed `CheckedItem`
-// carrier (`build_function_item`), so the `__ComptimeItemFragment` sentinel
-// builder + its exclusive callees below are now unreached. They are RETAINED
-// byte-unchanged and marked dead until the slice-5 U07 deletion removes them
-// whole; `#[allow(dead_code)]` is the staging annotation, not a rename.
-#[allow(dead_code)]
-fn build_function_item_fragment(
-    name: &str,
-    return_type_slot: &KindedSlot,
-    value: &KindedSlot,
-) -> Result<HeapValue, String> {
-    if !is_valid_generated_function_name(name) {
-        return Err(format!(
-            "item_fn expected a valid generated free-function name, got '{}'",
-            name
-        ));
-    }
-    let return_type = type_source_from_string_or_type_ref_slot(return_type_slot, "item_fn")?;
-    let return_type_ref = type_ref_slot_from_string_or_type_ref_slot(return_type_slot, "item_fn")?;
-    let literal_fields = literal_fragment_fields_from_slot(value, "item_fn")?;
-
-    let mut fields = vec![
-        ("kind", nb_str("function")),
-        ("name", nb_str(name)),
-        ("return_type", nb_str(return_type.as_str())),
-        ("return_type_ref", return_type_ref),
-    ];
-    fields.extend(literal_fields);
-    let fragment = typed_object_for_named_schema("__ComptimeItemFragment", &fields);
-    Ok(heap_value_from_typed_object_slot(fragment))
-}
-
-fn function_item_from_fragment(
-    storage: &TypedObjectStorage,
-    schema: &shape_runtime::type_schema::TypeSchema,
-) -> Result<shape_ast::ast::Item, String> {
-    use shape_ast::ast::{FunctionDef, Item, Span, Statement};
-
-    let kind = string_field_from_typed_object(storage, schema, "kind")?;
-    if kind != "function" {
-        return Err(format!(
-            "unsupported ItemFragment kind '{}'; only 'function' is supported",
-            kind
-        ));
-    }
-    let name = string_field_from_typed_object(storage, schema, "name")?;
-    if !is_valid_generated_function_name(&name) {
-        return Err(format!(
-            "ItemFragment function name '{}' is not a valid Shape identifier",
-            name
-        ));
-    }
-    let return_type_ref = field_slot_from_typed_object(storage, schema, "return_type_ref")?;
-    let return_type =
-        type_annotation_from_string_or_type_ref_slot(&return_type_ref, "ItemFragment.return_type")?;
-    let expr = literal_expr_from_fragment(storage, schema)?;
-
-    // ADR-009 D1 (S3): the spans below are mini-VM scaffolding — this
-    // builder runs inside comptime execution, where no application anchor
-    // exists yet. The directive-consumption points
-    // (`materialize_computed_comptime_extends` /
-    // `apply_comptime_extend_items`) re-base every decl-level span to the
-    // real application anchor via `anchor_generated_function_decl` BEFORE
-    // the declaration is reserved or registered, so no Span::default()
-    // survives onto a registered generated declaration (Decision 68).
-    Ok(Item::Function(
-        FunctionDef {
-            name,
-            name_span: Span::default(),
-            declaring_module_path: None,
-            doc_comment: None,
-            type_params: None,
-            params: Vec::new(),
-            return_type: Some(return_type),
-            where_clause: None,
-            body: vec![Statement::Expression(expr, Span::default())],
-            annotations: Vec::new(),
-            is_async: false,
-            is_comptime: false,
-        },
-        Span::default(),
-    ))
-}
-
+/// ADR-009 E2 #18 (slice 5): resolve a typed generation carrier to AST items —
+/// `__CheckedItem`-ONLY. The source-string `extend`/`replace module` generation
+/// route (U03) was deleted this slice; a non-carrier slot (a source string, any
+/// other typed object, or a non-object) is rejected with the named `[C0929]`
+/// diagnostic naming the typed alternatives.
+///
+/// HONEST-NAMING caveat (same pre-existing infra gap as C0927/C0928): `[C0929]`
+/// is an UNCODED STRING TAG prefixed into the `Err(String)` message, NOT a
+/// registered diagnostic code — a comptime builtin has no path to emit a coded
+/// diagnostic. Minting it as a real code is the shared C092x follow-up on record.
 fn parse_extend_items_slot(slot: &KindedSlot) -> Result<Vec<shape_ast::ast::Item>, String> {
-    if let Some(payload) = slot.as_str() {
-        return parse_module_items_payload(payload);
-    }
+    const C0929_REJECTION: &str = "[C0929] the source-string `extend`/`replace module` generation route has been removed; pass a typed generation carrier — item_fn(name, ret, value) for a free function, extend_method(...)/extend_method_literal(...) for a method, or use the direct `extend target { … }` statement";
 
-    let storage = slot.as_typed_object_storage().ok_or_else(|| {
-        format!(
-            "__emit_extend_items expects a source string, __CheckedItem, or __ComptimeItemFragment, got {:?}",
-            slot.kind()
-        )
-    })?;
+    let Some(storage) = slot.as_typed_object_storage() else {
+        return Err(C0929_REJECTION.to_string());
+    };
     let schema = shape_runtime::type_schema::lookup_schema_by_id_public(storage.schema_id as u32)
-        .ok_or_else(|| {
-        format!(
-            "__emit_extend_items could not resolve typed-object schema id {}",
-            storage.schema_id
-        )
+        .ok_or_else(|| C0929_REJECTION.to_string())?;
+    if schema.name != "__CheckedItem" {
+        return Err(C0929_REJECTION.to_string());
+    }
+    // The TYPED route — a `__CheckedItem` handle `item_fn` / `extend_method*`
+    // produced. Resolve its index back to the driver-side `CheckedItem` built
+    // during THIS comptime run, with no sentinel decode and no source/JSON string.
+    let index = field_slot_from_typed_object(storage, &schema, "index")?
+        .as_i64()
+        .ok_or_else(|| "__CheckedItem.index is not an int".to_string())?;
+    let checked = comptime_checked_item_at(index as usize).ok_or_else(|| {
+        format!("__CheckedItem index {index} is not live in this comptime execution")
     })?;
-    // ADR-009 E2 #18 (slice 2): the TYPED route — a `__CheckedItem` handle
-    // `item_fn` produced. Resolve its index back to the driver-side `CheckedItem`
-    // built during THIS comptime run, with no sentinel decode and no source/JSON
-    // string.
-    if schema.name == "__CheckedItem" {
-        let index = field_slot_from_typed_object(storage, &schema, "index")?
-            .as_i64()
-            .ok_or_else(|| "__CheckedItem.index is not an int".to_string())?;
-        let checked = comptime_checked_item_at(index as usize).ok_or_else(|| {
-            format!("__CheckedItem index {index} is not live in this comptime execution")
-        })?;
-        return Ok(vec![checked.into_item()]);
-    }
-    // LEGACY (U07 — dies WHOLE in slice 5): the `__ComptimeItemFragment` sentinel
-    // map. Byte-unchanged and now unreached (item_fn moved to CheckedItem); it
-    // survives beside the typed route per the E2-D8 staging until the deletion.
-    if schema.name != "__ComptimeItemFragment" {
-        return Err(format!(
-            "__emit_extend_items expects a source string, __CheckedItem, or __ComptimeItemFragment, got '{}'",
-            schema.name
-        ));
-    }
-    Ok(vec![function_item_from_fragment(storage, &schema)?])
+    Ok(vec![checked.into_item()])
 }
 
 /// Helper: create a string-kinded `KindedSlot` from a `&str`.
@@ -1297,7 +1026,7 @@ fn comptime_builtins_module_base(trait_impl_keys: HashSet<String>) -> ModuleExpo
         "item_fn",
         // E2-D10: this SURFACE (name + signature) survives E2 as the CheckedItem
         // constructor; its INTERNALS (the __ComptimeItemFragment schema + sentinel
-        // machinery) die in the slice-5 U07 deletion.
+        // machinery) were removed by the slice-5 U07 deletion.
         "Build a typed CheckedItem for a zero-arg generated free function",
         vec![
             shape_runtime::module_exports::ModuleParam {
@@ -1319,13 +1048,12 @@ fn comptime_builtins_module_base(trait_impl_keys: HashSet<String>) -> ModuleExpo
                 ..Default::default()
             },
         ],
-        // ADR-009 E2 #18 (slice 2, E2-D10): `item_fn` now yields the typed
-        // `__CheckedItem` carrier — a handle to a driver-side `CheckedItem` —
-        // instead of the `__ComptimeItemFragment` sentinel map. The builtin
-        // builds the AST `Item` directly (no sentinel fields, no source/JSON
-        // string), stashes it in the per-run `CheckedItem` store, and returns a
-        // handle carrying its index. The legacy fragment builders survive
-        // (dead-but-present) until the slice-5 U07 deletion.
+        // ADR-009 E2 #18 (slice 2, E2-D10): `item_fn` yields the typed
+        // `__CheckedItem` carrier — a handle to a driver-side `CheckedItem`. The
+        // builtin builds the AST `Item` directly (no sentinel fields, no
+        // source/JSON string), stashes it in the per-run `CheckedItem` store, and
+        // returns a handle carrying its index. (Slice 5 deleted the legacy
+        // `__ComptimeItemFragment` sentinel map + its fragment builders.)
         ConcreteType::OpaqueTypedObject("__CheckedItem".to_string()),
         |slots, _ctx| {
             if slots.len() != 3 {
@@ -1651,29 +1379,12 @@ fn comptime_builtins_module_base(trait_impl_keys: HashSet<String>) -> ModuleExpo
         },
     );
 
-    // Internal comptime directive: replace function body from serialized AST payload.
-    // __emit_replace_body(body_payload: string)
-    register_typed_fn_1::<_, Arc<String>>(
-        &mut module,
-        "__emit_replace_body",
-        "Internal: replace function body from AST payload",
-        "body_payload",
-        "string",
-        ConcreteType::Unit,
-        |payload, _ctx| {
-            let body = parse_function_body_payload(payload.as_str())?;
-            push_comptime_directive(ComptimeDirective::ReplaceBody { body })?;
-            Ok(TypedReturn::Concrete(ConcreteReturn::Unit))
-        },
-    );
-
-    // ADR-009 E2 #18 (slice 5, Part A): the TYPED block-form `replace body { ... }`
-    // carrier. The block-form emit stashes the Vec<Statement> at handler-COMPILE
-    // (COMPTIME_REPLACE_BODIES) and passes its INDEX here — no source/JSON string,
-    // no reparse. A SEPARATE builtin from `__emit_replace_body` (string) so a bare
-    // int index cannot collide with the expr-form's arbitrary payload; the legacy
-    // string builtin above + `parse_function_body_payload` die in Part B (they
-    // lose all callers once the block form routes here and the expr form rejects).
+    // ADR-009 E2 #18: the TYPED block-form `replace body { ... }` carrier — the
+    // ONLY replace-body transport. The block-form emit stashes the Vec<Statement>
+    // at handler-COMPILE (COMPTIME_REPLACE_BODIES) and passes its INDEX here — no
+    // source/JSON string, no reparse. (Slice 5 deleted the source-string
+    // `__emit_replace_body` builtin + `parse_function_body_payload`; the expr form
+    // `replace body (expr)` is rejected at compile with [C0928].)
     // __emit_replace_body_checked(index: int)
     register_typed_function(
         &mut module,
@@ -1704,20 +1415,17 @@ fn comptime_builtins_module_base(trait_impl_keys: HashSet<String>) -> ModuleExpo
         },
     );
 
-    // Internal comptime directive: replace module items. TWO complete paths
-    // (E2-D8 staging, ADR-009 E2 #18 slice 1). Slot-typed (`unknown`) so both
-    // reach it; the arm is selected by the slot's RUNTIME kind, never by a
-    // string round-trip:
-    //   - a legacy source/JSON `string` -> `parse_module_items_payload` ->
-    //     `ReplaceModule` (retained UNCHANGED until the slice-5 deletion);
-    //   - a typed `__ComptimeItemFragment` (e.g. `item_fn(...)`) ->
-    //     `ReplaceModuleChecked`. No source/JSON string ever materializes on
-    //     this path — the typed transport this slice adds.
+    // Internal comptime directive: replace module items from a typed generation
+    // carrier (`item_fn(...)` -> `__CheckedItem`). `parse_extend_items_slot`
+    // resolves it to AST items with no source/JSON string ever materializing, and
+    // the module-target consumer builds a provenance-stamped `CheckedModule`.
+    // (Slice 5 deleted the source-string arm + `parse_module_items_payload`; a
+    // source-string payload now rejects with the named [C0929] diagnostic.)
     // __emit_replace_module(module_payload)
     register_typed_function(
         &mut module,
         "__emit_replace_module",
-        "Internal: replace module items from a source/JSON payload (legacy) or a typed ItemFragment",
+        "Internal: replace module items from a typed generation carrier",
         vec![shape_runtime::module_exports::ModuleParam {
             name: "module_payload".to_string(),
             type_name: "unknown".to_string(),
@@ -1732,29 +1440,18 @@ fn comptime_builtins_module_base(trait_impl_keys: HashSet<String>) -> ModuleExpo
                     slots.len()
                 ));
             }
-            let slot = &slots[0];
-            if let Some(payload) = slot.as_str() {
-                // LEGACY (U03) source/JSON reparse — unchanged until slice 5.
-                let items = parse_module_items_payload(payload)?;
-                push_comptime_directive(ComptimeDirective::ReplaceModule { items })?;
-            } else {
-                // TYPED route: a `__ComptimeItemFragment`. `parse_extend_items_slot`
-                // here takes ONLY its fragment branch (the string branch is
-                // excluded above), converting the fragment directly to AST items
-                // with no source/JSON string in between.
-                let items = parse_extend_items_slot(slot)?;
-                push_comptime_directive(ComptimeDirective::ReplaceModuleChecked { items })?;
-            }
+            let items = parse_extend_items_slot(&slots[0])?;
+            push_comptime_directive(ComptimeDirective::ReplaceModuleChecked { items })?;
             Ok(TypedReturn::Concrete(ConcreteReturn::Unit))
         },
     );
 
-    // Internal comptime directive: ADD generated items from source or typed
-    // ItemFragment payload (§4.5.7 `extend (expr)`).
+    // Internal comptime directive: ADD generated items from a typed generation
+    // carrier (§4.5.7 `extend (expr)`; slice 5 deleted the source-string arm).
     register_typed_function(
         &mut module,
         "__emit_extend_items",
-        "Internal: add generated module items from source or typed ItemFragment payload",
+        "Internal: add generated module items from a typed generation carrier",
         vec![shape_runtime::module_exports::ModuleParam {
             name: "items_payload".to_string(),
             type_name: "unknown".to_string(),

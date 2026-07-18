@@ -1913,7 +1913,7 @@ impl BytecodeCompiler {
     /// shape the top-level pipeline uses.
     /// Comptime-excellence §4.5.1 whole-program pre-pass.
     ///
-    /// A computed `extend (f"fn ...")` directive inside a comptime annotation
+    /// A computed `extend (item_fn(...))` directive inside a comptime annotation
     /// handler only materializes its generated free function during pass-2,
     /// when the annotated *type* is compiled — which is *after* the analyzer
     /// and after user function bodies resolve their call sites. So a program
@@ -1922,8 +1922,9 @@ impl BytecodeCompiler {
     /// generated `User_json_schema` was invisible to every earlier phase.
     ///
     /// This pre-pass runs the type-targeting comptime handlers *before* the
-    /// analyzer, parses the generated source, and returns the generated free
-    /// functions so the driver can insert them as ordinary program items. From
+    /// analyzer, materializes the generated declarations, and returns the
+    /// generated free functions so the driver can insert them as ordinary program
+    /// items. From
     /// there they flow through function registration, analysis, inference and
     /// pass-2 body compilation exactly like hand-written functions — visible to
     /// `fn main()` and to every user body.
@@ -3190,8 +3191,7 @@ impl BytecodeCompiler {
                         "`replace body` directives are only valid when compiling function targets",
                     ));
                 }
-                super::comptime_builtins::ComptimeDirective::ReplaceModule { .. }
-                | super::comptime_builtins::ComptimeDirective::ReplaceModuleChecked { .. } => {
+                super::comptime_builtins::ComptimeDirective::ReplaceModuleChecked { .. } => {
                     return Err(Self::directive_error(
                         "`replace module` directives are only valid when compiling module targets",
                     ));
@@ -3425,8 +3425,7 @@ impl BytecodeCompiler {
                     *pending_original_body_shadow = Some(pending);
                     *replacement_body_origin = Some(replacement_origin);
                 }
-                super::comptime_builtins::ComptimeDirective::ReplaceModule { .. }
-                | super::comptime_builtins::ComptimeDirective::ReplaceModuleChecked { .. } => {
+                super::comptime_builtins::ComptimeDirective::ReplaceModuleChecked { .. } => {
                     return Err(Self::directive_error(
                         "`replace module` directives are only valid when compiling module targets",
                     ));
