@@ -123,6 +123,45 @@ fn closure_free_replace_body_stays_pass2_and_reserves_no_shadow() {
     );
 }
 
+/// SCOPING CONTROL — a CONST-template function-target `replace body` edit stays
+/// a pass-2 concern even when its replacement is closure-bearing: the pre-pass
+/// runs the handler with unbound consts (`&[]`), so a const-specialization-
+/// dependent body could materialize differently (or not at all) in the
+/// single-program pre-analysis view (slice-0 §"Scoping boundary surfaced"). The
+/// `const_free` guard excludes it, so NO shadow is reserved by the pre-pass —
+/// witnessing that the const-dependent route is NOT pre-analysis-materialized.
+/// (The compile result is not asserted: whether an unspecialized const template
+/// compiles is a separate, pre-existing concern; the invariant this slice owns is
+/// that its pre-pass never materializes a const-dependent edit.)
+#[test]
+fn const_template_replace_body_is_not_pre_analysis_materialized() {
+    let program = shape_ast::parse_program(&format!(
+        r#"
+annotation edit_const() {{
+  targets: [function]
+  comptime post(target, ctx) {{
+    replace body {{ {CLOSURE_BEARING_REPLACEMENT} }}
+  }}
+}}
+
+@edit_const()
+fn probe(const x: int) -> int {{ x }}
+"#
+    ))
+    .expect("const-template fixture parses");
+    let mut compiler = BytecodeCompiler::new();
+    let shadow = compiler.original_body_shadow_name("probe");
+
+    // Result intentionally ignored — see the doc comment.
+    let _ = compiler.compile_in_place(&program);
+
+    assert!(
+        !compiler.generated_symbols.contains_name(&shadow),
+        "a const-template replace-body edit is excluded by the const_free guard, so the pre-pass \
+         reserves no shadow for it (it stays a pass-2 concern)"
+    );
+}
+
 /// ROLLBACK / ATOMICITY PIN (pairs with the reserve pin above — same
 /// closure-bearing shape: on success the shadow IS reserved, on failure it is
 /// NOT, so the reservation is transaction-scoped). A closure-bearing replace-body
