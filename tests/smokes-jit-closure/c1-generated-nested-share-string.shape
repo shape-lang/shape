@@ -2,13 +2,13 @@
 annotation add_label() {
   targets: [type]
   comptime post(target, ctx) {
-    extend ("extend Job { method label() -> string { var text = \"a\"
+    extend target { method label() -> string { var text = "a"
       let outer = |; share text| {
         let inner = |suffix: string; share text| { text = text + suffix
           text }
-        inner(\"bb\")
+        inner("bb")
         text }
-      outer() } }")
+      outer() } }
   }
 }
 

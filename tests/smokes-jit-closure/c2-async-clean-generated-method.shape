@@ -12,7 +12,7 @@ async fn tick() -> int { 0 }
 annotation add_run() {
   targets: [type]
   comptime post(target, ctx) {
-    extend (f"extend {target.name} \{ async method run() -> int \{ let c: int = 1; await tick(); c \} \}")
+    extend target { async method run() -> int { let c: int = 1; await tick(); c } }
   }
 }
 

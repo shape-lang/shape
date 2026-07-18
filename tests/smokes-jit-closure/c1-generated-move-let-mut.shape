@@ -2,10 +2,10 @@
 annotation add_answer() {
   targets: [type]
   comptime post(target, ctx) {
-    extend ("extend Job { method answer() -> int { let mut total = 40
+    extend target { method answer() -> int { let mut total = 40
       let worker = |; move total| { total = total + 2
         total }
-      worker() } }")
+      worker() } }
   }
 }
 

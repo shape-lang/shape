@@ -2,9 +2,9 @@
 annotation add_label() {
   targets: [type]
   comptime post(target, ctx) {
-    extend ("extend Job { method label() -> string { let label = \"shape\"
+    extend target { method label() -> string { let label = "shape"
       let worker = |; move label| label
-      worker() } }")
+      worker() } }
   }
 }
 
