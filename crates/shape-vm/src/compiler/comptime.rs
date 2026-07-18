@@ -300,6 +300,25 @@ const COMPTIME_BUILTIN_FORWARDERS: &[(
     // First typed generation fragment surface. `item_fn(...)` returns a
     // typed fragment carrier accepted by `extend (expr)`.
     ("item_fn", 3, "item_fn", None, None, None),
+    // ADR-009 E2 #18 (slice 4.5, E2-Q2/B): `extend_method(...)` — the typed
+    // single-extend-method producer (arity 5), same carrier shape as item_fn
+    // (returns the `__CheckedItem` OpaqueTypedObject accepted by `extend (expr)`;
+    // no return-schema marker, no typed-carrier param schemas — forwarder params
+    // are unannotated and infer their type from the caller). Handler-scope
+    // resolution requires this forwarder row IN ADDITION to
+    // `comptime_builtins_module_base` registration — the second registration
+    // surface a comptime builtin needs, or `extend_method(...)` is `[C0001]
+    // Undefined function` in a handler.
+    ("extend_method", 5, "extend_method", None, None, None),
+    // ADR-009 E2 #18 (slice 5b-1): `extend_method_literal(...)` — the literal-body
+    // sibling of `extend_method` (arity 4: type_name, method_name, return_type,
+    // value). Same carrier shape (returns the `__CheckedItem` OpaqueTypedObject
+    // accepted by `extend (expr)`); its `value` literal is decoded by the same
+    // `literal_expr_from_slot` authority item_fn uses. Handler-scope resolution
+    // needs this forwarder row IN ADDITION to `comptime_builtins_module_base`
+    // registration, or `extend_method_literal(...)` is `[C0001] Undefined function`
+    // in a handler.
+    ("extend_method_literal", 4, "extend_method_literal", None, None, None),
     // Comptime-excellence §4.5.7.4 — `string_lit(s)` renders a computed string
     // as a Shape source literal for embedding into `extend (expr)` output.
     ("string_lit", 1, "string_lit", None, None, None),
@@ -2328,6 +2347,16 @@ pub(crate) fn execute_comptime_with_annotation_handler(
         }
     }
 
+    // ADR-009 E2 #18 (slice 5, Part A): clear the block-form `replace body`
+    // carrier store at handler-run ENTRY — BEFORE this handler is compiled below
+    // (its `replace body { ... }` statements stash into the store during that
+    // compile) and thus before its VM run reads them by index. Distinct from the
+    // pre-execute `clear_comptime_checked_items` (which clears item_fn's
+    // execute-populated store): the body stash is compile-populated, so a
+    // pre-execute clear would wipe it. Per-run clear ⇒ pre-pass and pass-2 each
+    // index a fresh store, no stale body leaks across the double compile.
+    super::comptime_builtins::clear_comptime_replace_bodies();
+
     let params: Vec<FunctionParameter> = handler_params
         .iter()
         .enumerate()
@@ -2636,6 +2665,9 @@ fn execute_in_runtime_with_module_bindings(
 
         super::comptime_builtins::clear_comptime_directives();
         super::comptime_builtins::clear_comptime_diagnostics();
+        // ADR-009 E2 #18 (slice 2): reset the `item_fn` carrier store so this
+        // run's `__CheckedItem` handles index a fresh store.
+        super::comptime_builtins::clear_comptime_checked_items();
         let value = vm.execute(None).map_err(|e| ShapeError::RuntimeError {
             message: format!("Comptime handler execution failed: {}", e),
             location: None,

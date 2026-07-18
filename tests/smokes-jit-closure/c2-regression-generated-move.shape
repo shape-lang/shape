@@ -8,9 +8,9 @@
 annotation add_answer() {
   targets: [type]
   comptime post(target, ctx) {
-    extend ("extend Job { method answer() -> int { let base = 100
+    extend target { method answer() -> int { let base = 100
       let worker = |; move base| base + 23
-      worker() } }")
+      worker() } }
   }
 }
 

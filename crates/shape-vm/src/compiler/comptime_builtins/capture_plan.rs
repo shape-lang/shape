@@ -65,7 +65,7 @@ pub(crate) use callable_semantics::*;
 pub(crate) use model::*;
 pub use query::{
     CaptureSiteRole, GENERATED_CAPTURE_ARTIFACT_CONFLICT_CODE,
-    GENERATED_CAPTURE_SOURCE_UNAVAILABLE_CODE, GeneratedCaptureBindingIdentity,
+    GeneratedCaptureBindingIdentity,
     GeneratedCaptureDescriptorView, GeneratedCaptureOccurrenceIdentity, GeneratedCapturePosition,
     GeneratedCaptureQuery, GeneratedCaptureQueryIssue, GeneratedCaptureSemanticType,
     GeneratedCaptureSite, GeneratedCaptureSlot, GeneratedCaptureSourceMap,

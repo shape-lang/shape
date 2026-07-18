@@ -458,6 +458,44 @@ not a bounded C2 patch. The public typed-builder surface
 annotation/`extend`/`replace body` pathway now routing through the validator. See
 the [rejected-design record](../defections.md).
 
+**CURRENT / VM+JIT - typed `CheckedItem`/`CheckedModule` generation, source
+reparsing DELETED (E2 `CheckedItem`/`CheckedModule` LANDED on `adr009/e2`,
+complete-pending-merge, ticket ADR009-E2 #18, legacy classes U03/U07).** Comptime
+declaration generation no longer produces or reparses Shape source strings.
+`replace module (expr)` carries a typed item carrier
+(`ComptimeDirective::ReplaceModuleChecked` = `CheckedModule`); `item_fn(name,
+ret, value)` mints a typed literal-body free function (`CheckedItem`); block-form
+`replace body` materializes pre-analysis through the internal C2 `CheckedBody`
+validator (which flipped the C0911 replace-body quarantine tripwire — an edited
+replace-body's closure capture is now published as a structural inference fact
+before analysis, not quarantined); and computed method bodies flow through
+`extend_method(...)` (a Dec-73 checked template → native f-string via the
+language's universal f-string parse, single formatter authority) or
+`extend_method_literal(...)` (literal method body, reusing `item_fn`'s
+`literal_expr_from_slot` verbatim). The old source-string routes are rejected at
+the boundary with two named diagnostics: `[C0928]` (expr-form `replace body
+(expr)`; use the block form) and `[C0929]` (the source-string
+`extend`/`replace module` generation route; pass a typed carrier —
+`item_fn`/`extend_method`/`extend_method_literal` or the direct `extend target {
+… }` statement). The whole closed-under-callers U03/U07 inventory was deleted in
+ONE commit (`cba541fb`: 11 symbols — the `__ComptimeItemFragment` schema, the
+`__body_probe`/`__module_probe__` reparsers, the fragment builders/readers, and
+the `__emit_replace_body`/`__emit_replace_module` string arms — with zero live
+refs afterward), only after parity + review (E2-D8). Shipped stdlib
+(`serde/derive`, `serde/serialize`, `llm/tools`) is 100% off the source-string
+arm — **E2-Q1-A totality MET**; `string_lit` has zero live stdlib callers.
+~89 test-fixture sites across 14 files + 9 `.shape` CLI fixtures were migrated to
+typed or direct-`extend` forms with original runtime assertions preserved. VM+JIT
+proven (`jit_c2_install_native`; the C1 fixture matrix 9/9 native incl. the async
+cell). Independent Opus review PASS, high confidence, 0 blocking / 2 LOW.
+Findings, capability gaps (free-fn non-literal bodies + annotation-decls-in-
+replaced-modules, both awaiting `quote item`/`quote module` on the E-track), the
+E2-D2 `__type_probe`-stays-E1/E5 inventory correction, and the E1 hand-off
+inventory (`__emit_extend`, `__emit_set_param_value`, `serialize_directive_payload`
+core, the `statements.rs` emit surface — E1 must not start until E2 merges) are in
+the [close report](typed-comptime/e2-close-report.md) + [slice-5
+report](typed-comptime/e2-slice5-report.md).
+
 **CURRENT / VM+JIT - applied type annotation generation**
 
 ```shape
@@ -921,11 +959,13 @@ The migration inventory identifies fourteen classes:
 
 1. Parsed AST serialized to JSON and parsed back into directives.
 2. Source/JSON type reparsing.
-3. Source/JSON body and module reparsing.
+3. Source/JSON body and module reparsing. **REMOVED (E2 #18, `adr009/e2`,
+   complete-pending-merge — U03).**
 4. String-backed `TypeRef` and `Any` descriptor fields.
 5. String-keyed type reflection and symbol rewriting.
 6. Parameters selected by spelling.
-7. String/sentinel `ItemFragment` encoding.
+7. String/sentinel `ItemFragment` encoding. **REMOVED (E2 #18, `adr009/e2`,
+   complete-pending-merge — U07).**
 8. `string_lit` source escaping.
 9. Helpers and annotations resolved by names after parsing.
 10. Unhygienic synthetic names and magic handler roles.

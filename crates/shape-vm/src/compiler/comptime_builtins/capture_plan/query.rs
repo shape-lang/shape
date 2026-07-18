@@ -3,9 +3,11 @@
 //! Capture identity comes only from the compiler-issued expansion origin and
 //! resolved slot carried by the compiler's capture pack. Source spans are presentation
 //! data: this module publishes them only when every span round-trips through
-//! a structural AST node in the caller's source program. Reparsed generated
-//! strings therefore remain represented as typed descriptors in the compiler
-//! query but never gain invented source locations.
+//! a structural AST node in the caller's source program. Post-U03-deletion the
+//! source-string reparse route that could produce an unmapped generated capture
+//! is gone, so a validated capture with no structural source map is an invariant
+//! violation — quarantined as a [C0911] conflict, never published with an
+//! invented source location.
 
 use crate::compiler::{BytecodeCompiler, SourceAnchor};
 use shape_ast::ast::{CaptureMode, Program};
@@ -25,10 +27,6 @@ pub use specialization::{
     GeneratedCaptureSpecializationIdentity,
 };
 use specialization::{normalize_semantic_presentations, specialization_for};
-
-/// C1 query diagnostic: a validated capture exists, but its generated AST
-/// offsets do not have an exact structural mapping into the source program.
-pub const GENERATED_CAPTURE_SOURCE_UNAVAILABLE_CODE: &str = "C0910";
 
 /// C1 query diagnostic: compiler artifacts carrying one structural capture
 /// occurrence identity disagree. Tooling must stop rather than choose one.
@@ -405,17 +403,18 @@ impl GeneratedCaptureQuery {
                         continue;
                     }
                 };
-                if source_map.is_none() {
-                    issues.push(GeneratedCaptureQueryIssue {
-                        code: GENERATED_CAPTURE_SOURCE_UNAVAILABLE_CODE,
-                        message: format!(
-                            "[C0910] generated capture '{}' in node {} has no exact source map; its typed descriptor remains available through the compiler capture query, but source hover and navigation are unavailable",
-                            descriptor.name,
-                            origin.render_path(),
-                        ),
-                        anchor: application,
-                    });
-                }
+                // ADR-009 E2 #18 slice 5 (Part B, fix-round): a generated capture
+                // with no structural source map is the NORMAL state for a non-extend
+                // route — a callable/closure capture or a `replace body` edit has no
+                // `extend Type { method }` statement for `source_map_for` to map to
+                // (`unique_direct_method` -> None). Such a capture is LISTED with full
+                // semantics; only its source hover/navigation is unavailable. The
+                // deleted U03 reparse route was NOT the sole producer of
+                // source_map==None (that reachability verdict was extend-route-scoped
+                // — REFUTED-in-part), so the earlier poison quarantine here wrongly
+                // dropped these legitimate captures. No issue is emitted (the [C0910]
+                // degraded-navigation code was removed with the U03 route); the
+                // view below carries source_map: None honestly.
                 let view = GeneratedCaptureDescriptorView {
                     identity: identity.clone(),
                     occurrence_identity: occurrence_identity.clone(),

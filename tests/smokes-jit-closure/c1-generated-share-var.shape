@@ -5,11 +5,11 @@
 annotation add_answer() {
   targets: [type]
   comptime post(target, ctx) {
-    extend ("extend Job { method answer() -> int { var total = 40
+    extend target { method answer() -> int { var total = 40
       let worker = |; share total| { total = total + 2
         total }
       worker()
-      total } }")
+      total } }
   }
 }
 

@@ -19,7 +19,7 @@
 annotation add_answer() {
   targets: [type]
   comptime post(target, ctx) {
-    extend (f"extend {target.name} \{ method answer() -> int \{ let worker = || 42; worker() \} \}")
+    extend target { method answer() -> int { let worker = || 42; worker() } }
   }
 }
 

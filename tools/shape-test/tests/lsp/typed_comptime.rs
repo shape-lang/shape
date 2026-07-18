@@ -809,7 +809,7 @@ fn completion_sees_generated_free_function_after_discovery() {
     let source = r#"annotation schema_of() {
     targets: [type]
     comptime post(target, ctx) {
-        extend (f"fn {target.name}_label() -> string \{ {string_lit("User schema")} \}")
+        extend (item_fn(f"{target.name}_label", "string", "User schema"))
     }
 }
 
@@ -840,7 +840,7 @@ fn generated_free_function_visible_to_later_source_runs_identically_in_vm_and_ji
     let source = r#"annotation schema_of() {
     targets: [type]
     comptime post(target, ctx) {
-        extend (f"fn {target.name}_answer() -> int \{ 21 \}")
+        extend (item_fn(f"{target.name}_answer", "int", 21))
     }
 }
 

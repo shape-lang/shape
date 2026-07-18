@@ -64,7 +64,13 @@ pub annotation llm_tool(description) {
             }
         }
         let schema = f"\{\"name\": \"{target.name}\", \"description\": \"{description}\", \"parameters\": \{\"type\": \"object\", \"properties\": \{{props}\}, \"required\": [{required}]\}\}"
-        extend (f"fn {target.name}_tool_def() -> string \{ {string_lit(schema)} \}")
+        // Emit `fn {fn}_tool_def() -> string { "<schema>" }` via the TYPED
+        // checked-item route (ADR-009 E2 #18 slice 4): `item_fn` builds the AST
+        // function directly — the computed `schema` becomes the returned string
+        // LITERAL with no source text and no `string_lit` escape round-trip.
+        // Byte-identical output to the retired
+        // `extend (f"fn ... { string_lit(schema) } ")` source-string form.
+        extend (item_fn(f"{target.name}_tool_def", "string", schema))
     }
 }
 

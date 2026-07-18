@@ -20,7 +20,11 @@ use shape_runtime::typed_module_exports::{
     ConcreteReturn, ConcreteType, TypedReturn, register_typed_function,
 };
 use shape_value::heap_value::{HeapKind, HeapValue, TypedObjectStorage};
+use shape_value::v2::string_obj::StringObj;
+use shape_value::v2::typed_array::{ELEM_TYPE_STRING, TypedArray, read_elem_type};
 use shape_value::{KindedSlot, NativeKind};
+// ADR-009 E2 #18 (slice 2): the typed `item_fn` carrier (E2-D10).
+use super::comptime_fragments::CheckedItem;
 use std::cell::RefCell;
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -103,12 +107,19 @@ pub(crate) enum ComptimeDirective {
     ReplaceBody {
         body: Vec<shape_ast::ast::Statement>,
     },
-    ReplaceModule {
+    /// ADR-009 E2 #18: the `replace module` route. Its items arrive from a typed
+    /// generation carrier (`item_fn` -> `__CheckedItem`) — no source/JSON string
+    /// ever exists — and the module-target consumer routes them through
+    /// `build_checked_module` (generated-provenance stamp + hygienic export
+    /// reservation), producing a `comptime_fragments::CheckedModule`. (Slice 5
+    /// deleted the legacy source-string `ReplaceModule` sibling this staged
+    /// alongside; this is now the sole `replace module` directive.)
+    ReplaceModuleChecked {
         items: Vec<shape_ast::ast::Item>,
     },
     /// §4.5.7: ADD generated items at the annotated item's module scope. Unlike
-    /// `ReplaceModule` (which is only valid on a module target and replaces its
-    /// body), `ExtendItems` is additive and valid on type/function/module
+    /// `ReplaceModuleChecked` (which is only valid on a module target and replaces
+    /// its body), `ExtendItems` is additive and valid on type/function/module
     /// targets: the parsed items are registered + compiled alongside the
     /// existing program.
     ExtendItems {
@@ -129,6 +140,33 @@ pub(crate) struct ComptimeDiagnostic {
 thread_local! {
     static COMPTIME_DIRECTIVES: RefCell<Vec<ComptimeDirective>> = const { RefCell::new(Vec::new()) };
     static COMPTIME_DIAGNOSTICS: RefCell<Vec<ComptimeDiagnostic>> = const { RefCell::new(Vec::new()) };
+    /// ADR-009 E2 #18 (slice 2): the `item_fn` typed-carrier store (E2-D10). A
+    /// comptime builtin has no `&mut` compiler access, so `item_fn` cannot hand
+    /// the driver an AST `Item` through a compiler table — it stashes the built
+    /// `CheckedItem` here and returns a `__CheckedItem` handle carrying its
+    /// INDEX; the consumer (`parse_extend_items_slot`, running inside
+    /// `__emit_extend_items` / `__emit_replace_module` in the SAME comptime
+    /// execution) resolves the index back to the item. Cleared before each
+    /// handler run alongside `COMPTIME_DIRECTIVES` (`comptime.rs`), so indices
+    /// start fresh per execution and never leak across runs; the read clones,
+    /// leaving the store intact until that clear.
+    static COMPTIME_CHECKED_ITEMS: RefCell<Vec<CheckedItem>> = const { RefCell::new(Vec::new()) };
+    /// ADR-009 E2 #18 (slice 5, Part A): the block-form `replace body { ... }`
+    /// typed-carrier store. Unlike `COMPTIME_CHECKED_ITEMS` (populated during VM
+    /// EXECUTE by `item_fn`), a block-form body's statements are known at handler
+    /// COMPILE time — `emit_comptime_replace_body_directive` stashes the
+    /// `Vec<Statement>` here and emits `__emit_replace_body_checked(index)` (an
+    /// int handle) instead of a JSON source string. So this store is CLEARED at
+    /// `execute_comptime_with_annotation_handler` ENTRY (BEFORE the inner compile
+    /// at `comptime.rs`), NOT at the pre-execute clear point where
+    /// `COMPTIME_CHECKED_ITEMS` clears — clearing there would wipe the
+    /// compile-populated stash before the VM reads it. Indices start fresh per
+    /// handler run, so the pre-pass/pass-2 double-compile never leaks a stale
+    /// body across runs; the read clones, leaving the store intact until the next
+    /// per-run clear. Replaced the U03 JSON body transport (`parse_function_body_payload`),
+    /// which slice 5 deleted whole.
+    static COMPTIME_REPLACE_BODIES: RefCell<Vec<Vec<shape_ast::ast::Statement>>> =
+        const { RefCell::new(Vec::new()) };
     /// True while the §4.5.1 whole-program pre-pass speculatively runs a
     /// type-target comptime handler to materialize generated function
     /// signatures. The pre-pass is not the authoritative run — pass-2 re-runs
@@ -188,6 +226,61 @@ fn push_comptime_directive(directive: ComptimeDirective) -> Result<(), String> {
         directives.push(directive);
     });
     Ok(())
+}
+
+/// ADR-009 E2 #18 (slice 2): clear the `item_fn` carrier store before a comptime
+/// run (called from `comptime.rs` alongside `clear_comptime_directives`), so
+/// each execution's handles index a fresh store.
+pub(crate) fn clear_comptime_checked_items() {
+    COMPTIME_CHECKED_ITEMS.with(|items| items.borrow_mut().clear());
+}
+
+/// Stash a built `CheckedItem` and return the index the `__CheckedItem` handle
+/// carries. The index refers to the CURRENT execution's store (cleared per run),
+/// and the returned index is exactly the just-pushed slot, so the handle and the
+/// item stay consistent regardless of how many `item_fn` calls precede it.
+fn push_comptime_checked_item(item: CheckedItem) -> usize {
+    COMPTIME_CHECKED_ITEMS.with(|items| {
+        let mut items = items.borrow_mut();
+        items.push(item);
+        items.len() - 1
+    })
+}
+
+/// Resolve a `__CheckedItem` handle's index back to its `CheckedItem` (cloned;
+/// the store stays intact until the next per-run clear).
+fn comptime_checked_item_at(index: usize) -> Option<CheckedItem> {
+    COMPTIME_CHECKED_ITEMS.with(|items| items.borrow().get(index).cloned())
+}
+
+/// ADR-009 E2 #18 (slice 5, Part A): clear the block-form `replace body` carrier
+/// store at `execute_comptime_with_annotation_handler` ENTRY — BEFORE the handler
+/// is compiled (its `replace body { ... }` statements stash here during that
+/// compile) and thus BEFORE its VM run reads them. This is deliberately NOT the
+/// pre-execute clear point where `clear_comptime_checked_items` runs (see the
+/// store's declaration): the body stash is compile-populated, so clearing it
+/// pre-execute would wipe it before the read.
+pub(crate) fn clear_comptime_replace_bodies() {
+    COMPTIME_REPLACE_BODIES.with(|bodies| bodies.borrow_mut().clear());
+}
+
+/// Stash a block-form replacement body and return the index the
+/// `__emit_replace_body_checked(index)` call carries. Called from the emit side
+/// (`emit_comptime_replace_body_directive`) at handler-compile. The index refers
+/// to the CURRENT handler run's store (cleared at that run's entry), so pre-pass
+/// and pass-2 each index a fresh store and never read a stale body.
+pub(crate) fn push_comptime_replace_body(body: Vec<shape_ast::ast::Statement>) -> usize {
+    COMPTIME_REPLACE_BODIES.with(|bodies| {
+        let mut bodies = bodies.borrow_mut();
+        bodies.push(body);
+        bodies.len() - 1
+    })
+}
+
+/// Resolve a `__emit_replace_body_checked` index back to its stashed body
+/// (cloned; the store stays intact until the next per-run clear).
+fn comptime_replace_body_at(index: usize) -> Option<Vec<shape_ast::ast::Statement>> {
+    COMPTIME_REPLACE_BODIES.with(|bodies| bodies.borrow().get(index).cloned())
 }
 
 fn parse_type_annotation_payload(payload: &str) -> Result<shape_ast::ast::TypeAnnotation, String> {
@@ -281,78 +374,6 @@ fn type_annotation_from_string_or_type_ref_slot(
     parse_type_annotation_payload(&source)
 }
 
-fn type_source_from_string_or_type_ref_slot(
-    slot: &KindedSlot,
-    builtin_name: &str,
-) -> Result<String, String> {
-    if let Some(payload) = slot.as_str() {
-        parse_type_annotation_payload(payload)?;
-        return Ok(payload.to_string());
-    }
-    if slot.kind() != NativeKind::Ptr(HeapKind::TypedObject) {
-        return Err(format!(
-            "{builtin_name} expects a string type payload or __ComptimeTypeRef value, got {:?}",
-            slot.kind()
-        ));
-    }
-    let storage = slot
-        .as_typed_object_storage()
-        .ok_or_else(|| format!("{builtin_name} expects a non-null __ComptimeTypeRef value"))?;
-    let schema = shape_runtime::type_schema::lookup_schema_by_id_public(storage.schema_id as u32)
-        .ok_or_else(|| {
-        format!(
-            "{builtin_name} could not resolve typed-object schema id {}",
-            storage.schema_id
-        )
-    })?;
-    if schema.name != "__ComptimeTypeRef" {
-        return Err(format!(
-            "{builtin_name} expects __ComptimeTypeRef, got '{}'",
-            schema.name
-        ));
-    }
-    let source = string_field_from_typed_object(storage, &schema, "source")?;
-    parse_type_annotation_payload(&source)?;
-    Ok(source)
-}
-
-fn parse_function_body_payload(payload: &str) -> Result<Vec<shape_ast::ast::Statement>, String> {
-    if let Ok(parsed) = serde_json::from_str::<Vec<shape_ast::ast::Statement>>(payload) {
-        return Ok(parsed);
-    }
-
-    // Fallback for older callers that still pass source text.
-    let snippet = format!("fn __body_probe() {{ {} }}", payload);
-    let program = shape_ast::parse_program(&snippet)
-        .map_err(|e| format!("invalid replacement body payload: {}", e))?;
-
-    let maybe_body = program.items.into_iter().find_map(|item| match item {
-        shape_ast::ast::Item::Function(func, _) => Some(func.body),
-        _ => None,
-    });
-
-    maybe_body.ok_or_else(|| "could not parse replacement function body payload".to_string())
-}
-
-fn parse_module_items_payload(payload: &str) -> Result<Vec<shape_ast::ast::Item>, String> {
-    if let Ok(parsed) = serde_json::from_str::<Vec<shape_ast::ast::Item>>(payload) {
-        return Ok(parsed);
-    }
-
-    let snippet = format!("mod __module_probe__ {{ {} }}", payload);
-    let program = shape_ast::parse_program(&snippet)
-        .map_err(|e| format!("invalid replacement module payload: {}", e))?;
-
-    let maybe_items = program.items.into_iter().find_map(|item| match item {
-        shape_ast::ast::Item::Module(module, _) if module.name == "__module_probe__" => {
-            Some(module.items)
-        }
-        _ => None,
-    });
-
-    maybe_items.ok_or_else(|| "could not parse replacement module payload".to_string())
-}
-
 fn heap_value_from_typed_object_slot(kinded: KindedSlot) -> HeapValue {
     let ptr = kinded.raw() as *const shape_value::heap_value::TypedObjectStorage;
     // SAFETY: `typed_object_for_named_schema` returns a live TypedObjectStorage
@@ -416,163 +437,62 @@ fn is_valid_generated_function_name(name: &str) -> bool {
         && chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
 }
 
-fn literal_fragment_fields_from_slot(
-    slot: &KindedSlot,
-    builtin_name: &str,
-) -> Result<Vec<(&'static str, KindedSlot)>, String> {
-    let mut fields = vec![
-        ("literal_string", nb_str("")),
-        ("literal_int", KindedSlot::from_int(0)),
-        ("literal_number", KindedSlot::from_number(0.0)),
-        ("literal_bool", KindedSlot::from_bool(false)),
-    ];
-    let kind = if let Some(value) = slot.as_str() {
-        fields[0] = ("literal_string", nb_str(value));
-        "string"
+/// ADR-009 E2 #18 (slice 2): a literal value slot -> an `Expr::Literal`,
+/// DIRECTLY. No `literal_kind` discriminator, no parallel sentinel fields: the
+/// slot's runtime kind selects the literal. (Slice 5 deleted the
+/// `__ComptimeItemFragment` sentinel encode/decode this superseded.)
+fn literal_expr_from_slot(slot: &KindedSlot, builtin_name: &str) -> Result<shape_ast::ast::Expr, String> {
+    use shape_ast::ast::{Expr, Literal, Span};
+
+    let literal = if let Some(value) = slot.as_str() {
+        Literal::String(value.to_string())
     } else if let Some(value) = slot.as_i64() {
-        fields[1] = ("literal_int", KindedSlot::from_int(value));
-        "int"
+        Literal::Int(value)
     } else if let Some(value) = slot.as_f64() {
         if !value.is_finite() {
             return Err(format!(
-                "{builtin_name} only supports finite numeric literals in ItemFragment values"
+                "{builtin_name} only supports finite numeric literal return values"
             ));
         }
-        fields[2] = ("literal_number", KindedSlot::from_number(value));
-        "number"
+        Literal::Number(value)
     } else if let Some(value) = slot.as_bool() {
-        fields[3] = ("literal_bool", KindedSlot::from_bool(value));
-        "bool"
+        Literal::Bool(value)
     } else {
         return Err(format!(
             "{builtin_name} only supports string, int, number, or bool literal return values; got {:?}",
             slot.kind()
         ));
     };
-    fields.insert(0, ("literal_kind", nb_str(kind)));
-    Ok(fields)
-}
-
-fn literal_expr_from_fragment(
-    storage: &TypedObjectStorage,
-    schema: &shape_runtime::type_schema::TypeSchema,
-) -> Result<shape_ast::ast::Expr, String> {
-    use shape_ast::ast::{Expr, Literal, Span};
-
-    let kind = string_field_from_typed_object(storage, schema, "literal_kind")?;
-    let literal = match kind.as_str() {
-        "string" => Literal::String(string_field_from_typed_object(
-            storage,
-            schema,
-            "literal_string",
-        )?),
-        "int" => {
-            let slot = field_slot_from_typed_object(storage, schema, "literal_int")?;
-            Literal::Int(
-                slot.as_i64()
-                    .ok_or_else(|| "ItemFragment.literal_int is not an int".to_string())?,
-            )
-        }
-        "number" => {
-            let slot = field_slot_from_typed_object(storage, schema, "literal_number")?;
-            let value = slot
-                .as_f64()
-                .ok_or_else(|| "ItemFragment.literal_number is not a number".to_string())?;
-            if !value.is_finite() {
-                return Err("ItemFragment.literal_number must be finite".to_string());
-            }
-            Literal::Number(value)
-        }
-        "bool" => {
-            let slot = field_slot_from_typed_object(storage, schema, "literal_bool")?;
-            Literal::Bool(
-                slot.as_bool()
-                    .ok_or_else(|| "ItemFragment.literal_bool is not a bool".to_string())?,
-            )
-        }
-        other => {
-            return Err(format!("unsupported ItemFragment literal kind '{}'", other));
-        }
-    };
     Ok(Expr::Literal(literal, Span::default()))
 }
 
-fn type_ref_slot_from_string_or_type_ref_slot(
-    slot: &KindedSlot,
-    builtin_name: &str,
-) -> Result<KindedSlot, String> {
-    if let Some(source) = slot.as_str() {
-        parse_type_annotation_payload(source)?;
-        return Ok(super::comptime_target::build_type_ref_descriptor(
-            source, None,
-        ));
-    }
-    type_annotation_from_string_or_type_ref_slot(slot, builtin_name)?;
-    Ok(slot.clone())
-}
-
-fn build_function_item_fragment(
+/// ADR-009 E2 #18 (slice 2): build the generated free-function `Item` DIRECTLY
+/// from `item_fn`'s raw args (E2-D10). The typed return comes from the raw
+/// return-type slot and the body from the value slot; no sentinel fields and no
+/// source/JSON string participate. (Slice 5 deleted the
+/// `build_function_item_fragment` -> `function_item_from_fragment` sentinel
+/// round-trip this replaced.) Spans are `Span::default()` scaffolding — the
+/// directive consumer's shared check sequence (`check_generated_function_item`)
+/// re-bases them to the real application anchor before the decl is reserved.
+fn build_function_item(
     name: &str,
     return_type_slot: &KindedSlot,
-    value: &KindedSlot,
-) -> Result<HeapValue, String> {
+    value_slot: &KindedSlot,
+) -> Result<shape_ast::ast::Item, String> {
+    use shape_ast::ast::{FunctionDef, Item, Span, Statement};
+
     if !is_valid_generated_function_name(name) {
         return Err(format!(
             "item_fn expected a valid generated free-function name, got '{}'",
             name
         ));
     }
-    let return_type = type_source_from_string_or_type_ref_slot(return_type_slot, "item_fn")?;
-    let return_type_ref = type_ref_slot_from_string_or_type_ref_slot(return_type_slot, "item_fn")?;
-    let literal_fields = literal_fragment_fields_from_slot(value, "item_fn")?;
+    let return_type = type_annotation_from_string_or_type_ref_slot(return_type_slot, "item_fn")?;
+    let body_expr = literal_expr_from_slot(value_slot, "item_fn")?;
 
-    let mut fields = vec![
-        ("kind", nb_str("function")),
-        ("name", nb_str(name)),
-        ("return_type", nb_str(return_type.as_str())),
-        ("return_type_ref", return_type_ref),
-    ];
-    fields.extend(literal_fields);
-    let fragment = typed_object_for_named_schema("__ComptimeItemFragment", &fields);
-    Ok(heap_value_from_typed_object_slot(fragment))
-}
-
-fn function_item_from_fragment(
-    storage: &TypedObjectStorage,
-    schema: &shape_runtime::type_schema::TypeSchema,
-) -> Result<shape_ast::ast::Item, String> {
-    use shape_ast::ast::{FunctionDef, Item, Span, Statement};
-
-    let kind = string_field_from_typed_object(storage, schema, "kind")?;
-    if kind != "function" {
-        return Err(format!(
-            "unsupported ItemFragment kind '{}'; only 'function' is supported",
-            kind
-        ));
-    }
-    let name = string_field_from_typed_object(storage, schema, "name")?;
-    if !is_valid_generated_function_name(&name) {
-        return Err(format!(
-            "ItemFragment function name '{}' is not a valid Shape identifier",
-            name
-        ));
-    }
-    let return_type_ref = field_slot_from_typed_object(storage, schema, "return_type_ref")?;
-    let return_type =
-        type_annotation_from_string_or_type_ref_slot(&return_type_ref, "ItemFragment.return_type")?;
-    let expr = literal_expr_from_fragment(storage, schema)?;
-
-    // ADR-009 D1 (S3): the spans below are mini-VM scaffolding — this
-    // builder runs inside comptime execution, where no application anchor
-    // exists yet. The directive-consumption points
-    // (`materialize_computed_comptime_extends` /
-    // `apply_comptime_extend_items`) re-base every decl-level span to the
-    // real application anchor via `anchor_generated_function_decl` BEFORE
-    // the declaration is reserved or registered, so no Span::default()
-    // survives onto a registered generated declaration (Decision 68).
     Ok(Item::Function(
         FunctionDef {
-            name,
+            name: name.to_string(),
             name_span: Span::default(),
             declaring_module_path: None,
             doc_comment: None,
@@ -580,7 +500,7 @@ fn function_item_from_fragment(
             params: Vec::new(),
             return_type: Some(return_type),
             where_clause: None,
-            body: vec![Statement::Expression(expr, Span::default())],
+            body: vec![Statement::Expression(body_expr, Span::default())],
             annotations: Vec::new(),
             is_async: false,
             is_comptime: false,
@@ -589,31 +509,271 @@ fn function_item_from_fragment(
     ))
 }
 
-fn parse_extend_items_slot(slot: &KindedSlot) -> Result<Vec<shape_ast::ast::Item>, String> {
-    if let Some(payload) = slot.as_str() {
-        return parse_module_items_payload(payload);
-    }
-
-    let storage = slot.as_typed_object_storage().ok_or_else(|| {
-        format!(
-            "__emit_extend_items expects a source string or __ComptimeItemFragment, got {:?}",
-            slot.kind()
-        )
-    })?;
-    let schema = shape_runtime::type_schema::lookup_schema_by_id_public(storage.schema_id as u32)
-        .ok_or_else(|| {
-        format!(
-            "__emit_extend_items could not resolve typed-object schema id {}",
-            storage.schema_id
-        )
-    })?;
-    if schema.name != "__ComptimeItemFragment" {
+/// ADR-009 E2 #18 (slice 4.5): read an `Array<string>` comptime-builtin argument
+/// into `Vec<String>`. Mirrors the established v2-raw string-array read
+/// (`comptime_target.rs`): kind witness + non-null + element-type stamp guard,
+/// then `TypedArray::as_slice` over `*const StringObj`. Used by `extend_method`
+/// to read the template's literal segments and self-field splices.
+fn read_comptime_string_array_slot(slot: &KindedSlot, arg_name: &str) -> Result<Vec<String>, String> {
+    if slot.kind() != NativeKind::Ptr(HeapKind::TypedArray) {
         return Err(format!(
-            "__emit_extend_items expects a source string or __ComptimeItemFragment, got '{}'",
-            schema.name
+            "extend_method expects {arg_name} as an Array<string>, got {:?}",
+            slot.kind()
         ));
     }
-    Ok(vec![function_item_from_fragment(storage, &schema)?])
+    let ptr = slot.raw() as *const TypedArray<*const StringObj>;
+    if ptr.is_null() {
+        return Err(format!("extend_method received a null {arg_name} array"));
+    }
+    // SAFETY: kind witness (Ptr(TypedArray)) + non-null + ELEM_TYPE_STRING stamp
+    // prove this is a live `Array<string>`; each element is a borrowed
+    // `*const StringObj` (no ownership taken); we copy each into an owned String.
+    unsafe {
+        if read_elem_type(ptr as *const u8) != ELEM_TYPE_STRING {
+            return Err(format!(
+                "extend_method expects {arg_name} to be an Array<string> (element type mismatch)"
+            ));
+        }
+        let slice = TypedArray::<*const StringObj>::as_slice(ptr);
+        let mut out = Vec::with_capacity(slice.len());
+        for &elem in slice {
+            if elem.is_null() {
+                return Err(format!("extend_method received a null string in {arg_name}"));
+            }
+            out.push(StringObj::as_str(elem).to_string());
+        }
+        Ok(out)
+    }
+}
+
+/// ADR-009 E2 #18 (slice 4.5, condition 1 — BOUNDED HOLE GRAMMAR): a self-field
+/// splice must be a bare identifier, so the assembled `{self.<ident>}` hole is
+/// structurally incapable of carrying an arbitrary handler expression. Anything
+/// else is rejected at the builtin boundary with the named `[C0927]` diagnostic
+/// (E2-D5: E2's diagnostic block is C0927+). This is the injection guard the
+/// negative pin exercises (`a} + evil() + {b` etc. are rejected, never assembled).
+///
+/// HONEST-NAMING caveat (E2-Q2/B condition 2, review F3): `[C0927]` here is an
+/// UNCODED STRING TAG prefixed into the builtin's `Err(String)` message — NOT a
+/// registered diagnostic code. This is a PRE-EXISTING infra gap: every comptime
+/// builtin surfaces failures as `Err(String)` (there is no path for a comptime
+/// builtin to emit a coded diagnostic), so no E2 builtin can mint a real code
+/// today. Minting `C0927` as a genuine registered diagnostic is a follow-up on
+/// record; the pin asserts `contains("C0927")`, which passes on the substring.
+fn is_valid_self_field_identifier(name: &str) -> bool {
+    let mut chars = name.chars();
+    match chars.next() {
+        Some(c) if c == '_' || c.is_ascii_alphabetic() => {}
+        _ => return false,
+    }
+    chars.all(|c| c == '_' || c.is_ascii_alphanumeric())
+}
+
+/// ADR-009 E2 #18 (slice 4.5): escape a literal template segment for the
+/// `Literal::FormattedString` value form. Only braces need escaping so the
+/// interpolation parser (`parse_interpolation_with_mode`) reads them as LITERAL
+/// braces (`\{`/`\}`), not interpolation delimiters; quotes and other bytes are
+/// already in post-string-unescape form in a FormattedString value and pass
+/// through literally. This reproduces byte-for-byte the value the retired
+/// `extend (f"…")` source route produced after string-literal parsing (verified
+/// against showcases `TO_JSON_EXPECTED`).
+fn escape_fstring_literal_segment(segment: &str) -> String {
+    let mut out = String::with_capacity(segment.len());
+    for ch in segment.chars() {
+        match ch {
+            '{' => out.push_str("\\{"),
+            '}' => out.push_str("\\}"),
+            other => out.push(other),
+        }
+    }
+    out
+}
+
+/// ADR-009 E2 #18 (slice 4.5, E2-Q2/B): build the generated `Item::Extend { Type
+/// { method <name>() -> <ret> { <f-string> } } }` DIRECTLY from a typed template
+/// (E2-D8/§4.5 typed producer; the serialize-shaped minimal subset). The body is
+/// a NATIVE f-string literal the builtin assembles from the template:
+///
+/// - `segments` are literal text (ConstLift'd JSON punctuation / field names),
+///   escaped for the FormattedString value (`escape_fstring_literal_segment`);
+/// - `field_splices` are field-name identifiers, ASSERTED (condition 1) and
+///   emitted ONLY as producer-generated `{self.<ident>}` holes.
+///
+/// Invariant: `segments.len() == field_splices.len() + 1` (strict interleave
+/// `seg[0] {self.f[0]} seg[1] … {self.f[n-1]} seg[n]`). The producer-generated
+/// holes resolve through the language's native f-string compile parse
+/// (`parse_expression_str`) — the SAME path as every user-authored f-string;
+/// this is NOT the U03 directive transport and NOT body-as-text (E2-Q2/B ruling,
+/// 2026-07-18). No source text, no `parse_program`, no directive payload.
+fn build_extend_method_item(
+    type_name: &str,
+    method_name: &str,
+    return_type_slot: &KindedSlot,
+    segments: &[String],
+    field_splices: &[String],
+) -> Result<shape_ast::ast::Item, String> {
+    use shape_ast::ast::{Expr, InterpolationMode, Literal, Span};
+
+    if segments.len() != field_splices.len() + 1 {
+        return Err(format!(
+            "extend_method template mismatch: {} segments require {} field splices, got {}",
+            segments.len(),
+            segments.len().saturating_sub(1),
+            field_splices.len()
+        ));
+    }
+
+    // Assemble the native f-string VALUE: escaped literal segments interleaved
+    // with producer-generated `{self.<ident>}` holes (each field asserted).
+    let mut value = String::new();
+    for (i, field) in field_splices.iter().enumerate() {
+        if !is_valid_self_field_identifier(field) {
+            return Err(format!(
+                "[C0927] extend_method: field splice '{field}' is not a valid identifier; the \
+                 template channel only carries `self.<identifier>` holes, never an expression"
+            ));
+        }
+        value.push_str(&escape_fstring_literal_segment(&segments[i]));
+        value.push_str("{self.");
+        value.push_str(field);
+        value.push('}');
+    }
+    value.push_str(&escape_fstring_literal_segment(&segments[field_splices.len()]));
+
+    let body_expr = Expr::Literal(
+        Literal::FormattedString {
+            value,
+            mode: InterpolationMode::Braces,
+        },
+        Span::default(),
+    );
+
+    build_extend_item_with_method_body(
+        "extend_method",
+        type_name,
+        method_name,
+        return_type_slot,
+        body_expr,
+    )
+}
+
+/// ADR-009 E2 #18 (slice 5b-1): build the generated `Item::Extend { Type { method
+/// <name>() -> <ret> { <literal> } } }` whose method body is a typed LITERAL value
+/// (int / number / bool / string), DIRECTLY from the value slot. The literal is
+/// decoded by the SAME `literal_expr_from_slot` authority `item_fn` uses (slice 2)
+/// — no second literal decoder, no source text, no f-string template. This is the
+/// literal-body sibling of `build_extend_method_item`: it closes the migration gap
+/// for the retired `extend (f"…{ <literal> }…")` fixtures that generate a CONSTANT
+/// method body (e.g. `method answer() -> int { 42 }`), which the template producer
+/// (self-field interpolation only) cannot express. Both producers share the method
+/// + `Item::Extend` assembly (`build_extend_item_with_method_body`) and both flow
+/// to the same generic `Item::Extend` materialization; the body expr is the only
+/// axis of difference.
+fn build_extend_method_literal_item(
+    type_name: &str,
+    method_name: &str,
+    return_type_slot: &KindedSlot,
+    value_slot: &KindedSlot,
+) -> Result<shape_ast::ast::Item, String> {
+    let body_expr = literal_expr_from_slot(value_slot, "extend_method_literal")?;
+    build_extend_item_with_method_body(
+        "extend_method_literal",
+        type_name,
+        method_name,
+        return_type_slot,
+        body_expr,
+    )
+}
+
+/// ADR-009 E2 #18 (slice 5b-1): the SHARED method + `Item::Extend` assembly for
+/// both `extend_method` (computed self-field f-string body) and
+/// `extend_method_literal` (typed literal body). Validates the type/method
+/// identifiers, resolves the typed return annotation, and wraps the caller-built
+/// `body_expr` in a single-method `Item::Extend`. The `body_expr` is the ONLY axis
+/// of difference between the two producers — neither materializes source text.
+/// `builtin_name` labels the identifier / return diagnostics with the calling
+/// producer.
+fn build_extend_item_with_method_body(
+    builtin_name: &str,
+    type_name: &str,
+    method_name: &str,
+    return_type_slot: &KindedSlot,
+    body_expr: shape_ast::ast::Expr,
+) -> Result<shape_ast::ast::Item, String> {
+    use shape_ast::ast::{ExtendStatement, Item, MethodDef, Span, Statement, TypeName};
+
+    if !is_valid_self_field_identifier(method_name) {
+        return Err(format!(
+            "{builtin_name} expected a valid method name, got '{method_name}'"
+        ));
+    }
+    if !is_valid_self_field_identifier(type_name) {
+        return Err(format!(
+            "{builtin_name} expected a valid type name, got '{type_name}'"
+        ));
+    }
+
+    let return_type = type_annotation_from_string_or_type_ref_slot(return_type_slot, builtin_name)?;
+
+    let method = MethodDef {
+        name: method_name.to_string(),
+        span: Span::default(),
+        declaring_module_path: None,
+        doc_comment: None,
+        annotations: Vec::new(),
+        type_params: None,
+        params: Vec::new(),
+        when_clause: None,
+        return_type: Some(return_type),
+        body: vec![Statement::Expression(body_expr, Span::default())],
+        is_async: false,
+    };
+
+    Ok(Item::Extend(
+        ExtendStatement {
+            // `TypeName::Simple` carries a `TypePath`; `.into()` builds it via
+            // `TypePath::from_qualified` — byte-identical to the legacy extend
+            // parse route (`TypeName::Simple(name.into())`, parser/extensions.rs),
+            // so the generated extend keys the target type exactly as a parsed
+            // `extend Type { … }` would.
+            type_name: TypeName::Simple(type_name.into()),
+            methods: vec![method],
+        },
+        Span::default(),
+    ))
+}
+
+/// ADR-009 E2 #18 (slice 5): resolve a typed generation carrier to AST items —
+/// `__CheckedItem`-ONLY. The source-string `extend`/`replace module` generation
+/// route (U03) was deleted this slice; a non-carrier slot (a source string, any
+/// other typed object, or a non-object) is rejected with the named `[C0929]`
+/// diagnostic naming the typed alternatives.
+///
+/// HONEST-NAMING caveat (same pre-existing infra gap as C0927/C0928): `[C0929]`
+/// is an UNCODED STRING TAG prefixed into the `Err(String)` message, NOT a
+/// registered diagnostic code — a comptime builtin has no path to emit a coded
+/// diagnostic. Minting it as a real code is the shared C092x follow-up on record.
+fn parse_extend_items_slot(slot: &KindedSlot) -> Result<Vec<shape_ast::ast::Item>, String> {
+    const C0929_REJECTION: &str = "[C0929] the source-string `extend`/`replace module` generation route has been removed; pass a typed generation carrier — item_fn(name, ret, value) for a free function, extend_method(...)/extend_method_literal(...) for a method, or use the direct `extend target { … }` statement";
+
+    let Some(storage) = slot.as_typed_object_storage() else {
+        return Err(C0929_REJECTION.to_string());
+    };
+    let schema = shape_runtime::type_schema::lookup_schema_by_id_public(storage.schema_id as u32)
+        .ok_or_else(|| C0929_REJECTION.to_string())?;
+    if schema.name != "__CheckedItem" {
+        return Err(C0929_REJECTION.to_string());
+    }
+    // The TYPED route — a `__CheckedItem` handle `item_fn` / `extend_method*`
+    // produced. Resolve its index back to the driver-side `CheckedItem` built
+    // during THIS comptime run, with no sentinel decode and no source/JSON string.
+    let index = field_slot_from_typed_object(storage, &schema, "index")?
+        .as_i64()
+        .ok_or_else(|| "__CheckedItem.index is not an int".to_string())?;
+    let checked = comptime_checked_item_at(index as usize).ok_or_else(|| {
+        format!("__CheckedItem index {index} is not live in this comptime execution")
+    })?;
+    Ok(vec![checked.into_item()])
 }
 
 /// Helper: create a string-kinded `KindedSlot` from a `&str`.
@@ -864,7 +1024,10 @@ fn comptime_builtins_module_base(trait_impl_keys: HashSet<String>) -> ModuleExpo
     register_typed_function(
         &mut module,
         "item_fn",
-        "Build a typed ItemFragment for a zero-arg generated free function",
+        // E2-D10: this SURFACE (name + signature) survives E2 as the CheckedItem
+        // constructor; its INTERNALS (the __ComptimeItemFragment schema + sentinel
+        // machinery) were removed by the slice-5 U07 deletion.
+        "Build a typed CheckedItem for a zero-arg generated free function",
         vec![
             shape_runtime::module_exports::ModuleParam {
                 name: "name".to_string(),
@@ -885,7 +1048,13 @@ fn comptime_builtins_module_base(trait_impl_keys: HashSet<String>) -> ModuleExpo
                 ..Default::default()
             },
         ],
-        ConcreteType::OpaqueTypedObject("__ComptimeItemFragment".to_string()),
+        // ADR-009 E2 #18 (slice 2, E2-D10): `item_fn` yields the typed
+        // `__CheckedItem` carrier — a handle to a driver-side `CheckedItem`. The
+        // builtin builds the AST `Item` directly (no sentinel fields, no
+        // source/JSON string), stashes it in the per-run `CheckedItem` store, and
+        // returns a handle carrying its index. (Slice 5 deleted the legacy
+        // `__ComptimeItemFragment` sentinel map + its fragment builders.)
+        ConcreteType::OpaqueTypedObject("__CheckedItem".to_string()),
         |slots, _ctx| {
             if slots.len() != 3 {
                 return Err(format!("item_fn expects 3 arguments, got {}", slots.len()));
@@ -893,9 +1062,183 @@ fn comptime_builtins_module_base(trait_impl_keys: HashSet<String>) -> ModuleExpo
             let name = slots[0]
                 .as_str()
                 .ok_or_else(|| "item_fn expects a string function name".to_string())?;
-            let fragment = build_function_item_fragment(name, &slots[1], &slots[2])?;
+            let item = build_function_item(name, &slots[1], &slots[2])?;
+            let index = push_comptime_checked_item(CheckedItem::new(item));
+            let handle = typed_object_for_named_schema(
+                "__CheckedItem",
+                &[("index", KindedSlot::from_int(index as i64))],
+            );
             Ok(TypedReturn::Concrete(ConcreteReturn::OpaqueTypedObject(
-                Arc::new(fragment),
+                Arc::new(heap_value_from_typed_object_slot(handle)),
+            )))
+        },
+    );
+
+    // ADR-009 E2 #18 (slice 4.5, E2-Q2/B USER-RATIFIED 2026-07-18): the typed
+    // producer for a SINGLE generated extend-method with a computed body — the
+    // serialize-shaped minimal subset that closes the `@to_json` gap (item_fn is
+    // free-function + literal-body only). The body is a NATIVE f-string assembled
+    // by the builtin from a typed template: literal `segments` (ConstLift'd
+    // punctuation) interleaved with `field_splices` (field-name identifiers,
+    // asserted — condition 1 BOUNDED HOLE GRAMMAR). The producer-generated
+    // `{self.<ident>}` holes resolve through the language's OWN native f-string
+    // compile parse (`parse_expression_str`, `string_interpolation.rs`), the same
+    // path as every user-authored f-string — this is NOT the U03 directive
+    // transport and NOT body-as-text (E2-Q2/B ruling). No source string, no
+    // `parse_program`. Yields the `__CheckedItem` carrier (Item-general, slice 2)
+    // wrapping an `Item::Extend`, which flows through `parse_extend_items_slot` ->
+    // ExtendItems -> the existing generic Item::Extend materialization (stamp /
+    // reserve / register), so there is zero consumer change. `extend_method` is
+    // an INTERNAL builtin (stdlib-consumed like item_fn), not a public
+    // quote/builder surface (that stays E1's per the C2 D1 amendment).
+    register_typed_function(
+        &mut module,
+        "extend_method",
+        "Build a typed CheckedItem for one generated extend-method whose body is a computed self-field f-string template",
+        vec![
+            shape_runtime::module_exports::ModuleParam {
+                name: "type_name".to_string(),
+                type_name: "string".to_string(),
+                required: true,
+                ..Default::default()
+            },
+            shape_runtime::module_exports::ModuleParam {
+                name: "method_name".to_string(),
+                type_name: "string".to_string(),
+                required: true,
+                ..Default::default()
+            },
+            shape_runtime::module_exports::ModuleParam {
+                name: "return_type".to_string(),
+                type_name: "unknown".to_string(),
+                required: true,
+                ..Default::default()
+            },
+            shape_runtime::module_exports::ModuleParam {
+                // Parameterized `Array<string>` — a bare `Array` is an invalid
+                // unparameterized generic at a strict-checked direct call site
+                // (the intrinsics' bare `"Array"` works only because they are
+                // SOH-gated / method-rewrite-called, not directly). A user-called
+                // comptime builtin (like this one and item_fn) must declare a
+                // valid param type, or the handler's `extend_method(...)` call
+                // fails to type-check.
+                name: "segments".to_string(),
+                type_name: "Array<string>".to_string(),
+                required: true,
+                ..Default::default()
+            },
+            shape_runtime::module_exports::ModuleParam {
+                name: "field_splices".to_string(),
+                type_name: "Array<string>".to_string(),
+                required: true,
+                ..Default::default()
+            },
+        ],
+        ConcreteType::OpaqueTypedObject("__CheckedItem".to_string()),
+        |slots, _ctx| {
+            if slots.len() != 5 {
+                return Err(format!(
+                    "extend_method expects 5 arguments, got {}",
+                    slots.len()
+                ));
+            }
+            let type_name = slots[0]
+                .as_str()
+                .ok_or_else(|| "extend_method expects a string type name".to_string())?;
+            let method_name = slots[1]
+                .as_str()
+                .ok_or_else(|| "extend_method expects a string method name".to_string())?;
+            let segments = read_comptime_string_array_slot(&slots[3], "segments")?;
+            let field_splices = read_comptime_string_array_slot(&slots[4], "field_splices")?;
+            let item = build_extend_method_item(
+                type_name,
+                method_name,
+                &slots[2],
+                &segments,
+                &field_splices,
+            )?;
+            let index = push_comptime_checked_item(CheckedItem::new(item));
+            let handle = typed_object_for_named_schema(
+                "__CheckedItem",
+                &[("index", KindedSlot::from_int(index as i64))],
+            );
+            Ok(TypedReturn::Concrete(ConcreteReturn::OpaqueTypedObject(
+                Arc::new(heap_value_from_typed_object_slot(handle)),
+            )))
+        },
+    );
+
+    // ADR-009 E2 #18 (slice 5b-1): the typed producer for a SINGLE generated
+    // extend-method whose body is a typed LITERAL value (int / number / bool /
+    // string) — the literal-body sibling of `extend_method` (which carries a
+    // computed self-field f-string template only). It closes the migration gap for
+    // the retired `extend (f"…{ <literal> }…")` fixtures that generate a CONSTANT
+    // method body (e.g. `method answer() -> int { 42 }`). Same carrier shape as
+    // item_fn / extend_method (returns the `__CheckedItem` OpaqueTypedObject
+    // accepted by `extend (expr)`); the `value` literal is decoded by the SAME
+    // `literal_expr_from_slot` authority item_fn uses (single literal decoder). Like
+    // extend_method, handler-scope resolution requires the paired forwarder row in
+    // `COMPTIME_BUILTIN_FORWARDERS` IN ADDITION to this registration, or
+    // `extend_method_literal(...)` is `[C0001] Undefined function` in a handler.
+    register_typed_function(
+        &mut module,
+        "extend_method_literal",
+        "Build a typed CheckedItem for one generated extend-method whose body is a typed literal value",
+        vec![
+            shape_runtime::module_exports::ModuleParam {
+                name: "type_name".to_string(),
+                type_name: "string".to_string(),
+                required: true,
+                ..Default::default()
+            },
+            shape_runtime::module_exports::ModuleParam {
+                name: "method_name".to_string(),
+                type_name: "string".to_string(),
+                required: true,
+                ..Default::default()
+            },
+            shape_runtime::module_exports::ModuleParam {
+                name: "return_type".to_string(),
+                type_name: "unknown".to_string(),
+                required: true,
+                ..Default::default()
+            },
+            shape_runtime::module_exports::ModuleParam {
+                // The literal method body; the slot's runtime kind selects the
+                // literal (string / int / number / bool) — inferred from the caller.
+                name: "value".to_string(),
+                type_name: "unknown".to_string(),
+                required: true,
+                ..Default::default()
+            },
+        ],
+        ConcreteType::OpaqueTypedObject("__CheckedItem".to_string()),
+        |slots, _ctx| {
+            if slots.len() != 4 {
+                return Err(format!(
+                    "extend_method_literal expects 4 arguments, got {}",
+                    slots.len()
+                ));
+            }
+            let type_name = slots[0]
+                .as_str()
+                .ok_or_else(|| "extend_method_literal expects a string type name".to_string())?;
+            let method_name = slots[1]
+                .as_str()
+                .ok_or_else(|| "extend_method_literal expects a string method name".to_string())?;
+            let item = build_extend_method_literal_item(
+                type_name,
+                method_name,
+                &slots[2],
+                &slots[3],
+            )?;
+            let index = push_comptime_checked_item(CheckedItem::new(item));
+            let handle = typed_object_for_named_schema(
+                "__CheckedItem",
+                &[("index", KindedSlot::from_int(index as i64))],
+            );
+            Ok(TypedReturn::Concrete(ConcreteReturn::OpaqueTypedObject(
+                Arc::new(heap_value_from_typed_object_slot(handle)),
             )))
         },
     );
@@ -1036,44 +1379,79 @@ fn comptime_builtins_module_base(trait_impl_keys: HashSet<String>) -> ModuleExpo
         },
     );
 
-    // Internal comptime directive: replace function body from serialized AST payload.
-    // __emit_replace_body(body_payload: string)
-    register_typed_fn_1::<_, Arc<String>>(
+    // ADR-009 E2 #18: the TYPED block-form `replace body { ... }` carrier — the
+    // ONLY replace-body transport. The block-form emit stashes the Vec<Statement>
+    // at handler-COMPILE (COMPTIME_REPLACE_BODIES) and passes its INDEX here — no
+    // source/JSON string, no reparse. (Slice 5 deleted the source-string
+    // `__emit_replace_body` builtin + `parse_function_body_payload`; the expr form
+    // `replace body (expr)` is rejected at compile with [C0928].)
+    // __emit_replace_body_checked(index: int)
+    register_typed_function(
         &mut module,
-        "__emit_replace_body",
-        "Internal: replace function body from AST payload",
-        "body_payload",
-        "string",
+        "__emit_replace_body_checked",
+        "Internal: replace function body from a typed block-form carrier index",
+        vec![shape_runtime::module_exports::ModuleParam {
+            name: "index".to_string(),
+            type_name: "int".to_string(),
+            required: true,
+            ..Default::default()
+        }],
         ConcreteType::Unit,
-        |payload, _ctx| {
-            let body = parse_function_body_payload(payload.as_str())?;
+        |slots, _ctx| {
+            if slots.len() != 1 {
+                return Err(format!(
+                    "__emit_replace_body_checked expects 1 argument, got {}",
+                    slots.len()
+                ));
+            }
+            let index = slots[0]
+                .as_i64()
+                .ok_or_else(|| "__emit_replace_body_checked expects an int index".to_string())?;
+            let body = comptime_replace_body_at(index as usize).ok_or_else(|| {
+                format!("__emit_replace_body_checked index {index} is not live in this comptime execution")
+            })?;
             push_comptime_directive(ComptimeDirective::ReplaceBody { body })?;
             Ok(TypedReturn::Concrete(ConcreteReturn::Unit))
         },
     );
 
-    // Internal comptime directive: replace module items from source payload.
-    // __emit_replace_module(module_payload: string)
-    register_typed_fn_1::<_, Arc<String>>(
+    // Internal comptime directive: replace module items from a typed generation
+    // carrier (`item_fn(...)` -> `__CheckedItem`). `parse_extend_items_slot`
+    // resolves it to AST items with no source/JSON string ever materializing, and
+    // the module-target consumer builds a provenance-stamped `CheckedModule`.
+    // (Slice 5 deleted the source-string arm + `parse_module_items_payload`; a
+    // source-string payload now rejects with the named [C0929] diagnostic.)
+    // __emit_replace_module(module_payload)
+    register_typed_function(
         &mut module,
         "__emit_replace_module",
-        "Internal: replace module items from source payload",
-        "module_payload",
-        "string",
+        "Internal: replace module items from a typed generation carrier",
+        vec![shape_runtime::module_exports::ModuleParam {
+            name: "module_payload".to_string(),
+            type_name: "unknown".to_string(),
+            required: true,
+            ..Default::default()
+        }],
         ConcreteType::Unit,
-        |payload, _ctx| {
-            let items = parse_module_items_payload(payload.as_str())?;
-            push_comptime_directive(ComptimeDirective::ReplaceModule { items })?;
+        |slots, _ctx| {
+            if slots.len() != 1 {
+                return Err(format!(
+                    "__emit_replace_module expects 1 argument, got {}",
+                    slots.len()
+                ));
+            }
+            let items = parse_extend_items_slot(&slots[0])?;
+            push_comptime_directive(ComptimeDirective::ReplaceModuleChecked { items })?;
             Ok(TypedReturn::Concrete(ConcreteReturn::Unit))
         },
     );
 
-    // Internal comptime directive: ADD generated items from source or typed
-    // ItemFragment payload (§4.5.7 `extend (expr)`).
+    // Internal comptime directive: ADD generated items from a typed generation
+    // carrier (§4.5.7 `extend (expr)`; slice 5 deleted the source-string arm).
     register_typed_function(
         &mut module,
         "__emit_extend_items",
-        "Internal: add generated module items from source or typed ItemFragment payload",
+        "Internal: add generated module items from a typed generation carrier",
         vec![shape_runtime::module_exports::ModuleParam {
             name: "items_payload".to_string(),
             type_name: "unknown".to_string(),
@@ -1610,6 +1988,334 @@ fn render_shape_string_literal(s: &str) -> String {
 // `ModuleExports::invoke_export` which is part of the deleted comptime
 // dispatch ABI; restoration requires the kinded comptime invocation
 // surface (Phase-2c reentry per ADR-006 §2.7.4).
+/// ADR-009 E2-D9 flip-condition tripwire (accepted addition to the slice-2
+/// round). The typed MODULE-replacement producer is `item_fn` — the sole typed
+/// producer today — and it yields a CLOSURE-FREE function: its body is a bare
+/// literal, never an `Expr::FunctionExpr`. So a `replace module (item_fn(...))`
+/// replacement carries no closure, and [C0911] (a generated closure whose
+/// inference fact was never published) CANNOT fire for module scope — the
+/// E2-D9 mootness, pinned on the real producer path.
+///
+/// When a closure-capable producer (`quote module`) lands, the typed module
+/// route's item will be able to carry a closure and this assertion FLIPS. The
+/// flip is the signal to write the module closure-capture C0911 pin FIRST and
+/// decide the discovery-worklist question per E2-D9's flip condition — NOT to
+/// relax this pin. Runs in the default tier (not deep-tests) so the gate trips.
+#[cfg(test)]
+mod e2_d9_closure_free_tripwire {
+    use super::*;
+    use shape_ast::ast::{Expr, Item, Statement};
+
+    #[test]
+    fn typed_module_producer_item_fn_is_closure_free() {
+        let item = build_function_item("answer", &nb_str("int"), &KindedSlot::from_int(42))
+            .expect("item_fn's typed producer builds a literal function");
+        let Item::Function(func_def, _) = item else {
+            panic!("item_fn must produce a function item");
+        };
+        assert_eq!(
+            func_def.body.len(),
+            1,
+            "a closure-free literal producer emits a single-statement body"
+        );
+        assert!(
+            matches!(&func_def.body[0], Statement::Expression(Expr::Literal(..), _)),
+            "the typed module producer's body is a bare literal — NO closure. If this flips, \
+             a closure-capable producer landed: write the module C0911 closure-capture pin \
+             FIRST (E2-D9 flip condition), do not relax this pin. Got: {:?}",
+            func_def.body[0]
+        );
+    }
+}
+
+// ADR-009 E2 #18 (slice 4.5, E2-Q2/B) — producer-tier pins for `extend_method`'s
+// body assembly + the condition-1 BOUNDED HOLE GRAMMAR boundary. Plain
+// `#[cfg(test)]` (NOT deep-tests-gated) so they run in the standard gate — the
+// first version of these lived in the deep-tests `mod tests` below and never ran
+// (disclosed defect, slice 4.5 fix round). They exercise `build_extend_method_item`
+// directly (no VM / no array-slot reading), pinning the AST shape, the byte-exact
+// FormattedString value, and the identifier assertion in isolation; the
+// end-to-end byte-parity arbiter is the shape-test
+// `to_json_serializes_via_stdlib_import_*` rows.
+#[cfg(test)]
+mod extend_method_producer_tests {
+    use super::*;
+
+    fn extract_extend_method_body_value(item: &shape_ast::ast::Item) -> String {
+        use shape_ast::ast::{Expr, Item, Literal, Statement};
+        let Item::Extend(extend, _) = item else {
+            panic!("expected Item::Extend, got a different item kind");
+        };
+        assert_eq!(extend.methods.len(), 1, "exactly one generated method");
+        let method = &extend.methods[0];
+        assert_eq!(method.body.len(), 1, "single-statement generated body");
+        let Statement::Expression(Expr::Literal(Literal::FormattedString { value, .. }, _), _) =
+            &method.body[0]
+        else {
+            panic!("generated method body must be a single FormattedString expression");
+        };
+        value.clone()
+    }
+
+    #[test]
+    fn extend_method_assembles_byte_exact_fstring_body() {
+        // The serialize `type User { id: int, name: string }` template.
+        let segments = vec![
+            "{ \"id\": ".to_string(),
+            ", \"name\": \"".to_string(),
+            "\" }".to_string(),
+        ];
+        let field_splices = vec!["id".to_string(), "name".to_string()];
+        let item = build_extend_method_item(
+            "User",
+            "to_json",
+            &KindedSlot::from_string("string"),
+            &segments,
+            &field_splices,
+        )
+        .expect("valid template assembles");
+
+        // Braces in segments escape to `\{`/`\}`; splices are producer-generated
+        // `{self.<ident>}` — byte-for-byte the value the retired source route
+        // produced, so interpolation yields `{ "id": 1, "name": "Ada" }`.
+        assert_eq!(
+            extract_extend_method_body_value(&item),
+            "\\{ \"id\": {self.id}, \"name\": \"{self.name}\" \\}"
+        );
+        // Confirms the outer AST too: an extend on `User` with method `to_json`.
+        let shape_ast::ast::Item::Extend(extend, _) = &item else {
+            unreachable!("checked above");
+        };
+        assert!(
+            matches!(&extend.type_name, shape_ast::ast::TypeName::Simple(n) if n == "User")
+        );
+        assert_eq!(extend.methods[0].name, "to_json");
+    }
+
+    #[test]
+    fn extend_method_assembles_number_and_bool_fields_byte_exact() {
+        // Design §4 scalar coverage (review F1): int+string are pinned above;
+        // number+bool here. `number`/`bool` fields are NON-string like `int` — the
+        // handler encodes their BARE (unquoted) shape into the segments, so the
+        // producer emits a bare `{self.<f>}` hole (no surrounding quote segment).
+        // A `type Metric { ratio: number, ok: bool }` template.
+        let segments = vec![
+            "{ \"ratio\": ".to_string(),
+            ", \"ok\": ".to_string(),
+            " }".to_string(),
+        ];
+        let field_splices = vec!["ratio".to_string(), "ok".to_string()];
+        let item = build_extend_method_item(
+            "Metric",
+            "to_json",
+            &KindedSlot::from_string("string"),
+            &segments,
+            &field_splices,
+        )
+        .expect("valid non-string-scalar template assembles");
+        assert_eq!(
+            extract_extend_method_body_value(&item),
+            "\\{ \"ratio\": {self.ratio}, \"ok\": {self.ok} \\}"
+        );
+    }
+
+    #[test]
+    fn extend_method_rejects_non_identifier_field_splice_c0927() {
+        // Condition-1 / condition-3: a field-name-shaped value carrying an
+        // injection payload is REJECTED at the builtin boundary, never assembled.
+        let err = build_extend_method_item(
+            "User",
+            "to_json",
+            &KindedSlot::from_string("string"),
+            &["{ ".to_string(), " }".to_string()],
+            &["a} + evil() + {b".to_string()],
+        )
+        .expect_err("a non-identifier field splice must reject");
+        assert!(
+            err.contains("[C0927]"),
+            "rejection must carry the named [C0927] diagnostic: {err}"
+        );
+    }
+
+    #[test]
+    fn extend_method_rejects_segment_splice_count_mismatch() {
+        // Strict interleave: segments.len() must be field_splices.len() + 1.
+        let err = build_extend_method_item(
+            "User",
+            "to_json",
+            &KindedSlot::from_string("string"),
+            &["only-one-segment".to_string()],
+            &["id".to_string()],
+        )
+        .expect_err("a segment/splice count mismatch must reject");
+        assert!(
+            err.contains("template mismatch"),
+            "rejection must name the interleave-invariant violation: {err}"
+        );
+    }
+
+    // ADR-009 E2 #18 (slice 5b-1) — producer-tier pins for `extend_method_literal`'s
+    // literal-body assembly. They exercise `build_extend_method_literal_item`
+    // directly (no VM), pinning the AST shape and the byte-exact literal for each of
+    // the four literal kinds `literal_expr_from_slot` decodes (int / number / bool /
+    // string). The literal decoder is the SAME authority item_fn uses (slice 2), so
+    // these pin the extend-method WRAPPING around it, not a second decoder.
+    fn extend_method_literal_body(item: &shape_ast::ast::Item) -> shape_ast::ast::Literal {
+        use shape_ast::ast::{Expr, Item, Statement};
+        let Item::Extend(extend, _) = item else {
+            panic!("expected Item::Extend, got a different item kind");
+        };
+        assert_eq!(extend.methods.len(), 1, "exactly one generated method");
+        let method = &extend.methods[0];
+        assert_eq!(method.body.len(), 1, "single-statement generated body");
+        let Statement::Expression(Expr::Literal(lit, _), _) = &method.body[0] else {
+            panic!("generated method body must be a single literal expression");
+        };
+        lit.clone()
+    }
+
+    #[test]
+    fn extend_method_literal_builds_int_body_byte_exact() {
+        use shape_ast::ast::{Literal, TypeName};
+        // The generated_method_runtime `method answer() -> int { 42 }` shape.
+        let item = build_extend_method_literal_item(
+            "Answer",
+            "answer",
+            &KindedSlot::from_string("int"),
+            &KindedSlot::from_int(42),
+        )
+        .expect("valid int literal body assembles");
+        assert!(matches!(extend_method_literal_body(&item), Literal::Int(42)));
+        let shape_ast::ast::Item::Extend(extend, _) = &item else {
+            unreachable!("checked in helper");
+        };
+        assert!(matches!(&extend.type_name, TypeName::Simple(n) if n == "Answer"));
+        assert_eq!(extend.methods[0].name, "answer");
+    }
+
+    #[test]
+    fn extend_method_literal_builds_number_body_byte_exact() {
+        use shape_ast::ast::Literal;
+        let item = build_extend_method_literal_item(
+            "Metric",
+            "ratio",
+            &KindedSlot::from_string("number"),
+            &KindedSlot::from_number(3.5),
+        )
+        .expect("valid number literal body assembles");
+        assert!(matches!(extend_method_literal_body(&item), Literal::Number(n) if n == 3.5));
+    }
+
+    #[test]
+    fn extend_method_literal_builds_bool_body_byte_exact() {
+        use shape_ast::ast::Literal;
+        let item = build_extend_method_literal_item(
+            "Flag",
+            "enabled",
+            &KindedSlot::from_string("bool"),
+            &KindedSlot::from_bool(true),
+        )
+        .expect("valid bool literal body assembles");
+        assert!(matches!(extend_method_literal_body(&item), Literal::Bool(true)));
+    }
+
+    #[test]
+    fn extend_method_literal_builds_string_body_byte_exact() {
+        use shape_ast::ast::Literal;
+        let item = build_extend_method_literal_item(
+            "Greeter",
+            "greeting",
+            &KindedSlot::from_string("string"),
+            &KindedSlot::from_string("hello"),
+        )
+        .expect("valid string literal body assembles");
+        assert!(matches!(extend_method_literal_body(&item), Literal::String(s) if s == "hello"));
+    }
+
+    #[test]
+    fn extend_method_literal_rejects_non_identifier_method_name() {
+        // The shared assembly labels its identifier diagnostics with the calling
+        // producer — a bad method name reports `extend_method_literal`, not
+        // `extend_method`.
+        let err = build_extend_method_literal_item(
+            "Answer",
+            "not a method",
+            &KindedSlot::from_string("int"),
+            &KindedSlot::from_int(42),
+        )
+        .expect_err("a non-identifier method name must reject");
+        assert!(
+            err.contains("extend_method_literal") && err.contains("valid method name"),
+            "rejection must name the calling producer: {err}"
+        );
+    }
+
+    #[test]
+    fn extend_method_literal_rejects_non_finite_number_body() {
+        // `literal_expr_from_slot` (the shared literal decoder) rejects non-finite
+        // numbers; the wrapper surfaces that unchanged.
+        let err = build_extend_method_literal_item(
+            "Metric",
+            "ratio",
+            &KindedSlot::from_string("number"),
+            &KindedSlot::from_number(f64::INFINITY),
+        )
+        .expect_err("a non-finite number literal must reject");
+        assert!(
+            err.contains("finite"),
+            "rejection must name the finiteness constraint: {err}"
+        );
+    }
+}
+
+// ADR-009 E2 #18 (slice 5, Part A) — the block-form replace-body carrier's
+// per-run-clear no-stale-leak property, pinned DIRECTLY at the store level (the
+// definitive proof the supervisor's "double-compile, no stale item across runs"
+// asks for: the pre-pass/pass-2 double-compile clears the store per handler run,
+// so index 0 of run N never resolves to run N-1's body). The full compile-path
+// exercise is the existing lsp/vm replace-body suites, which now flow through
+// this carrier (transport-parity arbiter).
+#[cfg(test)]
+mod replace_body_carrier_tests {
+    use super::*;
+
+    fn body_of(src: &str) -> Vec<shape_ast::ast::Statement> {
+        shape_ast::parse_program(src)
+            .expect("carrier fixture parses")
+            .items
+            .into_iter()
+            .find_map(|item| match item {
+                shape_ast::ast::Item::Function(func, _) => Some(func.body),
+                _ => None,
+            })
+            .expect("fixture has one function")
+    }
+
+    #[test]
+    fn replace_body_carrier_index_restarts_per_run_no_stale_leak() {
+        let body_a = body_of("fn a() -> int { return 1 }");
+        let body_b = body_of("fn b() -> int { return 2 }");
+        assert_ne!(body_a, body_b, "fixtures are distinct");
+
+        // Run 1: clear (handler entry), stash A at index 0.
+        clear_comptime_replace_bodies();
+        assert_eq!(push_comptime_replace_body(body_a.clone()), 0);
+        assert_eq!(comptime_replace_body_at(0).as_ref(), Some(&body_a));
+
+        // Run 2: clear (next handler entry), stash a DIFFERENT body — index
+        // restarts at 0, and index 0 now resolves to B, never the stale A.
+        clear_comptime_replace_bodies();
+        assert_eq!(
+            push_comptime_replace_body(body_b.clone()),
+            0,
+            "index restarts per run"
+        );
+        let resolved = comptime_replace_body_at(0).expect("live in this run");
+        assert_eq!(resolved, body_b, "index 0 resolves to THIS run's body");
+        assert_ne!(resolved, body_a, "no stale body leaks across the per-run clear");
+    }
+}
+
 #[cfg(all(test, feature = "deep-tests"))]
 mod tests {
     use super::*;

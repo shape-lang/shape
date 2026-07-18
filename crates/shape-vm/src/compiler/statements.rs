@@ -702,20 +702,40 @@ impl BytecodeCompiler {
         body: &[Statement],
         span: Span,
     ) -> Result<()> {
-        let payload = self.serialize_directive_payload(body, "replace-body", span)?;
+        // ADR-009 E2 #18 (slice 5, Part A): a block-form `replace body { ... }`
+        // body is known at COMPILE time — stash it in the per-run carrier store
+        // and emit its typed INDEX (`__emit_replace_body_checked(index)`) instead
+        // of `serialize_directive_payload` -> a JSON source string. No reparse;
+        // slice 5 deleted the U03 JSON body transport.
+        let index = super::comptime_builtins::push_comptime_replace_body(body.to_vec());
         self.emit_comptime_internal_call(
-            "__emit_replace_body",
-            vec![Expr::Literal(Literal::String(payload), span)],
+            "__emit_replace_body_checked",
+            vec![Expr::Literal(Literal::Int(index as i64), span)],
             span,
         )
     }
 
     fn emit_comptime_replace_body_expr_directive(
         &mut self,
-        expression: &Expr,
+        _expression: &Expr,
         span: Span,
     ) -> Result<()> {
-        self.emit_comptime_internal_call("__emit_replace_body", vec![expression.clone()], span)
+        // ADR-009 E2 #18 (slice 5, Q1 ruling): `replace body (expr)` is the
+        // source-string transport (formerly `__emit_replace_body(<string>)` ->
+        // `parse_function_body_payload`). E2-D7 rules its end-state REJECTION
+        // (the ignored D5 test), and E2-D4 forbids a grammar change — so it is
+        // rejected cleanly at COMPILE time here rather than deleted at the parser
+        // (which would degrade the diagnostic). Use the block form
+        // `replace body { ... }` (the typed carrier). `[C0928]` is an uncoded
+        // string tag in the message (next-free after C0927; same pre-existing
+        // infra caveat as C0927 — comptime/compile errors here are string-tagged,
+        // not registered codes).
+        Err(ShapeError::SemanticError {
+            message: "[C0928] `replace body (expr)` is not supported; use the block form \
+                      `replace body { ... }`"
+                .to_string(),
+            location: Some(self.span_to_source_location(span)),
+        })
     }
 
     fn emit_comptime_replace_module_expr_directive(
@@ -5336,8 +5356,14 @@ impl BytecodeCompiler {
                     outcome.removed = true;
                     break;
                 }
-                super::comptime_builtins::ComptimeDirective::ReplaceModule { items } => {
-                    *module_items = items;
+                super::comptime_builtins::ComptimeDirective::ReplaceModuleChecked { items } => {
+                    // ADR-009 E2 #18 (slice 1) TYPED route: build the
+                    // `CheckedModule` internal representation (generated
+                    // provenance stamped, hygienic export symbols reserved — no
+                    // source/JSON string ever existed) and apply its items. The
+                    // module-compile flow qualifies + registers them as usual.
+                    let checked = self.build_checked_module(items, site)?;
+                    *module_items = checked.into_items();
                     outcome.replaced = true;
                 }
                 super::comptime_builtins::ComptimeDirective::SetParamType { .. }
@@ -7957,103 +7983,14 @@ mod tests {
         );
     }
 
-    #[cfg(any())]
-    #[test]
-    fn test_module_annotation_can_replace_module_items() {
-        let code = r#"
-            annotation synth_module() {
-                targets: [module]
-                comptime post(target, ctx) {
-                    replace module ("const ANSWER = 40; fn plus_two() { ANSWER + 2 }")
-                }
-            }
-
-            @synth_module()
-            mod demo {}
-
-            demo::plus_two()
-        "#;
-
-        let program = parse_program(code).expect("Failed to parse");
-        let bytecode = BytecodeCompiler::new()
-            .compile(&program)
-            .expect("Failed to compile");
-
-        let mut vm = VirtualMachine::new(VMConfig::default());
-        vm.load_program(bytecode);
-        vm.populate_module_objects();
-        let result = vm.execute(None).expect("Failed to execute");
-        assert_eq!(
-            result
-                .as_number_coerce()
-                .expect("module call should return number"),
-            42.0
-        );
-    }
-
-    #[cfg(any())]
-    #[test]
-    fn test_module_inline_comptime_can_replace_module_items() {
-        let code = r#"
-            mod demo {
-                comptime {
-                    replace module ("const ANSWER = 40; fn plus_two() { ANSWER + 2 }")
-                }
-            }
-
-            demo::plus_two()
-        "#;
-
-        let program = parse_program(code).expect("Failed to parse");
-        let bytecode = BytecodeCompiler::new()
-            .compile(&program)
-            .expect("Failed to compile");
-
-        let mut vm = VirtualMachine::new(VMConfig::default());
-        vm.load_program(bytecode);
-        vm.populate_module_objects();
-        let result = vm.execute(None).expect("Failed to execute");
-        assert_eq!(
-            result
-                .as_number_coerce()
-                .expect("module call should return number"),
-            42.0
-        );
-    }
-
-    #[cfg(any())]
-    #[test]
-    fn test_module_inline_comptime_can_use_module_local_comptime_helper() {
-        let code = r#"
-            mod demo {
-                comptime fn synth() {
-                    "const ANSWER = 40; fn plus_two() { ANSWER + 2 }"
-                }
-
-                comptime {
-                    replace module (synth())
-                }
-            }
-
-            demo::plus_two()
-        "#;
-
-        let program = parse_program(code).expect("Failed to parse");
-        let bytecode = BytecodeCompiler::new()
-            .compile(&program)
-            .expect("Failed to compile");
-
-        let mut vm = VirtualMachine::new(VMConfig::default());
-        vm.load_program(bytecode);
-        vm.populate_module_objects();
-        let result = vm.execute(None).expect("Failed to execute");
-        assert_eq!(
-            result
-                .as_number_coerce()
-                .expect("module call should return number"),
-            42.0
-        );
-    }
+    // ADR-009 E2 #18 5b Part B (companion A-part-3): three `#[cfg(any())]`
+    // (permanently disabled, never-compiled) unit tests DELETED —
+    // `test_module_annotation_can_replace_module_items`,
+    // `test_module_inline_comptime_can_replace_module_items`, and
+    // `test_module_inline_comptime_can_use_module_local_comptime_helper`. All three
+    // drove the source-string `replace module ("…")` / `replace module (synth())`
+    // route removed by the slice-5 U03 deletion; the typed `replace module
+    // (item_fn(...))` route is covered in the shape-test directives suite.
 
     #[test]
     fn test_type_annotated_variable_no_wrapping() {

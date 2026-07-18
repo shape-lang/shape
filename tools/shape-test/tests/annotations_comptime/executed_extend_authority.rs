@@ -88,29 +88,37 @@ print(n.diff())
     );
 }
 
-/// D12 — the COMPUTED snippet directive `extend (f"extend {target.name} …")`
-/// has NO literal `extend` statement in the handler body, so the deleted
-/// static AST scan could never have found it: it materializes exclusively
-/// through the executed pre-pass. This is the load-bearing parity row.
+// ADR-009 E2 #18 slice 5b Part B (companion A) — `d12_computed_snippet_extend_
+// only_materializes_via_executed_prepass` RETIRED. Its subject (a COMPUTED
+// source-string `extend (f"…")` materializing via the executed pre-pass) IS the
+// deleted U03 route. Its deletion-boundary SUCCESSOR is
+// `computed_snippet_extend_is_rejected_with_named_alternative` below.
+
+/// ADR-009 E2 #18 slice 5b Part B (companion B) — the d12 deletion-boundary
+/// successor. Post-U03-deletion (slice 5), a COMPUTED source-string `extend
+/// (f"…")` is rejected at the builtin boundary with the named `[C0929]`
+/// diagnostic pointing at the typed producer alternatives (item_fn /
+/// extend_method*), instead of materializing via the executed pre-pass. The
+/// extend-side twin of the replace-module pin
+/// (`directives::replace_module_source_string_is_rejected_with_named_alternative`).
 #[test]
-fn d12_computed_snippet_extend_only_materializes_via_executed_prepass() {
-    expect_vm_and_jit_output(
-        r#"
+fn computed_snippet_extend_is_rejected_with_named_alternative() {
+    let source = r#"
 annotation gen() {
   targets: [type]
   comptime post(target, ctx) {
-    extend (f"extend {target.name} \{ method answer() -> int \{ 42 \} \}")
+    extend (f"fn {target.name}_tag() -> int \{ 7 \}")
   }
 }
 
 @gen()
 type Widget { id: int }
 
-let w = Widget { id: 1 }
-print(w.answer())
-"#,
-        "42",
-    );
+print(Widget { id: 1 }.id)
+"#;
+    ShapeTest::new(source)
+        .expect_run_err_contains("[C0929]")
+        .expect_run_err_contains("item_fn");
 }
 
 /// R6 — `ctx.target`/`target` resolution: the `target` head of a direct
@@ -254,7 +262,7 @@ fn u10_target_delivered_by_position_after_hygienic_rename() {
 annotation named() {
   targets: [type]
   comptime post(target, ctx) {
-    extend (f"extend {target.name} \{ method who() -> string \{ \"{target.name}\" \} \}")
+    extend (extend_method_literal(target.name, "who", "string", target.name))
   }
 }
 

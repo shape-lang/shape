@@ -20,7 +20,9 @@
 //! and `@prompt` are ordinary Shape annotations living in `stdlib-src/serde/`
 //! and `stdlib-src/llm/`, built entirely on the public comptime contract
 //! (`target.fields` / `target.params` / `target.return_type`, `error()`, and
-//! the `extend (...)` + `string_lit` code-generation surface).
+//! the typed `extend (item_fn(...))` / `extend (extend_method(...))`
+//! code-generation surface — ADR-009 E2 #18 slices 4/4.5 moved these off the
+//! retired `extend (f"…")` + `string_lit` source-string form).
 
 use shape_test::shape_test::ShapeTest;
 
@@ -99,6 +101,59 @@ fn to_json_serializes_via_stdlib_import_jit() {
         .with_stdlib()
         .with_jit()
         .expect_string(TO_JSON_EXPECTED);
+}
+
+// ADR-009 E2 #18 slice 4.5 (E2-Q2/B condition 3) — end-to-end injection guard:
+// the `extend_method` template channel is structurally incapable of carrying an
+// arbitrary handler expression. A field-splice value with non-identifier content
+// (`a} + boom() + {b`) is REJECTED at the builtin boundary with the named
+// `[C0927]` diagnostic and never assembled into a generated body. This is the
+// negative pin for the BOUNDED HOLE GRAMMAR condition, through the real comptime
+// path (the builder-tier pin is `comptime_builtins::tests::
+// extend_method_rejects_non_identifier_field_splice_c0927`).
+#[test]
+fn extend_method_rejects_injection_field_splice() {
+    ShapeTest::new(
+        r#"
+annotation inject() {
+    targets: [type]
+    comptime post(target, ctx) {
+        extend (extend_method(target.name, "evil", "string", ["{ ", " }"], ["a} + boom() + {b"]))
+    }
+}
+
+@inject()
+type T { x: int }
+
+print("unreachable")
+"#,
+    )
+    .expect_run_err_contains("C0927");
+}
+
+// ADR-009 E2 #18 slice 4.5 (review F2) — DISCLOSED behavior change, pinned so it
+// fails LOUDLY if silently "fixed". A 0-field `@to_json` type is REJECTED
+// ("requires at least one field"): the typed template's field_splices array would
+// have to be empty, and an empty typed-array literal init is not available in
+// comptime ([C0001]). The retired string-concat serializer produced `{  }` for a
+// 0-field type — this is an accepted behavior delta vs the source route (an
+// untested edge case), not a regression to fix silently. `error()` surfaces on
+// the stdlib-import path (unlike a swallowed [C0001]), so the rejection is
+// observable end-to-end.
+#[test]
+fn to_json_zero_field_type_is_rejected() {
+    ShapeTest::new(
+        r#"
+from std::serde::serialize use { @to_json }
+
+@to_json()
+type Empty {}
+
+print("unreachable")
+"#,
+    )
+    .with_stdlib()
+    .expect_run_err_contains("requires at least one field");
 }
 
 const LLM_PROGRAM: &str = r#"

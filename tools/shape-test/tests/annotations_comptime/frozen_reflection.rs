@@ -38,7 +38,7 @@ annotation reflect_category() {
       FrozenTypeCategory::Nominal => 1
       _ => 0
     }
-    extend (f"fn user_category_flag() -> int \{ {flag} \}")
+    extend (item_fn("user_category_flag", "int", flag))
   }
 }
 
@@ -64,7 +64,7 @@ annotation reflect_category() {
       FrozenTypeCategory::Nominal => 1
       _ => 0
     }
-    extend (f"fn user_category_flag() -> int \{ {flag} \}")
+    extend (item_fn("user_category_flag", "int", flag))
   }
 }
 
@@ -121,7 +121,7 @@ annotation reflect_tuple() {
       FrozenTypeCategory::Tuple => 1
       _ => 0
     }
-    extend (f"fn tuple_flag() -> int \{ {flag} \}")
+    extend (item_fn("tuple_flag", "int", flag))
   }
 }
 
@@ -183,7 +183,7 @@ annotation reflect_width() {
       }
       _ => 0
     }
-    extend (f"fn int_width_flag() -> int \{ {flag} \}")
+    extend (item_fn("int_width_flag", "int", flag))
   }
 }
 
@@ -211,7 +211,7 @@ annotation reflect_arity() {
       FrozenType::Tuple(t) => t.elements.len()
       _ => 0
     }
-    extend (f"fn tuple_arity() -> int \{ {n} \}")
+    extend (item_fn("tuple_arity", "int", n))
   }
 }
 

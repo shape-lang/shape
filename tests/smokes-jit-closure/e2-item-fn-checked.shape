@@ -1,0 +1,20 @@
+// ADR-009 E2 #18 slice 2 — the typed `item_fn` CheckedItem carrier (E2-D10):
+// additive generation via extend-items runs natively in BOTH tiers, adding the
+// JIT proof the D10 matrix row never had (D10 was VM-only). The type-target
+// handler emits `extend (item_fn("gen_value", "int", 7))`, which produces the
+// free function `gen_value() -> int { 7 }` through the CheckedItem path — the
+// AST item is built directly (no `__ComptimeItemFragment` sentinel map, no
+// source/JSON string). Printing 7 proves the generated function runs; it is a
+// plain int function + a call, with no async, closure, or top-level comptime,
+// so JIT == VM natively (zero [jit-fallback]).
+annotation add_value() {
+  targets: [type]
+  comptime post(target, ctx) {
+    extend (item_fn("gen_value", "int", 7))
+  }
+}
+
+@add_value()
+type Widget { id: int }
+
+print(gen_value())

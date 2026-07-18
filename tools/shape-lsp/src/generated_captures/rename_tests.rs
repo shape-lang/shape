@@ -50,19 +50,12 @@ annotation add_readers() {
 type Job { id: int }
 "#;
 
-const REPARSED_CAPTURE: &str = r#"
-annotation add_reader() {
-  targets: [type]
-  comptime post(target, ctx) {
-    extend ("extend Job { method read() -> int { let base = 40
-      let worker = |; move base| base + 2
-      worker() } }")
-  }
-}
-
-@add_reader()
-type Job { id: int }
-"#;
+// ADR-009 E2 #18 5b Part B (companion A): REPARSED_CAPTURE fixture RETIRED with
+// its `unmapped_generated_string_is_quarantined_from_name_fallback` test —
+// subject = a reparsed (source-string) generated capture quarantined from name
+// fallback under an unavailable source map; the deleted U03 route was its sole
+// producer. (`unavailable_query_context_never_falls_through_as_an_ordinary_rename`
+// below constructs CaptureQueryContext::unavailable() DIRECTLY and stays.)
 
 #[test]
 fn rename_matches_the_complete_identity_joined_reference_graph() {
@@ -135,29 +128,8 @@ fn same_spelling_in_another_owner_is_not_renamed() {
     }));
 }
 
-#[test]
-fn unmapped_generated_string_is_quarantined_from_name_fallback() {
-    let program = parse_program(REPARSED_CAPTURE).expect("fixture parses");
-    let session = GeneratedQuerySession::new(
-        &program,
-        REPARSED_CAPTURE,
-        CaptureQueryContext::unavailable(),
-    );
-    let uri: Uri = "file:///unmapped-capture.shape".parse().unwrap();
-    let generated_text = REPARSED_CAPTURE.find("move base").unwrap() + "move ".len();
-
-    assert!(matches!(
-        generated_capture_rename(
-            &program,
-            REPARSED_CAPTURE,
-            generated_text,
-            &uri,
-            "renamed",
-            &session,
-        ),
-        GeneratedCaptureLookup::Unavailable,
-    ));
-}
+// unmapped_generated_string_is_quarantined_from_name_fallback RETIRED — see the
+// REPARSED_CAPTURE fixture-retirement note above (reparse route deleted).
 
 #[test]
 fn unavailable_query_context_never_falls_through_as_an_ordinary_rename() {

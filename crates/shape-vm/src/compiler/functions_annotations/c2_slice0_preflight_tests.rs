@@ -48,7 +48,9 @@ const FAILING_ANALYSIS_BODY_PROGRAM: &str = r#"
 annotation genfail() {
   targets: [type]
   comptime post(target, ctx) {
-    extend (f"extend {target.name} \{ method answer() -> int \{ nonexistent() \} \}")
+    extend target {
+      method answer() -> int { nonexistent() }
+    }
   }
 }
 
@@ -71,7 +73,9 @@ const FAILING_PASS2_BODY_PROGRAM: &str = r#"
 annotation genmut() {
   targets: [type]
   comptime post(target, ctx) {
-    extend (f"extend {target.name} \{ method answer() -> int \{ let x = 1; x = 2; x \} \}")
+    extend target {
+      method answer() -> int { let x = 1; x = 2; x }
+    }
   }
 }
 
@@ -89,7 +93,7 @@ const SUCCEEDING_BODY_PROGRAM: &str = r#"
 annotation gen() {
   targets: [type]
   comptime post(target, ctx) {
-    extend (f"extend {target.name} \{ method answer() -> int \{ 42 \} \}")
+    extend (extend_method_literal(target.name, "answer", "int", 42))
   }
 }
 
@@ -384,7 +388,10 @@ const FAILING_PASS2_M3_PROGRAM: &str = r#"
 annotation genm3() {
   targets: [type]
   comptime post(target, ctx) {
-    extend (f"extend {target.name} \{ method witness() -> int \{ let mut ghost_local = 0; ghost_local \} method fail() -> int \{ let z = 1; z = 2; z \} \}")
+    extend target {
+      method witness() -> int { let mut ghost_local = 0; ghost_local }
+      method fail() -> int { let z = 1; z = 2; z }
+    }
   }
 }
 
@@ -399,7 +406,9 @@ const SUCCEEDING_M3_PROGRAM: &str = r#"
 annotation genm3ok() {
   targets: [type]
   comptime post(target, ctx) {
-    extend (f"extend {target.name} \{ method witness() -> int \{ let mut ghost_local = 0; ghost_local \} \}")
+    extend target {
+      method witness() -> int { let mut ghost_local = 0; ghost_local }
+    }
   }
 }
 
@@ -443,7 +452,9 @@ const FAILING_PASS2_M4_PROGRAM: &str = r#"
 annotation genm4() {
   targets: [type]
   comptime post(target, ctx) {
-    extend (f"extend {target.name} \{ method answer() -> int \{ let z = 1; z = 2; z \} \}")
+    extend target {
+      method answer() -> int { let z = 1; z = 2; z }
+    }
   }
 }
 
@@ -461,7 +472,7 @@ const SUCCEEDING_M4_PROGRAM: &str = r#"
 annotation genm4ok() {
   targets: [type]
   comptime post(target, ctx) {
-    extend (f"extend {target.name} \{ method answer() -> int \{ 42 \} \}")
+    extend (extend_method_literal(target.name, "answer", "int", 42))
   }
 }
 

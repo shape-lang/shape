@@ -86,7 +86,7 @@ from pkg::beta use { @same }
 annotation same() {
   targets: [type]
   comptime post(target, ctx) {
-    extend (f"extend {target.name} \{ method answer() -> int \{ 42 \} \}")
+    extend (extend_method_literal(target.name, "answer", "int", 42))
   }
 }
 
@@ -125,7 +125,7 @@ type Probe { id: int }
 annotation same() {
   targets: [type]
   comptime post(target, ctx) {
-    extend (f"extend {target.name} \{ method answer() -> int \{ 42 \} \}")
+    extend (extend_method_literal(target.name, "answer", "int", 42))
   }
 }
 "#,
@@ -314,7 +314,7 @@ type Probe { id: int }
 annotation read_text() {
   targets: [type]
   comptime post(target, ctx) {
-    extend ("fn forbidden_generated() -> int { 1 }")
+    extend (item_fn("forbidden_generated", "int", 1))
   }
 }
 "#,

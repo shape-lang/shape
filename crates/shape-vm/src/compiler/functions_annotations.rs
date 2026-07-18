@@ -17,7 +17,7 @@ use super::comptime_builtins::FrozenTypeIdentity;
 use super::comptime_builtins::expansion_provenance::{
     ApplicationClaim, ApplicationId, CanonicalHash, ComptimeStage, DeclarationDiscoveryFixedPoint,
     ExpansionIdentity, ExpansionSite, GeneratedNodePath, GeneratedOrigin, GeneratedSymbolTable,
-    GeneratorRef, SymbolReservation, TargetIdentity,
+    GeneratorRef, SourceAnchor, SymbolId, SymbolReservation, TargetIdentity,
 };
 use super::{BytecodeCompiler, HygienicRole, ParamPassMode};
 
@@ -49,6 +49,14 @@ mod c2_slice2_battery_tests;
 #[cfg(test)]
 #[path = "functions_annotations/c2_slice4_edit_tests.rs"]
 mod c2_slice4_edit_tests;
+
+#[cfg(test)]
+#[path = "functions_annotations/e2_slice0_spike_tests.rs"]
+mod e2_slice0_spike_tests;
+
+#[cfg(test)]
+#[path = "functions_annotations/e2_slice3_replace_body_tests.rs"]
+mod e2_slice3_replace_body_tests;
 
 /// ADR-009 E3 (slice S3, legacy class U11): the TYPED capability a `replace
 /// body` replacement reaches through `ctx.original`. It replaces the deleted
@@ -1905,7 +1913,7 @@ impl BytecodeCompiler {
     /// shape the top-level pipeline uses.
     /// Comptime-excellence §4.5.1 whole-program pre-pass.
     ///
-    /// A computed `extend (f"fn ...")` directive inside a comptime annotation
+    /// A computed `extend (item_fn(...))` directive inside a comptime annotation
     /// handler only materializes its generated free function during pass-2,
     /// when the annotated *type* is compiled — which is *after* the analyzer
     /// and after user function bodies resolve their call sites. So a program
@@ -1914,8 +1922,9 @@ impl BytecodeCompiler {
     /// generated `User_json_schema` was invisible to every earlier phase.
     ///
     /// This pre-pass runs the type-targeting comptime handlers *before* the
-    /// analyzer, parses the generated source, and returns the generated free
-    /// functions so the driver can insert them as ordinary program items. From
+    /// analyzer, materializes the generated declarations, and returns the
+    /// generated free functions so the driver can insert them as ordinary program
+    /// items. From
     /// there they flow through function registration, analysis, inference and
     /// pass-2 body compilation exactly like hand-written functions — visible to
     /// `fn main()` and to every user body.
@@ -1986,6 +1995,11 @@ impl BytecodeCompiler {
             .to_string();
 
         let mut generated: Vec<Item> = Vec::new();
+        // ADR-009 E2 #18 (slice 3): fresh per-run set of const-free function-target
+        // `replace body` edits materialized below (drained by the driver into the
+        // analysis-program clone). Cleared here so a reused compiler never carries
+        // a prior compile's edits.
+        self.pending_replace_body_analysis.clear();
 
         // ADR-009 D2 (Decision 67): the monotonic declaration-discovery fixed
         // point. The formerly single, unbounded speculative pass is now a
@@ -2181,6 +2195,83 @@ impl BytecodeCompiler {
                         );
 
                         for directive in execution.directives {
+                            // ADR-009 E2 #18 (slice 3): pre-analysis
+                            // materialization of a const-free FUNCTION-target
+                            // `replace body` edit. Handled BEFORE the item-
+                            // producing match below because a replacement is a
+                            // BODY EDIT of an existing function, not a new item.
+                            // The build runs inside the already-open C2
+                            // `InstallTransaction`, so the shadow reservation is
+                            // journaled; the driver applies the resulting edit to
+                            // the analysis-program clone before the analyzer runs,
+                            // which is what publishes the replacement closures'
+                            // structural facts and flips C0911. Pass-2 still does
+                            // the authoritative body swap byte-unchanged.
+                            //
+                            // A NON-function target `replace body` is left to
+                            // pass-2 to reject ("only valid when compiling function
+                            // targets"); a CONST-template target stays a pass-2
+                            // concern (slice-0 §"Scoping boundary surfaced": its
+                            // body may depend on a per-call-site const
+                            // specialization absent from this single-program
+                            // pre-analysis view).
+                            if let super::comptime_builtins::ComptimeDirective::ReplaceBody {
+                                body,
+                            } = &directive
+                            {
+                                if let Some(func_def) = disc_target.function_def() {
+                                    let const_free =
+                                        !func_def.params.iter().any(|p| p.is_const);
+                                    // Slice-3 scope: top-level function targets only.
+                                    // A module-NESTED function target would need
+                                    // module-path-aware targeting of the analysis
+                                    // clone (and module-target pre-analysis is the
+                                    // deferred E2-D9 territory), so a nested edit
+                                    // stays a pass-2 concern for now — no regression
+                                    // (its C0911 quarantine is the pre-existing
+                                    // state), just not-yet-materialized.
+                                    let top_level =
+                                        disc_target.lexical_module_path().is_none();
+                                    // Materialize ONLY closure-bearing replacements:
+                                    // pre-analysis materialization exists to publish
+                                    // a replacement closure's structural inference
+                                    // fact (the C0911 flip). A closure-FREE
+                                    // replacement has no such fact, so materializing
+                                    // it would only add analyzer exposure with no
+                                    // benefit — those edits stay pass-2-only,
+                                    // byte-identical to the legacy behavior (the
+                                    // "legacy route untouched" control). Same walk
+                                    // the stamping uses, so detection and stamping
+                                    // agree.
+                                    let carries_closure = !shape_ast::transform::
+                                        generated_closure_source_paths(body, &[])
+                                        .is_empty();
+                                    // Record ONE edit per target: a second
+                                    // `replace body` on the same function is the
+                                    // pass-2 "multiple `replace body` … ambiguous"
+                                    // rejection — materializing both would instead
+                                    // surface a duplicate-function analysis error
+                                    // and mask that authoritative message. First
+                                    // edit wins here; pass-2 emits the rejection.
+                                    let already_edited = self
+                                        .pending_replace_body_analysis
+                                        .iter()
+                                        .any(|edit| edit.target_name() == func_def.name);
+                                    if const_free
+                                        && top_level
+                                        && carries_closure
+                                        && !already_edited
+                                    {
+                                        let checked = self.build_checked_replace_body(
+                                            func_def,
+                                            body,
+                                            &expansion_site,
+                                        )?;
+                                        self.pending_replace_body_analysis.push(checked);
+                                    }
+                                }
+                                continue;
+                            }
                             // ADR-009 E3 (slice S1): the executed pre-pass is
                             // now the SINGLE authority for BOTH generated
                             // directive shapes — the computed
@@ -2851,6 +2942,220 @@ impl BytecodeCompiler {
         matches!(expr, Expr::Identifier(name, _) if name == expected)
     }
 
+    /// ADR-009 E2 #18 (slice 1/2): the SHARED per-item check sequence — anchor,
+    /// generated closure-provenance stamp (`GeneratedNodeIssuer`), hygienic
+    /// export reservation (`SymbolId`, journaled through the InstallTransaction)
+    /// — used by BOTH the typed replace-module consumer (`build_checked_module`,
+    /// slice 1) and the typed extend-items / `CheckedItem` consumer (slice 2),
+    /// so the two never duplicate the sequence. Returns the stamped item and its
+    /// reserved hygienic export symbol; the fingerprint is taken BEFORE anchoring
+    /// so pass-2's raw hash agrees (ADR-009 D1 S3). Does NOT `register_function`:
+    /// the caller decides (module-replace does not — the module-compile flow
+    /// registers; extend-items does — see `apply_comptime_extend_items`).
+    ///
+    /// (Lives in `functions_annotations` rather than `comptime_fragments/`
+    /// because `stamp_generated_closure_provenance` / `generated_free_fn_content`
+    /// / `expansion_rejection` are module-private here; the DATA carriers
+    /// `CheckedModule` / `CheckedItem` are the `comptime_fragments/` half.)
+    fn check_generated_function_item(
+        &mut self,
+        mut func_def: FunctionDef,
+        span: Span,
+        site: &ExpansionSite,
+        source_anchor: SourceAnchor,
+        generator_anchor: SourceAnchor,
+        node_path_prefix: &str,
+    ) -> Result<(shape_ast::ast::Item, SymbolId)> {
+        // Fingerprint BEFORE anchoring so pass-2's raw hash agrees (ADR-009 D1
+        // S3), then re-base decl spans to the anchor.
+        let content = generated_free_fn_content(&func_def);
+        anchor_generated_function_decl(&mut func_def, site.application_span());
+        let node_path =
+            GeneratedNodePath::decl_root(format!("{node_path_prefix}:{}", func_def.name));
+        let origin = GeneratedOrigin {
+            expansion: site.identity().clone(),
+            node_path,
+            source_anchor,
+        };
+        self.stamp_generated_closure_provenance(&mut func_def.body, &origin, &func_def.name);
+        let export = match self.reserve_generated_decl_journaled(
+            &func_def.name,
+            origin,
+            content,
+            generator_anchor,
+        ) {
+            Ok(SymbolReservation::Fresh(id)) | Ok(SymbolReservation::Reissued(id)) => id,
+            Err(message) => return Err(self.expansion_rejection(message, site)),
+        };
+        Ok((shape_ast::ast::Item::Function(func_def, span), export))
+    }
+
+    /// ADR-009 E2 #18 (slice 1): build the typed `CheckedModule` for a
+    /// `ReplaceModuleChecked` directive (the module-target consumer,
+    /// `process_comptime_directives_for_module`). Each generated item is
+    /// anchored, stamped with generated closure provenance
+    /// (`stamp_generated_closure_provenance` / `GeneratedNodeIssuer`), and its
+    /// declaration reserves a hygienic export symbol (`SymbolId`) — the SAME
+    /// per-item sequence the fresh-generated declaration-discovery pre-pass runs
+    /// in `materialize_computed_comptime_extends`, MINUS `register_function`
+    /// (the module-compile flow qualifies + registers the replacement items
+    /// itself; double-registration would collide). No source/JSON string
+    /// participates. The reservation is JOURNALED, so a failed install rolls it
+    /// back with the rest of the transaction.
+    ///
+    /// Non-function items (none are producible by the slice-1 typed producer
+    /// `item_fn`, which mints only a single function) pass through unstamped —
+    /// the typed producer's reach grows with the fragment schema, not here.
+    pub(super) fn build_checked_module(
+        &mut self,
+        items: Vec<shape_ast::ast::Item>,
+        site: &ExpansionSite,
+    ) -> Result<super::comptime_fragments::CheckedModule> {
+        use shape_ast::ast::Item;
+
+        // Validated once and reused across items (both anchors are `Copy`), the
+        // same way the discovery pre-pass reuses them across a round's decls.
+        let source_anchor = site
+            .source_anchor()
+            .map_err(|message| self.expansion_rejection(message, site))?;
+        let generator_anchor = site
+            .generator_anchor()
+            .map_err(|message| self.expansion_rejection(message, site))?;
+
+        let mut stamped: Vec<Item> = Vec::with_capacity(items.len());
+        let mut exports = Vec::new();
+        for item in items {
+            match item {
+                Item::Function(func_def, span) => {
+                    let (checked, export) = self.check_generated_function_item(
+                        func_def,
+                        span,
+                        site,
+                        source_anchor,
+                        generator_anchor,
+                        "module_fn",
+                    )?;
+                    exports.push(export);
+                    stamped.push(checked);
+                }
+                other => stamped.push(other),
+            }
+        }
+        Ok(super::comptime_fragments::CheckedModule::new(stamped, exports))
+    }
+
+    /// ADR-009 E2 #18 (slice 3): build the typed `CheckedReplaceBody` for a
+    /// const-free FUNCTION-target `replace body` edit, so the driver can
+    /// materialize the replacement PRE-ANALYSIS (swap the target's body + prepend
+    /// the hygienic `ctx.original` shadow into the analysis-program clone) before
+    /// `analyze_program_full`. This is what flips the C0911 quarantine: the
+    /// analyzer then infers the STAMPED replacement closures and publishes their
+    /// structural specialization facts, keyed by the same content-derived
+    /// closure-origin identity pass-2's capture descriptor uses (both stamp with
+    /// the SAME `ExpansionSite` via `stamp_generated_replacement_body`).
+    ///
+    /// The sequence mirrors pass-2's `ReplaceBody` application
+    /// (`process_comptime_directives_for_function`) exactly — same shadow name,
+    /// same `ctx.original` capability + rewrite, same stamp — MINUS the
+    /// authoritative install (pass-2 still swaps the shipped body and registers
+    /// the shadow byte-unchanged). The ONE persistent publication here is the
+    /// shadow's reserved hygienic identity, JOURNALED through the already-open C2
+    /// `InstallTransaction`, so a failed compile rolls it back atomically. The
+    /// shadow's own closures are deliberately NOT generated-stamped — it retains
+    /// user code (the capture gate follows the node stamp, not the reservation).
+    ///
+    /// Scoping (slice-0 §"Scoping boundary surfaced"): the caller restricts this
+    /// to const-free targets. A const-template `replace body` whose emitted body
+    /// depends on a per-call-site const specialization would materialize
+    /// differently (or not at all) in this single-program pre-analysis view, so
+    /// those edits stay a pass-2 concern.
+    pub(super) fn build_checked_replace_body(
+        &mut self,
+        target: &FunctionDef,
+        replacement_body: &[Statement],
+        site: &ExpansionSite,
+    ) -> Result<super::comptime_fragments::CheckedReplaceBody> {
+        // Same hygienic shadow identity + `ctx.original` capability pass-2 builds
+        // (`original_body_shadow_name` is a stable digest of the function name).
+        let shadow_name = self.original_body_shadow_name(&target.name);
+        let capability = self.build_original_capability(target, shadow_name.clone())?;
+
+        // Rewrite every `ctx.original(args)` in the replacement into a direct
+        // typed call to the hygienic shadow, seeding scope with the target's
+        // parameter binders (incl. destructuring) and `self` — identical to the
+        // pass-2 rewrite so the analyzed body matches the shipped one.
+        let mut bound_receivers: HashSet<String> = target
+            .params
+            .iter()
+            .flat_map(|p| p.get_identifiers())
+            .collect();
+        bound_receivers.insert("self".to_string());
+        let rewritten = super::original_body_rewrite::rewrite_original_calls_in_statements(
+            replacement_body,
+            &bound_receivers,
+            capability.shadow_name(),
+        );
+
+        // Stamp the replacement's closures with generated provenance through the
+        // SAME `stamp_generated_replacement_body(site)` pass-2 calls — so the
+        // analyzer's published fact and pass-2's capture descriptor share one
+        // content-derived closure-origin identity. The annotations are dropped on
+        // the analysis copy (it is analyzed, never re-discovered).
+        let mut replacement = target.clone();
+        replacement.annotations = Vec::new();
+        replacement.body = rewritten;
+        let _replacement_origin = self.stamp_generated_replacement_body(&mut replacement, site)?;
+
+        // The hygienic shadow: the pre-annotation body under the shadow name (the
+        // `PendingOriginalBodyShadow::new` emission shape). NOT closure-stamped.
+        let shadow = FunctionDef {
+            name: shadow_name.clone(),
+            name_span: target.name_span,
+            declaring_module_path: target.declaring_module_path.clone(),
+            doc_comment: None,
+            params: target.params.clone(),
+            return_type: target.return_type.clone(),
+            body: target.body.clone(),
+            type_params: target.type_params.clone(),
+            annotations: Vec::new(),
+            where_clause: target.where_clause.clone(),
+            is_async: target.is_async,
+            is_comptime: target.is_comptime,
+        };
+
+        // Reserve the shadow's hygienic identity, JOURNALED through the open
+        // transaction (rolls back on a failed install — the atomicity pin). The
+        // node path distinguishes the shadow from the replacement stamp above.
+        let content = generated_free_fn_content(&shadow);
+        let source_anchor = site
+            .source_anchor()
+            .map_err(|message| self.expansion_rejection(message, site))?;
+        let generator_anchor = site
+            .generator_anchor()
+            .map_err(|message| self.expansion_rejection(message, site))?;
+        let origin = GeneratedOrigin {
+            expansion: site.identity().clone(),
+            node_path: GeneratedNodePath::decl_root(format!("shadow_fn:{}", target.name)),
+            source_anchor,
+        };
+        let shadow_export = match self.reserve_generated_decl_journaled(
+            &shadow_name,
+            origin,
+            content,
+            generator_anchor,
+        ) {
+            Ok(SymbolReservation::Fresh(id)) | Ok(SymbolReservation::Reissued(id)) => id,
+            Err(message) => return Err(self.expansion_rejection(message, site)),
+        };
+
+        Ok(super::comptime_fragments::CheckedReplaceBody::new(
+            target.name.clone(),
+            replacement.body,
+            shadow,
+            shadow_export,
+        ))
+    }
+
     pub(super) fn process_comptime_directives(
         &mut self,
         directives: Vec<super::comptime_builtins::ComptimeDirective>,
@@ -2886,7 +3191,7 @@ impl BytecodeCompiler {
                         "`replace body` directives are only valid when compiling function targets",
                     ));
                 }
-                super::comptime_builtins::ComptimeDirective::ReplaceModule { .. } => {
+                super::comptime_builtins::ComptimeDirective::ReplaceModuleChecked { .. } => {
                     return Err(Self::directive_error(
                         "`replace module` directives are only valid when compiling module targets",
                     ));
@@ -3120,7 +3425,7 @@ impl BytecodeCompiler {
                     *pending_original_body_shadow = Some(pending);
                     *replacement_body_origin = Some(replacement_origin);
                 }
-                super::comptime_builtins::ComptimeDirective::ReplaceModule { .. } => {
+                super::comptime_builtins::ComptimeDirective::ReplaceModuleChecked { .. } => {
                     return Err(Self::directive_error(
                         "`replace module` directives are only valid when compiling module targets",
                     ));
@@ -4515,7 +4820,7 @@ mod s2_expansion_provenance_tests {
 annotation gen() {
   targets: [type]
   comptime post(target, ctx) {
-    extend (f"extend {target.name} \{ method answer() -> int \{ 42 \} \}")
+    extend (extend_method_literal(target.name, "answer", "int", 42))
   }
 }
 
@@ -4576,7 +4881,7 @@ type Point { id: int }
 annotation gen2() {
   targets: [type]
   comptime post(target, ctx) {
-    extend ("fn generated_flag() -> int { 7 }")
+    extend (item_fn("generated_flag", "int", 7))
   }
 }
 
@@ -4612,7 +4917,7 @@ fn main() -> int { generated_flag() }
 annotation dup() {
   targets: [type]
   comptime post(target, ctx) {
-    extend ("fn clash() -> int { 1 }")
+    extend (item_fn("clash", "int", 1))
   }
 }
 
@@ -4880,16 +5185,19 @@ type Point { id: int }
         );
     }
 
-    /// A generated method parsed from a SNIPPET (`extend (f"extend …")`) has
-    /// snippet-relative spans; the registered declaration must be re-based to
-    /// the application span, not left pointing into synthetic snippet text.
+    /// ADR-009 E2 #18 5b Part B — producer-route METHOD span pin (replaces the
+    /// retired snippet-span test whose subject was the deleted `extend (f"…")`
+    /// route). A generated method from the TYPED producer (extend_method_literal)
+    /// carries Span::default() scaffolding that the shared check sequence re-bases
+    /// to the application span; the registered declaration must anchor there. This
+    /// is the surviving-route residual required to retire the deleted snippet test.
     #[test]
-    fn generated_snippet_extend_method_name_span_anchors_at_the_application_site() {
+    fn generated_producer_extend_method_name_span_anchors_at_the_application_site() {
         let source = r#"
 annotation gen() {
   targets: [type]
   comptime post(target, ctx) {
-    extend (f"extend {target.name} \{ method answer() -> int \{ 42 \} \}")
+    extend (extend_method_literal(target.name, "answer", "int", 42))
   }
 }
 
@@ -4909,17 +5217,20 @@ type Point { id: int }
         );
     }
 
-    /// A generated FREE function parsed from the `mod __module_probe__`
-    /// snippet anchors at the application site, and its `GeneratedOrigin`
-    /// source anchor resolves to the SAME location — the identity table and
-    /// the registered declaration agree on one real anchor.
+    /// ADR-009 E2 #18 5b Part B — producer-route FREE-FUNCTION span pin (replaces
+    /// the retired snippet-span test whose subject was the deleted
+    /// `mod __module_probe__` reparse route). A generated free function from the
+    /// TYPED producer (item_fn) anchors at the application site, and its
+    /// `GeneratedOrigin` source anchor resolves to the SAME location — the identity
+    /// table and the registered declaration agree on one real anchor. The
+    /// surviving-route residual required to retire the deleted snippet test.
     #[test]
-    fn generated_free_function_anchors_at_the_application_site_not_the_snippet() {
+    fn generated_producer_free_function_anchors_at_the_application_site() {
         let source = r#"
 annotation gen2() {
   targets: [type]
   comptime post(target, ctx) {
-    extend ("fn generated_flag() -> int { 7 }")
+    extend (item_fn("generated_flag", "int", 7))
   }
 }
 

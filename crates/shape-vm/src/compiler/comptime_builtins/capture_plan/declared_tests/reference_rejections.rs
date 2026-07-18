@@ -61,10 +61,12 @@ fn generated_direct_reference_is_rejected() {
 annotation add_reader() {
   targets: [type]
   comptime post(target, ctx) {
-    extend ("extend Job { method read(x: int) -> int { let value = 7
-      let r = &value
-      let worker = |y: int; move r| y + r
-      worker(x) } }")
+    extend target {
+      method read(x: int) -> int { let value = 7
+        let r = &value
+        let worker = |y: int; move r| y + r
+        worker(x) }
+    }
   }
 }
 @add_reader()
@@ -83,11 +85,13 @@ fn generated_straight_line_reference_alias_is_rejected() {
 annotation add_reader() {
   targets: [type]
   comptime post(target, ctx) {
-    extend ("extend Job { method read(x: int) -> int { let value = 7
-      let r = &value
-      let alias = r
-      let worker = |y: int; move alias| y + alias
-      worker(x) } }")
+    extend target {
+      method read(x: int) -> int { let value = 7
+        let r = &value
+        let alias = r
+        let worker = |y: int; move alias| y + alias
+        worker(x) }
+    }
   }
 }
 @add_reader()
@@ -106,9 +110,11 @@ fn generated_owned_binding_is_not_falsely_rejected() {
 annotation add_reader() {
   targets: [type]
   comptime post(target, ctx) {
-    extend ("extend Job { method read(x: int) -> int { let owned = 7
-      let worker = |y: int; move owned| y + owned
-      worker(x) } }")
+    extend target {
+      method read(x: int) -> int { let owned = 7
+        let worker = |y: int; move owned| y + owned
+        worker(x) }
+    }
   }
 }
 @add_reader()
@@ -120,6 +126,16 @@ job.read(2)
     outcome.expect("an owned binding remains a valid declared move capture");
 }
 
+// ADR-009 E2 #18 5b-2 Option C (isolated commit): the three tests below drove
+// their MODULE-BINDING capture arms (C0902 / C0906 / C0912) through a GENERATED
+// FREE FUNCTION, whose container has no surviving typed route post-U03. They are
+// rewritten to a generated METHOD container. The C0902/C0906/C0912 arms classify
+// by BINDING PROVENANCE (registered module-level let), not by the closure's
+// container, so the diagnostics SHOULD fire identically — but this is the
+// constraint-1 "module-binding may behave differently in a method body" trigger,
+// unverifiable without a compile. Assertions are byte-unchanged; the interim gate
+// empirically arbitrates (green = cleared; red = these 3 surface, synthetic-unit
+// coverage in declared_tests::rejections stays either way).
 #[test]
 fn generated_free_function_module_reference_rejects_before_closure_publication() {
     let (compiler, outcome) = compile_outcome_with_known_bindings(
@@ -130,14 +146,17 @@ let module_ref = &module_value
 annotation add_reader() {
   targets: [type]
   comptime post(target, ctx) {
-    extend ("fn generated_read(x: int) -> int {
-      let worker = |y: int; share module_ref| y + module_ref
-      worker(x) }")
+    extend target {
+      method generated_read(x: int) -> int {
+        let worker = |y: int; share module_ref| y + module_ref
+        worker(x) }
+    }
   }
 }
 @add_reader()
 type Job { id: int }
-generated_read(2)
+let job = Job { id: 1 }
+job.generated_read(2)
 "#,
         &["module_ref"],
     );
@@ -163,14 +182,17 @@ let count = 41
 annotation add_reader() {
   targets: [type]
   comptime post(target, ctx) {
-    extend ("fn generated_read(x: int) -> int {
-      let worker = |; move count| count
-      x + worker() }")
+    extend target {
+      method generated_read(x: int) -> int {
+        let worker = |; move count| count
+        x + worker() }
+    }
   }
 }
 @add_reader()
 type Job { id: int }
-generated_read(2)
+let job = Job { id: 1 }
+job.generated_read(2)
 "#,
         &["count"],
     );
@@ -203,14 +225,17 @@ let count = 41
 annotation add_reader() {
   targets: [type]
   comptime post(target, ctx) {
-    extend ("fn generated_read(x: int) -> int {
-      let worker = |; share count| count
-      x + worker() }")
+    extend target {
+      method generated_read(x: int) -> int {
+        let worker = |; share count| count
+        x + worker() }
+    }
   }
 }
 @add_reader()
 type Job { id: int }
-generated_read(2)
+let job = Job { id: 1 }
+job.generated_read(2)
 "#,
         &["count"],
     );

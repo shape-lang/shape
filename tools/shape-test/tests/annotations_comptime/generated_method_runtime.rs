@@ -65,29 +65,14 @@ print(pair.total())
     );
 }
 
-/// Snippet directive shape: `extend (f"extend {target.name} { … }")` — the
-/// generated method is parsed from synthetic snippet text and re-anchored to
-/// the application site; its runtime behavior is unchanged.
-#[test]
-fn generated_snippet_extend_method_behaves_identically_in_vm_and_jit() {
-    expect_vm_and_jit_output(
-        r#"
-annotation gen() {
-  targets: [type]
-  comptime post(target, ctx) {
-    extend (f"extend {target.name} \{ method answer() -> int \{ 42 \} \}")
-  }
-}
-
-@gen()
-type Point { id: int }
-
-let p = Point { id: 1 }
-print(p.answer())
-"#,
-        "42",
-    );
-}
+// ADR-009 E2 #18 slice 5b Part B: `generated_snippet_extend_method_behaves_
+// identically_in_vm_and_jit` RETIRED. Its subject was a generated method parsed
+// from synthetic SNIPPET text (the U03 `extend (f"…")` source-string route) and
+// re-anchored — that route is deleted in this slice, so the test has no live
+// subject. Its residual coverage (VM/JIT identity of a generated method) is
+// carried by the direct-route siblings above:
+// generated_extend_target_method_behaves_identically_in_vm_and_jit +
+// _arithmetic_method_. (Supervisor-ruled retire-with-disclosure; baseline 11->10.)
 
 /// Generated FREE function (the §4.5.1 pre-pass visibility case): resolved
 /// from user function bodies, compiled through the full MIR/JIT driver,
@@ -105,7 +90,7 @@ fn generated_free_function_behaves_identically_in_vm_and_jit() {
 annotation gen2() {
   targets: [type]
   comptime post(target, ctx) {
-    extend ("fn generated_flag() -> int { 7 }")
+    extend (item_fn("generated_flag", "int", 7))
   }
 }
 

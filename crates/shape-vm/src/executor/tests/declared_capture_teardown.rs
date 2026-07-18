@@ -90,9 +90,11 @@ const MOVE_LET_STRING: &str = r#"
 annotation add_reader() {
   targets: [type]
   comptime post(target, ctx) {
-    extend ("extend Job { method read() -> string { let tag = \"hi\"
-      let worker = |; move tag| tag
-      worker() } }")
+    extend target {
+      method read() -> string { let tag = "hi"
+        let worker = |; move tag| tag
+        worker() }
+    }
   }
 }
 @add_reader()
@@ -107,9 +109,11 @@ const MOVE_LET_INT: &str = r#"
 annotation add_reader() {
   targets: [type]
   comptime post(target, ctx) {
-    extend ("extend Job { method read() -> int { let tag = 7
-      let worker = |; move tag| tag
-      worker() } }")
+    extend target {
+      method read() -> int { let tag = 7
+        let worker = |; move tag| tag
+        worker() }
+    }
   }
 }
 @add_reader()
@@ -123,9 +127,11 @@ const MOVE_LET_MUT_ARRAY: &str = r#"
 annotation add_reader() {
   targets: [type]
   comptime post(target, ctx) {
-    extend ("extend Job { method read() -> int { let mut xs = [1.0, 2.0]
-      let worker = |; move xs| xs.len()
-      worker() } }")
+    extend target {
+      method read() -> int { let mut xs = [1.0, 2.0]
+        let worker = |; move xs| xs.len()
+        worker() }
+    }
   }
 }
 @add_reader()
@@ -139,9 +145,11 @@ const SHARE_VAR: &str = r#"
 annotation add_reader() {
   targets: [type]
   comptime post(target, ctx) {
-    extend ("extend Job { method read(x: int) -> int { var total = 5
-      let worker = |y: int; share total| y + total
-      worker(x) } }")
+    extend target {
+      method read(x: int) -> int { var total = 5
+        let worker = |y: int; share total| y + total
+        worker(x) }
+    }
   }
 }
 @add_reader()
@@ -158,9 +166,11 @@ const MOVE_LET_MUT_ARRAY_MONO: &str = r#"
 annotation add_reader() {
   targets: [type]
   comptime post(target, ctx) {
-    extend ("extend Job { method read<T>(f: T) -> int { let mut xs = [1.0, 2.0]
-      let worker = |t: T; move xs| xs.len()
-      worker(f) } }")
+    extend target {
+      method read<T>(f: T) -> int { let mut xs = [1.0, 2.0]
+        let worker = |t: T; move xs| xs.len()
+        worker(f) }
+    }
   }
 }
 @add_reader()
@@ -173,9 +183,11 @@ const SHARE_VAR_MONO: &str = r#"
 annotation add_reader() {
   targets: [type]
   comptime post(target, ctx) {
-    extend ("extend Job { method read<T>(f: T) -> int { var total = 5
-      let worker = |t: T; share total| total
-      worker(f) } }")
+    extend target {
+      method read<T>(f: T) -> int { var total = 5
+        let worker = |t: T; share total| total
+        worker(f) }
+    }
   }
 }
 @add_reader()
@@ -188,9 +200,11 @@ const MOVE_LET_STRING_MONO: &str = r#"
 annotation add_reader() {
   targets: [type]
   comptime post(target, ctx) {
-    extend ("extend Job { method read<T>(f: T) -> string { let tag = \"hi\"
-      let worker = |t: T; move tag| tag
-      worker(f) } }")
+    extend target {
+      method read<T>(f: T) -> string { let tag = "hi"
+        let worker = |t: T; move tag| tag
+        worker(f) }
+    }
   }
 }
 @add_reader()
@@ -352,9 +366,11 @@ fn declared_move_of_a_scalar_let_mut_reclaims_its_box_cell() {
 annotation add_scaler() {
   targets: [type]
   comptime post(target, ctx) {
-    extend ("extend Job { method scale(f: int) -> int { let mut hits = 3
-      let worker = |x: int; move hits| x * hits
-      worker(f) } }")
+    extend target {
+      method scale(f: int) -> int { let mut hits = 3
+        let worker = |x: int; move hits| x * hits
+        worker(f) }
+    }
   }
 }
 @add_scaler()

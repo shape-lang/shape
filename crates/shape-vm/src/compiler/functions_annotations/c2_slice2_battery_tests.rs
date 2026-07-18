@@ -141,7 +141,9 @@ fn battery_row1_type_mismatch_rejects_atomically() {
 annotation gen1() {
   targets: [type]
   comptime post(target, ctx) {
-    extend (f"extend {target.name} \{ method run() -> int \{ let y: int = true; y \} \}")
+    extend target {
+      method run() -> int { let y: int = true; y }
+    }
   }
 }
 
@@ -169,7 +171,9 @@ fn battery_row3_ownership_use_after_move_rejects_atomically() {
 annotation gen3() {
   targets: [type]
   comptime post(target, ctx) {
-    extend (f"extend {target.name} \{ method run() -> int \{ let p = [1, 2, 3]; let q = p; p[0] \} \}")
+    extend target {
+      method run() -> int { let p = [1, 2, 3]; let q = p; p[0] }
+    }
   }
 }
 
@@ -192,7 +196,9 @@ fn battery_row4_borrow_conflict_rejects_atomically() {
 annotation gen4() {
   targets: [type]
   comptime post(target, ctx) {
-    extend (f"extend {target.name} \{ method run() -> int \{ let mut x = 1; let shared = &x; let excl = &mut x; let held = shared; 0 \} \}")
+    extend target {
+      method run() -> int { let mut x = 1; let shared = &x; let excl = &mut x; let held = shared; 0 }
+    }
   }
 }
 
@@ -226,7 +232,9 @@ fn battery_row5_lifetime_reference_escape_rejects_atomically() {
 annotation gen5() {
   targets: [type]
   comptime post(target, ctx) {
-    extend (f"extend {target.name} \{ method run() -> int \{ let value = 7; let r = &value; let worker = |y: int; move r| y + r; worker(1) \} \}")
+    extend target {
+      method run() -> int { let value = 7; let r = &value; let worker = |y: int; move r| y + r; worker(1) }
+    }
   }
 }
 
@@ -266,7 +274,9 @@ fn battery_row6_suspension_exclusive_ref_across_task_boundary_rejects_atomically
 annotation gen6() {
   targets: [type]
   comptime post(target, ctx) {
-    extend (f"extend {target.name} \{ async method run() -> int \{ let mut x = 1; async let fut = \{ let r = &mut x; 0 \}; await fut; 0 \} \}")
+    extend target {
+      async method run() -> int { let mut x = 1; async let fut = { let r = &mut x; 0 }; await fut; 0 }
+    }
   }
 }
 
@@ -316,7 +326,9 @@ fn battery_row7_send_nonsendable_across_task_boundary_rejects_atomically() {
 annotation gen7() {
   targets: [type]
   comptime post(target, ctx) {
-    extend (f"extend {target.name} \{ async method run() -> int \{ let mut x = 1; x = x + 1; x = x + 1; async let fut = \{ let g = |; move x| x; g() \}; await fut; 0 \} \}")
+    extend target {
+      async method run() -> int { let mut x = 1; x = x + 1; x = x + 1; async let fut = { let g = |; move x| x; g() }; await fut; 0 }
+    }
   }
 }
 
@@ -350,7 +362,9 @@ impl Drop for AsyncRes {
 annotation gen9() {
   targets: [type]
   comptime post(target, ctx) {
-    extend (f"extend {target.name} \{ method run() -> int \{ let r: AsyncRes = AsyncRes \{ id: 1 \}; r.id \} \}")
+    extend target {
+      method run() -> int { let r: AsyncRes = AsyncRes { id: 1 }; r.id }
+    }
   }
 }
 
@@ -389,7 +403,7 @@ async fn tick() -> int {{ 0 }}
 annotation gen10b() {{
   targets: [type]
   comptime post(target, ctx) {{
-    extend (f"extend {{target.name}} \{{ {method_body} \}}")
+    extend target {{ {method_body} }}
   }}
 }}
 
@@ -420,7 +434,7 @@ type Widget {{ id: int }}
 fn battery_row10b_d6_drop_obligated_across_suspension_rejects_atomically() {
     assert_generated_install_rejected(
         &d6_program(
-            r#"async method run() -> int \{ let v: int = \{ let c: Conn = Conn \{ id: 1 \}; c.id \}; await tick(); v \}"#,
+            r#"async method run() -> int { let v: int = { let c: Conn = Conn { id: 1 }; c.id }; await tick(); v }"#,
         ),
         // Row 10b NEW code: the D6 greenfield async-drop-context ex.1 check,
         // slice 3 assigns C0922. Reached via D6's conservative over-rejection.
@@ -446,7 +460,7 @@ fn battery_row10b_d6_drop_obligated_across_suspension_rejects_atomically() {
 fn battery_row10b_d6_inferred_method_call_drop_local_across_suspension_rejects_atomically() {
     assert_generated_install_rejected(
         &d6_program(
-            r#"async method run() -> int \{ let v: int = \{ let p: Pool = Pool \{ n: 0 \}; let x = p.acquire(); x.id \}; await tick(); v \}"#,
+            r#"async method run() -> int { let v: int = { let p: Pool = Pool { n: 0 }; let x = p.acquire(); x.id }; await tick(); v }"#,
         ),
         // Same NEW C0922 as the sibling firing pin; the RAII repair (ece86852)
         // makes `x`'s inferred drop obligation resolve so D6's conservative check
@@ -473,7 +487,7 @@ fn battery_row10b_d6_inferred_method_call_drop_local_across_suspension_rejects_a
 fn battery_row10b_d6_headline_case_live_across_await_rejects_with_c0922() {
     assert_generated_install_rejected(
         &d6_program(
-            r#"async method run() -> int \{ let c: Conn = Conn \{ id: 1 \}; await tick(); c.id \}"#,
+            r#"async method run() -> int { let c: Conn = Conn { id: 1 }; await tick(); c.id }"#,
         ),
         // D6 catches the headline live-across case with its named code. (Was the
         // emission-preemption envelope "not available in compile-time code" at
@@ -490,7 +504,7 @@ fn battery_row10b_d6_headline_case_live_across_await_rejects_with_c0922() {
 #[test]
 fn battery_row10b_d6_control_suspension_without_drop_local_installs() {
     assert_generated_install_succeeds(&d6_program(
-        r#"async method run() -> int \{ let c: int = 1; await tick(); c \}"#,
+        r#"async method run() -> int { let c: int = 1; await tick(); c }"#,
     ));
 }
 
@@ -501,7 +515,7 @@ fn battery_row10b_d6_control_suspension_without_drop_local_installs() {
 #[test]
 fn battery_row10b_d6_control_drop_local_without_suspension_installs() {
     assert_generated_install_succeeds(&d6_program(
-        r#"async method run() -> int \{ let c: Conn = Conn \{ id: 1 \}; c.id \}"#,
+        r#"async method run() -> int { let c: Conn = Conn { id: 1 }; c.id }"#,
     ));
 }
 

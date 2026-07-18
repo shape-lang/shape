@@ -7,7 +7,7 @@
 // ADR-009 E3 (slice S1): the parallel static comptime-extend collector
 // (`comptime_extends`, deleted) was a NON-EVALUATING AST scan that re-derived
 // `extend` items without executing the annotation handler — it could observe
-// false-guarded edits and never saw computed `extend (f"…")` snippets. The
+// false-guarded edits and never saw computed `extend (...)` directives. The
 // executed declaration-discovery pre-pass
 // (`shape_vm::compiler::executed_generated_items` /
 // `augment_program_with_executed_extends`) is now the single authority; no

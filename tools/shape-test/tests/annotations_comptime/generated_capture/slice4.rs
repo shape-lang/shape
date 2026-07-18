@@ -23,9 +23,11 @@ const MOVE_LET: &str = r#"
 annotation add_answer() {
   targets: [type]
   comptime post(target, ctx) {
-    extend ("extend Job { method answer() -> int { let base = 40
-      let worker = |; move base| base + 2
-      worker() } }")
+    extend target {
+      method answer() -> int { let base = 40
+        let worker = |; move base| base + 2
+        worker() }
+    }
   }
 }
 @add_answer()
@@ -38,10 +40,12 @@ const MOVE_LET_MUT: &str = r#"
 annotation add_answer() {
   targets: [type]
   comptime post(target, ctx) {
-    extend ("extend Job { method answer() -> int { let mut total = 40
-      let worker = |; move total| { total = total + 2
-        total }
-      worker() } }")
+    extend target {
+      method answer() -> int { let mut total = 40
+        let worker = |; move total| { total = total + 2
+          total }
+        worker() }
+    }
   }
 }
 @add_answer()
@@ -54,9 +58,11 @@ const MOVE_HEAP_LET: &str = r#"
 annotation add_label() {
   targets: [type]
   comptime post(target, ctx) {
-    extend ("extend Job { method label() -> string { let label = \"shape\"
-      let worker = |; move label| label
-      worker() } }")
+    extend target {
+      method label() -> string { let label = "shape"
+        let worker = |; move label| label
+        worker() }
+    }
   }
 }
 @add_label()
@@ -69,13 +75,15 @@ const NESTED_SHARE: &str = r#"
 annotation add_answer() {
   targets: [type]
   comptime post(target, ctx) {
-    extend ("extend Job { method answer() -> int { var total = 40
-      let outer = |; share total| {
-        let inner = |step: int; share total| { total = total + step
+    extend target {
+      method answer() -> int { var total = 40
+        let outer = |; share total| {
+          let inner = |step: int; share total| { total = total + step
+            total }
+          inner(2)
           total }
-        inner(2)
-        total }
-      outer() } }")
+        outer() }
+    }
   }
 }
 @add_answer()
@@ -147,8 +155,13 @@ fn ordinary_inferred_nested_share_recaptures_the_same_cell_in_both_tiers() {
 #[test]
 fn nested_share_fresh_cell_control_breaks_outer_observation() {
     let isolated = NESTED_SHARE.replace(
-        "let inner = |step: int; share total| { total = total + step\n          total }",
-        "var isolated = total\n        let inner = |step: int; share isolated| { isolated = isolated + step\n          isolated }",
+        "let inner = |step: int; share total| { total = total + step\n            total }",
+        "var isolated = total\n          let inner = |step: int; share isolated| { isolated = isolated + step\n            isolated }",
+    );
+    assert_ne!(
+        isolated, NESTED_SHARE,
+        "the fresh-cell mutation must actually rewrite the inner closure — guard against a \
+         no-op .replace after the 5b-2 direct-form re-indent left the control vacuous"
     );
     expect_number_in_both_tiers(&isolated, 40.0);
 }

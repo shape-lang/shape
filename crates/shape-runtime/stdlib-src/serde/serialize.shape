@@ -25,33 +25,87 @@
 pub annotation to_json() {
     targets: [type]
     comptime post(target, ctx) {
-        // Build the per-field pieces of the generated f-string body. Inside the
-        // generated source, `\"` is a literal quote and `{self.field}` is a
-        // runtime f-string interpolation, so from here a literal `\` is written
-        // `\\`, a literal `"` is `\"`, and a literal `{`/`}` (forming the runtime
-        // interpolation) is `\{`/`\}`.
-        let mut body = ""
-        let mut first = true
+        // ADR-009 E2 #18 slice 4.5 (E2-Q2/B): build a TYPED template for the
+        // `extend_method` producer instead of generating source text. `segments`
+        // are the literal JSON punctuation between splices; `field_splices` are
+        // the field NAMES the producer emits as `{self.<field>}` holes (asserted
+        // identifiers at the builtin boundary). `extend_method` assembles the
+        // native f-string body `{ "f": {self.f}, ... }` and the extend-method AST
+        // directly — no source string, no reparse. Strict interleave invariant:
+        // segments.len() == field_splices.len() + 1.
+        //
+        // An EMPTY typed-array literal init (`let x: Array<string> = []`) is not
+        // available in comptime ([C0001]); non-empty-init + `.push()` is. So both
+        // arrays are SEEDED non-empty from the FIRST field's REAL data (captured
+        // by iteration, no indexing) before the append loop — no placeholder ever
+        // reaches `extend_method`. A 0-field type would need an empty
+        // field_splices array and is rejected below (see the slice report; the
+        // retired string-concat serializer produced `{  }` for it).
+        let mut first_name = ""
+        let mut first_type = ""
+        let mut have_first = false
         for field in target.fields {
-            let mut piece = ""
-            if field.type == "string" {
-                piece = f"\\\"{field.name}\\\": \\\"\{self.{field.name}\}\\\""
-            } else if field.type == "int" || field.type == "number" || field.type == "bool" {
-                piece = f"\\\"{field.name}\\\": \{self.{field.name}\}"
-            } else {
+            let is_string = field.type == "string"
+            if !is_string && field.type != "int" && field.type != "number" && field.type != "bool" {
                 error(f"@to_json: field '{field.name}' has type '{field.type}', which has no JSON representation")
             }
-            if first {
-                body = piece
-                first = false
-            } else {
-                body = f"{body}, {piece}"
+            if !have_first {
+                first_name = field.name
+                first_type = field.type
+                have_first = true
             }
         }
-        // Wrap the pieces in an object f-string: `f"\{ <body> \}"`.
-        let generated_body = f"f\"\\\{ {body} \\\}\""
+        if !have_first {
+            error(f"@to_json on '{target.name}' requires at least one field")
+        }
+
+        // Seed from the first field's real data (never a sentinel): its leading
+        // punctuation segment + its name splice.
+        let first_is_string = first_type == "string"
+        let mut seg = "{ "
+        if first_is_string {
+            seg = f"{seg}\"{first_name}\": \""
+        } else {
+            seg = f"{seg}\"{first_name}\": "
+        }
+        let mut segments = [seg]
+        let mut field_splices = [first_name]
+        // Punctuation AFTER the first splice starts the next segment.
+        if first_is_string {
+            seg = "\""
+        } else {
+            seg = ""
+        }
+
+        // Append every field AFTER the first (skipped by the flag, not by
+        // indexing). Each contributes a `, ` separator + `"name": ` (+ opening
+        // quote for a string), its name splice, then a closing quote or empty.
+        let mut is_first = true
+        for field in target.fields {
+            if is_first {
+                is_first = false
+            } else {
+                let is_string = field.type == "string"
+                seg = f"{seg}, "
+                if is_string {
+                    seg = f"{seg}\"{field.name}\": \""
+                } else {
+                    seg = f"{seg}\"{field.name}\": "
+                }
+                segments.push(seg)
+                field_splices.push(field.name)
+                if is_string {
+                    seg = "\""
+                } else {
+                    seg = ""
+                }
+            }
+        }
+        // Trailing segment: close the object.
+        seg = f"{seg} \}"
+        segments.push(seg)
         // Emit a `to_json()` method on the type (implicit `self` receiver), so
         // callers write `value.to_json()`.
-        extend (f"extend {target.name} \{ method to_json() -> string \{ {generated_body} \} \}")
+        extend (extend_method(target.name, "to_json", "string", segments, field_splices))
     }
 }

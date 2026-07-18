@@ -164,3 +164,44 @@ fn c2_async_clean_generated_method_installs_and_runs_named_fallback() {
 fn c2_generated_move_capture_still_native_post_c2() {
     assert_c2_fixture_reaches_native_jit("c2-regression-generated-move.shape", "123\n");
 }
+
+/// ADR-009 E2 #18 slice 1 — a TYPED `replace module` (an `item_fn` fragment,
+/// no source/JSON string) installs via the `CheckedModule` path and runs
+/// natively in both tiers. The generated module function `answer` is a plain
+/// int function, so JIT == VM with zero fallback (output distinguishes the
+/// typed replacement 42 from the pre-replace 0).
+#[test]
+fn e2_typed_replace_module_runs_natively_both_tiers() {
+    assert_c2_fixture_reaches_native_jit("e2-replace-module-checked.shape", "42\n");
+}
+
+/// ADR-009 E2 #18 slice 2 — the typed `item_fn` CheckedItem carrier: additive
+/// generation via extend-items installs and runs natively in both tiers, adding
+/// the JIT proof the D10 matrix row never had (it was VM-only). The generated
+/// free function is a plain int function, so JIT == VM with zero fallback.
+#[test]
+fn e2_item_fn_checked_extend_runs_natively_both_tiers() {
+    assert_c2_fixture_reaches_native_jit("e2-item-fn-checked.shape", "7\n");
+}
+
+/// ADR-009 E2 #18 slice 3 — a CLOSURE-BEARING `replace body` edit installs and
+/// runs NATIVELY in both tiers under `--mode jit`, printing 42 (the post-edit
+/// replacement, not the pre-edit 7). The replacement's explicit `move`-capture
+/// closure runs native post-C1 #12 (1f0127a3): C1's slice-4 zero-fallback matrix
+/// (9/9) already proved declared-capture closures — move/let, move/heap,
+/// move/let-mut, share/local-var — JIT natively, and this `|; move base|` is
+/// exactly that class. So JIT == VM with zero `[jit-fallback]` — the standard
+/// `assert_c2_fixture_reaches_native_jit` proof, same as the e2 sibling rows and
+/// the C1 matrix. (An earlier version of this pin asserted a `>= 1` deopt on a
+/// STALE "capturing closures always deopt" prior measured 2026-07-14, before C1
+/// merged; the re-gate proved it native.)
+///
+/// This proof lives in the CLI subprocess harness because the shape-test harness
+/// `JITExecutor` leg captures EMPTY output for annotation-generated programs (a
+/// pre-existing main-side hole, family: the `generated_method_runtime` baseline
+/// names) — so the shape-test runtime pin for this fixture is VM-only, and the
+/// JIT-side truth is proven here, where the harness works.
+#[test]
+fn e2_closure_bearing_replace_body_runs_natively_both_tiers() {
+    assert_c2_fixture_reaches_native_jit("e2-replace-body-closure.shape", "42\n");
+}

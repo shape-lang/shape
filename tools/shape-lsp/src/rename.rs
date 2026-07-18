@@ -709,7 +709,7 @@ annotation gen() {
   targets: [type]
   comptime post(target, ctx) {
     let suffix = "swer"
-    extend (f"extend {target.name} \{ method an{suffix}() -> int \{ 42 \} \}")
+    extend (extend_method_literal(target.name, f"an{suffix}", "int", 42))
   }
 }
 
@@ -810,7 +810,7 @@ let x = p.answer()
 annotation gen(mname) {
   targets: [type]
   comptime post(target, ctx) {
-    extend (f"extend {target.name} \{ method {mname}() -> int \{ 1 \} \}")
+    extend (extend_method_literal(target.name, mname, "int", 1))
   }
 }
 

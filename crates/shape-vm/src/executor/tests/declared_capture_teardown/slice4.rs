@@ -12,13 +12,15 @@ const NESTED_SHARE_VAR: &str = r#"
 annotation add_reader() {
   targets: [type]
   comptime post(target, ctx) {
-    extend ("extend Job { method read() -> int { var total = 40
-      let outer = |; share total| { let inner = |; share total| {
-        total = total + 2
-        total }
-        inner()
-        total }
-      outer() } }")
+    extend target {
+      method read() -> int { var total = 40
+        let outer = |; share total| { let inner = |; share total| {
+          total = total + 2
+          total }
+          inner()
+          total }
+        outer() }
+    }
   }
 }
 @add_reader()

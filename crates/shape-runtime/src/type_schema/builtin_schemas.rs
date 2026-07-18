@@ -846,16 +846,15 @@ pub fn register_builtin_schemas(registry: &mut TypeSchemaRegistry) -> BuiltinSch
         .array_field("bounds", FieldType::Any)
         .register(registry);
 
-    let _comptime_item_fragment = TypeSchemaBuilder::new("__ComptimeItemFragment")
-        .string_field("kind")
-        .string_field("name")
-        .string_field("return_type")
-        .object_field("return_type_ref", "__ComptimeTypeRef")
-        .string_field("literal_kind")
-        .string_field("literal_string")
-        .int_field("literal_int")
-        .f64_field("literal_number")
-        .bool_field("literal_bool")
+    // ADR-009 E2 #18 (slice 2): the typed `item_fn` carrier (E2-D10). This schema
+    // carries ONLY an opaque `index` handle into the driver's thread-local
+    // `CheckedItem` store — the built AST `Item` lives compiler-side, never
+    // re-encoded into fields (the FrozenTypeRef opaque-identity pattern). (Slice 5
+    // deleted the legacy `__ComptimeItemFragment` sentinel schema this replaced —
+    // it encoded the whole declaration into `kind`/`name`/`return_type`/`literal_*`
+    // fields.)
+    let _comptime_checked_item = TypeSchemaBuilder::new("__CheckedItem")
+        .int_field("index")
         .register(registry);
 
     let _comptime_field_descriptor = TypeSchemaBuilder::new("__ComptimeFieldDescriptor")
@@ -989,7 +988,6 @@ mod tests {
         assert!(registry.has_type(COMPTIME_FROZEN_TRAIT_REF_SCHEMA));
         assert!(registry.has_type(COMPTIME_FROZEN_IMPL_REF_SCHEMA));
         assert!(registry.has_type("FrozenTypeCategory"));
-        assert!(registry.has_type("__ComptimeItemFragment"));
 
         // ADR-009 B4 (Stage 2, Dec 54): uniform nominal-application carriers +
         // the ParamKind vocabulary.
