@@ -2,20 +2,28 @@ use shape_test::shape_test::ShapeTest;
 
 use super::expect_vm_and_jit_number;
 
+// E2 #18 5b-2 Option C: subject is the container-agnostic generated-closure
+// capture gate (provenance-stamped node, not the container). The free-function
+// container is retired with the U03 string route (see #18 close capability-gap
+// entry: complex free-fn generation returns with quote-item, E-track); the
+// method container carries the identical coverage.
 #[test]
 fn generated_function_allows_capture_free_closure() {
     let source = r#"
 annotation generate_constant() {
   targets: [type]
   comptime post(target, ctx) {
-    extend ("fn generated_constant() -> int { let worker = || 42; worker() }")
+    extend target {
+      method generated_constant() -> int { let worker = || 42; worker() }
+    }
   }
 }
 
 @generate_constant()
 type Job { id: int }
 
-generated_constant()
+let job = Job { id: 1 }
+job.generated_constant()
 "#;
     expect_vm_and_jit_number(source, 42.0);
 }
@@ -47,19 +55,24 @@ generated_constant()
 /// `__closure_0`, which is not in the generated-symbol table.
 #[test]
 fn generated_nested_closure_rejects_implicit_capture() {
+    // Option C (see file header): fn-container retired with U03; the method
+    // container carries the nested-generated-closure gate coverage identically.
     ShapeTest::new(
         r#"
 annotation generate_worker() {
   targets: [type]
   comptime post(target, ctx) {
-    extend ("fn generated_nested() -> int { let outer = || { let v = 41; let inner = || v + 1; inner() }; outer() }")
+    extend target {
+      method generated_nested() -> int { let outer = || { let v = 41; let inner = || v + 1; inner() }; outer() }
+    }
   }
 }
 
 @generate_worker()
 type Job { id: int }
 
-print(generated_nested())
+let job = Job { id: 1 }
+print(job.generated_nested())
 "#,
     )
     .expect_run_err_contains(
@@ -74,19 +87,26 @@ print(generated_nested())
 /// dropping it is a compile error.
 #[test]
 fn generated_generic_body_rejects_implicit_capture_through_monomorphization() {
+    // Option C (see file header): fn-container retired with U03; the generic
+    // METHOD container carries the monomorphized-generated-closure gate coverage
+    // (generic methods parse in the direct extend form — grammar method_def
+    // type_params?, verified against existing `method describe<N>` extends).
     ShapeTest::new(
         r#"
 annotation generate_worker() {
   targets: [type]
   comptime post(target, ctx) {
-    extend ("fn generated_generic<T>(x: T) -> T { let value = x; let worker = || value; worker() }")
+    extend target {
+      method generated_generic<T>(x: T) -> T { let value = x; let worker = || value; worker() }
+    }
   }
 }
 
 @generate_worker()
 type Job { id: int }
 
-print(generated_generic(41))
+let job = Job { id: 1 }
+print(job.generated_generic(41))
 "#,
     )
     .expect_run_err_contains(
