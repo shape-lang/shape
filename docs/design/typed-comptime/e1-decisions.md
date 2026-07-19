@@ -75,6 +75,25 @@ time, the repo is the authority.
   reconstruction fn (primitive spellings invert the ONE
   `PRIMITIVE_SYNONYM_FAMILIES` table — no second name table).
 
+- **E1-D6 (slice-1 scope ratifications; supervisor 2026-07-19, anchors
+  independently verified).** (a) Slice 1 = the COMPILER-INTERNAL Rust
+  builder in `comptime_fragments/` (`pub(in crate::compiler)`), NOT the
+  Decision-95 Shape `body(captures){}` staging surface (C3/E-track) — the
+  C2-D1 "beside `checked_body/`" phrasing pins this. (b) `finish()` =
+  construction chokepoint (`Result<CheckedBody, ShapeError>`, provenance-
+  ready, never a silent partial); #13's atomic "checks and installs" is
+  discharged BY COMPOSITION with the shipped C2 validator +
+  InstallTransaction at the consumer (the CheckedItem "provenance-READY,
+  not yet reserved" precedent) — slices 3-5 MUST route through BOTH, never
+  either alone; stated in the carrier docs; the review checks the
+  composition claim. (c) Boundary: API-foundation-only — no consumer wired
+  in slice 1; negative tests per rejection class; reviewer assesses API fit
+  against the slice-3/4/5 emit sites; wiring-time API changes are
+  append-only + delta re-review. (d) Typestate builder (`finish()` only on
+  `<Present,Present>`); `[C0902]`/`[C0907]` reused with verified-faithful
+  semantics; empty-body rejection deliberately UN-NUMBERED pending E1-D4's
+  C0930 next-free computation (C092x follow-up).
+
 ## Operating rules
 
 The E2-proven pipeline carries over wholesale (recorded in the AGENTS.md E1
