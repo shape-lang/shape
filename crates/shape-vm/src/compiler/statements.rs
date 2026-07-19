@@ -615,10 +615,16 @@ impl BytecodeCompiler {
         extend: &shape_ast::ast::ExtendStatement,
         span: Span,
     ) -> Result<()> {
-        let payload = self.serialize_directive_payload(extend, "extend", span)?;
+        // ADR-009 E1 #17 (slice 4): a direct-block `extend Type { … }` is literal
+        // AST known at COMPILE time — stash the typed `ExtendStatement` in the
+        // per-run store and emit its INDEX (`__emit_extend_checked`), not a
+        // `serialize_directive_payload` JSON round-trip. No reparse. The COMPUTED
+        // extend (`extend (item_fn/extend_method …)`) uses the distinct
+        // `__emit_extend_items` typed carrier (E2), untouched.
+        let index = super::comptime_builtins::push_comptime_extend_statement(extend.clone());
         self.emit_comptime_internal_call(
-            "__emit_extend",
-            vec![Expr::Literal(Literal::String(payload), span)],
+            "__emit_extend_checked",
+            vec![Expr::Literal(Literal::Int(index as i64), span)],
             span,
         )
     }

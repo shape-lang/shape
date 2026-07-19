@@ -181,6 +181,20 @@ thread_local! {
     /// JSON-string path are UNTOUCHED (slice 5 / slice 6 respectively).
     static COMPTIME_DIRECTIVE_TYPES: RefCell<Vec<shape_ast::ast::TypeAnnotation>> =
         const { RefCell::new(Vec::new()) };
+    /// ADR-009 E1 #17 (slice 4): the direct-block `extend Type { … }` carrier
+    /// store. The methods of a direct block are literal AST known at handler
+    /// COMPILE time (like a `replace body { … }`), so this shares the
+    /// `COMPTIME_REPLACE_BODIES` compile-populated lifecycle — CLEARED at
+    /// `execute_comptime_with_annotation_handler` ENTRY (before the inner compile
+    /// stashes into it), per-run indices, read clones. `emit_comptime_extend_directive`
+    /// stashes the `ExtendStatement` here and emits `__emit_extend_checked(index)`
+    /// instead of a `serialize_directive_payload` JSON round-trip. This is NOT a
+    /// parallel extend-item carrier: the E2 COMPUTED-extend path
+    /// (`__emit_extend_items` ← `parse_extend_items_slot` ← a `__CheckedItem`
+    /// handle) is EXECUTE-populated with a different source and is untouched; only
+    /// the `ComptimeDirective::Extend` transport moves off JSON.
+    static COMPTIME_EXTEND_STATEMENTS: RefCell<Vec<shape_ast::ast::ExtendStatement>> =
+        const { RefCell::new(Vec::new()) };
     /// True while the §4.5.1 whole-program pre-pass speculatively runs a
     /// type-target comptime handler to materialize generated function
     /// signatures. The pre-pass is not the authoritative run — pass-2 re-runs
@@ -321,6 +335,30 @@ pub(crate) fn push_comptime_directive_type(annotation: shape_ast::ast::TypeAnnot
 /// (cloned; the store stays intact until the next per-run clear).
 fn comptime_directive_type_at(index: usize) -> Option<shape_ast::ast::TypeAnnotation> {
     COMPTIME_DIRECTIVE_TYPES.with(|types| types.borrow().get(index).cloned())
+}
+
+/// ADR-009 E1 #17 (slice 4): clear the direct-block extend carrier store at
+/// handler run ENTRY — same compile-populated lifecycle as
+/// [`clear_comptime_replace_bodies`] / [`clear_comptime_directive_types`].
+pub(crate) fn clear_comptime_extend_statements() {
+    COMPTIME_EXTEND_STATEMENTS.with(|extends| extends.borrow_mut().clear());
+}
+
+/// Stash a direct-block `extend Type { … }` statement and return the index the
+/// `__emit_extend_checked(index)` call carries. Called from the emit side at
+/// handler-compile; the index refers to the CURRENT handler run's store.
+pub(crate) fn push_comptime_extend_statement(extend: shape_ast::ast::ExtendStatement) -> usize {
+    COMPTIME_EXTEND_STATEMENTS.with(|extends| {
+        let mut extends = extends.borrow_mut();
+        extends.push(extend);
+        extends.len() - 1
+    })
+}
+
+/// Resolve an extend-carrier index back to its stashed `ExtendStatement`
+/// (cloned; the store stays intact until the next per-run clear).
+fn comptime_extend_statement_at(index: usize) -> Option<shape_ast::ast::ExtendStatement> {
+    COMPTIME_EXTEND_STATEMENTS.with(|extends| extends.borrow().get(index).cloned())
 }
 
 fn parse_type_annotation_payload(payload: &str) -> Result<shape_ast::ast::TypeAnnotation, String> {
@@ -1468,6 +1506,45 @@ fn comptime_builtins_module_base(trait_impl_keys: HashSet<String>) -> ModuleExpo
         },
     );
 
+    // ADR-009 E1 #17 (slice 4): the direct-block `extend Type { … }` typed
+    // carrier. The emit side stashes the literal `ExtendStatement` at
+    // handler-COMPILE (`COMPTIME_EXTEND_STATEMENTS`) and passes its INDEX here —
+    // no `serialize_directive_payload` JSON, no `serde_json` reparse. The legacy
+    // string `__emit_extend` + `serialize_directive_payload` go dead-but-present
+    // for the slice-6 deletion; the E2 COMPUTED-extend path (`__emit_extend_items`
+    // ← `__CheckedItem`) is a distinct, execute-populated carrier and is untouched.
+    // __emit_extend_checked(index: int)
+    register_typed_function(
+        &mut module,
+        "__emit_extend_checked",
+        "Internal: emit an extend directive from a typed block-form carrier index",
+        vec![shape_runtime::module_exports::ModuleParam {
+            name: "index".to_string(),
+            type_name: "int".to_string(),
+            required: true,
+            ..Default::default()
+        }],
+        ConcreteType::Unit,
+        |slots, _ctx| {
+            if slots.len() != 1 {
+                return Err(format!(
+                    "__emit_extend_checked expects 1 argument, got {}",
+                    slots.len()
+                ));
+            }
+            let index = slots[0]
+                .as_i64()
+                .ok_or_else(|| "__emit_extend_checked expects an int index".to_string())?;
+            let extend = comptime_extend_statement_at(index as usize).ok_or_else(|| {
+                format!(
+                    "__emit_extend_checked index {index} is not live in this comptime execution"
+                )
+            })?;
+            push_comptime_directive(ComptimeDirective::Extend(extend))?;
+            Ok(TypedReturn::Concrete(ConcreteReturn::Unit))
+        },
+    );
+
     // Internal comptime directive: replace module items from a typed generation
     // carrier (`item_fn(...)` -> `__CheckedItem`). `parse_extend_items_slot`
     // resolves it to AST items with no source/JSON string ever materializing, and
@@ -2419,6 +2496,52 @@ mod e1_literal_type_carrier_tests {
         let err = type_annotation_from_string_or_type_ref_slot(&slot, "__emit_set_return_type")
             .expect_err("an out-of-range index is a named error");
         assert!(err.contains("index 99"), "got: {err}");
+    }
+}
+
+// ADR-009 E1 #17 (slice 4): the direct-block extend carrier store. Same per-run,
+// compile-populated lifecycle as the literal-type and replace-body carriers.
+#[cfg(test)]
+mod e1_extend_carrier_tests {
+    use super::*;
+
+    fn extend_of(src: &str) -> shape_ast::ast::ExtendStatement {
+        shape_ast::parse_program(src)
+            .expect("fixture parses")
+            .items
+            .into_iter()
+            .find_map(|item| match item {
+                shape_ast::ast::Item::Extend(extend, _) => Some(extend),
+                _ => None,
+            })
+            .expect("fixture has one extend statement")
+    }
+
+    #[test]
+    fn extend_carrier_index_restarts_per_run_no_stale_leak() {
+        let a = extend_of("extend A { fn m(self) -> int { 1 } }");
+        let b = extend_of("extend B { fn m(self) -> int { 2 } }");
+        assert_ne!(a, b);
+
+        clear_comptime_extend_statements();
+        assert_eq!(push_comptime_extend_statement(a.clone()), 0);
+        assert_eq!(comptime_extend_statement_at(0).as_ref(), Some(&a));
+
+        clear_comptime_extend_statements();
+        assert_eq!(
+            push_comptime_extend_statement(b.clone()),
+            0,
+            "index restarts per run"
+        );
+        let resolved = comptime_extend_statement_at(0).expect("live in this run");
+        assert_eq!(resolved, b, "index 0 resolves to THIS run's extend");
+        assert_ne!(resolved, a, "no stale extend leaks across the per-run clear");
+    }
+
+    #[test]
+    fn missing_extend_index_resolves_to_none() {
+        clear_comptime_extend_statements();
+        assert!(comptime_extend_statement_at(7).is_none());
     }
 }
 

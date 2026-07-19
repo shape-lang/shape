@@ -347,3 +347,59 @@ print(answer())
     .expect_run_ok()
     .expect_output("42");
 }
+
+// ADR-009 E1 #17 (slice 4): a direct-block `extend Type { … }` in a comptime
+// handler travels end-to-end over the typed store+index transport (no JSON
+// round-trip). Capture-free method bodies keep these off the JITExecutor
+// empty-capture debt; calling the generated method proves it was added (a
+// missing method would be a run error), so `expect_run_ok` + the call is the
+// load-bearing assertion, `expect_output` the value check.
+
+#[test]
+fn direct_block_extend_adds_callable_method_via_typed_transport() {
+    ShapeTest::new(
+        r#"
+annotation add_label() {
+  targets: [type]
+  comptime post(target, ctx) {
+    extend Widget {
+      fn label(self) -> string { "direct block" }
+    }
+  }
+}
+
+@add_label()
+type Widget { id: int }
+
+let w = Widget { id: 1 }
+print(w.label())
+"#,
+    )
+    .expect_run_ok()
+    .expect_output("direct block");
+}
+
+#[test]
+fn direct_block_extend_multiple_methods_via_typed_transport() {
+    ShapeTest::new(
+        r#"
+annotation add_ops() {
+  targets: [type]
+  comptime post(target, ctx) {
+    extend Counter {
+      fn doubled(self) -> int { self.n * 2 }
+      fn tripled(self) -> int { self.n * 3 }
+    }
+  }
+}
+
+@add_ops()
+type Counter { n: int }
+
+let c = Counter { n: 7 }
+print(c.doubled() + c.tripled())
+"#,
+    )
+    .expect_run_ok()
+    .expect_output("35");
+}
