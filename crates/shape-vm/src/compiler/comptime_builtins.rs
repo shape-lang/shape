@@ -2316,6 +2316,148 @@ mod replace_body_carrier_tests {
     }
 }
 
+// ADR-009 E1 #17 slice-0 reconstruction spike (E1-D1). SLICE-0 SPIKE PINS.
+// Plain `#[cfg(test)]` (NOT deep-tests-gated) so the supervisor's standard gate
+// runs them (E2 finding 5: pins in a deep-tests-gated module never run).
+//
+// Question (E1-D1): can the expr-form comptime type refs at
+// `tools/shape-test/tests/annotations_comptime/type_mutation.rs:297`
+// (`set return (target.params[0].type_ref)`) and `:323`
+// (`set param left: (target.params[1].type_ref)`) — BOTH resolving `string` —
+// be reconstructed to a `TypeAnnotation` from the B7 FrozenTypeIdentity
+// descriptor WITHOUT reparsing `__ComptimeTypeRef.source`?
+//
+// Verdict: PROVEN for the corpus cases. The non-reparse route is
+//   overlay.identity_of(name) -> overlay.payload_of(identity)
+//     -> reconstruct(FrozenPayloadDescriptor) -> TypeAnnotation
+// and it yields the byte-identical annotation the current reparse consumer
+// (`type_annotation_from_string_or_type_ref_slot`, which reads `.source` and
+// calls `parse_type_annotation_payload`) produces. See
+// `docs/design/typed-comptime/e1-slice0-report.md`.
+#[cfg(test)]
+mod e1_slice0_reconstruction_spike {
+    use super::semantic_freeze::overlay_for_tests;
+    use super::type_reflection::payloads::FrozenPayloadDescriptor;
+    use super::{parse_type_annotation_payload, type_annotation_from_string_or_type_ref_slot};
+    use crate::compiler::BytecodeCompiler;
+    use crate::compiler::comptime_target::build_type_ref_descriptor;
+    use shape_ast::ast::TypeAnnotation;
+    use shape_runtime::comptime_reflection::FrozenPrimitive;
+
+    /// SLICE-0 SPIKE SCAFFOLD (not production). The non-reparse reconstruction:
+    /// the COMPLETE B7 primitive descriptor -> the AST `TypeAnnotation`, keyed
+    /// on the sealed `FrozenPrimitive` family (never re-reading a name string,
+    /// never invoking the parser). Slice 5 replaces this with the total fn over
+    /// the full `FrozenPayloadDescriptor` algebra: primitive spellings derived
+    /// by inverting the ONE `PRIMITIVE_SYNONYM_FAMILIES` table (no second name
+    /// table), composites recursed through the overlay's element identities.
+    /// The `panic!` arm marks exactly that slice-5 build-out surface; the corpus
+    /// needs only `string` (both cases), with `bool` covered here to show the
+    /// mapping tracks the descriptor, not the input name.
+    fn spike_reconstruct_primitive(primitive: FrozenPrimitive) -> TypeAnnotation {
+        let canonical_spelling = match primitive {
+            FrozenPrimitive::String => "string",
+            FrozenPrimitive::Bool => "bool",
+            other => panic!(
+                "slice-0 reconstruction spike covers the corpus primitive family \
+                 (string) plus bool; slice 5 generalizes to {other:?}"
+            ),
+        };
+        TypeAnnotation::Basic(canonical_spelling.to_string())
+    }
+
+    /// Resolve the frozen PRIMITIVE descriptor for a leaf type NAME through the
+    /// shared freeze query API — the exact non-reparse starting point available
+    /// at the directive consumer (the type_ref's `name` field is this string).
+    fn primitive_descriptor_for(name: &str) -> FrozenPrimitive {
+        let overlay = overlay_for_tests(&BytecodeCompiler::new());
+        let identity = overlay
+            .identity_of(name)
+            .unwrap_or_else(|| panic!("{name} is frozen in every unit"));
+        match overlay.payload_of(identity) {
+            Ok(FrozenPayloadDescriptor::Primitive(primitive)) => primitive,
+            other => {
+                panic!("{name} must resolve to a complete primitive descriptor, got {other:?}")
+            }
+        }
+    }
+
+    // PIN 1 (PRIMARY). The corpus type (`string`) reconstructs off the B7
+    // descriptor to the SAME `TypeAnnotation` the reparse route yields — proving
+    // the descriptor is a sufficient, reparse-free source for the corpus.
+    #[test]
+    fn e1_s0_string_reconstructs_off_descriptor_without_reparse() {
+        let descriptor = primitive_descriptor_for("string");
+        assert_eq!(descriptor, FrozenPrimitive::String);
+
+        let reconstructed = spike_reconstruct_primitive(descriptor);
+        // Oracle: what the CURRENT reparse route (`parse_type_annotation_payload`
+        // -> parse_program) produces for the same leaf.
+        let reparsed = parse_type_annotation_payload("string").expect("string reparses");
+        assert_eq!(
+            reconstructed, reparsed,
+            "descriptor reconstruction must match the reparse route exactly"
+        );
+        assert_eq!(reconstructed, TypeAnnotation::Basic("string".to_string()));
+    }
+
+    // PIN 2 (CONSUMER CORROBORATION). Against the REAL production input: the
+    // producer builds the `__ComptimeTypeRef` the corpus handler reads
+    // (`build_type_ref_descriptor("string")`); feeding it to the CURRENT reparse
+    // consumer yields Basic("string"), identical to the descriptor route. This
+    // ties the spike to the exact value that flows at `:297`/`:323`.
+    #[test]
+    fn e1_s0_descriptor_route_matches_current_reparse_consumer() {
+        let type_ref_slot = build_type_ref_descriptor("string", None);
+        let via_reparse_consumer =
+            type_annotation_from_string_or_type_ref_slot(&type_ref_slot, "e1_slice0_spike")
+                .expect("current consumer resolves the string type_ref");
+
+        let via_descriptor = spike_reconstruct_primitive(primitive_descriptor_for("string"));
+
+        assert_eq!(
+            via_descriptor, via_reparse_consumer,
+            "the reparse-free descriptor route agrees with the current \
+             __ComptimeTypeRef.source reparse consumer on the exact corpus input"
+        );
+    }
+
+    // PIN 3 (DESCRIPTOR-DRIVEN). A different primitive descriptor yields a
+    // different reconstruction, each matching its own reparse oracle — the
+    // reconstruction tracks the FrozenPrimitive family, it does not echo a name.
+    #[test]
+    fn e1_s0_reconstruction_tracks_the_descriptor_not_the_name() {
+        let string_ann = spike_reconstruct_primitive(primitive_descriptor_for("string"));
+        let bool_ann = spike_reconstruct_primitive(primitive_descriptor_for("bool"));
+        assert_ne!(string_ann, bool_ann);
+        assert_eq!(
+            bool_ann,
+            parse_type_annotation_payload("bool").expect("bool reparses")
+        );
+    }
+
+    // PIN 4 (MECHANISM GAP — the E1↔E5 boundary). The name route is lossless
+    // ONLY for leaf types. `identity_of` is a frozen-name-table lookup, not a
+    // parser: a COMPOSITE spelling ("Array<int>") is not a frozen name, so it
+    // resolves to None — the type_ref's stringy `name`/`kind` fields cannot
+    // recover a composite identity. The corpus (both leaf `string`) is inside
+    // the resolvable set; general expr-form U02 composites are the named gap
+    // slice 5's shape must dispose (producer-stamped identity vs an E1↔E5 split).
+    #[test]
+    fn e1_s0_composite_typeref_is_the_named_leaf_boundary_gap() {
+        let overlay = overlay_for_tests(&BytecodeCompiler::new());
+        assert!(
+            overlay.identity_of("string").is_some(),
+            "leaf primitive resolves off its name (corpus case)"
+        );
+        assert!(
+            overlay.identity_of("Array<int>").is_none(),
+            "a composite spelling is not a frozen name — only .source reparse or a \
+             producer-stamped identity recovers it (the E1↔E5 boundary)"
+        );
+    }
+}
+
 #[cfg(all(test, feature = "deep-tests"))]
 mod tests {
     use super::*;
