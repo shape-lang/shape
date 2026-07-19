@@ -36,7 +36,7 @@ typestate `CheckedBodyBuilder<SigState, CapturesState>`; API-foundation-only.
 returns a provenance-ready `CheckedBody`; it does **not** install, publish,
 stamp, or reserve, and holds no `&mut BytecodeCompiler`. This mirrors the shipped
 `CheckedItem` precedent ("provenance-READY, not yet reserved",
-`comptime_fragments/mod.rs:88-92`): a comptime builtin has no `&mut` compiler
+`comptime_fragments/mod.rs:96`): a comptime builtin has no `&mut` compiler
 access, so the atomic publish happens later, at the directive consumer, through
 the ALREADY-open C2 `InstallTransaction` + §4.2 battery
 (`crate::compiler::checked_body`).
@@ -70,13 +70,20 @@ are named distinctly from Decision-95's SEMANTIC `CheckedBody<Sig, Captures>` ty
 parameters (the Shape comptime-type face), which land with the Decision-95 Shape
 staging surface in a later E-track/C3 slice. Documented at the type.
 
-## Construction rejection matrix (D4: reuse authoritative codes)
+## Construction rejection matrix (D4: reuse authoritative codes AND class)
 
-| Class | Code | Where checkable at construction |
-|---|---|---|
-| borrow-mode capture (`&` / `&mut`) | `[C0902]` | `entry.mode.is_borrow()` — no scope needed |
-| duplicate capture name | `[C0907]` | name-level dup scan (the subset before slot resolution, which stays the planner's install-time job) |
-| empty body | un-numbered named error | `body.is_empty()` |
+Every construction rejection is a `ShapeError::SemanticError` — the SAME error
+CLASS the authoritative capture-family rejections use
+(`capture_plan/planner.rs:162,:199`), not just the same code tag. (Slice 1
+originally emitted `RuntimeError`, which shares the code string but is a distinct
+`ErrorCode` class; the review's should-fix aligned the class so a consumer
+classifies a construction diagnostic identically to the planner's.)
+
+| Class | Code | ShapeError class | Where checkable at construction |
+|---|---|---|---|
+| borrow-mode capture (`&` / `&mut`) | `[C0902]` | `SemanticError` | `entry.mode.is_borrow()` — no scope needed |
+| duplicate capture name | `[C0907]` | `SemanticError` | name-level dup scan (the subset before slot resolution, which stays the planner's install-time job) |
+| empty body | un-numbered named error | `SemanticError` | `body.is_empty()` |
 
 `[C0902]`/`[C0907]` are the authoritative capture-family codes (`captures.rs`
 table; `capture_plan/planner.rs:221`), reused per D4 — no parallel codes minted.

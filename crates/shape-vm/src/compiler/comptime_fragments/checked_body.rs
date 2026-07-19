@@ -214,11 +214,16 @@ impl CheckedBodyBuilder<Present, Present> {
     /// [`CheckedBody`], or a named `ShapeError` — never a silent partial.
     ///
     /// This is the CONSTRUCTION chokepoint ONLY (see the module docs): it does
-    /// not install, stamp, reserve, or publish. Construction rejections:
+    /// not install, stamp, reserve, or publish. Every rejection is a
+    /// `ShapeError::SemanticError` — the SAME error CLASS the authoritative
+    /// capture-family rejections use (`capture_plan/planner.rs`), not just the
+    /// same code tag, so a consumer classifies a construction diagnostic
+    /// identically to the planner's. Construction rejections:
     ///
     /// - a borrow-mode capture (`&` / `&mut`) — `[C0902]`, reserved until Shape
-    ///   has a closure-region story (the authoritative capture-family code);
-    /// - a duplicate capture name — `[C0907]` (the authoritative code the
+    ///   has a closure-region story (the authoritative capture-family code +
+    ///   class);
+    /// - a duplicate capture name — `[C0907]` (the authoritative code + class the
     ///   capture planner uses; slice 1 checks the name-level subset available at
     ///   construction, before slot resolution);
     /// - an empty body — a checked generated body must contain at least one
@@ -241,7 +246,7 @@ impl CheckedBodyBuilder<Present, Present> {
         validate_capture_clause(&captures)?;
 
         if self.body.is_empty() {
-            return Err(ShapeError::RuntimeError {
+            return Err(ShapeError::SemanticError {
                 message: "a checked generated body must contain at least one statement; an \
                           empty body cannot match a signature"
                     .to_string(),
@@ -259,13 +264,14 @@ impl CheckedBodyBuilder<Present, Present> {
 
 /// Construction-time validation of the declared capture set — the subset
 /// checkable WITHOUT scope/slot resolution (that is the capture planner's
-/// install-time job). Reuses the authoritative capture-family codes (D4: reuse,
-/// do not mint parallel codes).
+/// install-time job). Reuses the authoritative capture-family codes AND their
+/// `ShapeError::SemanticError` class (D4: reuse, do not mint parallel codes or a
+/// divergent class).
 fn validate_capture_clause(clause: &CaptureClause) -> Result<()> {
     let mut seen: Vec<&str> = Vec::with_capacity(clause.entries.len());
     for entry in &clause.entries {
         if entry.mode.is_borrow() {
-            return Err(ShapeError::RuntimeError {
+            return Err(ShapeError::SemanticError {
                 message: format!(
                     "[C0902] capture '{} {}' uses a borrow mode; a borrow that escapes into a \
                      generated body has no lifetime to check and is reserved until Shape has a \
@@ -277,7 +283,7 @@ fn validate_capture_clause(clause: &CaptureClause) -> Result<()> {
             });
         }
         if seen.contains(&entry.name.as_str()) {
-            return Err(ShapeError::RuntimeError {
+            return Err(ShapeError::SemanticError {
                 message: format!(
                     "[C0907] duplicate capture declaration for '{}'; each captured binding may \
                      be declared at most once",
