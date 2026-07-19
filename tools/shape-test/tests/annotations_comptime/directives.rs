@@ -71,7 +71,10 @@ fn add(x: int) -> int {
 print(add(5))
 "#,
     )
-    .expect_run_err_contains("unknown parameter 'missing'");
+    // E1-D4 (slice 2): the analysis pre-pass now resolves the param spelling
+    // against the frozen callable and fails closed with [C0930] BEFORE pass-2's
+    // "unknown parameter" message — a still-a-compile-error message change.
+    .expect_run_err_contains("[C0930]");
 }
 
 #[test]

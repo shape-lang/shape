@@ -6,7 +6,7 @@ use shape_ast::ast::{
     DestructurePattern, Expr, FunctionDef, GeneratedNodeOrigin, Literal, ObjectEntry, Span,
     Spanned, Statement, TypeAnnotation,
 };
-use shape_ast::error::{Result, ShapeError};
+use shape_ast::error::{Result, ShapeError, SourceLocation};
 use shape_runtime::annotation_context::TargetOwner;
 use shape_runtime::comptime_reflection::NominalShape;
 use shape_runtime::type_schema::FieldType;
@@ -57,6 +57,84 @@ mod e2_slice0_spike_tests;
 #[cfg(test)]
 #[path = "functions_annotations/e2_slice3_replace_body_tests.rs"]
 mod e2_slice3_replace_body_tests;
+
+#[cfg(test)]
+#[path = "functions_annotations/e1_param_selection_tests.rs"]
+mod e1_param_selection_tests;
+
+/// ADR-009 E1 #17 (slice 2, E1-D4): the SINGLE spelling->position resolution of
+/// a signature directive's parameter against the frozen callable.
+///
+/// A comptime `set param …` directive names its parameter by SPELLING. E1-D4
+/// resolves that spelling to a POSITION exactly once, here, and mints a
+/// [`ParamId`]; downstream mutation indexes by the resolved position and never
+/// re-resolves the spelling. A spelling the frozen callable does not declare is
+/// the named hard error `[C0930]` (`ShapeError::SemanticError`, the slice-1
+/// error-class precedent) — never the pre-E1 silent skip that dropped the
+/// directive. The `ParamId` field is private to this module, so a position can
+/// be obtained ONLY through [`resolve_param_id`].
+mod param_selection {
+    use shape_ast::ast::FunctionDef;
+    use shape_ast::error::{ShapeError, SourceLocation};
+
+    /// A parameter POSITION resolved once against the frozen callable. Minted
+    /// only by [`resolve_param_id`] (private field), so the spelling is resolved
+    /// at exactly one point.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub(super) struct ParamId(usize);
+
+    impl ParamId {
+        /// The resolved position, for indexing `func_def.params`.
+        pub(super) fn index(self) -> usize {
+            self.0
+        }
+    }
+
+    /// Resolve a directive's parameter spelling to a [`ParamId`] against the
+    /// frozen callable. A miss is the named hard error `[C0930]` carrying the
+    /// directive kind, the missing spelling, and the callable's actual parameter
+    /// list — the fail-closed conversion of the pre-E1 silent skip.
+    pub(super) fn resolve_param_id(
+        func_def: &FunctionDef,
+        spelling: &str,
+        directive_kind: &str,
+        annotation_name: &str,
+        handler_location: &SourceLocation,
+    ) -> Result<ParamId, ShapeError> {
+        match func_def
+            .params
+            .iter()
+            .position(|p| p.simple_name() == Some(spelling))
+        {
+            Some(index) => Ok(ParamId(index)),
+            None => Err(ShapeError::SemanticError {
+                message: format!(
+                    "[C0930] comptime `{directive_kind}` from @{annotation_name} on `{}` names \
+                     parameter `{spelling}`, which the frozen signature does not declare; its \
+                     parameters are [{}]",
+                    func_def.name,
+                    param_spellings(func_def).join(", ")
+                ),
+                location: Some(handler_location.clone()),
+            }),
+        }
+    }
+
+    /// The frozen callable's declared parameter spellings, in order, for the
+    /// `[C0930]` message. A destructuring parameter (no simple name) is shown as
+    /// `<destructured>`.
+    fn param_spellings(func_def: &FunctionDef) -> Vec<String> {
+        func_def
+            .params
+            .iter()
+            .map(|p| {
+                p.simple_name()
+                    .map(str::to_string)
+                    .unwrap_or_else(|| "<destructured>".to_string())
+            })
+            .collect()
+    }
+}
 
 /// ADR-009 E3 (slice S3, legacy class U11): the TYPED capability a `replace
 /// body` replacement reaches through `ctx.original`. It replaces the deleted
@@ -363,46 +441,56 @@ impl BytecodeCompiler {
                             continue;
                         }
                     };
+                    let handler_location = self.span_to_source_location(handler.span);
                     Self::apply_signature_directives_to_analysis_function(
                         func_def,
                         execution.directives,
-                    )
-                    .map_err(|message| ShapeError::RuntimeError {
-                        message: format!(
-                            "Comptime handler '{}' directive processing failed: {}",
-                            ann.name, message
-                        ),
-                        location: Some(self.span_to_source_location(handler.span)),
-                    })?;
+                        &ann.name,
+                        handler_location,
+                    )?;
                 }
             }
         }
         Ok(())
     }
 
+    /// Apply a comptime handler's signature directives to the analysis
+    /// `FunctionDef`. ADR-009 E1-D4 (slice 2): each directive's parameter
+    /// SPELLING is resolved to a POSITION exactly once, via
+    /// [`param_selection::resolve_param_id`], and the resolved [`ParamId`] is
+    /// what the mutation indexes — the spelling is never re-resolved. A spelling
+    /// the frozen callable does not declare is the named hard error `[C0930]`
+    /// (never the pre-E1 silent skip that dropped the directive).
     fn apply_signature_directives_to_analysis_function(
         func_def: &mut FunctionDef,
         directives: Vec<super::comptime_builtins::ComptimeDirective>,
-    ) -> std::result::Result<(), String> {
+        annotation_name: &str,
+        handler_location: SourceLocation,
+    ) -> std::result::Result<(), ShapeError> {
         for directive in directives {
             match directive {
                 super::comptime_builtins::ComptimeDirective::SetParamType {
                     param_name,
                     type_annotation,
                 } => {
-                    let Some(param) = func_def
-                        .params
-                        .iter_mut()
-                        .find(|p| p.simple_name() == Some(param_name.as_str()))
-                    else {
-                        continue;
-                    };
+                    let param_id = param_selection::resolve_param_id(
+                        func_def,
+                        &param_name,
+                        "set param type",
+                        annotation_name,
+                        &handler_location,
+                    )?;
+                    let param = &mut func_def.params[param_id.index()];
                     if let Some(existing) = &param.type_annotation {
                         if existing != &type_annotation {
-                            return Err(format!(
-                                "cannot override explicit type of parameter '{}'",
-                                param_name
-                            ));
+                            return Err(ShapeError::RuntimeError {
+                                message: format!(
+                                    "Comptime handler '{}' directive processing failed: cannot \
+                                     override explicit type of parameter '{}'",
+                                    annotation_name, param_name
+                                ),
+                                location: Some(handler_location.clone()),
+                            });
                         }
                     } else {
                         param.type_annotation = Some(type_annotation);
@@ -412,17 +500,24 @@ impl BytecodeCompiler {
                     param_name,
                     value,
                 } => {
-                    let Some(param) = func_def
-                        .params
-                        .iter_mut()
-                        .find(|p| p.simple_name() == Some(param_name.as_str()))
-                    else {
-                        continue;
-                    };
-                    param.default_value = Some(Self::scalar_default_expr_from_kinded_slot(
+                    let param_id = param_selection::resolve_param_id(
+                        func_def,
                         &param_name,
-                        &value,
-                    )?);
+                        "set param value",
+                        annotation_name,
+                        &handler_location,
+                    )?;
+                    let default_value =
+                        Self::scalar_default_expr_from_kinded_slot(&param_name, &value).map_err(
+                            |message| ShapeError::RuntimeError {
+                                message: format!(
+                                    "Comptime handler '{}' directive processing failed: {}",
+                                    annotation_name, message
+                                ),
+                                location: Some(handler_location.clone()),
+                            },
+                        )?;
+                    func_def.params[param_id.index()].default_value = Some(default_value);
                 }
                 super::comptime_builtins::ComptimeDirective::SetReturnType { .. } => {}
                 _ => {}
