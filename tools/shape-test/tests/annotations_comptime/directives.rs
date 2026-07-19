@@ -362,8 +362,8 @@ fn direct_block_extend_adds_callable_method_via_typed_transport() {
 annotation add_label() {
   targets: [type]
   comptime post(target, ctx) {
-    extend Widget {
-      fn label(self) -> string { "direct block" }
+    extend target {
+      method label() { "direct block" }
     }
   }
 }
@@ -386,9 +386,9 @@ fn direct_block_extend_multiple_methods_via_typed_transport() {
 annotation add_ops() {
   targets: [type]
   comptime post(target, ctx) {
-    extend Counter {
-      fn doubled(self) -> int { self.n * 2 }
-      fn tripled(self) -> int { self.n * 3 }
+    extend target {
+      method doubled() { self.n * 2 }
+      method tripled() { self.n * 3 }
     }
   }
 }
