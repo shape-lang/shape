@@ -57,6 +57,24 @@ time, the repo is the authority.
   known swallowed-imported-annotation-handler-failure hazard. This converts
   the `functions_annotations.rs:396/:418` silent skips into hard errors.
 
+## Supervisor rulings (within ratified bounds)
+
+- **E1-D5 (slice-5 shape — probe-first; supervisor 2026-07-19, within
+  E1-D1's ratified frame).** Slice-0 verdict: **PROVEN for the corpus**
+  (gated GREEN at `7a4e9809`, 4/4 pins). The leaf/composite boundary (pin 4:
+  `identity_of("Array<int>")` = None) means slice 5's shape is decided by a
+  READ-ONLY probe at its top: is the `FreezeOverlay` available at
+  `comptime_target` build time? If yes → **Shape A** (producer stamps the
+  FrozenTypeIdentity onto the type_ref via the already-declared
+  `identity_high/low` fields, `builtin_schemas.rs:423`) — full-E1 U02 off
+  reparse. If no → **Shape B** (leaf now, composite = the ruled E1↔E5 split
+  E1-D1 contemplated), surfaced to the user at the slice-5 gate before
+  execution. No pre-commitment; the probe result decides. Slice-5 build-outs
+  either way: thread `Arc<FreezeOverlay>` into `comptime_builtins_module_base`
+  consumers, and write the total `FrozenPayloadDescriptor -> TypeAnnotation`
+  reconstruction fn (primitive spellings invert the ONE
+  `PRIMITIVE_SYNONYM_FAMILIES` table — no second name table).
+
 ## Operating rules
 
 The E2-proven pipeline carries over wholesale (recorded in the AGENTS.md E1
