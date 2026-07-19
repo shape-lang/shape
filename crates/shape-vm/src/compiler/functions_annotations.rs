@@ -94,12 +94,17 @@ mod param_selection {
     /// frozen callable. A miss is the named hard error `[C0930]` carrying the
     /// directive kind, the missing spelling, and the callable's actual parameter
     /// list — the fail-closed conversion of the pre-E1 silent skip.
+    /// `annotation_name`/`location` are the analysis pre-pass's context (the
+    /// applying annotation + handler span); the pass-2 install applier has
+    /// neither and passes `None`, so the `[C0930]` text drops the `from @…`
+    /// clause and carries no span — the same single diagnostic from both call
+    /// sites (E1-D4 resolve-ONCE).
     pub(super) fn resolve_param_id(
         func_def: &FunctionDef,
         spelling: &str,
         directive_kind: &str,
-        annotation_name: &str,
-        handler_location: &SourceLocation,
+        annotation_name: Option<&str>,
+        location: Option<&SourceLocation>,
     ) -> Result<ParamId, ShapeError> {
         match func_def
             .params
@@ -107,16 +112,21 @@ mod param_selection {
             .position(|p| p.simple_name() == Some(spelling))
         {
             Some(index) => Ok(ParamId(index)),
-            None => Err(ShapeError::SemanticError {
-                message: format!(
-                    "[C0930] comptime `{directive_kind}` from @{annotation_name} on `{}` names \
-                     parameter `{spelling}`, which the frozen signature does not declare; its \
-                     parameters are [{}]",
-                    func_def.name,
-                    param_spellings(func_def).join(", ")
-                ),
-                location: Some(handler_location.clone()),
-            }),
+            None => {
+                let from = annotation_name
+                    .map(|name| format!(" from @{name}"))
+                    .unwrap_or_default();
+                Err(ShapeError::SemanticError {
+                    message: format!(
+                        "[C0930] comptime `{directive_kind}`{from} on `{}` names parameter \
+                         `{spelling}`, which the frozen signature does not declare; its \
+                         parameters are [{}]",
+                        func_def.name,
+                        param_spellings(func_def).join(", ")
+                    ),
+                    location: location.cloned(),
+                })
+            }
         }
     }
 
@@ -477,8 +487,8 @@ impl BytecodeCompiler {
                         func_def,
                         &param_name,
                         "set param type",
-                        annotation_name,
-                        &handler_location,
+                        Some(annotation_name),
+                        Some(&handler_location),
                     )?;
                     let param = &mut func_def.params[param_id.index()];
                     if let Some(existing) = &param.type_annotation {
@@ -504,8 +514,8 @@ impl BytecodeCompiler {
                         func_def,
                         &param_name,
                         "set param value",
-                        annotation_name,
-                        &handler_location,
+                        Some(annotation_name),
+                        Some(&handler_location),
                     )?;
                     let default_value =
                         Self::scalar_default_expr_from_kinded_slot(&param_name, &value).map_err(
@@ -3395,16 +3405,18 @@ impl BytecodeCompiler {
                     param_name,
                     type_annotation,
                 } => {
-                    let maybe_param = func_def
-                        .params
-                        .iter_mut()
-                        .find(|p| p.simple_name() == Some(param_name.as_str()));
-                    let Some(param) = maybe_param else {
-                        return Err(Self::directive_error(format!(
-                            "comptime directive referenced unknown parameter '{}'",
-                            param_name
-                        )));
-                    };
+                    // E1-D4: ONE param-miss diagnostic everywhere — the install
+                    // applier resolves through the same `resolve_param_id` as the
+                    // analysis pre-pass, so a miss is `[C0930]` here too (no
+                    // annotation/span context at this phase → `None`).
+                    let param_id = param_selection::resolve_param_id(
+                        func_def,
+                        &param_name,
+                        "set param type",
+                        None,
+                        None,
+                    )?;
+                    let param = &mut func_def.params[param_id.index()];
                     if let Some(existing) = &param.type_annotation {
                         if existing != &type_annotation {
                             return Err(Self::directive_error(format!(
@@ -3420,20 +3432,17 @@ impl BytecodeCompiler {
                     param_name,
                     value,
                 } => {
-                    let maybe_param = func_def
-                        .params
-                        .iter_mut()
-                        .find(|p| p.simple_name() == Some(param_name.as_str()));
-                    let Some(param) = maybe_param else {
-                        return Err(Self::directive_error(format!(
-                            "comptime directive referenced unknown parameter '{}'",
-                            param_name
-                        )));
-                    };
-                    param.default_value = Some(
+                    let param_id = param_selection::resolve_param_id(
+                        func_def,
+                        &param_name,
+                        "set param value",
+                        None,
+                        None,
+                    )?;
+                    let default_value =
                         Self::scalar_default_expr_from_kinded_slot(&param_name, &value)
-                            .map_err(Self::directive_error)?,
-                    );
+                            .map_err(Self::directive_error)?;
+                    func_def.params[param_id.index()].default_value = Some(default_value);
                 }
                 super::comptime_builtins::ComptimeDirective::SetReturnType { type_annotation } => {
                     if let Some(existing) = &func_def.return_type {

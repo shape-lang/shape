@@ -100,6 +100,29 @@ fn set_param_value_on_an_undeclared_param_is_c0930() {
     assert!(msg.contains("ghost"), "names the missing spelling: {msg}");
 }
 
+// PASS-2 UNIFICATION (E1-D4 resolve-ONCE): the install-phase applier
+// (`process_comptime_directives_for_function`) now resolves through the SAME
+// `resolve_param_id`, called with no annotation/span context (`None, None`).
+// That call shape is normally preempted by the analysis-pre-pass [C0930] on a
+// full compile, so it is pinned here directly against the unified helper: still
+// [C0930], just without the `from @…` clause. This is the deleted divergent
+// "referenced unknown parameter" message's replacement — one diagnostic, one
+// resolver.
+#[test]
+fn resolve_param_id_without_annotation_context_is_still_c0930() {
+    let fd = function_def("fn f(real) -> int { 0 }");
+    let err = super::param_selection::resolve_param_id(&fd, "ghost", "set param type", None, None)
+        .expect_err("a miss is [C0930] even without annotation/span context");
+    let msg = err.to_string();
+    assert!(msg.contains("[C0930]"), "got: {msg}");
+    assert!(
+        !msg.contains("from @"),
+        "no annotation clause when context is absent: {msg}"
+    );
+    assert!(msg.contains("ghost"), "names the missing spelling: {msg}");
+    assert!(msg.contains("real"), "lists the frozen callable's params: {msg}");
+}
+
 // --- imported-annotation-handler hazard (end to end) -----------------------
 //
 // The known hazard (C2 finding 3): imported-annotation-handler outcomes were at

@@ -88,16 +88,18 @@ the pass-2 message — has zero test assertions workspace-wide.)
    and reaches the seam, where `[C0930]` now fires — proven by the imported-handler
    pin.)
 
-2. **Pass-2 re-resolves with a divergent message** (`functions_annotations.rs:3394-3437`,
-   the install-phase directive application): its `set param` arms do their OWN
-   `find(...)` and error `comptime directive referenced unknown parameter` — a
-   SECOND resolution point with a different (untested) message. It already
-   hard-errors (not a silent skip), so it is outside the ratified `:396/:418`
-   scope; and the analysis pre-pass `[C0930]` now preempts it on the standard
-   compile path. **Recommendation:** a small follow-up (or an append-only delta if
-   wanted now) routes these two arms through `resolve_param_id` too, giving one
-   `[C0930]` everywhere and making `resolve_param_id` the single resolution helper
-   in the fullest sense of E1-D4. Low risk (no test asserts the pass-2 message).
+2. **Pass-2 re-resolution — UNIFIED (append-only delta, supervisor-ordered
+   after gate-green).** The install-phase applier
+   (`process_comptime_directives_for_function`, `functions_annotations.rs:3394-3437`)
+   was a SECOND resolution point erroring `comptime directive referenced unknown
+   parameter`. Its two `set param` arms now route through the SAME
+   `resolve_param_id` (called `None, None` — no annotation/span at this phase), so
+   `[C0930]` is the single param-miss diagnostic everywhere (E1-D4 resolve-ONCE).
+   The divergent message was DELETED, not duplicated (zero `referenced unknown
+   parameter` survive workspace-wide). On a full compile the analysis pre-pass
+   `[C0930]` preempts this arm, so it is pinned directly against the unified helper
+   (`resolve_param_id_without_annotation_context_is_still_c0930`) rather than
+   through the hard-to-invoke install method. No test asserted the deleted message.
 
 ## API fit (slices 3-5)
 
