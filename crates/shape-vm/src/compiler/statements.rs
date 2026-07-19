@@ -649,12 +649,18 @@ impl BytecodeCompiler {
         type_annotation: &TypeAnnotation,
         span: Span,
     ) -> Result<()> {
-        let payload = self.serialize_directive_payload(type_annotation, "param type", span)?;
+        // ADR-009 E1 #17 (slice 3, U01): a literal `set param x: T` type is known
+        // at COMPILE time — stash the typed `TypeAnnotation` in the per-run store
+        // and emit its INDEX (an int handle), not a `serialize_directive_payload`
+        // JSON round-trip. No reparse; the consumer fetches the typed annotation
+        // by index. The `set param x: (…type_ref)` expr form is a distinct emitter
+        // (`_expr_`, slice 5), untouched.
+        let index = super::comptime_builtins::push_comptime_directive_type(type_annotation.clone());
         self.emit_comptime_internal_call(
             "__emit_set_param_type",
             vec![
                 Expr::Literal(Literal::String(param_name.to_string()), span),
-                Expr::Literal(Literal::String(payload), span),
+                Expr::Literal(Literal::Int(index as i64), span),
             ],
             span,
         )
@@ -681,10 +687,14 @@ impl BytecodeCompiler {
         type_annotation: &TypeAnnotation,
         span: Span,
     ) -> Result<()> {
-        let payload = self.serialize_directive_payload(type_annotation, "return type", span)?;
+        // ADR-009 E1 #17 (slice 3, U01): literal `set return T` — stash the typed
+        // `TypeAnnotation` in the per-run store and emit its INDEX, not a JSON
+        // round-trip. The `set return (…type_ref)` expr form (`_expr_`, slice 5)
+        // is untouched.
+        let index = super::comptime_builtins::push_comptime_directive_type(type_annotation.clone());
         self.emit_comptime_internal_call(
             "__emit_set_return_type",
-            vec![Expr::Literal(Literal::String(payload), span)],
+            vec![Expr::Literal(Literal::Int(index as i64), span)],
             span,
         )
     }

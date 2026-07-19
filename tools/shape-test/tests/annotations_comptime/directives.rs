@@ -296,3 +296,54 @@ print(answer())
     )
     .expect_run_err_contains("only valid when compiling module targets");
 }
+
+// ADR-009 E1 #17 (slice 3, U01): literal `set param x: T` / `set return T`
+// travel end-to-end over the typed store+index transport (no JSON round-trip).
+// These exercise the full emit->store->exec->apply path; a regression here means
+// the typed carrier lost the literal type.
+
+#[test]
+fn set_param_type_literal_applies_via_typed_transport() {
+    ShapeTest::new(
+        r#"
+annotation typed_param() {
+  targets: [function]
+  comptime post(target, ctx) {
+    set param x: int
+  }
+}
+
+@typed_param()
+fn identity(x) -> int {
+  x
+}
+
+print(identity(7))
+"#,
+    )
+    .expect_run_ok()
+    .expect_output("7");
+}
+
+#[test]
+fn set_return_type_literal_applies_via_typed_transport() {
+    ShapeTest::new(
+        r#"
+annotation typed_return() {
+  targets: [function]
+  comptime post(target, ctx) {
+    set return int
+  }
+}
+
+@typed_return()
+fn answer() {
+  42
+}
+
+print(answer())
+"#,
+    )
+    .expect_run_ok()
+    .expect_output("42");
+}

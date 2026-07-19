@@ -167,6 +167,20 @@ thread_local! {
     /// which slice 5 deleted whole.
     static COMPTIME_REPLACE_BODIES: RefCell<Vec<Vec<shape_ast::ast::Statement>>> =
         const { RefCell::new(Vec::new()) };
+    /// ADR-009 E1 #17 (slice 3): the U01 literal-type carrier store. A literal
+    /// `set param x: T` / `set return T` type is known at handler COMPILE time —
+    /// `emit_comptime_set_param_type_directive` / `_set_return_type_directive`
+    /// stash the typed `TypeAnnotation` here and emit the directive's INDEX (an
+    /// int handle) instead of a `serialize_directive_payload` JSON round-trip.
+    /// Same lifecycle as `COMPTIME_REPLACE_BODIES` (compile-populated ⇒ CLEARED
+    /// at `execute_comptime_with_annotation_handler` ENTRY, before the inner
+    /// compile, NOT at the pre-execute `COMPTIME_CHECKED_ITEMS` clear); indices
+    /// start fresh per handler run so the pre-pass/pass-2 double-compile never
+    /// leaks a stale type; the read clones, leaving the store intact until the
+    /// next per-run clear. The U02 expr form (`set … (…type_ref)`) and the legacy
+    /// JSON-string path are UNTOUCHED (slice 5 / slice 6 respectively).
+    static COMPTIME_DIRECTIVE_TYPES: RefCell<Vec<shape_ast::ast::TypeAnnotation>> =
+        const { RefCell::new(Vec::new()) };
     /// True while the §4.5.1 whole-program pre-pass speculatively runs a
     /// type-target comptime handler to materialize generated function
     /// signatures. The pre-pass is not the authoritative run — pass-2 re-runs
@@ -283,6 +297,32 @@ fn comptime_replace_body_at(index: usize) -> Option<Vec<shape_ast::ast::Statemen
     COMPTIME_REPLACE_BODIES.with(|bodies| bodies.borrow().get(index).cloned())
 }
 
+/// ADR-009 E1 #17 (slice 3): clear the U01 literal-type carrier store at handler
+/// run ENTRY — same compile-populated lifecycle as
+/// [`clear_comptime_replace_bodies`] (cleared BEFORE the inner compile that
+/// stashes here, NOT at the pre-execute clear point).
+pub(crate) fn clear_comptime_directive_types() {
+    COMPTIME_DIRECTIVE_TYPES.with(|types| types.borrow_mut().clear());
+}
+
+/// Stash a literal directive type and return the index the
+/// `__emit_set_param_type` / `__emit_set_return_type` call carries. Called from
+/// the emit side at handler-compile; the index refers to the CURRENT handler
+/// run's store (cleared at that run's entry).
+pub(crate) fn push_comptime_directive_type(annotation: shape_ast::ast::TypeAnnotation) -> usize {
+    COMPTIME_DIRECTIVE_TYPES.with(|types| {
+        let mut types = types.borrow_mut();
+        types.push(annotation);
+        types.len() - 1
+    })
+}
+
+/// Resolve a literal-type directive index back to its stashed `TypeAnnotation`
+/// (cloned; the store stays intact until the next per-run clear).
+fn comptime_directive_type_at(index: usize) -> Option<shape_ast::ast::TypeAnnotation> {
+    COMPTIME_DIRECTIVE_TYPES.with(|types| types.borrow().get(index).cloned())
+}
+
 fn parse_type_annotation_payload(payload: &str) -> Result<shape_ast::ast::TypeAnnotation, String> {
     if let Ok(parsed) = serde_json::from_str::<shape_ast::ast::TypeAnnotation>(payload) {
         return Ok(parsed);
@@ -339,6 +379,19 @@ fn type_annotation_from_string_or_type_ref_slot(
     slot: &KindedSlot,
     builtin_name: &str,
 ) -> Result<shape_ast::ast::TypeAnnotation, String> {
+    // ADR-009 E1 #17 (slice 3, U01): a literal type is carried as an INDEX into
+    // the per-run typed store (`COMPTIME_DIRECTIVE_TYPES`) — no JSON, no reparse.
+    // Its `Int64` kind is disjoint from the legacy JSON-string payload (`String`)
+    // and the U02 `__ComptimeTypeRef` object (`Ptr(TypedObject)`), so this branch
+    // never shadows those paths.
+    if slot.kind() == NativeKind::Int64 {
+        let index = slot.as_i64().ok_or_else(|| {
+            format!("{builtin_name} expects a non-null literal-type carrier index")
+        })?;
+        return comptime_directive_type_at(index as usize).ok_or_else(|| {
+            format!("{builtin_name}: no stored literal directive type at index {index}")
+        });
+    }
     if let Some(payload) = slot.as_str() {
         return parse_type_annotation_payload(payload);
     }
@@ -2313,6 +2366,59 @@ mod replace_body_carrier_tests {
         let resolved = comptime_replace_body_at(0).expect("live in this run");
         assert_eq!(resolved, body_b, "index 0 resolves to THIS run's body");
         assert_ne!(resolved, body_a, "no stale body leaks across the per-run clear");
+    }
+}
+
+// ADR-009 E1 #17 (slice 3, U01): the literal-type carrier store + the consumer's
+// Int64-index branch. Same lifecycle discipline as the replace-body carrier
+// above; these pin the typed transport that replaces the serialize/reparse JSON
+// round-trip for literal `set param x: T` / `set return T`.
+#[cfg(test)]
+mod e1_literal_type_carrier_tests {
+    use super::*;
+    use shape_ast::ast::TypeAnnotation;
+
+    #[test]
+    fn literal_type_carrier_index_restarts_per_run_no_stale_leak() {
+        let a = TypeAnnotation::Basic("int".to_string());
+        let b = TypeAnnotation::Basic("string".to_string());
+        assert_ne!(a, b);
+
+        clear_comptime_directive_types();
+        assert_eq!(push_comptime_directive_type(a.clone()), 0);
+        assert_eq!(comptime_directive_type_at(0).as_ref(), Some(&a));
+
+        clear_comptime_directive_types();
+        assert_eq!(
+            push_comptime_directive_type(b.clone()),
+            0,
+            "index restarts per run"
+        );
+        let resolved = comptime_directive_type_at(0).expect("live in this run");
+        assert_eq!(resolved, b, "index 0 resolves to THIS run's type");
+        assert_ne!(resolved, a, "no stale type leaks across the per-run clear");
+    }
+
+    #[test]
+    fn literal_type_index_resolves_through_the_consumer_without_reparse() {
+        // The emit side pushes the typed annotation and bakes its index; the
+        // consumer fetches it from an Int64 slot — the exact new U01 path.
+        clear_comptime_directive_types();
+        let ann = TypeAnnotation::Basic("int".to_string());
+        let index = push_comptime_directive_type(ann.clone());
+        let slot = KindedSlot::from_int(index as i64);
+        let resolved = type_annotation_from_string_or_type_ref_slot(&slot, "__emit_set_param_type")
+            .expect("Int64 index resolves to the stored typed annotation");
+        assert_eq!(resolved, ann);
+    }
+
+    #[test]
+    fn missing_literal_type_index_is_a_named_error_not_a_panic() {
+        clear_comptime_directive_types();
+        let slot = KindedSlot::from_int(99);
+        let err = type_annotation_from_string_or_type_ref_slot(&slot, "__emit_set_return_type")
+            .expect_err("an out-of-range index is a named error");
+        assert!(err.contains("index 99"), "got: {err}");
     }
 }
 

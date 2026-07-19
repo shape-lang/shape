@@ -2356,6 +2356,10 @@ pub(crate) fn execute_comptime_with_annotation_handler(
     // pre-execute clear would wipe it. Per-run clear ⇒ pre-pass and pass-2 each
     // index a fresh store, no stale body leaks across the double compile.
     super::comptime_builtins::clear_comptime_replace_bodies();
+    // ADR-009 E1 #17 (slice 3): the U01 literal-type carrier store shares the
+    // replace-body lifecycle (compile-populated during the inner compile below),
+    // so it clears here at run entry too — a pre-execute clear would wipe it.
+    super::comptime_builtins::clear_comptime_directive_types();
 
     let params: Vec<FunctionParameter> = handler_params
         .iter()
