@@ -69,7 +69,7 @@ pub(in crate::compiler) struct Present;
 /// type, straight from the AST the directive consumer already holds (the target
 /// `FunctionDef`'s `params`/`return_type`). Slice 1 carries the signature; the
 /// install-time battery (C2) is what type-checks the body against it.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub(in crate::compiler) struct BodySignature {
     params: Vec<FunctionParameter>,
     return_type: Option<TypeAnnotation>,
@@ -113,6 +113,7 @@ impl BodySignature {
 /// published. The atomic install is the consumer's job, through the C2
 /// `InstallTransaction` — `finish()` and the C2 seam COMPOSE; a consumer must use
 /// both.
+#[derive(Debug)]
 pub(in crate::compiler) struct CheckedBody {
     signature: BodySignature,
     captures: CaptureClause,
