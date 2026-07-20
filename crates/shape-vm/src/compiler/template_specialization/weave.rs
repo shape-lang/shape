@@ -1500,10 +1500,13 @@ victim_a(10) * 1000 + victim_b(10)
     }
 
     // Scalar + composite captures in one WOVEN PROGRAM — via TWO
-    // annotations (one handler each): all `capture()` value args inside ONE
-    // handler must unify (the pre-existing handler-wide inference
-    // limitation pinned below), so the mixed-kind program spells each
-    // config kind in its own handler. Both bake spellings are exercised;
+    // annotations (one handler each). HISTORICAL NOTE (S4a): this fixture
+    // was written under the S3-era handler-wide capture-type unification
+    // limitation (all `capture()` value args in one handler had to agree);
+    // S4a's generic `capture<T>` forwarder REMOVED that limitation (the
+    // mixed-in-one-handler pins below), but this green pin keeps its
+    // two-annotation fixture as-is — it independently proves both bake
+    // spellings through one wrapper. Both bake spellings are exercised;
     // the executed value proves the baked config drives the mutation. (#65
     // fence: cfg hoisted to a handler local. The hygienic impl shadow is
     // OUT of this claim — it is USER code and may legitimately read module
@@ -1574,23 +1577,22 @@ victim(4)
         );
     }
 
-    // PROBE RESULT (S3c, disclosed in the slice report): capture VALUE
-    // types unify HANDLER-WIDE — mixing an int capture and an Array capture
-    // in ONE handler's compile fails the comptime mini-VM's type solving
-    // with the PRE-EXISTING loud "[C0001] Could not solve type constraints"
-    // error (the `capture` builtin's `unknown` value param is one shared
-    // inference site, so all `capture()` calls in a handler must agree —
-    // probed: the mixed-in-one-array spelling below AND two separate
-    // mixed installs in one handler both fail identically). Homogeneous
-    // multi-capture handlers work (two scalars: the C0907 duplicate pin;
-    // two arrays: probed green); mixed kinds need one handler per kind
-    // (the W39 pin above). This pin locks the LOUD surface-and-stop
-    // behavior — never a silent narrowing; the limitation is a
-    // pre-existing inference gap surfaced for supervisor relay, NOT fixed
-    // in S3 (S3 mints no new rejections beyond the lift domain).
+    // ── S4a (#66 item 1): per-call-site capture value typing ───────────────
+    //
+    // S4a PIN FLIP (the S4-opening fix, #66 item 1): the S3c probe pinned
+    // capture VALUE types unifying HANDLER-WIDE (`[C0001] Could not solve
+    // type constraints` — one shared inference var on the monomorphic
+    // `capture` forwarder's value param). The forwarder is now the ONE
+    // GENERIC forwarder — `capture<T>(name, value: T) -> __CaptureBinding`
+    // (`comptime.rs::comptime_builtin_forwarders`, the named special-case)
+    // — so each `capture()` call instantiates its own T through ordinary
+    // generic-call inference + monomorphization, and the S3c fixture (int +
+    // Array<int> in ONE captures array) compiles AND EXECUTES end-to-end.
+    // Mixed-typed config is exactly the shape the S4 declarative sugar's
+    // typed config params lower onto (C3-G2: the public API must carry it).
     #[test]
-    fn mixed_capture_value_types_in_one_handler_are_a_loud_inference_rejection_today() {
-        let (result, compiler) = compile_source(&hook_source(
+    fn mixed_capture_value_types_in_one_handler_execute_end_to_end() {
+        let (value, compiler) = top_level_i64(&hook_source(
             "fn tmpl<Args>(args: Args, bump: int, cfg: Array<int>) -> Args {\n\
              \x20   args[0] = args[0] * bump + cfg[0]\n\
              \x20   return args\n\
@@ -1599,16 +1601,145 @@ victim(4)
              install(before_hook(tmpl, [capture(\"bump\", 3), capture(\"cfg\", cfg)]))",
             "@hookann()\nfn victim(a: int) -> int { return a }\n\nvictim(4)",
         ));
-        let text = result
-            .expect_err("the mixed-kind captures array is a loud pre-existing rejection")
-            .to_string();
-        assert!(
-            text.contains("Could not solve type constraints"),
-            "the pre-existing loud inference rejection fires (never a silent narrowing): {text}"
+        // before: 4*3 + 5 = 17 → impl(17) = 17. Skip ⇒ 4; a misread of
+        // either baked constant shifts the value.
+        assert_eq!(value, 17, "BOTH mixed-typed baked constants drive the mutation");
+        assert_eq!(compiler.hook_install_registry.len(), 1, "one install lands");
+        let row = &compiler.hook_install_registry[0];
+        assert_eq!(
+            row.captures,
+            vec![
+                ("bump".to_string(), "3".to_string()),
+                ("cfg".to_string(), "[5, 6]".to_string())
+            ],
+            "the row renders both capture values in delivery order"
         );
         assert!(
-            compiler.hook_install_registry.is_empty(),
-            "no install lands behind the rejection"
+            row.specialized_symbol.contains("::cfg#2"),
+            "the specialized symbol carries the two-value config arity head: {}",
+            row.specialized_symbol
+        );
+    }
+
+    // Charter pin (S4a): int + string captures in ONE handler — the exact
+    // `annotation retry(times: int, label: string)` mixed-config shape the
+    // S4 sugar lowers onto. Value-distinguishing: the string's length
+    // enters the arithmetic, so a dropped or altered string capture shifts
+    // the executed value.
+    #[test]
+    fn int_and_string_captures_in_one_handler_execute_end_to_end() {
+        let (value, compiler) = top_level_i64(&hook_source(
+            "fn tmpl<Args>(args: Args, bump: int, tag: string) -> Args {\n\
+             \x20   args[0] = args[0] * bump + tag.length()\n\
+             \x20   return args\n\
+             }",
+            "install(before_hook(tmpl, [capture(\"bump\", 3), capture(\"tag\", \"ab\")]))",
+            "@hookann()\nfn victim(a: int) -> int { return a * 10 }\n\nvictim(4)",
+        ));
+        // before: 4*3 + len("ab") = 14 → impl(14) = 140. Skip ⇒ 40; a
+        // dropped tag ⇒ 120; a different tag length shifts the value.
+        assert_eq!(value, 140, "the int AND the string baked constants drive the mutation");
+        assert_eq!(compiler.hook_install_registry.len(), 1, "one install lands");
+        assert_eq!(
+            compiler.hook_install_registry[0].captures,
+            vec![
+                ("bump".to_string(), "3".to_string()),
+                ("tag".to_string(), "\"ab\"".to_string())
+            ],
+            "the row renders the int and the quoted string in delivery order"
+        );
+    }
+
+    // Mixed capture types across TWO separate installs in ONE handler run
+    // (the second spelling the S3c probe measured failing): a before with
+    // an int capture + an after with an Array<int> capture, both installed
+    // by the same handler, executed end-to-end.
+    #[test]
+    fn mixed_captures_across_two_installs_in_one_handler_execute_end_to_end() {
+        let (value, compiler) = top_level_i64(&hook_source(
+            "fn bump_by<Args>(args: Args, bump: int) -> Args {\n\
+             \x20   args[0] = args[0] + bump\n\
+             \x20   return args\n\
+             }\n\
+             fn scale_result(r: int, cfg: Array<int>) -> int {\n\
+             \x20   return r * cfg[0] + cfg.length()\n\
+             }",
+            "let cfg = [5, 6]\n    \
+             install(before_hook(bump_by, [capture(\"bump\", 3)]))\n    \
+             install(after_hook(scale_result, [capture(\"cfg\", cfg)]))",
+            "@hookann()\nfn victim(a: int) -> int { return a * 10 }\n\nvictim(4)",
+        ));
+        // before: 4+3 = 7 → impl(7) = 70 → after: 70*5 + 2 = 352. Skipping
+        // the before ⇒ 202; skipping the after ⇒ 70.
+        assert_eq!(value, 352, "the int before-capture AND the array after-capture both bake");
+        assert_eq!(compiler.hook_install_registry.len(), 2, "both installs land");
+        assert_eq!(
+            compiler.hook_install_registry[0].captures,
+            vec![("bump".to_string(), "3".to_string())]
+        );
+        assert_eq!(
+            compiler.hook_install_registry[1].captures,
+            vec![("cfg".to_string(), "[5, 6]".to_string())]
+        );
+    }
+
+    // Rule-6 identity on MIXED config (S4a): two applications with equal
+    // (int, string) config SHARE one baked specialization; a differing
+    // string SPLITS — the structural spec-hash covers the WHOLE mixed
+    // config vector, not just its first value.
+    #[test]
+    fn rule6_mixed_config_equal_shares_and_differing_splits() {
+        let src = r#"
+fn tmpl<Args>(args: Args, bump: int, tag: string) -> Args {
+    args[0] = args[0] * bump + tag.length()
+    return args
+}
+
+annotation ab_one() {
+  targets: [function]
+  comptime post(target, ctx) {
+    install(before_hook(tmpl, [capture("bump", 3), capture("tag", "ab")]))
+  }
+}
+
+annotation ab_two() {
+  targets: [function]
+  comptime post(target, ctx) {
+    install(before_hook(tmpl, [capture("bump", 3), capture("tag", "ab")]))
+  }
+}
+
+annotation with_xyz() {
+  targets: [function]
+  comptime post(target, ctx) {
+    install(before_hook(tmpl, [capture("bump", 3), capture("tag", "xyz")]))
+  }
+}
+
+@ab_one()
+fn victim_a(a: int) -> int { return a + 1 }
+
+@ab_two()
+fn victim_b(a: int) -> int { return a + 2 }
+
+@with_xyz()
+fn victim_c(a: int) -> int { return a + 3 }
+
+(victim_a(10) * 1000 + victim_b(20)) * 1000 + victim_c(30)
+"#;
+        let (value, compiler) = top_level_i64(src);
+        // a: 10*3+2 = 32 → 33; b: 20*3+2 = 62 → 64; c: 30*3+3 = 93 → 96.
+        assert_eq!(value, 33064096, "all three targets execute their own mixed config");
+        assert_eq!(compiler.hook_install_registry.len(), 3);
+        assert_eq!(
+            compiler.hook_install_registry[0].function_index,
+            compiler.hook_install_registry[1].function_index,
+            "rule 6: structurally EQUAL (int, string) config SHARES one specialization"
+        );
+        assert_ne!(
+            compiler.hook_install_registry[0].function_index,
+            compiler.hook_install_registry[2].function_index,
+            "rule 6: a differing string in the mixed config vector SPLITS"
         );
     }
 

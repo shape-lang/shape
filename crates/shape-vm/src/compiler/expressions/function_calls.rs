@@ -218,6 +218,49 @@ mod w27_implicit_generic_tests {
         );
     }
 
+    // ADR-009 C3 #14 (slice 4, S4a — #66 item 1 collateral completion),
+    // measured via the comptime handler wrapper: a MIXED
+    // annotated/unannotated implicit-generic fn whose ANNOTATED-position
+    // arg has no compile-time-resolvable type (here: a known-binding
+    // identifier — the comptime mini-program's runtime-preset target/ctx
+    // shape) must still specialize on its UNANNOTATED positions. Pre-fix,
+    // `try_specialize_implicit_generic_free_function_call` required a
+    // concrete type for EVERY arg — one unresolvable arg at an annotated
+    // position (whose declaration the substitution never touches) vetoed
+    // the whole specialization, the call dispatched onto the dead deferred
+    // template, and a generic callee on the unannotated param inside that
+    // template hard-failed with "cannot infer type argument(s) for generic
+    // function 'cap'".
+    #[test]
+    fn mixed_annotated_implicit_generic_specializes_despite_unresolvable_annotated_arg() {
+        let source = r#"
+fn cap<T>(name, value: T) -> int { return 7 }
+fn handler(t: string, c: string, factor) -> int { return cap("f", factor) }
+handler(tgt, ctx, 3)
+"#;
+        let program = parse_program(source).expect("source should parse");
+        let mut compiler = BytecodeCompiler::new();
+        // Runtime-preset bindings: known by NAME only — no compile-time type.
+        compiler.register_known_bindings(&["tgt".to_string(), "ctx".to_string()]);
+        let bytecode = compiler
+            .compile(&program)
+            .expect("the mixed annotated/unannotated implicit generic must compile");
+        // The unannotated position drove a real specialization; the two
+        // annotated positions key as declaration-fixed.
+        assert!(
+            bytecode
+                .functions
+                .iter()
+                .any(|function| function.name.starts_with("__w27_implicit_handler")),
+            "expected a __w27_implicit_handler specialization, got: {:?}",
+            bytecode
+                .functions
+                .iter()
+                .map(|function| function.name.as_str())
+                .collect::<Vec<_>>()
+        );
+    }
+
     #[test]
     fn unannotated_mutual_recursion_rejects_wrong_kind_call_boundary() {
         let source = r#"
@@ -2363,11 +2406,12 @@ impl BytecodeCompiler {
             {
                 call_func_idx = specialized_idx;
                 call_name = self.program.functions[call_func_idx].name.clone();
-            } else if self
-                .function_defs
-                .get(&call_name)
-                .and_then(|d| d.type_params.as_ref())
-                .is_some_and(|tps| tps.iter().any(|tp| !tp.is_const()))
+            } else if !self.deferring_uninstantiated_template_body
+                && self
+                    .function_defs
+                    .get(&call_name)
+                    .and_then(|d| d.type_params.as_ref())
+                    .is_some_and(|tps| tps.iter().any(|tp| !tp.is_const()))
             {
                 // Soundness: the callee is a generic function and
                 // monomorphization could not resolve a concrete specialization
@@ -2380,6 +2424,15 @@ impl BytecodeCompiler {
                 // fall-through. A self-recursive generic call resolves to its
                 // specialization's index above (`ensure_monomorphic_function`
                 // caches before compiling the body), so it never reaches here.
+                //
+                // ADR-009 C3 #14 (slice 4, S4a): guarded by
+                // `deferring_uninstantiated_template_body` — the SAME
+                // discipline as the implicit-generic sibling branch below.
+                // Inside a deferred implicit-generic TEMPLATE body the blob is
+                // DEAD (its AST is re-emitted per concrete call site with
+                // proven types, where this error still fires for real gaps);
+                // a generic callee whose type args come from the template's
+                // own unresolved params must not hard-fail the dead blob.
                 return Err(ShapeError::SemanticError {
                     message: format!(
                         "cannot infer type argument(s) for generic function '{}' from the call-site arguments — annotate the arguments or call with values whose types are statically known",
@@ -6827,12 +6880,33 @@ impl BytecodeCompiler {
             return Ok(None);
         }
 
-        let mut arg_cts = Vec::with_capacity(args.len());
-        for arg in args {
+        // ADR-009 C3 #14 (slice 4, S4a — #66 item 1 collateral completion):
+        // only the param positions the substitution loop below can SUBSTITUTE
+        // (unannotated, by-value, simple-identifier) need a call-site-resolved
+        // concrete type. Positions with a DECLARED annotation (and
+        // reference/const/destructuring params) keep their declaration
+        // untouched, so requiring THEIR args to resolve here let one
+        // unresolvable arg at an annotated position veto the whole
+        // specialization — the call then dispatched onto the dead template
+        // blob with its unannotated params unresolved (measured: the comptime
+        // handler wrapper's runtime-preset target/ctx binding identifiers,
+        // which have no compile-time type, blocked specializing the handler
+        // for its config param and broke every generic call on that param).
+        let mut arg_cts: Vec<Option<ConcreteType>> = Vec::with_capacity(args.len());
+        for (param, arg) in original_def.params.iter().zip(args.iter()) {
+            let substitutable = param.type_annotation.is_none()
+                && !param.is_reference
+                && !param.is_mut_reference
+                && !param.is_const
+                && param.simple_name().is_some();
+            if !substitutable {
+                arg_cts.push(None);
+                continue;
+            }
             let Some(ct) = self.concrete_type_for_implicit_specialization_arg(arg)? else {
                 return Ok(None);
             };
-            arg_cts.push(ct);
+            arg_cts.push(Some(ct));
         }
 
         let mut specialized_def = original_def.clone();
@@ -6846,6 +6920,10 @@ impl BytecodeCompiler {
             {
                 continue;
             }
+            // Substitutable positions always resolved above.
+            let Some(ct) = ct.as_ref() else {
+                continue;
+            };
             let Some(ann) = type_annotation_from_concrete_type(ct) else {
                 return Ok(None);
             };
@@ -6853,8 +6931,25 @@ impl BytecodeCompiler {
             changed = true;
         }
 
-        if let Some(return_ct) =
-            self.implicit_specialization_return_concrete_type(&original_def, &arg_cts, 0)
+        // Return inference needs a full per-position type vector; fill the
+        // non-substituted positions from their DECLARED annotations when the
+        // annotation converts (an inconvertible annotation just skips return
+        // inference — the specialized body infers its own return type).
+        let full_cts: Option<Vec<ConcreteType>> = original_def
+            .params
+            .iter()
+            .zip(arg_cts.iter())
+            .map(|(param, ct)| {
+                ct.clone().or_else(|| {
+                    param.type_annotation.as_ref().and_then(
+                        crate::compiler::v2_map_emission::concrete_type_from_annotation,
+                    )
+                })
+            })
+            .collect();
+        if let Some(full_cts) = full_cts
+            && let Some(return_ct) =
+                self.implicit_specialization_return_concrete_type(&original_def, &full_cts, 0)
             && specialized_def.return_type.is_none()
             && let Some(ann) = type_annotation_from_concrete_type(&return_ct)
         {
@@ -6873,7 +6968,14 @@ impl BytecodeCompiler {
                 .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '_' })
                 .collect::<String>()
         )];
-        name_parts.extend(arg_cts.iter().map(concrete_type_cache_key));
+        // Substituted positions key on the resolved type (all-unannotated
+        // fns — the whole pre-S4a domain — keep byte-identical keys);
+        // non-substituted positions are fixed by the declaration, so one
+        // stable marker keeps the key injective over what actually varies.
+        name_parts.extend(arg_cts.iter().map(|ct| match ct {
+            Some(ct) => concrete_type_cache_key(ct),
+            None => "decl".to_string(),
+        }));
         specialized_def.name = name_parts.join("_");
         specialized_def.type_params = Some(Vec::new());
 

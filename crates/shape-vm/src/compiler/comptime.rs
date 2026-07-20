@@ -9,7 +9,8 @@ use crate::compiler::comptime_builtins::expansion_provenance::{HygienicRole, Hyg
 use crate::executor::{VMConfig, VirtualMachine};
 use shape_ast::ast::{
     AnnotationHandlerParam, DestructurePattern, Expr, FunctionDef, FunctionParameter, Item,
-    ObjectEntry, ObjectTypeField, Program, Span, Statement, TypeAnnotation, VarKind, VariableDecl,
+    ObjectEntry, ObjectTypeField, Program, Span, Statement, TypeAnnotation, TypeParam, VarKind,
+    VariableDecl,
 };
 use shape_ast::error::{Result, ShapeError};
 use shape_value::heap_value::{HeapKind, HeapValue};
@@ -369,6 +370,10 @@ const COMPTIME_BUILTIN_FORWARDERS: &[(
     // forwarder's declared `__CaptureBinding` struct return (the
     // `array_elements_all_typed_object` producer-side proof) — without it,
     // strict typing rejects the literal as element-type-unprovable.
+    // S4a (#66 item 1): this row generates as the ONE GENERIC forwarder
+    // (`capture<T>(name, value: T)` — see the named special-case in
+    // `comptime_builtin_forwarders`) so capture VALUES type per call site
+    // and mixed-type captures in one handler are legal.
     (
         "capture",
         2,
@@ -664,6 +669,21 @@ fn comptime_builtin_forwarders() -> Vec<Item> {
     items.extend(hook_template_carrier_items());
     items.extend(COMPTIME_BUILTIN_FORWARDERS.iter().map(
         |(name, arity, target_method, return_fields, named_return_type, param_annotations)| {
+            // ADR-009 C3 #14 (slice 4, S4a — #66 item 1): `capture` is the
+            // ONE generic forwarder — `fn capture<T>(name, value: T) ->
+            // __CaptureBinding`. A monomorphic forwarder gives the VALUE
+            // param a single shared inference site, so every `capture()`
+            // call in one handler unifies against the same var and
+            // mixed-type captures (int + string, int + Array<int>) fail
+            // with `[C0001] Could not solve type constraints` — exactly the
+            // shape S4's typed config params lower to (the G2 sugar test).
+            // Making the forwarder generic types the value PER CALL SITE
+            // via the language's own generic-call inference +
+            // monomorphization; each mono body still calls the variadic
+            // kind-agnostic `__comptime__.capture`. Param 0 (name) stays
+            // UNANNOTATED so the builtin's own "capture expects a string
+            // capture name" sentence stays reachable.
+            let is_generic_capture_forwarder = *name == "capture";
             let params: Vec<shape_ast::ast::FunctionParameter> = (0..*arity)
                 .map(|i| shape_ast::ast::FunctionParameter {
                     pattern: shape_ast::ast::DestructurePattern::Identifier(
@@ -676,7 +696,11 @@ fn comptime_builtin_forwarders() -> Vec<Item> {
                     is_out: false,
                     type_annotation: param_annotations
                         .and_then(|annotations| annotations.get(i))
-                        .map(|annotation| TypeAnnotation::Basic((*annotation).to_string())),
+                        .map(|annotation| TypeAnnotation::Basic((*annotation).to_string()))
+                        .or_else(|| {
+                            (is_generic_capture_forwarder && i == 1)
+                                .then(|| TypeAnnotation::Basic("T".to_string()))
+                        }),
                     default_value: None,
                 })
                 .collect();
@@ -751,7 +775,17 @@ fn comptime_builtin_forwarders() -> Vec<Item> {
                     params,
                     return_type,
                     body: vec![Statement::Return(Some(body_expr), Span::DUMMY)],
-                    type_params: Some(Vec::new()),
+                    type_params: Some(if is_generic_capture_forwarder {
+                        vec![TypeParam::Type {
+                            name: "T".to_string(),
+                            span: Span::DUMMY,
+                            doc_comment: None,
+                            default_type: None,
+                            trait_bounds: Vec::new(),
+                        }]
+                    } else {
+                        Vec::new()
+                    }),
                     annotations: Vec::new(),
                     where_clause: None,
                     is_async: false,

@@ -3649,14 +3649,17 @@ victim(1)
         );
     }
 
-    // S3b PIN FLIP (ordered by the slice-3 charter; the S2 twin asserted
-    // "outside this slice's ConstLift domain … lands with S3 ConstLift" —
-    // that landing-point sentence is DELETED with the flip): a
-    // non-liftable heap value (here the handler's own `target` descriptor —
-    // an ordinary-struct-shaped TypedObject to the lift wall) rejects
-    // through the S3 out-of-domain producer, naming the kind and the closed
-    // C3-G5 domain. (#65 note: an INLINE array-literal capture value
-    // `[capture("cfg", [1, 2])]` still trips the PRE-EXISTING
+    // S3b PIN FLIP (ordered by the slice-3 charter), RE-TARGETED in S4a: a
+    // non-liftable heap value rejects through the S3 out-of-domain producer,
+    // naming the kind and the closed C3-G5 domain — proven end-to-end
+    // through the public API with a HashMap capture value (statically typed,
+    // so the S4a generic `capture<T>` forwarder instantiates and the value
+    // REACHES the execute-time lift wall). The S3-era spelling used the
+    // handler's own `target` descriptor; its inline-Object annotation is
+    // outside the `ConcreteType` algebra, so under per-call-site value
+    // typing that spelling now rejects EARLIER at the capture call site —
+    // locked by the sibling pin below. (#65 note: an INLINE array-literal
+    // capture value `[capture("cfg", [1, 2])]` still trips the PRE-EXISTING
     // `pending_variable_typed_array_kind` leak — the S3b composite fixtures
     // hoist to a local first; #65 itself is not fixed in S3.)
     #[test]
@@ -3664,9 +3667,32 @@ victim(1)
         expect_compile_reject(
             &hook_program(
                 "fn my_before(x: int, cfg: int) -> int { return x }",
+                "let m: HashMap<string, int> = HashMap()\n    \
+                 let t = before_hook(my_before, [capture(\"cfg\", m)])",
+            ),
+            "outside the ConstLift domain (kind Ptr(HashMap))",
+        );
+    }
+
+    // S4a (#66 item 1) DISCLOSED CONSEQUENCE of per-call-site capture value
+    // typing: a capture VALUE whose static type does not resolve in the
+    // `ConcreteType` algebra (here the handler's `target` param — its inline
+    // `TypeAnnotation::Object` annotation is the S2d-measured proof-gap (a)
+    // family, S7's named follow-up) can no longer instantiate the generic
+    // `capture<T>` forwarder, so the rejection fires LOUDLY at COMPILE time
+    // with the established generic-inference sentence instead of reaching
+    // the execute-time S3 lift wall. Still surface-and-stop — never a
+    // silent narrowing; the S3 value-tier producers stay reachable for
+    // resolvable-typed values (the pin above) and are unit-locked per class
+    // arm in `const_lift.rs`.
+    #[test]
+    fn target_descriptor_capture_value_is_a_loud_compile_time_inference_rejection() {
+        expect_compile_reject(
+            &hook_program(
+                "fn my_before(x: int, cfg: int) -> int { return x }",
                 "let t = before_hook(my_before, [capture(\"cfg\", target)])",
             ),
-            "outside the ConstLift domain (kind Ptr(TypedObject))",
+            "cannot infer type argument(s) for generic function 'capture'",
         );
     }
 
