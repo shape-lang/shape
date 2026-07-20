@@ -2687,6 +2687,113 @@ mod e1_slice0_reconstruction_spike {
     }
 }
 
+// ADR-009 E1 #17 slice-5 A-FULL — STOP-shaped composite-boundary pins (E1-D7).
+//
+// Stage 1 locks the RULED A-FULL reconstructable frontier in-code. The
+// descriptor algebra reconstructs primitive leaves + Never + base `any` +
+// Tuple + Reference + Union + Callable(round-tripping); every nominal-headed
+// form (applied generics `Array<int>`/`Option<T>`/`HashMap`, records, bare
+// user-nominals, un-applied heads) is a NAMED rejection at `payload_of`, NOT
+// reconstructable in E1. Applied generics are therefore STAMP-GATED to
+// unstamped (identity = INVALID) → the existing `__ComptimeTypeRef.source`
+// reparse arm (dead-but-present until slice 6 / B4-B5), which is exactly
+// E1-D7(a) unstamped-fall-through + E1-D7(c) "every variant handled OR a named
+// error" (the nominal-headed variants ARE handled — as named errors).
+//
+// Plain `#[cfg(test)]` (NOT deep-tests-gated) so the standard supervisor gate
+// runs them (E2 finding 5: pins in a deep-tests-gated module never run). No
+// production code changes this stage, so all recorded baselines are unmoved by
+// construction.
+#[cfg(test)]
+mod e1_s5_boundary {
+    use super::semantic_freeze::overlay_for_tests;
+    use super::type_reflection::payloads::{self, FrozenPayloadDescriptor};
+    use crate::compiler::BytecodeCompiler;
+    use shape_ast::ast::TypeAnnotation;
+
+    // The strengthened successor to the retired slice-0 PIN4 (which only
+    // asserted `identity_of("Array<int>").is_none()`). `Array<int>`
+    // canonicalizes CLEANLY to a Nominal identity — the boundary is at payload
+    // issuance, not canonicalization: `payload_of` routes the site-interned
+    // Nominal to `substituted_applied_nominal(head, args)`, which returns `None`
+    // for a builtin generic head (no frozen struct field annotations to
+    // substitute) → the NAMED `applied_nominal_pending_rejection`. This proves
+    // applied generics are stamp-gated to the `.source` reparse arm, NOT
+    // reconstructable in E1 (applied-nominal substitution is B4/B5, out of E1).
+    #[test]
+    fn e1_s5_applied_nominal_is_pending_rejection_not_reconstructable() {
+        let overlay = overlay_for_tests(&BytecodeCompiler::new());
+        // `Array<int>` as the compiler sees it at from_function/from_type — a
+        // real `TypeAnnotation`, built directly to avoid any grammar dependence.
+        // `TypeAnnotation::Array(int)` routes through `canonical_applied`
+        // (type_reflection.rs:976-977), identical to `Generic{"Array",[int]}`.
+        let array_int = TypeAnnotation::Array(Box::new(TypeAnnotation::Basic("int".to_string())));
+
+        let identity = overlay
+            .canonicalize_type_projection(&array_int)
+            .expect("Array<int> canonicalizes to a Nominal identity")
+            .identity();
+
+        match overlay.payload_of(identity) {
+            Err(message) => assert_eq!(
+                message,
+                payloads::applied_nominal_pending_rejection(),
+                "Array<int> must be the NAMED applied-nominal-pending rejection \
+                 (stamp-gated to the .source reparse arm), never a silent gap"
+            ),
+            Ok(descriptor) => panic!(
+                "Array<int> must NOT reconstruct via the descriptor algebra in E1 \
+                 (applied-generic substitution is B4/B5, out of E1's footprint); \
+                 got {descriptor:?}"
+            ),
+        }
+    }
+
+    // The POSITIVE boundary: a `Tuple[int, string]` reconstructs via the
+    // descriptor algebra — `payload_of` returns `Tuple` with two ordered
+    // element identities that each themselves `payload_of` to `Primitive`. This
+    // locks the reconstructable frontier stage 2's total reconstruction fn
+    // targets, and proves composites-that-round-trip (Tuple) are INSIDE A-FULL
+    // while applied nominals (above) are not.
+    #[test]
+    fn e1_s5_tuple_int_string_reconstructs_via_descriptor() {
+        let overlay = overlay_for_tests(&BytecodeCompiler::new());
+        let tuple_int_string = TypeAnnotation::Tuple(vec![
+            TypeAnnotation::Basic("int".to_string()),
+            TypeAnnotation::Basic("string".to_string()),
+        ]);
+
+        let identity = overlay
+            .canonicalize_type_projection(&tuple_int_string)
+            .expect("[int, string] canonicalizes to a Tuple identity")
+            .identity();
+
+        let elements = match overlay.payload_of(identity) {
+            Ok(FrozenPayloadDescriptor::Tuple(descriptor)) => descriptor.elements,
+            other => panic!(
+                "[int, string] must reconstruct as a Tuple descriptor (inside the \
+                 A-FULL reconstructable frontier); got {other:?}"
+            ),
+        };
+        assert_eq!(
+            elements.len(),
+            2,
+            "the tuple carries its two ordered element identities"
+        );
+
+        for element in elements {
+            assert!(
+                matches!(
+                    overlay.payload_of(element),
+                    Ok(FrozenPayloadDescriptor::Primitive(_))
+                ),
+                "each tuple element is a primitive leaf that itself reconstructs \
+                 off its own descriptor (int / string)"
+            );
+        }
+    }
+}
+
 #[cfg(all(test, feature = "deep-tests"))]
 mod tests {
     use super::*;
