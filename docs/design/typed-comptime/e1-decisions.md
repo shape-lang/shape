@@ -94,6 +94,31 @@ time, the repo is the authority.
   semantics; empty-body rejection deliberately UN-NUMBERED pending E1-D4's
   C0930 next-free computation (C092x follow-up).
 
+- **E1-D7 (slice-5 scope — A-FULL; USER-RATIFIED 2026-07-20).** The E1-D5
+  probe (report `f6000a07`) found Shape A FEASIBLE (overlay reachable at all
+  three producer sites) with three divergences: `__ComptimeTypeRef`
+  (builtin_schemas.rs:408) does NOT yet carry identity fields (the :423
+  identity_high/low belong to `COMPTIME_FROZEN_TYPE_REF_SCHEMA`, a different
+  schema); `ComptimeTarget` stores types as rendered STRINGS (AST discarded
+  at from_function/from_type); `declaration_discovery.rs:101` pre-pass calls
+  `from_type` without overlay scope. The user ratified **A-FULL in one
+  slice**: composites included — AST canonicalized at from_function/from_type,
+  FrozenTypeIdentity stored in ComptimeTarget, overlay threaded into the
+  pre-pass, identity fields ADDED to `__ComptimeTypeRef`. Binding
+  implementation rules: (a) **stamped→identity-only**: a type_ref carrying a
+  stamped identity resolves via identity or fails with a NAMED error — no
+  silent fallback to `.source` reparse (that fallback is the canonical
+  walk-back shape); unstamped/legacy refs fall to the existing arms
+  unchanged (dead-but-present until slice 6). (b) **ONE identity
+  computation**: producer-side identity for composites must reuse the
+  freeze's canonical hashing path — a second independent hasher is a
+  parallel-implementation defection. (c) Reconstruction inverts the ONE
+  `PRIMITIVE_SYNONYM_FAMILIES` table; composites recurse the descriptor
+  algebra totally. Execution: supervised multi-agent workflow (ultracode) —
+  read-only parallel scouts/verify lenses, SEQUENTIAL single-writer
+  implement stages through the memory-capped lane, supervisor integration
+  verify after.
+
 ## Operating rules
 
 The E2-proven pipeline carries over wholesale (recorded in the AGENTS.md E1
