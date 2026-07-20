@@ -6,6 +6,18 @@ This doc is the running source-of-truth for what slices 3–5 orphaned but left
 **byte-unchanged** for slice-6 deletion. Branch `adr009/e1`, current through
 stage-5 of slice 5 (`f6b1e327` + the stage-5 test/docs commit).
 
+> **STATUS — slice-6 pure-deletion LANDED (commit `07638332`).** The three
+> **carried-forward** fully-dead rows (§"Carried-forward orphans") are
+> **DELETED**. The four **primary orphan targets** (§"Primary orphan targets":
+> the `.source` field, the reparse arm, `parse_type_annotation_payload` the fn,
+> and `__type_probe`) **SURVIVE E1** — they are still live for unstamped
+> (`identity == INVALID`) refs per the load-bearing ordering constraint below,
+> and their deletion is **BOUND to B4/B5 → E5** (the user-ratified E1-D8
+> stamp-gate residual). A-phase sentinel (strengthened anti-walk-back pin) is
+> `05a62a91`; B-phase absence sentinel is
+> `crates/shape-vm/src/executor/tests/no_json_comptime_protocol.rs`. Deletion
+> evidence: `docs/design/typed-comptime/e1-slice6-report.md`.
+
 > **Load-bearing ordering constraint (read first).** Every row below is
 > dead-but-present **only for STAMPED refs**. The `.source` string field and its
 > reparse machinery are STILL LIVE for **unstamped (`identity == INVALID`)
@@ -32,6 +44,14 @@ stage-5 of slice 5 (`f6b1e327` + the stage-5 test/docs commit).
 
 ## Primary orphan targets (U02 `.source` reparse — new this slice)
 
+> **SURVIVE E1 — BOUND to B4/B5 → E5.** All four rows below stay LIVE for
+> unstamped (`identity == INVALID`) refs and are NOT part of the slice-6
+> pure-deletion (`07638332`). Their deletion is the user-ratified E1-D8
+> stamp-gate residual: it can only land once B4/B5 makes the applied-generic /
+> record / bare-nominal type_refs reconstructable and every INVALID-stamping
+> producer (module/expression targets, the unresolved fallback, optional
+> fields) is migrated off the reparse arm. See §"Slice-6 close checklist" step 1.
+
 | # | Site (current line @ HEAD) | What | Status for STAMPED refs | Still LIVE for |
 |---|---|---|---|---|
 | 1 | `crates/shape-runtime/src/type_schema/builtin_schemas.rs:418` | `.string_field("source")` on the `__ComptimeTypeRef` schema | Dead — stamped refs resolve via `identity_high`/`identity_low` (`:419/:420`, which SURVIVE) | Unstamped refs read `.source` |
@@ -45,13 +65,17 @@ are the replacement, not orphans. `name` / `kind` stay (read by
 `target_params_and_return_expose_type_refs` and general reflection); only
 `source` and its reparse consumers are orphaned.
 
-## Carried-forward orphans (slices 3–4, still awaiting slice-6 deletion)
+## Carried-forward orphans (slices 3–4) — DELETED in slice-6 pure deletion (`07638332`)
 
-| Site (current line @ HEAD) | What | Note |
+All three rows are **DELETED** (commit `07638332`, worktree
+`shape-adr009-a3`, branch `adr009/e1`). Deletion evidence + re-run sweep in
+`docs/design/typed-comptime/e1-slice6-report.md`.
+
+| Site (line @ pre-deletion HEAD `2d1f627f`) | What | Status |
 |---|---|---|
-| `crates/shape-vm/src/compiler/statements.rs:148` | `fn serialize_directive_payload` | Fully caller-less since slice 4 (extend was its last user). Dead-code warns — the E2-D8 byte-unchanged consequence; a warning, not a test flip. |
-| `crates/shape-vm/src/compiler/comptime_builtins.rs` (`__emit_extend` builtin) | `register_typed_fn_1` + `serde_json::from_str::<ExtendStatement>` | Registered but never emitted (slice 4 moved extend to the typed store+index). Dead-but-present, no warning. |
-| `crates/shape-vm/src/compiler/comptime_builtins.rs:365` | `serde_json::from_str::<TypeAnnotation>` first branch of `parse_type_annotation_payload` | Carried from slice 3. Orphaned once #2 above is deleted (it is only reachable through the reparse arm). |
+| `crates/shape-vm/src/compiler/statements.rs:148` | `fn serialize_directive_payload` | **DELETED** `07638332`. Fully caller-less since slice 4 (extend was its last user); the ONLY one of the three that dead-code-warned — that warning is now **cleared** (expected E2-D8 byte-unchanged consequence). |
+| `crates/shape-vm/src/compiler/comptime_builtins.rs:1535-1548` (`"__emit_extend"` builtin) | `register_typed_fn_1` + inline consumer + `serde_json::from_str::<ExtendStatement>` | **DELETED** `07638332`. Registered but never emitted since slice 4 (extend moved to the typed store+index; the emit side uses the typed-index `"__emit_extend_checked"`). `ComptimeDirective::Extend` survives via `__emit_extend_checked`. |
+| `crates/shape-vm/src/compiler/comptime_builtins.rs:365` | `serde_json::from_str::<TypeAnnotation>` first branch of `parse_type_annotation_payload` | **DELETED** `07638332` (branch only). No producer serializes a `TypeAnnotation` since slice 3 (U01 → Int64 index) and `serialize_directive_payload` (row 1) was its only serializer. The fn signature + `__type_probe` source-reparse remainder SURVIVE byte-unchanged (the live unstamped path). |
 
 ## Already retired (do NOT re-list as orphans)
 
@@ -73,16 +97,23 @@ are the replacement, not orphans. `name` / `kind` stay (read by
 
 ## Slice-6 close checklist (for the deletion agent)
 
-1. Migrate or gate EVERY INVALID-stamping producer (module/expression targets,
-   the `"unknown"` fallback, optional fields) so no live path depends on the
-   `.source` reparse — else deleting rows 1–4 breaks those targets.
-   Applied-nominal / record / bare-nominal type_refs stay INVALID until B4/B5;
-   coordinate the deletion of their reparse dependence with that work.
-2. Delete rows 1–4 (the `.source` field + reparse arm + `parse_type_annotation_payload`
-   + `__type_probe`) together, in the pure-deletion phase.
-3. Delete the carried-forward slice-3/4 rows (`serialize_directive_payload`,
-   `__emit_extend`, the `serde_json::<TypeAnnotation>` branch) in the same
-   pure-deletion phase.
-4. Workspace-wide both-spelling closure sweep (E2-D8 discipline); `just
-   check-clean` green; the recorded baselines (st-annotations 10-name, vmlib
-   7-name + `nested_exact` flapper, st-comptime 3-name @ `-j1`) UNMOVED.
+1. **[B4/B5 → E5 — NOT done in E1]** Migrate or gate EVERY INVALID-stamping
+   producer (module/expression targets, the `"unknown"` fallback, optional
+   fields) so no live path depends on the `.source` reparse — else deleting
+   rows 1–4 breaks those targets. Applied-nominal / record / bare-nominal
+   type_refs stay INVALID until B4/B5; coordinate the deletion of their reparse
+   dependence with that work. **User-ratified E1-D8 stamp-gate residual: this
+   step is explicitly deferred out of E1.**
+2. **[B4/B5 → E5 — NOT done in E1]** Delete rows 1–4 (the `.source` field +
+   reparse arm + `parse_type_annotation_payload` + `__type_probe`) together,
+   once step 1 lands. They SURVIVE E1 byte-unchanged (verified compiling at
+   `07638332`).
+3. **[DONE `07638332`]** Delete the carried-forward slice-3/4 rows
+   (`serialize_directive_payload`, the `"__emit_extend"` builtin, the
+   `serde_json::<TypeAnnotation>` branch) — the three fully-dead items, done in
+   the slice-6 pure-deletion commit.
+4. **[DONE — see the report]** Workspace-wide both-spelling closure sweep
+   (E2-D8 discipline) re-run at `2d1f627f`; `cargo check -p shape-vm
+   --all-targets` + `cargo test -p shape-vm --lib e1_` green. The B-phase adds
+   an absence sentinel (`no_json_comptime_protocol.rs`) pinning the two deleted
+   symbol names to 0 across the source trees.
