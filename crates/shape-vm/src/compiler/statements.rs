@@ -141,25 +141,6 @@ impl BytecodeCompiler {
         Ok(())
     }
 
-    /// Serialize a value to JSON for comptime directive payloads.
-    ///
-    /// Wraps serde_json serialization errors into ShapeError with the given
-    /// directive label for diagnostics.
-    fn serialize_directive_payload(
-        &self,
-        value: &(impl serde::Serialize + ?Sized),
-        directive_label: &str,
-        span: Span,
-    ) -> Result<String> {
-        serde_json::to_string(value).map_err(|e| ShapeError::RuntimeError {
-            message: format!(
-                "Failed to serialize comptime {} directive: {}",
-                directive_label, e
-            ),
-            location: Some(self.span_to_source_location(span)),
-        })
-    }
-
     /// Check that the compiler is in comptime mode, returning an error otherwise.
     fn require_comptime_mode(&self, directive_name: &str, span: Span) -> Result<()> {
         if !self.comptime_mode {

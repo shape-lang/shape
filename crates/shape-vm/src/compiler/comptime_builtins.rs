@@ -362,10 +362,6 @@ fn comptime_extend_statement_at(index: usize) -> Option<shape_ast::ast::ExtendSt
 }
 
 fn parse_type_annotation_payload(payload: &str) -> Result<shape_ast::ast::TypeAnnotation, String> {
-    if let Ok(parsed) = serde_json::from_str::<shape_ast::ast::TypeAnnotation>(payload) {
-        return Ok(parsed);
-    }
-
     // Fallback for older callers that still pass textual type source.
     let snippet = format!("fn __type_probe(value: {}) {{ value }}", payload);
     let program = shape_ast::parse_program(&snippet)
@@ -1528,22 +1524,6 @@ fn comptime_builtins_module_base(
             Ok(TypedReturn::Concrete(ConcreteReturn::OpaqueTypedObject(
                 Arc::new(heap_value_from_typed_object_slot(handle)),
             )))
-        },
-    );
-
-    // Internal comptime directive: emit an extend statement payload (JSON AST).
-    register_typed_fn_1::<_, Arc<String>>(
-        &mut module,
-        "__emit_extend",
-        "Internal: emit extend directive payload",
-        "payload",
-        "string",
-        ConcreteType::Unit,
-        |json, _ctx| {
-            let extend: shape_ast::ast::ExtendStatement = serde_json::from_str(json.as_str())
-                .map_err(|e| format!("invalid extend payload: {}", e))?;
-            push_comptime_directive(ComptimeDirective::Extend(extend))?;
-            Ok(TypedReturn::Concrete(ConcreteReturn::Unit))
         },
     );
 
