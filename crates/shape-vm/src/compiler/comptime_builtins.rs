@@ -3181,6 +3181,58 @@ mod e1_s5_route_proof {
             "the error is the reparse arm's own parse failure, got: {err}"
         );
     }
+
+    // (e) ANTI-WALK-BACK sentinel THROUGH THE FULL CONSUMER (E1-D7(a)). The
+    // strengthened companion to pin (c): where (c) calls
+    // `reconstruct_type_annotation` DIRECTLY, this drives the WHOLE
+    // `type_annotation_from_string_or_type_ref_slot` consumer with a slot that
+    // is (i) STAMPED — identity != INVALID, so the consumer takes the identity
+    // reconstruct branch (comptime_builtins.rs:490-492) — AND (ii) carries a
+    // VALID, parseable `.source` ("int"). The fabricated identity was never
+    // frozen, so reconstruct Errs; the consumer MUST surface that Err and MUST
+    // NOT fall back to reparsing the valid `.source` arm (:493-494). If a future
+    // edit turned the reconstruct-failure into a `.source` fallback, "int" would
+    // reparse to `Ok(Basic("int"))` and this `expect_err` would fire — catching
+    // the canonical stamped->reparse walk-back that pin (c) cannot see (its slot
+    // has no valid source, and it bypasses the consumer's branch ordering). The
+    // VALID `.source` is the load-bearing difference from pin (c): here a
+    // walk-back WOULD succeed, so an `Ok` is unambiguous proof of the walk-back.
+    #[test]
+    fn e1_s5_stamped_unresolvable_ref_errs_through_full_consumer_never_reparses_valid_source() {
+        let overlay = overlay_for_tests(&BytecodeCompiler::new());
+        // A fabricated identity the freeze never issued (SHA-256 prefixes are not
+        // 0xDEAD/0xBEEF), and NOT the INVALID sentinel — a genuinely STAMPED ref.
+        let fabricated = FrozenTypeIdentity {
+            high: 0xDEAD,
+            low: 0xBEEF,
+        };
+        assert_ne!(
+            fabricated,
+            FrozenTypeIdentity::INVALID,
+            "the sentinel must be a STAMPED identity, not INVALID"
+        );
+        // `.source = "int"` is a fully VALID, reparseable type payload: the
+        // `.source` fallback arm WOULD answer `Ok(Basic("int"))` if the consumer
+        // ever reached it. A stamped ref must not.
+        let slot = build_type_ref_descriptor("int", None, Some(fabricated));
+        let err = type_annotation_from_string_or_type_ref_slot(
+            &slot,
+            "__emit_set_return_type",
+            &overlay,
+        )
+        .expect_err(
+            "a stamped-but-unresolvable ref must Err through the FULL consumer, never silently \
+             reparse the valid .source (E1-D7(a) stamped->reparse walk-back refusal)",
+        );
+        // The surfaced String is reconstruct's named unknown-identity rejection
+        // (`payload_of` -> `category_for_identity`), NOT a reparse of "int" — a
+        // reparse would have been `Ok`, never an error mentioning the identity.
+        assert!(
+            err.to_lowercase().contains("identity"),
+            "the error must be the identity-route's named rejection, not a .source reparse; \
+             got: {err}"
+        );
+    }
 }
 
 #[cfg(all(test, feature = "deep-tests"))]
