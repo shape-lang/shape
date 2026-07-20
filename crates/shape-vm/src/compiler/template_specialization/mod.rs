@@ -74,6 +74,7 @@
 pub(in crate::compiler) mod const_lift;
 pub(in crate::compiler) mod install_registry;
 pub(in crate::compiler) mod pseudo_tuple;
+pub(in crate::compiler) mod weave;
 
 use shape_ast::ast::{FunctionDef, Span, TypeAnnotation};
 use shape_ast::error::{Result, ShapeError};
@@ -1664,20 +1665,23 @@ mod tests {
     // specialization is a HARD error wrapped with BOTH signatures at the
     // `@application` span — never an anonymous error deep in the hook body,
     // never a generic fallback. Fixture = the emission-tier strict-proof
-    // class (arithmetic on a bool-typed pseudo-slot — exactly the g6
-    // per-instantiation error family). Two MEASURED near-miss fixtures are
-    // surfaced in the stage report as observations about the G10
-    // emission-tier boundary: `args[0].trim()` on an int slot and
-    // `args[0] = "boom"` into an int slot BOTH compile at this seam today
-    // (unknown-method dispatch defers to runtime; a local re-assignment
-    // re-stamps the slot kind at emission) — battery row 1 (the
-    // whole-program analyzer) does not re-run per specialization BY RULING
-    // (slice-0 §7.3), so the emission tier's strict-proof classes are the
-    // per-specialization checking surface.
+    // class (arithmetic on a bool-typed pseudo-slot READ — exactly the g6
+    // per-instantiation error family). S2c UPDATE: the S1-surfaced
+    // near-miss WRITE class (`args[0] = "boom"` into an int slot — a
+    // carrier-local re-assignment re-stamping the slot kind at emission) is
+    // now CLOSED by the aggregate-kind guard
+    // (`pseudo_tuple::guard_carrier_write_kinds`, pinned in `weave.rs`
+    // tests), which front-runs the emission tier for carrier WRITES; this
+    // fixture therefore uses a READ (`let y = args[0] + 1`) so it keeps
+    // pinning the emission tier's own strict-proof surface — battery row 1
+    // (the whole-program analyzer) does not re-run per specialization BY
+    // RULING (slice-0 §7.3). The `args[0].trim()` unknown-method READ
+    // deferral remains an emission-tier boundary observation; as a WRITE
+    // (`args[0] = args[0].trim()`) it is guard-rejected (weave.rs pin).
     #[test]
     fn body_type_error_wraps_with_both_signatures_at_the_application_site() {
         let src = "fn tmpl<Args>(args: Args) -> Args {\n\
-                   \x20   args[0] = args[0] + 1\n\
+                   \x20   let y = args[0] + 1\n\
                    \x20   return args\n\
                    }\n\
                    fn target_fn(a: bool) -> bool { return a }\n";

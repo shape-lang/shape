@@ -450,6 +450,18 @@ pub enum HygienicRole {
     AnnotationHookImplBody,
     /// An intermediate before/after chain wrapper (former `{name}___{annotation}`).
     AnnotationHookWrapper,
+    // ── ADR-009 C3 #14 (slice 2, S2c) — the typed hook-template weave's
+    // hygienic impl identity: the target's FINAL body (post-directives,
+    // post-`replace body`) moved under an unspellable shadow name so the
+    // generated typed-AST wrapper compiled under the target's own name can
+    // call it directly (the C3-G6 SMALL shape — bytecode AND MIR from the
+    // same wrapped definition). The C3 successor of `AnnotationHookImplBody`
+    // on the NEW path; the legacy role stays untouched beside it until the
+    // S6 capstone deletes the legacy weave. The nonce is a stable digest of
+    // the target function's name so re-registration is idempotent.
+    /// The hook-template weave's impl body (the target's final body under
+    /// the weave shadow).
+    TemplateWeaveImplBody,
 }
 
 impl HygienicRole {
@@ -474,6 +486,7 @@ impl HygienicRole {
             Self::OriginalBodyShadow => "role:original-body-shadow".to_string(),
             Self::AnnotationHookImplBody => "role:annotation-hook-impl-body".to_string(),
             Self::AnnotationHookWrapper => "role:annotation-hook-wrapper".to_string(),
+            Self::TemplateWeaveImplBody => "role:template-weave-impl-body".to_string(),
         }
     }
 }

@@ -258,7 +258,11 @@ fn generated_extend_method_content(
 }
 
 /// Canonical structural content encoding of a generated free function.
-fn generated_free_fn_content(func_def: &FunctionDef) -> CanonicalHash {
+/// (`pub(in crate::compiler)`: the S2c hook-template weave shadow
+/// reservation in `template_specialization/weave.rs` encodes its shadow def
+/// through the SAME encoder — visibility-only widening, byte-identical
+/// behavior.)
+pub(in crate::compiler) fn generated_free_fn_content(func_def: &FunctionDef) -> CanonicalHash {
     CanonicalHash::from_canonical_decl_encoding(&format!("fn:{func_def:?}"))
 }
 
@@ -1218,10 +1222,19 @@ impl BytecodeCompiler {
             self.finalize_pending_original_body_shadow(pending)?;
         }
 
-        // ADR-009 C3 #14 (slice 2, S2b): `staged_hook_installs` drops here BY
-        // PLAN — the weave that consumes it (wrapping the final def once, in
-        // application order) is S2c territory. The applied installs remain
-        // observable through the journaled `hook_install_registry` rows.
+        // ADR-009 C3 #14 (slice 2, S2c): materialize the accumulated hook
+        // installs ONCE, after the target's LAST handler + body directives
+        // (and after a `replace body`'s original-body shadow finalized above,
+        // so the weave wraps the FINAL — possibly replace-body-edited — def):
+        // move the final body under the journaled hygienic weave shadow,
+        // compile the shadow through the ordinary pipeline, and swap the
+        // generated typed-AST wrapper into `func_def`, which then continues
+        // through `compile_function_inner`'s ordinary tail (bytecode AND MIR
+        // from the same wrapped definition — the C3-G6 SMALL shape). See
+        // `template_specialization::weave` for the full contract.
+        if !removed && !staged_hook_installs.is_empty() {
+            self.materialize_hook_template_weave(func_def, &staged_hook_installs)?;
+        }
         Ok(removed)
     }
 

@@ -480,7 +480,7 @@ impl BytecodeCompiler {
                     .as_deref()
                     .expect("template_suffix is Some exactly when template_plan is Some"),
             );
-            pseudo_tuple::resolve_pseudo_tuple(&mut specialized_def, plan)
+            pseudo_tuple::resolve_pseudo_tuple(&mut specialized_def, plan, self)
                 .map_err(SpecializationFailure::Hard)?;
         }
         let specialized_name = specialized_def.name.clone();

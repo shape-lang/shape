@@ -76,6 +76,11 @@ pub(in crate::compiler) struct StagedHookInstall {
     pub(in crate::compiler) annotation_name: String,
     /// The `@application` anchor (origin, parameter-threaded).
     pub(in crate::compiler) application_span: Span,
+    /// The handler application's `ExpansionSite` (origin, parameter-threaded)
+    /// — the S2c weave derives the shadow reservation's `GeneratedOrigin` +
+    /// anchors from the FIRST staged install's site (the `CheckedReplaceBody`
+    /// shadow-construction precedent).
+    pub(in crate::compiler) site: ExpansionSite,
 }
 
 /// One row of the hook-install registry (module docs above): the S8
@@ -258,6 +263,7 @@ impl BytecodeCompiler {
             hook_kind: bound.template.hook_kind(),
             annotation_name: annotation_name.to_string(),
             application_span,
+            site: site.clone(),
         });
         Ok(())
     }
@@ -515,11 +521,21 @@ annotation hookann() {{
 
         // Direct-call execution proof: [a=5, b=4.5, factor=3] →
         // a0 = 5*3 + args.length(=2) = 17, a1 = 4.5 untouched.
+        //
+        // S2c UPDATE (execute by NAME, not by compiler-side index): the
+        // row's `function_index` is a COMPILER-side program index, and
+        // `VirtualMachine::load_program` links/relocates the shipped
+        // program — its function ids need not match. At S2b the two
+        // orderings happened to coincide; the S2c weave's extra generated
+        // functions (hygienic shadow + woven wrapper) shifted the linked
+        // order, so executing the raw index silently ran the WOVEN TARGET
+        // instead of the handler. The row's `specialized_symbol` names the
+        // handler unambiguously in both tables.
         let mut vm = VirtualMachine::new(VMConfig::default());
         vm.load_program(compiler.program.clone());
         let result = vm
-            .execute_function_by_id(
-                row.function_index,
+            .execute_function_by_name(
+                &row.specialized_symbol,
                 vec![
                     KindedSlot::from_int(5),
                     KindedSlot::from_number(4.5),

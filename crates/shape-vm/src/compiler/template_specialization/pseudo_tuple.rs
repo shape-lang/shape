@@ -252,6 +252,7 @@ pub(in crate::compiler) fn validate_pseudo_tuple_uses(
 pub(in crate::compiler) fn resolve_pseudo_tuple(
     def: &mut FunctionDef,
     plan: &TemplateSpecializationPlan,
+    compiler: &crate::compiler::BytecodeCompiler,
 ) -> Result<()> {
     let arity = plan.arity();
     let internal = |message: String| ShapeError::RuntimeError {
@@ -309,13 +310,36 @@ pub(in crate::compiler) fn resolve_pseudo_tuple(
     }
     let capture_tail: Vec<FunctionParameter> = def.params.split_off(1);
 
-    // (1) The rewrite walk — same core, second face.
+    // (1) The rewrite walk — same core, second face. The walk COLLECTS every
+    // per-slot mutation's rewritten RHS for the aggregate-kind guard below.
+    let carrier_writes = std::cell::RefCell::new(Vec::new());
     let scan = Scan {
         args_param: &plan.args_param,
         type_param: &plan.type_param,
-        face: Face::Rewrite(plan),
+        face: Face::Rewrite {
+            plan,
+            carrier_writes: &carrier_writes,
+        },
     };
     walk_template_body(&scan, &mut def.body)?;
+
+    // (1b) ADR-009 C3 #14 (slice 2, S2c) — the aggregate-kind guard, closing
+    // the S1 pending observation (c3-slice1-report.md §Observations: a
+    // carrier-local re-assignment re-stamps the slot kind at emission, so an
+    // aggregate field's runtime kind could silently diverge from its declared
+    // carrier annotation — and the weave's typed `.a{i}` read would then
+    // misinterpret raw bits). Every collected `args[i] = expr` write must
+    // PROVE the declared parameter type; a proven-divergent or unprovable
+    // write is a NAMED rejection here (surface-and-stop, CLAUDE.md "if the
+    // type can't be proven, it is a compile error"), which the
+    // monomorphization ride classifies Hard and the seam wraps through
+    // `template_application_error` with both signatures at the
+    // `@application` site. Runs at specialization BEFORE the handler
+    // compiles: there is no post-compile record of proven per-field kinds
+    // (return `ConcreteType`s register from DECLARED annotations only), so
+    // the guard proves the writes at the only point where the declared
+    // types and the write expressions are both in hand.
+    guard_carrier_write_kinds(compiler, plan, &capture_tail, &carrier_writes.into_inner())?;
 
     // (2) Per-slot minted parameters, typed from the target's AST side; the
     // trailing capture parameters (already concrete — never substituted)
@@ -365,6 +389,185 @@ pub(in crate::compiler) fn resolve_pseudo_tuple(
     Ok(())
 }
 
+/// ADR-009 C3 #14 (slice 2, S2c) — the aggregate-kind guard (see the call
+/// site in [`resolve_pseudo_tuple`] for the full rationale). Every collected
+/// per-slot write must PROVE the declared parameter type via
+/// [`carrier_write_concrete_type`]; a proven-divergent write and an
+/// unprovable write are both NAMED rejections with positive twins
+/// (surface-and-stop — never a silently kind-divergent typed read in the
+/// weave). Comparison is `ConcreteType` equality (never spelling equality —
+/// the S1 same-Sig cache-hit carrier-spelling observation), so alias
+/// spellings of one concrete type (`Array<int>` / `Vec<int>`) agree.
+fn guard_carrier_write_kinds(
+    compiler: &crate::compiler::BytecodeCompiler,
+    plan: &TemplateSpecializationPlan,
+    capture_tail: &[FunctionParameter],
+    writes: &[(usize, Expr)],
+) -> Result<()> {
+    use crate::compiler::monomorphization::type_resolution::declared_annotation_concrete_type;
+    use shape_value::v2::ConcreteType;
+
+    if writes.is_empty() {
+        return Ok(());
+    }
+    // Declared per-slot ConcreteTypes. The specialization seam
+    // (`specialize_polymorphic_before`) already proved every target
+    // parameter resolves concretely before building the plan, so a miss
+    // here is internal-error-shaped, never a user rejection.
+    let mut declared_slots: Vec<ConcreteType> = Vec::with_capacity(plan.target_params.len());
+    for (param_name, annotation) in &plan.target_params {
+        let Some(concrete) = declared_annotation_concrete_type(compiler, annotation) else {
+            return Err(reject(format!(
+                "internal error: the aggregate-kind guard could not resolve the declared type \
+                 `{}` of target parameter `{param_name}`; the specialization seam proves every \
+                 parameter resolves concretely before building the plan",
+                annotation.to_type_string()
+            )));
+        };
+        declared_slots.push(concrete);
+    }
+    let captures: Vec<(String, ConcreteType)> = capture_tail
+        .iter()
+        .filter_map(|param| {
+            let name = param.simple_name()?.to_string();
+            let concrete = param
+                .type_annotation
+                .as_ref()
+                .and_then(|annotation| declared_annotation_concrete_type(compiler, annotation))?;
+            Some((name, concrete))
+        })
+        .collect();
+
+    for (slot, expr) in writes {
+        let (param_name, annotation) = &plan.target_params[*slot];
+        let required = &declared_slots[*slot];
+        match carrier_write_concrete_type(compiler, &declared_slots, &captures, expr) {
+            Some(proven) if &proven == required => {}
+            Some(proven) => {
+                return Err(reject(format!(
+                    "the value assigned to `{args}[{slot}]` proves type `{proven}` but the \
+                     target's parameter `{param_name}` declares `{ann}` — a kind-divergent \
+                     write would make the typed mutation carrier's field a{slot} lie about \
+                     its runtime kind at the weave's typed read; assign a `{ann}` value (or \
+                     change the target parameter's declared type)",
+                    args = plan.args_param,
+                    ann = annotation.to_type_string(),
+                )));
+            }
+            None => {
+                return Err(reject(format!(
+                    "cannot prove the type of the value assigned to `{args}[{slot}]`: the \
+                     typed mutation carrier requires every per-slot write to prove the \
+                     declared parameter type `{ann}` (parameter `{param_name}`) — assign an \
+                     expression whose type is provable at specialization (a literal, another \
+                     `{args}[i]` slot, a declared capture, a typed fn's result, or arithmetic \
+                     over those)",
+                    args = plan.args_param,
+                    ann = annotation.to_type_string(),
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The guard's bounded, template-owned type evaluator: resolve the
+/// `ConcreteType` an expression PROVES inside a rewritten specialized
+/// template body. Knows exactly the template's own vocabulary — the minted
+/// carrier locals (declared slot types), the declared trailing captures, and
+/// structural arithmetic/comparison composition over those — and delegates
+/// every other leaf to the compiler's existing
+/// [`concrete_type_for_expr`](crate::compiler::monomorphization::type_resolution::concrete_type_for_expr)
+/// resolver (literals, module constants, typed fn calls, ...). `None` =
+/// unprovable — the guard rejects, never guesses (no fabricated kind).
+fn carrier_write_concrete_type(
+    compiler: &crate::compiler::BytecodeCompiler,
+    declared_slots: &[shape_value::v2::ConcreteType],
+    captures: &[(String, shape_value::v2::ConcreteType)],
+    expr: &Expr,
+) -> Option<shape_value::v2::ConcreteType> {
+    use crate::compiler::monomorphization::type_resolution::concrete_type_for_expr;
+    use shape_ast::ast::operators::{BinaryOp, UnaryOp};
+    use shape_value::v2::ConcreteType;
+
+    fn is_numeric(concrete: &ConcreteType) -> bool {
+        matches!(
+            concrete,
+            ConcreteType::I64
+                | ConcreteType::F64
+                | ConcreteType::F32
+                | ConcreteType::I32
+                | ConcreteType::I16
+                | ConcreteType::I8
+                | ConcreteType::U64
+                | ConcreteType::U32
+                | ConcreteType::U16
+                | ConcreteType::U8
+        )
+    }
+
+    match expr {
+        Expr::Identifier(name, _) => {
+            for (index, concrete) in declared_slots.iter().enumerate() {
+                if name.as_str() == slot_local_name(index) {
+                    return Some(concrete.clone());
+                }
+            }
+            if let Some((_, concrete)) = captures.iter().find(|(n, _)| n == name) {
+                return Some(concrete.clone());
+            }
+            concrete_type_for_expr(compiler, expr)
+        }
+        Expr::BinaryOp {
+            left, op, right, ..
+        } => {
+            let lt = carrier_write_concrete_type(compiler, declared_slots, captures, left)?;
+            let rt = carrier_write_concrete_type(compiler, declared_slots, captures, right)?;
+            match op {
+                BinaryOp::Add => {
+                    (lt == rt && (is_numeric(&lt) || lt == ConcreteType::String))
+                        .then(|| lt.clone())
+                }
+                BinaryOp::Sub | BinaryOp::Mul | BinaryOp::Div | BinaryOp::Mod | BinaryOp::Pow => {
+                    (lt == rt && is_numeric(&lt)).then(|| lt.clone())
+                }
+                BinaryOp::BitAnd
+                | BinaryOp::BitOr
+                | BinaryOp::BitXor
+                | BinaryOp::BitShl
+                | BinaryOp::BitShr => {
+                    (lt == rt && lt == ConcreteType::I64).then_some(ConcreteType::I64)
+                }
+                BinaryOp::Greater
+                | BinaryOp::Less
+                | BinaryOp::GreaterEq
+                | BinaryOp::LessEq
+                | BinaryOp::Equal
+                | BinaryOp::NotEqual
+                | BinaryOp::FuzzyEqual
+                | BinaryOp::FuzzyGreater
+                | BinaryOp::FuzzyLess => (lt == rt).then_some(ConcreteType::Bool),
+                BinaryOp::And | BinaryOp::Or => (lt == ConcreteType::Bool
+                    && rt == ConcreteType::Bool)
+                    .then_some(ConcreteType::Bool),
+                // Null-handling / pipeline composition is outside the
+                // guard's structural domain — unprovable here, named
+                // rejection at the guard (never a guess).
+                BinaryOp::NullCoalesce | BinaryOp::ErrorContext | BinaryOp::Pipe => None,
+            }
+        }
+        Expr::UnaryOp { op, operand, .. } => {
+            let inner = carrier_write_concrete_type(compiler, declared_slots, captures, operand)?;
+            match op {
+                UnaryOp::Neg => is_numeric(&inner).then(|| inner.clone()),
+                UnaryOp::Not => (inner == ConcreteType::Bool).then_some(ConcreteType::Bool),
+                UnaryOp::BitNot => (inner == ConcreteType::I64).then_some(ConcreteType::I64),
+            }
+        }
+        _ => concrete_type_for_expr(compiler, expr),
+    }
+}
+
 /// The shared top-level driver both faces run: per-statement traversal with
 /// the implicit-return tail interception (a FINAL bare `args` expression
 /// statement at the TOP LEVEL of the body is the mutation-return spelling).
@@ -378,7 +581,7 @@ fn walk_template_body(scan: &Scan<'_>, body: &mut [Statement]) -> Result<()> {
                     if name.as_str() == scan.args_param
             );
             if is_tail_bare_args {
-                if let Face::Rewrite(plan) = scan.face {
+                if let Face::Rewrite { plan, .. } = scan.face {
                     let Statement::Expression(expr, _) = stmt else {
                         unreachable!("guarded by is_tail_bare_args");
                     };
@@ -410,8 +613,14 @@ enum Face<'a> {
     /// mutates.
     Validate,
     /// Specialization-time resolution — the same classification plus the G9
-    /// node replacements.
-    Rewrite(&'a TemplateSpecializationPlan),
+    /// node replacements. `carrier_writes` collects every per-slot mutation
+    /// (`args[i] = expr`, post-rewrite RHS) for the S2c aggregate-kind guard
+    /// (`guard_carrier_write_kinds`) — the walk only COLLECTS; the guard's
+    /// comparison runs once after the walk.
+    Rewrite {
+        plan: &'a TemplateSpecializationPlan,
+        carrier_writes: &'a std::cell::RefCell<Vec<(usize, Expr)>>,
+    },
 }
 
 /// What the template-body interception decided for one expression node.
@@ -674,7 +883,7 @@ impl<'a> Scan<'a> {
                 if mode == ScanMode::TemplateBody {
                     if let Some(inner) = value {
                         if self.is_args_identifier(inner) {
-                            if let Face::Rewrite(plan) = self.face {
+                            if let Face::Rewrite { plan, .. } = self.face {
                                 let span = inner.span();
                                 *inner = plan.carrier_expr(span);
                             }
@@ -1003,7 +1212,7 @@ impl<'a> Scan<'a> {
                 }
                 Ok(match self.face {
                     Face::Validate => Intercept::LegalKeep,
-                    Face::Rewrite(plan) => Intercept::Replace(Expr::Literal(
+                    Face::Rewrite { plan, .. } => Intercept::Replace(Expr::Literal(
                         Literal::Int(plan.arity() as i64),
                         *span,
                     )),
@@ -1018,7 +1227,7 @@ impl<'a> Scan<'a> {
                 let slot_index = self.args_index_access(index, end_index.as_deref())?;
                 Ok(match self.face {
                     Face::Validate => Intercept::LegalKeep,
-                    Face::Rewrite(plan) => Intercept::Replace(Expr::Identifier(
+                    Face::Rewrite { plan, .. } => Intercept::Replace(Expr::Identifier(
                         self.checked_slot_local(slot_index, plan)?,
                         *span,
                     )),
@@ -1291,11 +1500,25 @@ impl<'a> Scan<'a> {
                         _ => None,
                     };
                     if let Some((slot_index, span)) = intercepted {
-                        if let Face::Rewrite(plan) = self.face {
+                        if let Face::Rewrite {
+                            plan,
+                            carrier_writes,
+                        } = self.face
+                        {
                             *assign_expr.target = Expr::Identifier(
                                 self.checked_slot_local(slot_index, plan)?,
                                 span,
                             );
+                            // Rewrite the RHS FIRST so the collected write
+                            // carries the post-rewrite expression (nested
+                            // `args[j]` reads already resolved to their
+                            // minted locals), then record it for the S2c
+                            // aggregate-kind guard.
+                            self.expr(&mut assign_expr.value, mode)?;
+                            carrier_writes
+                                .borrow_mut()
+                                .push((slot_index as usize, (*assign_expr.value).clone()));
+                            return Ok(());
                         }
                         return self.expr(&mut assign_expr.value, mode);
                     }
@@ -1312,7 +1535,7 @@ impl<'a> Scan<'a> {
                 if mode == ScanMode::TemplateBody {
                     if let Some(inner) = value.as_deref_mut() {
                         if self.is_args_identifier(inner) {
-                            if let Face::Rewrite(plan) = self.face {
+                            if let Face::Rewrite { plan, .. } = self.face {
                                 let span = inner.span();
                                 *inner = plan.carrier_expr(span);
                             }
@@ -1560,7 +1783,8 @@ mod tests {
 
     fn resolve(src: &str, plan: &TemplateSpecializationPlan) -> Result<FunctionDef> {
         let mut def = def_of(src);
-        resolve_pseudo_tuple(&mut def, plan)?;
+        let compiler = crate::compiler::BytecodeCompiler::new();
+        resolve_pseudo_tuple(&mut def, plan, &compiler)?;
         Ok(def)
     }
 
@@ -2091,7 +2315,8 @@ fn t<Args>(args: Args) -> Args {
     #[test]
     fn resolve_on_a_mismatched_def_is_an_internal_error() {
         let mut def = def_of("fn t(x: int, y: int) -> int { return x }");
-        let err = resolve_pseudo_tuple(&mut def, &aggregate_plan())
+        let compiler = crate::compiler::BytecodeCompiler::new();
+        let err = resolve_pseudo_tuple(&mut def, &aggregate_plan(), &compiler)
             .expect_err("a mismatched def must be an internal error");
         assert!(
             err.to_string().contains("internal error"),
