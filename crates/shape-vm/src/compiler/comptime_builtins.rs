@@ -466,7 +466,8 @@ fn type_annotation_from_string_or_type_ref_slot(
     // consumer ABI boundary) with NO silent fallback to reparse — silent
     // stamped->reparse is the canonical walk-back shape and is refused. Only an
     // UNSTAMPED ref (identity == INVALID) falls through to the `.source` reparse
-    // arm below, byte-unchanged (slice 6 deletes it). The identity halves are
+    // arm below, byte-unchanged (LIVE for unstamped refs; deletion bound to
+    // B4/B5 → E5 per E1-D8). The identity halves are
     // read with the same `get_field` -> `clone_field_kinded` -> `as_i64` shape
     // as `frozen_identity_from_ref` (type_reflection.rs) — an existing
     // sanctioned read of the sibling schema, not a new decode path.
@@ -1695,8 +1696,8 @@ fn comptime_builtins_module_base(
     // carrier. The emit side stashes the literal `ExtendStatement` at
     // handler-COMPILE (`COMPTIME_EXTEND_STATEMENTS`) and passes its INDEX here —
     // no `serialize_directive_payload` JSON, no `serde_json` reparse. The legacy
-    // string `__emit_extend` + `serialize_directive_payload` go dead-but-present
-    // for the slice-6 deletion; the E2 COMPUTED-extend path (`__emit_extend_items`
+    // string `__emit_extend` + `serialize_directive_payload` were DELETED whole
+    // in slice 6 (07638332); the E2 COMPUTED-extend path (`__emit_extend_items`
     // ← `__CheckedItem`) is a distinct, execute-populated carrier and is untouched.
     // __emit_extend_checked(index: int)
     register_typed_function(
@@ -2762,7 +2763,8 @@ mod e1_extend_carrier_tests {
 // user-nominals, un-applied heads) is a NAMED rejection at `payload_of`, NOT
 // reconstructable in E1. Applied generics are therefore STAMP-GATED to
 // unstamped (identity = INVALID) → the existing `__ComptimeTypeRef.source`
-// reparse arm (dead-but-present until slice 6 / B4-B5), which is exactly
+// reparse arm (LIVE for unstamped refs; deletion bound to B4/B5 → E5 per
+// E1-D8), which is exactly
 // E1-D7(a) unstamped-fall-through + E1-D7(c) "every variant handled OR a named
 // error" (the nominal-headed variants ARE handled — as named errors).
 //
@@ -3131,8 +3133,8 @@ mod e1_s5_route_proof {
     // byte-for-byte. An `identity == INVALID` ref with a VALID source resolves
     // via the reparse arm; the negative sub-case (INVALID + GARBAGE source) still
     // Errs — proving the reparse arm is GENUINELY reached and live, not shadowed
-    // by an always-on identity path. This is the dead-but-present legacy path the
-    // unstamped/legacy refs still use until slice 6.
+    // by an always-on identity path. This is the legacy path the unstamped/legacy
+    // refs still use — LIVE until B4/B5 → E5 (E1-D8 stamp-gate residual).
     #[test]
     fn e1_s5_unstamped_typeref_falls_through_to_source_arm_bytewise() {
         let overlay = overlay_for_tests(&BytecodeCompiler::new());

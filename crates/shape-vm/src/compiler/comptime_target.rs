@@ -149,7 +149,8 @@ pub(crate) fn build_type_ref_descriptor(
 /// A canonicalize error (a non-freezable ref) is SWALLOWED to `None` — NEVER
 /// propagated — so the `__ComptimeTypeRef` carries `INVALID` and the consumer's
 /// identity-only route is a no-op, falling through to the existing `.source`
-/// reparse arm (E1-D7(a) unstamped fall-through, dead-but-present until slice 6).
+/// reparse arm (E1-D7(a) unstamped fall-through — LIVE for unstamped refs;
+/// deletion bound to B4/B5 → E5 per E1-D8).
 /// The stamp-gate rejects everything that is NOT reconstructable this slice
 /// (applied-generic nominals like `Array<int>`/`Option<T>`, records, bare
 /// user-nominals, un-applied heads) → `INVALID` → reparse.
