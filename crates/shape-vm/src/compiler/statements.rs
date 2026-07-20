@@ -141,25 +141,6 @@ impl BytecodeCompiler {
         Ok(())
     }
 
-    /// Serialize a value to JSON for comptime directive payloads.
-    ///
-    /// Wraps serde_json serialization errors into ShapeError with the given
-    /// directive label for diagnostics.
-    fn serialize_directive_payload(
-        &self,
-        value: &(impl serde::Serialize + ?Sized),
-        directive_label: &str,
-        span: Span,
-    ) -> Result<String> {
-        serde_json::to_string(value).map_err(|e| ShapeError::RuntimeError {
-            message: format!(
-                "Failed to serialize comptime {} directive: {}",
-                directive_label, e
-            ),
-            location: Some(self.span_to_source_location(span)),
-        })
-    }
-
     /// Check that the compiler is in comptime mode, returning an error otherwise.
     fn require_comptime_mode(&self, directive_name: &str, span: Span) -> Result<()> {
         if !self.comptime_mode {
@@ -615,10 +596,16 @@ impl BytecodeCompiler {
         extend: &shape_ast::ast::ExtendStatement,
         span: Span,
     ) -> Result<()> {
-        let payload = self.serialize_directive_payload(extend, "extend", span)?;
+        // ADR-009 E1 #17 (slice 4): a direct-block `extend Type { … }` is literal
+        // AST known at COMPILE time — stash the typed `ExtendStatement` in the
+        // per-run store and emit its INDEX (`__emit_extend_checked`), not a
+        // `serialize_directive_payload` JSON round-trip. No reparse. The COMPUTED
+        // extend (`extend (item_fn/extend_method …)`) uses the distinct
+        // `__emit_extend_items` typed carrier (E2), untouched.
+        let index = super::comptime_builtins::push_comptime_extend_statement(extend.clone());
         self.emit_comptime_internal_call(
-            "__emit_extend",
-            vec![Expr::Literal(Literal::String(payload), span)],
+            "__emit_extend_checked",
+            vec![Expr::Literal(Literal::Int(index as i64), span)],
             span,
         )
     }
@@ -649,12 +636,18 @@ impl BytecodeCompiler {
         type_annotation: &TypeAnnotation,
         span: Span,
     ) -> Result<()> {
-        let payload = self.serialize_directive_payload(type_annotation, "param type", span)?;
+        // ADR-009 E1 #17 (slice 3, U01): a literal `set param x: T` type is known
+        // at COMPILE time — stash the typed `TypeAnnotation` in the per-run store
+        // and emit its INDEX (an int handle), not a `serialize_directive_payload`
+        // JSON round-trip. No reparse; the consumer fetches the typed annotation
+        // by index. The `set param x: (…type_ref)` expr form is a distinct emitter
+        // (`_expr_`, slice 5), untouched.
+        let index = super::comptime_builtins::push_comptime_directive_type(type_annotation.clone());
         self.emit_comptime_internal_call(
             "__emit_set_param_type",
             vec![
                 Expr::Literal(Literal::String(param_name.to_string()), span),
-                Expr::Literal(Literal::String(payload), span),
+                Expr::Literal(Literal::Int(index as i64), span),
             ],
             span,
         )
@@ -681,10 +674,14 @@ impl BytecodeCompiler {
         type_annotation: &TypeAnnotation,
         span: Span,
     ) -> Result<()> {
-        let payload = self.serialize_directive_payload(type_annotation, "return type", span)?;
+        // ADR-009 E1 #17 (slice 3, U01): literal `set return T` — stash the typed
+        // `TypeAnnotation` in the per-run store and emit its INDEX, not a JSON
+        // round-trip. The `set return (…type_ref)` expr form (`_expr_`, slice 5)
+        // is untouched.
+        let index = super::comptime_builtins::push_comptime_directive_type(type_annotation.clone());
         self.emit_comptime_internal_call(
             "__emit_set_return_type",
-            vec![Expr::Literal(Literal::String(payload), span)],
+            vec![Expr::Literal(Literal::Int(index as i64), span)],
             span,
         )
     }
@@ -4114,10 +4111,17 @@ impl BytecodeCompiler {
                     // (same ann node, same handler AST, same ComptimeTarget
                     // inputs) — one identity across both phases.
                     let expansion_site = self.annotation_expansion_site(ann, &handler, &target);
+                    // ADR-009 E1 #17 (slice 5): ONE overlay acquired before
+                    // `to_nanboxed` stamps this type target's field `type_ref`
+                    // identities (producer stamp-gate), is REUSED for the Dec-56
+                    // `access_identity` mint below, AND is threaded into the
+                    // handler executor — one acquisition, one shared composite
+                    // memo the consumer resolves against.
+                    let freeze = self.comptime_freeze_overlay()?;
                     // R8 W9 G.2 Step 2 Bucket 7: to_nanboxed now returns
                     // Result; surface the V3-S5 ckpt-5 SURFACE through the
                     // caller's Result chain instead of panicking.
-                    let target_value = target.to_nanboxed()?;
+                    let target_value = target.to_nanboxed(Some(freeze.as_ref()))?;
                     let target_name = struct_def.name.clone();
                     let handler_span = handler.span;
                     // ADR-009 B5 (Dec 56): declaration-attached type-target hook
@@ -4125,12 +4129,9 @@ impl BytecodeCompiler {
                     // this type's frozen identity as the handler's third
                     // positional `access` parameter (author consent). A type the
                     // freeze never issued mints no authority.
-                    let access_identity = {
-                        let freeze = self.comptime_freeze_overlay()?;
-                        freeze
-                            .identity_of(&target_name)
-                            .map(|identity| (identity.high, identity.low))
-                    };
+                    let access_identity = freeze
+                        .identity_of(&target_name)
+                        .map(|identity| (identity.high, identity.low));
                     let mut execution = self.execute_comptime_annotation_handler(
                         ann,
                         &handler,
@@ -4138,6 +4139,7 @@ impl BytecodeCompiler {
                         &compiled.param_names,
                         &[],
                         access_identity,
+                        freeze,
                     )?;
 
                     // ADR-009 E3 (S4, U11): resolve the `extend <target>` OWNER
@@ -5410,9 +5412,15 @@ impl BytecodeCompiler {
                     let expansion_site = self.annotation_expansion_site(ann, &handler, &target);
                     // R8 W9 G.2 Step 2 Bucket 7: to_nanboxed now returns
                     // Result; surface the V3-S5 ckpt-5 SURFACE through the
-                    // caller's Result chain instead of panicking.
-                    let target_value = target.to_nanboxed()?;
+                    // caller's Result chain instead of panicking. E1 slice-5:
+                    // module fields are string-only (no AST) → `None` overlay,
+                    // every stamp INVALID.
+                    let target_value = target.to_nanboxed(None)?;
                     let handler_span = handler.span;
+                    // ADR-009 E1 #17 (slice 5): the handler executor still needs a
+                    // freeze handle; acquire it here (no target stamping occurred,
+                    // so any overlay is behavior-equivalent).
+                    let freeze = self.comptime_freeze_overlay()?;
                     let execution = self.execute_comptime_annotation_handler(
                         ann,
                         &handler,
@@ -5421,6 +5429,7 @@ impl BytecodeCompiler {
                         &[],
                         // Module target: no representation authority (Dec 56).
                         None,
+                        freeze,
                     )?;
                     let directive_outcome = self
                         .process_comptime_directives_for_module(

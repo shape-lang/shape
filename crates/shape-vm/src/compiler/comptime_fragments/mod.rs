@@ -28,6 +28,14 @@ use shape_ast::ast::{FunctionDef, Item, Statement};
 
 use crate::compiler::comptime_builtins::expansion_provenance::SymbolId;
 
+/// ADR-009 E1 #17 (slice 1) — the public typed builder for a checked generated
+/// body (`CheckedBodyBuilder` + `finish()`), discharging the C2-D1 amendment.
+/// The construction chokepoint; the atomic install stays the C2
+/// `crate::compiler::checked_body` seam (see the submodule's construction/install
+/// split docs). API-foundation-only: the `CheckedBody` carrier + builder are
+/// consumed by E1 slices 3/4/5, which add the re-export at their wiring site.
+pub(in crate::compiler) mod checked_body;
+
 /// A comptime-generated module replacement, checked at construction: its items
 /// carry generated closure provenance and each generated declaration owns a
 /// reserved hygienic export identity (`Exports`). Built ONLY by

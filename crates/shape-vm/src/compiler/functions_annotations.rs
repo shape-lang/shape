@@ -6,7 +6,7 @@ use shape_ast::ast::{
     DestructurePattern, Expr, FunctionDef, GeneratedNodeOrigin, Literal, ObjectEntry, Span,
     Spanned, Statement, TypeAnnotation,
 };
-use shape_ast::error::{Result, ShapeError};
+use shape_ast::error::{Result, ShapeError, SourceLocation};
 use shape_runtime::annotation_context::TargetOwner;
 use shape_runtime::comptime_reflection::NominalShape;
 use shape_runtime::type_schema::FieldType;
@@ -57,6 +57,94 @@ mod e2_slice0_spike_tests;
 #[cfg(test)]
 #[path = "functions_annotations/e2_slice3_replace_body_tests.rs"]
 mod e2_slice3_replace_body_tests;
+
+#[cfg(test)]
+#[path = "functions_annotations/e1_param_selection_tests.rs"]
+mod e1_param_selection_tests;
+
+/// ADR-009 E1 #17 (slice 2, E1-D4): the SINGLE spelling->position resolution of
+/// a signature directive's parameter against the frozen callable.
+///
+/// A comptime `set param …` directive names its parameter by SPELLING. E1-D4
+/// resolves that spelling to a POSITION exactly once, here, and mints a
+/// [`ParamId`]; downstream mutation indexes by the resolved position and never
+/// re-resolves the spelling. A spelling the frozen callable does not declare is
+/// the named hard error `[C0930]` (`ShapeError::SemanticError`, the slice-1
+/// error-class precedent) — never the pre-E1 silent skip that dropped the
+/// directive. The `ParamId` field is private to this module, so a position can
+/// be obtained ONLY through [`resolve_param_id`].
+mod param_selection {
+    use shape_ast::ast::FunctionDef;
+    use shape_ast::error::{ShapeError, SourceLocation};
+
+    /// A parameter POSITION resolved once against the frozen callable. Minted
+    /// only by [`resolve_param_id`] (private field), so the spelling is resolved
+    /// at exactly one point.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub(super) struct ParamId(usize);
+
+    impl ParamId {
+        /// The resolved position, for indexing `func_def.params`.
+        pub(super) fn index(self) -> usize {
+            self.0
+        }
+    }
+
+    /// Resolve a directive's parameter spelling to a [`ParamId`] against the
+    /// frozen callable. A miss is the named hard error `[C0930]` carrying the
+    /// directive kind, the missing spelling, and the callable's actual parameter
+    /// list — the fail-closed conversion of the pre-E1 silent skip.
+    /// `annotation_name`/`location` are the analysis pre-pass's context (the
+    /// applying annotation + handler span); the pass-2 install applier has
+    /// neither and passes `None`, so the `[C0930]` text drops the `from @…`
+    /// clause and carries no span — the same single diagnostic from both call
+    /// sites (E1-D4 resolve-ONCE).
+    pub(super) fn resolve_param_id(
+        func_def: &FunctionDef,
+        spelling: &str,
+        directive_kind: &str,
+        annotation_name: Option<&str>,
+        location: Option<&SourceLocation>,
+    ) -> Result<ParamId, ShapeError> {
+        match func_def
+            .params
+            .iter()
+            .position(|p| p.simple_name() == Some(spelling))
+        {
+            Some(index) => Ok(ParamId(index)),
+            None => {
+                let from = annotation_name
+                    .map(|name| format!(" from @{name}"))
+                    .unwrap_or_default();
+                Err(ShapeError::SemanticError {
+                    message: format!(
+                        "[C0930] comptime `{directive_kind}`{from} on `{}` names parameter \
+                         `{spelling}`, which the frozen signature does not declare; its \
+                         parameters are [{}]",
+                        func_def.name,
+                        param_spellings(func_def).join(", ")
+                    ),
+                    location: location.cloned(),
+                })
+            }
+        }
+    }
+
+    /// The frozen callable's declared parameter spellings, in order, for the
+    /// `[C0930]` message. A destructuring parameter (no simple name) is shown as
+    /// `<destructured>`.
+    fn param_spellings(func_def: &FunctionDef) -> Vec<String> {
+        func_def
+            .params
+            .iter()
+            .map(|p| {
+                p.simple_name()
+                    .map(str::to_string)
+                    .unwrap_or_else(|| "<destructured>".to_string())
+            })
+            .collect()
+    }
+}
 
 /// ADR-009 E3 (slice S3, legacy class U11): the TYPED capability a `replace
 /// body` replacement reaches through `ctx.original`. It replaces the deleted
@@ -311,7 +399,23 @@ impl BytecodeCompiler {
                 };
                 for handler in entry.handlers.iter().filter(|h| &h.handler_type == phase) {
                     let target = super::comptime_target::ComptimeTarget::from_function(func_def);
-                    let target_value = target.to_nanboxed()?;
+                    // S3 pre-pass freeze rule (see `s3_freeze_gate_tests`
+                    // module doc): this signature-directive pre-pass runs
+                    // AFTER the semantic-freeze barrier and consumes the
+                    // real registration-complete freeze handle — the same
+                    // one pass-2 uses. A site that cannot obtain it is the
+                    // row-3 named compile error; the handle is acquired
+                    // before the output-suppression toggle so the error
+                    // path cannot leak suppression state.
+                    //
+                    // ADR-009 E1 #17 (slice 5): acquired BEFORE `to_nanboxed` so
+                    // the SAME `Arc<FreezeOverlay>` both stamps the target's
+                    // `type_ref` identities (producer stamp-gate) AND is threaded
+                    // to the handler executor below — a composite identity
+                    // interned at stamp time lives in this overlay's shared memo
+                    // and is visible to the consumer's `payload_of`.
+                    let freeze = self.comptime_freeze_overlay()?;
+                    let target_value = target.to_nanboxed(Some(freeze.as_ref()))?;
                     let handler_module_path = entry
                         .defining_module_path
                         .as_deref()
@@ -321,15 +425,6 @@ impl BytecodeCompiler {
                         entry.helper_authority(),
                     );
 
-                    // S3 pre-pass freeze rule (see `s3_freeze_gate_tests`
-                    // module doc): this signature-directive pre-pass runs
-                    // AFTER the semantic-freeze barrier and consumes the
-                    // real registration-complete freeze handle — the same
-                    // one pass-2 uses. A site that cannot obtain it is the
-                    // row-3 named compile error; the handle is acquired
-                    // before the output-suppression toggle so the error
-                    // path cannot leak suppression state.
-                    let freeze = self.comptime_freeze_overlay()?;
                     let prev_suppressed =
                         super::comptime_builtins::set_comptime_output_suppressed(true);
                     let execution_result =
@@ -363,46 +458,56 @@ impl BytecodeCompiler {
                             continue;
                         }
                     };
+                    let handler_location = self.span_to_source_location(handler.span);
                     Self::apply_signature_directives_to_analysis_function(
                         func_def,
                         execution.directives,
-                    )
-                    .map_err(|message| ShapeError::RuntimeError {
-                        message: format!(
-                            "Comptime handler '{}' directive processing failed: {}",
-                            ann.name, message
-                        ),
-                        location: Some(self.span_to_source_location(handler.span)),
-                    })?;
+                        &ann.name,
+                        handler_location,
+                    )?;
                 }
             }
         }
         Ok(())
     }
 
+    /// Apply a comptime handler's signature directives to the analysis
+    /// `FunctionDef`. ADR-009 E1-D4 (slice 2): each directive's parameter
+    /// SPELLING is resolved to a POSITION exactly once, via
+    /// [`param_selection::resolve_param_id`], and the resolved [`ParamId`] is
+    /// what the mutation indexes — the spelling is never re-resolved. A spelling
+    /// the frozen callable does not declare is the named hard error `[C0930]`
+    /// (never the pre-E1 silent skip that dropped the directive).
     fn apply_signature_directives_to_analysis_function(
         func_def: &mut FunctionDef,
         directives: Vec<super::comptime_builtins::ComptimeDirective>,
-    ) -> std::result::Result<(), String> {
+        annotation_name: &str,
+        handler_location: SourceLocation,
+    ) -> std::result::Result<(), ShapeError> {
         for directive in directives {
             match directive {
                 super::comptime_builtins::ComptimeDirective::SetParamType {
                     param_name,
                     type_annotation,
                 } => {
-                    let Some(param) = func_def
-                        .params
-                        .iter_mut()
-                        .find(|p| p.simple_name() == Some(param_name.as_str()))
-                    else {
-                        continue;
-                    };
+                    let param_id = param_selection::resolve_param_id(
+                        func_def,
+                        &param_name,
+                        "set param type",
+                        Some(annotation_name),
+                        Some(&handler_location),
+                    )?;
+                    let param = &mut func_def.params[param_id.index()];
                     if let Some(existing) = &param.type_annotation {
                         if existing != &type_annotation {
-                            return Err(format!(
-                                "cannot override explicit type of parameter '{}'",
-                                param_name
-                            ));
+                            return Err(ShapeError::RuntimeError {
+                                message: format!(
+                                    "Comptime handler '{}' directive processing failed: cannot \
+                                     override explicit type of parameter '{}'",
+                                    annotation_name, param_name
+                                ),
+                                location: Some(handler_location.clone()),
+                            });
                         }
                     } else {
                         param.type_annotation = Some(type_annotation);
@@ -412,17 +517,24 @@ impl BytecodeCompiler {
                     param_name,
                     value,
                 } => {
-                    let Some(param) = func_def
-                        .params
-                        .iter_mut()
-                        .find(|p| p.simple_name() == Some(param_name.as_str()))
-                    else {
-                        continue;
-                    };
-                    param.default_value = Some(Self::scalar_default_expr_from_kinded_slot(
+                    let param_id = param_selection::resolve_param_id(
+                        func_def,
                         &param_name,
-                        &value,
-                    )?);
+                        "set param value",
+                        Some(annotation_name),
+                        Some(&handler_location),
+                    )?;
+                    let default_value =
+                        Self::scalar_default_expr_from_kinded_slot(&param_name, &value).map_err(
+                            |message| ShapeError::RuntimeError {
+                                message: format!(
+                                    "Comptime handler '{}' directive processing failed: {}",
+                                    annotation_name, message
+                                ),
+                                location: Some(handler_location.clone()),
+                            },
+                        )?;
+                    func_def.params[param_id.index()].default_value = Some(default_value);
                 }
                 super::comptime_builtins::ComptimeDirective::SetReturnType { .. } => {}
                 _ => {}
@@ -1042,10 +1154,15 @@ impl BytecodeCompiler {
         let target = super::comptime_target::ComptimeTarget::from_function(func_def);
         // ADR-009 D1 (S2): expansion site for this handler application.
         let expansion_site = self.annotation_expansion_site(annotation, handler, &target);
+        // ADR-009 E1 #17 (slice 5): ONE overlay acquired before `to_nanboxed`
+        // stamps the target's `type_ref` identities (producer stamp-gate) AND is
+        // threaded (below) into `execute_comptime_annotation_handler` so the
+        // consumer resolves composites off the same shared overlay memo.
+        let freeze = self.comptime_freeze_overlay()?;
         // R8 W9 G.2 Step 2 Bucket 7: to_nanboxed now returns Result;
         // surface the V3-S5 ckpt-5 SURFACE through the caller's Result
         // chain instead of panicking.
-        let target_value = target.to_nanboxed()?;
+        let target_value = target.to_nanboxed(Some(freeze.as_ref()))?;
         let target_name = func_def.name.clone();
         let handler_span = handler.span;
         let const_bindings = self
@@ -1062,6 +1179,7 @@ impl BytecodeCompiler {
             &const_bindings,
             // Function target: no representation authority (Dec 56).
             None,
+            freeze,
         )?;
 
         // ADR-009 E3 (S4, U11): resolve the `extend <target>` OWNER placeholder
@@ -1116,6 +1234,12 @@ impl BytecodeCompiler {
         // module / expression targets (which receive no representation
         // authority). The mint call is injected into the handler mini-VM.
         access_identity: Option<(i64, i64)>,
+        // ADR-009 E1 #17 (slice 5): the SAME `Arc<FreezeOverlay>` the CALLER used
+        // to stamp this target's `type_ref` identities (via `to_nanboxed`). It is
+        // threaded straight to `execute_comptime_with_annotation_handler` so a
+        // composite identity interned at stamp time is visible to the consumer's
+        // `payload_of` off the shared memo — no second overlay is minted here.
+        overlay: std::sync::Arc<super::comptime_builtins::FreezeOverlay>,
     ) -> Result<super::comptime::ComptimeExecutionResult> {
         let handler_span = handler.span;
         let extensions: Vec<_> = self
@@ -1158,7 +1282,11 @@ impl BytecodeCompiler {
         // (`TypeReflectionSnapshot::default()`) is deleted. This runs in
         // pass 2, after the freeze barrier; a handler reached without an
         // installed freeze is a compile error (row 3).
-        let freeze = self.comptime_freeze_overlay()?;
+        //
+        // ADR-009 E1 #17 (slice 5): the handle is now the caller-supplied
+        // `overlay` — the SAME `Arc` used to stamp this target's `type_ref`
+        // identities — not a freshly minted one, so the stamp and resolve share
+        // one composite memo.
         let execution = super::comptime::execute_comptime_with_annotation_handler(
             &handler.body,
             &handler.params,
@@ -1172,7 +1300,7 @@ impl BytecodeCompiler {
             &ctx_module_path,
             &ctx_file,
             trait_impls,
-            freeze,
+            overlay,
             // ADR-009 B5 (Dec 56): forward the caller-supplied type identity
             // (Some for a declaration-attached type-target hook; None otherwise).
             access_identity,
@@ -2085,7 +2213,24 @@ impl BytecodeCompiler {
                                 );
                             }
                         }
-                        let Ok(target_value) = target.to_nanboxed() else {
+                        // S3 pre-pass freeze rule (see `s3_freeze_gate_tests`
+                        // module doc): this speculative run fires AFTER the
+                        // semantic-freeze barrier and consumes the real
+                        // registration-complete freeze handle. A site that
+                        // cannot obtain the handle is the row-3 named compile
+                        // error; the handle is acquired before the
+                        // output-suppression toggle so the error path cannot leak
+                        // suppression state.
+                        //
+                        // ADR-009 E1 #17 (slice 5): acquired BEFORE `to_nanboxed`
+                        // so the SAME `Arc<FreezeOverlay>` both stamps the
+                        // target's `type_ref` identities (producer stamp-gate,
+                        // through the `let Ok(..) else continue` swallow — a
+                        // canonicalize gap stays INVALID, never propagates) AND is
+                        // threaded to the handler executor below (shared
+                        // composite-memo round-trip) and to `identity_of`.
+                        let freeze = self.comptime_freeze_overlay()?;
+                        let Ok(target_value) = target.to_nanboxed(Some(freeze.as_ref())) else {
                             continue;
                         };
 
@@ -2107,18 +2252,11 @@ impl BytecodeCompiler {
                         // materializes generated function signatures); pass-2
                         // re-runs the same handler authoritatively. Suppress raw
                         // handler output during the speculative run so a handler
-                        // that prints does not emit twice.
-                        // S3 pre-pass freeze rule (see `s3_freeze_gate_tests`
-                        // module doc): this speculative run fires AFTER the
-                        // semantic-freeze barrier and consumes the real
-                        // registration-complete freeze handle, so reflection-
-                        // using handlers materialize their generated functions
-                        // here (visible to every user body) instead of
-                        // deferring to pass 2. A site that cannot obtain the
-                        // handle is the row-3 named compile error; the handle
-                        // is acquired before the output-suppression toggle so
-                        // the error path cannot leak suppression state.
-                        let freeze = self.comptime_freeze_overlay()?;
+                        // that prints does not emit twice. Reflection-using
+                        // handlers materialize their generated functions here
+                        // (visible to every user body) instead of deferring to
+                        // pass 2. The freeze handle was acquired above (before
+                        // `to_nanboxed`); it is reused here — one acquisition.
                         // ADR-009 B5 (Dec 56): a declaration-attached TYPE-target
                         // hook mints a `RepresentationAccess<T>` authority bound to
                         // the annotated type's frozen identity and delivers it as
@@ -3300,16 +3438,18 @@ impl BytecodeCompiler {
                     param_name,
                     type_annotation,
                 } => {
-                    let maybe_param = func_def
-                        .params
-                        .iter_mut()
-                        .find(|p| p.simple_name() == Some(param_name.as_str()));
-                    let Some(param) = maybe_param else {
-                        return Err(Self::directive_error(format!(
-                            "comptime directive referenced unknown parameter '{}'",
-                            param_name
-                        )));
-                    };
+                    // E1-D4: ONE param-miss diagnostic everywhere — the install
+                    // applier resolves through the same `resolve_param_id` as the
+                    // analysis pre-pass, so a miss is `[C0930]` here too (no
+                    // annotation/span context at this phase → `None`).
+                    let param_id = param_selection::resolve_param_id(
+                        func_def,
+                        &param_name,
+                        "set param type",
+                        None,
+                        None,
+                    )?;
+                    let param = &mut func_def.params[param_id.index()];
                     if let Some(existing) = &param.type_annotation {
                         if existing != &type_annotation {
                             return Err(Self::directive_error(format!(
@@ -3325,20 +3465,17 @@ impl BytecodeCompiler {
                     param_name,
                     value,
                 } => {
-                    let maybe_param = func_def
-                        .params
-                        .iter_mut()
-                        .find(|p| p.simple_name() == Some(param_name.as_str()));
-                    let Some(param) = maybe_param else {
-                        return Err(Self::directive_error(format!(
-                            "comptime directive referenced unknown parameter '{}'",
-                            param_name
-                        )));
-                    };
-                    param.default_value = Some(
+                    let param_id = param_selection::resolve_param_id(
+                        func_def,
+                        &param_name,
+                        "set param value",
+                        None,
+                        None,
+                    )?;
+                    let default_value =
                         Self::scalar_default_expr_from_kinded_slot(&param_name, &value)
-                            .map_err(Self::directive_error)?,
-                    );
+                            .map_err(Self::directive_error)?;
+                    func_def.params[param_id.index()].default_value = Some(default_value);
                 }
                 super::comptime_builtins::ComptimeDirective::SetReturnType { type_annotation } => {
                     if let Some(existing) = &func_def.return_type {

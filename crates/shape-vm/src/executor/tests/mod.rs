@@ -41,6 +41,12 @@ mod matrix_ops;
 // passed to an array HOF) must dispatch correctly and NEVER SIGSEGV.
 mod named_fn_value;
 mod no_dynamic;
+// ADR-009 E1 #17 slice-6 absence sentinel: the deleted JSON/string
+// comptime-directive protocol remnants (the directive-payload serializer fn
+// and the extend-payload builtin registration) must not reappear. The needle
+// literals live inside the sentinel, assembled from fragments; this comment
+// names the targets by role so it does not itself trip the scan.
+mod no_json_comptime_protocol;
 mod declared_capture_teardown;
 // GC Phase 4 — end-of-program teardown sweep (Finding #82). Reclaims
 // module-scope closure-capture cycles at VM teardown; memory-only.

@@ -672,8 +672,10 @@ print(add(5))
     ShapeTest::new(code).expect_run_ok().expect_output("105");
 }
 
-/// SURFACE: `set param extra: int` does not add a new parameter during semantic
-/// analysis, so the function body still rejects `extra` as undefined.
+/// E1-D4 (slice 2): `set param extra: int` names a parameter `greet` does not
+/// declare. It is now the named hard error [C0930] at the directive itself.
+/// (Pre-E1 this silently skipped, and the body then rejected `extra` as an
+/// undefined variable — the silent-skip behavior E1-D4 converts to fail-closed.)
 #[test]
 
 fn ct_45c_set_param_typed() {
@@ -692,7 +694,7 @@ fn greet(name: string) -> string {
 
 print(greet("World"))
 "#;
-    ShapeTest::new(code).expect_run_err_contains("Undefined variable: 'extra'");
+    ShapeTest::new(code).expect_run_err_contains("[C0930]");
 }
 
 // ============================================================================

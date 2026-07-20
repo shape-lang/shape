@@ -2356,6 +2356,13 @@ pub(crate) fn execute_comptime_with_annotation_handler(
     // pre-execute clear would wipe it. Per-run clear ⇒ pre-pass and pass-2 each
     // index a fresh store, no stale body leaks across the double compile.
     super::comptime_builtins::clear_comptime_replace_bodies();
+    // ADR-009 E1 #17 (slice 3): the U01 literal-type carrier store shares the
+    // replace-body lifecycle (compile-populated during the inner compile below),
+    // so it clears here at run entry too — a pre-execute clear would wipe it.
+    super::comptime_builtins::clear_comptime_directive_types();
+    // ADR-009 E1 #17 (slice 4): the direct-block extend carrier shares the same
+    // compile-populated lifecycle — cleared here at run entry too.
+    super::comptime_builtins::clear_comptime_extend_statements();
 
     let params: Vec<FunctionParameter> = handler_params
         .iter()
@@ -6089,7 +6096,7 @@ mod tests_deferred {
         };
 
         let target = ComptimeTarget::from_function(&func);
-        let target_value = target.to_nanboxed();
+        let target_value = target.to_nanboxed(None);
 
         // Handler body: return target.kind
         let handler_body = Expr::PropertyAccess {

@@ -664,9 +664,14 @@ impl BytecodeCompiler {
                     self.annotation_expansion_site(annotation, &handler, &target_desc);
                 // R8 W9 G.2 Step 2 Bucket 7: to_nanboxed now returns
                 // Result; surface the V3-S5 ckpt-5 SURFACE through the
-                // caller's Result chain instead of panicking.
-                let target_value = target_desc.to_nanboxed()?;
+                // caller's Result chain instead of panicking. E1 slice-5: an
+                // expression target has no members/AST → `None` overlay, every
+                // stamp INVALID.
+                let target_value = target_desc.to_nanboxed(None)?;
                 let handler_span = handler.span;
+                // ADR-009 E1 #17 (slice 5): the handler executor still needs a
+                // freeze handle; acquire it here (no target stamping occurred).
+                let freeze = self.comptime_freeze_overlay()?;
                 let execution = self.execute_comptime_annotation_handler(
                     annotation,
                     &handler,
@@ -675,6 +680,7 @@ impl BytecodeCompiler {
                     &[],
                     // Expression target: no representation authority (Dec 56).
                     None,
+                    freeze,
                 )?;
 
                 let removed = self

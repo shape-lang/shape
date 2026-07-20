@@ -160,7 +160,10 @@ fn authoritative_execution(
         .expect("fixture has a comptime post handler");
     let target =
         crate::compiler::comptime_target::ComptimeTarget::from_function(&target_function())
-            .to_nanboxed()?;
+            .to_nanboxed(None)?;
+    // E1 slice-5: the handler executor takes the overlay explicitly now; the
+    // fixture installs the freeze, so acquire it from the compiler.
+    let overlay = compiler.comptime_freeze_overlay()?;
     compiler.execute_comptime_annotation_handler(
         &applied(annotation_name),
         handler,
@@ -168,6 +171,7 @@ fn authoritative_execution(
         &[],
         &[],
         None,
+        overlay,
     )
 }
 

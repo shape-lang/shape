@@ -167,6 +167,34 @@ thread_local! {
     /// which slice 5 deleted whole.
     static COMPTIME_REPLACE_BODIES: RefCell<Vec<Vec<shape_ast::ast::Statement>>> =
         const { RefCell::new(Vec::new()) };
+    /// ADR-009 E1 #17 (slice 3): the U01 literal-type carrier store. A literal
+    /// `set param x: T` / `set return T` type is known at handler COMPILE time —
+    /// `emit_comptime_set_param_type_directive` / `_set_return_type_directive`
+    /// stash the typed `TypeAnnotation` here and emit the directive's INDEX (an
+    /// int handle) instead of a `serialize_directive_payload` JSON round-trip.
+    /// Same lifecycle as `COMPTIME_REPLACE_BODIES` (compile-populated ⇒ CLEARED
+    /// at `execute_comptime_with_annotation_handler` ENTRY, before the inner
+    /// compile, NOT at the pre-execute `COMPTIME_CHECKED_ITEMS` clear); indices
+    /// start fresh per handler run so the pre-pass/pass-2 double-compile never
+    /// leaks a stale type; the read clones, leaving the store intact until the
+    /// next per-run clear. The U02 expr form (`set … (…type_ref)`) and the legacy
+    /// JSON-string path are UNTOUCHED (slice 5 / slice 6 respectively).
+    static COMPTIME_DIRECTIVE_TYPES: RefCell<Vec<shape_ast::ast::TypeAnnotation>> =
+        const { RefCell::new(Vec::new()) };
+    /// ADR-009 E1 #17 (slice 4): the direct-block `extend Type { … }` carrier
+    /// store. The methods of a direct block are literal AST known at handler
+    /// COMPILE time (like a `replace body { … }`), so this shares the
+    /// `COMPTIME_REPLACE_BODIES` compile-populated lifecycle — CLEARED at
+    /// `execute_comptime_with_annotation_handler` ENTRY (before the inner compile
+    /// stashes into it), per-run indices, read clones. `emit_comptime_extend_directive`
+    /// stashes the `ExtendStatement` here and emits `__emit_extend_checked(index)`
+    /// instead of a `serialize_directive_payload` JSON round-trip. This is NOT a
+    /// parallel extend-item carrier: the E2 COMPUTED-extend path
+    /// (`__emit_extend_items` ← `parse_extend_items_slot` ← a `__CheckedItem`
+    /// handle) is EXECUTE-populated with a different source and is untouched; only
+    /// the `ComptimeDirective::Extend` transport moves off JSON.
+    static COMPTIME_EXTEND_STATEMENTS: RefCell<Vec<shape_ast::ast::ExtendStatement>> =
+        const { RefCell::new(Vec::new()) };
     /// True while the §4.5.1 whole-program pre-pass speculatively runs a
     /// type-target comptime handler to materialize generated function
     /// signatures. The pre-pass is not the authoritative run — pass-2 re-runs
@@ -283,11 +311,57 @@ fn comptime_replace_body_at(index: usize) -> Option<Vec<shape_ast::ast::Statemen
     COMPTIME_REPLACE_BODIES.with(|bodies| bodies.borrow().get(index).cloned())
 }
 
-fn parse_type_annotation_payload(payload: &str) -> Result<shape_ast::ast::TypeAnnotation, String> {
-    if let Ok(parsed) = serde_json::from_str::<shape_ast::ast::TypeAnnotation>(payload) {
-        return Ok(parsed);
-    }
+/// ADR-009 E1 #17 (slice 3): clear the U01 literal-type carrier store at handler
+/// run ENTRY — same compile-populated lifecycle as
+/// [`clear_comptime_replace_bodies`] (cleared BEFORE the inner compile that
+/// stashes here, NOT at the pre-execute clear point).
+pub(crate) fn clear_comptime_directive_types() {
+    COMPTIME_DIRECTIVE_TYPES.with(|types| types.borrow_mut().clear());
+}
 
+/// Stash a literal directive type and return the index the
+/// `__emit_set_param_type` / `__emit_set_return_type` call carries. Called from
+/// the emit side at handler-compile; the index refers to the CURRENT handler
+/// run's store (cleared at that run's entry).
+pub(crate) fn push_comptime_directive_type(annotation: shape_ast::ast::TypeAnnotation) -> usize {
+    COMPTIME_DIRECTIVE_TYPES.with(|types| {
+        let mut types = types.borrow_mut();
+        types.push(annotation);
+        types.len() - 1
+    })
+}
+
+/// Resolve a literal-type directive index back to its stashed `TypeAnnotation`
+/// (cloned; the store stays intact until the next per-run clear).
+fn comptime_directive_type_at(index: usize) -> Option<shape_ast::ast::TypeAnnotation> {
+    COMPTIME_DIRECTIVE_TYPES.with(|types| types.borrow().get(index).cloned())
+}
+
+/// ADR-009 E1 #17 (slice 4): clear the direct-block extend carrier store at
+/// handler run ENTRY — same compile-populated lifecycle as
+/// [`clear_comptime_replace_bodies`] / [`clear_comptime_directive_types`].
+pub(crate) fn clear_comptime_extend_statements() {
+    COMPTIME_EXTEND_STATEMENTS.with(|extends| extends.borrow_mut().clear());
+}
+
+/// Stash a direct-block `extend Type { … }` statement and return the index the
+/// `__emit_extend_checked(index)` call carries. Called from the emit side at
+/// handler-compile; the index refers to the CURRENT handler run's store.
+pub(crate) fn push_comptime_extend_statement(extend: shape_ast::ast::ExtendStatement) -> usize {
+    COMPTIME_EXTEND_STATEMENTS.with(|extends| {
+        let mut extends = extends.borrow_mut();
+        extends.push(extend);
+        extends.len() - 1
+    })
+}
+
+/// Resolve an extend-carrier index back to its stashed `ExtendStatement`
+/// (cloned; the store stays intact until the next per-run clear).
+fn comptime_extend_statement_at(index: usize) -> Option<shape_ast::ast::ExtendStatement> {
+    COMPTIME_EXTEND_STATEMENTS.with(|extends| extends.borrow().get(index).cloned())
+}
+
+fn parse_type_annotation_payload(payload: &str) -> Result<shape_ast::ast::TypeAnnotation, String> {
     // Fallback for older callers that still pass textual type source.
     let snippet = format!("fn __type_probe(value: {}) {{ value }}", payload);
     let program = shape_ast::parse_program(&snippet)
@@ -338,7 +412,21 @@ fn field_slot_from_typed_object(
 fn type_annotation_from_string_or_type_ref_slot(
     slot: &KindedSlot,
     builtin_name: &str,
+    overlay: &FreezeOverlay,
 ) -> Result<shape_ast::ast::TypeAnnotation, String> {
+    // ADR-009 E1 #17 (slice 3, U01): a literal type is carried as an INDEX into
+    // the per-run typed store (`COMPTIME_DIRECTIVE_TYPES`) — no JSON, no reparse.
+    // Its `Int64` kind is disjoint from the legacy JSON-string payload (`String`)
+    // and the U02 `__ComptimeTypeRef` object (`Ptr(TypedObject)`), so this branch
+    // never shadows those paths.
+    if slot.kind() == NativeKind::Int64 {
+        let index = slot.as_i64().ok_or_else(|| {
+            format!("{builtin_name} expects a non-null literal-type carrier index")
+        })?;
+        return comptime_directive_type_at(index as usize).ok_or_else(|| {
+            format!("{builtin_name}: no stored literal directive type at index {index}")
+        });
+    }
     if let Some(payload) = slot.as_str() {
         return parse_type_annotation_payload(payload);
     }
@@ -370,8 +458,177 @@ fn type_annotation_from_string_or_type_ref_slot(
             schema.name
         ));
     }
+    // ADR-009 E1 #17 (slice 5, A-FULL) — E1-D7(a) STAMPED->IDENTITY-ONLY: a
+    // type_ref carrying a real frozen identity resolves via the ONE inverse of
+    // the semantic-freeze composite algebra (`reconstruct_type_annotation`),
+    // NEVER by reparsing `.source`. A stamped-but-unresolvable identity is a
+    // NAMED `ShapeError::SemanticError` (surfaced here as its `String` at the
+    // consumer ABI boundary) with NO silent fallback to reparse — silent
+    // stamped->reparse is the canonical walk-back shape and is refused. Only an
+    // UNSTAMPED ref (identity == INVALID) falls through to the `.source` reparse
+    // arm below, byte-unchanged (LIVE for unstamped refs; deletion bound to
+    // B4/B5 → E5 per E1-D8). The identity halves are
+    // read with the same `get_field` -> `clone_field_kinded` -> `as_i64` shape
+    // as `frozen_identity_from_ref` (type_reflection.rs) — an existing
+    // sanctioned read of the sibling schema, not a new decode path.
+    let identity_field = |name: &str| -> Result<i64, String> {
+        let field = schema
+            .get_field(name)
+            .ok_or_else(|| format!("__ComptimeTypeRef schema has no {name} field"))?;
+        storage
+            .clone_field_kinded(field.index as usize)
+            .and_then(|value| value.as_i64())
+            .ok_or_else(|| format!("__ComptimeTypeRef {name} is not an integer"))
+    };
+    let identity = FrozenTypeIdentity {
+        high: identity_field("identity_high")?,
+        low: identity_field("identity_low")?,
+    };
+    if identity != FrozenTypeIdentity::INVALID {
+        return reconstruct_type_annotation(overlay, identity).map_err(|e| e.to_string());
+    }
     let source = string_field_from_typed_object(storage, &schema, "source")?;
     parse_type_annotation_payload(&source)
+}
+
+/// ADR-009 E1 #17 (slice 5, A-FULL): the ONE total inverse of the semantic
+/// freeze's composite algebra — a frozen `FrozenTypeIdentity` back to the AST
+/// `TypeAnnotation` it canonicalized from, WITHOUT reparsing
+/// `__ComptimeTypeRef.source`. This is the E1-D7(c) totality obligation: every
+/// one of the 10 `FrozenPayloadDescriptor` variants either reconstructs
+/// structurally or returns a NAMED `ShapeError::SemanticError` — there is no
+/// catch-all silent arm, and an unresolvable sub-identity surfaces the freeze
+/// query's own named rejection through `?`.
+///
+/// - Primitive spellings invert the ONE `PRIMITIVE_SYNONYM_FAMILIES` table via
+///   [`type_reflection::canonical_primitive_spelling`] (names[0] canonical) — no
+///   second name table (E1-D7(c)).
+/// - Reference is the structural inverse of the canonicalizer's `Borrow` arm
+///   (`&T` / `&mut T`, type_reflection.rs); Callable re-applies each parameter's
+///   `PassingMode` borrow around its reconstructed VALUE type, the exact inverse
+///   of the canonicalizer's `Function` arm (the mode axis the identity hash
+///   factors out).
+/// - Nominal / Record / Parameter are irrecoverable this slice (applied/bare
+///   nominal reconstruction is B4/B5, record field names are one-way-hashed into
+///   hygienic member identities) — each a distinct NAMED rejection.
+///
+/// STAGE 4 (LIVE): the consumer flip wired this into the live directive
+/// resolver — `type_annotation_from_string_or_type_ref_slot` now resolves a
+/// stamped `__ComptimeTypeRef` through THIS inverse (identity-only, no
+/// `.source` fallback), and the producer stamp-gate (stage 3) admits an
+/// identity iff `reconstruct_type_annotation(...).is_ok()`, so producer and
+/// consumer share ONE code path (E1-D7(b)).
+pub(crate) fn reconstruct_type_annotation(
+    overlay: &FreezeOverlay,
+    identity: FrozenTypeIdentity,
+) -> Result<shape_ast::ast::TypeAnnotation, shape_ast::error::ShapeError> {
+    use shape_ast::ast::{FunctionParam, TypeAnnotation};
+    use shape_runtime::comptime_reflection::PassingMode;
+    use type_reflection::payloads::FrozenPayloadDescriptor;
+
+    fn named(message: String) -> shape_ast::error::ShapeError {
+        shape_ast::error::ShapeError::SemanticError {
+            message,
+            location: None,
+        }
+    }
+
+    // The `?` here converts the freeze query's OWN named rejection (unknown
+    // identity, applied-nominal-pending, un-applied-head, bounded-erased, …)
+    // into a named SemanticError — this is the total-coverage boundary for
+    // every identity that is NOT reconstructable (E1-D7(c)).
+    let payload = overlay.payload_of(identity).map_err(named)?;
+
+    match payload {
+        FrozenPayloadDescriptor::Primitive(primitive) => {
+            type_reflection::canonical_primitive_spelling(primitive)
+                .map(|spelling| TypeAnnotation::Basic(spelling.to_string()))
+                .ok_or_else(|| {
+                    named(format!(
+                        "reconstruct_type_annotation: no canonical spelling for frozen \
+                         primitive {primitive:?}"
+                    ))
+                })
+        }
+        FrozenPayloadDescriptor::Never => Ok(TypeAnnotation::Never),
+        FrozenPayloadDescriptor::Erased { bounds } => {
+            if bounds.is_empty() {
+                Ok(TypeAnnotation::Basic("any".to_string()))
+            } else {
+                Err(named(
+                    type_reflection::payloads::bounded_erased_payload_rejection(),
+                ))
+            }
+        }
+        FrozenPayloadDescriptor::Tuple(descriptor) => {
+            let mut elements = Vec::with_capacity(descriptor.elements.len());
+            for element in descriptor.elements {
+                elements.push(reconstruct_type_annotation(overlay, element)?);
+            }
+            Ok(TypeAnnotation::Tuple(elements))
+        }
+        FrozenPayloadDescriptor::Reference(descriptor) => {
+            let inner = reconstruct_type_annotation(overlay, descriptor.referent)?;
+            Ok(TypeAnnotation::Borrow {
+                mutable: descriptor.mutable,
+                inner: Box::new(inner),
+            })
+        }
+        FrozenPayloadDescriptor::Union(descriptor) => {
+            let mut members = Vec::with_capacity(descriptor.members.len());
+            for member in descriptor.members {
+                members.push(reconstruct_type_annotation(overlay, member)?);
+            }
+            Ok(TypeAnnotation::Union(members))
+        }
+        FrozenPayloadDescriptor::Callable(descriptor) => {
+            let mut params = Vec::with_capacity(descriptor.params.len());
+            for param in descriptor.params {
+                // The canonicalizer factored the ADR mode axis OUT of the
+                // borrow wrapper (PassingMode) and recorded the VALUE type; the
+                // structural inverse re-applies the borrow around it.
+                let value = reconstruct_type_annotation(overlay, param.type_identity)?;
+                let type_annotation = match param.mode {
+                    PassingMode::Move => value,
+                    PassingMode::SharedBorrow => TypeAnnotation::Borrow {
+                        mutable: false,
+                        inner: Box::new(value),
+                    },
+                    PassingMode::ExclusiveBorrow => TypeAnnotation::Borrow {
+                        mutable: true,
+                        inner: Box::new(value),
+                    },
+                };
+                params.push(FunctionParam {
+                    name: param.name,
+                    optional: param.optional,
+                    type_annotation,
+                });
+            }
+            let returns = reconstruct_type_annotation(overlay, descriptor.returns)?;
+            Ok(TypeAnnotation::Function {
+                params,
+                returns: Box::new(returns),
+            })
+        }
+        FrozenPayloadDescriptor::Nominal(_) => Err(named(
+            "reconstruct_type_annotation: a nominal declaration shape carries no \
+             spellable type_ref target (applied/bare nominal reconstruction is B4/B5, \
+             out of E1); an unstamped ref reparses .source"
+                .to_string(),
+        )),
+        FrozenPayloadDescriptor::Record(_) => Err(named(
+            "reconstruct_type_annotation: a structural record's field names are \
+             one-way-hashed into hygienic member identities and cannot be recovered to \
+             a spellable type_ref; an unstamped ref reparses .source"
+                .to_string(),
+        )),
+        FrozenPayloadDescriptor::Parameter(_) => Err(named(
+            "reconstruct_type_annotation: a scoped generic parameter is not a spellable \
+             type_ref target this slice; an unstamped ref reparses .source"
+                .to_string(),
+        )),
+    }
 }
 
 fn heap_value_from_typed_object_slot(kinded: KindedSlot) -> HeapValue {
@@ -478,6 +735,7 @@ fn build_function_item(
     name: &str,
     return_type_slot: &KindedSlot,
     value_slot: &KindedSlot,
+    overlay: &FreezeOverlay,
 ) -> Result<shape_ast::ast::Item, String> {
     use shape_ast::ast::{FunctionDef, Item, Span, Statement};
 
@@ -487,7 +745,8 @@ fn build_function_item(
             name
         ));
     }
-    let return_type = type_annotation_from_string_or_type_ref_slot(return_type_slot, "item_fn")?;
+    let return_type =
+        type_annotation_from_string_or_type_ref_slot(return_type_slot, "item_fn", overlay)?;
     let body_expr = literal_expr_from_slot(value_slot, "item_fn")?;
 
     Ok(Item::Function(
@@ -611,6 +870,7 @@ fn build_extend_method_item(
     return_type_slot: &KindedSlot,
     segments: &[String],
     field_splices: &[String],
+    overlay: &FreezeOverlay,
 ) -> Result<shape_ast::ast::Item, String> {
     use shape_ast::ast::{Expr, InterpolationMode, Literal, Span};
 
@@ -654,6 +914,7 @@ fn build_extend_method_item(
         method_name,
         return_type_slot,
         body_expr,
+        overlay,
     )
 }
 
@@ -674,6 +935,7 @@ fn build_extend_method_literal_item(
     method_name: &str,
     return_type_slot: &KindedSlot,
     value_slot: &KindedSlot,
+    overlay: &FreezeOverlay,
 ) -> Result<shape_ast::ast::Item, String> {
     let body_expr = literal_expr_from_slot(value_slot, "extend_method_literal")?;
     build_extend_item_with_method_body(
@@ -682,6 +944,7 @@ fn build_extend_method_literal_item(
         method_name,
         return_type_slot,
         body_expr,
+        overlay,
     )
 }
 
@@ -699,6 +962,7 @@ fn build_extend_item_with_method_body(
     method_name: &str,
     return_type_slot: &KindedSlot,
     body_expr: shape_ast::ast::Expr,
+    overlay: &FreezeOverlay,
 ) -> Result<shape_ast::ast::Item, String> {
     use shape_ast::ast::{ExtendStatement, Item, MethodDef, Span, Statement, TypeName};
 
@@ -713,7 +977,8 @@ fn build_extend_item_with_method_body(
         ));
     }
 
-    let return_type = type_annotation_from_string_or_type_ref_slot(return_type_slot, builtin_name)?;
+    let return_type =
+        type_annotation_from_string_or_type_ref_slot(return_type_slot, builtin_name, overlay)?;
 
     let method = MethodDef {
         name: method_name.to_string(),
@@ -812,7 +1077,7 @@ pub(crate) fn create_comptime_builtins_module(
     site_time_impl_keys: HashSet<String>,
     freeze: Arc<FreezeOverlay>,
 ) -> ModuleExports {
-    let mut module = comptime_builtins_module_base(trait_impl_keys);
+    let mut module = comptime_builtins_module_base(trait_impl_keys, Arc::clone(&freeze));
     // ADR-009 B2 (slice S4): `trait_ref` / `find_impl` consume the SAME
     // freeze handle — implementation evidence comes ONLY from the frozen
     // barrier truth (freeze inputs 4/5), never from the legacy
@@ -834,7 +1099,22 @@ pub(crate) fn create_comptime_builtins_module(
 // consumes the real freeze handle via `create_comptime_builtins_module`.
 
 /// All comptime builtins EXCEPT the freeze-consuming reflection trio.
-fn comptime_builtins_module_base(trait_impl_keys: HashSet<String>) -> ModuleExports {
+///
+/// ADR-009 E1 #17 (slice 5, A-FULL): the typed-generation producers
+/// (`item_fn` / `extend_method` / `extend_method_literal`) and the type-ref
+/// directive emitters (`__emit_set_param_type` / `__emit_set_return_type`) now
+/// resolve a stamped `__ComptimeTypeRef` via its frozen identity, so they need
+/// the SAME `Arc<FreezeOverlay>` the producer stamped with (stage 3
+/// shared-overlay plumbing). Each such closure move-captures its own
+/// `Arc::clone(&freeze)` and threads `&freeze` into
+/// `type_annotation_from_string_or_type_ref_slot`, whose `overlay.payload_of`
+/// then finds any composite identity interned at produce time. The overlay
+/// reaching the reflection trio (`create_comptime_builtins_module`) is the same
+/// Arc, so the whole comptime module shares one freeze memo.
+fn comptime_builtins_module_base(
+    trait_impl_keys: HashSet<String>,
+    freeze: Arc<FreezeOverlay>,
+) -> ModuleExports {
     let mut module = ModuleExports::new("__comptime__");
 
     // implements(type_name: string, trait_name: string) -> bool
@@ -1021,6 +1301,7 @@ fn comptime_builtins_module_base(trait_impl_keys: HashSet<String>) -> ModuleExpo
     // `fn ...` source text. The fragment is still converted to an AST item and
     // compiled by the same strict registration/type/body pipeline as the
     // source-string `extend (expr)` path.
+    let freeze_for_item_fn = Arc::clone(&freeze);
     register_typed_function(
         &mut module,
         "item_fn",
@@ -1055,14 +1336,14 @@ fn comptime_builtins_module_base(trait_impl_keys: HashSet<String>) -> ModuleExpo
         // returns a handle carrying its index. (Slice 5 deleted the legacy
         // `__ComptimeItemFragment` sentinel map + its fragment builders.)
         ConcreteType::OpaqueTypedObject("__CheckedItem".to_string()),
-        |slots, _ctx| {
+        move |slots, _ctx| {
             if slots.len() != 3 {
                 return Err(format!("item_fn expects 3 arguments, got {}", slots.len()));
             }
             let name = slots[0]
                 .as_str()
                 .ok_or_else(|| "item_fn expects a string function name".to_string())?;
-            let item = build_function_item(name, &slots[1], &slots[2])?;
+            let item = build_function_item(name, &slots[1], &slots[2], &freeze_for_item_fn)?;
             let index = push_comptime_checked_item(CheckedItem::new(item));
             let handle = typed_object_for_named_schema(
                 "__CheckedItem",
@@ -1091,6 +1372,7 @@ fn comptime_builtins_module_base(trait_impl_keys: HashSet<String>) -> ModuleExpo
     // reserve / register), so there is zero consumer change. `extend_method` is
     // an INTERNAL builtin (stdlib-consumed like item_fn), not a public
     // quote/builder surface (that stays E1's per the C2 D1 amendment).
+    let freeze_for_extend_method = Arc::clone(&freeze);
     register_typed_function(
         &mut module,
         "extend_method",
@@ -1135,7 +1417,7 @@ fn comptime_builtins_module_base(trait_impl_keys: HashSet<String>) -> ModuleExpo
             },
         ],
         ConcreteType::OpaqueTypedObject("__CheckedItem".to_string()),
-        |slots, _ctx| {
+        move |slots, _ctx| {
             if slots.len() != 5 {
                 return Err(format!(
                     "extend_method expects 5 arguments, got {}",
@@ -1156,6 +1438,7 @@ fn comptime_builtins_module_base(trait_impl_keys: HashSet<String>) -> ModuleExpo
                 &slots[2],
                 &segments,
                 &field_splices,
+                &freeze_for_extend_method,
             )?;
             let index = push_comptime_checked_item(CheckedItem::new(item));
             let handle = typed_object_for_named_schema(
@@ -1180,6 +1463,7 @@ fn comptime_builtins_module_base(trait_impl_keys: HashSet<String>) -> ModuleExpo
     // extend_method, handler-scope resolution requires the paired forwarder row in
     // `COMPTIME_BUILTIN_FORWARDERS` IN ADDITION to this registration, or
     // `extend_method_literal(...)` is `[C0001] Undefined function` in a handler.
+    let freeze_for_extend_method_literal = Arc::clone(&freeze);
     register_typed_function(
         &mut module,
         "extend_method_literal",
@@ -1213,7 +1497,7 @@ fn comptime_builtins_module_base(trait_impl_keys: HashSet<String>) -> ModuleExpo
             },
         ],
         ConcreteType::OpaqueTypedObject("__CheckedItem".to_string()),
-        |slots, _ctx| {
+        move |slots, _ctx| {
             if slots.len() != 4 {
                 return Err(format!(
                     "extend_method_literal expects 4 arguments, got {}",
@@ -1231,6 +1515,7 @@ fn comptime_builtins_module_base(trait_impl_keys: HashSet<String>) -> ModuleExpo
                 method_name,
                 &slots[2],
                 &slots[3],
+                &freeze_for_extend_method_literal,
             )?;
             let index = push_comptime_checked_item(CheckedItem::new(item));
             let handle = typed_object_for_named_schema(
@@ -1240,22 +1525,6 @@ fn comptime_builtins_module_base(trait_impl_keys: HashSet<String>) -> ModuleExpo
             Ok(TypedReturn::Concrete(ConcreteReturn::OpaqueTypedObject(
                 Arc::new(heap_value_from_typed_object_slot(handle)),
             )))
-        },
-    );
-
-    // Internal comptime directive: emit an extend statement payload (JSON AST).
-    register_typed_fn_1::<_, Arc<String>>(
-        &mut module,
-        "__emit_extend",
-        "Internal: emit extend directive payload",
-        "payload",
-        "string",
-        ConcreteType::Unit,
-        |json, _ctx| {
-            let extend: shape_ast::ast::ExtendStatement = serde_json::from_str(json.as_str())
-                .map_err(|e| format!("invalid extend payload: {}", e))?;
-            push_comptime_directive(ComptimeDirective::Extend(extend))?;
-            Ok(TypedReturn::Concrete(ConcreteReturn::Unit))
         },
     );
 
@@ -1274,6 +1543,7 @@ fn comptime_builtins_module_base(trait_impl_keys: HashSet<String>) -> ModuleExpo
 
     // Internal comptime directive: set a parameter type by parameter name.
     // __emit_set_param_type(param_name: string, type_payload: string | TypeRef)
+    let freeze_for_set_param_type = Arc::clone(&freeze);
     register_typed_function(
         &mut module,
         "__emit_set_param_type",
@@ -1293,7 +1563,7 @@ fn comptime_builtins_module_base(trait_impl_keys: HashSet<String>) -> ModuleExpo
             },
         ],
         ConcreteType::Unit,
-        |slots, _ctx| {
+        move |slots, _ctx| {
             if slots.len() != 2 {
                 return Err(format!(
                     "__emit_set_param_type expects 2 arguments, got {}",
@@ -1304,8 +1574,11 @@ fn comptime_builtins_module_base(trait_impl_keys: HashSet<String>) -> ModuleExpo
                 .as_str()
                 .ok_or_else(|| "__emit_set_param_type expects a string param name".to_string())?
                 .to_string();
-            let type_annotation =
-                type_annotation_from_string_or_type_ref_slot(&slots[1], "__emit_set_param_type")?;
+            let type_annotation = type_annotation_from_string_or_type_ref_slot(
+                &slots[1],
+                "__emit_set_param_type",
+                &freeze_for_set_param_type,
+            )?;
             push_comptime_directive(ComptimeDirective::SetParamType {
                 param_name,
                 type_annotation,
@@ -1354,6 +1627,7 @@ fn comptime_builtins_module_base(trait_impl_keys: HashSet<String>) -> ModuleExpo
 
     // Internal comptime directive: set function return type.
     // __emit_set_return_type(type_payload: string | TypeRef)
+    let freeze_for_set_return_type = Arc::clone(&freeze);
     register_typed_function(
         &mut module,
         "__emit_set_return_type",
@@ -1365,15 +1639,18 @@ fn comptime_builtins_module_base(trait_impl_keys: HashSet<String>) -> ModuleExpo
             ..Default::default()
         }],
         ConcreteType::Unit,
-        |slots, _ctx| {
+        move |slots, _ctx| {
             if slots.len() != 1 {
                 return Err(format!(
                     "__emit_set_return_type expects 1 argument, got {}",
                     slots.len()
                 ));
             }
-            let type_annotation =
-                type_annotation_from_string_or_type_ref_slot(&slots[0], "__emit_set_return_type")?;
+            let type_annotation = type_annotation_from_string_or_type_ref_slot(
+                &slots[0],
+                "__emit_set_return_type",
+                &freeze_for_set_return_type,
+            )?;
             push_comptime_directive(ComptimeDirective::SetReturnType { type_annotation })?;
             Ok(TypedReturn::Concrete(ConcreteReturn::Unit))
         },
@@ -1411,6 +1688,45 @@ fn comptime_builtins_module_base(trait_impl_keys: HashSet<String>) -> ModuleExpo
                 format!("__emit_replace_body_checked index {index} is not live in this comptime execution")
             })?;
             push_comptime_directive(ComptimeDirective::ReplaceBody { body })?;
+            Ok(TypedReturn::Concrete(ConcreteReturn::Unit))
+        },
+    );
+
+    // ADR-009 E1 #17 (slice 4): the direct-block `extend Type { … }` typed
+    // carrier. The emit side stashes the literal `ExtendStatement` at
+    // handler-COMPILE (`COMPTIME_EXTEND_STATEMENTS`) and passes its INDEX here —
+    // no `serialize_directive_payload` JSON, no `serde_json` reparse. The legacy
+    // string `__emit_extend` + `serialize_directive_payload` were DELETED whole
+    // in slice 6 (07638332); the E2 COMPUTED-extend path (`__emit_extend_items`
+    // ← `__CheckedItem`) is a distinct, execute-populated carrier and is untouched.
+    // __emit_extend_checked(index: int)
+    register_typed_function(
+        &mut module,
+        "__emit_extend_checked",
+        "Internal: emit an extend directive from a typed block-form carrier index",
+        vec![shape_runtime::module_exports::ModuleParam {
+            name: "index".to_string(),
+            type_name: "int".to_string(),
+            required: true,
+            ..Default::default()
+        }],
+        ConcreteType::Unit,
+        |slots, _ctx| {
+            if slots.len() != 1 {
+                return Err(format!(
+                    "__emit_extend_checked expects 1 argument, got {}",
+                    slots.len()
+                ));
+            }
+            let index = slots[0]
+                .as_i64()
+                .ok_or_else(|| "__emit_extend_checked expects an int index".to_string())?;
+            let extend = comptime_extend_statement_at(index as usize).ok_or_else(|| {
+                format!(
+                    "__emit_extend_checked index {index} is not live in this comptime execution"
+                )
+            })?;
+            push_comptime_directive(ComptimeDirective::Extend(extend))?;
             Ok(TypedReturn::Concrete(ConcreteReturn::Unit))
         },
     );
@@ -2008,8 +2324,13 @@ mod e2_d9_closure_free_tripwire {
 
     #[test]
     fn typed_module_producer_item_fn_is_closure_free() {
-        let item = build_function_item("answer", &nb_str("int"), &KindedSlot::from_int(42))
-            .expect("item_fn's typed producer builds a literal function");
+        let item = build_function_item(
+            "answer",
+            &nb_str("int"),
+            &KindedSlot::from_int(42),
+            &semantic_freeze::overlay_for_tests(&crate::compiler::BytecodeCompiler::new()),
+        )
+        .expect("item_fn's typed producer builds a literal function");
         let Item::Function(func_def, _) = item else {
             panic!("item_fn must produce a function item");
         };
@@ -2072,6 +2393,7 @@ mod extend_method_producer_tests {
             &KindedSlot::from_string("string"),
             &segments,
             &field_splices,
+            &semantic_freeze::overlay_for_tests(&crate::compiler::BytecodeCompiler::new()),
         )
         .expect("valid template assembles");
 
@@ -2111,6 +2433,7 @@ mod extend_method_producer_tests {
             &KindedSlot::from_string("string"),
             &segments,
             &field_splices,
+            &semantic_freeze::overlay_for_tests(&crate::compiler::BytecodeCompiler::new()),
         )
         .expect("valid non-string-scalar template assembles");
         assert_eq!(
@@ -2129,6 +2452,7 @@ mod extend_method_producer_tests {
             &KindedSlot::from_string("string"),
             &["{ ".to_string(), " }".to_string()],
             &["a} + evil() + {b".to_string()],
+            &semantic_freeze::overlay_for_tests(&crate::compiler::BytecodeCompiler::new()),
         )
         .expect_err("a non-identifier field splice must reject");
         assert!(
@@ -2146,6 +2470,7 @@ mod extend_method_producer_tests {
             &KindedSlot::from_string("string"),
             &["only-one-segment".to_string()],
             &["id".to_string()],
+            &semantic_freeze::overlay_for_tests(&crate::compiler::BytecodeCompiler::new()),
         )
         .expect_err("a segment/splice count mismatch must reject");
         assert!(
@@ -2183,6 +2508,7 @@ mod extend_method_producer_tests {
             "answer",
             &KindedSlot::from_string("int"),
             &KindedSlot::from_int(42),
+            &semantic_freeze::overlay_for_tests(&crate::compiler::BytecodeCompiler::new()),
         )
         .expect("valid int literal body assembles");
         assert!(matches!(extend_method_literal_body(&item), Literal::Int(42)));
@@ -2201,6 +2527,7 @@ mod extend_method_producer_tests {
             "ratio",
             &KindedSlot::from_string("number"),
             &KindedSlot::from_number(3.5),
+            &semantic_freeze::overlay_for_tests(&crate::compiler::BytecodeCompiler::new()),
         )
         .expect("valid number literal body assembles");
         assert!(matches!(extend_method_literal_body(&item), Literal::Number(n) if n == 3.5));
@@ -2214,6 +2541,7 @@ mod extend_method_producer_tests {
             "enabled",
             &KindedSlot::from_string("bool"),
             &KindedSlot::from_bool(true),
+            &semantic_freeze::overlay_for_tests(&crate::compiler::BytecodeCompiler::new()),
         )
         .expect("valid bool literal body assembles");
         assert!(matches!(extend_method_literal_body(&item), Literal::Bool(true)));
@@ -2227,6 +2555,7 @@ mod extend_method_producer_tests {
             "greeting",
             &KindedSlot::from_string("string"),
             &KindedSlot::from_string("hello"),
+            &semantic_freeze::overlay_for_tests(&crate::compiler::BytecodeCompiler::new()),
         )
         .expect("valid string literal body assembles");
         assert!(matches!(extend_method_literal_body(&item), Literal::String(s) if s == "hello"));
@@ -2242,6 +2571,7 @@ mod extend_method_producer_tests {
             "not a method",
             &KindedSlot::from_string("int"),
             &KindedSlot::from_int(42),
+            &semantic_freeze::overlay_for_tests(&crate::compiler::BytecodeCompiler::new()),
         )
         .expect_err("a non-identifier method name must reject");
         assert!(
@@ -2259,6 +2589,7 @@ mod extend_method_producer_tests {
             "ratio",
             &KindedSlot::from_string("number"),
             &KindedSlot::from_number(f64::INFINITY),
+            &semantic_freeze::overlay_for_tests(&crate::compiler::BytecodeCompiler::new()),
         )
         .expect_err("a non-finite number literal must reject");
         assert!(
@@ -2313,6 +2644,576 @@ mod replace_body_carrier_tests {
         let resolved = comptime_replace_body_at(0).expect("live in this run");
         assert_eq!(resolved, body_b, "index 0 resolves to THIS run's body");
         assert_ne!(resolved, body_a, "no stale body leaks across the per-run clear");
+    }
+}
+
+// ADR-009 E1 #17 (slice 3, U01): the literal-type carrier store + the consumer's
+// Int64-index branch. Same lifecycle discipline as the replace-body carrier
+// above; these pin the typed transport that replaces the serialize/reparse JSON
+// round-trip for literal `set param x: T` / `set return T`.
+#[cfg(test)]
+mod e1_literal_type_carrier_tests {
+    use super::*;
+    use shape_ast::ast::TypeAnnotation;
+
+    #[test]
+    fn literal_type_carrier_index_restarts_per_run_no_stale_leak() {
+        let a = TypeAnnotation::Basic("int".to_string());
+        let b = TypeAnnotation::Basic("string".to_string());
+        assert_ne!(a, b);
+
+        clear_comptime_directive_types();
+        assert_eq!(push_comptime_directive_type(a.clone()), 0);
+        assert_eq!(comptime_directive_type_at(0).as_ref(), Some(&a));
+
+        clear_comptime_directive_types();
+        assert_eq!(
+            push_comptime_directive_type(b.clone()),
+            0,
+            "index restarts per run"
+        );
+        let resolved = comptime_directive_type_at(0).expect("live in this run");
+        assert_eq!(resolved, b, "index 0 resolves to THIS run's type");
+        assert_ne!(resolved, a, "no stale type leaks across the per-run clear");
+    }
+
+    #[test]
+    fn literal_type_index_resolves_through_the_consumer_without_reparse() {
+        // The emit side pushes the typed annotation and bakes its index; the
+        // consumer fetches it from an Int64 slot — the exact new U01 path.
+        clear_comptime_directive_types();
+        let ann = TypeAnnotation::Basic("int".to_string());
+        let index = push_comptime_directive_type(ann.clone());
+        let slot = KindedSlot::from_int(index as i64);
+        let resolved = type_annotation_from_string_or_type_ref_slot(
+            &slot,
+            "__emit_set_param_type",
+            &semantic_freeze::overlay_for_tests(&crate::compiler::BytecodeCompiler::new()),
+        )
+        .expect("Int64 index resolves to the stored typed annotation");
+        assert_eq!(resolved, ann);
+    }
+
+    #[test]
+    fn missing_literal_type_index_is_a_named_error_not_a_panic() {
+        clear_comptime_directive_types();
+        let slot = KindedSlot::from_int(99);
+        let err = type_annotation_from_string_or_type_ref_slot(
+            &slot,
+            "__emit_set_return_type",
+            &semantic_freeze::overlay_for_tests(&crate::compiler::BytecodeCompiler::new()),
+        )
+        .expect_err("an out-of-range index is a named error");
+        assert!(err.contains("index 99"), "got: {err}");
+    }
+}
+
+// ADR-009 E1 #17 (slice 4): the direct-block extend carrier store. Same per-run,
+// compile-populated lifecycle as the literal-type and replace-body carriers.
+#[cfg(test)]
+mod e1_extend_carrier_tests {
+    use super::*;
+
+    fn extend_of(src: &str) -> shape_ast::ast::ExtendStatement {
+        shape_ast::parse_program(src)
+            .expect("fixture parses")
+            .items
+            .into_iter()
+            .find_map(|item| match item {
+                shape_ast::ast::Item::Extend(extend, _) => Some(extend),
+                _ => None,
+            })
+            .expect("fixture has one extend statement")
+    }
+
+    #[test]
+    fn extend_carrier_index_restarts_per_run_no_stale_leak() {
+        let a = extend_of("extend A { fn m(self) -> int { 1 } }");
+        let b = extend_of("extend B { fn m(self) -> int { 2 } }");
+        assert_ne!(a, b);
+
+        clear_comptime_extend_statements();
+        assert_eq!(push_comptime_extend_statement(a.clone()), 0);
+        assert_eq!(comptime_extend_statement_at(0).as_ref(), Some(&a));
+
+        clear_comptime_extend_statements();
+        assert_eq!(
+            push_comptime_extend_statement(b.clone()),
+            0,
+            "index restarts per run"
+        );
+        let resolved = comptime_extend_statement_at(0).expect("live in this run");
+        assert_eq!(resolved, b, "index 0 resolves to THIS run's extend");
+        assert_ne!(resolved, a, "no stale extend leaks across the per-run clear");
+    }
+
+    #[test]
+    fn missing_extend_index_resolves_to_none() {
+        clear_comptime_extend_statements();
+        assert!(comptime_extend_statement_at(7).is_none());
+    }
+}
+
+// ADR-009 E1 #17 slice-5 A-FULL — STOP-shaped composite-boundary pins (E1-D7).
+//
+// Stage 1 locks the RULED A-FULL reconstructable frontier in-code. The
+// descriptor algebra reconstructs primitive leaves + Never + base `any` +
+// Tuple + Reference + Union + Callable(round-tripping); every nominal-headed
+// form (applied generics `Array<int>`/`Option<T>`/`HashMap`, records, bare
+// user-nominals, un-applied heads) is a NAMED rejection at `payload_of`, NOT
+// reconstructable in E1. Applied generics are therefore STAMP-GATED to
+// unstamped (identity = INVALID) → the existing `__ComptimeTypeRef.source`
+// reparse arm (LIVE for unstamped refs; deletion bound to B4/B5 → E5 per
+// E1-D8), which is exactly
+// E1-D7(a) unstamped-fall-through + E1-D7(c) "every variant handled OR a named
+// error" (the nominal-headed variants ARE handled — as named errors).
+//
+// Plain `#[cfg(test)]` (NOT deep-tests-gated) so the standard supervisor gate
+// runs them (E2 finding 5: pins in a deep-tests-gated module never run). No
+// production code changes this stage, so all recorded baselines are unmoved by
+// construction.
+#[cfg(test)]
+mod e1_s5_boundary {
+    use super::semantic_freeze::overlay_for_tests;
+    use super::type_reflection::payloads::{self, FrozenPayloadDescriptor};
+    use crate::compiler::BytecodeCompiler;
+    use shape_ast::ast::TypeAnnotation;
+
+    // The strengthened successor to the retired slice-0 PIN4 (which only
+    // asserted `identity_of("Array<int>").is_none()`). `Array<int>`
+    // canonicalizes CLEANLY to a Nominal identity — the boundary is at payload
+    // issuance, not canonicalization: `payload_of` routes the site-interned
+    // Nominal to `substituted_applied_nominal(head, args)`, which returns `None`
+    // for a builtin generic head (no frozen struct field annotations to
+    // substitute) → the NAMED `applied_nominal_pending_rejection`. This proves
+    // applied generics are stamp-gated to the `.source` reparse arm, NOT
+    // reconstructable in E1 (applied-nominal substitution is B4/B5, out of E1).
+    #[test]
+    fn e1_s5_applied_nominal_is_pending_rejection_not_reconstructable() {
+        let overlay = overlay_for_tests(&BytecodeCompiler::new());
+        // `Array<int>` as the compiler sees it at from_function/from_type — a
+        // real `TypeAnnotation`, built directly to avoid any grammar dependence.
+        // `TypeAnnotation::Array(int)` routes through `canonical_applied`
+        // (type_reflection.rs:976-977), identical to `Generic{"Array",[int]}`.
+        let array_int = TypeAnnotation::Array(Box::new(TypeAnnotation::Basic("int".to_string())));
+
+        let identity = overlay
+            .canonicalize_type_projection(&array_int)
+            .expect("Array<int> canonicalizes to a Nominal identity")
+            .identity();
+
+        match overlay.payload_of(identity) {
+            Err(message) => assert_eq!(
+                message,
+                payloads::applied_nominal_pending_rejection(),
+                "Array<int> must be the NAMED applied-nominal-pending rejection \
+                 (stamp-gated to the .source reparse arm), never a silent gap"
+            ),
+            Ok(descriptor) => panic!(
+                "Array<int> must NOT reconstruct via the descriptor algebra in E1 \
+                 (applied-generic substitution is B4/B5, out of E1's footprint); \
+                 got {descriptor:?}"
+            ),
+        }
+    }
+
+    // The POSITIVE boundary: a `Tuple[int, string]` reconstructs via the
+    // descriptor algebra — `payload_of` returns `Tuple` with two ordered
+    // element identities that each themselves `payload_of` to `Primitive`. This
+    // locks the reconstructable frontier stage 2's total reconstruction fn
+    // targets, and proves composites-that-round-trip (Tuple) are INSIDE A-FULL
+    // while applied nominals (above) are not.
+    #[test]
+    fn e1_s5_tuple_int_string_reconstructs_via_descriptor() {
+        let overlay = overlay_for_tests(&BytecodeCompiler::new());
+        let tuple_int_string = TypeAnnotation::Tuple(vec![
+            TypeAnnotation::Basic("int".to_string()),
+            TypeAnnotation::Basic("string".to_string()),
+        ]);
+
+        let identity = overlay
+            .canonicalize_type_projection(&tuple_int_string)
+            .expect("[int, string] canonicalizes to a Tuple identity")
+            .identity();
+
+        let elements = match overlay.payload_of(identity) {
+            Ok(FrozenPayloadDescriptor::Tuple(descriptor)) => descriptor.elements,
+            other => panic!(
+                "[int, string] must reconstruct as a Tuple descriptor (inside the \
+                 A-FULL reconstructable frontier); got {other:?}"
+            ),
+        };
+        assert_eq!(
+            elements.len(),
+            2,
+            "the tuple carries its two ordered element identities"
+        );
+
+        for element in elements {
+            assert!(
+                matches!(
+                    overlay.payload_of(element),
+                    Ok(FrozenPayloadDescriptor::Primitive(_))
+                ),
+                "each tuple element is a primitive leaf that itself reconstructs \
+                 off its own descriptor (int / string)"
+            );
+        }
+    }
+}
+
+// ADR-009 E1 #17 slice-5 A-FULL — STAGE 2 reconstruction pins (E1-D7(b)/(c)).
+//
+// The total inverse (`reconstruct_type_annotation`) exercised directly. These
+// keep the (still-unwired, stage-4-live) reconstruction fn `used` and lock:
+// (1) primitive inversion returns the ONE table's canonical (names[0]) spelling
+// — a synonym reconstructs to its family head, never the input spelling
+// (E1-D7(c) "one name table, inverted"); (2) composites recurse the descriptor
+// algebra (Tuple → element identities → primitives); (3) TOTALITY — every
+// non-reconstructable identity (applied nominal, record, bare generic head) is
+// a NAMED `ShapeError::SemanticError`, no panic, no catch-all silent arm. All
+// three are plain `#[cfg(test)]` so the standard supervisor gate runs them.
+//
+// STAGE 2 is behavior-preserving: the live directive consumer still reparses
+// `.source` (every producer stamp is INVALID this stage), so no baseline moves.
+#[cfg(test)]
+mod e1_s5_reconstruction {
+    use super::reconstruct_type_annotation;
+    use super::semantic_freeze::overlay_for_tests;
+    use super::type_reflection::payloads;
+    use crate::compiler::BytecodeCompiler;
+    use shape_ast::ast::{ObjectTypeField, TypeAnnotation};
+    use shape_ast::error::ShapeError;
+
+    // PIN (c). A frozen PRIMITIVE reconstructs to the ONE
+    // `PRIMITIVE_SYNONYM_FAMILIES` table's canonical (`names[0]`) spelling —
+    // proven by feeding a SYNONYM (`str`, `i64`, `f64`) and getting the family
+    // HEAD back (`string`, `int`, `number`), never the input spelling. This is
+    // the "no second name table" obligation made observable: the forward
+    // classifier and the reverse speller share the ONE table.
+    #[test]
+    fn e1_s5_reconstruct_primitive_inverts_synonym_family_to_canonical() {
+        let overlay = overlay_for_tests(&BytecodeCompiler::new());
+        // (input spelling, expected canonical head). The four families the
+        // stage instructions name — String / Bool / SignedInteger(W64) /
+        // BinaryFloat(W64) — each probed via a synonym that differs from its
+        // head where one exists.
+        let cases = [
+            ("string", "string"),
+            ("str", "string"),
+            ("bool", "bool"),
+            ("int", "int"),
+            ("i64", "int"),
+            ("number", "number"),
+            ("f64", "number"),
+            ("float", "number"),
+        ];
+        for (input, canonical) in cases {
+            let identity = overlay
+                .canonicalize_type(&TypeAnnotation::Basic(input.to_string()))
+                .unwrap_or_else(|error| panic!("leaf '{input}' canonicalizes: {error}"));
+            let reconstructed = reconstruct_type_annotation(&overlay, identity)
+                .unwrap_or_else(|error| panic!("leaf '{input}' reconstructs: {error:?}"));
+            assert_eq!(
+                reconstructed,
+                TypeAnnotation::Basic(canonical.to_string()),
+                "primitive '{input}' must reconstruct to its family's canonical \
+                 spelling '{canonical}' (names[0]), not the input spelling"
+            );
+        }
+    }
+
+    // PIN (composite). `[int, string]` reconstructs by recursing the Tuple
+    // descriptor's ordered element identities — each element itself
+    // reconstructs off its own primitive descriptor. The composite round-trips
+    // to the byte-identical annotation, proving the algebra recurses TOTALLY
+    // (not just at the leaf).
+    #[test]
+    fn e1_s5_reconstruct_tuple_recurses_element_identities() {
+        let overlay = overlay_for_tests(&BytecodeCompiler::new());
+        let tuple = TypeAnnotation::Tuple(vec![
+            TypeAnnotation::Basic("int".to_string()),
+            TypeAnnotation::Basic("string".to_string()),
+        ]);
+        let identity = overlay
+            .canonicalize_type(&tuple)
+            .expect("[int, string] canonicalizes to a Tuple identity");
+        let reconstructed =
+            reconstruct_type_annotation(&overlay, identity).expect("[int, string] reconstructs");
+        assert_eq!(
+            reconstructed,
+            TypeAnnotation::Tuple(vec![
+                TypeAnnotation::Basic("int".to_string()),
+                TypeAnnotation::Basic("string".to_string()),
+            ]),
+            "the Tuple reconstructs by recursing its two element identities"
+        );
+    }
+
+    // PIN (d) TOTALITY. Every non-reconstructable identity yields a NAMED
+    // `ShapeError::SemanticError` — no panic, no catch-all silent arm (E1-D7(c)):
+    // (1) an APPLIED nominal (`Array<int>`) surfaces the freeze's own
+    // applied-nominal-pending rejection through `?`; (2) a structural RECORD
+    // (`{x, y}`) hits the reconstruction's named record arm (field names are
+    // one-way-hashed); (3) a BARE generic head (`Array`) surfaces the freeze's
+    // un-applied-head rejection. Each stamp-gates to the `.source` reparse arm.
+    #[test]
+    fn e1_s5_reconstruct_covers_frozen_payload_descriptor_totally() {
+        let overlay = overlay_for_tests(&BytecodeCompiler::new());
+
+        // (1) Applied nominal — Err propagated from `payload_of` via `?`.
+        let array_int = TypeAnnotation::Array(Box::new(TypeAnnotation::Basic("int".to_string())));
+        let applied_identity = overlay
+            .canonicalize_type(&array_int)
+            .expect("Array<int> canonicalizes");
+        match reconstruct_type_annotation(&overlay, applied_identity) {
+            Err(ShapeError::SemanticError { message, .. }) => assert_eq!(
+                message,
+                payloads::applied_nominal_pending_rejection(),
+                "Array<int> reconstruction surfaces the applied-nominal-pending named error"
+            ),
+            other => panic!("Array<int> must be a named SemanticError, got {other:?}"),
+        }
+
+        // (2) Structural record — the reconstruction's own named record arm.
+        let record = TypeAnnotation::Object(vec![
+            ObjectTypeField {
+                name: "x".to_string(),
+                optional: false,
+                type_annotation: TypeAnnotation::Basic("int".to_string()),
+                annotations: Vec::new(),
+            },
+            ObjectTypeField {
+                name: "y".to_string(),
+                optional: false,
+                type_annotation: TypeAnnotation::Basic("string".to_string()),
+                annotations: Vec::new(),
+            },
+        ]);
+        let record_identity = overlay
+            .canonicalize_type(&record)
+            .expect("{x: int, y: string} canonicalizes to a Record identity");
+        match reconstruct_type_annotation(&overlay, record_identity) {
+            Err(ShapeError::SemanticError { message, .. }) => assert!(
+                message.contains("record"),
+                "a Record reconstructs to a named record rejection, got: {message}"
+            ),
+            other => panic!("a Record must be a named SemanticError, got {other:?}"),
+        }
+
+        // (3) Bare generic head — Err propagated from `payload_of` via `?`.
+        let bare_head = TypeAnnotation::Basic("Array".to_string());
+        let head_identity = overlay
+            .canonicalize_type(&bare_head)
+            .expect("bare `Array` head canonicalizes to a Nominal identity");
+        match reconstruct_type_annotation(&overlay, head_identity) {
+            Err(ShapeError::SemanticError { message, .. }) => assert_eq!(
+                message,
+                payloads::unapplied_generic_head_rejection(),
+                "a bare generic head reconstruction surfaces the un-applied-head named error"
+            ),
+            other => panic!("a bare generic head must be a named SemanticError, got {other:?}"),
+        }
+    }
+}
+
+// ADR-009 E1 #17 slice-5 A-FULL — STAGE 5 route-proof pins (E1-D7(a)/(b)/(c)).
+//
+// The consumer flip (stage 4) is LIVE: a STAMPED `__ComptimeTypeRef` resolves
+// identity-only via `reconstruct_type_annotation`, never `.source`. These four
+// pins prove the ROUTE the live resolver actually takes, by stamping a real
+// identity onto a ref whose `.source` is UNPARSEABLE — a green result can then
+// ONLY have come from the identity path (a `.source` reparse of
+// "###unparseable###" would error). Plain `#[cfg(test)]` (NOT deep-tests-gated)
+// so the standard supervisor gate runs them (E2 finding 5: pins in a
+// deep-tests-gated module never run under the default gate). No production code
+// changes this stage, so every recorded baseline is unmoved by construction.
+#[cfg(test)]
+mod e1_s5_route_proof {
+    use super::reconstruct_type_annotation;
+    use super::semantic_freeze::overlay_for_tests;
+    use super::type_annotation_from_string_or_type_ref_slot;
+    use super::FrozenTypeIdentity;
+    use crate::compiler::comptime_target::build_type_ref_descriptor;
+    use crate::compiler::BytecodeCompiler;
+    use shape_ast::ast::TypeAnnotation;
+    use shape_ast::error::ShapeError;
+
+    // (a) LEAF identity route. A `__ComptimeTypeRef` stamped with `string`'s
+    // frozen identity but an UNPARSEABLE `.source` resolves to `Basic("string")`
+    // — success PROVES the identity route fired, because a `.source` reparse of
+    // "###unparseable###" would error. This is the unit-tier witness for the
+    // byte-identical corpus flip (leaf `string` now resolves via identity).
+    #[test]
+    fn e1_s5_leaf_identity_route_resolves_past_garbage_source() {
+        let overlay = overlay_for_tests(&BytecodeCompiler::new());
+        let identity = overlay
+            .canonicalize_type(&TypeAnnotation::Basic("string".to_string()))
+            .expect("`string` canonicalizes to a leaf identity");
+        let slot = build_type_ref_descriptor("###unparseable###", None, Some(identity));
+        let resolved =
+            type_annotation_from_string_or_type_ref_slot(&slot, "__emit_set_return_type", &overlay)
+                .expect("a stamped leaf ref resolves via identity, not the garbage source");
+        assert_eq!(
+            resolved,
+            TypeAnnotation::Basic("string".to_string()),
+            "the identity route reconstructs the canonical leaf, past the unparseable source"
+        );
+    }
+
+    // (b) COMPOSITE identity route + shared-overlay (unit tier). A
+    // `__ComptimeTypeRef` stamped with `[int, string]`'s composite identity plus
+    // a garbage source resolves to the byte-identical Tuple — ON THE SAME overlay
+    // the identity was minted from (the composite payload lives in that Arc's
+    // per-instance `composites` memo, so a DIFFERENT overlay could not answer
+    // `payload_of`). Green proves BOTH the composite route AND the shared-overlay
+    // requirement at the unit tier; the Tuple e2e is the integration canary for
+    // the same property across the real handler path.
+    #[test]
+    fn e1_s5_composite_identity_route_resolves_past_garbage_source() {
+        let overlay = overlay_for_tests(&BytecodeCompiler::new());
+        let tuple = TypeAnnotation::Tuple(vec![
+            TypeAnnotation::Basic("int".to_string()),
+            TypeAnnotation::Basic("string".to_string()),
+        ]);
+        // `canonicalize_type_projection` (NOT bare `canonicalize_type`) is the
+        // producer's own stamp-site call: it BOTH computes the identity AND
+        // interns the composite payload into this overlay's `composites` memo,
+        // exactly as `stamp_for` does — the same shared-overlay evidence the
+        // consumer's `payload_of` then reads.
+        let identity = overlay
+            .canonicalize_type_projection(&tuple)
+            .expect("[int, string] canonicalizes + interns its composite payload")
+            .identity();
+        let slot = build_type_ref_descriptor("###unparseable###", None, Some(identity));
+        let resolved =
+            type_annotation_from_string_or_type_ref_slot(&slot, "__emit_set_return_type", &overlay)
+                .expect("a stamped composite ref resolves via identity off the SAME overlay");
+        assert_eq!(
+            resolved,
+            TypeAnnotation::Tuple(vec![
+                TypeAnnotation::Basic("int".to_string()),
+                TypeAnnotation::Basic("string".to_string()),
+            ]),
+            "the composite route recurses the Tuple element identities, past the garbage source"
+        );
+    }
+
+    // (c) ANTI-WALK-BACK sentinel (E1-D7(a)). A STAMPED-but-never-frozen identity
+    // is a NAMED `ShapeError::SemanticError` — NOT `Ok`, NOT a silent `.source`
+    // reparse. `reconstruct_type_annotation` is called directly (the exact fn the
+    // live resolver invokes on a stamped ref) with an identity the overlay never
+    // issued; `payload_of` rejects it with its named unknown-identity error,
+    // surfaced as a typed SemanticError. This is the canonical stamped->reparse
+    // walk-back refusal made a test: a stamped identity NEVER falls back.
+    #[test]
+    fn e1_s5_stamped_unresolvable_identity_is_named_semantic_error_no_fallback() {
+        let overlay = overlay_for_tests(&BytecodeCompiler::new());
+        // A fabricated identity the freeze never issued (SHA-256 prefixes are not
+        // 0xDEAD/0xBEEF), and NOT the INVALID sentinel — a genuinely STAMPED ref.
+        let fabricated = FrozenTypeIdentity {
+            high: 0xDEAD,
+            low: 0xBEEF,
+        };
+        assert_ne!(
+            fabricated,
+            FrozenTypeIdentity::INVALID,
+            "the sentinel must be a STAMPED identity, not INVALID"
+        );
+        match reconstruct_type_annotation(&overlay, fabricated) {
+            Err(ShapeError::SemanticError { .. }) => {}
+            other => panic!(
+                "a stamped-but-unresolvable identity must be a NAMED SemanticError with NO \
+                 fallback to reparse (E1-D7(a)); got {other:?}"
+            ),
+        }
+    }
+
+    // (d) UNSTAMPED (INVALID) ref falls through to the `.source` reparse arm,
+    // byte-for-byte. An `identity == INVALID` ref with a VALID source resolves
+    // via the reparse arm; the negative sub-case (INVALID + GARBAGE source) still
+    // Errs — proving the reparse arm is GENUINELY reached and live, not shadowed
+    // by an always-on identity path. This is the legacy path the unstamped/legacy
+    // refs still use — LIVE until B4/B5 → E5 (E1-D8 stamp-gate residual).
+    #[test]
+    fn e1_s5_unstamped_typeref_falls_through_to_source_arm_bytewise() {
+        let overlay = overlay_for_tests(&BytecodeCompiler::new());
+
+        // INVALID stamp (None identity) + valid source -> reparse arm -> Basic.
+        let valid = build_type_ref_descriptor("string", None, None);
+        let resolved = type_annotation_from_string_or_type_ref_slot(
+            &valid,
+            "__emit_set_return_type",
+            &overlay,
+        )
+        .expect("an unstamped ref with a valid source resolves via the reparse arm");
+        assert_eq!(resolved, TypeAnnotation::Basic("string".to_string()));
+
+        // INVALID stamp + GARBAGE source -> the reparse arm is genuinely reached
+        // and Errs (an always-on identity path would never surface a parse error).
+        let garbage = build_type_ref_descriptor("###unparseable###", None, None);
+        let err = type_annotation_from_string_or_type_ref_slot(
+            &garbage,
+            "__emit_set_return_type",
+            &overlay,
+        )
+        .expect_err("an unstamped ref with a garbage source Errs through the live reparse arm");
+        assert!(
+            err.contains("###unparseable###") || err.to_lowercase().contains("parse"),
+            "the error is the reparse arm's own parse failure, got: {err}"
+        );
+    }
+
+    // (e) ANTI-WALK-BACK sentinel THROUGH THE FULL CONSUMER (E1-D7(a)). The
+    // strengthened companion to pin (c): where (c) calls
+    // `reconstruct_type_annotation` DIRECTLY, this drives the WHOLE
+    // `type_annotation_from_string_or_type_ref_slot` consumer with a slot that
+    // is (i) STAMPED — identity != INVALID, so the consumer takes the identity
+    // reconstruct branch (comptime_builtins.rs:490-492) — AND (ii) carries a
+    // VALID, parseable `.source` ("int"). The fabricated identity was never
+    // frozen, so reconstruct Errs; the consumer MUST surface that Err and MUST
+    // NOT fall back to reparsing the valid `.source` arm (:493-494). If a future
+    // edit turned the reconstruct-failure into a `.source` fallback, "int" would
+    // reparse to `Ok(Basic("int"))` and this `expect_err` would fire — catching
+    // the canonical stamped->reparse walk-back that pin (c) cannot see (its slot
+    // has no valid source, and it bypasses the consumer's branch ordering). The
+    // VALID `.source` is the load-bearing difference from pin (c): here a
+    // walk-back WOULD succeed, so an `Ok` is unambiguous proof of the walk-back.
+    #[test]
+    fn e1_s5_stamped_unresolvable_ref_errs_through_full_consumer_never_reparses_valid_source() {
+        let overlay = overlay_for_tests(&BytecodeCompiler::new());
+        // A fabricated identity the freeze never issued (SHA-256 prefixes are not
+        // 0xDEAD/0xBEEF), and NOT the INVALID sentinel — a genuinely STAMPED ref.
+        let fabricated = FrozenTypeIdentity {
+            high: 0xDEAD,
+            low: 0xBEEF,
+        };
+        assert_ne!(
+            fabricated,
+            FrozenTypeIdentity::INVALID,
+            "the sentinel must be a STAMPED identity, not INVALID"
+        );
+        // `.source = "int"` is a fully VALID, reparseable type payload: the
+        // `.source` fallback arm WOULD answer `Ok(Basic("int"))` if the consumer
+        // ever reached it. A stamped ref must not.
+        let slot = build_type_ref_descriptor("int", None, Some(fabricated));
+        let err = type_annotation_from_string_or_type_ref_slot(
+            &slot,
+            "__emit_set_return_type",
+            &overlay,
+        )
+        .expect_err(
+            "a stamped-but-unresolvable ref must Err through the FULL consumer, never silently \
+             reparse the valid .source (E1-D7(a) stamped->reparse walk-back refusal)",
+        );
+        // The surfaced String is reconstruct's named unknown-identity rejection
+        // (`payload_of` -> `category_for_identity`), NOT a reparse of "int" — a
+        // reparse would have been `Ok`, never an error mentioning the identity.
+        assert!(
+            err.to_lowercase().contains("identity"),
+            "the error must be the identity-route's named rejection, not a .source reparse; \
+             got: {err}"
+        );
     }
 }
 

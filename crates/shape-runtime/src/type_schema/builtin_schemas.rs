@@ -405,10 +405,19 @@ pub fn register_builtin_schemas(registry: &mut TypeSchemaRegistry) -> BuiltinSch
         .int_field("comptime_api")
         .register(registry);
 
+    // ADR-009 E1 #17 (slice 5, A-FULL): `identity_high`/`identity_low` carry the
+    // producer-stamped `FrozenTypeIdentity` (INVALID = {-1,-1} for an unstamped
+    // ref). Appended LAST so the existing name-keyed field offsets
+    // (name=0, kind=1, source=2) stay stable and every name-keyed reader is
+    // unaffected. Distinct from `COMPTIME_FROZEN_TYPE_REF_SCHEMA` (below): that
+    // is the `type_ref(T)` intrinsic's opaque frozen ref; THIS is the
+    // annotation-handler `target.params[].type_ref` carrier the U02 corpus reads.
     let _comptime_type_ref = TypeSchemaBuilder::new("__ComptimeTypeRef")
         .string_field("name")
         .string_field("kind")
         .string_field("source")
+        .int_field("identity_high")
+        .int_field("identity_low")
         .register(registry);
 
     let _frozen_type_category = registry.register_enum_scoped(

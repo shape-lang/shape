@@ -336,6 +336,78 @@ print(join("type", "ref"))
     .expect_output("typeref");
 }
 
+// ADR-009 E1 #17 slice-5 A-FULL composite e2e (integration canary). A
+// `set return (target.params[0].type_ref)` where param 0 is an inline TUPLE
+// `[int, int]` — a reconstructable STRUCTURAL composite (NOT `Array<int>`,
+// proven non-reconstructable in E1 / stage 1; using it would force a forbidden
+// silent fallback). A tuple is treated uniformly by the freeze canonicalizer
+// regardless of element homogeneity (`FrozenTypeCategory::Tuple` with ordered
+// element identities, type_reflection.rs), so `[int, int]` routes the composite
+// IDENTITY path exactly as the heterogeneous form does — but `[int, int]` is
+// also a constructible runtime VALUE (`[3, 4]`), while a heterogeneous tuple
+// value is rejected (bracket VALUEs are homogeneous-only). The handler runs at
+// compile time: the producer (stage 3) stamps the tuple type_ref with its
+// composite identity into the ONE shared `Arc<FreezeOverlay>`, and the consumer
+// (stage 4) resolves it identity-only off that SAME overlay back to `[int, int]`.
+// If the shared-overlay plumbing were wrong the composite identity would not
+// round-trip and this fails LOUDLY at compile time (E1-D7(a): no `.source`
+// fallback) while the leaf corpus stays green — the exact differential the canary
+// exists for.
+#[test]
+fn set_return_accepts_composite_type_ref_expression() {
+    ShapeTest::new(
+        r#"
+annotation return_like_first_param() {
+  targets: [function]
+  comptime post(target, ctx) {
+    set return (target.params[0].type_ref)
+  }
+}
+
+@return_like_first_param()
+fn echo(value: [int, int]) {
+  value
+}
+
+let arg: [int, int] = [7, 9]
+let pair = echo(arg)
+print(pair[1])
+"#,
+    )
+    .expect_run_ok()
+    .expect_output("9");
+}
+
+// The `set param` sibling: `set param left: (target.params[1].type_ref)` where
+// param 1 `right` is the inline TUPLE `[int, int]`. `left` (initially
+// unannotated) is retyped to the composite via the identity route, then indexed
+// as a tuple in the body. Same shared-overlay canary on the PARAM producer path
+// (functions_annotations.rs site) rather than the return path.
+#[test]
+fn set_param_type_accepts_composite_type_ref_expression() {
+    ShapeTest::new(
+        r#"
+annotation first_param_like_second() {
+  targets: [function]
+  comptime post(target, ctx) {
+    set param left: (target.params[1].type_ref)
+  }
+}
+
+@first_param_like_second()
+fn pick(left, right: [int, int]) -> int {
+  left[1]
+}
+
+let a: [int, int] = [1, 42]
+let b: [int, int] = [2, 3]
+print(pick(a, b))
+"#,
+    )
+    .expect_run_ok()
+    .expect_output("42");
+}
+
 #[test]
 fn duplicate_annotation_application_is_compile_error() {
     // Q47 / §4.1.1: applying the same annotation twice to one target is a v1

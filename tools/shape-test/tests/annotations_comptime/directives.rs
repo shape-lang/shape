@@ -71,7 +71,10 @@ fn add(x: int) -> int {
 print(add(5))
 "#,
     )
-    .expect_run_err_contains("unknown parameter 'missing'");
+    // E1-D4 (slice 2): the analysis pre-pass now resolves the param spelling
+    // against the frozen callable and fails closed with [C0930] BEFORE pass-2's
+    // "unknown parameter" message — a still-a-compile-error message change.
+    .expect_run_err_contains("[C0930]");
 }
 
 #[test]
@@ -292,4 +295,111 @@ print(answer())
 "#,
     )
     .expect_run_err_contains("only valid when compiling module targets");
+}
+
+// ADR-009 E1 #17 (slice 3, U01): literal `set param x: T` / `set return T`
+// travel end-to-end over the typed store+index transport (no JSON round-trip).
+// These exercise the full emit->store->exec->apply path; a regression here means
+// the typed carrier lost the literal type.
+
+#[test]
+fn set_param_type_literal_applies_via_typed_transport() {
+    ShapeTest::new(
+        r#"
+annotation typed_param() {
+  targets: [function]
+  comptime post(target, ctx) {
+    set param x: int
+  }
+}
+
+@typed_param()
+fn identity(x) -> int {
+  x
+}
+
+print(identity(7))
+"#,
+    )
+    .expect_run_ok()
+    .expect_output("7");
+}
+
+#[test]
+fn set_return_type_literal_applies_via_typed_transport() {
+    ShapeTest::new(
+        r#"
+annotation typed_return() {
+  targets: [function]
+  comptime post(target, ctx) {
+    set return int
+  }
+}
+
+@typed_return()
+fn answer() {
+  42
+}
+
+print(answer())
+"#,
+    )
+    .expect_run_ok()
+    .expect_output("42");
+}
+
+// ADR-009 E1 #17 (slice 4): a direct-block `extend Type { … }` in a comptime
+// handler travels end-to-end over the typed store+index transport (no JSON
+// round-trip). Capture-free method bodies keep these off the JITExecutor
+// empty-capture debt; calling the generated method proves it was added (a
+// missing method would be a run error), so `expect_run_ok` + the call is the
+// load-bearing assertion, `expect_output` the value check.
+
+#[test]
+fn direct_block_extend_adds_callable_method_via_typed_transport() {
+    ShapeTest::new(
+        r#"
+annotation add_label() {
+  targets: [type]
+  comptime post(target, ctx) {
+    extend target {
+      method label() { "direct block" }
+    }
+  }
+}
+
+@add_label()
+type Widget { id: int }
+
+let w = Widget { id: 1 }
+print(w.label())
+"#,
+    )
+    .expect_run_ok()
+    .expect_output("direct block");
+}
+
+#[test]
+fn direct_block_extend_multiple_methods_via_typed_transport() {
+    ShapeTest::new(
+        r#"
+annotation add_ops() {
+  targets: [type]
+  comptime post(target, ctx) {
+    extend target {
+      method doubled() { self.n * 2 }
+      method tripled() { self.n * 3 }
+    }
+  }
+}
+
+@add_ops()
+type Counter { n: int }
+
+let c = Counter { n: 7 }
+print(c.doubled() + c.tripled())
+"#,
+    )
+    .expect_run_ok()
+    .expect_output("35");
 }
