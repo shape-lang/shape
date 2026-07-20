@@ -2364,7 +2364,10 @@ pub(super) fn build_type_info_heap_value(
                 .collect()
         })
         .unwrap_or_default();
-    let fields = comptime_target::build_field_descriptor_array(&field_rows)
+    // E1 slice-5: the `type_info(T).fields` reflection surface is out of the U02
+    // annotation-handler stamp scope; pass no overlay/ASTs so its `type_ref`
+    // rows stay INVALID (→ `.source`), behavior-identical to before.
+    let fields = comptime_target::build_field_descriptor_array(&field_rows, None, &[])
         .map_err(|error| format!("failed to build type_info fields for '{type_name}': {error}"))?;
     typed_slot_into_heap_value(typed_object_for_named_schema(
         "__ComptimeTypeInfo",

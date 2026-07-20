@@ -4130,10 +4130,17 @@ impl BytecodeCompiler {
                     // (same ann node, same handler AST, same ComptimeTarget
                     // inputs) — one identity across both phases.
                     let expansion_site = self.annotation_expansion_site(ann, &handler, &target);
+                    // ADR-009 E1 #17 (slice 5): ONE overlay acquired before
+                    // `to_nanboxed` stamps this type target's field `type_ref`
+                    // identities (producer stamp-gate), is REUSED for the Dec-56
+                    // `access_identity` mint below, AND is threaded into the
+                    // handler executor — one acquisition, one shared composite
+                    // memo the consumer resolves against.
+                    let freeze = self.comptime_freeze_overlay()?;
                     // R8 W9 G.2 Step 2 Bucket 7: to_nanboxed now returns
                     // Result; surface the V3-S5 ckpt-5 SURFACE through the
                     // caller's Result chain instead of panicking.
-                    let target_value = target.to_nanboxed()?;
+                    let target_value = target.to_nanboxed(Some(freeze.as_ref()))?;
                     let target_name = struct_def.name.clone();
                     let handler_span = handler.span;
                     // ADR-009 B5 (Dec 56): declaration-attached type-target hook
@@ -4141,12 +4148,9 @@ impl BytecodeCompiler {
                     // this type's frozen identity as the handler's third
                     // positional `access` parameter (author consent). A type the
                     // freeze never issued mints no authority.
-                    let access_identity = {
-                        let freeze = self.comptime_freeze_overlay()?;
-                        freeze
-                            .identity_of(&target_name)
-                            .map(|identity| (identity.high, identity.low))
-                    };
+                    let access_identity = freeze
+                        .identity_of(&target_name)
+                        .map(|identity| (identity.high, identity.low));
                     let mut execution = self.execute_comptime_annotation_handler(
                         ann,
                         &handler,
@@ -4154,6 +4158,7 @@ impl BytecodeCompiler {
                         &compiled.param_names,
                         &[],
                         access_identity,
+                        freeze,
                     )?;
 
                     // ADR-009 E3 (S4, U11): resolve the `extend <target>` OWNER
@@ -5426,9 +5431,15 @@ impl BytecodeCompiler {
                     let expansion_site = self.annotation_expansion_site(ann, &handler, &target);
                     // R8 W9 G.2 Step 2 Bucket 7: to_nanboxed now returns
                     // Result; surface the V3-S5 ckpt-5 SURFACE through the
-                    // caller's Result chain instead of panicking.
-                    let target_value = target.to_nanboxed()?;
+                    // caller's Result chain instead of panicking. E1 slice-5:
+                    // module fields are string-only (no AST) → `None` overlay,
+                    // every stamp INVALID.
+                    let target_value = target.to_nanboxed(None)?;
                     let handler_span = handler.span;
+                    // ADR-009 E1 #17 (slice 5): the handler executor still needs a
+                    // freeze handle; acquire it here (no target stamping occurred,
+                    // so any overlay is behavior-equivalent).
+                    let freeze = self.comptime_freeze_overlay()?;
                     let execution = self.execute_comptime_annotation_handler(
                         ann,
                         &handler,
@@ -5437,6 +5448,7 @@ impl BytecodeCompiler {
                         &[],
                         // Module target: no representation authority (Dec 56).
                         None,
+                        freeze,
                     )?;
                     let directive_outcome = self
                         .process_comptime_directives_for_module(

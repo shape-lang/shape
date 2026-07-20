@@ -6096,7 +6096,7 @@ mod tests_deferred {
         };
 
         let target = ComptimeTarget::from_function(&func);
-        let target_value = target.to_nanboxed();
+        let target_value = target.to_nanboxed(None);
 
         // Handler body: return target.kind
         let handler_body = Expr::PropertyAccess {

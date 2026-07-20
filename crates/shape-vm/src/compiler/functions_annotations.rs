@@ -399,7 +399,23 @@ impl BytecodeCompiler {
                 };
                 for handler in entry.handlers.iter().filter(|h| &h.handler_type == phase) {
                     let target = super::comptime_target::ComptimeTarget::from_function(func_def);
-                    let target_value = target.to_nanboxed()?;
+                    // S3 pre-pass freeze rule (see `s3_freeze_gate_tests`
+                    // module doc): this signature-directive pre-pass runs
+                    // AFTER the semantic-freeze barrier and consumes the
+                    // real registration-complete freeze handle — the same
+                    // one pass-2 uses. A site that cannot obtain it is the
+                    // row-3 named compile error; the handle is acquired
+                    // before the output-suppression toggle so the error
+                    // path cannot leak suppression state.
+                    //
+                    // ADR-009 E1 #17 (slice 5): acquired BEFORE `to_nanboxed` so
+                    // the SAME `Arc<FreezeOverlay>` both stamps the target's
+                    // `type_ref` identities (producer stamp-gate) AND is threaded
+                    // to the handler executor below — a composite identity
+                    // interned at stamp time lives in this overlay's shared memo
+                    // and is visible to the consumer's `payload_of`.
+                    let freeze = self.comptime_freeze_overlay()?;
+                    let target_value = target.to_nanboxed(Some(freeze.as_ref()))?;
                     let handler_module_path = entry
                         .defining_module_path
                         .as_deref()
@@ -409,15 +425,6 @@ impl BytecodeCompiler {
                         entry.helper_authority(),
                     );
 
-                    // S3 pre-pass freeze rule (see `s3_freeze_gate_tests`
-                    // module doc): this signature-directive pre-pass runs
-                    // AFTER the semantic-freeze barrier and consumes the
-                    // real registration-complete freeze handle — the same
-                    // one pass-2 uses. A site that cannot obtain it is the
-                    // row-3 named compile error; the handle is acquired
-                    // before the output-suppression toggle so the error
-                    // path cannot leak suppression state.
-                    let freeze = self.comptime_freeze_overlay()?;
                     let prev_suppressed =
                         super::comptime_builtins::set_comptime_output_suppressed(true);
                     let execution_result =
@@ -1147,10 +1154,15 @@ impl BytecodeCompiler {
         let target = super::comptime_target::ComptimeTarget::from_function(func_def);
         // ADR-009 D1 (S2): expansion site for this handler application.
         let expansion_site = self.annotation_expansion_site(annotation, handler, &target);
+        // ADR-009 E1 #17 (slice 5): ONE overlay acquired before `to_nanboxed`
+        // stamps the target's `type_ref` identities (producer stamp-gate) AND is
+        // threaded (below) into `execute_comptime_annotation_handler` so the
+        // consumer resolves composites off the same shared overlay memo.
+        let freeze = self.comptime_freeze_overlay()?;
         // R8 W9 G.2 Step 2 Bucket 7: to_nanboxed now returns Result;
         // surface the V3-S5 ckpt-5 SURFACE through the caller's Result
         // chain instead of panicking.
-        let target_value = target.to_nanboxed()?;
+        let target_value = target.to_nanboxed(Some(freeze.as_ref()))?;
         let target_name = func_def.name.clone();
         let handler_span = handler.span;
         let const_bindings = self
@@ -1167,6 +1179,7 @@ impl BytecodeCompiler {
             &const_bindings,
             // Function target: no representation authority (Dec 56).
             None,
+            freeze,
         )?;
 
         // ADR-009 E3 (S4, U11): resolve the `extend <target>` OWNER placeholder
@@ -1221,6 +1234,12 @@ impl BytecodeCompiler {
         // module / expression targets (which receive no representation
         // authority). The mint call is injected into the handler mini-VM.
         access_identity: Option<(i64, i64)>,
+        // ADR-009 E1 #17 (slice 5): the SAME `Arc<FreezeOverlay>` the CALLER used
+        // to stamp this target's `type_ref` identities (via `to_nanboxed`). It is
+        // threaded straight to `execute_comptime_with_annotation_handler` so a
+        // composite identity interned at stamp time is visible to the consumer's
+        // `payload_of` off the shared memo — no second overlay is minted here.
+        overlay: std::sync::Arc<super::comptime_builtins::FreezeOverlay>,
     ) -> Result<super::comptime::ComptimeExecutionResult> {
         let handler_span = handler.span;
         let extensions: Vec<_> = self
@@ -1263,7 +1282,11 @@ impl BytecodeCompiler {
         // (`TypeReflectionSnapshot::default()`) is deleted. This runs in
         // pass 2, after the freeze barrier; a handler reached without an
         // installed freeze is a compile error (row 3).
-        let freeze = self.comptime_freeze_overlay()?;
+        //
+        // ADR-009 E1 #17 (slice 5): the handle is now the caller-supplied
+        // `overlay` — the SAME `Arc` used to stamp this target's `type_ref`
+        // identities — not a freshly minted one, so the stamp and resolve share
+        // one composite memo.
         let execution = super::comptime::execute_comptime_with_annotation_handler(
             &handler.body,
             &handler.params,
@@ -1277,7 +1300,7 @@ impl BytecodeCompiler {
             &ctx_module_path,
             &ctx_file,
             trait_impls,
-            freeze,
+            overlay,
             // ADR-009 B5 (Dec 56): forward the caller-supplied type identity
             // (Some for a declaration-attached type-target hook; None otherwise).
             access_identity,
@@ -2190,7 +2213,24 @@ impl BytecodeCompiler {
                                 );
                             }
                         }
-                        let Ok(target_value) = target.to_nanboxed() else {
+                        // S3 pre-pass freeze rule (see `s3_freeze_gate_tests`
+                        // module doc): this speculative run fires AFTER the
+                        // semantic-freeze barrier and consumes the real
+                        // registration-complete freeze handle. A site that
+                        // cannot obtain the handle is the row-3 named compile
+                        // error; the handle is acquired before the
+                        // output-suppression toggle so the error path cannot leak
+                        // suppression state.
+                        //
+                        // ADR-009 E1 #17 (slice 5): acquired BEFORE `to_nanboxed`
+                        // so the SAME `Arc<FreezeOverlay>` both stamps the
+                        // target's `type_ref` identities (producer stamp-gate,
+                        // through the `let Ok(..) else continue` swallow — a
+                        // canonicalize gap stays INVALID, never propagates) AND is
+                        // threaded to the handler executor below (shared
+                        // composite-memo round-trip) and to `identity_of`.
+                        let freeze = self.comptime_freeze_overlay()?;
+                        let Ok(target_value) = target.to_nanboxed(Some(freeze.as_ref())) else {
                             continue;
                         };
 
@@ -2212,18 +2252,11 @@ impl BytecodeCompiler {
                         // materializes generated function signatures); pass-2
                         // re-runs the same handler authoritatively. Suppress raw
                         // handler output during the speculative run so a handler
-                        // that prints does not emit twice.
-                        // S3 pre-pass freeze rule (see `s3_freeze_gate_tests`
-                        // module doc): this speculative run fires AFTER the
-                        // semantic-freeze barrier and consumes the real
-                        // registration-complete freeze handle, so reflection-
-                        // using handlers materialize their generated functions
-                        // here (visible to every user body) instead of
-                        // deferring to pass 2. A site that cannot obtain the
-                        // handle is the row-3 named compile error; the handle
-                        // is acquired before the output-suppression toggle so
-                        // the error path cannot leak suppression state.
-                        let freeze = self.comptime_freeze_overlay()?;
+                        // that prints does not emit twice. Reflection-using
+                        // handlers materialize their generated functions here
+                        // (visible to every user body) instead of deferring to
+                        // pass 2. The freeze handle was acquired above (before
+                        // `to_nanboxed`); it is reused here — one acquisition.
                         // ADR-009 B5 (Dec 56): a declaration-attached TYPE-target
                         // hook mints a `RepresentationAccess<T>` authority bound to
                         // the annotated type's frozen identity and delivers it as

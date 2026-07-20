@@ -16,7 +16,7 @@
 // ADR-009 E1 #17 (slice 5): the producer-stamped semantic identity carried by
 // each `__ComptimeTypeRef`. Re-exported by `comptime_builtins`; the type_ref's
 // consumer resolves the SAME identity via `reconstruct_type_annotation`.
-use crate::compiler::comptime_builtins::FrozenTypeIdentity;
+use crate::compiler::comptime_builtins::{FreezeOverlay, FrozenTypeIdentity};
 use shape_ast::ast::functions::Annotation;
 pub(crate) use shape_ast::ast::functions::AnnotationTargetKind;
 use shape_ast::ast::literals::Literal;
@@ -134,6 +134,45 @@ pub(crate) fn build_type_ref_descriptor(
     )
 }
 
+/// ADR-009 E1 #17 (slice 5, A-FULL) STAMP-GATE (E1-D7(a)+(b)).
+///
+/// Compute the producer-side [`FrozenTypeIdentity`] for `ast` ONLY when it will
+/// reconstruct — the SAME predicate the consumer resolves with
+/// (`reconstruct_type_annotation(...).is_ok()`), so producer and consumer share
+/// ONE code path (E1-D7(b), no parallel gate logic). Identity comes ONLY from
+/// [`FreezeOverlay::canonicalize_type_projection`] (projection.rs), which BOTH
+/// computes the identity AND interns the composite payload into the shared
+/// `overlay.composites` memo — required so the consumer's `payload_of` sees the
+/// same composite evidence off the shared `Arc<FreezeOverlay>`. No second hasher
+/// is written (E1-D7(b)).
+///
+/// A canonicalize error (a non-freezable ref) is SWALLOWED to `None` — NEVER
+/// propagated — so the `__ComptimeTypeRef` carries `INVALID` and the consumer's
+/// identity-only route is a no-op, falling through to the existing `.source`
+/// reparse arm (E1-D7(a) unstamped fall-through, dead-but-present until slice 6).
+/// The stamp-gate rejects everything that is NOT reconstructable this slice
+/// (applied-generic nominals like `Array<int>`/`Option<T>`, records, bare
+/// user-nominals, un-applied heads) → `INVALID` → reparse.
+fn stamp_for(
+    overlay: Option<&FreezeOverlay>,
+    ast: Option<&TypeAnnotation>,
+) -> Option<FrozenTypeIdentity> {
+    let overlay = overlay?;
+    let ast = ast?;
+    match overlay.canonicalize_type_projection(ast) {
+        Ok(projection)
+            if crate::compiler::comptime_builtins::reconstruct_type_annotation(
+                overlay,
+                projection.identity(),
+            )
+            .is_ok() =>
+        {
+            Some(projection.identity())
+        }
+        _ => None,
+    }
+}
+
 /// Build an `Array<string>` slot carried by a stamped v2-raw
 /// `TypedArray<*const StringObj>`.
 fn nb_string_array(strings: Vec<String>) -> Result<KindedSlot, ShapeError> {
@@ -191,13 +230,20 @@ fn nb_object_array(objs: Vec<KindedSlot>) -> Result<KindedSlot, ShapeError> {
 /// a top-level `Option<T>` / `T?` field type is unwrapped to `T` with `optional`
 /// set true (comptime-excellence §4.1.1). Both introspection surfaces produce
 /// identical rows from this one builder.
+/// `field_type_asts` is index-parallel to `fields` (E1 slice-5 R2+H1); it is the
+/// original per-field `TypeAnnotation` AST, or empty (`&[]`) on reflection
+/// surfaces that carry no AST. The producer stamps each field's `type_ref`
+/// identity via the shared [`stamp_for`] gate. A `None` overlay (or absent AST)
+/// leaves the stamp `INVALID` (→ `.source` reparse), preserving current behavior.
 pub(crate) fn build_field_descriptor_array(
     fields: &[(String, String, Vec<FieldAnnotation>)],
+    overlay: Option<&FreezeOverlay>,
+    field_type_asts: &[Option<TypeAnnotation>],
 ) -> Result<KindedSlot, ShapeError> {
     use shape_runtime::type_schema::typed_object_for_named_schema;
 
     let mut field_objs: Vec<KindedSlot> = Vec::with_capacity(fields.len());
-    for (fname, ftype, fanns) in fields {
+    for (idx, (fname, ftype, fanns)) in fields.iter().enumerate() {
         // Each annotation becomes {name, args} where args is an array of
         // stringified arg values.
         let mut ann_objs: Vec<KindedSlot> = Vec::with_capacity(fanns.len());
@@ -215,6 +261,20 @@ pub(crate) fn build_field_descriptor_array(
         } else {
             ftype.clone()
         };
+        // E1 slice-5 stamp: the emitted `.source` is `unwrap_option_type(ftype)`,
+        // so the stamp AST must render to that same source. For a non-optional
+        // field the full AST renders to `ftype` == the emitted source; for an
+        // OPTIONAL field the emitted source is the UNWRAPPED inner while the AST
+        // is the full `Option<…>` (a Nominal, non-reconstructable this slice),
+        // so stamping the full AST would mismatch the source — leave it `None`
+        // (→ INVALID → reparse). The gate would reject the applied-Option
+        // identity anyway; gating on `!is_optional` keeps stamp-AST ↔ source
+        // exact.
+        let field_identity = if is_optional {
+            None
+        } else {
+            stamp_for(overlay, field_type_asts.get(idx).and_then(|a| a.as_ref()))
+        };
         field_objs.push(typed_object_for_named_schema(
             "__ComptimeFieldDescriptor",
             &[
@@ -224,7 +284,7 @@ pub(crate) fn build_field_descriptor_array(
                 ("optional", KindedSlot::from_bool(is_optional)),
                 (
                     "type_ref",
-                    build_type_ref_descriptor(&unwrap_option_type(ftype), None, None),
+                    build_type_ref_descriptor(&unwrap_option_type(ftype), None, field_identity),
                 ),
             ],
         ));
@@ -250,6 +310,24 @@ pub(crate) struct ComptimeTarget {
     pub annotations: Vec<String>,
     /// Captured variables (for closures): variable names from outer scope
     pub captures: Vec<String>,
+    // ADR-009 E1 #17 (slice 5, A-FULL) — R2+H1 additive parallel AST carriers
+    // for the producer stamp-gate. Each is INDEX-COUPLED to a string tuple vec
+    // above: `param_type_asts[i]` ↔ `params[i]`, `field_type_asts[i]` ↔
+    // `fields[i]`, `return_type_ast` ↔ `return_type`. INVARIANT: populated in
+    // LOCKSTEP inside the constructor bodies ONLY, never mutated elsewhere.
+    //
+    // ADR-006: these are ADDITIVE parallel vecs, NOT a widening of the existing
+    // string tuples. `comptime_target_dependency_descriptors`
+    // (functions_annotations.rs) — the D1 ExpansionIdentity reader — destructures
+    // ONLY `params`/`fields`/`return_type`, which stay byte-identical, so the
+    // pre-pass↔pass-2 expansion identity is unperturbed. Identity/AST never feeds
+    // that reader.
+    /// AST for each parameter's declared type (index-parallel to `params`).
+    pub param_type_asts: Vec<Option<TypeAnnotation>>,
+    /// AST for the function return type (parallel to `return_type`).
+    pub return_type_ast: Option<TypeAnnotation>,
+    /// AST for each field's declared type (index-parallel to `fields`).
+    pub field_type_asts: Vec<Option<TypeAnnotation>>,
 }
 
 impl ComptimeTarget {
@@ -268,8 +346,13 @@ impl ComptimeTarget {
                 (name, type_str, p.is_const)
             })
             .collect();
+        // E1 slice-5 R2+H1: parallel AST vec, LOCKSTEP with `params` (same
+        // `func.params` iteration order/length).
+        let param_type_asts: Vec<Option<TypeAnnotation>> =
+            func.params.iter().map(|p| p.type_annotation.clone()).collect();
 
         let return_type = func.return_type.as_ref().map(type_annotation_to_string);
+        let return_type_ast = func.return_type.clone();
 
         let annotations = func.annotations.iter().map(|a| a.name.clone()).collect();
 
@@ -285,6 +368,9 @@ impl ComptimeTarget {
             return_type,
             annotations,
             captures,
+            param_type_asts,
+            return_type_ast,
+            field_type_asts: Vec::new(),
         }
     }
 
@@ -297,6 +383,10 @@ impl ComptimeTarget {
         name: &str,
         fields: &[(String, Option<TypeAnnotation>, Vec<Annotation>)],
     ) -> Self {
+        // E1 slice-5 R2+H1: parallel AST vec, LOCKSTEP with the `fields` string
+        // tuple vec below (same `fields` iteration order/length).
+        let field_type_asts: Vec<Option<TypeAnnotation>> =
+            fields.iter().map(|(_, ftype, _)| ftype.clone()).collect();
         let fields = fields
             .iter()
             .map(|(fname, ftype, anns)| {
@@ -323,6 +413,9 @@ impl ComptimeTarget {
             return_type: None,
             annotations: Vec::new(),
             captures: Vec::new(),
+            param_type_asts: Vec::new(),
+            return_type_ast: None,
+            field_type_asts,
         }
     }
 
@@ -342,6 +435,10 @@ impl ComptimeTarget {
             return_type: None,
             annotations: Vec::new(),
             captures: Vec::new(),
+            // Module fields are string-only (no AST); expression has no members.
+            param_type_asts: Vec::new(),
+            return_type_ast: None,
+            field_type_asts: Vec::new(),
         }
     }
 
@@ -355,6 +452,9 @@ impl ComptimeTarget {
             return_type: None,
             annotations: Vec::new(),
             captures: Vec::new(),
+            param_type_asts: Vec::new(),
+            return_type_ast: None,
+            field_type_asts: Vec::new(),
         }
     }
 
@@ -374,7 +474,16 @@ impl ComptimeTarget {
     /// Object-array construction requires each element to already carry
     /// `NativeKind::Ptr(HeapKind::TypedObject)`. A mismatched element is a
     /// structural compile-time error, not a runtime kind-inference fallback.
-    pub fn to_nanboxed(&self) -> Result<KindedSlot, ShapeError> {
+    ///
+    /// ADR-009 E1 #17 (slice 5, A-FULL): when `overlay` is `Some`, each
+    /// `type_ref` descriptor is producer-stamped with the semantic identity of
+    /// its declared-type AST via the [`stamp_for`] gate (identity + shared
+    /// composite-memo interning through `overlay.canonicalize_type_projection`).
+    /// `None` (module/expression targets, tests) stamps `INVALID` everywhere.
+    /// The consumer STILL reparses `.source` until the slice-4 flip, so a `Some`
+    /// overlay is behavior-identical to `None` here — the identity is written,
+    /// not yet read.
+    pub fn to_nanboxed(&self, overlay: Option<&FreezeOverlay>) -> Result<KindedSlot, ShapeError> {
         // S2 (comptime-excellence §4.3): every descriptor object is built
         // through `typed_object_for_named_schema`, which resolves a
         // reserved, concrete, pre-registered schema BY NAME. The previous
@@ -449,21 +558,28 @@ impl ComptimeTarget {
 
         // fields: array of {name, type, annotations, optional} TypedObjects,
         // built through the shared `build_field_descriptor_array` row builder so
-        // `target.fields` and `type_info(T).fields` produce identical rows.
-        let fields_arr = build_field_descriptor_array(&self.fields)?;
+        // `target.fields` and `type_info(T).fields` produce identical rows. The
+        // field ASTs (E1 slice-5 R2+H1) thread through for per-field stamping.
+        let fields_arr =
+            build_field_descriptor_array(&self.fields, overlay, &self.field_type_asts)?;
 
-        // params: array of {name, type, const} TypedObjects
+        // params: array of {name, type, const} TypedObjects. The `type_ref` of
+        // each param is producer-stamped (E1 slice-5) from `param_type_asts[i]`,
+        // index-coupled to `params[i]`.
         let param_objs: Vec<KindedSlot> = self
             .params
             .iter()
-            .map(|(pname, ptype, is_const)| {
+            .enumerate()
+            .map(|(idx, (pname, ptype, is_const))| {
+                let identity =
+                    stamp_for(overlay, self.param_type_asts.get(idx).and_then(|a| a.as_ref()));
                 typed_object_for_named_schema(
                     "__ComptimeParamDescriptor",
                     &[
                         ("name", nb_string(pname.clone())),
                         ("type", nb_string(ptype.clone())),
                         ("const", KindedSlot::from_bool(*is_const)),
-                        ("type_ref", build_type_ref_descriptor(ptype, None, None)),
+                        ("type_ref", build_type_ref_descriptor(ptype, None, identity)),
                     ],
                 )
             })
@@ -476,10 +592,13 @@ impl ComptimeTarget {
             .as_ref()
             .map(|r| nb_string(r.clone()))
             .unwrap_or_else(KindedSlot::none);
+        // The return `type_ref` is producer-stamped from `return_type_ast`; the
+        // synthetic "unknown" fallback (no declared return) stays INVALID.
+        let ret_identity = stamp_for(overlay, self.return_type_ast.as_ref());
         let ret_ref = self
             .return_type
             .as_deref()
-            .map(|r| build_type_ref_descriptor(r, None, None))
+            .map(|r| build_type_ref_descriptor(r, None, ret_identity))
             .unwrap_or_else(|| build_type_ref_descriptor("unknown", Some("Unresolved"), None));
 
         // annotations: array of strings (names only)
@@ -737,9 +856,12 @@ mod tests {
             return_type: Some("bool".to_string()),
             annotations: vec!["cached".to_string()],
             captures: vec!["outer_var".to_string()],
+            param_type_asts: Vec::new(),
+            return_type_ast: None,
+            field_type_asts: Vec::new(),
         };
 
-        let _value = target.to_nanboxed();
+        let _value = target.to_nanboxed(None);
     }
 
     #[test]
@@ -764,9 +886,12 @@ mod tests {
             return_type: None,
             annotations: Vec::new(),
             captures: Vec::new(),
+            param_type_asts: Vec::new(),
+            return_type_ast: None,
+            field_type_asts: Vec::new(),
         };
 
-        let _value = target.to_nanboxed();
+        let _value = target.to_nanboxed(None);
     }
 
     #[test]
@@ -779,9 +904,12 @@ mod tests {
             return_type: Some("int".to_string()),
             annotations: vec!["memo".to_string(), "trace".to_string()],
             captures: vec!["outer".to_string()],
+            param_type_asts: Vec::new(),
+            return_type_ast: None,
+            field_type_asts: Vec::new(),
         };
 
-        let slot = target.to_nanboxed().unwrap();
+        let slot = target.to_nanboxed(None).unwrap();
         assert_eq!(slot.kind(), NativeKind::Ptr(HeapKind::TypedObject));
 
         let storage = slot
@@ -919,9 +1047,12 @@ mod tests {
             return_type: None,
             annotations: Vec::new(),
             captures: vec!["x".to_string(), "y".to_string()],
+            param_type_asts: Vec::new(),
+            return_type_ast: None,
+            field_type_asts: Vec::new(),
         };
 
-        let _value = target.to_nanboxed();
+        let _value = target.to_nanboxed(None);
     }
 
     #[test]
