@@ -489,6 +489,19 @@ impl<'a> Scan<'a> {
         ))
     }
 
+    /// Verify-1 fix: the template type parameter spelled as a call name
+    /// (`Args(1)` / `x.Args(1)` / `Args::f(1)`).
+    fn reject_type_param_call(&self) -> ShapeError {
+        reject(format!(
+            "the template type parameter `{tp}` cannot be called or used as a call name: it \
+             names the whole bound signature and resolves away at specialization; call a \
+             concrete function, or address the typed parameter slots through \
+             `{args}[<int literal>]`",
+            tp = self.type_param,
+            args = self.args_param
+        ))
+    }
+
     fn reject_reserved_prefix(&self, name: &str) -> ShapeError {
         reject(format!(
             "identifier `{name}` uses the reserved prefix `{prefix}` (the compiler-internal \
@@ -552,6 +565,36 @@ impl<'a> Scan<'a> {
                 // use (only per-slot `args[i] = e` is).
                 if name == self.args_param {
                     return Err(self.reject_bare_value());
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// A name in CALL-NAME position (function name, qualified-call
+    /// namespace/function, method name). Verify-1 fix: call names previously
+    /// checked only the reserved prefix, so `args(1)` passed both faces and
+    /// post-rewrite either degraded to a confusing downstream resolution
+    /// error or — if a module fn spelled `args` existed — silently resolved
+    /// to it (a meaning shift). Call names resolve OUTSIDE the pseudo-tuple
+    /// surface, so either template name appearing as one is a NAMED
+    /// rejection under both scan modes: the same bare-value /
+    /// closure-occurrence sentences for `args_param`, the call-name twin of
+    /// the annotation rejection for `type_param`.
+    fn check_call_name(&self, name: &str, mode: ScanMode) -> Result<()> {
+        self.check_reserved(name)?;
+        match mode {
+            ScanMode::ClosureInterior => {
+                if name == self.args_param || name == self.type_param {
+                    return Err(self.reject_closure_occurrence(name));
+                }
+            }
+            ScanMode::TemplateBody => {
+                if name == self.args_param {
+                    return Err(self.reject_bare_value());
+                }
+                if name == self.type_param {
+                    return Err(self.reject_type_param_call());
                 }
             }
         }
@@ -1031,7 +1074,7 @@ impl<'a> Scan<'a> {
                 named_args,
                 span: _,
             } => {
-                self.check_reserved(name)?;
+                self.check_call_name(name, mode)?;
                 self.exprs(const_args, mode)?;
                 self.exprs(args, mode)?;
                 self.named_exprs(named_args, mode)
@@ -1045,8 +1088,8 @@ impl<'a> Scan<'a> {
                 named_args,
                 span: _,
             } => {
-                self.check_reserved(namespace)?;
-                self.check_reserved(function)?;
+                self.check_call_name(namespace, mode)?;
+                self.check_call_name(function, mode)?;
                 self.exprs(const_args, mode)?;
                 self.exprs(args, mode)?;
                 self.named_exprs(named_args, mode)
@@ -1250,7 +1293,7 @@ impl<'a> Scan<'a> {
                 optional: _,
                 span: _,
             } => {
-                self.check_reserved(method)?;
+                self.check_call_name(method, mode)?;
                 self.expr(receiver, mode)?;
                 self.exprs(args, mode)?;
                 self.named_exprs(named_args, mode)
@@ -1715,6 +1758,69 @@ fn t<Args>(args: Args) -> Args {
         );
     }
 
+    // NEGATIVE (verify-1 fix): the pseudo-tuple spelling in FUNCTION-CALL
+    // name position (`args(1)`) is not a call — the same bare-value
+    // rejection class. Pre-fix this passed both faces and degraded to a
+    // confusing downstream error (or a silent meaning shift onto a module
+    // fn spelled `args`).
+    #[test]
+    fn args_as_function_call_name_is_rejected() {
+        expect_reject(
+            r#"
+fn t<Args>(args: Args) -> Args {
+    let x = args(1)
+    return args
+}
+"#,
+            "no first-class value",
+        );
+    }
+
+    // NEGATIVE (verify-1 fix): the same rejection for the METHOD-name
+    // spelling (`y.args(0)`).
+    #[test]
+    fn args_as_method_name_is_rejected() {
+        expect_reject(
+            r#"
+fn t<Args>(args: Args) -> Args {
+    let y = [1]
+    let x = y.args(0)
+    return args
+}
+"#,
+            "no first-class value",
+        );
+    }
+
+    // NEGATIVE (verify-1 fix): the template type parameter as a call name.
+    #[test]
+    fn type_param_as_call_name_is_rejected() {
+        expect_reject(
+            r#"
+fn t<Args>(args: Args) -> Args {
+    let x = Args(1)
+    return args
+}
+"#,
+            "cannot be called",
+        );
+    }
+
+    // NEGATIVE (verify-1 fix): call-name occurrences inside a closure use
+    // the closure-occurrence sentence, same as every other occurrence.
+    #[test]
+    fn args_as_call_name_inside_closure_is_rejected() {
+        expect_reject(
+            r#"
+fn t<Args>(args: Args) -> Args {
+    let f = |x| args(x)
+    return args
+}
+"#,
+            "does not cross closure boundaries",
+        );
+    }
+
     // =====================================================================
     // Rewrite face (specialization-time) — the C3-G9 resolution.
     // =====================================================================
@@ -1921,6 +2027,22 @@ fn t<Args>(args: Args) -> Args {
 "#,
             &aggregate_plan(),
             "does not cross closure boundaries",
+        );
+    }
+
+    // … and the call-name misuse (verify-1 fix): the SAME shared core fires
+    // the bare-value rejection on the rewrite face too.
+    #[test]
+    fn rewrite_face_rejects_args_call_name_via_the_shared_core() {
+        expect_resolve_reject(
+            r#"
+fn t<Args>(args: Args) -> Args {
+    let x = args(1)
+    return args
+}
+"#,
+            &aggregate_plan(),
+            "no first-class value",
         );
     }
 

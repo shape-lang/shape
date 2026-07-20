@@ -51,14 +51,50 @@ pub const DEFAULT_CLOSURE_SPECIALIZATION_BUDGET: u32 = 64;
 /// structurally DIVERGES from plain substitution (the G9 pseudo-tuple
 /// resolution rewrites params, body, and return), so it must never share a
 /// cache entry or a registered symbol with an ordinary generic instantiation
-/// of the same body fn at the same type arguments. The salt is appended to
-/// the mono key BEFORE `prepare_semantic_specialization` consumes it (cache +
+/// of the same body fn at the same type arguments. The salt is applied (as
+/// the head of [`template_specialization_key_suffix`]) to the mono key
+/// BEFORE `prepare_semantic_specialization` consumes it (cache +
 /// cycle-detector isolation via `LegacySpecializationKey` /
 /// `SpecializationProgressKey`) and to the specialized symbol at the rename
 /// seam (name isolation — the Legacy `specialized_symbol` is a pass-through
 /// of the substituted name, so the key salt alone would not reach the
 /// registered fn name).
 pub(in crate::compiler) const TEMPLATE_SPECIALIZATION_KEY_SALT: &str = "::c3_before_hook";
+
+/// ADR-009 C3 #14 (S1 verify-1 fix) — the INJECTIVE template-seam key/symbol
+/// suffix: the salt plus a Sig disambiguator.
+///
+/// `ConcreteType::Tuple::mono_key()` renders a FLAT, non-delimited join
+/// (`"tuple_" + parts.join("_")`), which is NON-INJECTIVE when a target
+/// parameter is itself a bracket-tuple type: parameter types can
+/// redistribute across the arity boundary. Concrete user-expressible
+/// colliding pair: the Sigs of `fn a(x: [int, int, int], y: number)` and
+/// `fn b(x: [int, int], y: int, z: number)` BOTH render
+/// `tuple_tuple_i64_i64_i64_f64`, so the flat key alone would let the
+/// second target cache-hit (and symbol-collide with) the first target's
+/// compiled handler — an UNCHECKED body against the wrong Sig, a 2-param
+/// handler for a 3-param target, `args.length` frozen at the wrong constant
+/// (the C3-G10 per-specialization-checking violation). The suffix therefore
+/// appends, per type argument, the Sig arity (`::a{n}`) AND the DELIMITED
+/// `Display` rendering (the `"( , )"` form — injective by parenthesization),
+/// restoring "same Sig = same entry; distinct Sig = new entry" for every
+/// expressible Sig. Scoped to the template seam ONLY: making
+/// `Tuple::mono_key` itself delimited is the root fix but would shift every
+/// ordinary tuple cache key in the program and needs its own regression
+/// pass (named follow-up in `docs/design/typed-comptime/c3-slice1-report.md`).
+pub(in crate::compiler) fn template_specialization_key_suffix(
+    type_args: &[ConcreteType],
+) -> String {
+    use std::fmt::Write as _;
+    let mut suffix = String::from(TEMPLATE_SPECIALIZATION_KEY_SALT);
+    for arg in type_args {
+        if let ConcreteType::Tuple(elems) = arg {
+            let _ = write!(suffix, "::a{}", elems.len());
+        }
+        let _ = write!(suffix, "::{arg}");
+    }
+    suffix
+}
 
 mod failure;
 #[cfg(test)]
@@ -310,13 +346,18 @@ impl BytecodeCompiler {
             }
         }
 
+        // C3 S1c key suffix (see template_specialization_key_suffix — the
+        // salt + the injective Sig disambiguator): appended BEFORE
+        // prepare_semantic_specialization consumes the key, so it flows into
+        // the LegacySpecializationKey cache identity and the cycle-detector
+        // SpecializationProgressKey. Computed once and reused at the symbol
+        // rename seam below so key and symbol stay identity-locked.
+        let template_suffix = template_plan
+            .is_some()
+            .then(|| template_specialization_key_suffix(type_args));
         let mut mono_key = build_mono_key(base_fn_name, type_args);
-        if template_plan.is_some() {
-            // C3 S1c key salt (see TEMPLATE_SPECIALIZATION_KEY_SALT): appended
-            // BEFORE prepare_semantic_specialization consumes the key, so the
-            // salt flows into the LegacySpecializationKey cache identity and
-            // the cycle-detector SpecializationProgressKey.
-            mono_key.push_str(TEMPLATE_SPECIALIZATION_KEY_SALT);
+        if let Some(suffix) = &template_suffix {
+            mono_key.push_str(suffix);
         }
         let semantic = self
             .prepare_semantic_specialization(
@@ -423,17 +464,22 @@ impl BytecodeCompiler {
         specialized_def.name = semantic.specialized_symbol(specialized_def.name);
         if let Some(plan) = template_plan {
             // C3 S1c — the G9 resolution, immediately after substitution +
-            // renaming. The symbol carries the same salt as the mono key
-            // (the Legacy `specialized_symbol` is a pass-through of the
-            // substituted name, so the registered symbol needs the salt
-            // applied here to stay distinct from an ordinary generic
-            // instantiation); then the pseudo-tuple resolves away — after
+            // renaming. The symbol carries the same injective suffix as the
+            // mono key (the Legacy `specialized_symbol` is a pass-through of
+            // the substituted name, so the registered symbol needs the
+            // suffix applied here to stay distinct from an ordinary generic
+            // instantiation AND from a colliding-flat-rendering sibling
+            // Sig); then the pseudo-tuple resolves away — after
             // this call the def is a plain concrete typed AST function and
             // everything downstream (register, cache-insert-before-compile,
             // in-progress guard, save/restore, the overlay guard,
             // `compile_function` = the C3-G10 battery, cache_remove-on-Err,
             // the Hard classification) runs UNCHANGED.
-            specialized_def.name.push_str(TEMPLATE_SPECIALIZATION_KEY_SALT);
+            specialized_def.name.push_str(
+                template_suffix
+                    .as_deref()
+                    .expect("template_suffix is Some exactly when template_plan is Some"),
+            );
             pseudo_tuple::resolve_pseudo_tuple(&mut specialized_def, plan)
                 .map_err(SpecializationFailure::Hard)?;
         }

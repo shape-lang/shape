@@ -1111,6 +1111,11 @@ mod tests {
             err.to_string().contains("declares no parameters"),
             "expected the named zero-param rejection: {err}"
         );
+        assert!(
+            err.to_string()
+                .contains("remove the `before` template or use an `after` template"),
+            "rejection must carry the positive twin: {err}"
+        );
     }
 
     // TRANSACTION COMPOSITION (E1-D6b): specialize_template REQUIRES the
@@ -1565,6 +1570,81 @@ mod tests {
             "a distinct Sig must get its own specialization"
         );
         assert_eq!(fx.compiler.monomorphization_cache.legacy_len(), 2);
+        assert_clean_specialization_state(&fx.compiler);
+    }
+
+    // THE VERIFY-1 REFUTER (the flat-mono-key collision class): two DISTINCT
+    // Sigs whose FLAT `ConcreteType::Tuple::mono_key` renderings COLLIDE
+    // (parameter types redistributing across the arity boundary through a
+    // bracket-tuple param) must NOT share one checked specialization.
+    // Pre-fix, target_b cache-hit target_a's compiled handler — an unchecked
+    // body against the wrong Sig, a 2-param handler for a 3-param target
+    // (the C3-G10 violation). The template seam's injective key/symbol
+    // suffix (`template_specialization_key_suffix`: arity + delimited
+    // Display rendering) is what keeps the identities distinct.
+    #[test]
+    fn colliding_flat_tuple_renderings_specialize_separately() {
+        // Control (non-vacuity): the FLAT renderings really do collide — if
+        // a future mono_key change makes them distinct, this refuter no
+        // longer bites and must move to whatever the new collision class is.
+        let sig_a = ConcreteType::Tuple(vec![
+            ConcreteType::Tuple(vec![ConcreteType::I64; 3]),
+            ConcreteType::F64,
+        ]);
+        let sig_b = ConcreteType::Tuple(vec![
+            ConcreteType::Tuple(vec![ConcreteType::I64; 2]),
+            ConcreteType::I64,
+            ConcreteType::F64,
+        ]);
+        assert_eq!(
+            sig_a.mono_key(),
+            sig_b.mono_key(),
+            "control: the flat tuple mono keys must collide for this refuter to bite"
+        );
+
+        let src = "fn tmpl<Args>(args: Args) -> Args {\n\
+                   \x20   return args\n\
+                   }\n\
+                   fn target_a(x: [int, int, int], y: number) -> int { return 1 }\n\
+                   fn target_b(x: [int, int], y: int, z: number) -> int { return y }\n";
+        let mut fx = fixture(src);
+        let template = template(&fx, TemplateHookKind::Before, "tmpl");
+
+        let target_a = target_for(&fx, "target_a", None);
+        let first = specialize(&mut fx.compiler, &template, &target_a)
+            .expect("the tuple-param target specializes");
+        let target_b = target_for(&fx, "target_b", None);
+        let second = specialize(&mut fx.compiler, &template, &target_b)
+            .expect("the colliding-flat-key target specializes on its own");
+
+        assert_ne!(
+            first.function_index(),
+            second.function_index(),
+            "distinct Sigs must never share one checked specialization"
+        );
+        assert_eq!(
+            fx.compiler.monomorphization_cache.legacy_len(),
+            2,
+            "each distinct Sig gets its own cache entry"
+        );
+        let def_a = registered_specialized_def(&fx.compiler, first.function_index());
+        let def_b = registered_specialized_def(&fx.compiler, second.function_index());
+        assert_eq!(def_a.params.len(), 2, "target_a's handler binds its 2 typed params");
+        assert_eq!(
+            def_b.params.len(),
+            3,
+            "target_b's handler binds its own 3 typed params — never target_a's 2-param handler"
+        );
+        match (first.carrier(), second.carrier()) {
+            (
+                Some(MutationCarrier::Aggregate { fields: fields_a }),
+                Some(MutationCarrier::Aggregate { fields: fields_b }),
+            ) => {
+                assert_eq!(fields_a.len(), 2, "target_a's aggregate carries 2 fields");
+                assert_eq!(fields_b.len(), 3, "target_b's aggregate carries 3 fields");
+            }
+            other => panic!("expected two aggregate carriers, got {other:?}"),
+        }
         assert_clean_specialization_state(&fx.compiler);
     }
 
