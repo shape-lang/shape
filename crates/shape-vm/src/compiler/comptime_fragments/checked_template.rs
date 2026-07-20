@@ -156,8 +156,9 @@ impl CheckedTemplate {
     }
 
     /// The trailing capture parameters — `(name, declared concrete
-    /// annotation)` in the body fn's PARAMETER order. The weave delivers
-    /// capture values in this order (`const_lift::bind_captures_for_install`);
+    /// annotation)` in the body fn's PARAMETER order. This is the DELIVERY
+    /// order: the S3b bake prologue and the rule-6 `::cfg#` identity segment
+    /// both consume it (`const_lift::capture_values_in_delivery_order`);
     /// the capture() bijection matched them by NAME at `finish()`.
     pub(in crate::compiler) fn capture_params(&self) -> &[(String, TypeAnnotation)] {
         &self.capture_params
@@ -348,7 +349,7 @@ fn validate_template_type_params(hook_kind: TemplateHookKind, func: &FunctionDef
 ///
 /// - Captures are the TRAILING parameters of the body fn: `Sig arity =
 ///   params.len() - |capture clause|`; the trailing parameters are matched to
-///   the clause's capture names as a BIJECTION (by NAME — the weave delivers
+///   the clause's capture names as a BIJECTION (by NAME — the S3b bake binds
 ///   values in PARAMETER order). Each trailing capture parameter must be a
 ///   plain by-value identifier parameter with a CONCRETE type annotation (a
 ///   bare-`T` capture parameter is a named rejection).

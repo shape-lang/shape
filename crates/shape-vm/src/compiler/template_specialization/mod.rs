@@ -85,7 +85,8 @@ use shape_ast::ast::{FunctionDef, Span, TypeAnnotation};
 use shape_ast::error::{Result, ShapeError};
 use shape_value::v2::ConcreteType;
 
-use self::pseudo_tuple::TemplateSpecializationPlan;
+use self::const_lift::LiftedConst;
+use self::pseudo_tuple::{PseudoTuplePlan, TemplateSpecializationPlan};
 use crate::compiler::BytecodeCompiler;
 use crate::compiler::comptime_builtins::{CallableDescriptor, FrozenTypeIdentity};
 use crate::compiler::comptime_fragments::checked_body::BodySignature;
@@ -229,14 +230,17 @@ impl BytecodeCompiler {
     /// `begin_checked_body_install` has not opened the journal; this function
     /// NEVER opens a second transaction.
     ///
-    /// This stage implements the CONCRETE degenerate case (match-or-error at
-    /// the `@application` site naming both signatures; the concrete body was
-    /// already checked at definition under its own signature, so no re-check
-    /// runs — `function_index` resolves the definition-compiled body). The
-    /// polymorphic arms are named placeholders until the next stage.
+    /// S3b: `capture_values` are the template's LIFTED capture values (the
+    /// `capture()` builtin's binding order); they are re-ordered ONCE here
+    /// into delivery (trailing-parameter) order and flow into the
+    /// [`TemplateSpecializationPlan`] — the Dec-95 rule-6 identity (the
+    /// `::cfg#` key/symbol segment) and the heap-constant BAKE
+    /// (`const_lift::bake_captures_into_def`) both consume exactly that
+    /// order. Zero-capture templates keep every S1/S2 route byte-unchanged.
     pub(in crate::compiler) fn specialize_template(
         &mut self,
         template: &CheckedTemplate,
+        capture_values: &[(String, LiftedConst)],
         target: &SpecializationTarget,
     ) -> Result<SpecializedHandler> {
         if self.install_journal.is_none() {
@@ -248,6 +252,7 @@ impl BytecodeCompiler {
                 location: None,
             });
         }
+        let captures = const_lift::capture_values_in_delivery_order(template, capture_values)?;
 
         match template.sig() {
             // The C3-G4 polymorphic arms: the G9 pseudo-tuple resolution +
@@ -263,18 +268,24 @@ impl BytecodeCompiler {
                 debug_assert_eq!(template.hook_kind(), TemplateHookKind::Before);
                 let type_param = type_param.clone();
                 let args_param = args_param.clone();
-                self.specialize_polymorphic_before(template, target, &type_param, &args_param)
+                self.specialize_polymorphic_before(
+                    template,
+                    target,
+                    &type_param,
+                    &args_param,
+                    captures,
+                )
             }
             TemplateSig::PolymorphicResult { .. } => {
                 debug_assert_eq!(template.hook_kind(), TemplateHookKind::After);
-                self.specialize_polymorphic_after(template, target)
+                self.specialize_polymorphic_after(template, target, captures)
             }
             TemplateSig::Concrete(signature) => match template.hook_kind() {
                 TemplateHookKind::Before => {
-                    self.specialize_concrete_before(template, target, signature)
+                    self.specialize_concrete_before(template, target, signature, captures)
                 }
                 TemplateHookKind::After => {
-                    self.specialize_concrete_after(template, target, signature)
+                    self.specialize_concrete_after(template, target, signature, captures)
                 }
             },
         }
@@ -301,6 +312,7 @@ impl BytecodeCompiler {
         target: &SpecializationTarget,
         type_param: &str,
         args_param: &str,
+        captures: Vec<(String, LiftedConst)>,
     ) -> Result<SpecializedHandler> {
         if target.params.is_empty() {
             return Err(self.template_application_error(
@@ -343,21 +355,19 @@ impl BytecodeCompiler {
                     .collect(),
             }
         };
+        // S3b: capture VALUES ride the plan (delivery order — ordered once
+        // at specialize_template): they enter the rule-6 `::cfg#` identity
+        // segment AND bake into the specialized handler's prologue. The S2
+        // "NAMES only / value-generic cache key" posture is superseded by
+        // this slice's charter (Dec-95 rule 6).
         let plan = TemplateSpecializationPlan {
-            args_param: args_param.to_string(),
-            type_param: type_param.to_string(),
-            target_params: target.params.clone(),
-            carrier: carrier.clone(),
-            // S2b capture-plan threading: the rewrite face preserves the
-            // body fn's trailing capture parameters (concrete, delivery
-            // order) after the minted per-slot parameters. NAMES only —
-            // capture values are never part of the plan or the cache key
-            // (invariants resolution 5).
-            capture_param_names: template
-                .capture_params()
-                .iter()
-                .map(|(name, _)| name.clone())
-                .collect(),
+            pseudo_tuple: Some(PseudoTuplePlan {
+                args_param: args_param.to_string(),
+                type_param: type_param.to_string(),
+                target_params: target.params.clone(),
+                carrier: carrier.clone(),
+            }),
+            captures,
         };
         let function_index = self
             .ensure_monomorphic_template_specialization(
@@ -377,16 +387,23 @@ impl BytecodeCompiler {
         })
     }
 
-    /// The C3-G4 polymorphic `after` case: the specialized def IS plain
-    /// substitution of the template body at the target's result type, so it
-    /// rides the plain, UNCHANGED
+    /// The C3-G4 polymorphic `after` case. ZERO captures: the specialized
+    /// def IS plain substitution of the template body at the target's result
+    /// type, so it rides the plain, UNCHANGED
     /// `ensure_monomorphic_function_for_callsite` — no plan, no salt
     /// (sharing a cache entry/symbol with an ordinary generic instantiation
-    /// at `R` is correct). Same hard-fail wrap as the `before` case.
+    /// at `R` is correct; the pinned S1 shared-entry behavior). WITH
+    /// captures (S3b): the def structurally diverges from plain substitution
+    /// (values BAKE into the body), so it routes through
+    /// `ensure_monomorphic_template_specialization` with
+    /// `plan{pseudo_tuple: None, captures}` — suffixed key + symbol; it may
+    /// no longer share an entry/symbol with an ordinary generic
+    /// instantiation at `R`. Same hard-fail wrap as the `before` case.
     fn specialize_polymorphic_after(
         &mut self,
         template: &CheckedTemplate,
         target: &SpecializationTarget,
+        captures: Vec<(String, LiftedConst)>,
     ) -> Result<SpecializedHandler> {
         let required = match &target.return_type {
             Some(TypeAnnotation::Void) | None => {
@@ -412,8 +429,8 @@ impl BytecodeCompiler {
                 ),
             ));
         };
-        let function_index = self
-            .ensure_monomorphic_function_for_callsite(
+        let function_index = if captures.is_empty() {
+            self.ensure_monomorphic_function_for_callsite(
                 template.body_fn(),
                 &[result_concrete],
                 SemanticSpecializationRequest::Legacy,
@@ -421,11 +438,62 @@ impl BytecodeCompiler {
             .map_err(|failure| {
                 let detail = specialization_failure_detail(failure);
                 self.template_application_error(template, target, &detail)
-            })?;
+            })?
+        } else {
+            let plan = TemplateSpecializationPlan {
+                pseudo_tuple: None,
+                captures,
+            };
+            self.ensure_monomorphic_template_specialization(
+                template.body_fn(),
+                &[result_concrete],
+                SemanticSpecializationRequest::Legacy,
+                &plan,
+            )
+            .map_err(|failure| {
+                let detail = specialization_failure_detail(failure);
+                self.template_application_error(template, target, &detail)
+            })?
+        };
         Ok(SpecializedHandler {
             function_index,
             carrier: None,
             observer: false,
+        })
+    }
+
+    /// The S3b bake ride for CONCRETE (and observer) templates WITH
+    /// captures: the definition-compiled body fn REMAINS an ordinary module
+    /// fn; the baked specialization is a SEPARATE suffixed def produced by
+    /// the ONE monomorphization pipeline with `type_args = []` and
+    /// `plan{pseudo_tuple: None, captures}` (key = base name + salt + cfg
+    /// segment; substitution with empty subs is a clone; the gated
+    /// declares-no-type-params seam in `cache.rs` admits the empty
+    /// type-argument list). REJECTED ALTERNATIVE (named per the stage
+    /// charter): a separate concrete-bake compile beside monomorphization
+    /// would be a second register/cache/rollback implementation — a
+    /// parallel-implementation defection. Rollback: baked entries live in
+    /// the same cache store, covered by the S1c
+    /// `evict_at_or_above_function_index` fold-in.
+    fn ensure_baked_concrete_specialization(
+        &mut self,
+        template: &CheckedTemplate,
+        target: &SpecializationTarget,
+        captures: Vec<(String, LiftedConst)>,
+    ) -> Result<u16> {
+        let plan = TemplateSpecializationPlan {
+            pseudo_tuple: None,
+            captures,
+        };
+        self.ensure_monomorphic_template_specialization(
+            template.body_fn(),
+            &[],
+            SemanticSpecializationRequest::Legacy,
+            &plan,
+        )
+        .map_err(|failure| {
+            let detail = specialization_failure_detail(failure);
+            self.template_application_error(template, target, &detail)
         })
     }
 
@@ -446,14 +514,23 @@ impl BytecodeCompiler {
     /// it is target-uniform so one observer template serves every target the
     /// installing annotation applies to.
     fn specialize_concrete_before(
-        &self,
+        &mut self,
         template: &CheckedTemplate,
         target: &SpecializationTarget,
         signature: &BodySignature,
+        captures: Vec<(String, LiftedConst)>,
     ) -> Result<SpecializedHandler> {
         if concrete_signature_is_observer(signature) {
+            // Zero captures: the S1/S2 definition-compiled fast path,
+            // untouched. With captures (S3b): the baked specialization is a
+            // separate suffixed def.
+            let function_index = if captures.is_empty() {
+                self.template_body_function_index(template)?
+            } else {
+                self.ensure_baked_concrete_specialization(template, target, captures)?
+            };
             return Ok(SpecializedHandler {
-                function_index: self.template_body_function_index(template)?,
+                function_index,
                 carrier: None,
                 observer: true,
             });
@@ -519,8 +596,13 @@ impl BytecodeCompiler {
                         ));
                     }
                 }
+                let function_index = if captures.is_empty() {
+                    self.template_body_function_index(template)?
+                } else {
+                    self.ensure_baked_concrete_specialization(template, target, captures)?
+                };
                 Ok(SpecializedHandler {
-                    function_index: self.template_body_function_index(template)?,
+                    function_index,
                     carrier: Some(MutationCarrier::Single {
                         annotation: required.clone(),
                     }),
@@ -552,14 +634,23 @@ impl BytecodeCompiler {
     /// targets, the canonical exit-logging shape); the target's result (if
     /// any) threads through unchanged.
     fn specialize_concrete_after(
-        &self,
+        &mut self,
         template: &CheckedTemplate,
         target: &SpecializationTarget,
         signature: &BodySignature,
+        captures: Vec<(String, LiftedConst)>,
     ) -> Result<SpecializedHandler> {
         if concrete_signature_is_observer(signature) {
+            // Zero captures: the S1/S2 definition-compiled fast path,
+            // untouched. With captures (S3b): the baked specialization is a
+            // separate suffixed def.
+            let function_index = if captures.is_empty() {
+                self.template_body_function_index(template)?
+            } else {
+                self.ensure_baked_concrete_specialization(template, target, captures)?
+            };
             return Ok(SpecializedHandler {
-                function_index: self.template_body_function_index(template)?,
+                function_index,
                 carrier: None,
                 observer: true,
             });
@@ -622,8 +713,13 @@ impl BytecodeCompiler {
                 ));
             }
         }
+        let function_index = if captures.is_empty() {
+            self.template_body_function_index(template)?
+        } else {
+            self.ensure_baked_concrete_specialization(template, target, captures)?
+        };
         Ok(SpecializedHandler {
-            function_index: self.template_body_function_index(template)?,
+            function_index,
             carrier: None,
             observer: false,
         })
@@ -955,14 +1051,26 @@ mod tests {
 
     /// Open the C2 install transaction around the specialization (E1-D6b
     /// composition: commit = drop token + clear journal; failure = rollback)
-    /// — the production discipline, mirrored.
+    /// — the production discipline, mirrored. Zero-capture form; the S3b
+    /// with-capture twin is [`specialize_with_captures`].
     fn specialize(
         compiler: &mut BytecodeCompiler,
         template: &CheckedTemplate,
         target: &SpecializationTarget,
     ) -> Result<SpecializedHandler> {
+        specialize_with_captures(compiler, template, &[], target)
+    }
+
+    /// The S3b with-capture twin of [`specialize`]: capture values flow into
+    /// the plan (rule-6 identity + bake).
+    fn specialize_with_captures(
+        compiler: &mut BytecodeCompiler,
+        template: &CheckedTemplate,
+        capture_values: &[(String, LiftedConst)],
+        target: &SpecializationTarget,
+    ) -> Result<SpecializedHandler> {
         let transaction = compiler.begin_checked_body_install();
-        match compiler.specialize_template(template, target) {
+        match compiler.specialize_template(template, capture_values, target) {
             Ok(handler) => {
                 drop(transaction);
                 compiler.install_journal = None;
@@ -1291,7 +1399,7 @@ mod tests {
         assert!(fx.compiler.install_journal.is_none(), "control: no journal open");
         let err = fx
             .compiler
-            .specialize_template(&template, &target)
+            .specialize_template(&template, &[], &target)
             .expect_err("specialization outside the install transaction must reject");
         assert!(
             err.to_string()
@@ -1740,7 +1848,10 @@ mod tests {
     // body against the wrong Sig, a 2-param handler for a 3-param target
     // (the C3-G10 violation). The template seam's injective key/symbol
     // suffix (`template_specialization_key_suffix`: arity + delimited
-    // Display rendering) is what keeps the identities distinct.
+    // Display rendering) is what keeps the identities distinct. S3b extends
+    // the SAME suffix with the rule-6 `::cfg#` config segment; ZERO-capture
+    // templates (this refuter included) produce BYTE-IDENTICAL keys/symbols
+    // to S1/S2 — this test passing untouched IS the byte-stability pin.
     #[test]
     fn colliding_flat_tuple_renderings_specialize_separately() {
         // Control (non-vacuity): the FLAT renderings really do collide — if
@@ -1921,7 +2032,7 @@ mod tests {
         let transaction = fx.compiler.begin_checked_body_install();
         let first = fx
             .compiler
-            .specialize_template(&template, &target)
+            .specialize_template(&template, &[], &target)
             .expect("the first specialization succeeds inside the transaction");
         let first_index = first.function_index();
         assert!(fx.compiler.program.functions.len() > functions_before);
@@ -1980,5 +2091,404 @@ mod tests {
             err.to_string().contains("typed args mutation"),
             "rejection must explain the before-carrier requirement: {err}"
         );
+    }
+
+    // =====================================================================
+    // S3b — rule 6 (Dec-95): the `::cfg#` config identity segment + the
+    // heap-constant bake at the specialization seam.
+    // =====================================================================
+
+    use crate::compiler::monomorphization::cache::template_specialization_key_suffix;
+    use crate::compiler::template_specialization::const_lift::structural_key_segment;
+
+    fn capture_clause(names: &[&str]) -> CaptureClause {
+        CaptureClause {
+            entries: names
+                .iter()
+                .map(|name| shape_ast::ast::CaptureEntry {
+                    mode: shape_ast::ast::CaptureMode::Move,
+                    name: name.to_string(),
+                    span: Span::default(),
+                    name_span: Span::default(),
+                })
+                .collect(),
+            span: Span::default(),
+        }
+    }
+
+    fn template_with_captures(
+        fixture: &Fixture,
+        hook_kind: TemplateHookKind,
+        name: &str,
+        capture_names: &[&str],
+    ) -> CheckedTemplate {
+        CheckedTemplateBuilder::new(hook_kind)
+            .body_fn(fixture.defs.get(name).expect("template fn in fixture"))
+            .expect("template classifies")
+            .captures(capture_clause(capture_names))
+            .finish()
+            .expect("template finishes")
+    }
+
+    fn int_capture(name: &str, value: i64) -> (String, LiftedConst) {
+        (name.to_string(), LiftedConst::Int(value))
+    }
+
+    // ZERO-CAPTURE BYTE-STABILITY (the S1 identity discipline): with no
+    // captures the suffix is byte-identical to the S1/S2 rendering — no
+    // `cfg#` head, no `'#'` byte at all. With captures, the segment appends
+    // under the `::cfg#{count}` head whose `'#'` is not an identifier
+    // character (no ConcreteType Display / type rendering can produce it —
+    // the boundary against the Sig segments is unambiguous).
+    #[test]
+    fn template_suffix_zero_captures_is_byte_stable_and_cfg_headed_otherwise() {
+        let sig = [ConcreteType::Tuple(vec![ConcreteType::I64, ConcreteType::F64])];
+        let bare = template_specialization_key_suffix(&sig, &[]);
+        assert_eq!(
+            bare,
+            format!("{TEMPLATE_SPECIALIZATION_KEY_SALT}::a2::{}", sig[0]),
+            "zero captures = the S1 rendering exactly (byte-stable)"
+        );
+        assert!(!bare.contains('#'), "no cfg head without captures: {bare}");
+
+        let with = template_specialization_key_suffix(&sig, &[int_capture("c", 5)]);
+        assert_eq!(
+            with,
+            format!("{bare}::cfg#1::i:5"),
+            "the config segment appends under the cfg# head in delivery order"
+        );
+    }
+
+    // KEY-LEVEL INJECTIVITY REFUTERS with flat-join non-vacuity controls
+    // (the S1-verify-1 / #64 discipline extended to the config segment).
+    #[test]
+    fn template_suffix_config_segment_injectivity_refuters() {
+        let sig = [ConcreteType::I64];
+        let suffix = |captures: &[(String, LiftedConst)]| {
+            template_specialization_key_suffix(&sig, captures)
+        };
+
+        // Some(5) vs 5 — control: the naive payload-unwrap rendering (the
+        // REAL segment producer applied to the unwrapped payload) collides.
+        let five = LiftedConst::Int(5);
+        let some5 = LiftedConst::Some(Box::new(five.clone()));
+        let LiftedConst::Some(payload) = &some5 else { unreachable!() };
+        assert_eq!(
+            structural_key_segment(payload),
+            structural_key_segment(&five),
+            "control: payload-unwrap really collides"
+        );
+        assert_ne!(
+            suffix(&[("c".to_string(), some5)]),
+            suffix(&[("c".to_string(), five)]),
+            "Some(5) and 5 must key distinct specializations"
+        );
+
+        // ("ab","c") vs ("a","bc") across TWO capture positions — control:
+        // the flat string concatenation collides.
+        assert_eq!("ab".to_string() + "c", "a".to_string() + "bc");
+        assert_ne!(
+            suffix(&[
+                ("x".to_string(), LiftedConst::String("ab".to_string())),
+                ("y".to_string(), LiftedConst::String("c".to_string())),
+            ]),
+            suffix(&[
+                ("x".to_string(), LiftedConst::String("a".to_string())),
+                ("y".to_string(), LiftedConst::String("bc".to_string())),
+            ]),
+            "length-prefixed value segments must pin position boundaries"
+        );
+
+        // [12] vs [1, 2] across capture ARITY — control: the flat digit
+        // join collides; the `cfg#{count}` head pins top-level arity.
+        assert_eq!("12", format!("{}{}", 1, 2));
+        assert_ne!(
+            suffix(&[int_capture("c", 12)]),
+            suffix(&[int_capture("x", 1), int_capture("y", 2)]),
+            "the count head must pin capture arity"
+        );
+    }
+
+    // CONCRETE with captures (S3b route): the baked specialization is a
+    // SEPARATE suffixed def produced by the one monomorphization pipeline;
+    // the definition-compiled body fn REMAINS an ordinary module fn.
+    // Execution-proven on BOTH: the baked handler with ONLY the Sig arg
+    // (capture baked), the ordinary fn with both args (unchanged).
+    #[test]
+    fn concrete_before_with_captures_bakes_a_separate_suffixed_specialization() {
+        let src = "fn tmpl(x: int, factor: int) -> int { return x * factor }\n\
+                   fn target_fn(a: int) -> int { return a }\n";
+        let mut fx = fixture(src);
+        let template = template_with_captures(&fx, TemplateHookKind::Before, "tmpl", &["factor"]);
+        let target = target_for(&fx, "target_fn", None);
+
+        let handler = specialize_with_captures(
+            &mut fx.compiler,
+            &template,
+            &[int_capture("factor", 3)],
+            &target,
+        )
+        .expect("the concrete-with-captures route bakes");
+        assert!(!handler.is_observer());
+        assert!(
+            matches!(handler.carrier(), Some(MutationCarrier::Single { .. })),
+            "the concrete before carrier is unchanged by the bake"
+        );
+
+        let body_index = fx
+            .compiler
+            .find_function("tmpl")
+            .expect("the definition-compiled body fn remains an ordinary module fn");
+        assert_ne!(
+            handler.function_index() as usize,
+            body_index,
+            "the baked specialization is a separate def, never the body fn itself"
+        );
+        let def = registered_specialized_def(&fx.compiler, handler.function_index());
+        assert_eq!(def.params.len(), 1, "the capture param is stripped (arity == Sig arity)");
+        assert!(
+            def.name.contains("::cfg#1::i:3"),
+            "the baked symbol carries the rule-6 config segment: {}",
+            def.name
+        );
+
+        let baked = execute_specialized(&fx.compiler, handler.function_index(), vec![int_arg(5)]);
+        assert_eq!(baked.as_i64(), Some(15), "5 * baked factor 3 (only the Sig arg passed)");
+        // The ordinary module fn is untouched: still registered under its
+        // own name with BOTH parameters (identity-proof — the unit fixture
+        // registers but does not definition-compile concrete bodies, the S1
+        // posture; the end-to-end weave tests execute the full path).
+        let ordinary_def = fx
+            .compiler
+            .function_defs
+            .get("tmpl")
+            .expect("the ordinary def stays registered");
+        assert_eq!(ordinary_def.params.len(), 2, "the ordinary def keeps its capture param");
+        assert_clean_specialization_state(&fx.compiler);
+    }
+
+    // OBSERVER with captures: the baked observer specialization declares
+    // ZERO parameters (the weave calls it with zero args) and carries the
+    // config segment.
+    #[test]
+    fn observer_with_captures_bakes_a_zero_param_specialization() {
+        let src = "fn note(tag: int) { let x = tag }\n\
+                   fn target_fn(a: int) -> int { return a }\n";
+        let mut fx = fixture(src);
+        let template = template_with_captures(&fx, TemplateHookKind::Before, "note", &["tag"]);
+        let target = target_for(&fx, "target_fn", None);
+
+        let handler = specialize_with_captures(
+            &mut fx.compiler,
+            &template,
+            &[int_capture("tag", 7)],
+            &target,
+        )
+        .expect("the observer-with-captures route bakes");
+        assert!(handler.is_observer());
+        assert!(handler.carrier().is_none());
+        let def = registered_specialized_def(&fx.compiler, handler.function_index());
+        assert!(def.params.is_empty(), "observer arity == Sig arity == 0");
+        assert!(
+            def.name.contains("::cfg#1::i:7"),
+            "the baked observer symbol carries the config segment: {}",
+            def.name
+        );
+        // Execution-proven: the zero-arg baked observer runs in the VM.
+        execute_specialized(&fx.compiler, handler.function_index(), Vec::new());
+        assert_clean_specialization_state(&fx.compiler);
+    }
+
+    // POLYMORPHIC RESULT with captures: routes through the plan-bearing ride
+    // (suffix + bake) and may no longer share an entry/symbol with an
+    // ordinary generic instantiation at R — values bake in. (The
+    // zero-capture shared-entry behavior keeps its own S1 pin, untouched.)
+    #[test]
+    fn polymorphic_result_with_captures_bakes_and_departs_the_shared_entry() {
+        let src = "fn wrap<R>(result: R, offset: int) -> R { return result + offset }\n\
+                   fn target_fn(a: int) -> int { return a }\n";
+        let mut fx = fixture(src);
+        let template = template_with_captures(&fx, TemplateHookKind::After, "wrap", &["offset"]);
+        let target = target_for(&fx, "target_fn", None);
+
+        // Control: an ordinary generic instantiation of the same body at R.
+        let plain = fx
+            .compiler
+            .ensure_monomorphic_function_for_callsite(
+                "wrap",
+                &[ConcreteType::I64],
+                SemanticSpecializationRequest::Legacy,
+            )
+            .expect("the plain instantiation compiles");
+
+        let handler = specialize_with_captures(
+            &mut fx.compiler,
+            &template,
+            &[int_capture("offset", 3)],
+            &target,
+        )
+        .expect("the after-with-captures route bakes");
+        assert_ne!(
+            handler.function_index(),
+            plain,
+            "with captures the baked handler departs the ordinary-instantiation entry"
+        );
+        let def = registered_specialized_def(&fx.compiler, handler.function_index());
+        assert_eq!(def.params.len(), 1, "the capture param is stripped");
+        assert!(
+            def.name.contains("::cfg#1::i:3"),
+            "the baked symbol carries the config segment: {}",
+            def.name
+        );
+        let result =
+            execute_specialized(&fx.compiler, handler.function_index(), vec![int_arg(10)]);
+        assert_eq!(result.as_i64(), Some(13), "10 + baked offset 3");
+        assert_clean_specialization_state(&fx.compiler);
+    }
+
+    // RULE 6 at the seam, execution-proven: equal config SHARES one baked
+    // specialization (cache hit); different config on the SAME Sig gets a
+    // DISTINCT one; the baked polymorphic handler executes with ONLY the
+    // Sig args.
+    #[test]
+    fn rule6_seam_share_equal_config_and_split_distinct_config() {
+        let src = "fn tmpl<Args>(args: Args, factor: int) -> Args {\n\
+                   \x20   args[0] = args[0] * factor\n\
+                   \x20   return args\n\
+                   }\n\
+                   fn target_a(a: int) -> int { return a }\n\
+                   fn target_b(a: int) -> int { return a + 1 }\n";
+        let mut fx = fixture(src);
+        let template = template_with_captures(&fx, TemplateHookKind::Before, "tmpl", &["factor"]);
+
+        let target_a = target_for(&fx, "target_a", None);
+        let first = specialize_with_captures(
+            &mut fx.compiler,
+            &template,
+            &[int_capture("factor", 3)],
+            &target_a,
+        )
+        .expect("first install bakes");
+        let target_b = target_for(&fx, "target_b", None);
+        let second = specialize_with_captures(
+            &mut fx.compiler,
+            &template,
+            &[int_capture("factor", 3)],
+            &target_b,
+        )
+        .expect("equal-config install cache-hits");
+        assert_eq!(
+            first.function_index(),
+            second.function_index(),
+            "rule 6: structurally EQUAL config shares one specialization"
+        );
+        assert_eq!(fx.compiler.monomorphization_cache.legacy_len(), 1);
+
+        let third = specialize_with_captures(
+            &mut fx.compiler,
+            &template,
+            &[int_capture("factor", 5)],
+            &target_a,
+        )
+        .expect("distinct-config install bakes fresh");
+        assert_ne!(
+            first.function_index(),
+            third.function_index(),
+            "rule 6: structurally DIFFERENT config gets a distinct specialization"
+        );
+        assert_eq!(fx.compiler.monomorphization_cache.legacy_len(), 2);
+
+        // Execution with ONLY the Sig arg — the factor is baked.
+        let with3 = execute_specialized(&fx.compiler, first.function_index(), vec![int_arg(10)]);
+        assert_eq!(with3.as_i64(), Some(30), "baked factor 3");
+        let with5 = execute_specialized(&fx.compiler, third.function_index(), vec![int_arg(10)]);
+        assert_eq!(with5.as_i64(), Some(50), "baked factor 5");
+        assert_clean_specialization_state(&fx.compiler);
+    }
+
+    // EMPTY-ARRAY bake half of the S3b probe (the weave-side twin pins the
+    // handler-side spelling as a loud PRE-EXISTING comptime rejection —
+    // `weave.rs::empty_array_config_probe_is_a_loud_comptime_rejection_today`):
+    // the VALUE is host-constructible, and at the seam it lifts, matches the
+    // `Array<int>` annotation (empty matches any Array — S3a
+    // decided-and-pinned), bakes as the annotation-typed empty array
+    // prologue, and EXECUTES under strict typing (the declared annotation
+    // proves the element type). No validate_capture_value_types contingency
+    // rejection is needed for the baked half.
+    #[test]
+    fn empty_array_capture_value_bakes_at_the_seam() {
+        let src = "fn tmpl<Args>(args: Args, cfg: Array<int>) -> Args {\n\
+                   \x20   args[0] = args[0] * 10 + cfg.length()\n\
+                   \x20   return args\n\
+                   }\n\
+                   fn target_fn(a: int) -> int { return a }\n";
+        let mut fx = fixture(src);
+        let template = template_with_captures(&fx, TemplateHookKind::Before, "tmpl", &["cfg"]);
+        let target = target_for(&fx, "target_fn", None);
+
+        let handler = specialize_with_captures(
+            &mut fx.compiler,
+            &template,
+            &[("cfg".to_string(), LiftedConst::Array(Vec::new()))],
+            &target,
+        )
+        .expect("the empty-array capture bakes under the declared annotation");
+        let def = registered_specialized_def(&fx.compiler, handler.function_index());
+        assert_eq!(def.params.len(), 1, "the capture param is stripped");
+        assert!(
+            def.name.contains("::cfg#1::a:0:[]"),
+            "the empty array keys its own config segment: {}",
+            def.name
+        );
+        let result =
+            execute_specialized(&fx.compiler, handler.function_index(), vec![int_arg(1)]);
+        assert_eq!(result.as_i64(), Some(10), "1*10 + len([]) — the baked empty array executes");
+        assert_clean_specialization_state(&fx.compiler);
+    }
+
+    // ROLLBACK-RERUN for a BAKED install (mirrors
+    // rollback_evicts_the_specialization_cache_and_a_rerun_reregisters_fresh):
+    // baked entries live in the SAME cache store, so the S1c
+    // evict-at/above-watermark fold-in covers them.
+    #[test]
+    fn rollback_evicts_a_baked_install_and_a_rerun_rebakes_fresh() {
+        let src = "fn tmpl<Args>(args: Args, factor: int) -> Args {\n\
+                   \x20   args[0] = args[0] * factor\n\
+                   \x20   return args\n\
+                   }\n\
+                   fn target_fn(a: int) -> int { return a }\n";
+        let mut fx = fixture(src);
+        let template = template_with_captures(&fx, TemplateHookKind::Before, "tmpl", &["factor"]);
+        let target = target_for(&fx, "target_fn", None);
+        let captures = [int_capture("factor", 3)];
+
+        let functions_before = fx.compiler.program.functions.len();
+        let transaction = fx.compiler.begin_checked_body_install();
+        let first = fx
+            .compiler
+            .specialize_template(&template, &captures, &target)
+            .expect("the baked specialization succeeds inside the transaction");
+        let first_index = first.function_index();
+        assert_eq!(fx.compiler.monomorphization_cache.legacy_len(), 1);
+
+        fx.compiler.rollback_checked_body_install(transaction);
+        assert_eq!(fx.compiler.program.functions.len(), functions_before);
+        assert_eq!(
+            fx.compiler.monomorphization_cache.legacy_len(),
+            0,
+            "rollback evicts the baked at/above-watermark cache entry"
+        );
+
+        let handler = specialize_with_captures(&mut fx.compiler, &template, &captures, &target)
+            .expect("the re-run re-bakes fresh after rollback");
+        assert_eq!(
+            handler.function_index(),
+            first_index,
+            "the re-run re-registers at the freed watermark index"
+        );
+        let result =
+            execute_specialized(&fx.compiler, handler.function_index(), vec![int_arg(10)]);
+        assert_eq!(result.as_i64(), Some(30), "the re-baked handler executes correctly");
+        assert_clean_specialization_state(&fx.compiler);
     }
 }

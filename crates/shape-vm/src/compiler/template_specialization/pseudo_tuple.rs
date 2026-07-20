@@ -82,6 +82,7 @@ use shape_ast::ast::windows::{WindowExpr, WindowFunction};
 use shape_ast::error::{Result, ShapeError};
 
 use super::MutationCarrier;
+use super::const_lift::LiftedConst;
 
 /// The reserved specialization-internal identifier prefix (see module docs).
 pub(in crate::compiler) const RESERVED_SPECIALIZATION_PREFIX: &str = "__c3_";
@@ -96,14 +97,40 @@ fn slot_local_name(index: usize) -> String {
     format!("{RESERVED_SPECIALIZATION_PREFIX}arg_{index}")
 }
 
-/// Everything the rewrite face needs to resolve one polymorphic BEFORE
-/// template body against one frozen target (C3-G9/G10). Built at the
-/// specialization seam (`template_specialization::specialize_template`) and
-/// consumed by the monomorphization ride
-/// (`cache.rs::ensure_monomorphic_template_specialization`) — the plan is an
+/// Everything the monomorphization ride needs to specialize one template
+/// body against one frozen target (C3-G9/G10 + the S3b ConstLift bake).
+/// Built at the specialization seam
+/// (`template_specialization::specialize_template`) and consumed by
+/// `cache.rs::ensure_monomorphic_template_specialization` — the plan is an
 /// explicit parameter end to end; no ambient state.
+///
+/// ADR-009 C3 #14 (slice 3, S3b — Dec-95 rule 6): capture VALUES are IN the
+/// plan and IN the specialization identity. The S2 "NAMES only — values
+/// never in the plan or the cache key (invariants resolution 5)" posture is
+/// SUPERSEDED by this slice's charter: structurally EQUAL config shares a
+/// specialization; structurally DIFFERENT config gets a distinct one (the
+/// `::cfg#` segment of `template_specialization_key_suffix`), and the values
+/// BAKE into the specialized handler as constants
+/// (`const_lift::bake_captures_into_def`) — no call-site delivery exists.
 #[derive(Debug)]
 pub(in crate::compiler) struct TemplateSpecializationPlan {
+    /// The G9 pseudo-tuple resolution input — `Some` for PolymorphicArgs
+    /// templates ONLY; `None` for the concrete / observer /
+    /// PolymorphicResult with-capture routes (which need the bake + the
+    /// rule-6 identity but no pseudo-tuple rewrite).
+    pub(in crate::compiler) pseudo_tuple: Option<PseudoTuplePlan>,
+    /// The template's capture values `(name, value)` in delivery
+    /// (trailing-parameter) order — the ONE ordering shared by the `::cfg#`
+    /// identity segment and the bake's prologue
+    /// (`const_lift::capture_values_in_delivery_order`).
+    pub(in crate::compiler) captures: Vec<(String, LiftedConst)>,
+}
+
+/// The G9 pseudo-tuple face of a [`TemplateSpecializationPlan`]: everything
+/// the rewrite face needs to resolve one polymorphic BEFORE template body
+/// against one frozen target.
+#[derive(Debug)]
+pub(in crate::compiler) struct PseudoTuplePlan {
     /// The template's pseudo-tuple parameter spelling (`args`).
     pub(in crate::compiler) args_param: String,
     /// The template's type parameter spelling (`Args`).
@@ -115,22 +142,9 @@ pub(in crate::compiler) struct TemplateSpecializationPlan {
     /// How the mutated pack flows back (C3-G9): `Single` for a 1-ary target,
     /// the compiler-internal `Aggregate` otherwise.
     pub(in crate::compiler) carrier: MutationCarrier,
-    /// ADR-009 C3 #14 (slice 2, S2b — the capture-plan threading): the
-    /// template's TRAILING capture-parameter names, in parameter (delivery)
-    /// order. The construction chokepoint guarantees the body fn's shape is
-    /// `[args_param, <capture params>...]` with concretely-annotated
-    /// captures, so the rewrite face PRESERVES the capture tail verbatim
-    /// after the minted per-slot parameters: the specialized def is
-    /// `fn(__c3_p0..__c3_p{n-1}, <captures>...)` and the weave delivers the
-    /// capture values as typed trailing literals
-    /// (`const_lift::CaptureBindingPlan::CallSiteArgs`). Capture VALUES are
-    /// deliberately NOT part of this plan — the specialization cache key
-    /// stays value-generic (invariants resolution 5; the Dec-95 rule-6
-    /// spec-hash is S3's).
-    pub(in crate::compiler) capture_param_names: Vec<String>,
 }
 
-impl TemplateSpecializationPlan {
+impl PseudoTuplePlan {
     fn arity(&self) -> usize {
         self.target_params.len()
     }
@@ -254,11 +268,22 @@ pub(in crate::compiler) fn resolve_pseudo_tuple(
     plan: &TemplateSpecializationPlan,
     compiler: &crate::compiler::BytecodeCompiler,
 ) -> Result<()> {
-    let arity = plan.arity();
     let internal = |message: String| ShapeError::RuntimeError {
         message,
         location: None,
     };
+    // S3b: the pseudo-tuple face is `Some` for PolymorphicArgs plans only;
+    // the monomorphization ride guards the call on that — a `None` here is
+    // an internal invariant breach, never a route.
+    let Some(pt) = &plan.pseudo_tuple else {
+        return Err(internal(format!(
+            "internal error: resolve_pseudo_tuple for `{}` received a plan without a \
+             pseudo-tuple face; the monomorphization ride calls the resolution only for \
+             PolymorphicArgs plans",
+            def.name
+        )));
+    };
+    let arity = pt.arity();
     if arity == 0 {
         return Err(internal(format!(
             "internal error: resolve_pseudo_tuple for `{}` received a zero-parameter target \
@@ -267,7 +292,7 @@ pub(in crate::compiler) fn resolve_pseudo_tuple(
             def.name
         )));
     }
-    let carrier_consistent = match &plan.carrier {
+    let carrier_consistent = match &pt.carrier {
         MutationCarrier::Single { .. } => arity == 1,
         MutationCarrier::Aggregate { fields } => arity > 1 && fields.len() == arity,
     };
@@ -276,28 +301,31 @@ pub(in crate::compiler) fn resolve_pseudo_tuple(
             "internal error: resolve_pseudo_tuple for `{}` received an inconsistent plan \
              (arity {arity} vs carrier {:?}); the specialization seam derives the carrier \
              from the same target parameter list",
-            def.name, plan.carrier
+            def.name, pt.carrier
         )));
     }
     // The substituted def's parameter shape is chokepoint-guaranteed:
     // `[args_param, <capture params>...]` — the pseudo-tuple parameter first,
     // then the concretely-annotated trailing capture parameters in the
-    // plan's (delivery) order (S2b capture-plan threading; zero captures =
-    // the original exactly-one-parameter shape).
-    let expected_params = 1 + plan.capture_param_names.len();
+    // plan's (delivery) order (zero captures = the original
+    // exactly-one-parameter shape). The tail is PRESERVED here; the S3b bake
+    // (`const_lift::bake_captures_into_def`, run by the ride immediately
+    // after this resolution) strips it and bakes the values as prologue
+    // constants.
+    let expected_params = 1 + plan.captures.len();
     if def.params.len() != expected_params
-        || def.params[0].simple_name() != Some(plan.args_param.as_str())
+        || def.params[0].simple_name() != Some(pt.args_param.as_str())
     {
         return Err(internal(format!(
             "internal error: resolve_pseudo_tuple expected `{}` to carry the pseudo-tuple \
              parameter `{}` plus {} trailing capture parameter(s); a PolymorphicArgs template \
              classifies with exactly that shape at construction",
             def.name,
-            plan.args_param,
-            plan.capture_param_names.len(),
+            pt.args_param,
+            plan.captures.len(),
         )));
     }
-    for (offset, expected_name) in plan.capture_param_names.iter().enumerate() {
+    for (offset, (expected_name, _)) in plan.captures.iter().enumerate() {
         if def.params[1 + offset].simple_name() != Some(expected_name.as_str()) {
             return Err(internal(format!(
                 "internal error: resolve_pseudo_tuple expected `{}`'s trailing capture \
@@ -314,10 +342,10 @@ pub(in crate::compiler) fn resolve_pseudo_tuple(
     // per-slot mutation's rewritten RHS for the aggregate-kind guard below.
     let carrier_writes = std::cell::RefCell::new(Vec::new());
     let scan = Scan {
-        args_param: &plan.args_param,
-        type_param: &plan.type_param,
+        args_param: &pt.args_param,
+        type_param: &pt.type_param,
         face: Face::Rewrite {
-            plan,
+            plan: pt,
             carrier_writes: &carrier_writes,
         },
     };
@@ -339,14 +367,14 @@ pub(in crate::compiler) fn resolve_pseudo_tuple(
     // (return `ConcreteType`s register from DECLARED annotations only), so
     // the guard proves the writes at the only point where the declared
     // types and the write expressions are both in hand.
-    guard_carrier_write_kinds(compiler, plan, &capture_tail, &carrier_writes.into_inner())?;
+    guard_carrier_write_kinds(compiler, pt, &capture_tail, &carrier_writes.into_inner())?;
 
     // (2) Per-slot minted parameters, typed from the target's AST side; the
     // trailing capture parameters (already concrete — never substituted)
-    // are PRESERVED verbatim after them (S2b capture-plan threading): the
-    // weave appends the capture literals after the signature arguments at
-    // each handler call site, matching this parameter order.
-    def.params = plan
+    // are PRESERVED verbatim after them for the S3b bake, which strips the
+    // tail and bakes the values as prologue constants immediately after
+    // this resolution (the ride's bake seam).
+    def.params = pt
         .target_params
         .iter()
         .enumerate()
@@ -384,7 +412,7 @@ pub(in crate::compiler) fn resolve_pseudo_tuple(
     // production caller hands in a substitution output whose `type_params`
     // are already cleared; clear defensively so the resolved def is concrete
     // either way (the polymorphism has resolved away).
-    def.return_type = Some(plan.carrier_return_annotation());
+    def.return_type = Some(pt.carrier_return_annotation());
     def.type_params = None;
     Ok(())
 }
@@ -400,7 +428,7 @@ pub(in crate::compiler) fn resolve_pseudo_tuple(
 /// spellings of one concrete type (`Array<int>` / `Vec<int>`) agree.
 fn guard_carrier_write_kinds(
     compiler: &crate::compiler::BytecodeCompiler,
-    plan: &TemplateSpecializationPlan,
+    plan: &PseudoTuplePlan,
     capture_tail: &[FunctionParameter],
     writes: &[(usize, Expr)],
 ) -> Result<()> {
@@ -618,7 +646,7 @@ enum Face<'a> {
     /// (`guard_carrier_write_kinds`) — the walk only COLLECTS; the guard's
     /// comparison runs once after the walk.
     Rewrite {
-        plan: &'a TemplateSpecializationPlan,
+        plan: &'a PseudoTuplePlan,
         carrier_writes: &'a std::cell::RefCell<Vec<(usize, Expr)>>,
     },
 }
@@ -668,7 +696,7 @@ impl<'a> Scan<'a> {
     fn reject_index_out_of_range(
         &self,
         index: i64,
-        plan: &TemplateSpecializationPlan,
+        plan: &PseudoTuplePlan,
     ) -> ShapeError {
         let arity = plan.arity();
         reject(format!(
@@ -856,7 +884,7 @@ impl<'a> Scan<'a> {
     fn checked_slot_local(
         &self,
         index: i64,
-        plan: &TemplateSpecializationPlan,
+        plan: &PseudoTuplePlan,
     ) -> Result<String> {
         if index < 0 || (index as usize) >= plan.arity() {
             return Err(self.reject_index_out_of_range(index, plan));
@@ -1758,26 +1786,30 @@ mod tests {
     /// A 2-ary `(int, number)` aggregate plan — the mod.rs seam's shape.
     fn aggregate_plan() -> TemplateSpecializationPlan {
         TemplateSpecializationPlan {
-            args_param: "args".into(),
-            type_param: "Args".into(),
-            target_params: vec![("a".into(), int_ann()), ("b".into(), number_ann())],
-            carrier: MutationCarrier::Aggregate {
-                fields: vec![("a0".into(), int_ann()), ("a1".into(), number_ann())],
-            },
-            capture_param_names: Vec::new(),
+            pseudo_tuple: Some(PseudoTuplePlan {
+                args_param: "args".into(),
+                type_param: "Args".into(),
+                target_params: vec![("a".into(), int_ann()), ("b".into(), number_ann())],
+                carrier: MutationCarrier::Aggregate {
+                    fields: vec![("a0".into(), int_ann()), ("a1".into(), number_ann())],
+                },
+            }),
+            captures: Vec::new(),
         }
     }
 
     /// A 1-ary `(int)` Single plan.
     fn single_plan() -> TemplateSpecializationPlan {
         TemplateSpecializationPlan {
-            args_param: "args".into(),
-            type_param: "Args".into(),
-            target_params: vec![("a".into(), int_ann())],
-            carrier: MutationCarrier::Single {
-                annotation: int_ann(),
-            },
-            capture_param_names: Vec::new(),
+            pseudo_tuple: Some(PseudoTuplePlan {
+                args_param: "args".into(),
+                type_param: "Args".into(),
+                target_params: vec![("a".into(), int_ann())],
+                carrier: MutationCarrier::Single {
+                    annotation: int_ann(),
+                },
+            }),
+            captures: Vec::new(),
         }
     }
 

@@ -23,19 +23,17 @@
 //! no unit value can reach the capture seam at all — the sentence's own
 //! conditional names unit for the declaration-site reader.
 //!
-//! # Staging within S3 (S3a: dark-wired domain core)
+//! # Staging within S3 (S3b: the atomic flip is LANDED)
 //!
-//! S3a lands the domain core proven by unit pins while the `capture()`
-//! builtin's VALUE entry keeps its S2 scalar cascade byte-unchanged:
-//! [`lift_capture_value`] stays the production entry (scalars only; its
-//! rejection sentence still points at this module's S3 domain) until S3b
-//! flips it to delegate to [`lift_value`] ATOMICALLY with rule-6 identity
-//! ([`structural_key_segment`] entering the specialization key/symbol) and
-//! composite capture delivery. The DECLARATION-SITE domain check
-//! ([`annotation_within_lift_domain`], wired at
-//! `CheckedTemplateBuilder::finish()`) is LIVE from S3a — it rejects only
-//! declared-but-unusable capture-parameter types, which no green pin
-//! exercises.
+//! S3a landed the domain core dark-wired; S3b flipped it live ATOMICALLY:
+//! [`lift_capture_value`] (the `capture()` builtin's VALUE entry) delegates
+//! to [`lift_value`], [`structural_key_segment`] enters the specialization
+//! key/symbol (the Dec-95 rule-6 spec-hash — the `::cfg#` segment of
+//! `monomorphization/cache.rs::template_specialization_key_suffix`), and
+//! capture delivery is the BAKE ([`bake_captures_into_def`]): values are
+//! constants inside the specialized handler, never call-site arguments.
+//! The DECLARATION-SITE domain check ([`annotation_within_lift_domain`],
+//! wired at `CheckedTemplateBuilder::finish()`) has been LIVE since S3a.
 //!
 //! # Identity vs display — SEPARATE functions, never conflated
 //!
@@ -46,21 +44,28 @@
 //! The `#64`/S1-verify-1 injectivity bug class (flat non-delimited joins) is
 //! refuted by unit pins with non-vacuity controls in this module's tests.
 //!
-//! # Delivery (no second constant store)
+//! # Delivery (the S3b bake — no second constant store)
 //!
-//! [`CaptureBindingPlan::CallSiteArgs`] delivers capture values as TYPED
-//! AST expressions at the wrapper's handler call sites ([`LiftedConst::
-//! to_expr`]): scalars as literals, composites as array literals /
-//! `Some(...)` constructor calls riding the ESTABLISHED per-function
-//! constant-pool and array/Option literal emission — never a parallel
-//! constant store, and the compiler never emits the host-injection-only
-//! `Constant::Value(KindedConstant)` (`bytecode/core_types.rs`). This also
-//! kills the legacy per-invocation-config-eval disease and its W39
-//! `LoadModuleBinding` JIT poison (slice-0 report §4 / §8 item 11): the
-//! specialized handler and wrapper contain the VALUE, not a config read.
-//! S1's monomorphization plan-guard (b) (`cache.rs`, the CONST-PARAM GUARD)
-//! stays: a template plan reaching the const-generic reroute remains a named
-//! internal error.
+//! [`bake_captures_into_def`] is the ONE bake producer: at specialization it
+//! strips the body fn's trailing capture parameters and prepends, in
+//! parameter (delivery) order, `let mut {name}: {declared annotation} =
+//! {value.to_expr()};` — the capture VALUES become constants inside the
+//! specialized handler itself ([`LiftedConst::to_expr`]: scalars as
+//! literals, composites as array literals / `Some(...)` constructor calls),
+//! riding the ESTABLISHED per-function constant-pool and array/Option
+//! literal emission — never a parallel constant store, and the compiler
+//! never emits the host-injection-only `Constant::Value(KindedConstant)`
+//! (`bytecode/core_types.rs`). A baked `Array<int>` lives as `Constant::Int`
+//! entries in the specialized handler's own constant pool (content-addressed
+//! identity intact); the array value is constructed at handler entry from
+//! those constants. Evaluate-once holds because the CONFIG EXPRESSION was
+//! evaluated exactly once at `capture()` in the comptime mini-VM and no
+//! longer exists anywhere in emitted code; the handler contains NO
+//! `LoadModuleBinding` (nothing references module state) — this kills the
+//! legacy per-invocation-config-eval disease and its W39 JIT poison
+//! (slice-0 report §4 / §8 item 11). S1's monomorphization plan-guard (b)
+//! (`cache.rs`, the CONST-PARAM GUARD) stays: a template plan reaching the
+//! const-generic reroute remains a named internal error.
 //!
 //! # Naming (c3-decisions.md §Naming — binding)
 //!
@@ -80,8 +85,7 @@ use shape_value::heap_value::OptionData;
 use shape_value::v2::string_obj::StringObj;
 use shape_value::{HeapKind, KindedSlot, NativeKind};
 
-use super::SpecializationTarget;
-use crate::compiler::comptime_builtins::BoundTemplate;
+use crate::compiler::comptime_fragments::checked_template::CheckedTemplate;
 
 /// The closed-domain sentence (C3-G5), carried VERBATIM by every ConstLift
 /// rejection producer — the lift arms, the declaration-site check, and the
@@ -269,8 +273,9 @@ impl LiftedConst {
         }
     }
 
-    /// The typed AST expression the weave passes at a handler call site
-    /// ([`CaptureBindingPlan::CallSiteArgs`]). Scalars project to literals;
+    /// The typed AST expression the bake writes into the specialized
+    /// handler's prologue ([`bake_captures_into_def`]). Scalars project to
+    /// literals;
     /// arrays project to `Expr::Array` literals and Options to the
     /// `Some(...)` constructor call (`BuiltinFunction::SomeCtor` resolves
     /// the name) / `Literal::None` — riding the ESTABLISHED literal
@@ -325,10 +330,10 @@ impl LiftedConst {
 /// `Number` renders its `f64::to_bits` pattern (`{:016x}`) — finite-only by
 /// lift; bit-pattern rendering IS the structural equality (`-0.0` distinct
 /// from `0.0`; sound over-distinction, disclosed).
-// Dark until S3b: production wiring (the specialization key/symbol suffix)
-// lands atomically with value acceptance and delivery in S3b; unit-proven
-// here per the S3a charter.
-#[allow(dead_code)]
+///
+/// PRODUCTION consumer (S3b): `monomorphization/cache.rs::
+/// template_specialization_key_suffix` renders one segment per capture value
+/// under its `::cfg#{count}` head — key and symbol identity-locked.
 pub(in crate::compiler) fn structural_key_segment(value: &LiftedConst) -> String {
     match value {
         LiftedConst::Int(i) => format!("i:{i}"),
@@ -390,13 +395,14 @@ fn non_finite_message(name: &str, n: f64) -> String {
 /// exact on `NativeKind` per ADR-006 §2.7.6 / Q8 — never fabricated from raw
 /// bits; `as_str` covers both string carriers), then kind-witnessed
 /// composite arms (`Null` → `None`; `Ptr(Option)` → recurse on the
-/// `OptionData` payload; `Ptr(TypedArray)` → the elem-type-stamp walk), then
-/// the never-liftable class arms, then the out-of-domain arm naming the
-/// kind. Non-finite numbers reject at every depth.
-// Dark until S3b: `lift_capture_value` below stays the production entry for
-// the `capture()` builtin until S3b flips it to delegate here atomically
-// with identity + delivery; unit-proven here per the S3a charter.
-#[allow(dead_code)]
+/// host-side `OptionData` payload; `Ptr(TypedArray)` → the elem-type-stamp
+/// walk; `Ptr(TypedObject)` with the `__Option` schema → the CANONICAL L5
+/// runtime Option carrier, [`lift_option_typed_object`] — the S3b probe
+/// result), then the never-liftable class arms, then the out-of-domain arm
+/// naming the kind. Non-finite numbers reject at every depth.
+///
+/// PRODUCTION entry (S3b): [`lift_capture_value`] — the `capture()`
+/// builtin's value seam — delegates here.
 pub(in crate::compiler) fn lift_value(
     name: &str,
     value: &KindedSlot,
@@ -468,6 +474,15 @@ pub(in crate::compiler) fn lift_value(
             &format!("{kind:?}"),
         )),
         NativeKind::Ptr(HeapKind::TypedObject) if bits != 0 => {
+            // The CANONICAL runtime Option carrier is the L5 fixed-layout
+            // `__Option` TypedObject (`executor/result_option_carrier.rs` —
+            // Option is deliberately NOT a separate HeapKind, ADR-005 §1);
+            // it is what `Some(x)`/annotated `None` in comptime handler code
+            // actually produce (S3b probe result). Recognize it FIRST, then
+            // fall through to the descriptor wall / out-of-domain arms.
+            if let Some(lifted) = lift_option_typed_object(name, value)? {
+                return Ok(lifted);
+            }
             match compiler_descriptor_schema_name(value) {
                 Some(schema_name) => Err(never_liftable_message(
                     name,
@@ -574,6 +589,65 @@ fn lift_typed_array(name: &str, array: *const u8) -> Result<LiftedConst, String>
     }
 }
 
+/// The `__Option` runtime-carrier arm of [`lift_value`] (S3b probe result:
+/// comptime handler code's `Some(x)` / annotated `None` produce the L5
+/// fixed-layout `__Option` TypedObject — variant tag at field 0, payload at
+/// field 1 — NOT the host-side `Ptr(HeapKind::Option)` `OptionData` carrier,
+/// which the sibling arm above keeps handling). Schema-witnessed via the
+/// established registry lookup (the `read_option` /
+/// `compiler_descriptor_schema_name` pattern); the Some payload is read as
+/// an OWNED share through the ONE field-read producer
+/// (`comptime::read_typed_object_field` — the §2.7.7/Q9 retain discipline)
+/// and recursed. Returns `Ok(None)` when the object is not an `__Option`
+/// carrier; a malformed carrier is a LOUD out-of-domain rejection, never a
+/// guess.
+fn lift_option_typed_object(
+    name: &str,
+    value: &KindedSlot,
+) -> Result<Option<LiftedConst>, String> {
+    use shape_runtime::type_schema::builtin_schemas::{
+        OPTION_PAYLOAD, OPTION_VARIANT, OPTION_VARIANT_NONE, OPTION_VARIANT_SOME,
+    };
+    let Some(storage) = value.as_typed_object_storage() else {
+        return Ok(Option::None);
+    };
+    let Some(schema) =
+        shape_runtime::type_schema::lookup_schema_by_id_public(storage.schema_id as u32)
+    else {
+        return Ok(Option::None);
+    };
+    if schema.name != "__Option" {
+        return Ok(Option::None);
+    }
+    let slots = storage.slots();
+    if slots.len() != 2
+        || storage.field_kinds.len() != 2
+        || storage.field_kinds[OPTION_VARIANT] != NativeKind::Int64
+    {
+        return Err(out_of_domain_message(
+            name,
+            "Ptr(TypedObject) with a malformed __Option carrier",
+        ));
+    }
+    let variant = slots[OPTION_VARIANT].raw() as i64;
+    if variant == OPTION_VARIANT_NONE {
+        return Ok(Some(LiftedConst::None));
+    }
+    if variant == OPTION_VARIANT_SOME {
+        let payload = crate::compiler::comptime::read_typed_object_field(
+            slots[OPTION_PAYLOAD],
+            storage.field_kinds[OPTION_PAYLOAD],
+            storage.heap_mask,
+            OPTION_PAYLOAD,
+        );
+        return Ok(Some(LiftedConst::Some(Box::new(lift_value(name, &payload)?))));
+    }
+    Err(out_of_domain_message(
+        name,
+        &format!("Ptr(TypedObject) with an unknown __Option variant tag {variant}"),
+    ))
+}
+
 /// Classify a `TypedObject` capture value as a COMPILER DESCRIPTOR when its
 /// schema identifies one: the C3 opaque index handles (`__CheckedTemplate`,
 /// `__CaptureBinding`, the E2 `__CheckedItem`) by name, plus everything the
@@ -652,49 +726,17 @@ pub(in crate::compiler) fn annotation_within_lift_domain(
     }
 }
 
-/// Lift one declared capture VALUE off the `KindedSlot` substrate into the
-/// scalar constant domain, or a NAMED rejection with a positive twin.
-///
-/// S2-SHAPED PRODUCTION ENTRY (byte-unchanged in S3a): the `capture()`
-/// builtin's value acceptance stays scalar-only until S3b flips this fn to
-/// delegate to [`lift_value`] atomically with rule-6 identity and composite
-/// delivery — so its rejection sentence still names this module's S3 domain
-/// as the landing point.
-///
-/// The kind-dispatched scalar cascade mirrors the established
-/// `literal_expr_from_slot` decode (`comptime_builtins.rs`): each accessor is
-/// exact on `NativeKind` (ADR-006 §2.7.6 / Q8 — never fabricated from raw
-/// bits). Non-finite numbers are rejected like every literal-materialization
-/// path.
+/// The `capture()` builtin's VALUE entry — S3b: delegates to the C3-G5
+/// COMPOSITIONAL [`lift_value`]. The S2 scalar-only cascade and its
+/// "lands with S3 ConstLift" landing-point sentence are DELETED (this flip
+/// is the landing); every rejection now comes from the one set of S3 domain
+/// producers above ([`out_of_domain_message`] / [`never_liftable_message`] /
+/// [`non_finite_message`]).
 pub(in crate::compiler) fn lift_capture_value(
     name: &str,
     value: &KindedSlot,
 ) -> Result<LiftedConst, String> {
-    if let Some(s) = value.as_str() {
-        return Ok(LiftedConst::String(s.to_string()));
-    }
-    if let Some(i) = value.as_i64() {
-        return Ok(LiftedConst::Int(i));
-    }
-    if let Some(n) = value.as_f64() {
-        if !n.is_finite() {
-            return Err(format!(
-                "capture `{name}` holds a non-finite number ({n}); capture values must be \
-                 finite so they can be delivered as typed literals — pass a finite number"
-            ));
-        }
-        return Ok(LiftedConst::Number(n));
-    }
-    if let Some(b) = value.as_bool() {
-        return Ok(LiftedConst::Bool(b));
-    }
-    Err(format!(
-        "capture `{name}` holds a value outside this slice's ConstLift domain (kind {:?}); \
-         pass an int, number, bool, or string capture value — the compositional domain \
-         (tuples/arrays/Option of liftables, heap-constant baking, and the never-liftable \
-         named rejections) lands with S3 ConstLift",
-        value.kind()
-    ))
+    lift_value(name, value)
 }
 
 /// Validate each lifted capture VALUE against the body fn's declared trailing
@@ -732,54 +774,166 @@ pub(in crate::compiler) fn validate_capture_value_types(
     Ok(())
 }
 
-/// How a specialized handler receives its capture values. One plan shape:
-/// typed AST expressions at the wrapper's handler call sites (scalars as
-/// literals; S3b's composite delivery rides the same plan through
-/// [`LiftedConst::to_expr`] — never a second constant store).
-#[derive(Debug, Clone)]
-pub(in crate::compiler) enum CaptureBindingPlan {
-    /// The weave passes each capture value as a TYPED expression argument at
-    /// the wrapper's handler call sites, in the body fn's trailing-parameter
-    /// order.
-    CallSiteArgs(Vec<Expr>),
-}
-
-/// Build the capture delivery plan for one install of `template` onto
-/// `target` (the S2b weave consumer; S2a proves the seam). Values are
-/// ordered by the body fn's TRAILING PARAMETER order — the weave appends
-/// them after the signature arguments at each handler call site.
-///
-/// The `target` parameter anchors error attribution (the `@application`
-/// span); the plan itself is target-independent.
-pub(in crate::compiler) fn bind_captures_for_install(
-    bound: &BoundTemplate,
-    target: &SpecializationTarget,
-) -> Result<CaptureBindingPlan, ShapeError> {
-    let template = &bound.template;
-    let mut args = Vec::with_capacity(template.capture_params().len());
+/// Order a bound template's capture VALUES into delivery (trailing-parameter)
+/// order — the ONE ordering every S3b consumer shares: the plan's `captures`,
+/// the `::cfg#` identity segment, and the bake's prologue all use exactly
+/// this order. A missing value is internal-error-shaped (the finish()-time
+/// bijection plus the builtin's value validation make it unreachable).
+pub(in crate::compiler) fn capture_values_in_delivery_order(
+    template: &CheckedTemplate,
+    capture_values: &[(String, LiftedConst)],
+) -> Result<Vec<(String, LiftedConst)>, ShapeError> {
+    let mut ordered = Vec::with_capacity(template.capture_params().len());
     for (param_name, _annotation) in template.capture_params() {
-        let Some((_, lifted)) = bound
-            .capture_values
-            .iter()
-            .find(|(name, _)| name == param_name)
+        let Some((_, lifted)) = capture_values.iter().find(|(name, _)| name == param_name)
         else {
-            // Unreachable after the finish()-time bijection + the builtin's
-            // value validation; internal-error-shaped (the specialize_template
-            // precedent), anchored for the record at the application site.
             return Err(ShapeError::RuntimeError {
                 message: format!(
-                    "internal error: bind_captures_for_install found no capture value for \
-                     trailing parameter `{param_name}` of template body fn `{}` (install \
-                     target `{}`); the construction bijection was bypassed",
+                    "internal error: no capture value for trailing parameter `{param_name}` \
+                     of template body fn `{}`; the construction bijection was bypassed",
                     template.body_fn(),
-                    target.name,
                 ),
                 location: None,
             });
         };
-        args.push(lifted.to_expr());
+        ordered.push((param_name.clone(), lifted.clone()));
     }
-    Ok(CaptureBindingPlan::CallSiteArgs(args))
+    Ok(ordered)
+}
+
+/// Derive the declared trailing capture parameters `(name, annotation)` from
+/// a specialized def's parameter TAIL, verified against the plan's capture
+/// values (names in delivery order). The capture tail survives substitution
+/// verbatim (concretely annotated by construction), so the def itself is the
+/// authority for the declared annotations the bake prologue re-declares.
+/// Any mismatch is internal-error-shaped — the chokepoint guarantees the
+/// shape.
+pub(in crate::compiler) fn declared_capture_params_from_tail(
+    def: &shape_ast::ast::FunctionDef,
+    captures: &[(String, LiftedConst)],
+) -> Result<Vec<(String, TypeAnnotation)>, ShapeError> {
+    let internal = |message: String| ShapeError::RuntimeError {
+        message,
+        location: None,
+    };
+    if def.params.len() < captures.len() {
+        return Err(internal(format!(
+            "internal error: specialized def `{}` declares {} parameter(s) but the template \
+             plan carries {} capture value(s); the construction-time capture bijection \
+             guarantees the tail shape",
+            def.name,
+            def.params.len(),
+            captures.len(),
+        )));
+    }
+    let tail_start = def.params.len() - captures.len();
+    let mut capture_params = Vec::with_capacity(captures.len());
+    for (offset, (expected_name, _)) in captures.iter().enumerate() {
+        let param = &def.params[tail_start + offset];
+        if param.simple_name() != Some(expected_name.as_str()) {
+            return Err(internal(format!(
+                "internal error: specialized def `{}` trailing capture parameter at position \
+                 {} is not `{expected_name}`; the construction-time capture bijection \
+                 guarantees the tail order",
+                def.name,
+                tail_start + offset + 1,
+            )));
+        }
+        let Some(annotation) = param.type_annotation.clone() else {
+            return Err(internal(format!(
+                "internal error: specialized def `{}` capture parameter `{expected_name}` has \
+                 no declared annotation; capture parameters are concretely annotated at \
+                 construction",
+                def.name,
+            )));
+        };
+        capture_params.push((expected_name.clone(), annotation));
+    }
+    Ok(capture_params)
+}
+
+/// The S3b HEAP-CONSTANT BAKE — the ONE bake producer (module docs). Strips
+/// the trailing capture parameters from `def`'s parameter list and PREPENDS,
+/// in parameter (delivery) order, one prologue binding per capture:
+/// `let mut {name}: {declared annotation} = {value.to_expr()};`.
+///
+/// Body references to the capture names resolve to the prologue locals
+/// unchanged (no body rewrite — the binding replaces the parameter under the
+/// same name, so shadowing semantics are identical to the parameter it
+/// replaces). MUTABILITY PROBE RESULT (documented per the stage charter):
+/// Shape by-value parameters ARE assignable (`functions.rs:1941-1949` marks
+/// only `const` and by-ref-shared parameter bindings immutable), so the
+/// replacement local is `let mut` — a template body that assigns to its
+/// capture parameter keeps compiling; checkability is preserved.
+///
+/// Scalar prologue values compile to `PushConst` from the established
+/// per-function constant pool; arrays compile through the established
+/// typed-array literal emission (`v2_array_emission`); Options via the
+/// `Some(...)` ctor / `Literal::None`. The compiler never emits
+/// `Constant::Value(KindedConstant)` — no second constant store.
+pub(in crate::compiler) fn bake_captures_into_def(
+    def: &mut shape_ast::ast::FunctionDef,
+    values: &[(String, LiftedConst)],
+    capture_params: &[(String, TypeAnnotation)],
+) -> Result<(), ShapeError> {
+    use shape_ast::ast::program::{OwnershipModifier, VarKind, VariableDecl};
+    use shape_ast::ast::patterns::DestructurePattern;
+    use shape_ast::ast::statements::Statement;
+
+    let internal = |message: String| ShapeError::RuntimeError {
+        message,
+        location: None,
+    };
+    if def.params.len() < capture_params.len() {
+        return Err(internal(format!(
+            "internal error: bake_captures_into_def on `{}`: {} parameter(s) declared but {} \
+             capture parameter(s) to strip",
+            def.name,
+            def.params.len(),
+            capture_params.len(),
+        )));
+    }
+    // Strip the capture tail (verified by name — the chokepoint order).
+    let tail_start = def.params.len() - capture_params.len();
+    for (offset, (expected_name, _)) in capture_params.iter().enumerate() {
+        if def.params[tail_start + offset].simple_name() != Some(expected_name.as_str()) {
+            return Err(internal(format!(
+                "internal error: bake_captures_into_def on `{}`: trailing parameter at \
+                 position {} is not capture `{expected_name}`",
+                def.name,
+                tail_start + offset + 1,
+            )));
+        }
+    }
+    def.params.truncate(tail_start);
+
+    // Prepend the prologue in parameter (delivery) order: statement k binds
+    // capture_params[k], so prologue order == delivery order.
+    let span = Span::default();
+    let mut body = Vec::with_capacity(capture_params.len() + def.body.len());
+    for (name, annotation) in capture_params {
+        let Some((_, value)) = values.iter().find(|(value_name, _)| value_name == name) else {
+            return Err(internal(format!(
+                "internal error: bake_captures_into_def on `{}`: no capture value for \
+                 parameter `{name}`; the construction bijection was bypassed",
+                def.name,
+            )));
+        };
+        body.push(Statement::VariableDecl(
+            VariableDecl {
+                kind: VarKind::Let,
+                is_mut: true,
+                pattern: DestructurePattern::Identifier(name.clone(), span),
+                type_annotation: Some(annotation.clone()),
+                value: Some(value.to_expr()),
+                ownership: OwnershipModifier::Inferred,
+            },
+            span,
+        ));
+    }
+    body.append(&mut def.body);
+    def.body = body;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -1071,6 +1225,58 @@ mod tests {
             );
             assert!(err.contains(CONST_LIFT_DOMAIN_SENTENCE), "domain for {kind:?}: {err}");
         }
+    }
+
+    // S3b probe-result pin: the CANONICAL L5 runtime Option carrier (the
+    // fixed-layout `__Option` TypedObject `executor/result_option_carrier.rs`
+    // builds — what comptime handler code's `Some(x)` / annotated `None`
+    // actually produce) lifts through the schema-witnessed arm; the
+    // host-side `Ptr(HeapKind::Option)` `OptionData` carrier keeps its own
+    // sibling arm (pinned above).
+    #[test]
+    fn runtime_option_typed_object_carrier_lifts_some_and_none() {
+        use crate::executor::result_option_carrier::build_variant_object;
+        use shape_runtime::type_schema::builtin_schemas::{
+            OPTION_VARIANT_NONE, OPTION_VARIANT_SOME, register_builtin_schemas,
+        };
+        use shape_runtime::type_schema::registry::TypeSchemaRegistry;
+        use shape_runtime::type_schema::SyncRegistryScope;
+
+        let mut registry = TypeSchemaRegistry::new_with_stdlib();
+        let ids = register_builtin_schemas(&mut registry);
+        let _scope = SyncRegistryScope::enter(Arc::new(registry));
+
+        let some5 = build_variant_object(
+            ids.option as u64,
+            OPTION_VARIANT_SOME,
+            KindedSlot::from_int(5),
+        );
+        assert_eq!(
+            lift_value("cfg", &some5).expect("the runtime Some carrier lifts"),
+            LiftedConst::Some(Box::new(LiftedConst::Int(5)))
+        );
+
+        let none = build_variant_object(
+            ids.option as u64,
+            OPTION_VARIANT_NONE,
+            KindedSlot::none(),
+        );
+        assert_eq!(
+            lift_value("cfg", &none).expect("the runtime None carrier lifts"),
+            LiftedConst::None
+        );
+
+        // Nested payload recursion through the owned-share field read: the
+        // payload is itself a heap value (a string).
+        let some_str = build_variant_object(
+            ids.option as u64,
+            OPTION_VARIANT_SOME,
+            KindedSlot::from_string_arc(Arc::new("hi".to_string())),
+        );
+        assert_eq!(
+            lift_value("cfg", &some_str).expect("the heap payload lifts by owned share"),
+            LiftedConst::Some(Box::new(LiftedConst::String("hi".to_string())))
+        );
     }
 
     #[test]
@@ -1663,51 +1869,41 @@ mod tests {
         assert_eq!(LiftedConst::Number(1.5), LiftedConst::Number(1.5));
     }
 
-    // ── lift_capture_value: the S2 scalar production entry (byte-unchanged
-    //    in S3a; flips to delegate to lift_value in S3b) ────────────────────
+    // ── lift_capture_value: the S3b FLIPPED production entry (delegates to
+    //    the compositional lift_value; the S2 scalar-only producers and their
+    //    "lands with S3 ConstLift" landing sentence are DELETED — an ordered
+    //    in-territory pin flip, disclosed in the slice report) ──────────────
 
     #[test]
-    fn lifts_the_four_scalars() {
+    fn lift_capture_value_delegates_to_the_compositional_lift() {
+        // Scalars still lift (the S2 surface, now via delegation)…
         assert_eq!(
             lift_capture_value("c", &KindedSlot::from_int(42)).expect("int lifts"),
             LiftedConst::Int(42)
         );
+        // …and COMPOSITES now lift through the same entry: the S2 rejection
+        // for non-scalars is gone (the flip is the landing point that
+        // sentence pointed at).
         assert_eq!(
-            lift_capture_value("c", &KindedSlot::from_number(2.5)).expect("number lifts"),
-            LiftedConst::Number(2.5)
+            lift_capture_value("c", &int_array_slot(&[1, 2])).expect("array lifts"),
+            LiftedConst::Array(vec![LiftedConst::Int(1), LiftedConst::Int(2)])
         );
         assert_eq!(
-            lift_capture_value("c", &KindedSlot::from_bool(true)).expect("bool lifts"),
-            LiftedConst::Bool(true)
+            lift_capture_value("c", &null_slot()).expect("Null lifts to None"),
+            LiftedConst::None
         );
         assert_eq!(
-            lift_capture_value(
-                "c",
-                &KindedSlot::from_string_arc(std::sync::Arc::new("hi".to_string()))
-            )
-            .expect("string lifts"),
-            LiftedConst::String("hi".to_string())
+            lift_capture_value("c", &some_slot(KindedSlot::from_int(5))).expect("Some lifts"),
+            LiftedConst::Some(Box::new(LiftedConst::Int(5)))
         );
-    }
-
-    #[test]
-    fn non_scalar_value_is_a_named_rejection_pointing_at_the_s3_domain() {
-        // A Null-kinded slot is outside the S2 scalar domain; the S2-shaped
-        // rejection names the domain and the positive twin, and still points
-        // at this module's S3 landing (until S3b flips the delegation).
-        let unit = KindedSlot::new(ValueSlot::from_raw(0), NativeKind::Null);
-        let err = lift_capture_value("cfg", &unit).expect_err("null is not an S2 scalar");
+        // Out-of-domain kinds reject with the S3 domain sentence (never the
+        // deleted S2 "lands with S3 ConstLift" landing sentence).
+        let err = lift_capture_value("cfg", &zero_bits(NativeKind::Ptr(HeapKind::HashMap)))
+            .expect_err("out-of-domain kinds reject through the delegation");
+        assert!(err.contains(CONST_LIFT_DOMAIN_SENTENCE), "the S3 domain: {err}");
         assert!(
-            err.contains("outside this slice's ConstLift domain"),
-            "names the domain violation: {err}"
-        );
-        assert!(
-            err.contains("pass an int, number, bool, or string"),
-            "carries the positive twin: {err}"
-        );
-        assert!(
-            err.contains("lands with S3 ConstLift"),
-            "names the S3 compositional domain seam: {err}"
+            !err.contains("lands with S3 ConstLift"),
+            "the S2 landing sentence is deleted: {err}"
         );
     }
 
@@ -1783,12 +1979,15 @@ mod tests {
         assert!(err.contains("internal error"), "internal-error-shaped: {err}");
     }
 
-    // ── bind_captures_for_install (the S2b weave consumer's seam) ───────────
+    // ── the S3b bake (replaces the deleted CaptureBindingPlan /
+    //    bind_captures_for_install call-site-argument delivery — an ordered
+    //    in-territory replacement, disclosed in the slice report) ───────────
 
-    use crate::compiler::BytecodeCompiler;
     use crate::compiler::comptime_fragments::checked_template::{
         CheckedTemplateBuilder, TemplateHookKind,
     };
+    use shape_ast::ast::program::VarKind;
+    use shape_ast::ast::statements::Statement;
     use shape_ast::ast::{CaptureClause, CaptureEntry, CaptureMode, Item};
 
     fn def_of(src: &str) -> shape_ast::ast::FunctionDef {
@@ -1812,18 +2011,30 @@ mod tests {
         }
     }
 
-    fn target_of(src: &str) -> SpecializationTarget {
-        let def = def_of(src);
-        BytecodeCompiler::new()
-            .specialization_target_from_def(&def, None, def.name_span)
-            .expect("target glue builds from declared annotations")
+    /// Destructure one prologue statement: (is_mut let, name, annotation,
+    /// value expr).
+    fn prologue_let(stmt: &Statement) -> (bool, &str, &TypeAnnotation, &Expr) {
+        let Statement::VariableDecl(decl, _) = stmt else {
+            panic!("expected a prologue let, got {stmt:?}");
+        };
+        assert_eq!(decl.kind, VarKind::Let);
+        let shape_ast::ast::patterns::DestructurePattern::Identifier(name, _) = &decl.pattern
+        else {
+            panic!("expected an identifier pattern, got {:?}", decl.pattern);
+        };
+        (
+            decl.is_mut,
+            name.as_str(),
+            decl.type_annotation.as_ref().expect("prologue lets are annotated"),
+            decl.value.as_ref().expect("prologue lets are initialized"),
+        )
     }
 
     #[test]
-    fn call_site_args_deliver_in_param_order_regardless_of_binding_order() {
+    fn delivery_order_helper_orders_by_parameter_not_binding_order() {
         // The body fn's trailing captures are (factor: int, tag: string); the
-        // capture() bindings arrive in the REVERSE order — delivery follows
-        // PARAMETER order (the weave contract), matching by NAME.
+        // capture() bindings arrive in the REVERSE order — the shared
+        // delivery order follows PARAMETER order, matching by NAME.
         let def = def_of("fn t(x: int, factor: int, tag: string) -> int { return x }");
         let template = CheckedTemplateBuilder::new(TemplateHookKind::Before)
             .body_fn(&def)
@@ -1834,51 +2045,166 @@ mod tests {
             })
             .finish()
             .expect("template finishes");
-        let bound = BoundTemplate {
-            template,
-            capture_values: vec![
+        let ordered = capture_values_in_delivery_order(
+            &template,
+            &[
                 ("tag".to_string(), LiftedConst::String("hi".to_string())),
                 ("factor".to_string(), LiftedConst::Int(3)),
             ],
-        };
-        let target = target_of("fn victim(a: int) -> int { return a }");
+        )
+        .expect("ordering builds");
+        assert_eq!(ordered[0], ("factor".to_string(), LiftedConst::Int(3)));
+        assert_eq!(
+            ordered[1],
+            ("tag".to_string(), LiftedConst::String("hi".to_string()))
+        );
 
-        let CaptureBindingPlan::CallSiteArgs(args) =
-            bind_captures_for_install(&bound, &target).expect("plan builds");
-        assert_eq!(args.len(), 2);
-        match &args[0] {
-            Expr::Literal(Literal::Int(3), _) => {}
-            other => panic!("param order puts `factor` first, got {other:?}"),
-        }
-        match &args[1] {
-            Expr::Literal(Literal::String(s), _) if s == "hi" => {}
-            other => panic!("param order puts `tag` second, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn missing_capture_value_is_an_internal_error() {
-        let def = def_of("fn t(x: int, factor: int) -> int { return x }");
-        let template = CheckedTemplateBuilder::new(TemplateHookKind::Before)
-            .body_fn(&def)
-            .expect("shape passes")
-            .captures(CaptureClause {
-                entries: vec![move_entry("factor")],
-                span: shape_ast::ast::Span::default(),
-            })
-            .finish()
-            .expect("template finishes");
-        let bound = BoundTemplate {
-            template,
-            capture_values: Vec::new(), // the bypassed-bijection shape
-        };
-        let target = target_of("fn victim(a: int) -> int { return a }");
-
-        let err = bind_captures_for_install(&bound, &target)
+        let err = capture_values_in_delivery_order(&template, &[])
             .expect_err("a bypassed bijection fails loudly");
         assert!(
             err.to_string().contains("internal error"),
             "internal-error-shaped: {err}"
         );
+    }
+
+    #[test]
+    fn bake_strips_capture_params_and_prepends_prologue_in_delivery_order() {
+        let mut def = def_of(
+            "fn t(x: int, factor: int, tag: string) -> int { return x + factor }",
+        );
+        let capture_params = vec![
+            (
+                "factor".to_string(),
+                TypeAnnotation::Basic("int".to_string()),
+            ),
+            ("tag".to_string(), TypeAnnotation::Basic("string".to_string())),
+        ];
+        // Values arrive in REVERSE binding order — the bake matches by name;
+        // prologue order is capture_params (delivery) order.
+        let values = vec![
+            ("tag".to_string(), LiftedConst::String("hi".to_string())),
+            ("factor".to_string(), LiftedConst::Int(3)),
+        ];
+        bake_captures_into_def(&mut def, &values, &capture_params).expect("bake succeeds");
+
+        // Param strip: only the signature parameter survives.
+        assert_eq!(def.params.len(), 1);
+        assert_eq!(def.params[0].simple_name(), Some("x"));
+
+        // Prologue order == delivery order; declared annotations preserved;
+        // `let mut` per the parameter-assignability probe (params are
+        // assignable, so the replacement local must be too).
+        let (is_mut, name, annotation, value) = prologue_let(&def.body[0]);
+        assert!(is_mut, "capture locals match parameter assignability (let mut)");
+        assert_eq!(name, "factor");
+        assert!(matches!(annotation, TypeAnnotation::Basic(n) if n == "int"));
+        assert!(matches!(value, Expr::Literal(Literal::Int(3), _)));
+        let (_, name, annotation, value) = prologue_let(&def.body[1]);
+        assert_eq!(name, "tag");
+        assert!(matches!(annotation, TypeAnnotation::Basic(n) if n == "string"));
+        assert!(matches!(value, Expr::Literal(Literal::String(s), _) if s == "hi"));
+
+        // The original body follows unchanged: its `factor` reference now
+        // resolves to the prologue local under the SAME name (shadowing
+        // semantics identical to the parameter it replaces — no rewrite).
+        assert!(
+            matches!(&def.body[2], Statement::Return(Some(_), _)),
+            "the original body statement follows the prologue: {:?}",
+            def.body[2]
+        );
+        assert_eq!(def.body.len(), 3);
+    }
+
+    #[test]
+    fn bake_projects_composite_values_as_array_and_option_exprs() {
+        let mut def = def_of(
+            "fn t(x: int, cfg: Array<int>, opt: Option<int>) -> int { return x }",
+        );
+        let capture_params = vec![
+            (
+                "cfg".to_string(),
+                TypeAnnotation::Array(Box::new(TypeAnnotation::Basic("int".to_string()))),
+            ),
+            (
+                "opt".to_string(),
+                TypeAnnotation::option(TypeAnnotation::Basic("int".to_string())),
+            ),
+        ];
+        let values = vec![
+            (
+                "cfg".to_string(),
+                LiftedConst::Array(vec![LiftedConst::Int(1), LiftedConst::Int(2)]),
+            ),
+            (
+                "opt".to_string(),
+                LiftedConst::Some(Box::new(LiftedConst::Int(5))),
+            ),
+        ];
+        bake_captures_into_def(&mut def, &values, &capture_params).expect("bake succeeds");
+        let (_, name, _, value) = prologue_let(&def.body[0]);
+        assert_eq!(name, "cfg");
+        assert!(
+            matches!(value, Expr::Array(elems, _) if elems.len() == 2),
+            "the composite bakes as an array literal riding the established \
+             emission: {value:?}"
+        );
+        let (_, name, _, value) = prologue_let(&def.body[1]);
+        assert_eq!(name, "opt");
+        assert!(
+            matches!(value, Expr::FunctionCall { name, .. } if name == "Some"),
+            "the Option bakes as the Some(...) ctor call: {value:?}"
+        );
+    }
+
+    #[test]
+    fn bake_missing_value_or_wrong_tail_is_an_internal_error() {
+        let mut def = def_of("fn t(x: int, factor: int) -> int { return x }");
+        let err = bake_captures_into_def(
+            &mut def,
+            &[],
+            &[(
+                "factor".to_string(),
+                TypeAnnotation::Basic("int".to_string()),
+            )],
+        )
+        .expect_err("a bypassed bijection fails loudly");
+        assert!(err.to_string().contains("internal error"), "{err}");
+
+        let mut def = def_of("fn t(x: int, other: int) -> int { return x }");
+        let err = bake_captures_into_def(
+            &mut def,
+            &[("factor".to_string(), LiftedConst::Int(3))],
+            &[(
+                "factor".to_string(),
+                TypeAnnotation::Basic("int".to_string()),
+            )],
+        )
+        .expect_err("a tail-name mismatch fails loudly");
+        assert!(err.to_string().contains("internal error"), "{err}");
+    }
+
+    #[test]
+    fn declared_capture_params_derive_from_the_def_tail() {
+        let def = def_of("fn t(x: int, factor: int, tag: string) -> int { return x }");
+        let captures = vec![
+            ("factor".to_string(), LiftedConst::Int(3)),
+            ("tag".to_string(), LiftedConst::String("hi".to_string())),
+        ];
+        let params =
+            declared_capture_params_from_tail(&def, &captures).expect("derivation succeeds");
+        assert_eq!(params.len(), 2);
+        assert_eq!(params[0].0, "factor");
+        assert!(matches!(&params[0].1, TypeAnnotation::Basic(n) if n == "int"));
+        assert_eq!(params[1].0, "tag");
+        assert!(matches!(&params[1].1, TypeAnnotation::Basic(n) if n == "string"));
+
+        // Order mismatch against the tail is internal-error-shaped.
+        let swapped = vec![
+            ("tag".to_string(), LiftedConst::String("hi".to_string())),
+            ("factor".to_string(), LiftedConst::Int(3)),
+        ];
+        let err = declared_capture_params_from_tail(&def, &swapped)
+            .expect_err("a tail-order mismatch fails loudly");
+        assert!(err.to_string().contains("internal error"), "{err}");
     }
 }

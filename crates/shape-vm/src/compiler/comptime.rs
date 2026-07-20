@@ -3832,7 +3832,11 @@ fn typed_object_to_object_expr(
 /// bits are a heap pointer that needs retain-on-read, mirroring the
 /// `stack_read_kinded` retain discipline (ADR-006 §2.7.7 / Q9 — kind
 /// drives clone/drop dispatch).
-fn read_typed_object_field(
+// Visibility widened for ADR-009 C3 S3b: `template_specialization::
+// const_lift::lift_value` reuses this exact owned-share read for the
+// `__Option` runtime-carrier payload (one retain producer, never a second
+// field-read implementation).
+pub(in crate::compiler) fn read_typed_object_field(
     slot: shape_value::ValueSlot,
     kind: NativeKind,
     heap_mask: u64,

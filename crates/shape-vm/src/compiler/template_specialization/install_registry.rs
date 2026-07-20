@@ -21,9 +21,10 @@
 //! value-snapshot discipline to the handles the directives carry. Per install,
 //! IN ORDER: the C3-G8 generic-target named rejection → the mixed-legacy
 //! rejection (one weave owner per target until S6 deletes the legacy
-//! machinery) → [`super::SpecializationTarget`] glue → `specialize_template` →
-//! `bind_captures_for_install` → stage the install on the caller's per-target
-//! accumulator + write one journaled registry row.
+//! machinery) → [`super::SpecializationTarget`] glue → `specialize_template`
+//! (S3b: the capture VALUES flow in — rule-6 identity + the const_lift BAKE;
+//! no separate delivery-plan step exists) → stage the install on the
+//! caller's per-target accumulator + write one journaled registry row.
 //!
 //! # Transaction composition (E1-D6b — why the precondition holds)
 //!
@@ -61,7 +62,6 @@
 use shape_ast::ast::{FunctionDef, Span};
 use shape_ast::error::{Result, ShapeError};
 
-use super::const_lift::{self, CaptureBindingPlan};
 use super::{SpecializedHandler, render_template_declared_signature};
 use crate::compiler::BytecodeCompiler;
 use crate::compiler::comptime_builtins::expansion_provenance::ExpansionSite;
@@ -77,11 +77,11 @@ use crate::compiler::comptime_target::type_annotation_to_string;
 /// `pending_original_body_shadow` — never ambient compiler state.
 #[derive(Debug)]
 pub(in crate::compiler) struct StagedHookInstall {
-    /// The specialized handler (function index + mutation carrier).
+    /// The specialized handler (function index + mutation carrier). S3b:
+    /// capture values are BAKED into the specialized handler
+    /// (`const_lift::bake_captures_into_def`) — no capture delivery plan
+    /// exists; handler arity == Sig arity everywhere.
     pub(in crate::compiler) handler: SpecializedHandler,
-    /// How the weave delivers the template's capture values at the handler
-    /// call sites (S2: typed literals in trailing-parameter order).
-    pub(in crate::compiler) capture_plan: CaptureBindingPlan,
     /// Before or After — which side of the target the weave attaches to.
     pub(in crate::compiler) hook_kind: TemplateHookKind,
     /// The installing annotation's name (origin, parameter-threaded).
@@ -262,11 +262,12 @@ impl BytecodeCompiler {
         //    callers that already hold a `CallableDescriptor` (identity-only,
         //    slice-0 §7.4).
         let target = self.specialization_target_from_def(func_def, None, application_span)?;
-        let handler = self.specialize_template(&bound.template, &target)?;
-
-        // 6. Capture delivery plan (S2 scalars as typed call-site literals;
-        //    S3 replaces the domain at the const_lift boundary).
-        let capture_plan = const_lift::bind_captures_for_install(bound, &target)?;
+        // 5./6. Specialization + capture delivery are ONE step at S3b: the
+        //    capture values flow into the specialization plan (rule-6
+        //    identity + the bake) — the S2 bind-a-call-site-plan step is
+        //    deleted with `CaptureBindingPlan`.
+        let handler =
+            self.specialize_template(&bound.template, &bound.capture_values, &target)?;
 
         // 7. One journaled registry row (displaced-entry undo: the journal
         //    records the pre-write length; rollback truncates back, so a
@@ -296,7 +297,6 @@ impl BytecodeCompiler {
         // 8. Stage for the S2c weave (application order = accumulator order).
         staged.push(StagedHookInstall {
             handler,
-            capture_plan,
             hook_kind: bound.template.hook_kind(),
             annotation_name: annotation_name.to_string(),
             application_span,
@@ -357,8 +357,8 @@ impl BytecodeCompiler {
 }
 
 /// Render the capture bindings for the registry row: `(name, rendering)` in
-/// the body fn's trailing-parameter (delivery) order — the same order
-/// `bind_captures_for_install` delivers in.
+/// the body fn's trailing-parameter (delivery) order — the same order the
+/// S3b bake prologue binds in (`const_lift::capture_values_in_delivery_order`).
 fn rendered_captures(bound: &BoundTemplate) -> Vec<(String, String)> {
     bound
         .template
@@ -533,12 +533,15 @@ annotation hookann() {{
         );
     }
 
-    // EXECUTION PROOF (the S1c stage-4 pattern): a polymorphic install with
-    // a scalar capture specializes through the monomorphization ride with
-    // the CAPTURE TAIL PRESERVED — the specialized handler executes with
-    // [target slots..., capture value], mutates slot 0 via the capture and
-    // the `args.length` constant, and the capture literal is recorded on
-    // the registry row.
+    // EXECUTION PROOF (the S1c stage-4 pattern; S3b PIN RE-TARGET, ordered
+    // by the slice-3 charter): a polymorphic install with a scalar capture
+    // specializes through the monomorphization ride with the capture BAKED —
+    // the specialized handler's arity == Sig arity (the capture tail is
+    // STRIPPED; the value is a prologue constant), it executes with ONLY the
+    // target slots, mutates slot 0 via the BAKED capture and the
+    // `args.length` constant, and the capture literal is recorded on the
+    // registry row. The S2 twin executed with [target slots..., capture
+    // value] — that delivery mechanism is deleted.
     #[test]
     fn polymorphic_install_with_capture_executes_and_records_the_literal() {
         let compiler = compiled_ok(&hook_source(
@@ -566,9 +569,15 @@ annotation hookann() {{
             row.specialized_symbol, "tmpl",
             "a polymorphic handler is a specialization, never the generic def itself"
         );
+        assert!(
+            row.specialized_symbol.contains("::cfg#1::i:3"),
+            "S3b: the symbol carries the rule-6 config segment: {}",
+            row.specialized_symbol
+        );
 
-        // Direct-call execution proof: [a=5, b=4.5, factor=3] →
-        // a0 = 5*3 + args.length(=2) = 17, a1 = 4.5 untouched.
+        // Direct-call execution proof with ONLY the Sig args (S3b: the
+        // capture is BAKED, not passed): [a=5, b=4.5] →
+        // a0 = 5*factor(baked 3) + args.length(=2) = 17, a1 = 4.5 untouched.
         //
         // S2c UPDATE (execute by NAME, not by compiler-side index): the
         // row's `function_index` is a COMPILER-side program index, and
@@ -584,11 +593,7 @@ annotation hookann() {{
         let result = vm
             .execute_function_by_name(
                 &row.specialized_symbol,
-                vec![
-                    KindedSlot::from_int(5),
-                    KindedSlot::from_number(4.5),
-                    KindedSlot::from_int(3),
-                ],
+                vec![KindedSlot::from_int(5), KindedSlot::from_number(4.5)],
                 None,
             )
             .expect("the specialized handler executes");

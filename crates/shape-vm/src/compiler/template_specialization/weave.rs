@@ -51,11 +51,12 @@
 //!    pinned at `annotations_runtime/wrapping.rs`
 //!    `stacked_after_hooks_transform_result_in_order`, and no C3 ruling
 //!    ordered a change — a dated user ruling can flip this single iteration
-//!    order). Capture values append as TYPED LITERAL trailing args per
-//!    [`CaptureBindingPlan::CallSiteArgs`] at every handler call site.
-//!    OBSERVER installs (fix-round-1 C3-G2 growth: concrete
-//!    zero-signature-param void bodies) are called at their chain position
-//!    with ONLY their capture values — the args/result flow is untouched,
+//!    order). S3b: capture values are BAKED into the specialized handlers
+//!    (`const_lift::bake_captures_into_def`) — the weave passes ONLY the
+//!    current Sig args at every handler call site; handler arity == Sig
+//!    arity everywhere. OBSERVER installs (fix-round-1 C3-G2 growth:
+//!    concrete zero-signature-param void bodies) are called at their chain
+//!    position with ZERO arguments — the args/result flow is untouched,
 //!    which is what gives zero-param targets a `before` spelling and void
 //!    targets an `after` spelling.
 //!
@@ -87,7 +88,6 @@ use shape_ast::error::{Result, ShapeError};
 use shape_ast::ast::patterns::DestructurePattern;
 
 use super::MutationCarrier;
-use super::const_lift::CaptureBindingPlan;
 use super::install_registry::StagedHookInstall;
 use crate::compiler::BytecodeCompiler;
 use crate::compiler::comptime_builtins::expansion_provenance::{
@@ -269,10 +269,6 @@ impl BytecodeCompiler {
                 span,
             )
         };
-        let capture_args = |install: &StagedHookInstall| -> Vec<Expr> {
-            let CaptureBindingPlan::CallSiteArgs(args) = &install.capture_plan;
-            args.clone()
-        };
         let handler_symbol = |compiler: &Self, install: &StagedHookInstall| -> Result<String> {
             compiler
                 .program
@@ -299,17 +295,14 @@ impl BytecodeCompiler {
             .filter(|install| install.hook_kind == TemplateHookKind::Before)
         {
             let symbol = handler_symbol(self, install)?;
-            // OBSERVER install: called with ONLY its capture values; the
-            // target's arguments thread through UNTOUCHED (module docs).
+            // OBSERVER install: called with ZERO arguments (S3b — its
+            // capture values are BAKED into the handler); the target's
+            // arguments thread through UNTOUCHED (module docs).
             if install.handler.is_observer() {
-                stmts.push(Statement::Expression(
-                    call(&symbol, capture_args(install)),
-                    span,
-                ));
+                stmts.push(Statement::Expression(call(&symbol, Vec::new()), span));
                 continue;
             }
-            let mut args = current_args.clone();
-            args.extend(capture_args(install));
+            let args = current_args.clone();
             match install.handler.carrier() {
                 Some(MutationCarrier::Single { annotation }) => {
                     let local = fresh_local(&taken);
@@ -379,14 +372,10 @@ impl BytecodeCompiler {
             for install in afters.iter().rev() {
                 let symbol = handler_symbol(self, install)?;
                 if install.handler.is_observer() {
-                    stmts.push(Statement::Expression(
-                        call(&symbol, capture_args(install)),
-                        span,
-                    ));
+                    stmts.push(Statement::Expression(call(&symbol, Vec::new()), span));
                     continue;
                 }
-                let mut args = vec![result_expr];
-                args.extend(capture_args(install));
+                let args = vec![result_expr];
                 let local = fresh_local(&taken);
                 stmts.push(decl(&local, return_annotation.clone(), call(&symbol, args)));
                 result_expr = ident(&local);
@@ -410,10 +399,7 @@ impl BytecodeCompiler {
             stmts.push(Statement::Expression(impl_expr, span));
             for install in afters.iter().rev() {
                 let symbol = handler_symbol(self, install)?;
-                stmts.push(Statement::Expression(
-                    call(&symbol, capture_args(install)),
-                    span,
-                ));
+                stmts.push(Statement::Expression(call(&symbol, Vec::new()), span));
             }
         }
 
@@ -610,14 +596,18 @@ annotation hookann() {{
         assert_eq!(value, 16, "5*3 = 15 → impl(15) = 16 (skip ⇒ 6)");
     }
 
-    // ── captures: distinct values across ONE shared specialized handler ────
+    // ── captures: rule-6 baked specializations (S3b PIN FLIP) ──────────────
 
-    // Two annotations install the SAME polymorphic template at the SAME Sig
-    // with DIFFERENT capture values: the specialized handler is SHARED (the
-    // cache key is value-generic — invariants resolution 5) while each
-    // weave delivers its own capture literal at the call site.
+    // S3b PIN FLIP (Dec-95 rule 6, ordered by the slice-3 charter; the S2
+    // twin pinned ONE shared value-generic handler with call-site literal
+    // delivery — both superseded): two annotations install the SAME
+    // polymorphic template at the SAME Sig with DIFFERENT capture values ⇒
+    // TWO distinct baked specializations (the values are in the `::cfg#`
+    // identity segment and BAKED into each handler's prologue — no
+    // call-site delivery exists). The executed VALUES prove the bake, not a
+    // delivery mechanism: each target observes exactly its own config.
     #[test]
-    fn captures_deliver_distinct_values_across_a_shared_handler() {
+    fn rule6_distinct_scalar_config_gets_distinct_baked_specializations() {
         let src = r#"
 fn tmpl<Args>(args: Args, factor: int) -> Args {
     args[0] = args[0] * factor
@@ -647,20 +637,78 @@ fn victim_b(a: int) -> int { return a + 1 }
 victim_a(10) * 1000 + victim_b(10)
 "#;
         let (value, compiler) = top_level_i64(src);
-        // victim_a: 10*3 = 30 → 31; victim_b: 10*5 = 50 → 51.
-        assert_eq!(value, 31051, "each weave delivers its own capture literal");
+        // victim_a: 10*3 = 30 → 31; victim_b: 10*5 = 50 → 51 — BYTE-SAME
+        // output as the S2 twin (the flip changes identity, not behavior).
+        assert_eq!(value, 31051, "each baked handler holds its own config constant");
         assert_eq!(compiler.hook_install_registry.len(), 2);
         let (row_a, row_b) = (
             &compiler.hook_install_registry[0],
             &compiler.hook_install_registry[1],
         );
-        assert_eq!(
+        assert_ne!(
             row_a.function_index, row_b.function_index,
-            "one Sig ⇒ ONE shared value-generic specialized handler (the cache-share pin)"
+            "rule 6: structurally different config = DISTINCT specializations"
         );
         assert_ne!(
             row_a.captures, row_b.captures,
             "the installs differ ONLY in their capture literals"
+        );
+        // The rule-6 identity observable: both symbols carry the `::cfg#`
+        // config segment, and the segments differ.
+        assert!(
+            row_a.specialized_symbol.contains("::cfg#1::i:3"),
+            "row a's symbol carries its config segment: {}",
+            row_a.specialized_symbol
+        );
+        assert!(
+            row_b.specialized_symbol.contains("::cfg#1::i:5"),
+            "row b's symbol carries its config segment: {}",
+            row_b.specialized_symbol
+        );
+    }
+
+    // Rule-6 SHARE, execution-proven (the S0 §2 posture): two applications
+    // with structurally EQUAL config on two same-Sig targets resolve to the
+    // SAME baked handler index, and BOTH targets execute correctly through
+    // it.
+    #[test]
+    fn rule6_equal_config_shares_one_baked_specialization() {
+        let src = r#"
+fn tmpl<Args>(args: Args, factor: int) -> Args {
+    args[0] = args[0] * factor
+    return args
+}
+
+annotation first3() {
+  targets: [function]
+  comptime post(target, ctx) {
+    install(before_hook(tmpl, [capture("factor", 3)]))
+  }
+}
+
+annotation second3() {
+  targets: [function]
+  comptime post(target, ctx) {
+    install(before_hook(tmpl, [capture("factor", 3)]))
+  }
+}
+
+@first3()
+fn victim_a(a: int) -> int { return a + 1 }
+
+@second3()
+fn victim_b(a: int) -> int { return a + 2 }
+
+victim_a(10) * 1000 + victim_b(20)
+"#;
+        let (value, compiler) = top_level_i64(src);
+        // victim_a: 10*3 = 30 → 31; victim_b: 20*3 = 60 → 62.
+        assert_eq!(value, 31062, "both targets execute through the shared baked handler");
+        assert_eq!(compiler.hook_install_registry.len(), 2);
+        assert_eq!(
+            compiler.hook_install_registry[0].function_index,
+            compiler.hook_install_registry[1].function_index,
+            "rule 6: structurally EQUAL config SHARES one specialization"
         );
     }
 
@@ -981,9 +1029,9 @@ victim_a([1], 4) * 10000 + victim_b([2], 7)
         assert_eq!(compiler.hook_install_registry.len(), 2);
     }
 
-    // An observer with a CAPTURE: the weave delivers the typed literal as
-    // the observer's only call argument (delivery breakage would be an arity
-    // error at the nested wrapper compile), and the row records it.
+    // An observer with a CAPTURE (S3b re-target): the observer is called
+    // with ZERO arguments — its capture value is BAKED into the observer
+    // specialization's prologue — and the row records the literal.
     #[test]
     fn observer_with_capture_weaves_and_records_the_literal() {
         let (value, compiler) = top_level_i64(&hook_source(
@@ -1044,6 +1092,359 @@ victim_a([1], 4) * 10000 + victim_b([2], 7)
             "fn victim(a: int) -> int { return a * 10 }\n\nvictim(1)",
         );
         assert_eq!(value, 10);
+    }
+
+    // ── S3b: composite config end-to-end (rule 6 + the bake) ───────────────
+    //
+    // #65 FENCE (every fixture below): NEVER spell an array literal INLINE
+    // in the element expression of the TypedObject-element captures array —
+    // `[capture("cfg", [1, 2])]` trips the PRE-EXISTING #65
+    // `pending_variable_typed_array_kind` leak (runtime "expected
+    // Ptr(TypedObject), got Int64"). ALWAYS hoist to a local first:
+    // `let cfg = [1, 2]` then `install(before_hook(f, [capture("cfg",
+    // cfg)]))`. #65 itself is pre-existing and NOT fixed in S3.
+
+    // A CONCRETE before template with a capture through the full weave: the
+    // handler is the BAKED suffixed specialization (arity == Sig arity); the
+    // definition-compiled body fn remains an ordinary module fn beside it.
+    #[test]
+    fn concrete_install_with_capture_weaves_through_the_baked_specialization() {
+        let (value, compiler) = top_level_i64(&hook_source(
+            "fn add_n(x: int, n: int) -> int { return x + n }",
+            "install(before_hook(add_n, [capture(\"n\", 7)]))",
+            "@hookann()\nfn victim(a: int) -> int { return a * 10 }\n\nvictim(4)",
+        ));
+        assert_eq!(value, 110, "before(4) = 4 + baked 7 = 11 → impl 110 (skip ⇒ 40)");
+        let row = &compiler.hook_install_registry[0];
+        assert!(
+            row.specialized_symbol.contains("::cfg#1::i:7"),
+            "the concrete install resolves the BAKED suffixed specialization: {}",
+            row.specialized_symbol
+        );
+        assert!(
+            compiler.find_function("add_n").is_some(),
+            "the definition-compiled body fn remains an ordinary module fn"
+        );
+    }
+
+    // Rule-6 DISTINCT over composite config ([1,2] / [1,2,3] / [2,1]):
+    // three annotations, structurally different Array<int> config, one
+    // same-Sig target set ⇒ three DISTINCT baked specializations with
+    // distinct observable behavior. (#65 fence: cfg hoisted to a local.)
+    #[test]
+    fn rule6_distinct_composite_config_gets_distinct_specializations() {
+        let src = r#"
+fn tmpl<Args>(args: Args, cfg: Array<int>) -> Args {
+    args[0] = args[0] * 100 + cfg[0] * 10 + cfg.length()
+    return args
+}
+
+annotation with_one_two() {
+  targets: [function]
+  comptime post(target, ctx) {
+    let cfg = [1, 2]
+    install(before_hook(tmpl, [capture("cfg", cfg)]))
+  }
+}
+
+annotation with_one_two_three() {
+  targets: [function]
+  comptime post(target, ctx) {
+    let cfg = [1, 2, 3]
+    install(before_hook(tmpl, [capture("cfg", cfg)]))
+  }
+}
+
+annotation with_two_one() {
+  targets: [function]
+  comptime post(target, ctx) {
+    let cfg = [2, 1]
+    install(before_hook(tmpl, [capture("cfg", cfg)]))
+  }
+}
+
+@with_one_two()
+fn victim_a(a: int) -> int { return a }
+
+@with_one_two_three()
+fn victim_b(a: int) -> int { return a }
+
+@with_two_one()
+fn victim_c(a: int) -> int { return a }
+
+victim_a(1) * 1000000 + victim_b(1) * 1000 + victim_c(1)
+"#;
+        let (value, compiler) = top_level_i64(src);
+        // a: 100 + 1*10 + 2 = 112; b: 100 + 10 + 3 = 113; c: 100 + 20 + 2 = 122.
+        assert_eq!(
+            value, 112_113_122,
+            "each baked specialization observes exactly its own composite config"
+        );
+        assert_eq!(compiler.hook_install_registry.len(), 3);
+        let indices: Vec<u16> = compiler
+            .hook_install_registry
+            .iter()
+            .map(|row| row.function_index)
+            .collect();
+        assert_ne!(indices[0], indices[1], "[1,2] vs [1,2,3] are distinct (rule 6)");
+        assert_ne!(indices[0], indices[2], "[1,2] vs [2,1] are distinct (rule 6)");
+        assert_ne!(indices[1], indices[2], "[1,2,3] vs [2,1] are distinct (rule 6)");
+        assert_eq!(
+            compiler.hook_install_registry[0].captures,
+            vec![("cfg".to_string(), "[1, 2]".to_string())],
+            "the registry renders the composite capture"
+        );
+    }
+
+    // Rule-6 SHARE over composite config: two annotations with structurally
+    // EQUAL Array<int> config on two same-Sig targets share ONE baked
+    // specialization — and both targets execute correctly through it.
+    // (#65 fence: cfg hoisted.)
+    #[test]
+    fn rule6_equal_composite_config_shares_one_specialization() {
+        let src = r#"
+fn tmpl<Args>(args: Args, cfg: Array<int>) -> Args {
+    args[0] = args[0] * 100 + cfg[0] * 10 + cfg.length()
+    return args
+}
+
+annotation first_config() {
+  targets: [function]
+  comptime post(target, ctx) {
+    let cfg = [1, 2]
+    install(before_hook(tmpl, [capture("cfg", cfg)]))
+  }
+}
+
+annotation second_config() {
+  targets: [function]
+  comptime post(target, ctx) {
+    let cfg = [1, 2]
+    install(before_hook(tmpl, [capture("cfg", cfg)]))
+  }
+}
+
+@first_config()
+fn victim_a(a: int) -> int { return a }
+
+@second_config()
+fn victim_b(a: int) -> int { return a + 1 }
+
+victim_a(1) * 1000 + victim_b(2)
+"#;
+        let (value, compiler) = top_level_i64(src);
+        // a: 112; b: 2*100+10+2 = 212 → +1 = 213.
+        assert_eq!(value, 112_213, "both targets execute through the shared baked handler");
+        assert_eq!(compiler.hook_install_registry.len(), 2);
+        assert_eq!(
+            compiler.hook_install_registry[0].function_index,
+            compiler.hook_install_registry[1].function_index,
+            "rule 6: structurally EQUAL composite config SHARES one specialization"
+        );
+        assert_eq!(
+            compiler.hook_install_registry[0].captures,
+            compiler.hook_install_registry[1].captures,
+            "non-vacuity: both rows record the same [1, 2] rendering"
+        );
+    }
+
+    // KEY-LEVEL injectivity end-to-end: ("ab","c") vs ("a","bc") —
+    // Array<string> config whose FLAT concatenation collides (the in-test
+    // control) must produce DISTINCT baked specializations with distinct
+    // observable behavior. (#65 fence: cfg hoisted.)
+    #[test]
+    fn rule6_string_redistribution_config_stays_distinct_end_to_end() {
+        // Control (non-vacuity): the flat join of the two value lists
+        // really collides.
+        assert_eq!(
+            ["ab", "c"].concat(),
+            ["a", "bc"].concat(),
+            "control: the flat join must collide for this refuter to bite"
+        );
+        let src = r#"
+fn tmpl<Args>(args: Args, cfg: Array<string>) -> Args {
+    args[0] = args[0] * 10 + cfg[0].length()
+    return args
+}
+
+annotation with_ab_c() {
+  targets: [function]
+  comptime post(target, ctx) {
+    let cfg = ["ab", "c"]
+    install(before_hook(tmpl, [capture("cfg", cfg)]))
+  }
+}
+
+annotation with_a_bc() {
+  targets: [function]
+  comptime post(target, ctx) {
+    let cfg = ["a", "bc"]
+    install(before_hook(tmpl, [capture("cfg", cfg)]))
+  }
+}
+
+@with_ab_c()
+fn victim_a(a: int) -> int { return a }
+
+@with_a_bc()
+fn victim_b(a: int) -> int { return a }
+
+victim_a(1) * 1000 + victim_b(1)
+"#;
+        let (value, compiler) = top_level_i64(src);
+        // a: 10 + len("ab") = 12; b: 10 + len("a") = 11.
+        assert_eq!(value, 12011, "each handler observes its own string boundaries");
+        assert_ne!(
+            compiler.hook_install_registry[0].function_index,
+            compiler.hook_install_registry[1].function_index,
+            "the netstring config segment must distinguish the redistributed pair"
+        );
+    }
+
+    // NESTED composite config: [[1,2],[3]] vs [[1],[2,3]] — the flat-leaf
+    // collision pair (count prefixes pin nesting boundaries) must produce
+    // distinct baked specializations with distinct behavior. (#65 fence:
+    // cfg hoisted; per the charter's probe protocol the STANDALONE nested
+    // literal `let cfg = [[1, 2], [3]]` is probed first — if a sibling
+    // stamp leak fires the fixture element-hoists AND the repro surfaces on
+    // #65's thread.)
+    #[test]
+    fn rule6_nested_composite_config_stays_distinct_end_to_end() {
+        let src = r#"
+fn tmpl<Args>(args: Args, cfg: Array<Array<int>>) -> Args {
+    args[0] = args[0] * 100 + cfg[0].length() * 10 + cfg.length()
+    return args
+}
+
+annotation with_nested_a() {
+  targets: [function]
+  comptime post(target, ctx) {
+    let cfg = [[1, 2], [3]]
+    install(before_hook(tmpl, [capture("cfg", cfg)]))
+  }
+}
+
+annotation with_nested_b() {
+  targets: [function]
+  comptime post(target, ctx) {
+    let cfg = [[1], [2, 3]]
+    install(before_hook(tmpl, [capture("cfg", cfg)]))
+  }
+}
+
+@with_nested_a()
+fn victim_a(a: int) -> int { return a }
+
+@with_nested_b()
+fn victim_b(a: int) -> int { return a }
+
+victim_a(1) * 1000 + victim_b(1)
+"#;
+        let (value, compiler) = top_level_i64(src);
+        // a: 100 + 2*10 + 2 = 122; b: 100 + 1*10 + 2 = 112.
+        assert_eq!(value, 122_112, "each handler observes its own nesting boundaries");
+        assert_ne!(
+            compiler.hook_install_registry[0].function_index,
+            compiler.hook_install_registry[1].function_index,
+            "count-prefixed segments must distinguish the nested pair"
+        );
+        assert_eq!(
+            compiler.hook_install_registry[0].captures,
+            vec![("cfg".to_string(), "[[1, 2], [3]]".to_string())]
+        );
+    }
+
+    // OPTION config: Some(5) vs None — distinct baked specializations,
+    // distinct behavior, rows render the user spellings. (#65 fence: cfg
+    // hoisted. The Some(5)-vs-bare-5 pair is a KEY-LEVEL refuter in mod.rs
+    // — one template cannot declare a capture param typed both `int` and
+    // `Option<int>`, so the API cannot spell that pair end-to-end.)
+    #[test]
+    fn rule6_option_config_some_vs_none_stays_distinct_end_to_end() {
+        let src = r#"
+fn tmpl<Args>(args: Args, cfg: Option<int>) -> Args {
+    let bump = match cfg { Some(n) => n, None => 1 }
+    args[0] = args[0] + bump
+    return args
+}
+
+annotation with_some() {
+  targets: [function]
+  comptime post(target, ctx) {
+    let cfg: Option<int> = Some(5)
+    install(before_hook(tmpl, [capture("cfg", cfg)]))
+  }
+}
+
+annotation with_none() {
+  targets: [function]
+  comptime post(target, ctx) {
+    let cfg: Option<int> = None
+    install(before_hook(tmpl, [capture("cfg", cfg)]))
+  }
+}
+
+@with_some()
+fn victim_a(a: int) -> int { return a }
+
+@with_none()
+fn victim_b(a: int) -> int { return a }
+
+victim_a(10) * 1000 + victim_b(10)
+"#;
+        let (value, compiler) = top_level_i64(src);
+        // a: 10 + 5 = 15; b: 10 + 1 = 11.
+        assert_eq!(value, 15011, "each handler observes its own Option config");
+        assert_ne!(
+            compiler.hook_install_registry[0].function_index,
+            compiler.hook_install_registry[1].function_index,
+            "Some(5) and None are structurally distinct (rule 6)"
+        );
+        assert_eq!(
+            compiler.hook_install_registry[0].captures,
+            vec![("cfg".to_string(), "Some(5)".to_string())]
+        );
+        assert_eq!(
+            compiler.hook_install_registry[1].captures,
+            vec![("cfg".to_string(), "None".to_string())]
+        );
+    }
+
+    // EMPTY-ARRAY config PROBE RESULT (the charter's named contingency
+    // point, S3b probe 2026-07-20): the handler-side spelling `let cfg:
+    // Array<int> = []` cannot even CONSTRUCT the value — the comptime
+    // mini-VM rejects the empty typed-array literal with the PRE-EXISTING
+    // loud "[C0001] this operation is not available in compile-time code"
+    // error BEFORE `capture()` is reached, so the charter's
+    // validate_capture_value_types named-rejection contingency has no value
+    // to fire on through the API today. This pin locks the LOUD
+    // surface-and-stop behavior (never a silent crash); the BAKED-PROLOGUE
+    // half of the probe is proven at the seam
+    // (`mod.rs::empty_array_capture_value_bakes_at_the_seam` — the value is
+    // host-constructible and bakes/executes green), so the residual is
+    // exactly the pre-existing comptime empty-array-literal gap — disclosed
+    // in the slice report for supervisor relay. (#65 fence: hoisted.)
+    #[test]
+    fn empty_array_config_probe_is_a_loud_comptime_rejection_today() {
+        let (result, compiler) = compile_source(&hook_source(
+            "fn tmpl<Args>(args: Args, cfg: Array<int>) -> Args {\n\
+             \x20   args[0] = args[0] * 10 + cfg.length()\n\
+             \x20   return args\n\
+             }",
+            "let cfg: Array<int> = []\n    install(before_hook(tmpl, [capture(\"cfg\", cfg)]))",
+            "@hookann()\nfn victim(a: int) -> int { return a }\n\nvictim(1)",
+        ));
+        let text = result
+            .expect_err("the empty comptime array literal is a loud pre-existing rejection")
+            .to_string();
+        assert!(
+            text.contains("not available in compile-time code"),
+            "the pre-existing loud comptime rejection fires (never a silent crash): {text}"
+        );
+        assert!(
+            compiler.hook_install_registry.is_empty(),
+            "no install lands behind the rejection"
+        );
     }
 }
 

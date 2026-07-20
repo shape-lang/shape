@@ -268,10 +268,10 @@ thread_local! {
     /// to the directive buffer — and never reads this store lazily
     /// per-directive.
     static COMPTIME_HOOK_TEMPLATES: RefCell<Vec<BoundTemplate>> = const { RefCell::new(Vec::new()) };
-    /// ADR-009 C3 #14 (slice 2): the capture-binding store. `capture(name,
-    /// value)` lifts the value through the S2 ConstLift seam
-    /// (`const_lift::lift_capture_value` — scalars only; S3 replaces the
-    /// domain at that boundary) and stashes `(name, LiftedConst)` here,
+    /// ADR-009 C3 #14 (slice 2; S3b compositional): the capture-binding
+    /// store. `capture(name, value)` lifts the value through the ConstLift
+    /// seam (`const_lift::lift_capture_value` — since S3b the full C3-G5
+    /// compositional domain) and stashes `(name, LiftedConst)` here,
     /// returning a `__CaptureBinding` handle carrying its INDEX.
     /// EXECUTE-populated ⇒ same lifecycle as `COMPTIME_HOOK_TEMPLATES` /
     /// `COMPTIME_CHECKED_ITEMS`: cleared at the pre-execute clear point,
@@ -447,10 +447,11 @@ fn comptime_extend_statement_at(index: usize) -> Option<shape_ast::ast::ExtendSt
 /// ADR-009 C3 #14 (slice 2): a constructed hook template BOUND to its lifted
 /// capture values — `CheckedTemplate` (the ONE S1 carrier, produced through
 /// its typestate chokepoint) + the `(name, LiftedConst)` values `capture()`
-/// lifted through the S2 ConstLift seam. Lives beside the template store
-/// (`COMPTIME_HOOK_TEMPLATES`); the S2b install consumer resolves a
-/// `__CheckedTemplate` handle's index back to this pair and feeds
-/// `const_lift::bind_captures_for_install`.
+/// lifted through the ConstLift seam (the full C3-G5 compositional domain
+/// since S3b). Lives beside the template store (`COMPTIME_HOOK_TEMPLATES`);
+/// the S2b install consumer resolves a `__CheckedTemplate` handle's index
+/// back to this pair and feeds the values into `specialize_template` — the
+/// rule-6 identity + the const_lift BAKE (S3b; no call-site delivery).
 #[derive(Debug, Clone)]
 pub(in crate::compiler) struct BoundTemplate {
     /// The checked template (construction-validated: classification, capture
@@ -2047,10 +2048,10 @@ fn comptime_builtins_module_base(
     // `capture(name, value)` — one declared capture binding (the C1
     // value-snapshot mode implicitly; borrow modes are structurally
     // unconstructible through this builtin). The value rides the KindedSlot
-    // substrate and is lifted EAGERLY through the S2 ConstLift seam
-    // (`const_lift::lift_capture_value` — scalars only; S3 REPLACES that
-    // module's domain at its fn/type boundary), so an out-of-domain value
-    // rejects at the capture() call, not later.
+    // substrate and is lifted EAGERLY through the ConstLift seam
+    // (`const_lift::lift_capture_value` — S3b: the full C3-G5 compositional
+    // domain, recursively; never-liftables and out-of-domain kinds reject
+    // at the capture() call with the named class arms, not later.
     register_typed_function(
         &mut module,
         "capture",
@@ -3648,22 +3649,24 @@ victim(1)
         );
     }
 
-    // A heap value (here the handler's own `target` descriptor — a
-    // TypedObject) is outside the S2 scalar domain; the rejection names the
-    // S3 compositional seam. (An ARRAY-literal capture value would exercise
-    // the same lift rejection but currently trips a PRE-EXISTING
-    // `pending_variable_typed_array_kind` leak in nested-array-argument
-    // compilation — `[capture(\"cfg\", [1, 2])]` mis-stamps the inner `[1,2]`
-    // as a TypedObject-element array; recorded as a slice-report observation,
-    // not S2 territory.)
+    // S3b PIN FLIP (ordered by the slice-3 charter; the S2 twin asserted
+    // "outside this slice's ConstLift domain … lands with S3 ConstLift" —
+    // that landing-point sentence is DELETED with the flip): a
+    // non-liftable heap value (here the handler's own `target` descriptor —
+    // an ordinary-struct-shaped TypedObject to the lift wall) rejects
+    // through the S3 out-of-domain producer, naming the kind and the closed
+    // C3-G5 domain. (#65 note: an INLINE array-literal capture value
+    // `[capture("cfg", [1, 2])]` still trips the PRE-EXISTING
+    // `pending_variable_typed_array_kind` leak — the S3b composite fixtures
+    // hoist to a local first; #65 itself is not fixed in S3.)
     #[test]
-    fn non_scalar_capture_value_rejects_into_the_s3_domain_sentence() {
+    fn non_liftable_capture_value_rejects_with_the_s3_domain_sentence() {
         expect_compile_reject(
             &hook_program(
                 "fn my_before(x: int, cfg: int) -> int { return x }",
                 "let t = before_hook(my_before, [capture(\"cfg\", target)])",
             ),
-            "outside this slice's ConstLift domain",
+            "outside the ConstLift domain (kind Ptr(TypedObject))",
         );
     }
 

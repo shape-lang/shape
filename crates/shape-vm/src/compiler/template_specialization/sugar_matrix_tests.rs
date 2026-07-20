@@ -16,7 +16,7 @@
 //!
 //! | row | capability the sugar lowers to            | fixture (this module)                                        | public API surface exercised |
 //! |-----|-------------------------------------------|--------------------------------------------------------------|------------------------------|
-//! | r1  | typed config params → template inputs     | `r1_config_param_enters_the_template_only_as_a_capture`      | annotation-config binding + `capture(name, value)` + `before_hook` + `install` |
+//! | r1  | typed config params → template inputs     | `r1_config_params_are_rule6_constlift_identity_two_specializations` | annotation-config binding + `capture(name, value)` + `before_hook` + `install`; S3b: config values are rule-6 specialization identity (distinct config = distinct baked specialization) |
 //! | r2  | `before` body                             | `r2_before_body_is_a_module_scope_typed_fn`                  | `before_hook(fn_ident, captures)` + `install` |
 //! | r3  | `after` body                              | `r3_after_body_is_a_module_scope_typed_fn`                   | `after_hook(fn_ident, captures)` + `install` |
 //! | r4  | application to a target (target implicit) | `r4_application_covers_before_only_after_only_and_both`      | `install(t)` — before-only / after-only / both on three targets |
@@ -70,11 +70,14 @@ fn top_level_i64(src: &str) -> (i64, crate::compiler::BytecodeCompiler) {
 // The a5 surviving-legit path: config arrives as a handler param (the
 // existing annotation-args binding; S4's grammar adds the types) and enters
 // the template ONLY through `capture(name, value)` — never ambient scope.
-// Two applications with different config values share ONE value-generic
-// specialized handler (the capture stays out of the cache key) while each
-// weave delivers its own config value.
+// S3b PIN FLIP (Dec-95 rule 6, ordered by the slice-3 charter): config
+// VALUES are now ConstLift'd specialization identity — @scaled(3) and
+// @scaled(5) get TWO distinct baked specializations (structurally different
+// config = distinct specialization; the S2 "ONE shared value-generic
+// handler" posture is superseded). Registry rows still record 3/5; the
+// executed output is UNCHANGED.
 #[test]
-fn r1_config_param_enters_the_template_only_as_a_capture() {
+fn r1_config_params_are_rule6_constlift_identity_two_specializations() {
     let src = r#"
 fn tmpl<Args>(args: Args, factor: int) -> Args {
     args[0] = args[0] * factor
@@ -113,9 +116,10 @@ victim_a(10) * 1000 + victim_b(10)
         "the config ARG value (not the param name) is the recorded capture literal"
     );
     assert_eq!(row_b.captures, vec![("factor".to_string(), "5".to_string())]);
-    assert_eq!(
+    assert_ne!(
         row_a.function_index, row_b.function_index,
-        "config values stay OUT of the specialization cache key (one shared handler)"
+        "rule 6: structurally different config = DISTINCT baked specializations \
+         (the S2 shared-handler posture is superseded)"
     );
 }
 
