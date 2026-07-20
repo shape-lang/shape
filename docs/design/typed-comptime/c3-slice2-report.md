@@ -387,3 +387,191 @@ byte-unchanged; the 48 green annotation pins untouched; no grammar
 changes; no serde on template types; no C09xx minted; no new HeapKind; no
 `FieldType::Any` on the new path; `KindedSlot` never in the typed VM↔JIT
 slot ABI; forbidden-pattern and refused-regex discipline clean.
+
+## Fix round 1 — findings and fixes (append-only atop `4c95f9e8`/`2263f269`)
+
+Two review lenses ran over `34fe10bd..2263f269` (the G2-gate sugar-
+completeness lens, verdict FAIL; the seam/lifecycle lens). Fixes land
+append-only; the gated stage hashes are never amended.
+
+### F1 (BLOCKER, G2 hole) — the OBSERVER template form
+
+The round-1 G2 gate refuted S2d's "ZERO holes": observer hooks on
+zero-param targets and `after` hooks on void targets had NO public-API
+spelling (`specialize_polymorphic_before` empty-param rejection; concrete
+before arity-0 rejection; after void rejection), while the surviving
+declarative surface green-pins exactly those shapes (>= 6 of the 48 pins,
+list below), and the S1 report had EXPLICITLY deferred the void-return
+revisit TO S2 ("surface-and-stop; S2 revisits") — undischarged. Fix per
+C3-G2's own rule ("if desugaring ever needs a capability the API does not
+expose, the API must GROW"): the **OBSERVER form** — a CONCRETE template
+body with ZERO signature parameters and no/void return (trailing capture
+parameters still allowed; `fn note() { ... }`, `fn tagged(tag: int) { ... }`
++ `capture("tag", …)`). Offered to `before_hook`/`after_hook` it
+specializes on ANY target (target-uniform BY DESIGN — one lowering of an
+args/result-independent declarative block serves every target, no
+per-target branching in S4's sugar): the weave calls it at its chain
+position with ONLY its capture values; the target's args/result thread
+through UNTOUCHED. Zero-param targets thereby gain a `before` spelling and
+void targets an `after` spelling — the named holes close. The observer
+predicate is disjoint from every mutation form (a mutating before declares
+>= 1 signature param; a result-threading after declares exactly one + a
+return), so no template classifies both ways; a zero-param VALUE-returning
+body is NOT an observer (return would be silently dropped) and keeps the
+existing rejections. All four zero-param/void rejection sentences now carry
+the observer positive twin. DESIGN DISCLOSURE: the reviewer's sketch was
+"arity-0 PolymorphicArgs + After-void unit-observer"; the landed shape
+covers both holes with ONE concrete form and no monomorphization/
+pseudo-tuple/empty-aggregate machinery — polymorphic-before on 0-ary
+targets stays a rejection (its twin names the observer). Fix-agent design
+choice under the G2 mandate, flagged for supervisor/user ratification.
+Sugar matrix grows row r9 (`r9_observers_cover_zero_param_and_void_
+targets`); observer EXECUTION is proven by error-injection (an erroring
+observer body fails the woven program; the green control is the
+non-vacuity twin) since observers have no data-flow observable.
+
+### F2 (HIGH) — after-chain order: REVERSE application (wrapping/onion)
+
+S2c threaded BOTH chains in application order; the surviving declarative
+surface's stacked after hooks run INSIDE-OUT (wrapping.rs
+`stacked_after_hooks_transform_result_in_order`: the annotation nearest
+the fn is innermost — before chain outer→inner, after chain inner→outer),
+and no C3 ruling ordered a semantics change, so S4's lowering would have
+silently changed stacked-hook results (12 → 11 on the legacy pin's
+fixture). Fix: the weave threads the after chain in REVERSE application
+order — one iteration-order change (`weave.rs`), giving the coherent onion
+model (first-applied annotation = outermost wrapper). Updated pins: weave
+`stacked_after_installs_thread_the_result_in_reverse_application_order`
+(40 → 30), sugar r5 renamed `r5_stacked_annotations_compose_as_wrapping`
+(460 → 450). A dated user ruling preferring application order flips this
+single iteration order back (S6 would then rewrite the legacy pin's
+value instead).
+
+### F3 (MEDIUM) — `ctx` disposition row (NAMED OPEN DISPOSITION)
+
+The typed hook-template surface has NO `ctx` parameter (deliberate: G5
+makes function values never-liftable; the impl shadow is unspellably
+hygienic, so no capture-based spelling can exist), but the LEGACY runtime
+hook bodies receive `ctx` and the green pins use it: injection.rs:142-163
+(`before_hook_passes_ctx_info`, prints ctx) and before_after.rs:229-255
+(`ctx_target_calls_original_impl_from_after_hook` — the §4.1.5
+`ctx.target` original-impl call "WF-2C's @remote hard-depends on").
+c3-decisions.md fences ctx.state/HookDecision to E4 and says "`ctx.target`
+stays per the E3-S4 ruling". DISPOSITION ROW (default derived from the E4
+fence, needs supervisor/user ratification): **E4 owns the runtime-hook-body
+context family** (HookDecision, failure/retry, ctx.state — ctx.target is
+the same runtime-context family for hook BODIES); therefore the two
+ctx-dependent pins CANNOT be rewritten onto the typed surface by S6 —
+S6's deletion arithmetic must carry them as E4-blocked items, and if E4
+has not landed a typed replacement at S6 entry, S6 must surface for a
+user ruling BEFORE deleting the machinery implementing ctx (never a
+silent capability loss).
+
+### F4 (MEDIUM-LOW) — type-changing after hooks: RULED withdrawal, now named
+
+`After = (R) -> R` per C3-G4. The green pin wrapping.rs:32-49
+(`after_hook_wraps_result_in_string`, int result → string) is therefore
+INEXPRESSIBLE on the typed surface — a RULED withdrawal (G4), previously
+unnamed. Named here for the rejection inventory + the S6 pin-rewrite
+arithmetic: that pin is rewritten-with-capability-loss or dropped by dated
+disposition at S6.
+
+### F5 (LOW) — whole-args observability, named for S6
+
+`print(f"{args}")` (function_target.rs `annotation_on_multi_param_
+function` uses the pattern; the pin does not assert that line) has no
+new-path spelling: bare `args` in value position is a named rejection and
+f-string interpolation is the documented non-scanned boundary. Per-element
+reads cover the uses; named for S6's rewrite arithmetic.
+
+### Lens-2 F1 (MEDIUM) — install-handle SNAPSHOT resolution (stale-handle-across-runs)
+
+CONFIRMED and fixed. The pass-2 directive loop resolved each
+`InstallHookTemplate` index LAZILY per directive, while applying an
+EARLIER directive in the same list can trigger a NESTED handler run (a
+polymorphic `specialize_template` rides the mono pipeline into the full
+`compile_function`, which re-enters `execute_comptime_handlers` because
+annotations survive substitution; an `ExtendItems` compile does the same)
+that CLEARS + REPOPULATES the execute-populated stores — the later
+install's stale index then missed (misdiagnosed internal error) or, worse,
+resolved to the NESTED run's template and installed the WRONG one
+SILENTLY. Fix: `snapshot_install_hook_template_handles` — every install
+handle batch-resolves to its `BoundTemplate` at directive-loop ENTRY,
+before ANY directive applies (the `take_comptime_directives` value-snapshot
+discipline extended to the handles the directives carry);
+`apply_install_hook_template` now takes the resolved `&BoundTemplate`,
+never a live store read. PROVEN-BITING REFUTER
+(`nested_handler_run_during_processing_does_not_shift_install_handles`):
+an annotated polymorphic template body fn whose @noise handler pushes TWO
+templates during the nested specialization compile; with a throwaway
+lazy-resolution probe (reverted byte-clean before commit) the refuter
+fails exactly as derived — value 1090 (the nested run's Sig-compatible
+`h_noise2` silently installed) vs the correct 180 — proving both the
+nested-run mechanism and the silent-wrong-install failure mode. Store
+lifecycle docs updated (the "intact until the next per-run clear" sentence
+now names the mid-processing clear).
+
+### Lens-2 F2 (LOW) — module-target install rejection arm now fires
+
+`module_target_install_rejects_with_the_function_twin` — the
+`process_comptime_directives_for_module` arm's producer + positive twin
+fired end-to-end (`@hookann() mod demo { … }` with `targets: [module]`),
+the sibling of the type-target test.
+
+### Lens-2 F3 (LOW) — G8 prefix-walk edge, SURFACED only
+
+`generic_origin_of_specialized_name` walks `::` prefixes and cannot
+distinguish mono-rename suffixes from module qualification: a CONCRETE
+module-qualified `foo::bar` whose module name collides with a registered
+top-level generic `foo<T>` would false-positive the G8 rejection — LOUD
+and fail-closed (wrongly-attributed sentence naming `foo`), never a silent
+accept. Whether a module and a generic fn can share a name in one unit is
+unverified; if so, the walk needs mono-key-aware segmentation. Doc-comment
+at the fn names the edge; residual, not fixed.
+
+### Lens-2 F4 (NIT) — handler-local shadowing of the body fn identifier
+
+`let my_hook = 3; before_hook(my_hook, [])` previously bound the MODULE fn
+silently, inverting ordinary shadowing. Fix: the emit-side rewrite tracks
+handler-local binding names (`let` patterns + `for` binders) and rejects a
+shadowed body-fn reference with a named sentence + positive twin (rename
+either side). DISCLOSED NARROWING: the tracked set is a CONSERVATIVE flat
+set — names accumulate lexically and never pop at scope exit (a local in
+one branch flags a later use; over-approximation is only ever the LOUD
+rejection), and match-arm/closure-param bindings are outside the set
+(closure interiors are not recursed by this rewrite at all). Pinned unit +
+end-to-end.
+
+### S6 pin-rewrite arithmetic (the F1/F2/F4/F5 ledger)
+
+Now-expressible via observers (rewrite normally at S6):
+before_after.rs:174-198 (`before_hook_with_empty_params`),
+wrapping.rs:137-163 (`annotation_wrapping_void_function`),
+function_target.rs:11-31 (`annotation_on_simple_function`),
+other_targets.rs:74-93 (`targets_declaration_function_on_function_works`),
+other_targets.rs:166-187 (`annotation_on_module_item` — a fn-target pin
+despite the name). E4-blocked (F3): injection.rs:142-163,
+before_after.rs:229-255. Ruled-withdrawal (F4): wrapping.rs:32-49.
+Boundary-named (F5): function_target.rs multi-param `{args}` uses.
+Stacked-after value pins keep their legacy values under F2 (wrapping.rs:
+52-81 stays 12).
+
+### Fix-round-1 gates
+
+`cargo check -p shape-vm --all-targets` clean (one PRE-EXISTING
+unused-import warning at comptime_builtins.rs test scope, present at
+HEAD). template_specialization + checked_template + rewrite + builtin
+filters: 148/148. Full shape-vm `--lib` `--test-threads=1`: FAILED set ==
+the S0 7-name baseline + the DOCUMENTED `nested_exact` vmlib flapper
+(S2d residual 5) — flap re-confirmed NONDETERMINISTIC on the fix tree's
+single binary (`--exact` run thrice: FAILED, FAILED, ok), so not
+fix-caused. shape-test `annotations_runtime` 24/24 and
+`annotation_targets` 24/24 (the 48 legacy pins untouched and green);
+`annotations_comptime` FAILED == the 10-name set (116 passed); `comptime`
+FAILED == the 3-name set (261 passed). shape-cli `cli_tests` `jit_c3`
+filter 5/5 (both S2d cells + the 3 S1a proxies; the aggregate cell still
+pins EXACTLY ONE named-expected-fallback line). `just check-clean` exit 0;
+`just check-no-dynamic` exit 0; refused-regex grep over the full diff
+clean. Suites NOT re-run (disclosed): lsp / shape-lsp (surface untouched),
+the remaining cli_tests modules (fixtures untouched; compiled by
+check --all-targets) — per the blast-radius verification discipline.
