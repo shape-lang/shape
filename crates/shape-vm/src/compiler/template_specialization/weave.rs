@@ -1446,5 +1446,199 @@ victim_a(10) * 1000 + victim_b(10)
             "no install lands behind the rejection"
         );
     }
+
+    // ── S3c: the W39/LoadModuleBinding named check (charter (e)) ───────────
+    //
+    // The S0 §4 a4d/a4e-noted JIT poison: the LEGACY config path reads its
+    // config from a module binding at every invocation, planting
+    // `LoadModuleBinding` (0x52) in the generated wrapper ("generated
+    // wrapper contains `LoadModuleBinding` → W39 whole-program deopt"; the
+    // legacy machinery stays byte-unchanged beside the new path until S6).
+    // The NEW path bakes capture values as CONSTANTS at specialization, so
+    // config access must emit ZERO module-binding loads in the specialized
+    // handler AND the generated wrapper. This is a BYTECODE-level pin — it
+    // holds regardless of JIT status; the CLI zero-fallback twin
+    // (`jit_c3_carrier_native.rs::c3_composite_config_single_runs_natively_
+    // both_tiers`) proves the same shape natively.
+
+    /// The full module-binding LOAD family: the S0-named legacy
+    /// `LoadModuleBinding` (0x52) plus the typed Wave-E+3 load variants
+    /// (0x182..=0x18C). The typed variants are emitter-dead at HEAD
+    /// (`typed_load_module_binding_opcode` is `#[allow(dead_code)]`), but
+    /// the scan covers them anyway so a future emitter flip cannot
+    /// reintroduce config-via-module-binding under a typed spelling without
+    /// failing this pin.
+    fn is_module_binding_load(opcode: crate::bytecode::OpCode) -> bool {
+        use crate::bytecode::OpCode as Op;
+        matches!(
+            opcode,
+            Op::LoadModuleBinding
+                | Op::LoadModuleBindingI64
+                | Op::LoadModuleBindingU64
+                | Op::LoadModuleBindingF64
+                | Op::LoadModuleBindingI32
+                | Op::LoadModuleBindingU32
+                | Op::LoadModuleBindingI16
+                | Op::LoadModuleBindingU16
+                | Op::LoadModuleBindingI8
+                | Op::LoadModuleBindingU8
+                | Op::LoadModuleBindingBool
+                | Op::LoadModuleBindingPtr
+        )
+    }
+
+    /// Count module-binding loads in one registered function's body slice.
+    fn module_binding_loads(
+        compiler: &crate::compiler::BytecodeCompiler,
+        function: &crate::bytecode::Function,
+    ) -> usize {
+        let end = function.entry_point + function.body_length;
+        compiler.program.instructions[function.entry_point..end]
+            .iter()
+            .filter(|instr| is_module_binding_load(instr.opcode))
+            .count()
+    }
+
+    // Scalar + composite captures in one WOVEN PROGRAM — via TWO
+    // annotations (one handler each): all `capture()` value args inside ONE
+    // handler must unify (the pre-existing handler-wide inference
+    // limitation pinned below), so the mixed-kind program spells each
+    // config kind in its own handler. Both bake spellings are exercised;
+    // the executed value proves the baked config drives the mutation. (#65
+    // fence: cfg hoisted to a handler local. The hygienic impl shadow is
+    // OUT of this claim — it is USER code and may legitimately read module
+    // bindings; the claim is about the GENERATED artifacts' config access.)
+    #[test]
+    fn baked_config_emits_no_module_binding_loads_in_handler_or_wrapper() {
+        let src = r#"
+fn tmpl_scalar<Args>(args: Args, bump: int) -> Args {
+    args[0] = args[0] * bump
+    return args
+}
+fn tmpl_array<Args>(args: Args, cfg: Array<int>) -> Args {
+    args[0] = args[0] + cfg[0] * 10 + cfg.length()
+    return args
+}
+
+annotation scalar_ann() {
+  targets: [function]
+  comptime post(target, ctx) {
+    install(before_hook(tmpl_scalar, [capture("bump", 3)]))
+  }
+}
+
+annotation array_ann() {
+  targets: [function]
+  comptime post(target, ctx) {
+    let cfg = [5, 6]
+    install(before_hook(tmpl_array, [capture("cfg", cfg)]))
+  }
+}
+
+@scalar_ann()
+@array_ann()
+fn victim(a: int) -> int { return a }
+
+victim(4)
+"#;
+        let (value, compiler) = top_level_i64(src);
+        // before chain in application order: 4*3 = 12 → 12 + 5*10 + 2 = 64
+        // → impl(64) = 64. Skip-either ⇒ 16 / 12; any misread of either
+        // baked constant shifts the value.
+        assert_eq!(value, 64, "the baked scalar AND composite config drive the mutation");
+
+        assert_eq!(compiler.hook_install_registry.len(), 2, "two config-bearing installs");
+        for row in &compiler.hook_install_registry {
+            let handler = &compiler.program.functions[usize::from(row.function_index)];
+            assert!(
+                handler.name.contains("::cfg#1"),
+                "sanity: the handler IS a config-suffixed baked specialization: {}",
+                handler.name
+            );
+            assert_eq!(
+                module_binding_loads(&compiler, handler),
+                0,
+                "W39 named check: the specialized handler `{}` reads config from BAKED \
+                 constants — zero module-binding loads (the S0 §4 legacy poison is absent \
+                 from the new path)",
+                handler.name
+            );
+        }
+
+        let wrapper = function_entry(&compiler, "victim");
+        assert_eq!(
+            module_binding_loads(&compiler, wrapper),
+            0,
+            "W39 named check: the generated wrapper carries no per-invocation config \
+             machinery — zero module-binding loads"
+        );
+    }
+
+    // PROBE RESULT (S3c, disclosed in the slice report): capture VALUE
+    // types unify HANDLER-WIDE — mixing an int capture and an Array capture
+    // in ONE handler's compile fails the comptime mini-VM's type solving
+    // with the PRE-EXISTING loud "[C0001] Could not solve type constraints"
+    // error (the `capture` builtin's `unknown` value param is one shared
+    // inference site, so all `capture()` calls in a handler must agree —
+    // probed: the mixed-in-one-array spelling below AND two separate
+    // mixed installs in one handler both fail identically). Homogeneous
+    // multi-capture handlers work (two scalars: the C0907 duplicate pin;
+    // two arrays: probed green); mixed kinds need one handler per kind
+    // (the W39 pin above). This pin locks the LOUD surface-and-stop
+    // behavior — never a silent narrowing; the limitation is a
+    // pre-existing inference gap surfaced for supervisor relay, NOT fixed
+    // in S3 (S3 mints no new rejections beyond the lift domain).
+    #[test]
+    fn mixed_capture_value_types_in_one_handler_are_a_loud_inference_rejection_today() {
+        let (result, compiler) = compile_source(&hook_source(
+            "fn tmpl<Args>(args: Args, bump: int, cfg: Array<int>) -> Args {\n\
+             \x20   args[0] = args[0] * bump + cfg[0]\n\
+             \x20   return args\n\
+             }",
+            "let cfg = [5, 6]\n    \
+             install(before_hook(tmpl, [capture(\"bump\", 3), capture(\"cfg\", cfg)]))",
+            "@hookann()\nfn victim(a: int) -> int { return a }\n\nvictim(4)",
+        ));
+        let text = result
+            .expect_err("the mixed-kind captures array is a loud pre-existing rejection")
+            .to_string();
+        assert!(
+            text.contains("Could not solve type constraints"),
+            "the pre-existing loud inference rejection fires (never a silent narrowing): {text}"
+        );
+        assert!(
+            compiler.hook_install_registry.is_empty(),
+            "no install lands behind the rejection"
+        );
+    }
+
+    // NON-VACUITY CONTROL for the scanner: a fn that GENUINELY reads a
+    // top-level script binding loads it via `LoadModuleBinding` (the
+    // opcode_defs.rs:951-documented load path), so the same scanner counts
+    // > 0 here — proving the zero assertions above are falsifiable.
+    #[test]
+    fn module_binding_load_scanner_counts_a_genuine_module_read() {
+        let src = "let base = 7\n\
+                   fn reads_module() -> int { return base }\n\
+                   reads_module()";
+        let (value, compiler) = top_level_i64(src);
+        assert_eq!(value, 7, "the module read executes");
+        let reader = function_entry(&compiler, "reads_module");
+        let count = module_binding_loads(&compiler, reader);
+        assert!(
+            count > 0,
+            "control: a genuine top-level-binding read must be counted (got {count})"
+        );
+        // The S0 note names the legacy opcode itself: at HEAD the typed load
+        // variants are emitter-dead, so the counted load IS `LoadModuleBinding`
+        // (0x52) — the exact opcode the a4d wrapper measurement recorded.
+        let end = reader.entry_point + reader.body_length;
+        assert!(
+            compiler.program.instructions[reader.entry_point..end]
+                .iter()
+                .any(|instr| instr.opcode == crate::bytecode::OpCode::LoadModuleBinding),
+            "control: the S0-named opcode (LoadModuleBinding, 0x52) is the emitted load"
+        );
+    }
 }
 

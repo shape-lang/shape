@@ -1,0 +1,45 @@
+// ADR-009 C3 #14 slice 3 (S3c) — the EVALUATE-ONCE pin, TWO applications
+// (the sibling of c3-config-eval-once.shape): the same annotation applies
+// to TWO targets, so the handler (and its `warning("cfg-eval")` side
+// effect) runs EXACTLY TWICE — evaluate-once-per-BINDING, never
+// once-globally (a once-globally implementation would count 1) and never
+// scaling with the 200-call hot loop (a per-invocation implementation
+// would count 400+). The two applications carry structurally EQUAL config,
+// so rule 6 SHARES one baked specialization between them — the warning
+// count follows APPLICATIONS (handler runs), not specializations; both
+// targets execute through the shared baked handler.
+//
+// #65 FENCE: config array hoisted to a handler local (see the sibling).
+// The annotation `comptime post` handler is NOT a top-level comptime block
+// (parse-based vacuity guard).
+//
+// Arithmetic, per call i in 0..200 (cfg bump = 10 + 2 = 12):
+//   calc:  (i+12)*10;  calc2: (i+12)*100
+//   sum = 110 * (19900 + 12*200) = 110 * 22300 = 2453000
+// Expected stdout: 2453000
+fn tmpl<Args>(args: Args, cfg: Array<int>) -> Args {
+  args[0] = args[0] + cfg[0] + cfg.length()
+  return args
+}
+
+annotation hooked() {
+  targets: [function]
+  comptime post(target, ctx) {
+    warning("cfg-eval")
+    let cfg = [10, 20]
+    install(before_hook(tmpl, [capture("cfg", cfg)]))
+  }
+}
+
+@hooked()
+fn calc(a: int) -> int { a * 10 }
+
+@hooked()
+fn calc2(a: int) -> int { a * 100 }
+
+fn run() -> int {
+  let mut total = 0
+  for i in 0..200 { total = total + calc(i) + calc2(i) }
+  total
+}
+print(run())

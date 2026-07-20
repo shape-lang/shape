@@ -44,10 +44,34 @@
 //!    proves the chain — forcing the flip to the zero-fallback form. Never
 //!    vacuous in either direction. (S7 also owns depth beyond these cells:
 //!    the wider matrix, async named-expected-fallback, ctx-consuming hooks.)
+//! 6. `c3-composite-config-single` (S3c) — COMPOSITE (`Array<int>`) config
+//!    baked into the specialized handler's prologue (S3b ConstLift), 1-ary
+//!    SINGLE carrier: ZERO-FALLBACK (measured — the NewTypedArray*-lowering
+//!    named-expected-fallback contingency was NOT needed). The scalar-config
+//!    sibling is already covered natively by cell 4 (its `capture("bump",
+//!    2)`), so no scalar duplicate exists (charter check-first rule).
+//! 7./8. `c3-config-eval-once` + `-two-apps` (S3c) — the EVALUATE-ONCE
+//!    pins: the handler's `warning("cfg-eval")` marker on subprocess stderr
+//!    counts EXACTLY once per @application (1 and 2), in BOTH modes, while
+//!    the 200-call hot loop proves the baked value on every call — the
+//!    capture value is comptime-evaluated once at binding, never re-evaluated
+//!    at invocation (the S0 a4e legacy CONTRAST re-evaluates per call).
 
 use super::jit_test_support::{
     assert_fixture_has_no_top_level_comptime, count_fallback_lines, run_workspace_fixture,
 };
+
+/// Count the evaluate-once marker lines: the `warning("cfg-eval")` comptime
+/// diagnostic renders on stderr as a `warning[C0002]: cfg-eval` line
+/// (LSDS terminal render — probed S3c; the channel finding is recorded in
+/// c3-slice3-report.md). Counting LINES containing the marker keeps the count
+/// insensitive to the render's surrounding span/underline furniture.
+fn count_warning_marker_lines(stderr: &str, marker: &str) -> usize {
+    stderr
+        .lines()
+        .filter(|line| line.starts_with("warning[") && line.contains(marker))
+        .count()
+}
 
 /// Zero-fallback proof: VM and JIT exit 0, produce identical stdout equal to
 /// `expected_stdout`, and neither emits a `[jit-fallback]` line — i.e. the
@@ -203,5 +227,101 @@ fn c3_api_installed_hooks_aggregate_is_a_named_expected_fallback() {
         "{fixture}: the fallback must be EXACTLY the named W36 return-kind gap on the \
          specialized before-handler (a different fallback identity is a new regression, \
          not the pinned expectation): {fallback_line}"
+    );
+}
+
+/// Cell 6 (S3c) — COMPOSITE config, ZERO-FALLBACK (the charter (e) primary
+/// route): an `Array<int>` capture baked by S3b ConstLift into the
+/// specialized handler's `let mut cfg: Array<int> = [3, 4]` prologue, on a
+/// 1-ary SINGLE-carrier target (deliberately off the known aggregate-carrier
+/// gap — S7's named-expected-fallback follow-up — so this cell isolates
+/// config-JIT behavior). 462000 is value-distinguishing (fixture header
+/// derives skip ⇒ 199000, element-swap ⇒ 482000, dropped length ⇒ 458000).
+/// Measured S3c: the baked composite prologue reaches native JIT directly —
+/// the NewTypedArray*-lowering named-expected-fallback contingency was NOT
+/// needed. A zero-fallback pass here proves the specialized handler carries
+/// its config as heap CONSTANTS: no config expression, no LoadModuleBinding
+/// (the S0 §4 W39 JIT poison — bytecode-level twin pinned in
+/// `template_specialization/weave.rs`), no per-invocation re-eval.
+#[test]
+fn c3_composite_config_single_runs_natively_both_tiers() {
+    assert_c3_fixture_reaches_native_jit("c3-composite-config-single.shape", "462000\n");
+}
+
+/// Shared body for cells 7/8 — the EVALUATE-ONCE pin (charter item (d)):
+/// the annotation handler's `warning("cfg-eval")` is the observable comptime
+/// side effect; its stderr marker must appear EXACTLY `expected_marker_count`
+/// times (== the @application count), in BOTH modes, while the 200-call hot
+/// loop proves the baked value on every call (exact stdout + VM==JIT). A
+/// per-invocation implementation would scale the count with the hot loop
+/// (400+); a once-globally implementation would cap it at 1 regardless of
+/// applications — both are refuted by the 1-app/2-app sibling pair. The
+/// legacy CONTRAST (S0 §4 a4e, byte-unchanged until S6): the legacy config
+/// path re-evaluates its config expression per invocation.
+/// (Both fixtures also measured zero-fallback; the nativity PIN lives in
+/// cell 6 — this cell's assertions are evaluate-once semantics only, so its
+/// failure always means an evaluate-once regression, not a JIT deopt.)
+fn assert_c3_config_evaluates_once_per_application(
+    fixture: &str,
+    expected_stdout: &str,
+    expected_marker_count: usize,
+) {
+    assert_fixture_has_no_top_level_comptime(fixture);
+
+    let vm = run_workspace_fixture("vm", "smokes-jit-closure", fixture);
+    let jit = run_workspace_fixture("jit", "smokes-jit-closure", fixture);
+
+    assert_eq!(
+        vm.exit_code,
+        Some(0),
+        "{fixture}: VM must exit 0; stderr={}",
+        vm.stderr
+    );
+    assert_eq!(
+        jit.exit_code,
+        Some(0),
+        "{fixture}: JIT mode must exit 0; stderr={}",
+        jit.stderr
+    );
+    assert_eq!(
+        vm.stdout, expected_stdout,
+        "{fixture}: the baked value must drive all 200 calls (exact VM stdout)"
+    );
+    assert_eq!(
+        jit.stdout, vm.stdout,
+        "{fixture}: VM==JIT value equality; stderr={}",
+        jit.stderr
+    );
+    for (mode, run) in [("vm", &vm), ("jit", &jit)] {
+        assert_eq!(
+            count_warning_marker_lines(&run.stderr, "cfg-eval"),
+            expected_marker_count,
+            "{fixture} [{mode}]: the comptime config side effect must fire EXACTLY once \
+             per @application ({expected_marker_count} application(s)) — never once-globally, \
+             never scaling with the 200 hot-loop invocations. stderr={}",
+            run.stderr
+        );
+    }
+}
+
+/// Cell 7 (S3c) — evaluate-once, ONE application: exactly ONE `cfg-eval`
+/// marker in both modes; 223000 proves the baked `[10, 20]` config on all
+/// 200 calls (skip ⇒ 199000 — see the fixture header derivation).
+#[test]
+fn c3_config_eval_once_warning_fires_once_per_application() {
+    assert_c3_config_evaluates_once_per_application("c3-config-eval-once.shape", "223000\n", 1);
+}
+
+/// Cell 8 (S3c) — evaluate-once, TWO applications: exactly TWO markers —
+/// evaluate-once-per-BINDING, never once-globally (the two applications
+/// carry structurally EQUAL config and rule-6 SHARE one baked
+/// specialization, so the count follows APPLICATIONS, not specializations),
+/// and never scaling with the 200-call loop.
+#[test]
+fn c3_config_eval_once_two_applications_warn_exactly_twice() {
+    assert_c3_config_evaluates_once_per_application(
+        "c3-config-eval-once-two-apps.shape",
+        "2453000\n",
+        2,
     );
 }
