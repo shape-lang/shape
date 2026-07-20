@@ -59,6 +59,7 @@ fn stamped_closure() -> Expr {
             "closure:0",
         ]))),
         captures: None,
+        annotations: None,
         span: Span::default(),
     };
     Expr::FunctionExpr {
@@ -77,6 +78,7 @@ fn stamped_closure() -> Expr {
             "closure:0",
         ]))),
         captures: None,
+        annotations: None,
         span: Span::default(),
     }
 }
@@ -168,6 +170,7 @@ fn unstamped_source_closure_stays_unstamped() {
         body: vec![],
         generated_origin: None,
         captures: None,
+        annotations: None,
         span: Span::default(),
     };
     let mut subs = HashMap::new();

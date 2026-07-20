@@ -826,6 +826,8 @@ fn make_lambda(param: &str, body: &Expr, span: Span) -> Expr {
         body: vec![Statement::Return(Some(body.clone()), span)],
         generated_origin: None,
         captures: None,
+        // Desugar-minted lambdas carry no annotations (C3-G12 nested-fn carrier).
+        annotations: None,
         span,
     }
 }
@@ -857,6 +859,8 @@ fn make_binary_lambda(param1: &str, param2: &str, body: &Expr, span: Span) -> Ex
         body: vec![Statement::Return(Some(body.clone()), span)],
         generated_origin: None,
         captures: None,
+        // Desugar-minted lambdas carry no annotations (C3-G12 nested-fn carrier).
+        annotations: None,
         span,
     }
 }

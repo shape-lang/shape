@@ -116,7 +116,15 @@ pub(super) fn terminal_error() -> ShapeError {
 }
 
 mod installer;
-mod planner;
+// ADR-009 C3 #14 (slice 4): widened private→pub(in crate::compiler) so the
+// G12 nested-fn check (compiler statement tier) and the LocalAst handler-
+// resolution provenance can reach the ONE classification chokepoint
+// (`classify_annotation_surface` / `classify_annotation_params`). The sealed
+// evidence token stays private to planner.rs — the sealing is unchanged.
+pub(in crate::compiler) mod planner;
+// ADR-009 C3 #14 (slice 4, S4c): the sugar lowering producer — reachable by
+// the LocalAst handler-resolution provenance (`sugar_lowering_for_def`).
+pub(in crate::compiler) mod sugar_lowering;
 mod transaction;
 
 #[cfg(test)]

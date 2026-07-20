@@ -1862,3 +1862,45 @@ fn duration_literals_still_parse() {
         "both `5m` and `1.5d` must remain Duration literals"
     );
 }
+
+// ═══ ADR-009 C3 #14 (slice 4, C3-G12) — the nested-fn annotation CARRIER ═══
+// The `let name = fn(...)` desugar of a fn-local nested `fn` formerly
+// DROPPED spelled annotations silently (S0 a4/a4c). Both desugar sites
+// (statement position, parser/statements.rs; block-item position,
+// parser/expressions/control_flow/loops.rs) now thread them onto
+// `Expr::FunctionExpr.annotations` so the compiler can fire the loud
+// typed-config rejection. Closure literals stay `None`.
+
+#[test]
+fn nested_fn_annotations_are_carried_through_the_desugar() {
+    let items = parse_program_helper(
+        "fn outer() -> int {\n  @retry(3)\n  fn inner(x: int) -> int { return x }\n  return inner(4)\n}\n",
+    )
+    .expect("parse should succeed");
+    let crate::ast::Item::Function(outer, _) = &items[0] else {
+        panic!("expected outer fn item");
+    };
+    let crate::ast::Statement::VariableDecl(decl, _) = &outer.body[0] else {
+        panic!("expected the nested fn to desugar to a VariableDecl, got {:?}", outer.body[0]);
+    };
+    let Some(crate::ast::Expr::FunctionExpr { annotations, .. }) = &decl.value else {
+        panic!("expected a FunctionExpr initializer");
+    };
+    let annotations = annotations.as_deref().expect("annotations must be carried, not dropped");
+    assert_eq!(annotations.len(), 1);
+    assert_eq!(annotations[0].name, "retry");
+    assert_eq!(annotations[0].args.len(), 1);
+}
+
+#[test]
+fn closure_literal_carries_no_nested_fn_annotations() {
+    let items = parse_program_helper("let f = |x| x + 1\n").expect("parse should succeed");
+    let crate::ast::Item::Statement(crate::ast::Statement::VariableDecl(decl, _), _) = &items[0]
+    else {
+        panic!("expected a let statement, got {:?}", items[0]);
+    };
+    let Some(crate::ast::Expr::FunctionExpr { annotations, .. }) = &decl.value else {
+        panic!("expected a FunctionExpr initializer");
+    };
+    assert!(annotations.is_none(), "closure literals never carry annotations");
+}

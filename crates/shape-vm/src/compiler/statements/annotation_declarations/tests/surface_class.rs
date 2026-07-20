@@ -167,38 +167,105 @@ fn r1_positive_twins_every_liftable_spelling_compiles() {
     );
 }
 
-// ── the installer fork skeleton (surface-and-stop until the S4c lowering) ──
+// ── R3: the typed-surface hook-shape declaration-site rejection (S4c) ──────
+// The S4b installer surface-and-stop is REPLACED by the real lowering; its
+// two pins re-target here onto R3 (the same fixtures now reject EARLIER, at
+// planning, with the typed-surface shape sentence — never silent legacy
+// engagement, and never the legacy weave slots).
 
 #[test]
-fn typed_config_declarative_before_handler_is_a_surface_and_stop() {
-    // A TypedConfig def's declarative before/after handlers must NEVER
-    // register on the legacy weave slots. Until S4c lands the sugar
-    // lowering onto the public comptime API, this is an internal-error-
-    // shaped surface-and-stop — never silent legacy engagement.
+fn r3_typed_config_before_with_legacy_params_rejects_with_the_exact_sentence() {
     let message =
         compile_err("annotation typedcfg(times: int) { before(args, ctx) { args } }");
     assert!(
         message.contains(
-            "typed-config annotation `typedcfg` declares a declarative `before` handler"
+            "annotation `typedcfg` declares typed config parameters, which selects the \
+             typed hook surface, but its `before` handler declares (args, ctx); \
+             typed-surface hooks are before(args) / after(result) / zero-param observers \
+             before() / after() — or remove the parameter types to stay on the legacy \
+             surface until it is deleted (C3-G7/S6)"
         ),
-        "the fork must refuse the legacy slots, got: {message}"
-    );
-    assert!(
-        message.contains("the legacy weave slots are refused for typed-config definitions"),
-        "the refusal must be named, got: {message}"
+        "R3 must fire verbatim, got: {message}"
     );
 }
 
 #[test]
-fn typed_config_declarative_after_handler_is_a_surface_and_stop() {
+fn r3_typed_config_after_with_legacy_params_rejects_with_the_exact_sentence() {
     let message = compile_err(
         "annotation typedcfg(times: int) { after(args, result, ctx) { result } }",
     );
     assert!(
         message.contains(
-            "typed-config annotation `typedcfg` declares a declarative `after` handler"
+            "but its `after` handler declares (args, result, ctx); typed-surface hooks are"
         ),
-        "the fork must refuse the legacy slots, got: {message}"
+        "R3 must fire naming the after shape, got: {message}"
+    );
+}
+
+#[test]
+fn r3_single_param_magic_spellings_reject() {
+    // A SINGLE param named `fn` or `ctx` is a legacy magic spelling, not a
+    // pseudo-tuple binder — R3, so the legacy meaning can never silently
+    // change under the typed surface.
+    for source in [
+        "annotation typedcfg(times: int) { before(ctx) { ctx } }",
+        "annotation typedcfg(times: int) { after(fn) { 1 } }",
+    ] {
+        let message = compile_err(source);
+        assert!(
+            message.contains("typed-surface hooks are before(args) / after(result)"),
+            "R3 must fire on the magic single param, got: {message}"
+        );
+    }
+}
+
+#[test]
+fn r3_family_lifecycle_hooks_reject_citing_the_e4_s6_fence() {
+    for (source, kind) in [
+        (
+            "annotation typedcfg(times: int) { on_define(target) { 1 } }",
+            "`on_define`",
+        ),
+        (
+            "annotation typedcfg(times: int) { metadata(target) { 1 } }",
+            "`metadata`",
+        ),
+    ] {
+        let message = compile_err(source);
+        assert!(
+            message.contains("is a runtime-lifecycle hook with no typed-surface form yet"),
+            "the R3-family {kind} rejection must fire, got: {message}"
+        );
+        assert!(
+            message.contains("the runtime-hook context family is E4's charter")
+                && message.contains("deleted at C3-S6"),
+            "the E4/S6 fence must be cited, got: {message}"
+        );
+    }
+}
+
+#[test]
+fn r3_positive_twins_all_four_typed_surface_forms_compile() {
+    // before(args) / after(result) / before() / after() — with a body that
+    // satisfies each form's shape — all pass the declaration checks.
+    compile_ok(
+        "annotation typedcfg(times: int) {\n\
+         \x20 targets: [function]\n\
+         \x20 before(args) { return args }\n\
+         }",
+    );
+    compile_ok(
+        "annotation typedcfg2(times: int) {\n\
+         \x20 targets: [function]\n\
+         \x20 after(result) { return result }\n\
+         }",
+    );
+    compile_ok(
+        "annotation typedcfg3(times: int) {\n\
+         \x20 targets: [function]\n\
+         \x20 before() { let x = times }\n\
+         \x20 after() { let y = times }\n\
+         }",
     );
 }
 
@@ -208,3 +275,4 @@ fn legacy_untyped_declarative_before_handler_still_compiles() {
     // the fork twin.
     compile_ok("annotation once() { before(args, ctx) { args } }");
 }
+

@@ -3074,6 +3074,49 @@ fn closure_body_terminal_expr(body: &[shape_ast::ast::Statement]) -> Option<&Exp
 }
 
 impl BytecodeCompiler {
+    /// ADR-009 C3 #14 (slice 4, C3-G12): the nested-fn annotation check.
+    ///
+    /// Annotations on a fn-local nested `fn` are carried by the parser desugar
+    /// (`Expr::FunctionExpr.annotations` — the S0 a4/a4c drop sites now
+    /// preserve them) and reach here at the ONE closure-compilation dispatch.
+    /// An annotation resolving to a TypedConfig (hook-template) definition is
+    /// a LOUD named rejection at the application site — a hook-template
+    /// install on a nested fn has no weave seam yet (follow-up #62). An
+    /// annotation resolving to a Legacy definition (or not resolving at all)
+    /// keeps the PRE-slice-4 behavior byte-identical: silently dropped — the
+    /// recorded residual S5's rejection matrix owns.
+    pub(in crate::compiler) fn reject_typed_config_annotations_on_nested_fn(
+        &self,
+        annotations: &[shape_ast::ast::Annotation],
+    ) -> Result<()> {
+        use crate::compiler::statements::annotation_declarations::planner::{
+            classify_annotation_params, AnnotationSurfaceClass,
+        };
+        for annotation in annotations {
+            let Some((_, compiled)) = self.lookup_compiled_annotation(annotation) else {
+                continue;
+            };
+            if matches!(
+                classify_annotation_params(&compiled.param_defs),
+                Ok(AnnotationSurfaceClass::TypedConfig(_))
+            ) {
+                let fn_name = self
+                    .pending_variable_name
+                    .clone()
+                    .unwrap_or_else(|| "<nested fn>".to_string());
+                return Err(ShapeError::SemanticError {
+                    message: format!(
+                        "annotation `@{ann}` on fn-local nested function `{fn_name}` is not \
+                         applied — hook-template annotations on nested functions are not \
+                         supported yet (#62); apply @{ann} to a module-scope function",
+                        ann = annotation.name,
+                    ),
+                    location: Some(self.span_to_source_location(annotation.span)),
+                });
+            }
+        }
+        Ok(())
+    }
     pub(crate) fn callable_return_hint_name_for_expr(&self, expr: &Expr) -> Option<String> {
         callable_selection_arity(expr)?;
         let function_name = self.current_body_semantic_owner_key()?.to_string();

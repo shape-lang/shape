@@ -462,6 +462,25 @@ pub enum HygienicRole {
     /// The hook-template weave's impl body (the target's final body under
     /// the weave shadow).
     TemplateWeaveImplBody,
+    // ── ADR-009 C3 #14 (slice 4, S4c) — the sugar lowering's MINTED
+    // module-scope-shaped hook-template BODY FN (C3-G3): a TypedConfig
+    // annotation's declarative `before`/`after` block lowers to an ordinary
+    // typed Shape fn referenced by the synthesized public-API install
+    // handler. The name is hygienic so user code can neither shadow nor
+    // resolve to it (Lens-2 F4 shadow tracking is structurally disengaged
+    // for synthesized handlers). The nonce is a stable digest of the
+    // annotation's exact name + the hook kind + the handler index, so one
+    // definition mints ONE identity per hook across every handler run —
+    // which is what lets Dec-95 rule 6 SHARE a specialization across two
+    // applications with equal config (same body fn name, same spec-hash).
+    /// A sugar-lowered declarative hook's minted template body fn.
+    AnnotationSugarHookBody,
+    /// The minted polymorphic body fn's `Args`/`R` TYPE parameter. Hygienic
+    /// so the minted generic param can never capture/shadow a USER nominal
+    /// type spelled inside the verbatim hook body (`let x: Args = …` keeps
+    /// meaning the user's type). Same stable-nonce derivation as the body
+    /// fn it belongs to.
+    AnnotationSugarTypeParam,
 }
 
 impl HygienicRole {
@@ -487,6 +506,8 @@ impl HygienicRole {
             Self::AnnotationHookImplBody => "role:annotation-hook-impl-body".to_string(),
             Self::AnnotationHookWrapper => "role:annotation-hook-wrapper".to_string(),
             Self::TemplateWeaveImplBody => "role:template-weave-impl-body".to_string(),
+            Self::AnnotationSugarHookBody => "role:annotation-sugar-hook-body".to_string(),
+            Self::AnnotationSugarTypeParam => "role:annotation-sugar-type-param".to_string(),
         }
     }
 }

@@ -3404,12 +3404,30 @@ pub fn method_call_receiver_derived_concrete_type(
     receiver: &Expr,
     method: &str,
 ) -> Option<ConcreteType> {
+    // The receiver's type must be proven.
+    let receiver_ct = concrete_type_for_expr(compiler, receiver)?;
+    method_return_for_receiver_concrete_type(compiler, &receiver_ct, method)
+}
+
+/// ADR-009 C3 #14 (slice 4, S4c): the SAME registered-signature projection as
+/// [`method_call_receiver_derived_concrete_type`], entered with an
+/// ALREADY-PROVEN receiver `ConcreteType` — for callers that prove the
+/// receiver through their OWN typed environment instead of span-keyed
+/// inference facts (the aggregate-kind guard's slot/capture env: a sugar-
+/// lowered template body's spans point inside the annotation block, which the
+/// analyzer never visits, so no facts exist for its identifiers). One
+/// projection, two entries; an unproven receiver / unregistered method still
+/// yields `None` — no fabrication, no Bool-default.
+pub fn method_return_for_receiver_concrete_type(
+    compiler: &BytecodeCompiler,
+    receiver_ct: &ConcreteType,
+    method: &str,
+) -> Option<ConcreteType> {
     use shape_ast::ast::TypeAnnotation;
     use shape_runtime::type_system::Type;
     use shape_runtime::type_system::checking::TypeParamExpr;
 
-    // The receiver's type must be proven.
-    let receiver_ct = concrete_type_for_expr(compiler, receiver)?;
+    let receiver_ct = receiver_ct.clone();
 
     // --- Array<T> receivers: generic-signature-driven element/Self return ---
     if let ConcreteType::Array(elem) = &receiver_ct {

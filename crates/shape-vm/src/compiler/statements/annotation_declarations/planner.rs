@@ -19,6 +19,12 @@ pub(super) struct PlannedAnnotation {
     pub(super) definition: AnnotationDef,
     pub(super) allowed_targets: Vec<AnnotationTargetKind>,
     pub(super) surface_class: AnnotationSurfaceClass,
+    /// ADR-009 C3 #14 (slice 4, S4c): the sugar lowering's artifacts for a
+    /// TypedConfig definition with declarative hooks — validated (R3) and
+    /// built HERE at planning, stored on `CompiledAnnotation` by the
+    /// installer. `None` for Legacy definitions and for TypedConfig
+    /// definitions without declarative hooks.
+    pub(super) sugar: Option<super::sugar_lowering::SugarLowering>,
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -39,8 +45,12 @@ pub(super) struct PlannedAnnotation {
 //     `const_lift::annotation_within_lift_domain` (rejection R1) — a
 //     non-liftable config type is a named error before any application.
 //     TypedConfig definitions' declarative `before`/`after` handlers lower
-//     onto the PUBLIC comptime API (CheckedTemplate + install; the S4 sugar
-//     lowering) and must NEVER engage the legacy weave slots.
+//     onto the PUBLIC comptime API (CheckedTemplate + install; the S4c
+//     sugar lowering — see `sugar_lowering` for the BINDING RULES of the
+//     typed hook surface: `before(args)` / `after(result)` polymorphic
+//     forms, `before()` / `after()` observers, the R3 shape rejection, and
+//     the R3-family lifecycle-hook rejection) and must NEVER engage the
+//     legacy weave slots.
 //
 //   - **Legacy** — zero config parameters, or all parameters untyped. The
 //     declarative `before`/`after` handlers keep the BYTE-UNCHANGED legacy
@@ -108,16 +118,24 @@ pub(in crate::compiler) enum AnnotationSurfaceClass {
 pub(in crate::compiler) fn classify_annotation_surface(
     definition: &AnnotationDef,
 ) -> std::result::Result<AnnotationSurfaceClass, MixedConfigParams> {
-    let typed_count = definition
-        .params
+    classify_annotation_params(&definition.params)
+}
+
+/// The same classification rule keyed on the PARAM DEFINITIONS alone — for
+/// consumers holding a `CompiledAnnotation.param_defs` carrier instead of an
+/// AST definition (the C3-G12 nested-fn check). Same single-file sealing;
+/// [`classify_annotation_surface`] delegates here.
+pub(in crate::compiler) fn classify_annotation_params(
+    params: &[FunctionParameter],
+) -> std::result::Result<AnnotationSurfaceClass, MixedConfigParams> {
+    let typed_count = params
         .iter()
         .filter(|parameter| parameter.type_annotation.is_some())
         .count();
     if typed_count == 0 {
         return Ok(AnnotationSurfaceClass::Legacy(SurfaceClassEvidence(())));
     }
-    if let Some(first_untyped) = definition
-        .params
+    if let Some(first_untyped) = params
         .iter()
         .find(|parameter| parameter.type_annotation.is_none())
     {
@@ -182,8 +200,16 @@ pub(super) fn build(
         }
     }
 
+    // ADR-009 C3 #14 (slice 4, S4c): only LEGACY-classified declarative
+    // handlers register legacy runtime-handler function slots and reserve
+    // `{name}___{kind}` callables. TypedConfig before/after handlers lower
+    // onto the public comptime API (installed per-target through
+    // `specialize_template`) — they consume NO reserved slot and no callable
+    // name; TypedConfig lifecycle handlers were R3-family-rejected in
+    // `plan_definition` before reaching this loop.
     let runtime_handler_count = pending
         .iter()
+        .filter(|plan| matches!(plan.surface_class, AnnotationSurfaceClass::Legacy(_)))
         .map(|plan| runtime_handler_count(&plan.definition))
         .sum::<usize>();
     let end = compiler
@@ -198,6 +224,9 @@ pub(super) fn build(
 
     let mut planned_callable_names = BTreeSet::new();
     for plan in &pending {
+        if !matches!(plan.surface_class, AnnotationSurfaceClass::Legacy(_)) {
+            continue;
+        }
         for handler in &plan.definition.handlers {
             if is_runtime_handler(&handler.handler_type) {
                 let name = handler_callable_name(&plan.definition.name, &handler.handler_type);
@@ -270,6 +299,24 @@ fn plan_definition(
             }
         }
     }
+
+    // ADR-009 C3 #14 (slice 4, S4c): the sugar lowering — validated (R3 /
+    // R3-family, exact sentences from the ONE producer in `sugar_lowering`)
+    // and BUILT at the declaration, before any `@application` exists. The
+    // installer stores the artifacts on the `CompiledAnnotation` carrier.
+    let sugar = if matches!(surface_class, AnnotationSurfaceClass::TypedConfig(_)) {
+        match super::sugar_lowering::lower_typed_config_declarative_hooks(compiler, &definition) {
+            Ok(sugar) => sugar,
+            Err(rejection) => {
+                return Err(ShapeError::SemanticError {
+                    message: rejection.message,
+                    location: Some(compiler.span_to_source_location(rejection.span)),
+                });
+            }
+        }
+    } else {
+        None
+    };
 
     let mut handler_kinds = BTreeSet::new();
     for handler in &definition.handlers {
@@ -377,6 +424,7 @@ fn plan_definition(
         definition,
         allowed_targets,
         surface_class,
+        sugar,
     })
 }
 

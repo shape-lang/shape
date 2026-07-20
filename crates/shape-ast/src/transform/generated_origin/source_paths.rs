@@ -153,6 +153,9 @@ impl SourcePathWalker<'_> {
                 body,
                 generated_origin: _,
                 captures,
+                // C3-G12 nested-fn annotation carrier: not part of the
+                // projected closure source path.
+                annotations: _,
                 span: _,
             } => {
                 let closure_path = self.paths.next_closure();

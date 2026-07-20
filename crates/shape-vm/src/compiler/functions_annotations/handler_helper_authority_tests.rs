@@ -39,6 +39,8 @@ fn compiled_annotation(exact_name: &str, def: &AnnotationDef) -> CompiledAnnotat
             .cloned(),
         before_handler_template: None,
         after_handler_template: None,
+        sugar_post_handler: None,
+        sugar_body_fns: Vec::new(),
         allowed_targets: def.allowed_targets.clone().unwrap_or_default(),
     }
 }

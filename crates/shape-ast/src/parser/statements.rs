@@ -80,6 +80,14 @@ pub fn parse_statement(pair: Pair<Rule>) -> Result<Statement> {
                 // ADR-009 C1 (slice 3): a nested `fn` declaration has no
                 // capture clause — the surface is closure-literal-only.
                 captures: None,
+                // ADR-009 C3 #14 (slice 4, C3-G12): annotations on a nested
+                // `fn` were formerly DROPPED here (S0 a4/a4c); carry them so
+                // the compiler can fire the loud typed-config rejection.
+                annotations: if func_def.annotations.is_empty() {
+                    None
+                } else {
+                    Some(Box::new(func_def.annotations))
+                },
                 span,
             };
             Ok(Statement::VariableDecl(

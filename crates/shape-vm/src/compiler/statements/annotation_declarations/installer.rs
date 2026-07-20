@@ -32,6 +32,16 @@ pub(super) fn install(
         comptime_post_handler: None,
         before_handler_template: None,
         after_handler_template: None,
+        // ADR-009 C3 #14 (slice 4, S4c): the sugar lowering's artifacts
+        // (planner-built) ride the carrier so BOTH the pass-2 handler driver
+        // and the Compiled handler-resolution provenance run the synthesized
+        // public-API handler with its minted body fns.
+        sugar_post_handler: plan.sugar.as_ref().map(|sugar| sugar.post_handler.clone()),
+        sugar_body_fns: plan
+            .sugar
+            .as_ref()
+            .map(|sugar| sugar.body_fns.clone())
+            .unwrap_or_default(),
         allowed_targets: plan.allowed_targets.clone(),
     };
 
@@ -44,31 +54,20 @@ pub(super) fn install(
                 compiled.comptime_post_handler = Some(handler.clone());
             }
             AnnotationHandlerType::Before | AnnotationHandlerType::After => {
-                // ADR-009 C3 #14 (slice 4): the classification fork. A
+                // ADR-009 C3 #14 (slice 4, S4c): the classification fork. A
                 // TypedConfig definition's declarative before/after handlers
-                // must NEVER register on the legacy weave slots
-                // (`before_handler` / `before_handler_template` — silent
-                // legacy engagement of typed params is forbidden). Until the
-                // next stage lands the sugar lowering onto the public
-                // comptime API (CheckedTemplate + install), this arm is an
-                // internal-error-shaped surface-and-stop.
-                //
-                // REPLACED NEXT COMMIT (S4c): the lowering compiles the
-                // handler body as a minted module-scope-shaped body fn and
-                // installs it through `specialize_template` + the open
-                // InstallTransaction (C3-G2/G3/G4).
+                // NEVER register on the legacy weave slots (`before_handler`
+                // / `before_handler_template` — silent legacy engagement of
+                // typed params is forbidden). They are LOWERED onto the
+                // public comptime API instead: the planner validated (R3)
+                // and built the artifacts (`plan.sugar` — minted body fns +
+                // the synthesized public-API `comptime post` handler), which
+                // are attached to the carrier below and installed per-target
+                // through `specialize_template` + the open
+                // InstallTransaction, exactly like a hand-written handler
+                // (C3-G2/G3/G4).
                 if matches!(plan.surface_class, AnnotationSurfaceClass::TypedConfig(_)) {
-                    return Err(ShapeError::RuntimeError {
-                        message: format!(
-                            "Internal compiler error: typed-config annotation `{}` declares a declarative `{}` handler, whose lowering onto the public comptime hook-template API is not yet wired (C3 S4); the legacy weave slots are refused for typed-config definitions",
-                            definition.name,
-                            match &handler.handler_type {
-                                AnnotationHandlerType::Before => "before",
-                                _ => "after",
-                            }
-                        ),
-                        location: Some(compiler.span_to_source_location(handler.span)),
-                    });
+                    continue;
                 }
                 let name = handler_callable_name(&definition.name, &handler.handler_type);
                 let function = placeholder_function(name, handler.return_type.clone());

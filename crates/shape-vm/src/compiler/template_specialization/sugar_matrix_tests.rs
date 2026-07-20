@@ -515,3 +515,496 @@ log_it(4)
         );
     }
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// ADR-009 C3 #14 (slice 4, S4c) — THE SUGAR LOWERING e2e matrix.
+//
+// The declarative `annotation name(typed config) { before/after }` block now
+// LOWERS onto the public API (C3-G2): minted module-scope-shaped body fns
+// (C3-G3) + ONE synthesized `comptime post` handler spelling ONLY
+// install/before_hook/after_hook/capture, config bound as ConstLift'd
+// declared captures (C3-G4/G5) through the S4b typed injection. Every pin
+// below EXECUTES the woven program with value-distinguishing output; each
+// mirrors an S2d/S4a/S4b public-API pin so the sugar's behavior is the
+// API's behavior (the sugar-equivalence discipline; the E1/E2/E3 formal
+// equivalence pins land in the S4 close stage).
+// ═══════════════════════════════════════════════════════════════════════════
+
+// (a) THE CHARTER PIN — mixed (int, string) config through the sugar:
+// the declarative twin of the S4b hand-written
+// `typed_config_params_flow_through_the_public_api_end_to_end` (weave.rs),
+// same fixture values: two applications with DIFFERENT config prove the
+// values flow from each `@application`'s args (140240; swapped configs ⇒
+// 240140; skip ⇒ 40).
+#[test]
+fn s4c_sugar_mixed_int_string_config_executes_end_to_end() {
+    let src = r#"
+annotation retry(times: int, tag: string) {
+  targets: [function]
+  before(args) {
+    args[0] = args[0] * times + tag.length()
+    return args
+  }
+}
+
+@retry(3, "ab")
+fn victim_a(a: int) -> int { return a * 10 }
+
+@retry(5, "wxyz")
+fn victim_b(a: int) -> int { return a * 10 }
+
+victim_a(4) * 1000 + victim_b(4)
+"#;
+    let (value, compiler) = top_level_i64(src);
+    assert_eq!(
+        value, 140_240,
+        "each application's OWN typed config values drive its mutation through the sugar"
+    );
+    assert_eq!(compiler.hook_install_registry.len(), 2, "both installs land");
+    assert_eq!(
+        compiler.hook_install_registry[0].captures,
+        vec![
+            ("times".to_string(), "3".to_string()),
+            ("tag".to_string(), "\"ab\"".to_string())
+        ],
+        "row a renders the first application's config in declared order"
+    );
+    assert_eq!(
+        compiler.hook_install_registry[1].captures,
+        vec![
+            ("times".to_string(), "5".to_string()),
+            ("tag".to_string(), "\"wxyz\"".to_string())
+        ]
+    );
+    assert_ne!(
+        compiler.hook_install_registry[0].function_index,
+        compiler.hook_install_registry[1].function_index,
+        "rule 6: differing typed config splits the baked specializations"
+    );
+}
+
+// (a2) The second charter shape — int + Array<int> config through the sugar
+// (the declarative twin of the S4a
+// `mixed_capture_value_types_in_one_handler_execute_end_to_end` pin; same
+// arithmetic: 4*3 + 5 = 17, skip ⇒ 4, either constant misread shifts it).
+// The `cfg[0]` read inside the hook body exercises the guard-env IndexAccess
+// proof (a minted body has no span-keyed inference facts).
+#[test]
+fn s4c_sugar_int_and_array_config_executes_end_to_end() {
+    let src = r#"
+annotation boost(bump: int, cfg: Array<int>) {
+  targets: [function]
+  before(args) {
+    args[0] = args[0] * bump + cfg[0]
+    return args
+  }
+}
+
+@boost(3, [5, 6])
+fn victim(a: int) -> int { return a }
+
+victim(4)
+"#;
+    let (value, compiler) = top_level_i64(src);
+    assert_eq!(value, 17, "BOTH mixed-typed baked constants drive the mutation");
+    assert_eq!(compiler.hook_install_registry.len(), 1);
+    let row = &compiler.hook_install_registry[0];
+    assert_eq!(
+        row.captures,
+        vec![
+            ("bump".to_string(), "3".to_string()),
+            ("cfg".to_string(), "[5, 6]".to_string())
+        ],
+        "the row renders both capture values in declared order"
+    );
+    assert!(
+        row.specialized_symbol.contains("::cfg#2"),
+        "the specialized symbol carries the two-value config arity head: {}",
+        row.specialized_symbol
+    );
+}
+
+// (b) before + after in ONE sugar definition — both hooks lower, both fire:
+// before 4+3 = 7 → impl 70 → after 70*3 = 210 (skip before ⇒ 120, skip
+// after ⇒ 70).
+#[test]
+fn s4c_sugar_before_and_after_in_one_definition() {
+    let src = r#"
+annotation wrapb(bump: int) {
+  targets: [function]
+  before(args) {
+    args[0] = args[0] + bump
+    return args
+  }
+  after(result) {
+    return result * bump
+  }
+}
+
+@wrapb(3)
+fn victim(a: int) -> int { return a * 10 }
+
+victim(4)
+"#;
+    let (value, compiler) = top_level_i64(src);
+    assert_eq!(value, 210, "the before AND the after hook both execute");
+    assert_eq!(compiler.hook_install_registry.len(), 2);
+    assert_eq!(
+        compiler.hook_install_registry[0].hook_kind,
+        TemplateHookKind::Before,
+        "hooks install in declaration order: before first"
+    );
+    assert_eq!(
+        compiler.hook_install_registry[1].hook_kind,
+        TemplateHookKind::After
+    );
+}
+
+// (c) STACKED sugar annotations compose as WRAPPING (the F2 onion — the r5
+// value discipline): before chain in application order, after chain in
+// REVERSE application order. Non-commutative afters distinguish: onion =
+// 632; an application-order after chain would give 623.
+#[test]
+fn s4c_stacked_sugar_annotations_compose_as_wrapping() {
+    let src = r#"
+annotation wrap_x(k: int) {
+  targets: [function]
+  before(args) {
+    args[0] = args[0] + k
+    return args
+  }
+  after(result) {
+    return result * 10 + k
+  }
+}
+
+annotation wrap_y(k: int) {
+  targets: [function]
+  before(args) {
+    args[0] = args[0] + k
+    return args
+  }
+  after(result) {
+    return result * 10 + k
+  }
+}
+
+@wrap_x(2)
+@wrap_y(3)
+fn victim(x: int) -> int { return x }
+
+victim(1)
+"#;
+    let (value, compiler) = top_level_i64(src);
+    // befores (application order): 1+2 = 3 → 3+3 = 6 → impl 6.
+    // afters (REVERSE application — onion): 6*10+3 = 63 → 63*10+2 = 632.
+    assert_eq!(
+        value, 632,
+        "first-applied sugar annotation is the OUTERMOST wrapper (623 = broken order)"
+    );
+    assert_eq!(compiler.hook_install_registry.len(), 4);
+}
+
+// (d) OBSERVER forms through the sugar: `before()` / `after()` (zero params)
+// lower to the F1 concrete observer form on a zero-param void target. Green
+// control here; execution non-vacuity is the error-injection twin below.
+#[test]
+fn s4c_sugar_observers_on_zero_param_target() {
+    let src = r#"
+annotation trace_obs(tag: int) {
+  targets: [function]
+  before() { let x = tag }
+  after() { let y = tag }
+}
+
+@trace_obs(1)
+fn hello() { let a = 1 }
+
+hello()
+7
+"#;
+    let (value, compiler) = top_level_i64(src);
+    assert_eq!(value, 7, "both observer weaves execute cleanly");
+    assert_eq!(compiler.hook_install_registry.len(), 2);
+    assert_eq!(
+        compiler.hook_install_registry[0].hook_kind,
+        TemplateHookKind::Before
+    );
+    assert_eq!(
+        compiler.hook_install_registry[1].hook_kind,
+        TemplateHookKind::After
+    );
+}
+
+// (d-twin) EXECUTION PROOF for sugar observers (error-injection — observers
+// have no data-flow observable): an erroring observer body fails the woven
+// program iff the observer actually runs. The green pin above is the
+// non-vacuity control.
+#[test]
+fn s4c_sugar_observer_execution_proven_by_error_injection() {
+    for hook in ["before()", "after()"] {
+        let src = format!(
+            r#"
+annotation boom_obs(n: int) {{
+  targets: [function]
+  {hook} {{
+    let xs = [1, 2]
+    let mut i = 0
+    while i < 9 {{ i = i + 1 }}
+    let y = xs[i]
+  }}
+}}
+
+@boom_obs(1)
+fn hello() {{ let a = 1 }}
+
+hello()
+7
+"#
+        );
+        let compiler = compiled_ok(&src);
+        let mut vm = VirtualMachine::new(VMConfig::default());
+        vm.load_program(compiler.program.clone());
+        vm.execute(None).expect_err(&format!(
+            "the woven sugar {hook} observer must EXECUTE (its body errors at runtime)"
+        ));
+    }
+}
+
+// (e) Dec-95 rule 6 THROUGH the sugar: two applications with structurally
+// EQUAL config SHARE one baked specialization (equal registry
+// function_index); differing config SPLITS.
+#[test]
+fn s4c_sugar_rule6_equal_config_shares_and_differing_splits() {
+    let src = r#"
+annotation scale6(k: int) {
+  targets: [function]
+  before(args) {
+    args[0] = args[0] * k
+    return args
+  }
+}
+
+@scale6(4)
+fn v_a(a: int) -> int { return a + 1 }
+
+@scale6(4)
+fn v_b(a: int) -> int { return a + 2 }
+
+@scale6(9)
+fn v_c(a: int) -> int { return a + 3 }
+
+(v_a(10) * 1000 + v_b(20)) * 1000 + v_c(30)
+"#;
+    let (value, compiler) = top_level_i64(src);
+    // a: 10*4+1 = 41; b: 20*4+2 = 82; c: 30*9+3 = 273.
+    assert_eq!(value, 41082273, "all three targets execute their own config");
+    assert_eq!(compiler.hook_install_registry.len(), 3);
+    assert_eq!(
+        compiler.hook_install_registry[0].function_index,
+        compiler.hook_install_registry[1].function_index,
+        "rule 6 via sugar: equal config SHARES one specialization"
+    );
+    assert_ne!(
+        compiler.hook_install_registry[0].function_index,
+        compiler.hook_install_registry[2].function_index,
+        "rule 6 via sugar: differing config SPLITS"
+    );
+}
+
+// (f) Config-arg TYPE MISMATCH through the sugar: `@retry("x", "y")` feeds a
+// string application arg to the declared `times: int` config param — a LOUD
+// compile-time rejection (contains-level per the S4 charter; S5 owns exact
+// attribution). The green twin is the (a) charter pin.
+#[test]
+fn s4c_sugar_config_arg_mismatch_is_a_loud_rejection() {
+    let src = r#"
+annotation retry(times: int, tag: string) {
+  targets: [function]
+  before(args) {
+    args[0] = args[0] * times + tag.length()
+    return args
+  }
+}
+
+@retry("x", "y")
+fn victim(a: int) -> int { return a * 10 }
+
+victim(4)
+"#;
+    let (result, _) = compile_source(src);
+    let message = result
+        .expect_err("a string application arg against `times: int` must reject loudly")
+        .to_string();
+    assert!(
+        message.contains("int") || message.contains("type"),
+        "the rejection names the type mismatch (contains-level; S5 owns attribution): {message}"
+    );
+}
+
+// (g) COEXISTENCE: a TypedConfig definition with BOTH a user `comptime post`
+// handler (hand-written public-API install) AND a declarative hook — BOTH
+// fire, user handler first. 2+5 = 7 → impl 70 → sugar after 70+7 = 77
+// (skip user ⇒ 27, skip sugar ⇒ 70).
+#[test]
+fn s4c_sugar_coexists_with_a_user_comptime_post_handler() {
+    let src = r#"
+fn add_five(x: int) -> int { return x + 5 }
+
+annotation both_ways(bump: int) {
+  targets: [function]
+  comptime post(target, ctx) {
+    install(before_hook(add_five, []))
+  }
+  after(result) {
+    return result + bump
+  }
+}
+
+@both_ways(7)
+fn victim(a: int) -> int { return a * 10 }
+
+victim(2)
+"#;
+    let (value, compiler) = top_level_i64(src);
+    assert_eq!(
+        value, 77,
+        "the user handler's install AND the declarative hook both fire"
+    );
+    assert_eq!(compiler.hook_install_registry.len(), 2);
+    assert_eq!(
+        compiler.hook_install_registry[0].hook_kind,
+        TemplateHookKind::Before,
+        "the user handler's install lands first (user post runs before the sugar post)"
+    );
+    assert_eq!(
+        compiler.hook_install_registry[1].hook_kind,
+        TemplateHookKind::After
+    );
+}
+
+// C3-G8 THROUGH the sugar: a sugar annotation applied to a GENERIC target
+// fires the EXISTING S2b producer at the `@application` site (no new
+// producer) and leaves ZERO registry rows.
+#[test]
+fn s4c_sugar_on_generic_target_fires_the_g8_rejection() {
+    let src = r#"
+annotation retry_g(times: int) {
+  targets: [function]
+  before(args) {
+    args[0] = args[0] * times
+    return args
+  }
+}
+
+@retry_g(3)
+fn victim<T>(x: T) -> T { return x }
+
+victim(1)
+"#;
+    let (result, compiler) = compile_source(src);
+    let message = result
+        .expect_err("a sugar install on a generic target must reject (C3-G8)")
+        .to_string();
+    for fragment in [
+        "(via @retry_g) on `victim`",
+        "withdrawn until #59 (the monomorphization-origin re-arm)",
+        "apply @retry_g to a concrete function",
+    ] {
+        assert!(
+            message.contains(fragment),
+            "the G8 sentence must fire through the sugar; missing {fragment:?}: {message}"
+        );
+    }
+    assert!(
+        compiler.hook_install_registry.is_empty(),
+        "a rejected install leaves no registry row"
+    );
+}
+
+// C3-G12: a TypedConfig (hook-template) annotation on a fn-local NESTED fn
+// is a LOUD named rejection at the application site (the parser desugar
+// formerly dropped it SILENTLY — S0 a4/a4c; the annotations now ride
+// `Expr::FunctionExpr.annotations`).
+#[test]
+fn s4c_typed_config_annotation_on_nested_fn_rejects_loudly() {
+    let src = r#"
+annotation retry_n(times: int) {
+  targets: [function]
+  before(args) {
+    args[0] = args[0] * times
+    return args
+  }
+}
+
+fn outer() -> int {
+  @retry_n(3)
+  fn inner(x: int) -> int { return x }
+  return inner(4)
+}
+
+outer()
+"#;
+    let (result, _) = compile_source(src);
+    let message = result
+        .expect_err("a hook-template annotation on a nested fn must reject loudly (C3-G12)")
+        .to_string();
+    assert!(
+        message.contains(
+            "annotation `@retry_n` on fn-local nested function `inner` is not applied — \
+             hook-template annotations on nested functions are not supported yet (#62); \
+             apply @retry_n to a module-scope function"
+        ),
+        "the G12 sentence must fire verbatim, got: {message}"
+    );
+}
+
+// C3-G12 positive twin: the SAME annotation on a module-scope fn weaves.
+#[test]
+fn s4c_g12_twin_module_scope_target_weaves() {
+    let src = r#"
+annotation retry_n(times: int) {
+  targets: [function]
+  before(args) {
+    args[0] = args[0] * times
+    return args
+  }
+}
+
+@retry_n(3)
+fn scaled(x: int) -> int { return x }
+
+scaled(4)
+"#;
+    let (value, _) = top_level_i64(src);
+    assert_eq!(value, 12, "the module-scope twin weaves (skip ⇒ 4)");
+}
+
+// C3-G12 residual control: a LEGACY-classified annotation on a nested fn
+// keeps the PRE-slice-4 behavior BYTE-identical — silently dropped (the
+// recorded residual until S5's matrix owns the class). Value-distinguishing:
+// an APPLIED legacy before would replace the args with [99] ⇒ 99; the
+// silent drop keeps 4.
+#[test]
+fn s4c_g12_legacy_annotation_on_nested_fn_stays_silently_dropped() {
+    let src = r#"
+annotation legacy_n() {
+  targets: [function]
+  before(args, ctx) { [99] }
+}
+
+fn outer() -> int {
+  @legacy_n()
+  fn inner(x: int) -> int { return x }
+  return inner(4)
+}
+
+outer()
+"#;
+    let (value, compiler) = top_level_i64(src);
+    assert_eq!(
+        value, 4,
+        "the legacy annotation on the nested fn stays silently dropped (S5 owns the class)"
+    );
+    assert!(compiler.hook_install_registry.is_empty());
+}

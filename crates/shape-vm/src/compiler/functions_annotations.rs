@@ -440,13 +440,22 @@ impl BytecodeCompiler {
                     // at this pre-pass simply misses here and the named
                     // rejection defers this handler to pass-2 (the
                     // established pre-pass fallback below).
+                    //
+                    // S4c: the entry's MINTED sugar body fns resolve FIRST
+                    // (hygienic names — no user fn can collide).
                     let function_defs = &self.function_defs;
+                    let sugar_body_fns = &entry.sugar_body_fns;
                     let template_body_fn_lookup = move |name: &str| -> Option<FunctionDef> {
-                        function_defs.get(name).cloned().or_else(|| {
-                            function_defs
-                                .get(&Self::qualify_module_symbol(handler_module_path, name))
-                                .cloned()
-                        })
+                        sugar_body_fns
+                            .iter()
+                            .find(|def| def.name == name)
+                            .cloned()
+                            .or_else(|| function_defs.get(name).cloned())
+                            .or_else(|| {
+                                function_defs
+                                    .get(&Self::qualify_module_symbol(handler_module_path, name))
+                                    .cloned()
+                            })
                     };
                     let prev_suppressed =
                         super::comptime_builtins::set_comptime_output_suppressed(true);
@@ -1196,20 +1205,43 @@ impl BytecodeCompiler {
 
         // Phase 2: comptime post
         if !removed {
-            for ann in &annotations {
+            'post: for ann in &annotations {
                 if let Some((_, compiled)) = self.lookup_compiled_annotation(ann) {
-                    if let Some(handler) = compiled.comptime_post_handler {
-                        // Propagate the SAME `replace body` provenance out-param as
-                        // phase 1: both handler phases route through the one shared
-                        // `process_comptime_directives_for_function`, which is where
-                        // a `replace body` directive is processed and its
-                        // replacement origin recorded. A `replace body` is a
-                        // post-handler directive today, but the directive processor
-                        // is shared, so both phases must surface it uniformly — a
-                        // discard here would silently drop the D6 gate's provenance
-                        // for the one phase that actually emits it.
-                        let def_params =
-                            handler_resolution::annotation_def_params(&compiled.param_defs);
+                    // Propagate the SAME `replace body` provenance out-param as
+                    // phase 1: both handler phases route through the one shared
+                    // `process_comptime_directives_for_function`, which is where
+                    // a `replace body` directive is processed and its
+                    // replacement origin recorded. A `replace body` is a
+                    // post-handler directive today, but the directive processor
+                    // is shared, so both phases must surface it uniformly — a
+                    // discard here would silently drop the D6 gate's provenance
+                    // for the one phase that actually emits it.
+                    let def_params =
+                        handler_resolution::annotation_def_params(&compiled.param_defs);
+                    // ADR-009 C3 #14 (slice 4, S4c): the user comptime post
+                    // handler runs FIRST, then the sugar lowering's
+                    // SYNTHESIZED public-API handler (a TypedConfig
+                    // definition's declarative hooks) — coexistence is
+                    // allowed and ordered, matching the handler-map append
+                    // order both pre-pass provenances use.
+                    // S4c: the MINTED sugar body fns join the AST fn table
+                    // (module-scope-shaped, C3-G3) before the handlers run,
+                    // so the mono cache (`ensure_monomorphic_function`) can
+                    // record + specialize them — the SAME `function_defs`
+                    // contract hand-written and imported body fns already
+                    // ride. Names are hygienic/unspellable (no user
+                    // collision, unreachable from user code); `or_insert`
+                    // keeps nested/re-entrant handler runs idempotent.
+                    for def in &compiled.sugar_body_fns {
+                        self.function_defs
+                            .entry(def.name.clone())
+                            .or_insert_with(|| def.clone());
+                    }
+                    let post_handlers = [
+                        compiled.comptime_post_handler.clone(),
+                        compiled.sugar_post_handler.clone(),
+                    ];
+                    for handler in post_handlers.into_iter().flatten() {
                         if self.execute_function_comptime_handler(
                             ann,
                             &handler,
@@ -1221,7 +1253,7 @@ impl BytecodeCompiler {
                             &mut staged_hook_installs,
                         )? {
                             removed = true;
-                            break;
+                            break 'post;
                         }
                     }
                 }
@@ -1413,15 +1445,29 @@ impl BytecodeCompiler {
         // (`self.function_defs`; bare name first, then qualified under the
         // handler's defining module), threaded as a PARAMETER into the
         // executor's emit-side rewrite. Never ambient state.
+        //
+        // S4c: the annotation's STORED sugar body fns (installer-attached to
+        // the `CompiledAnnotation` carrier) resolve FIRST — this is how the
+        // synthesized sugar post handler reaches its minted hook bodies at
+        // pass-2 (hygienic names — no user fn can collide).
+        let sugar_body_fns: Vec<FunctionDef> = self
+            .lookup_compiled_annotation(annotation)
+            .map(|(_, compiled)| compiled.sugar_body_fns)
+            .unwrap_or_default();
         let function_defs = &self.function_defs;
         let template_body_fn_lookup = move |name: &str| -> Option<FunctionDef> {
-            function_defs.get(name).cloned().or_else(|| {
-                defining_module_path.and_then(|module| {
-                    function_defs
-                        .get(&Self::qualify_module_symbol(module, name))
-                        .cloned()
+            sugar_body_fns
+                .iter()
+                .find(|def| def.name == name)
+                .cloned()
+                .or_else(|| function_defs.get(name).cloned())
+                .or_else(|| {
+                    defining_module_path.and_then(|module| {
+                        function_defs
+                            .get(&Self::qualify_module_symbol(module, name))
+                            .cloned()
+                    })
                 })
-            })
         };
         let execution = super::comptime::execute_comptime_with_annotation_handler(
             &handler.body,
@@ -2409,17 +2455,25 @@ impl BytecodeCompiler {
                         // lookup (same table, threaded as a parameter; a
                         // pre-pass miss defers to pass-2 like every other
                         // pre-pass limitation below).
+                        //
+                        // S4c: entry-minted sugar body fns resolve FIRST.
                         let function_defs = &self.function_defs;
+                        let sugar_body_fns = &entry.sugar_body_fns;
                         let template_body_fn_lookup =
                             move |name: &str| -> Option<FunctionDef> {
-                                function_defs.get(name).cloned().or_else(|| {
-                                    function_defs
-                                        .get(&Self::qualify_module_symbol(
-                                            handler_module_path,
-                                            name,
-                                        ))
-                                        .cloned()
-                                })
+                                sugar_body_fns
+                                    .iter()
+                                    .find(|def| def.name == name)
+                                    .cloned()
+                                    .or_else(|| function_defs.get(name).cloned())
+                                    .or_else(|| {
+                                        function_defs
+                                            .get(&Self::qualify_module_symbol(
+                                                handler_module_path,
+                                                name,
+                                            ))
+                                            .cloned()
+                                    })
                             };
                         let prev_suppressed =
                             super::comptime_builtins::set_comptime_output_suppressed(true);

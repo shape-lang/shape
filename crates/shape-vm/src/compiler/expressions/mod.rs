@@ -1791,15 +1791,26 @@ impl BytecodeCompiler {
                 body,
                 generated_origin,
                 captures,
+                annotations,
                 span,
                 ..
-            } => self.compile_expr_closure(
-                params,
-                body,
-                captures.as_deref(),
-                generated_origin.as_deref(),
-                *span,
-            ),
+            } => {
+                // ADR-009 C3 #14 (slice 4, C3-G12): annotations on a fn-local
+                // NESTED `fn` (carried by the parser desugar) — a TypedConfig
+                // (hook-template) annotation is a LOUD named rejection at the
+                // application site; legacy-classified annotations keep the
+                // pre-slice-4 silent drop until S5's matrix owns the class.
+                if let Some(annotations) = annotations.as_deref() {
+                    self.reject_typed_config_annotations_on_nested_fn(annotations)?;
+                }
+                self.compile_expr_closure(
+                    params,
+                    body,
+                    captures.as_deref(),
+                    generated_origin.as_deref(),
+                    *span,
+                )
+            }
 
             // Conditionals
             Expr::Conditional {

@@ -546,6 +546,40 @@ fn carrier_write_concrete_type(
             }
             concrete_type_for_expr(compiler, expr)
         }
+        // ADR-009 C3 #14 (slice 4, S4c): a method call whose RECEIVER is only
+        // provable through THIS guard's own slot/capture env. The established
+        // chain (`concrete_type_for_expr` — specialized returns, span-keyed
+        // inference facts, receiver-derived projection) is tried FIRST; it
+        // covers hand-written bodies, whose spans the analyzer visited. A
+        // sugar-lowered template body's spans point inside the annotation
+        // block (never analyzer-visited — no facts), so `tag.length()` on a
+        // capture param needs the receiver proven from the guard env, then
+        // the ONE registered-signature projection
+        // (`method_return_for_receiver_concrete_type`) supplies the return.
+        // Unproven receiver / unregistered method still yields `None` → the
+        // loud named unprovable-write rejection stands (no fabrication).
+        Expr::MethodCall {
+            receiver, method, ..
+        } => concrete_type_for_expr(compiler, expr).or_else(|| {
+            let receiver_ct =
+                carrier_write_concrete_type(compiler, declared_slots, captures, receiver)?;
+            crate::compiler::monomorphization::type_resolution::
+                method_return_for_receiver_concrete_type(compiler, &receiver_ct, method)
+        }),
+        // Same S4c completion for a SINGLE-index read off a guard-env-proven
+        // array (`cfg[0]` on an `Array<int>` capture param): the element type
+        // IS the proof. Slices (`end_index` present) and non-array receivers
+        // fall through to `None` — the loud rejection stands.
+        Expr::IndexAccess {
+            object,
+            end_index: None,
+            ..
+        } => concrete_type_for_expr(compiler, expr).or_else(|| {
+            match carrier_write_concrete_type(compiler, declared_slots, captures, object)? {
+                ConcreteType::Array(element) => Some(*element),
+                _ => None,
+            }
+        }),
         Expr::BinaryOp {
             left, op, right, ..
         } => {
@@ -1464,6 +1498,9 @@ impl<'a> Scan<'a> {
                 body,
                 captures,
                 generated_origin: _,
+                // C3-G12 nested-fn annotation carrier: annotation args are
+                // application-site expressions, not template-body names.
+                annotations: _,
                 span: _,
             } => {
                 for param in params.iter_mut() {

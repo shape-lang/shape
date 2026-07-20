@@ -13,6 +13,7 @@ pub(super) fn rewrite(expr: &Expr, bound: &HashSet<String>, shadow: &str) -> Exp
         body,
         generated_origin,
         captures,
+        annotations,
         span,
     } = expr
     else {
@@ -30,6 +31,9 @@ pub(super) fn rewrite(expr: &Expr, bound: &HashSet<String>, shadow: &str) -> Exp
         // names rewritten by `ctx.original`.
         generated_origin: generated_origin.clone(),
         captures: captures.clone(),
+        // C3-G12 nested-fn annotation carrier: semantic carrier, not a name
+        // rewritten by `ctx.original`.
+        annotations: annotations.clone(),
         params: params
             .iter()
             .map(|param| {
