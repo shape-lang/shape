@@ -71,6 +71,7 @@
 //! USER-SPELLED target and template signatures — never `handler.span`, never
 //! a mangled mono-key name.
 
+pub(in crate::compiler) mod const_lift;
 pub(in crate::compiler) mod pseudo_tuple;
 
 use shape_ast::ast::{FunctionDef, Span, TypeAnnotation};

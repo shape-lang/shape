@@ -946,6 +946,21 @@ pub fn register_builtin_schemas(registry: &mut TypeSchemaRegistry) -> BuiltinSch
         .string_field("file")
         .register(registry);
 
+    // ADR-009 C3 #14 (slice 2): the typed hook-template + capture-binding
+    // carriers — the E2 `__CheckedItem` opaque-index pattern verbatim. Each
+    // schema carries ONLY an opaque `index` handle into the driver's
+    // thread-local store (`comptime_builtins.rs`: `COMPTIME_HOOK_TEMPLATES` /
+    // `COMPTIME_CAPTURE_BINDINGS`); the checked template / lifted capture
+    // value live compiler-side, never re-encoded into fields. Appended AFTER
+    // every pre-existing registration so no order-stable builtin schema id
+    // shifts.
+    let _comptime_checked_template = TypeSchemaBuilder::new("__CheckedTemplate")
+        .int_field("index")
+        .register(registry);
+    let _comptime_capture_binding = TypeSchemaBuilder::new("__CaptureBinding")
+        .int_field("index")
+        .register(registry);
+
     BuiltinSchemaIds {
         any_error,
         trace_frame,

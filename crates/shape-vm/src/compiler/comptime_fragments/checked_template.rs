@@ -52,7 +52,7 @@
 
 use std::marker::PhantomData;
 
-use shape_ast::ast::{CaptureClause, FunctionDef, Statement, TypeAnnotation, TypeParam};
+use shape_ast::ast::{CaptureClause, FunctionDef, TypeAnnotation, TypeParam};
 use shape_ast::error::{Result, ShapeError};
 
 use super::checked_body::{validate_capture_clause, BodySignature, Missing, Present};
@@ -95,14 +95,18 @@ pub(in crate::compiler) enum TemplateSig {
 }
 
 /// A checked annotation-hook template: one hook kind, one body fn (named,
-/// compiler-session-local), its classified [`TemplateSig`], and its complete
-/// explicitly-declared capture set. Built ONLY through
-/// [`CheckedTemplateBuilder::finish`]; the private fields and absent public
-/// constructor mean no compiler module can assemble one around the
-/// classification rule (so a `PolymorphicArgs` sig can never be paired with an
-/// `After` hook, and vice versa — the classifier derives the variant FROM the
-/// hook kind).
-#[derive(Debug)]
+/// compiler-session-local), its classified [`TemplateSig`], its complete
+/// explicitly-declared capture set, and (S2) the trailing capture-parameter
+/// projection. Built ONLY through [`CheckedTemplateBuilder::finish`]; the
+/// private fields and absent public constructor mean no compiler module can
+/// assemble one around the classification rule (so a `PolymorphicArgs` sig can
+/// never be paired with an `After` hook, and vice versa — the classifier
+/// derives the variant FROM the hook kind).
+///
+/// `Clone` exists for the S2 per-run template store (`comptime_builtins`
+/// `COMPTIME_HOOK_TEMPLATES`): reads clone, the store stays intact until the
+/// next per-run clear — the established E2 store discipline.
+#[derive(Debug, Clone)]
 pub(in crate::compiler) struct CheckedTemplate {
     hook_kind: TemplateHookKind,
     body_fn: String,
@@ -110,6 +114,10 @@ pub(in crate::compiler) struct CheckedTemplate {
     captures: CaptureClause,
     arity: usize,
     type_param_count: usize,
+    /// The trailing capture parameters — `(name, declared concrete
+    /// annotation)` in the body fn's PARAMETER order (the weave's delivery
+    /// order; the capture() bijection is by NAME).
+    capture_params: Vec<(String, TypeAnnotation)>,
 }
 
 impl CheckedTemplate {
@@ -133,7 +141,9 @@ impl CheckedTemplate {
         &self.captures
     }
 
-    /// The body fn's value-parameter count (1 for the polymorphic forms).
+    /// The body fn's SIGNATURE value-parameter count — the trailing capture
+    /// parameters are EXCLUDED (S2 capture-tail contract: `Sig arity =
+    /// params.len() - |capture clause|`). 1 for the polymorphic forms.
     pub(in crate::compiler) fn arity(&self) -> usize {
         self.arity
     }
@@ -143,18 +153,25 @@ impl CheckedTemplate {
     pub(in crate::compiler) fn type_param_count(&self) -> usize {
         self.type_param_count
     }
+
+    /// The trailing capture parameters — `(name, declared concrete
+    /// annotation)` in the body fn's PARAMETER order. The weave delivers
+    /// capture values in this order (`const_lift::bind_captures_for_install`);
+    /// the capture() bijection matched them by NAME at `finish()`.
+    pub(in crate::compiler) fn capture_params(&self) -> &[(String, TypeAnnotation)] {
+        &self.capture_params
+    }
 }
 
-/// The sig-side snapshot taken by [`CheckedTemplateBuilder::body_fn`]. The
-/// body statements are retained ONLY for `finish()`'s pseudo-tuple validation
-/// (they are not carried on [`CheckedTemplate`] — the template references its
-/// body fn by name; the fn itself stays in the ordinary registry).
+/// The sig-side snapshot taken by [`CheckedTemplateBuilder::body_fn`]: the
+/// whole `FunctionDef`, because classification is CAPTURE-DEPENDENT since S2
+/// (the trailing-capture split needs the clause, which may arrive on either
+/// builder axis) and so runs at `finish()`. The def is retained ONLY for
+/// `finish()`'s classification + pseudo-tuple validation — it is not carried
+/// on [`CheckedTemplate`] (the template references its body fn by name; the
+/// fn itself stays in the ordinary registry).
 struct BodyFnSnapshot {
-    name: String,
-    sig: TemplateSig,
-    arity: usize,
-    type_param_count: usize,
-    body: Vec<Statement>,
+    def: FunctionDef,
 }
 
 /// The typed builder for a [`CheckedTemplate`] — EXACTLY the
@@ -187,27 +204,21 @@ impl CheckedTemplateBuilder<Missing, Missing> {
 
 impl<SigState, CapturesState> CheckedTemplateBuilder<SigState, CapturesState> {
     /// Supply the template body fn (an ordinary typed Shape function, C3-G3),
-    /// advancing `SigState` to [`Present`]. Validates and CLASSIFIES the
-    /// signature (see [`classify_template_sig`]) and snapshots the fn's name,
-    /// arity, type-parameter count, and body statements.
+    /// advancing `SigState` to [`Present`]. Validates the CAPTURE-INDEPENDENT
+    /// type-parameter shape here (at most one plain, non-const type
+    /// parameter); the full classification (see [`classify_template_sig`]) is
+    /// capture-dependent since S2 (the trailing-capture split needs the
+    /// clause) and runs at [`finish`], where both axes are present.
+    ///
+    /// [`finish`]: CheckedTemplateBuilder::finish
     pub(in crate::compiler) fn body_fn(
         self,
         func: &FunctionDef,
     ) -> Result<CheckedTemplateBuilder<Present, CapturesState>> {
-        let sig = classify_template_sig(self.hook_kind, func)?;
+        validate_template_type_params(self.hook_kind, func)?;
         Ok(CheckedTemplateBuilder {
             hook_kind: self.hook_kind,
-            body_fn: Some(BodyFnSnapshot {
-                name: func.name.clone(),
-                sig,
-                arity: func.params.len(),
-                type_param_count: func
-                    .type_params
-                    .as_ref()
-                    .map(|params| params.len())
-                    .unwrap_or(0),
-                body: func.body.clone(),
-            }),
+            body_fn: Some(BodyFnSnapshot { def: func.clone() }),
             captures: self.captures,
             _sig: PhantomData,
             _captures: PhantomData,
@@ -241,19 +252,26 @@ impl CheckedTemplateBuilder<Present, Present> {
     /// - the capture-family two, which REUSE the shipped `checked_body`
     ///   validator verbatim (no third sentence producer): a borrow-mode
     ///   capture — `[C0902]`; a duplicate capture name — `[C0907]`;
+    /// - every classification + trailing-capture-contract rejection of
+    ///   [`classify_template_sig`] (S2: arity arithmetic, the name bijection,
+    ///   concrete capture-parameter annotations — precise uncoded sentences
+    ///   with positive twins; S5 owns C09xx minting from C0931+);
     /// - for a [`TemplateSig::PolymorphicArgs`] body, every pseudo-tuple
     ///   usage rejection of
     ///   [`validate_pseudo_tuple_uses`] (precise uncoded sentences with
-    ///   positive twins; S5 owns C09xx minting from C0931+).
+    ///   positive twins).
     ///
     /// Per-specialization checking against a frozen target (C3-G10) happens
     /// LATER, at the `template_specialization` seam — this is construction
-    /// only.
+    /// only. Capture VALUE validation (lifted kind vs the declared trailing
+    /// parameter type) is the caller's, through
+    /// `const_lift::validate_capture_value_types` — values are not a
+    /// construction-axis input here.
     pub(in crate::compiler) fn finish(self) -> Result<CheckedTemplate> {
         // Typestate guarantees both were supplied; the `Option` is an
         // implementation detail of the phantom-typed transitions, never a
         // runtime completeness gate.
-        let mut snapshot = self
+        let snapshot = self
             .body_fn
             .expect("Present SigState guarantees a body fn was supplied");
         let captures = self
@@ -262,55 +280,46 @@ impl CheckedTemplateBuilder<Present, Present> {
 
         validate_capture_clause(&captures)?;
 
+        let def = &snapshot.def;
+        let (sig, capture_params) = classify_template_sig(self.hook_kind, def, &captures)?;
+
         if let TemplateSig::PolymorphicArgs {
             type_param,
             args_param,
-        } = &snapshot.sig
+        } = &sig
         {
             // The walker's `&mut` is traversal-uniformity with its rewrite
             // face only; the validate face never mutates (pseudo_tuple.rs
             // module docs).
-            validate_pseudo_tuple_uses(&mut snapshot.body, args_param, type_param)?;
+            let mut body = def.body.clone();
+            validate_pseudo_tuple_uses(&mut body, args_param, type_param)?;
         }
 
         Ok(CheckedTemplate {
             hook_kind: self.hook_kind,
-            body_fn: snapshot.name,
-            sig: snapshot.sig,
+            body_fn: def.name.clone(),
+            sig,
             captures,
-            arity: snapshot.arity,
-            type_param_count: snapshot.type_param_count,
+            arity: def.params.len() - capture_params.len(),
+            type_param_count: def
+                .type_params
+                .as_ref()
+                .map(|params| params.len())
+                .unwrap_or(0),
+            capture_params,
         })
     }
 }
 
-/// The explicit classification rule (no guessing):
-///
-/// - `type_params` None/empty → [`TemplateSig::Concrete`] (the C3-G4
-///   degenerate case; the body was checked at definition under its own
-///   signature).
-/// - Exactly ONE plain (non-const) type param `T`, exactly one plain by-value
-///   value param annotated bare-`T` (`Basic("T")` or a single-segment
-///   `Reference`), and return annotation bare-`T` → the polymorphic form:
-///   [`TemplateSig::PolymorphicArgs`] for a [`TemplateHookKind::Before`]
-///   template, [`TemplateSig::PolymorphicResult`] for
-///   [`TemplateHookKind::After`].
-/// - Everything else → a named rejection (uncoded sentence + positive twin).
-///
-/// The variant derives FROM the hook kind, so "PolymorphicArgs offered to
-/// After" (and the converse) is unrepresentable through this builder: no
-/// public [`CheckedTemplate`] constructor exists that could pair a sig
-/// variant with the wrong hook kind.
-fn classify_template_sig(hook_kind: TemplateHookKind, func: &FunctionDef) -> Result<TemplateSig> {
+/// The CAPTURE-INDEPENDENT type-parameter shape checks, runnable at
+/// [`CheckedTemplateBuilder::body_fn`] time (before the capture clause is
+/// necessarily present): at most one type parameter, and never a const
+/// generic. The sentences are S1's, byte-unchanged.
+fn validate_template_type_params(hook_kind: TemplateHookKind, func: &FunctionDef) -> Result<()> {
     let type_params: &[TypeParam] = func.type_params.as_deref().unwrap_or(&[]);
-
     if type_params.is_empty() {
-        return Ok(TemplateSig::Concrete(BodySignature::new(
-            func.params.clone(),
-            func.return_type.clone(),
-        )));
+        return Ok(());
     }
-
     let form = polymorphic_form(hook_kind);
 
     if type_params.len() > 1 {
@@ -322,25 +331,203 @@ fn classify_template_sig(hook_kind: TemplateHookKind, func: &FunctionDef) -> Res
             type_params.len(),
         )));
     }
-
-    let type_param = &type_params[0];
-    if type_param.is_const() {
+    if type_params[0].is_const() {
         return Err(reject(format!(
             "template body fn `{}` declares a const generic parameter `{}`; a polymorphic \
              template body declares exactly one plain type parameter (`{form}`)",
             func.name,
-            type_param.name(),
+            type_params[0].name(),
         )));
     }
-    let type_param_name = type_param.name();
+    Ok(())
+}
 
-    if func.params.len() != 1 {
+/// The explicit classification rule (no guessing), extended in S2 with the
+/// TRAILING-CAPTURE-PARAMETER contract:
+///
+/// - Captures are the TRAILING parameters of the body fn: `Sig arity =
+///   params.len() - |capture clause|`; the trailing parameters are matched to
+///   the clause's capture names as a BIJECTION (by NAME — the weave delivers
+///   values in PARAMETER order). Each trailing capture parameter must be a
+///   plain by-value identifier parameter with a CONCRETE type annotation (a
+///   bare-`T` capture parameter is a named rejection).
+/// - `type_params` None/empty → [`TemplateSig::Concrete`] over the SIGNATURE
+///   parameters `params[0..sig_arity]` only (the C3-G4 degenerate case; the
+///   body was checked at definition under its own signature; the concrete
+///   match-or-error at the `template_specialization` seam therefore compares
+///   `params[0..sig_arity]` only).
+/// - Exactly ONE plain (non-const) type param `T`, exactly one SIGNATURE
+///   param (`sig_arity == 1`) that is plain by-value and annotated bare-`T`
+///   (`Basic("T")` or a single-segment `Reference`), and return annotation
+///   bare-`T` → the polymorphic form: [`TemplateSig::PolymorphicArgs`] for a
+///   [`TemplateHookKind::Before`] template, [`TemplateSig::PolymorphicResult`]
+///   for [`TemplateHookKind::After`].
+/// - Everything else → a named rejection (uncoded sentence + positive twin;
+///   the bijection-miss sentences follow the [C0930] param-miss model — S5
+///   owns C09xx minting from C0931+, so all of these stay uncoded).
+///
+/// The variant derives FROM the hook kind, so "PolymorphicArgs offered to
+/// After" (and the converse) is unrepresentable through this builder: no
+/// public [`CheckedTemplate`] constructor exists that could pair a sig
+/// variant with the wrong hook kind.
+///
+/// Returns the classified [`TemplateSig`] plus the trailing capture-parameter
+/// projection `(name, declared annotation)` in PARAMETER order.
+fn classify_template_sig(
+    hook_kind: TemplateHookKind,
+    func: &FunctionDef,
+    captures: &CaptureClause,
+) -> Result<(TemplateSig, Vec<(String, TypeAnnotation)>)> {
+    // Re-assert the body_fn()-time shape so this classifier stays total for
+    // any direct caller (harmless re-check on the builder path).
+    validate_template_type_params(hook_kind, func)?;
+    let type_params: &[TypeParam] = func.type_params.as_deref().unwrap_or(&[]);
+
+    let capture_count = captures.entries.len();
+    if capture_count > func.params.len() {
         return Err(reject(format!(
-            "template body fn `{}` is generic over `{type_param_name}` but declares {} value \
-             parameters; a polymorphic template body declares exactly one value parameter \
-             annotated with its type parameter (`{form}`)",
+            "template body fn `{}` declares {} value parameter(s) but {} capture(s) are \
+             declared; each capture binds exactly one trailing parameter — declare one \
+             trailing capture parameter per capture (`fn {}(<signature params>, <capture>: \
+             <concrete type>)`) or drop the extra capture() bindings",
             func.name,
             func.params.len(),
+            capture_count,
+            func.name,
+        )));
+    }
+    let sig_arity = func.params.len() - capture_count;
+
+    // The trailing capture parameters: plain by-value identifier parameters
+    // with CONCRETE annotations, projected in PARAMETER order.
+    let mut capture_params: Vec<(String, TypeAnnotation)> = Vec::with_capacity(capture_count);
+    for (offset, param) in func.params[sig_arity..].iter().enumerate() {
+        let position = sig_arity + offset + 1;
+        let name = match param.simple_name() {
+            Some(name)
+                if !param.is_const
+                    && !param.is_reference
+                    && !param.is_out
+                    && param.default_value.is_none() =>
+            {
+                name.to_string()
+            }
+            _ => {
+                return Err(reject(format!(
+                    "template body fn `{}`'s trailing capture parameter (position {position}) \
+                     is not a plain by-value identifier parameter; capture parameters are \
+                     plain concretely-annotated parameters (`name: <concrete type>`)",
+                    func.name,
+                )));
+            }
+        };
+        let annotation = match &param.type_annotation {
+            Some(annotation) => annotation.clone(),
+            None => {
+                return Err(reject(format!(
+                    "template body fn `{}`'s trailing capture parameter `{name}` has no type \
+                     annotation; annotate it with the capture value's concrete type (int, \
+                     number, bool, or string in this slice)",
+                    func.name,
+                )));
+            }
+        };
+        if let Some(type_param) = type_params.first() {
+            if is_bare_type_param(&annotation, type_param.name()) {
+                return Err(reject(format!(
+                    "template body fn `{}`'s trailing capture parameter `{name}` is annotated \
+                     with the type parameter `{}`; capture parameters are CONCRETE — annotate \
+                     `{name}` with the capture value's concrete type (int, number, bool, or \
+                     string in this slice)",
+                    func.name,
+                    type_param.name(),
+                )));
+            }
+        }
+        capture_params.push((name, annotation));
+    }
+
+    // The NAME bijection: every capture() binding names exactly one trailing
+    // capture parameter, and every trailing capture parameter has exactly one
+    // binding. (Duplicate capture names were already rejected by the reused
+    // [C0907] validator; the sentences here follow the [C0930] param-miss
+    // model, uncoded.)
+    for entry in &captures.entries {
+        if capture_params.iter().any(|(name, _)| *name == entry.name) {
+            continue;
+        }
+        if let Some((idx, _)) = func.params[..sig_arity]
+            .iter()
+            .enumerate()
+            .find(|(_, param)| param.simple_name() == Some(entry.name.as_str()))
+        {
+            return Err(reject(format!(
+                "capture `{}` on template body fn `{}` names signature parameter `{}` \
+                 (position {} of {}); captures bind only the TRAILING parameters after the \
+                 signature parameters — move `{}` to the end of `{}`'s parameter list or drop \
+                 the capture() binding",
+                entry.name,
+                func.name,
+                entry.name,
+                idx + 1,
+                sig_arity,
+                entry.name,
+                func.name,
+            )));
+        }
+        return Err(reject(format!(
+            "capture `{}` on template body fn `{}` matches none of its {} trailing capture \
+             parameter(s) [{}]; declare a trailing parameter `{}: <concrete type>` on `{}` or \
+             drop the capture() binding",
+            entry.name,
+            func.name,
+            capture_count,
+            capture_params
+                .iter()
+                .map(|(name, _)| name.as_str())
+                .collect::<Vec<_>>()
+                .join(", "),
+            entry.name,
+            func.name,
+        )));
+    }
+    for (name, _) in &capture_params {
+        if !captures.entries.iter().any(|entry| entry.name == *name) {
+            // Defensive (reachable only through duplicate trailing parameter
+            // names — the counts are equal by the arity arithmetic above).
+            return Err(reject(format!(
+                "template body fn `{}` declares trailing capture parameter `{name}` with no \
+                 matching capture() binding; add capture(\"{name}\", <value>) to the captures \
+                 array or remove the parameter",
+                func.name,
+            )));
+        }
+    }
+
+    if type_params.is_empty() {
+        return Ok((
+            TemplateSig::Concrete(BodySignature::new(
+                func.params[..sig_arity].to_vec(),
+                func.return_type.clone(),
+            )),
+            capture_params,
+        ));
+    }
+
+    let form = polymorphic_form(hook_kind);
+    let type_param_name = type_params[0].name();
+
+    if sig_arity != 1 {
+        let capture_note = if capture_count == 0 {
+            String::new()
+        } else {
+            format!(" (beyond its {capture_count} trailing capture parameter(s))")
+        };
+        return Err(reject(format!(
+            "template body fn `{}` is generic over `{type_param_name}` but declares {sig_arity} \
+             value parameters{capture_note}; a polymorphic template body declares exactly one \
+             value parameter annotated with its type parameter (`{form}`)",
+            func.name,
         )));
     }
 
@@ -404,16 +591,19 @@ fn classify_template_sig(hook_kind: TemplateHookKind, func: &FunctionDef) -> Res
         }
     }
 
-    Ok(match hook_kind {
-        TemplateHookKind::Before => TemplateSig::PolymorphicArgs {
-            type_param: type_param_name.to_string(),
-            args_param: param_name.to_string(),
+    Ok((
+        match hook_kind {
+            TemplateHookKind::Before => TemplateSig::PolymorphicArgs {
+                type_param: type_param_name.to_string(),
+                args_param: param_name.to_string(),
+            },
+            TemplateHookKind::After => TemplateSig::PolymorphicResult {
+                type_param: type_param_name.to_string(),
+                result_param: param_name.to_string(),
+            },
         },
-        TemplateHookKind::After => TemplateSig::PolymorphicResult {
-            type_param: type_param_name.to_string(),
-            result_param: param_name.to_string(),
-        },
-    })
+        capture_params,
+    ))
 }
 
 /// The accepted polymorphic spelling for each hook kind (the positive twin
@@ -558,10 +748,12 @@ mod tests {
     }
 
     // The typestate is order-independent: captures-then-body_fn reaches the
-    // same `<Present, Present>` finish() as body_fn-then-captures.
+    // same `<Present, Present>` finish() as body_fn-then-captures. (The body
+    // fn declares the matching trailing capture parameter — the S2 capture-
+    // tail contract.)
     #[test]
     fn typestate_transitions_are_order_independent() {
-        let func = fn_def("fn t<Args>(args: Args) -> Args { return args }");
+        let func = fn_def("fn t<Args>(args: Args, cfg: int) -> Args { return args }");
         let template = CheckedTemplateBuilder::new(TemplateHookKind::Before)
             .captures(clause(vec![entry(CaptureMode::Move, "cfg")]))
             .body_fn(&func)
@@ -569,6 +761,7 @@ mod tests {
             .finish()
             .expect("order-independent supply finishes");
         assert_eq!(template.captures().len(), 1);
+        assert_eq!(template.capture_params().len(), 1);
     }
 
     // NEGATIVE (reused validator, no third sentence producer): borrow-mode
@@ -607,10 +800,24 @@ mod tests {
         );
     }
 
+    // Classification is capture-dependent since S2, so the full-chain helper
+    // supplies an EMPTY clause and accepts the rejection from either builder
+    // stage (body_fn keeps the capture-independent type-parameter checks;
+    // finish() owns the rest).
     fn expect_classification_reject(hook_kind: TemplateHookKind, src: &str, needle: &str) {
+        expect_reject_with_captures(hook_kind, src, Vec::new(), needle);
+    }
+
+    fn expect_reject_with_captures(
+        hook_kind: TemplateHookKind,
+        src: &str,
+        entries: Vec<CaptureEntry>,
+        needle: &str,
+    ) {
         let func = fn_def(src);
         let err = CheckedTemplateBuilder::new(hook_kind)
             .body_fn(&func)
+            .and_then(|builder| builder.captures(clause(entries)).finish())
             .err()
             .unwrap_or_else(|| panic!("expected classification rejection for {src:?}"));
         assert!(
@@ -735,6 +942,125 @@ fn t<R>(result: R) -> R {
             .captures(clause(Vec::new()))
             .finish()
             .expect("a concrete body uses its params as ordinary values");
+    }
+
+    // ── S2 capture-tail contract ────────────────────────────────────────────
+
+    // GREEN: a concrete body with a trailing capture parameter splits into
+    // sig arity 1 + one capture param; the Concrete sig carries ONLY the
+    // signature parameters (the match-or-error comparison surface).
+    #[test]
+    fn concrete_with_trailing_capture_splits_sig_arity() {
+        let func = fn_def("fn t(x: int, cfg: int) -> int { return x + cfg }");
+        let template = CheckedTemplateBuilder::new(TemplateHookKind::Before)
+            .body_fn(&func)
+            .expect("shape passes")
+            .captures(clause(vec![entry(CaptureMode::Move, "cfg")]))
+            .finish()
+            .expect("concrete + trailing capture finishes");
+        assert_eq!(template.arity(), 1, "arity is the SIG arity");
+        assert_eq!(template.capture_params().len(), 1);
+        assert_eq!(template.capture_params()[0].0, "cfg");
+        match template.sig() {
+            TemplateSig::Concrete(signature) => {
+                assert_eq!(
+                    signature.params().len(),
+                    1,
+                    "the Concrete sig carries only the signature params"
+                );
+            }
+            other => panic!("expected Concrete, got {other:?}"),
+        }
+    }
+
+    // GREEN: a polymorphic before body with a concrete trailing capture
+    // parameter classifies as PolymorphicArgs with sig arity 1.
+    #[test]
+    fn polymorphic_before_with_trailing_capture_classifies() {
+        let func = fn_def("fn t<Args>(args: Args, factor: int) -> Args { return args }");
+        let template = CheckedTemplateBuilder::new(TemplateHookKind::Before)
+            .body_fn(&func)
+            .expect("shape passes")
+            .captures(clause(vec![entry(CaptureMode::Move, "factor")]))
+            .finish()
+            .expect("polymorphic + trailing capture finishes");
+        assert_eq!(template.arity(), 1);
+        assert_eq!(template.capture_params().len(), 1);
+        assert!(matches!(template.sig(), TemplateSig::PolymorphicArgs { .. }));
+    }
+
+    // NEGATIVE: a bare-T trailing capture parameter is a named rejection —
+    // capture parameters are CONCRETE.
+    #[test]
+    fn bare_t_capture_param_is_rejected() {
+        expect_reject_with_captures(
+            TemplateHookKind::Before,
+            "fn t<Args>(args: Args, cfg: Args) -> Args { return args }",
+            vec![entry(CaptureMode::Move, "cfg")],
+            "is annotated with the type parameter",
+        );
+    }
+
+    // NEGATIVE: an unannotated trailing capture parameter is a named
+    // rejection with the concrete-type positive twin.
+    #[test]
+    fn unannotated_capture_param_is_rejected() {
+        expect_reject_with_captures(
+            TemplateHookKind::Before,
+            "fn t(x: int, cfg) -> int { return x }",
+            vec![entry(CaptureMode::Move, "cfg")],
+            "has no type annotation",
+        );
+    }
+
+    // NEGATIVE (bijection): a capture binding matching no trailing parameter
+    // names the trailing set and carries the positive twin.
+    #[test]
+    fn capture_matching_no_trailing_param_is_rejected() {
+        expect_reject_with_captures(
+            TemplateHookKind::Before,
+            "fn t(x: int, cfg: int) -> int { return x }",
+            vec![entry(CaptureMode::Move, "wrong")],
+            "matches none of its 1 trailing capture parameter(s) [cfg]",
+        );
+    }
+
+    // NEGATIVE (bijection): a capture binding naming a SIGNATURE (non-
+    // trailing) parameter gets the move-it-to-the-tail sentence.
+    #[test]
+    fn capture_naming_signature_param_is_rejected() {
+        expect_reject_with_captures(
+            TemplateHookKind::Before,
+            "fn t(x: int, cfg: int) -> int { return x }",
+            vec![entry(CaptureMode::Move, "x")],
+            "names signature parameter `x`",
+        );
+    }
+
+    // NEGATIVE (arity arithmetic): more captures than parameters.
+    #[test]
+    fn more_captures_than_params_is_rejected() {
+        expect_reject_with_captures(
+            TemplateHookKind::Before,
+            "fn t(x: int) -> int { return x }",
+            vec![
+                entry(CaptureMode::Move, "a"),
+                entry(CaptureMode::Move, "b"),
+            ],
+            "declares 1 value parameter(s) but 2 capture(s) are declared",
+        );
+    }
+
+    // NEGATIVE: a generic body whose SIGNATURE arity (after the capture
+    // split) is not 1 gets the capture-aware sentence.
+    #[test]
+    fn polymorphic_sig_arity_error_is_capture_aware() {
+        expect_reject_with_captures(
+            TemplateHookKind::Before,
+            "fn t<Args>(args: Args, extra: int, cfg: int) -> Args { return args }",
+            vec![entry(CaptureMode::Move, "cfg")],
+            "declares 2 value parameters (beyond its 1 trailing capture parameter(s))",
+        );
     }
 
     // COMPILE-TIME GUARANTEE (documented, not runtime-testable): `finish()` is

@@ -425,6 +425,20 @@ impl BytecodeCompiler {
                         entry.helper_authority(),
                     );
 
+                    // ADR-009 C3 #14 (slice 2): the hook-template body-fn
+                    // lookup (same AST fn table as the helper collection;
+                    // threaded as a parameter). A root fn not yet registered
+                    // at this pre-pass simply misses here and the named
+                    // rejection defers this handler to pass-2 (the
+                    // established pre-pass fallback below).
+                    let function_defs = &self.function_defs;
+                    let template_body_fn_lookup = move |name: &str| -> Option<FunctionDef> {
+                        function_defs.get(name).cloned().or_else(|| {
+                            function_defs
+                                .get(&Self::qualify_module_symbol(handler_module_path, name))
+                                .cloned()
+                        })
+                    };
                     let prev_suppressed =
                         super::comptime_builtins::set_comptime_output_suppressed(true);
                     let execution_result =
@@ -444,6 +458,7 @@ impl BytecodeCompiler {
                             freeze,
                             // Function-target handler: no representation authority.
                             None,
+                            &template_body_fn_lookup,
                         );
                     super::comptime_builtins::set_comptime_output_suppressed(prev_suppressed);
 
@@ -1291,6 +1306,22 @@ impl BytecodeCompiler {
         // `overlay` — the SAME `Arc` used to stamp this target's `type_ref`
         // identities — not a freshly minted one, so the stamp and resolve share
         // one composite memo.
+        //
+        // ADR-009 C3 #14 (slice 2): the hook-template body-fn lookup — the
+        // SAME AST fn table `collect_authorized_comptime_helpers` reads
+        // (`self.function_defs`; bare name first, then qualified under the
+        // handler's defining module), threaded as a PARAMETER into the
+        // executor's emit-side rewrite. Never ambient state.
+        let function_defs = &self.function_defs;
+        let template_body_fn_lookup = move |name: &str| -> Option<FunctionDef> {
+            function_defs.get(name).cloned().or_else(|| {
+                defining_module_path.and_then(|module| {
+                    function_defs
+                        .get(&Self::qualify_module_symbol(module, name))
+                        .cloned()
+                })
+            })
+        };
         let execution = super::comptime::execute_comptime_with_annotation_handler(
             &handler.body,
             &handler.params,
@@ -1308,6 +1339,7 @@ impl BytecodeCompiler {
             // ADR-009 B5 (Dec 56): forward the caller-supplied type identity
             // (Some for a declaration-attached type-target hook; None otherwise).
             access_identity,
+            &template_body_fn_lookup,
         )
         .map_err(|e| self.build_comptime_failure(&e, handler_span, &context))?;
         // §4.4: re-emit any `warning()` output anchored at this handler site.
@@ -2272,6 +2304,22 @@ impl BytecodeCompiler {
                             .as_deref()
                             .and_then(|name| freeze.identity_of(name))
                             .map(|identity| (identity.high, identity.low));
+                        // ADR-009 C3 #14 (slice 2): the hook-template body-fn
+                        // lookup (same table, threaded as a parameter; a
+                        // pre-pass miss defers to pass-2 like every other
+                        // pre-pass limitation below).
+                        let function_defs = &self.function_defs;
+                        let template_body_fn_lookup =
+                            move |name: &str| -> Option<FunctionDef> {
+                                function_defs.get(name).cloned().or_else(|| {
+                                    function_defs
+                                        .get(&Self::qualify_module_symbol(
+                                            handler_module_path,
+                                            name,
+                                        ))
+                                        .cloned()
+                                })
+                            };
                         let prev_suppressed =
                             super::comptime_builtins::set_comptime_output_suppressed(true);
                         let execution_result =
@@ -2290,6 +2338,7 @@ impl BytecodeCompiler {
                                 trait_impls.clone(),
                                 freeze,
                                 access_identity,
+                                &template_body_fn_lookup,
                             );
                         super::comptime_builtins::set_comptime_output_suppressed(prev_suppressed);
                         let mut execution = match execution_result {
