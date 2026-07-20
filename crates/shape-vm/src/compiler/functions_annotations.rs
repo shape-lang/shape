@@ -609,7 +609,11 @@ impl BytecodeCompiler {
         }
     }
 
-    fn annotation_param_type_annotation(
+    // ADR-009 C3 S1c: visibility widened from private `fn` so the
+    // `template_specialization` target glue can bind Sig types from the
+    // AST/inference side (slice-0 report §7.4). Shared helper — NOT part of
+    // the C3-G7 deletion set; behavior byte-unchanged.
+    pub(in crate::compiler) fn annotation_param_type_annotation(
         &self,
         func_def: &FunctionDef,
         param_idx: usize,

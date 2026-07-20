@@ -48,6 +48,14 @@ pub(crate) use type_reflection::{
     FrozenTypeCategory, FrozenTypeIdentity, build_frozen_type_category_heap_value,
     build_frozen_type_ref_heap_value, frozen_type_category_from_ref, frozen_type_from_ref,
 };
+// ADR-009 C3 S1c: the frozen callable-signature descriptor (payloads.rs:83),
+// re-exported visibility-only so `template_specialization` can carry it for
+// Sig IDENTITY/equality ONLY (slice-0 report §7.4 — never a type source).
+pub(in crate::compiler) use type_reflection::payloads::CallableDescriptor;
+// Test-only sibling: `template_specialization` tests fabricate descriptors
+// per the `type_reflection/tests.rs:1779` pattern.
+#[cfg(test)]
+pub(in crate::compiler) use type_reflection::payloads::ParamDescriptor;
 // Legacy-path confinement (ADR-009 §4.1 "one kind vocabulary", ticket A1 S5):
 // `type_reflection::build_type_info_heap_value` is deliberately NOT
 // re-exported. The legacy `type_info` intrinsic below is its only caller
