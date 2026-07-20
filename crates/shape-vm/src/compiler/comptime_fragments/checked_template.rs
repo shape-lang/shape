@@ -56,6 +56,7 @@ use shape_ast::ast::{CaptureClause, FunctionDef, TypeAnnotation, TypeParam};
 use shape_ast::error::{Result, ShapeError};
 
 use super::checked_body::{validate_capture_clause, BodySignature, Missing, Present};
+use crate::compiler::template_specialization::const_lift;
 use crate::compiler::template_specialization::pseudo_tuple::validate_pseudo_tuple_uses;
 
 /// Which runtime hook a template body is written for. Drives classification:
@@ -443,6 +444,23 @@ fn classify_template_sig(
                     type_param.name(),
                 )));
             }
+        }
+        // ADR-009 C3 S3 (C3-G5, LIVE from S3a): the DECLARATION-SITE half of
+        // the ConstLift domain — a trailing capture parameter declared with a
+        // type outside the compositional lift domain rejects AT TEMPLATE
+        // CONSTRUCTION, before any capture value exists. Both hook builtins
+        // (and the nocapture forwarders trivially) route through `finish()` →
+        // this classifier — the single construction chokepoint, so no
+        // template with an unusable capture declaration can exist.
+        if let Err(reason) = const_lift::annotation_within_lift_domain(&annotation) {
+            return Err(reject(format!(
+                "template body fn `{}` declares trailing capture parameter `{name}: {}`, whose \
+                 type is outside the ConstLift domain ({reason}); {} — declare the capture \
+                 parameter with a liftable type",
+                func.name,
+                annotation.to_type_string(),
+                const_lift::CONST_LIFT_DOMAIN_SENTENCE,
+            )));
         }
         capture_params.push((name, annotation));
     }
@@ -1061,6 +1079,111 @@ fn t<R>(result: R) -> R {
             vec![entry(CaptureMode::Move, "cfg")],
             "declares 2 value parameters (beyond its 1 trailing capture parameter(s))",
         );
+    }
+
+    // ── ADR-009 C3 S3a: the declaration-site ConstLift domain check (LIVE
+    //    at finish() — it rejects only declared-but-unusable capture-
+    //    parameter types, which no green pin exercises) ────────────────────
+
+    // NEGATIVE (S3a, C3-G5): a trailing capture parameter declared with a
+    // FUNCTION type rejects at template construction, naming the
+    // never-liftable functions class and the closed domain.
+    #[test]
+    fn fn_typed_capture_param_is_rejected_at_declaration_site() {
+        let func = fn_def("fn t(x: int, cb: (int) => int) -> int { return x }");
+        let err = CheckedTemplateBuilder::new(TemplateHookKind::Before)
+            .body_fn(&func)
+            .expect("classification reaches the capture tail")
+            .captures(clause(vec![entry(CaptureMode::Move, "cb")]))
+            .finish()
+            .expect_err("a fn-typed capture parameter must reject at construction");
+        let message = err.to_string();
+        assert!(
+            message.contains("declares trailing capture parameter `cb:"),
+            "names the parameter and its type: {message}"
+        );
+        assert!(
+            message.contains("whose type is outside the ConstLift domain"),
+            "names the domain violation: {message}"
+        );
+        assert!(
+            message.contains("is a function type, and functions are never liftable (C3-G5 / Dec-95)"),
+            "names the never-liftable functions class: {message}"
+        );
+        assert!(
+            message.contains(crate::compiler::template_specialization::const_lift::CONST_LIFT_DOMAIN_SENTENCE),
+            "carries the closed-domain sentence: {message}"
+        );
+        assert!(
+            message.contains("declare the capture parameter with a liftable type"),
+            "carries the positive twin: {message}"
+        );
+    }
+
+    // NEGATIVE (S3a, C3-G5): `&T` capture declarations reject at
+    // construction. The BARE `cfg: &int` spelling parses as a reference
+    // PARAMETER (`is_reference`), so the S2 plain-by-value arm catches it
+    // first (fail-closed with its own named sentence); a Borrow ANNOTATION
+    // in a nested position reaches the S3a domain arm, which names the
+    // never-liftable references class.
+    #[test]
+    fn borrow_typed_capture_param_is_rejected_at_declaration_site() {
+        // Bare `&int`: the reference-parameter spelling — rejected by the S2
+        // plain-by-value contract before the domain check runs.
+        expect_reject_with_captures(
+            TemplateHookKind::Before,
+            "fn t(x: int, cfg: &int) -> int { return x }",
+            vec![entry(CaptureMode::Move, "cfg")],
+            "is not a plain by-value identifier parameter",
+        );
+        // Nested borrow annotation: the S3a domain arm names the class.
+        expect_reject_with_captures(
+            TemplateHookKind::Before,
+            "fn t(x: int, cfg: Array<&int>) -> int { return x }",
+            vec![entry(CaptureMode::Move, "cfg")],
+            "is a reference type, and references are never liftable (C3-G5 / Dec-95)",
+        );
+    }
+
+    // NEGATIVE (S3a, C3-G5): a nominal-struct-typed trailing capture
+    // parameter rejects with the out-of-domain reason + the domain sentence.
+    #[test]
+    fn nominal_struct_capture_param_is_rejected_at_declaration_site() {
+        expect_reject_with_captures(
+            TemplateHookKind::After,
+            "fn t(r: int, cfg: MyConfig) -> int { return r }",
+            vec![entry(CaptureMode::Move, "cfg")],
+            "`MyConfig` is not a liftable type",
+        );
+        // The full sentence carries the domain and the positive twin.
+        expect_reject_with_captures(
+            TemplateHookKind::After,
+            "fn t(r: int, cfg: MyConfig) -> int { return r }",
+            vec![entry(CaptureMode::Move, "cfg")],
+            "declare the capture parameter with a liftable type",
+        );
+    }
+
+    // GREEN (S3a): in-domain COMPOSITE capture declarations pass finish() —
+    // the declaration site accepts the full compositional domain even while
+    // value acceptance stays scalar until S3b (dark-wired by design).
+    #[test]
+    fn composite_capture_declarations_are_in_domain_at_finish() {
+        for src in [
+            "fn t(x: int, cfg: Array<int>) -> int { return x }",
+            "fn t(x: int, cfg: [int, int]) -> int { return x }",
+            "fn t(x: int, cfg: Option<int>) -> int { return x }",
+            "fn t(x: int, cfg: Array<Option<number>>) -> int { return x }",
+        ] {
+            let func = fn_def(src);
+            let template = CheckedTemplateBuilder::new(TemplateHookKind::Before)
+                .body_fn(&func)
+                .expect("classification reaches the capture tail")
+                .captures(clause(vec![entry(CaptureMode::Move, "cfg")]))
+                .finish()
+                .unwrap_or_else(|err| panic!("{src:?} declares an in-domain capture: {err}"));
+            assert_eq!(template.capture_params().len(), 1, "for {src:?}");
+        }
     }
 
     // COMPILE-TIME GUARANTEE (documented, not runtime-testable): `finish()` is
