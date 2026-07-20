@@ -56,6 +56,17 @@
 //!    the 200-call hot loop proves the baked value on every call — the
 //!    capture value is comptime-evaluated once at binding, never re-evaluated
 //!    at invocation (the S0 a4e legacy CONTRAST re-evaluates per call).
+//! 9. `c3-sugar-typed-config-single` (S4d) — the SUGAR-DECLARED typed-config
+//!    smoke, SINGLE carrier, ZERO-FALLBACK: a declarative annotation with
+//!    MIXED (int, string) config lowers through the S4c sugar (minted body
+//!    fn + synthesized public-API handler) and reaches native JIT — the
+//!    whole S4 stack (per-call-site capture typing → typed injection →
+//!    lowering → ConstLift bake) under the established zero-fallback proof.
+//! 10. `c3-sugar-config-eval-once` (S4d) — EVALUATE-ONCE through the sugar
+//!    (the S3c marker-count pattern on a COEXISTENCE definition): the user
+//!    `comptime post` marker counts EXACTLY twice (== the application count;
+//!    the equal-config pair rule-6 SHARES one baked specialization) and
+//!    never scales with the hot loop, in BOTH modes.
 
 use super::jit_test_support::{
     assert_fixture_has_no_top_level_comptime, count_fallback_lines, run_workspace_fixture,
@@ -322,6 +333,51 @@ fn c3_config_eval_once_two_applications_warn_exactly_twice() {
     assert_c3_config_evaluates_once_per_application(
         "c3-config-eval-once-two-apps.shape",
         "2453000\n",
+        2,
+    );
+}
+
+/// Cell 9 (S4d) — the SUGAR-DECLARED typed-config smoke, ZERO-FALLBACK
+/// (the S4 close's CLI obligation): `annotation boosted(times: int, tag:
+/// string)` with a declarative `before` hook lowers through the S4c sugar
+/// (minted hygienic body fn + synthesized handler spelling ONLY
+/// install/before_hook/capture) onto a 1-ary SINGLE-carrier target
+/// (deliberately off the S2d aggregate-carrier gap — S7's named follow-up
+/// with its measurement), 200-call hot loop crossing T1@100. 601000 is
+/// value-distinguishing per config value (before-skip 199000, string-branch
+/// false 597000, times misread 203000 — fixture header derives each).
+/// Measured S4d: the whole sugar stack (S4a per-call-site capture typing →
+/// S4b typed injection → S4c lowering → S3b ConstLift bake of BOTH the int
+/// and the string constant) reaches native JIT with zero fallback lines.
+/// The string config is consumed via an equality branch — the spelling
+/// cell 3 proved native; a scalar-returning string method (`.length()`)
+/// instead hits the PRE-EXISTING named STAGE-StringJIT whole-program deopt
+/// (loud, unrelated to the sugar path; recorded in the fixture header).
+#[test]
+fn c3_sugar_typed_config_single_runs_natively_both_tiers() {
+    assert_c3_fixture_reaches_native_jit("c3-sugar-typed-config-single.shape", "601000\n");
+}
+
+/// Cell 10 (S4d, the optional second cell — added: the sugar path's
+/// evaluate-once semantics deserve their own subprocess proof) —
+/// EVALUATE-ONCE through the SUGAR via the S3c marker-count pattern on a
+/// COEXISTENCE definition: the user `comptime post` carries
+/// `warning("sugar-cfg-eval")` beside a declarative typed-config `before`
+/// hook, applied to TWO targets with EQUAL config. The marker counts
+/// EXACTLY twice in BOTH modes — once per @application (the sugar's
+/// synthesized post runs at the same per-application cadence as the user
+/// post), never once-globally (equal config rule-6 SHARES one baked
+/// specialization yet the count is 2), never scaling with the 200-call hot
+/// loop (per-invocation would count 400+). 1194000 proves the baked config
+/// on every call of both targets (fixture header derives the refuters).
+/// Like cells 7/8 this cell asserts evaluate-once semantics only (both
+/// fixtures also measured zero-fallback; nativity is cell 9's pin), so its
+/// failure always means an evaluate-once regression.
+#[test]
+fn c3_sugar_config_eval_once_warns_once_per_application() {
+    assert_c3_config_evaluates_once_per_application(
+        "c3-sugar-config-eval-once.shape",
+        "1194000\n",
         2,
     );
 }

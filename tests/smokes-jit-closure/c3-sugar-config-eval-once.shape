@@ -1,0 +1,49 @@
+// ADR-009 C3 #14 slice 4 (S4d) — EVALUATE-ONCE through the SUGAR (the S3c
+// `warning[`-marker-count pattern, optional second cell): a COEXISTENCE
+// definition carries a user `comptime post` handler with the observable
+// marker (`warning("sugar-cfg-eval")`) BESIDE a declarative `before` hook
+// (typed config ⇒ TypedConfig class ⇒ the S4c lowering appends its
+// synthesized post handler AFTER the user handler — both run once per
+// @application). The marker must appear EXACTLY twice on subprocess stderr
+// (== the application count) in BOTH modes:
+//   - once-globally would cap it at 1 (the two applications carry
+//     structurally EQUAL config, so Dec-95 rule 6 SHARES one baked
+//     specialization — the count follows APPLICATIONS, not
+//     specializations);
+//   - a per-invocation config eval would scale with the 200-call hot loop
+//     (400+; the S0 §4 a4e legacy contrast).
+//
+// Hot loop of 200 iterations calls BOTH targets each pass (each target
+// crosses T1@100). 1-ary Single-carrier targets, off the S2d
+// aggregate-carrier gap (S7's named follow-up).
+//
+// Value-distinguishing arithmetic, per call i in 0..200 per target:
+//   before: a0 = i * times = 3i;  impl: * 10 → 30i
+//   total = 2 targets * 30 * 19900 = 1194000
+// Expected stdout: 1194000
+//   skipped before → 2 * 10 * 19900 = 398000
+//   times misread as 1 → 2 * 10 * 19900 = 398000 (same as skip: *1 is identity)
+//   one target unwoven → 30*19900 + 10*19900 = 796000
+annotation traced(times: int) {
+  targets: [function]
+  comptime post(target, ctx) {
+    warning("sugar-cfg-eval")
+  }
+  before(args) {
+    args[0] = args[0] * times
+    return args
+  }
+}
+
+@traced(3)
+fn calc_a(a: int) -> int { a * 10 }
+
+@traced(3)
+fn calc_b(a: int) -> int { a * 10 }
+
+fn run() -> int {
+  let mut total = 0
+  for i in 0..200 { total = total + calc_a(i) + calc_b(i) }
+  total
+}
+print(run())

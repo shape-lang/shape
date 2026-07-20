@@ -78,6 +78,7 @@ pub(in crate::compiler) struct SugarLowering {
 /// A declaration-site rejection from the lowering (R3 / R3-family), carrying
 /// the offending handler's span for attribution. The planner converts it to
 /// the spanned `SemanticError` — ONE firing site.
+#[derive(Debug)]
 pub(in crate::compiler) struct SugarLoweringRejection {
     pub(in crate::compiler) message: String,
     pub(in crate::compiler) span: Span,

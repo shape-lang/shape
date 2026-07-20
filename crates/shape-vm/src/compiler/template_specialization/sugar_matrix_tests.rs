@@ -1008,3 +1008,320 @@ outer()
     );
     assert!(compiler.hook_install_registry.is_empty());
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// ADR-009 C3 #14 (slice 4, S4d) — THE SUGAR-EQUIVALENCE PROOF (C3-G2).
+//
+// The G2 completeness gate's formal close: where the S4c lowering calls
+// internal seams for compile-time efficiency, these pins prove the
+// equivalent PUBLIC-API program produces IDENTICAL behavior:
+//
+//   E1 BEHAVIORAL — one program carries a sugar-declared typed-config
+//      annotation AND its hand-written public-API twin (identical hook body
+//      code as a module-scope fn + `comptime post` with capture/install;
+//      BOTH defs TypedConfig-classified), applied to identical twin
+//      targets: identical executed values + registry-row agreement.
+//   E2 IDENTITY-SUFFIX — the strongest cheap identity assertion: full
+//      symbol equality is IMPOSSIBLE (the sugar's minted hygienic body-fn
+//      name differs from the hand-written name by construction), so the
+//      pin splits both specialized symbols at `::cfg#` and asserts the
+//      rule-6 identity tail (the netstring config segment from the ONE
+//      identity-suffix producer, `template_specialization_key_suffix`) is
+//      BYTE-IDENTICAL for equal config — the producer provably serves both
+//      paths at the observable symbol tier. Differing-config split control
+//      included.
+//   E3 STRUCTURAL ZERO-SIDE-CHANNEL — a unit pin walking the SYNTHESIZED
+//      handler AST: every call is one of install/before_hook/after_hook/
+//      capture, every capture value argument is a bare config-param
+//      identifier, and no other statement/expression kind is present. The
+//      machine check that the lowering cannot use a private capability —
+//      its output is literally a public-API program.
+// ═══════════════════════════════════════════════════════════════════════════
+
+// The shared E1/E2 fixture: the hand-written API twin (`retry_api` +
+// module-scope `api_body`) and the sugar-declared def (`retry_sugar`) carry
+// IDENTICAL hook body code and IDENTICAL (int, string) config params; the
+// equal-config applications (3, "ab") land on identical twin targets. The
+// third application (5, "xy") is E2's differing-config split control.
+//
+// Values: twin targets both compute before 4*3 + len("ab") = 14 → impl 140;
+// the split control computes 4*5 + len("xy") = 22 → 220. Total:
+// (140*1000 + 140)*1000 + 220 = 140_140_220 (either twin diverging from the
+// other shifts a digit block — the behavioral-equality refuter).
+const S4D_EQUIVALENCE_SRC: &str = r#"
+fn api_body<Args>(args: Args, times: int, tag: string) -> Args {
+    args[0] = args[0] * times + tag.length()
+    return args
+}
+
+annotation retry_api(times: int, tag: string) {
+  targets: [function]
+  comptime post(target, ctx) {
+    install(before_hook(api_body, [capture("times", times), capture("tag", tag)]))
+  }
+}
+
+annotation retry_sugar(times: int, tag: string) {
+  targets: [function]
+  before(args) {
+    args[0] = args[0] * times + tag.length()
+    return args
+  }
+}
+
+@retry_api(3, "ab")
+fn victim_api(a: int) -> int { return a * 10 }
+
+@retry_sugar(3, "ab")
+fn victim_sugar(a: int) -> int { return a * 10 }
+
+@retry_sugar(5, "xy")
+fn victim_split(a: int) -> int { return a * 10 }
+
+(victim_api(4) * 1000 + victim_sugar(4)) * 1000 + victim_split(4)
+"#;
+
+fn row_for<'a>(
+    compiler: &'a crate::compiler::BytecodeCompiler,
+    target: &str,
+) -> &'a crate::compiler::template_specialization::install_registry::HookInstallRecord {
+    compiler
+        .hook_install_registry
+        .iter()
+        .find(|row| row.target_name == target)
+        .unwrap_or_else(|| panic!("registry row for {target}"))
+}
+
+// E1 — BEHAVIORAL equivalence: identical executed values AND registry-row
+// agreement on hook kind, capture names + LiftedConst renderings, the
+// `::cfg#{n}` arity head, and the (implicit) application target.
+#[test]
+fn s4d_e1_sugar_and_handwritten_api_twin_agree_behaviorally() {
+    let (value, compiler) = top_level_i64(S4D_EQUIVALENCE_SRC);
+    assert_eq!(
+        value, 140_140_220,
+        "the sugar twin and the hand-written API twin execute IDENTICALLY \
+         (both equal-config targets 140); the split control executes its own config (220)"
+    );
+    assert_eq!(compiler.hook_install_registry.len(), 3, "one row per install");
+
+    let api = row_for(&compiler, "victim_api");
+    let sugar = row_for(&compiler, "victim_sugar");
+    assert_eq!(
+        api.hook_kind, sugar.hook_kind,
+        "row agreement: hook kind (both Before)"
+    );
+    assert_eq!(api.hook_kind, TemplateHookKind::Before);
+    assert_eq!(
+        api.captures, sugar.captures,
+        "row agreement: capture names + LiftedConst renderings, in declared order"
+    );
+    assert_eq!(
+        api.captures,
+        vec![
+            ("times".to_string(), "3".to_string()),
+            ("tag".to_string(), "\"ab\"".to_string())
+        ]
+    );
+    for row in [api, sugar] {
+        assert!(
+            row.specialized_symbol.contains("::cfg#2"),
+            "row agreement: the two-value config arity head: {}",
+            row.specialized_symbol
+        );
+    }
+    // Target agreement: both paths install on the IMPLICIT application
+    // target (their own annotated fn) — neither path names a target.
+    assert_eq!(api.target_name, "victim_api");
+    assert_eq!(sugar.target_name, "victim_sugar");
+    assert_eq!(api.annotation_name, "retry_api");
+    assert_eq!(sugar.annotation_name, "retry_sugar");
+}
+
+// E2 — IDENTITY-SUFFIX equivalence: the `::cfg#` tail of both specialized
+// symbols is BYTE-IDENTICAL for equal config (the ONE identity-suffix
+// producer serves both paths); differing config splits the tail.
+#[test]
+fn s4d_e2_cfg_identity_suffix_is_byte_identical_across_both_paths() {
+    let (_, compiler) = top_level_i64(S4D_EQUIVALENCE_SRC);
+
+    let split = |target: &str| -> (String, String) {
+        let symbol = row_for(&compiler, target).specialized_symbol.clone();
+        let (head, tail) = symbol
+            .split_once("::cfg#")
+            .unwrap_or_else(|| panic!("{target}: symbol carries a ::cfg# segment: {symbol}"));
+        (head.to_string(), tail.to_string())
+    };
+    let (api_head, api_tail) = split("victim_api");
+    let (sugar_head, sugar_tail) = split("victim_sugar");
+    let (_, split_tail) = split("victim_split");
+
+    assert_eq!(
+        api_tail, sugar_tail,
+        "equal config: the rule-6 identity tail (netstring segments) is BYTE-IDENTICAL \
+         across the hand-written and sugar paths"
+    );
+    assert!(
+        api_tail.starts_with("2::"),
+        "the tail begins with the two-value arity head: {api_tail}"
+    );
+    assert_ne!(
+        api_head, sugar_head,
+        "why full-symbol equality is impossible: the sugar's minted hygienic body-fn \
+         name differs from the hand-written `api_body` (heads: {api_head} vs {sugar_head})"
+    );
+    assert_ne!(
+        split_tail, api_tail,
+        "differing-config SPLIT control: (5, \"xy\") produces a different identity tail"
+    );
+}
+
+// E3 — STRUCTURAL ZERO-SIDE-CHANNEL: walk the synthesized handler AST and
+// whitelist-check every node. Any statement or expression kind outside the
+// exact `install(before_hook|after_hook(<minted>, [capture("p", p), …]))`
+// shape panics — the machine proof that the lowering's output is literally
+// a public-API program (C3-G2: zero private side-channels BY CONSTRUCTION).
+#[test]
+fn s4d_e3_synthesized_handler_ast_is_public_api_only() {
+    use crate::compiler::statements::annotation_declarations::sugar_lowering::{
+        lower_typed_config_declarative_hooks, SugarLowering,
+    };
+    use shape_ast::ast::{AnnotationHandlerType, BlockItem, Expr, Item, Literal};
+
+    let src = r#"
+annotation retry(times: int, tag: string) {
+  targets: [function]
+  before(args) {
+    args[0] = args[0] * times + tag.length()
+    return args
+  }
+  after(result) {
+    return result + times
+  }
+}
+"#;
+    let program = shape_ast::parse_program(src).expect("fixture parses");
+    let definition = program
+        .items
+        .iter()
+        .find_map(|item| match item {
+            Item::AnnotationDef(definition, _) => Some(definition.clone()),
+            _ => None,
+        })
+        .expect("fixture has an annotation definition");
+    let compiler = crate::compiler::BytecodeCompiler::new();
+    let SugarLowering {
+        post_handler,
+        body_fns,
+    } = lower_typed_config_declarative_hooks(&compiler, &definition)
+        .expect("the TypedConfig definition lowers")
+        .expect("declarative hooks produce a lowering");
+
+    // The handler shell: a zero-param `comptime post` (config arrives via
+    // the S4b typed injection, exactly as for a hand-written handler).
+    assert!(matches!(
+        post_handler.handler_type,
+        AnnotationHandlerType::ComptimePost
+    ));
+    assert!(post_handler.params.is_empty(), "zero declared params");
+    assert!(post_handler.return_type.is_none());
+
+    let config_params = ["times", "tag"];
+    let minted_names: Vec<&str> = body_fns.iter().map(|f| f.name.as_str()).collect();
+    assert_eq!(minted_names.len(), 2, "one minted body fn per declarative hook");
+
+    // Whitelist walk. Every `match` arm below names an ALLOWED node; every
+    // else-branch panics — nothing outside the four public spellings can
+    // survive the walk.
+    let Expr::Block(block, _) = &post_handler.body else {
+        panic!("the synthesized body is a block, got {:?}", post_handler.body);
+    };
+    assert_eq!(
+        block.items.len(),
+        2,
+        "exactly one install statement per declarative hook, nothing else"
+    );
+    let expected_hooks = ["before_hook", "after_hook"];
+    for (index, item) in block.items.iter().enumerate() {
+        let BlockItem::Expression(expr) = item else {
+            panic!("non-expression item in the synthesized handler: {item:?}");
+        };
+        // install(<hook_call>)
+        let Expr::FunctionCall {
+            name: install_name,
+            const_args,
+            args,
+            named_args,
+            ..
+        } = expr
+        else {
+            panic!("non-call statement in the synthesized handler: {expr:?}");
+        };
+        assert_eq!(install_name, "install", "the outer call is `install`");
+        assert!(const_args.is_empty() && named_args.is_empty());
+        assert_eq!(args.len(), 1, "install takes exactly the hook call");
+        // before_hook/after_hook(<minted_ident>, [captures])
+        let Expr::FunctionCall {
+            name: hook_name,
+            const_args,
+            args: hook_args,
+            named_args,
+            ..
+        } = &args[0]
+        else {
+            panic!("install's argument must be a hook-builtin call: {:?}", args[0]);
+        };
+        assert_eq!(
+            hook_name, expected_hooks[index],
+            "hooks lower in declaration order"
+        );
+        assert!(const_args.is_empty() && named_args.is_empty());
+        assert_eq!(hook_args.len(), 2, "hook builtin takes (fn_ident, captures)");
+        let Expr::Identifier(fn_ident, _) = &hook_args[0] else {
+            panic!("the hook's template must be a bare identifier: {:?}", hook_args[0]);
+        };
+        assert_eq!(
+            fn_ident, minted_names[index],
+            "the identifier names THIS hook's minted body fn"
+        );
+        let Expr::Array(captures, _) = &hook_args[1] else {
+            panic!("the captures argument must be an array literal: {:?}", hook_args[1]);
+        };
+        assert_eq!(
+            captures.len(),
+            config_params.len(),
+            "one capture per config param"
+        );
+        for (capture, expected_param) in captures.iter().zip(config_params) {
+            // capture("p", p) — name literal + BARE config-param identifier.
+            let Expr::FunctionCall {
+                name: capture_name,
+                const_args,
+                args: capture_args,
+                named_args,
+                ..
+            } = capture
+            else {
+                panic!("captures array element must be a capture() call: {capture:?}");
+            };
+            assert_eq!(capture_name, "capture");
+            assert!(const_args.is_empty() && named_args.is_empty());
+            assert_eq!(capture_args.len(), 2);
+            let Expr::Literal(Literal::String(literal_name), _) = &capture_args[0] else {
+                panic!("capture's first arg must be a string literal: {:?}", capture_args[0]);
+            };
+            let Expr::Identifier(value_ident, _) = &capture_args[1] else {
+                panic!(
+                    "capture's VALUE arg must be a BARE config-param identifier \
+                     (zero side-channels): {:?}",
+                    capture_args[1]
+                );
+            };
+            assert_eq!(literal_name, expected_param, "captures in declared order");
+            assert_eq!(
+                value_ident, literal_name,
+                "the value identifier IS the named config param"
+            );
+        }
+    }
+}
