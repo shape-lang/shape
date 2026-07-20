@@ -84,6 +84,7 @@ mod control_flow;
 mod body_analysis_authority;
 mod checked_body;
 mod comptime_fragments;
+mod template_specialization;
 mod expressions;
 mod functions;
 mod functions_annotations;

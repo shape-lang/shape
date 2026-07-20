@@ -267,7 +267,7 @@ impl CheckedBodyBuilder<Present, Present> {
 /// install-time job). Reuses the authoritative capture-family codes AND their
 /// `ShapeError::SemanticError` class (D4: reuse, do not mint parallel codes or a
 /// divergent class).
-fn validate_capture_clause(clause: &CaptureClause) -> Result<()> {
+pub(in crate::compiler) fn validate_capture_clause(clause: &CaptureClause) -> Result<()> {
     let mut seen: Vec<&str> = Vec::with_capacity(clause.entries.len());
     for entry in &clause.entries {
         if entry.mode.is_borrow() {
