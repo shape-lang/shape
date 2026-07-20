@@ -3035,6 +3035,154 @@ mod e1_s5_reconstruction {
     }
 }
 
+// ADR-009 E1 #17 slice-5 A-FULL — STAGE 5 route-proof pins (E1-D7(a)/(b)/(c)).
+//
+// The consumer flip (stage 4) is LIVE: a STAMPED `__ComptimeTypeRef` resolves
+// identity-only via `reconstruct_type_annotation`, never `.source`. These four
+// pins prove the ROUTE the live resolver actually takes, by stamping a real
+// identity onto a ref whose `.source` is UNPARSEABLE — a green result can then
+// ONLY have come from the identity path (a `.source` reparse of
+// "###unparseable###" would error). Plain `#[cfg(test)]` (NOT deep-tests-gated)
+// so the standard supervisor gate runs them (E2 finding 5: pins in a
+// deep-tests-gated module never run under the default gate). No production code
+// changes this stage, so every recorded baseline is unmoved by construction.
+#[cfg(test)]
+mod e1_s5_route_proof {
+    use super::reconstruct_type_annotation;
+    use super::semantic_freeze::overlay_for_tests;
+    use super::type_annotation_from_string_or_type_ref_slot;
+    use super::FrozenTypeIdentity;
+    use crate::compiler::comptime_target::build_type_ref_descriptor;
+    use crate::compiler::BytecodeCompiler;
+    use shape_ast::ast::TypeAnnotation;
+    use shape_ast::error::ShapeError;
+
+    // (a) LEAF identity route. A `__ComptimeTypeRef` stamped with `string`'s
+    // frozen identity but an UNPARSEABLE `.source` resolves to `Basic("string")`
+    // — success PROVES the identity route fired, because a `.source` reparse of
+    // "###unparseable###" would error. This is the unit-tier witness for the
+    // byte-identical corpus flip (leaf `string` now resolves via identity).
+    #[test]
+    fn e1_s5_leaf_identity_route_resolves_past_garbage_source() {
+        let overlay = overlay_for_tests(&BytecodeCompiler::new());
+        let identity = overlay
+            .canonicalize_type(&TypeAnnotation::Basic("string".to_string()))
+            .expect("`string` canonicalizes to a leaf identity");
+        let slot = build_type_ref_descriptor("###unparseable###", None, Some(identity));
+        let resolved =
+            type_annotation_from_string_or_type_ref_slot(&slot, "__emit_set_return_type", &overlay)
+                .expect("a stamped leaf ref resolves via identity, not the garbage source");
+        assert_eq!(
+            resolved,
+            TypeAnnotation::Basic("string".to_string()),
+            "the identity route reconstructs the canonical leaf, past the unparseable source"
+        );
+    }
+
+    // (b) COMPOSITE identity route + shared-overlay (unit tier). A
+    // `__ComptimeTypeRef` stamped with `[int, string]`'s composite identity plus
+    // a garbage source resolves to the byte-identical Tuple — ON THE SAME overlay
+    // the identity was minted from (the composite payload lives in that Arc's
+    // per-instance `composites` memo, so a DIFFERENT overlay could not answer
+    // `payload_of`). Green proves BOTH the composite route AND the shared-overlay
+    // requirement at the unit tier; the Tuple e2e is the integration canary for
+    // the same property across the real handler path.
+    #[test]
+    fn e1_s5_composite_identity_route_resolves_past_garbage_source() {
+        let overlay = overlay_for_tests(&BytecodeCompiler::new());
+        let tuple = TypeAnnotation::Tuple(vec![
+            TypeAnnotation::Basic("int".to_string()),
+            TypeAnnotation::Basic("string".to_string()),
+        ]);
+        // `canonicalize_type_projection` (NOT bare `canonicalize_type`) is the
+        // producer's own stamp-site call: it BOTH computes the identity AND
+        // interns the composite payload into this overlay's `composites` memo,
+        // exactly as `stamp_for` does — the same shared-overlay evidence the
+        // consumer's `payload_of` then reads.
+        let identity = overlay
+            .canonicalize_type_projection(&tuple)
+            .expect("[int, string] canonicalizes + interns its composite payload")
+            .identity();
+        let slot = build_type_ref_descriptor("###unparseable###", None, Some(identity));
+        let resolved =
+            type_annotation_from_string_or_type_ref_slot(&slot, "__emit_set_return_type", &overlay)
+                .expect("a stamped composite ref resolves via identity off the SAME overlay");
+        assert_eq!(
+            resolved,
+            TypeAnnotation::Tuple(vec![
+                TypeAnnotation::Basic("int".to_string()),
+                TypeAnnotation::Basic("string".to_string()),
+            ]),
+            "the composite route recurses the Tuple element identities, past the garbage source"
+        );
+    }
+
+    // (c) ANTI-WALK-BACK sentinel (E1-D7(a)). A STAMPED-but-never-frozen identity
+    // is a NAMED `ShapeError::SemanticError` — NOT `Ok`, NOT a silent `.source`
+    // reparse. `reconstruct_type_annotation` is called directly (the exact fn the
+    // live resolver invokes on a stamped ref) with an identity the overlay never
+    // issued; `payload_of` rejects it with its named unknown-identity error,
+    // surfaced as a typed SemanticError. This is the canonical stamped->reparse
+    // walk-back refusal made a test: a stamped identity NEVER falls back.
+    #[test]
+    fn e1_s5_stamped_unresolvable_identity_is_named_semantic_error_no_fallback() {
+        let overlay = overlay_for_tests(&BytecodeCompiler::new());
+        // A fabricated identity the freeze never issued (SHA-256 prefixes are not
+        // 0xDEAD/0xBEEF), and NOT the INVALID sentinel — a genuinely STAMPED ref.
+        let fabricated = FrozenTypeIdentity {
+            high: 0xDEAD,
+            low: 0xBEEF,
+        };
+        assert_ne!(
+            fabricated,
+            FrozenTypeIdentity::INVALID,
+            "the sentinel must be a STAMPED identity, not INVALID"
+        );
+        match reconstruct_type_annotation(&overlay, fabricated) {
+            Err(ShapeError::SemanticError { .. }) => {}
+            other => panic!(
+                "a stamped-but-unresolvable identity must be a NAMED SemanticError with NO \
+                 fallback to reparse (E1-D7(a)); got {other:?}"
+            ),
+        }
+    }
+
+    // (d) UNSTAMPED (INVALID) ref falls through to the `.source` reparse arm,
+    // byte-for-byte. An `identity == INVALID` ref with a VALID source resolves
+    // via the reparse arm; the negative sub-case (INVALID + GARBAGE source) still
+    // Errs — proving the reparse arm is GENUINELY reached and live, not shadowed
+    // by an always-on identity path. This is the dead-but-present legacy path the
+    // unstamped/legacy refs still use until slice 6.
+    #[test]
+    fn e1_s5_unstamped_typeref_falls_through_to_source_arm_bytewise() {
+        let overlay = overlay_for_tests(&BytecodeCompiler::new());
+
+        // INVALID stamp (None identity) + valid source -> reparse arm -> Basic.
+        let valid = build_type_ref_descriptor("string", None, None);
+        let resolved = type_annotation_from_string_or_type_ref_slot(
+            &valid,
+            "__emit_set_return_type",
+            &overlay,
+        )
+        .expect("an unstamped ref with a valid source resolves via the reparse arm");
+        assert_eq!(resolved, TypeAnnotation::Basic("string".to_string()));
+
+        // INVALID stamp + GARBAGE source -> the reparse arm is genuinely reached
+        // and Errs (an always-on identity path would never surface a parse error).
+        let garbage = build_type_ref_descriptor("###unparseable###", None, None);
+        let err = type_annotation_from_string_or_type_ref_slot(
+            &garbage,
+            "__emit_set_return_type",
+            &overlay,
+        )
+        .expect_err("an unstamped ref with a garbage source Errs through the live reparse arm");
+        assert!(
+            err.contains("###unparseable###") || err.to_lowercase().contains("parse"),
+            "the error is the reparse arm's own parse failure, got: {err}"
+        );
+    }
+}
+
 #[cfg(all(test, feature = "deep-tests"))]
 mod tests {
     use super::*;
