@@ -119,6 +119,25 @@ time, the repo is the authority.
   implement stages through the memory-capped lane, supervisor integration
   verify after.
 
+- **E1-D8 (applied-generic boundary — stamp-gate; USER-RATIFIED 2026-07-20).**
+  Slice-5 stage-1 PROVED (pins at `389c1940`; supervisor-verified at
+  `semantic_freeze.rs:1122-1125`) that applied generic nominals
+  (`Array<int>`, `Option<T>`, `HashMap<K,V>`) canonicalize to a Nominal
+  identity but `payload_of` yields the pre-existing NAMED
+  `applied_nominal_pending_rejection` — `substituted_applied_nominal` is
+  None for builtin/generic heads. Reconstruction for them requires B4/B5
+  applied-nominal substitution, OUT of E1's footprint. Ruling: **stamp-gate**
+  — producers stamp FrozenTypeIdentity iff `reconstruct_type_annotation`
+  (the SAME predicate the consumer uses) succeeds; the reconstructable
+  frontier = primitives, Never, base `any`, Tuple, Reference, Union,
+  Callable. Applied generics / records / bare user-nominals fall through
+  UNSTAMPED to the `.source` reparse arm, which therefore stays **LIVE for
+  exactly that class** (not deletable in slice 6) until B4/B5 lands, then
+  E5 deletes it. A named follow-up issue binds the residual at E1 close.
+  Composite e2e coverage = Tuple (Array<int> would force a false failure or
+  a forbidden silent fallback). This narrows E1-D7's "composites included"
+  to the provable frontier — user-dispositioned, not a walk-back.
+
 ## Operating rules
 
 The E2-proven pipeline carries over wholesale (recorded in the AGENTS.md E1
