@@ -13,6 +13,10 @@
 //! - `type_ref` siblings: typed descriptors beside each string type field
 //! - `annotations`: array of annotation names already applied
 
+// ADR-009 E1 #17 (slice 5): the producer-stamped semantic identity carried by
+// each `__ComptimeTypeRef`. Re-exported by `comptime_builtins`; the type_ref's
+// consumer resolves the SAME identity via `reconstruct_type_annotation`.
+use crate::compiler::comptime_builtins::FrozenTypeIdentity;
 use shape_ast::ast::functions::Annotation;
 pub(crate) use shape_ast::ast::functions::AnnotationTargetKind;
 use shape_ast::ast::literals::Literal;
@@ -103,17 +107,29 @@ fn type_ref_name_from_source(source: &str) -> String {
     source.to_string()
 }
 
-pub(crate) fn build_type_ref_descriptor(source: &str, kind: Option<&str>) -> KindedSlot {
+pub(crate) fn build_type_ref_descriptor(
+    source: &str,
+    kind: Option<&str>,
+    identity: Option<FrozenTypeIdentity>,
+) -> KindedSlot {
     use shape_runtime::type_schema::typed_object_for_named_schema;
 
     let source = source.trim();
     let kind = kind.unwrap_or_else(|| type_ref_kind_from_source(source));
+    // ADR-009 E1 #17 (slice 5, A-FULL): an unstamped ref carries INVALID
+    // ({-1,-1}) so the consumer's identity-only route is a no-op (identity ==
+    // INVALID → the existing `.source` reparse arm, E1-D7(a)). The int halves
+    // are stamped exactly as `build_frozen_type_ref_heap_value`
+    // (type_reflection.rs) does for the sibling schema.
+    let id = identity.unwrap_or(FrozenTypeIdentity::INVALID);
     typed_object_for_named_schema(
         "__ComptimeTypeRef",
         &[
             ("name", nb_string(type_ref_name_from_source(source))),
             ("kind", nb_string(kind.to_string())),
             ("source", nb_string(source.to_string())),
+            ("identity_high", KindedSlot::from_int(id.high)),
+            ("identity_low", KindedSlot::from_int(id.low)),
         ],
     )
 }
@@ -208,7 +224,7 @@ pub(crate) fn build_field_descriptor_array(
                 ("optional", KindedSlot::from_bool(is_optional)),
                 (
                     "type_ref",
-                    build_type_ref_descriptor(&unwrap_option_type(ftype), None),
+                    build_type_ref_descriptor(&unwrap_option_type(ftype), None, None),
                 ),
             ],
         ));
@@ -447,7 +463,7 @@ impl ComptimeTarget {
                         ("name", nb_string(pname.clone())),
                         ("type", nb_string(ptype.clone())),
                         ("const", KindedSlot::from_bool(*is_const)),
-                        ("type_ref", build_type_ref_descriptor(ptype, None)),
+                        ("type_ref", build_type_ref_descriptor(ptype, None, None)),
                     ],
                 )
             })
@@ -463,8 +479,8 @@ impl ComptimeTarget {
         let ret_ref = self
             .return_type
             .as_deref()
-            .map(|r| build_type_ref_descriptor(r, None))
-            .unwrap_or_else(|| build_type_ref_descriptor("unknown", Some("Unresolved")));
+            .map(|r| build_type_ref_descriptor(r, None, None))
+            .unwrap_or_else(|| build_type_ref_descriptor("unknown", Some("Unresolved"), None));
 
         // annotations: array of strings (names only)
         let ann_arr = nb_string_array(self.annotations.clone())?;

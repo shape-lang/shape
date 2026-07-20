@@ -67,6 +67,22 @@ const PRIMITIVE_SYNONYM_FAMILIES: &[(&[&str], FrozenPrimitive)] = &[
     (&["undefined"], FrozenPrimitive::Undefined),
 ];
 
+/// ADR-009 E1 #17 (slice 5, A-FULL): invert the ONE [`PRIMITIVE_SYNONYM_FAMILIES`]
+/// table — the canonical (`names[0]`) spelling for a frozen primitive. The type-ref
+/// reconstruction path (`reconstruct_type_annotation`) reads THIS, never a second
+/// name table (E1-D7(c)): the same table that classifies leaf names forward also
+/// spells them back, so a synonym (`str`, `i64`, `f64`) always reconstructs to its
+/// family's canonical form (`string`, `int`, `number`). `None` iff a new
+/// `FrozenPrimitive` variant is added without a table row — a named rejection at
+/// the caller, never a guessed spelling.
+#[allow(dead_code)] // E1 slice-5 stage 2: consumer half; wired live at stage 4.
+pub(crate) fn canonical_primitive_spelling(primitive: FrozenPrimitive) -> Option<&'static str> {
+    PRIMITIVE_SYNONYM_FAMILIES
+        .iter()
+        .find(|(_, family_primitive)| *family_primitive == primitive)
+        .and_then(|(names, _)| names.first().copied())
+}
+
 /// ADR-009 B6 R2 (Dec 63): a callable's parameters are heterogeneous
 /// signature-indexed descriptors, not a homogeneous top-typed collection.
 /// Modeling a signature parameter with the compiler-internal `Any` top type
@@ -2358,7 +2374,7 @@ pub(super) fn build_type_info_heap_value(
             ("fields", fields),
             (
                 "type_ref",
-                comptime_target::build_type_ref_descriptor(type_name, Some(label.as_str())),
+                comptime_target::build_type_ref_descriptor(type_name, Some(label.as_str()), None),
             ),
         ],
     ))
