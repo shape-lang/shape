@@ -75,7 +75,6 @@ const PRIMITIVE_SYNONYM_FAMILIES: &[(&[&str], FrozenPrimitive)] = &[
 /// family's canonical form (`string`, `int`, `number`). `None` iff a new
 /// `FrozenPrimitive` variant is added without a table row — a named rejection at
 /// the caller, never a guessed spelling.
-#[allow(dead_code)] // E1 slice-5 stage 2: consumer half; wired live at stage 4.
 pub(crate) fn canonical_primitive_spelling(primitive: FrozenPrimitive) -> Option<&'static str> {
     PRIMITIVE_SYNONYM_FAMILIES
         .iter()

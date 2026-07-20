@@ -416,6 +416,7 @@ fn field_slot_from_typed_object(
 fn type_annotation_from_string_or_type_ref_slot(
     slot: &KindedSlot,
     builtin_name: &str,
+    overlay: &FreezeOverlay,
 ) -> Result<shape_ast::ast::TypeAnnotation, String> {
     // ADR-009 E1 #17 (slice 3, U01): a literal type is carried as an INDEX into
     // the per-run typed store (`COMPTIME_DIRECTIVE_TYPES`) — no JSON, no reparse.
@@ -461,6 +462,34 @@ fn type_annotation_from_string_or_type_ref_slot(
             schema.name
         ));
     }
+    // ADR-009 E1 #17 (slice 5, A-FULL) — E1-D7(a) STAMPED->IDENTITY-ONLY: a
+    // type_ref carrying a real frozen identity resolves via the ONE inverse of
+    // the semantic-freeze composite algebra (`reconstruct_type_annotation`),
+    // NEVER by reparsing `.source`. A stamped-but-unresolvable identity is a
+    // NAMED `ShapeError::SemanticError` (surfaced here as its `String` at the
+    // consumer ABI boundary) with NO silent fallback to reparse — silent
+    // stamped->reparse is the canonical walk-back shape and is refused. Only an
+    // UNSTAMPED ref (identity == INVALID) falls through to the `.source` reparse
+    // arm below, byte-unchanged (slice 6 deletes it). The identity halves are
+    // read with the same `get_field` -> `clone_field_kinded` -> `as_i64` shape
+    // as `frozen_identity_from_ref` (type_reflection.rs) — an existing
+    // sanctioned read of the sibling schema, not a new decode path.
+    let identity_field = |name: &str| -> Result<i64, String> {
+        let field = schema
+            .get_field(name)
+            .ok_or_else(|| format!("__ComptimeTypeRef schema has no {name} field"))?;
+        storage
+            .clone_field_kinded(field.index as usize)
+            .and_then(|value| value.as_i64())
+            .ok_or_else(|| format!("__ComptimeTypeRef {name} is not an integer"))
+    };
+    let identity = FrozenTypeIdentity {
+        high: identity_field("identity_high")?,
+        low: identity_field("identity_low")?,
+    };
+    if identity != FrozenTypeIdentity::INVALID {
+        return reconstruct_type_annotation(overlay, identity).map_err(|e| e.to_string());
+    }
     let source = string_field_from_typed_object(storage, &schema, "source")?;
     parse_type_annotation_payload(&source)
 }
@@ -486,13 +515,12 @@ fn type_annotation_from_string_or_type_ref_slot(
 ///   nominal reconstruction is B4/B5, record field names are one-way-hashed into
 ///   hygienic member identities) — each a distinct NAMED rejection.
 ///
-/// STAGE 2 (behavior-preserving): this is the consumer half of the A-FULL route
-/// but is NOT yet wired into the live directive resolver
-/// (`type_annotation_from_string_or_type_ref_slot` still reparses `.source`);
-/// the producer stamp-gate (stage 3) and the consumer flip (stage 4) make it
-/// live. The stamp-gate uses THIS predicate (`reconstruct_type_annotation(...)
-/// .is_ok()`) so producer and consumer share one code path (E1-D7(b)).
-#[allow(dead_code)] // E1 slice-5 stage 2: wired into the live consumer at stage 4.
+/// STAGE 4 (LIVE): the consumer flip wired this into the live directive
+/// resolver — `type_annotation_from_string_or_type_ref_slot` now resolves a
+/// stamped `__ComptimeTypeRef` through THIS inverse (identity-only, no
+/// `.source` fallback), and the producer stamp-gate (stage 3) admits an
+/// identity iff `reconstruct_type_annotation(...).is_ok()`, so producer and
+/// consumer share ONE code path (E1-D7(b)).
 pub(crate) fn reconstruct_type_annotation(
     overlay: &FreezeOverlay,
     identity: FrozenTypeIdentity,
@@ -710,6 +738,7 @@ fn build_function_item(
     name: &str,
     return_type_slot: &KindedSlot,
     value_slot: &KindedSlot,
+    overlay: &FreezeOverlay,
 ) -> Result<shape_ast::ast::Item, String> {
     use shape_ast::ast::{FunctionDef, Item, Span, Statement};
 
@@ -719,7 +748,8 @@ fn build_function_item(
             name
         ));
     }
-    let return_type = type_annotation_from_string_or_type_ref_slot(return_type_slot, "item_fn")?;
+    let return_type =
+        type_annotation_from_string_or_type_ref_slot(return_type_slot, "item_fn", overlay)?;
     let body_expr = literal_expr_from_slot(value_slot, "item_fn")?;
 
     Ok(Item::Function(
@@ -843,6 +873,7 @@ fn build_extend_method_item(
     return_type_slot: &KindedSlot,
     segments: &[String],
     field_splices: &[String],
+    overlay: &FreezeOverlay,
 ) -> Result<shape_ast::ast::Item, String> {
     use shape_ast::ast::{Expr, InterpolationMode, Literal, Span};
 
@@ -886,6 +917,7 @@ fn build_extend_method_item(
         method_name,
         return_type_slot,
         body_expr,
+        overlay,
     )
 }
 
@@ -906,6 +938,7 @@ fn build_extend_method_literal_item(
     method_name: &str,
     return_type_slot: &KindedSlot,
     value_slot: &KindedSlot,
+    overlay: &FreezeOverlay,
 ) -> Result<shape_ast::ast::Item, String> {
     let body_expr = literal_expr_from_slot(value_slot, "extend_method_literal")?;
     build_extend_item_with_method_body(
@@ -914,6 +947,7 @@ fn build_extend_method_literal_item(
         method_name,
         return_type_slot,
         body_expr,
+        overlay,
     )
 }
 
@@ -931,6 +965,7 @@ fn build_extend_item_with_method_body(
     method_name: &str,
     return_type_slot: &KindedSlot,
     body_expr: shape_ast::ast::Expr,
+    overlay: &FreezeOverlay,
 ) -> Result<shape_ast::ast::Item, String> {
     use shape_ast::ast::{ExtendStatement, Item, MethodDef, Span, Statement, TypeName};
 
@@ -945,7 +980,8 @@ fn build_extend_item_with_method_body(
         ));
     }
 
-    let return_type = type_annotation_from_string_or_type_ref_slot(return_type_slot, builtin_name)?;
+    let return_type =
+        type_annotation_from_string_or_type_ref_slot(return_type_slot, builtin_name, overlay)?;
 
     let method = MethodDef {
         name: method_name.to_string(),
@@ -1044,7 +1080,7 @@ pub(crate) fn create_comptime_builtins_module(
     site_time_impl_keys: HashSet<String>,
     freeze: Arc<FreezeOverlay>,
 ) -> ModuleExports {
-    let mut module = comptime_builtins_module_base(trait_impl_keys);
+    let mut module = comptime_builtins_module_base(trait_impl_keys, Arc::clone(&freeze));
     // ADR-009 B2 (slice S4): `trait_ref` / `find_impl` consume the SAME
     // freeze handle — implementation evidence comes ONLY from the frozen
     // barrier truth (freeze inputs 4/5), never from the legacy
@@ -1066,7 +1102,22 @@ pub(crate) fn create_comptime_builtins_module(
 // consumes the real freeze handle via `create_comptime_builtins_module`.
 
 /// All comptime builtins EXCEPT the freeze-consuming reflection trio.
-fn comptime_builtins_module_base(trait_impl_keys: HashSet<String>) -> ModuleExports {
+///
+/// ADR-009 E1 #17 (slice 5, A-FULL): the typed-generation producers
+/// (`item_fn` / `extend_method` / `extend_method_literal`) and the type-ref
+/// directive emitters (`__emit_set_param_type` / `__emit_set_return_type`) now
+/// resolve a stamped `__ComptimeTypeRef` via its frozen identity, so they need
+/// the SAME `Arc<FreezeOverlay>` the producer stamped with (stage 3
+/// shared-overlay plumbing). Each such closure move-captures its own
+/// `Arc::clone(&freeze)` and threads `&freeze` into
+/// `type_annotation_from_string_or_type_ref_slot`, whose `overlay.payload_of`
+/// then finds any composite identity interned at produce time. The overlay
+/// reaching the reflection trio (`create_comptime_builtins_module`) is the same
+/// Arc, so the whole comptime module shares one freeze memo.
+fn comptime_builtins_module_base(
+    trait_impl_keys: HashSet<String>,
+    freeze: Arc<FreezeOverlay>,
+) -> ModuleExports {
     let mut module = ModuleExports::new("__comptime__");
 
     // implements(type_name: string, trait_name: string) -> bool
@@ -1253,6 +1304,7 @@ fn comptime_builtins_module_base(trait_impl_keys: HashSet<String>) -> ModuleExpo
     // `fn ...` source text. The fragment is still converted to an AST item and
     // compiled by the same strict registration/type/body pipeline as the
     // source-string `extend (expr)` path.
+    let freeze_for_item_fn = Arc::clone(&freeze);
     register_typed_function(
         &mut module,
         "item_fn",
@@ -1287,14 +1339,14 @@ fn comptime_builtins_module_base(trait_impl_keys: HashSet<String>) -> ModuleExpo
         // returns a handle carrying its index. (Slice 5 deleted the legacy
         // `__ComptimeItemFragment` sentinel map + its fragment builders.)
         ConcreteType::OpaqueTypedObject("__CheckedItem".to_string()),
-        |slots, _ctx| {
+        move |slots, _ctx| {
             if slots.len() != 3 {
                 return Err(format!("item_fn expects 3 arguments, got {}", slots.len()));
             }
             let name = slots[0]
                 .as_str()
                 .ok_or_else(|| "item_fn expects a string function name".to_string())?;
-            let item = build_function_item(name, &slots[1], &slots[2])?;
+            let item = build_function_item(name, &slots[1], &slots[2], &freeze_for_item_fn)?;
             let index = push_comptime_checked_item(CheckedItem::new(item));
             let handle = typed_object_for_named_schema(
                 "__CheckedItem",
@@ -1323,6 +1375,7 @@ fn comptime_builtins_module_base(trait_impl_keys: HashSet<String>) -> ModuleExpo
     // reserve / register), so there is zero consumer change. `extend_method` is
     // an INTERNAL builtin (stdlib-consumed like item_fn), not a public
     // quote/builder surface (that stays E1's per the C2 D1 amendment).
+    let freeze_for_extend_method = Arc::clone(&freeze);
     register_typed_function(
         &mut module,
         "extend_method",
@@ -1367,7 +1420,7 @@ fn comptime_builtins_module_base(trait_impl_keys: HashSet<String>) -> ModuleExpo
             },
         ],
         ConcreteType::OpaqueTypedObject("__CheckedItem".to_string()),
-        |slots, _ctx| {
+        move |slots, _ctx| {
             if slots.len() != 5 {
                 return Err(format!(
                     "extend_method expects 5 arguments, got {}",
@@ -1388,6 +1441,7 @@ fn comptime_builtins_module_base(trait_impl_keys: HashSet<String>) -> ModuleExpo
                 &slots[2],
                 &segments,
                 &field_splices,
+                &freeze_for_extend_method,
             )?;
             let index = push_comptime_checked_item(CheckedItem::new(item));
             let handle = typed_object_for_named_schema(
@@ -1412,6 +1466,7 @@ fn comptime_builtins_module_base(trait_impl_keys: HashSet<String>) -> ModuleExpo
     // extend_method, handler-scope resolution requires the paired forwarder row in
     // `COMPTIME_BUILTIN_FORWARDERS` IN ADDITION to this registration, or
     // `extend_method_literal(...)` is `[C0001] Undefined function` in a handler.
+    let freeze_for_extend_method_literal = Arc::clone(&freeze);
     register_typed_function(
         &mut module,
         "extend_method_literal",
@@ -1445,7 +1500,7 @@ fn comptime_builtins_module_base(trait_impl_keys: HashSet<String>) -> ModuleExpo
             },
         ],
         ConcreteType::OpaqueTypedObject("__CheckedItem".to_string()),
-        |slots, _ctx| {
+        move |slots, _ctx| {
             if slots.len() != 4 {
                 return Err(format!(
                     "extend_method_literal expects 4 arguments, got {}",
@@ -1463,6 +1518,7 @@ fn comptime_builtins_module_base(trait_impl_keys: HashSet<String>) -> ModuleExpo
                 method_name,
                 &slots[2],
                 &slots[3],
+                &freeze_for_extend_method_literal,
             )?;
             let index = push_comptime_checked_item(CheckedItem::new(item));
             let handle = typed_object_for_named_schema(
@@ -1506,6 +1562,7 @@ fn comptime_builtins_module_base(trait_impl_keys: HashSet<String>) -> ModuleExpo
 
     // Internal comptime directive: set a parameter type by parameter name.
     // __emit_set_param_type(param_name: string, type_payload: string | TypeRef)
+    let freeze_for_set_param_type = Arc::clone(&freeze);
     register_typed_function(
         &mut module,
         "__emit_set_param_type",
@@ -1525,7 +1582,7 @@ fn comptime_builtins_module_base(trait_impl_keys: HashSet<String>) -> ModuleExpo
             },
         ],
         ConcreteType::Unit,
-        |slots, _ctx| {
+        move |slots, _ctx| {
             if slots.len() != 2 {
                 return Err(format!(
                     "__emit_set_param_type expects 2 arguments, got {}",
@@ -1536,8 +1593,11 @@ fn comptime_builtins_module_base(trait_impl_keys: HashSet<String>) -> ModuleExpo
                 .as_str()
                 .ok_or_else(|| "__emit_set_param_type expects a string param name".to_string())?
                 .to_string();
-            let type_annotation =
-                type_annotation_from_string_or_type_ref_slot(&slots[1], "__emit_set_param_type")?;
+            let type_annotation = type_annotation_from_string_or_type_ref_slot(
+                &slots[1],
+                "__emit_set_param_type",
+                &freeze_for_set_param_type,
+            )?;
             push_comptime_directive(ComptimeDirective::SetParamType {
                 param_name,
                 type_annotation,
@@ -1586,6 +1646,7 @@ fn comptime_builtins_module_base(trait_impl_keys: HashSet<String>) -> ModuleExpo
 
     // Internal comptime directive: set function return type.
     // __emit_set_return_type(type_payload: string | TypeRef)
+    let freeze_for_set_return_type = Arc::clone(&freeze);
     register_typed_function(
         &mut module,
         "__emit_set_return_type",
@@ -1597,15 +1658,18 @@ fn comptime_builtins_module_base(trait_impl_keys: HashSet<String>) -> ModuleExpo
             ..Default::default()
         }],
         ConcreteType::Unit,
-        |slots, _ctx| {
+        move |slots, _ctx| {
             if slots.len() != 1 {
                 return Err(format!(
                     "__emit_set_return_type expects 1 argument, got {}",
                     slots.len()
                 ));
             }
-            let type_annotation =
-                type_annotation_from_string_or_type_ref_slot(&slots[0], "__emit_set_return_type")?;
+            let type_annotation = type_annotation_from_string_or_type_ref_slot(
+                &slots[0],
+                "__emit_set_return_type",
+                &freeze_for_set_return_type,
+            )?;
             push_comptime_directive(ComptimeDirective::SetReturnType { type_annotation })?;
             Ok(TypedReturn::Concrete(ConcreteReturn::Unit))
         },
@@ -2279,8 +2343,13 @@ mod e2_d9_closure_free_tripwire {
 
     #[test]
     fn typed_module_producer_item_fn_is_closure_free() {
-        let item = build_function_item("answer", &nb_str("int"), &KindedSlot::from_int(42))
-            .expect("item_fn's typed producer builds a literal function");
+        let item = build_function_item(
+            "answer",
+            &nb_str("int"),
+            &KindedSlot::from_int(42),
+            &semantic_freeze::overlay_for_tests(&crate::compiler::BytecodeCompiler::new()),
+        )
+        .expect("item_fn's typed producer builds a literal function");
         let Item::Function(func_def, _) = item else {
             panic!("item_fn must produce a function item");
         };
@@ -2343,6 +2412,7 @@ mod extend_method_producer_tests {
             &KindedSlot::from_string("string"),
             &segments,
             &field_splices,
+            &semantic_freeze::overlay_for_tests(&crate::compiler::BytecodeCompiler::new()),
         )
         .expect("valid template assembles");
 
@@ -2382,6 +2452,7 @@ mod extend_method_producer_tests {
             &KindedSlot::from_string("string"),
             &segments,
             &field_splices,
+            &semantic_freeze::overlay_for_tests(&crate::compiler::BytecodeCompiler::new()),
         )
         .expect("valid non-string-scalar template assembles");
         assert_eq!(
@@ -2400,6 +2471,7 @@ mod extend_method_producer_tests {
             &KindedSlot::from_string("string"),
             &["{ ".to_string(), " }".to_string()],
             &["a} + evil() + {b".to_string()],
+            &semantic_freeze::overlay_for_tests(&crate::compiler::BytecodeCompiler::new()),
         )
         .expect_err("a non-identifier field splice must reject");
         assert!(
@@ -2417,6 +2489,7 @@ mod extend_method_producer_tests {
             &KindedSlot::from_string("string"),
             &["only-one-segment".to_string()],
             &["id".to_string()],
+            &semantic_freeze::overlay_for_tests(&crate::compiler::BytecodeCompiler::new()),
         )
         .expect_err("a segment/splice count mismatch must reject");
         assert!(
@@ -2454,6 +2527,7 @@ mod extend_method_producer_tests {
             "answer",
             &KindedSlot::from_string("int"),
             &KindedSlot::from_int(42),
+            &semantic_freeze::overlay_for_tests(&crate::compiler::BytecodeCompiler::new()),
         )
         .expect("valid int literal body assembles");
         assert!(matches!(extend_method_literal_body(&item), Literal::Int(42)));
@@ -2472,6 +2546,7 @@ mod extend_method_producer_tests {
             "ratio",
             &KindedSlot::from_string("number"),
             &KindedSlot::from_number(3.5),
+            &semantic_freeze::overlay_for_tests(&crate::compiler::BytecodeCompiler::new()),
         )
         .expect("valid number literal body assembles");
         assert!(matches!(extend_method_literal_body(&item), Literal::Number(n) if n == 3.5));
@@ -2485,6 +2560,7 @@ mod extend_method_producer_tests {
             "enabled",
             &KindedSlot::from_string("bool"),
             &KindedSlot::from_bool(true),
+            &semantic_freeze::overlay_for_tests(&crate::compiler::BytecodeCompiler::new()),
         )
         .expect("valid bool literal body assembles");
         assert!(matches!(extend_method_literal_body(&item), Literal::Bool(true)));
@@ -2498,6 +2574,7 @@ mod extend_method_producer_tests {
             "greeting",
             &KindedSlot::from_string("string"),
             &KindedSlot::from_string("hello"),
+            &semantic_freeze::overlay_for_tests(&crate::compiler::BytecodeCompiler::new()),
         )
         .expect("valid string literal body assembles");
         assert!(matches!(extend_method_literal_body(&item), Literal::String(s) if s == "hello"));
@@ -2513,6 +2590,7 @@ mod extend_method_producer_tests {
             "not a method",
             &KindedSlot::from_string("int"),
             &KindedSlot::from_int(42),
+            &semantic_freeze::overlay_for_tests(&crate::compiler::BytecodeCompiler::new()),
         )
         .expect_err("a non-identifier method name must reject");
         assert!(
@@ -2530,6 +2608,7 @@ mod extend_method_producer_tests {
             "ratio",
             &KindedSlot::from_string("number"),
             &KindedSlot::from_number(f64::INFINITY),
+            &semantic_freeze::overlay_for_tests(&crate::compiler::BytecodeCompiler::new()),
         )
         .expect_err("a non-finite number literal must reject");
         assert!(
@@ -2625,8 +2704,12 @@ mod e1_literal_type_carrier_tests {
         let ann = TypeAnnotation::Basic("int".to_string());
         let index = push_comptime_directive_type(ann.clone());
         let slot = KindedSlot::from_int(index as i64);
-        let resolved = type_annotation_from_string_or_type_ref_slot(&slot, "__emit_set_param_type")
-            .expect("Int64 index resolves to the stored typed annotation");
+        let resolved = type_annotation_from_string_or_type_ref_slot(
+            &slot,
+            "__emit_set_param_type",
+            &semantic_freeze::overlay_for_tests(&crate::compiler::BytecodeCompiler::new()),
+        )
+        .expect("Int64 index resolves to the stored typed annotation");
         assert_eq!(resolved, ann);
     }
 
@@ -2634,8 +2717,12 @@ mod e1_literal_type_carrier_tests {
     fn missing_literal_type_index_is_a_named_error_not_a_panic() {
         clear_comptime_directive_types();
         let slot = KindedSlot::from_int(99);
-        let err = type_annotation_from_string_or_type_ref_slot(&slot, "__emit_set_return_type")
-            .expect_err("an out-of-range index is a named error");
+        let err = type_annotation_from_string_or_type_ref_slot(
+            &slot,
+            "__emit_set_return_type",
+            &semantic_freeze::overlay_for_tests(&crate::compiler::BytecodeCompiler::new()),
+        )
+        .expect_err("an out-of-range index is a named error");
         assert!(err.contains("index 99"), "got: {err}");
     }
 }
