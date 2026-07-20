@@ -1,0 +1,31 @@
+// ADR-009 C3 #14 slice 1 (S1a) — the C3-G9 MUTATION-RETURN AGGREGATE pin,
+// 2-ary HETEROGENEOUS (int, number) target. Per C3-G9, an args-mutating
+// before-hook specializes to a COMPILER-INTERNAL per-target aggregate at the
+// weave boundary. PROXY RELATION (disclosed): the user-declared `type HookOut`
+// here is the fixture-expressible proxy for that compiler-internal aggregate —
+// same runtime shape (NewTypedObject with fully typed fields) as the inline
+// schema the generated weave will produce; only the declaration site differs.
+// int<->number stays explicit (`2.0`, `* 2.0`) per the no-implicit-conversion
+// rule. The impl consumes the number via a `b > 3.0` comparison (NOT a
+// `b as int` cast: a MEASURED PRE-EXISTING JIT gap deopts any fn containing
+// `number as int` — a no-hook control reproduces the identical fallback — so
+// the cast spelling would pin an unrelated gap, not the carrier). The 3.0
+// threshold makes the before-hook's number mutation VALUE-DISTINGUISHING:
+// only the mutated a1 = 2.0 * 2.0 = 4.0 passes; a silently skipped before
+// hook (raw b = 2.0) would print 600, not 40800. Hot loop of 200 calls
+// crosses T1@100. Expected stdout: 40800
+// (per call (i+1)*2 + 3 = 2i+5; 2*19900 + 5*200).
+type HookOut { a0: int, a1: number }
+fn calc_impl(a: int, b: number) -> int { if b > 3.0 { a * 2 } else { 0 } }
+fn hook_before(a: int, b: number) -> HookOut { HookOut { a0: a + 1, a1: b * 2.0 } }
+fn hook_after(r: int) -> int { r + 3 }
+fn calc(a: int, b: number) -> int {
+  let m = hook_before(a, b)
+  hook_after(calc_impl(m.a0, m.a1))
+}
+fn run() -> int {
+  let mut total = 0
+  for i in 0..200 { total = total + calc(i, 2.0) }
+  total
+}
+print(run())
