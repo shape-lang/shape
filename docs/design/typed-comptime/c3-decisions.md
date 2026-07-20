@@ -137,6 +137,56 @@ disposition 2026-07-20 (satisfies the scope-reclaim rule).
   gate-runnable example + design-index row + defections.md + close (final
   3-lens panel, full gate, verify-merge).
 
+## Slice-0 rulings (supervisor 2026-07-20, presented at the user-ordered
+## pause; user ruled "continue now" — recommendations adopted, G9 disclosed)
+
+- **C3-G9 (the Args carrier — S1-blocking fork resolved).** S0 proved G4's
+  typed tuple does NOT exist at the value level (no heterogeneous literal,
+  no index surface). Ruling: **(b′) per-param native carrier + `args` as a
+  SPECIALIZATION-RESOLVED PSEUDO-TUPLE.** `args[i]` / `args.length` are
+  template-level constructs resolved at specialization to the i-th typed
+  param slot / a constant (constant indices only; non-constant index = a
+  named rejection); polymorphic bodies address params through the
+  pseudo-tuple, concrete bodies through their own declared params;
+  args-mutation returns specialize to a COMPILER-INTERNAL per-target
+  aggregate at the weave boundary (never user-visible). Runtime shape = the
+  per-param form S0 measured VM==JIT zero-fallback. DISCLOSED refinement of
+  the pause-presented lean: bare per-param args fails G4 (no aggregate for
+  polymorphism/mutation); a first-class tuple surface would satisfy G4
+  verbatim but holds C3 hostage to a general language feature — filed as
+  **#63** instead (G0-aligned, wanted independently). The carrier is
+  RUNTIME-PINNED VM+JIT as S1's FIRST stage before anything stacks on it
+  (the S0 mandate).
+- **C3-G10 (per-spec checking tier authority).** Emission tier + MIR
+  battery, riding `ensure_monomorphic_function_for_callsite` (substitution
+  + battery + hard-fail + cache). Genuinely new pieces: application-site
+  error attribution naming BOTH signatures; Sig→ConcreteType glue; the
+  concrete-body match-or-error comparison. Sig TYPES bind from the
+  AST/inference side; the frozen CallableDescriptor is for IDENTITY only
+  (reconstruct_type_annotation rejects Nominal/Record until B4/B5).
+  Built BESIDE `compile_specialized_annotation_handler` (a G7 deletion
+  target, not a foundation).
+- **C3-G11 (G8 withdrawal confirmed).** S0 proved generic-target hooks are
+  NOT uniformly broken today (type-agnostic hooks on single-type-param
+  generics work: g1/g2/g4/g5). The G8 surface-and-stop rejection is
+  therefore a DELIBERATE CAPABILITY WITHDRAWAL — confirmed anyway (the
+  working cases work by accident of the homogeneous-args representation C3
+  deletes). Obligation: defections.md entry lands WITH the rejection (S5),
+  naming the withdrawn cases and the #59 re-arm condition.
+- **C3-G12 (nested-fn annotation drop).** Annotations on fn-local nested
+  functions are SILENTLY DROPPED today (S0 a4/a4c). C3 adds a LOUD named
+  rejection at the application site; support = follow-up **#62**.
+- **C3-G13 (implicit-capture rejection coding).** Pin as message-text now
+  with a #60 routing note (the E1 precedent for comptime-builtin-layer
+  diagnostics); revisit when #60's coded path lands.
+- **JIT soundness fence (from S0, binding on S7 and all JIT work):**
+  un-suppressing `mir_data` on the LEGACY weave is MEASURED-FORBIDDEN
+  (hooks silently skipped: VM 40600 vs JIT 20500). Full-native comes ONLY
+  via the generated typed-AST wrapper through the ordinary pipeline (the
+  measured-green C3 shape). Any fallback-if-ever is classifier
+  trampolining; never compile-failure demotion; async hooks =
+  named-expected-fallback; S7 cells MUST execute hook paths.
+
 ## Operating rules
 
 The E1/E2-proven pipeline carries over wholesale (AGENTS.md C3 row):
