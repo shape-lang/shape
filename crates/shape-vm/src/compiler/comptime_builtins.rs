@@ -143,13 +143,18 @@ pub(crate) enum ComptimeDirective {
     /// the annotation's target function. `template_index` is the opaque
     /// `__CheckedTemplate` handle's index into the per-run
     /// `COMPTIME_HOOK_TEMPLATES` store (execute-populated; the store stays
-    /// intact until the NEXT per-run clear, so the pass-2 consumer resolves
-    /// the index AFTER `vm.execute` returns — see the store's lifecycle doc).
-    /// The target is IMPLICIT (the annotation's target), matching every other
-    /// directive. Consumed ONLY by the authoritative pass-2 function-target
-    /// consumer (`process_comptime_directives_for_function`); the pre-pass
-    /// consumers are documented no-ops (never double-install), and every
-    /// non-function target consumer is a named rejection.
+    /// intact until the NEXT per-run clear). Fix-round-1: the pass-2 consumer
+    /// SNAPSHOT-resolves every install index to its `BoundTemplate` at
+    /// directive-loop ENTRY (`snapshot_install_hook_template_handles`),
+    /// before any directive applies — a directive apply can trigger a NESTED
+    /// handler run that clears + repopulates this store, so lazy
+    /// per-directive resolution would cross store generations (see the
+    /// store's lifecycle doc). The target is IMPLICIT (the annotation's
+    /// target), matching every other directive. Consumed ONLY by the
+    /// authoritative pass-2 function-target consumer
+    /// (`process_comptime_directives_for_function`); the pre-pass consumers
+    /// are documented no-ops (never double-install), and every non-function
+    /// target consumer is a named rejection.
     InstallHookTemplate {
         template_index: usize,
     },
@@ -250,9 +255,18 @@ thread_local! {
     /// `COMPTIME_CHECKED_ITEMS` lifecycle: cleared at the pre-execute clear
     /// point (`comptime.rs`, beside `clear_comptime_checked_items`) so indices
     /// are fresh per run; reads clone, and the store stays intact until the
-    /// NEXT per-run clear — which is what lets the driver resolve a
-    /// `template_index` AFTER `vm.execute` returns (`take_comptime_directives`
-    /// runs before any next handler run on this thread).
+    /// NEXT per-run clear. Fix-round-1 CAVEAT (why the pass-2 consumer
+    /// snapshot-resolves): "the next per-run clear" can arrive DURING the
+    /// current run's directive PROCESSING — applying a directive can trigger
+    /// a nested annotation-handler run (a polymorphic template
+    /// specialization's nested `compile_function` re-enters
+    /// `execute_comptime_handlers`; an `ExtendItems` compile does the same),
+    /// which clears + repopulates this store. So the driver resolves EVERY
+    /// install handle at directive-loop entry
+    /// (`snapshot_install_hook_template_handles`, install_registry.rs) —
+    /// the same value-snapshot discipline `take_comptime_directives` applies
+    /// to the directive buffer — and never reads this store lazily
+    /// per-directive.
     static COMPTIME_HOOK_TEMPLATES: RefCell<Vec<BoundTemplate>> = const { RefCell::new(Vec::new()) };
     /// ADR-009 C3 #14 (slice 2): the capture-binding store. `capture(name,
     /// value)` lifts the value through the S2 ConstLift seam
@@ -497,8 +511,10 @@ fn push_comptime_hook_template(template: BoundTemplate) -> usize {
 }
 
 /// Resolve a `__CheckedTemplate` handle's index back to its [`BoundTemplate`]
-/// (cloned; the store stays intact until the next per-run clear — the S2b
-/// install consumer resolves indices AFTER `vm.execute` returns).
+/// (cloned; the store stays intact until the next per-run clear — which can
+/// arrive DURING directive processing via a nested handler run, so the S2b
+/// install consumer SNAPSHOT-resolves all indices at directive-loop entry,
+/// fix-round-1: `snapshot_install_hook_template_handles`).
 pub(in crate::compiler) fn comptime_hook_template_at(index: usize) -> Option<BoundTemplate> {
     COMPTIME_HOOK_TEMPLATES.with(|templates| templates.borrow().get(index).cloned())
 }

@@ -5,13 +5,23 @@
 //!
 //! The `ComptimeDirective::InstallHookTemplate` consumer for the authoritative
 //! pass-2 function-target phase (`process_comptime_directives_for_function`).
-//! Per install, IN ORDER: resolve the handle from the still-intact per-run
-//! store (`comptime_hook_template_at` — safe post-execute per the store's
-//! lifecycle doc: execute-populated stores clear at the PRE-execute point, so
-//! the store survives until the next handler run on this thread) → the C3-G8
-//! generic-target named rejection → the mixed-legacy rejection (one weave
-//! owner per target until S6 deletes the legacy machinery) →
-//! [`super::SpecializationTarget`] glue → `specialize_template` →
+//! Handle resolution is a BATCH SNAPSHOT taken at the TOP of that directive
+//! loop, before ANY directive applies
+//! ([`BytecodeCompiler::snapshot_install_hook_template_handles`] — fix-round-1):
+//! applying an earlier directive can trigger a NESTED annotation-handler run
+//! (a polymorphic `specialize_template` rides the monomorphization pipeline
+//! into the full `compile_function`, which re-enters
+//! `execute_comptime_handlers` because annotations survive substitution; an
+//! `ExtendItems` compile does the same), and the nested run CLEARS +
+//! REPOPULATES the per-run execute-populated stores — so a LATER install's
+//! lazily resolved index would read across store generations (a miss
+//! misdiagnosed as the internal lifecycle error, or — worse — a repopulated
+//! store resolving the stale index to the NESTED run's template and silently
+//! installing the WRONG one). The snapshot extends `take_comptime_directives`'
+//! value-snapshot discipline to the handles the directives carry. Per install,
+//! IN ORDER: the C3-G8 generic-target named rejection → the mixed-legacy
+//! rejection (one weave owner per target until S6 deletes the legacy
+//! machinery) → [`super::SpecializationTarget`] glue → `specialize_template` →
 //! `bind_captures_for_install` → stage the install on the caller's per-target
 //! accumulator + write one journaled registry row.
 //!
@@ -55,7 +65,9 @@ use super::const_lift::{self, CaptureBindingPlan};
 use super::{SpecializedHandler, render_template_declared_signature};
 use crate::compiler::BytecodeCompiler;
 use crate::compiler::comptime_builtins::expansion_provenance::ExpansionSite;
-use crate::compiler::comptime_builtins::{BoundTemplate, comptime_hook_template_at};
+use crate::compiler::comptime_builtins::{
+    BoundTemplate, ComptimeDirective, comptime_hook_template_at,
+};
 use crate::compiler::comptime_fragments::checked_template::TemplateHookKind;
 use crate::compiler::comptime_target::type_annotation_to_string;
 
@@ -111,35 +123,60 @@ pub(in crate::compiler) struct HookInstallRecord {
 }
 
 impl BytecodeCompiler {
+    /// Fix-round-1: the BATCH handle snapshot — resolve EVERY
+    /// `InstallHookTemplate` directive's per-run store index to its
+    /// [`BoundTemplate`] up front, before any directive of the run applies
+    /// (module docs: nested handler runs triggered by directive application
+    /// clear + repopulate the execute-populated stores, so lazy per-directive
+    /// resolution can cross store generations — missing handles misdiagnosed
+    /// as the lifecycle internal error, or a stale index SILENTLY resolving
+    /// to the nested run's template). Returns the resolved templates in
+    /// DIRECTIVE ORDER; the consumer pops one per `InstallHookTemplate` arm.
+    /// A miss here is still a broken lifecycle invariant —
+    /// internal-error-shaped, never a user rejection (a handle can only be
+    /// minted by `before_hook`/`after_hook` with the just-pushed index).
+    pub(in crate::compiler) fn snapshot_install_hook_template_handles(
+        &self,
+        directives: &[ComptimeDirective],
+        site: &ExpansionSite,
+    ) -> Result<std::collections::VecDeque<BoundTemplate>> {
+        let mut resolved = std::collections::VecDeque::new();
+        for directive in directives {
+            let ComptimeDirective::InstallHookTemplate { template_index } = directive else {
+                continue;
+            };
+            let Some(bound) = comptime_hook_template_at(*template_index) else {
+                return Err(ShapeError::RuntimeError {
+                    message: format!(
+                        "internal error: install directive template index {template_index} is \
+                         not live in this comptime execution (the hook-template store is \
+                         per-run and handles are snapshot-resolved before any directive \
+                         applies — see the COMPTIME_HOOK_TEMPLATES lifecycle doc)"
+                    ),
+                    location: Some(self.span_to_source_location(site.application_span())),
+                });
+            };
+            resolved.push_back(bound);
+        }
+        Ok(resolved)
+    }
+
     /// The pass-2 apply seam for one `InstallHookTemplate` directive (module
     /// docs above for the ordered sequence + the transaction-composition
-    /// chain). `annotation_name` + `site` are the parameter-threaded origin;
-    /// `staged` is the caller's per-target accumulator.
+    /// chain). `bound` is the SNAPSHOT-resolved template
+    /// ([`Self::snapshot_install_hook_template_handles`] — never a live store
+    /// read here, fix-round-1); `annotation_name` + `site` are the
+    /// parameter-threaded origin; `staged` is the caller's per-target
+    /// accumulator.
     pub(in crate::compiler) fn apply_install_hook_template(
         &mut self,
-        template_index: usize,
+        bound: &BoundTemplate,
         annotation_name: &str,
         func_def: &FunctionDef,
         site: &ExpansionSite,
         staged: &mut Vec<StagedHookInstall>,
     ) -> Result<()> {
         let application_span = site.application_span();
-
-        // 1. Resolve the handle against the still-intact per-run store. A
-        //    handle can only be minted by `before_hook`/`after_hook` with the
-        //    just-pushed index, so a miss here is a broken lifecycle
-        //    invariant — internal-error-shaped, never a user rejection.
-        let Some(bound) = comptime_hook_template_at(template_index) else {
-            return Err(ShapeError::RuntimeError {
-                message: format!(
-                    "internal error: install directive template index {template_index} is not \
-                     live in this comptime execution (the hook-template store is per-run and \
-                     must survive until the directive is consumed — see the \
-                     COMPTIME_HOOK_TEMPLATES lifecycle doc)"
-                ),
-                location: Some(self.span_to_source_location(application_span)),
-            });
-        };
 
         // 2. C3-G8: installing on a GENERIC target is a named rejection at
         //    the `@application` site — a deliberate capability withdrawal
@@ -229,7 +266,7 @@ impl BytecodeCompiler {
 
         // 6. Capture delivery plan (S2 scalars as typed call-site literals;
         //    S3 replaces the domain at the const_lift boundary).
-        let capture_plan = const_lift::bind_captures_for_install(&bound, &target)?;
+        let capture_plan = const_lift::bind_captures_for_install(bound, &target)?;
 
         // 7. One journaled registry row (displaced-entry undo: the journal
         //    records the pre-write length; rollback truncates back, so a
@@ -252,7 +289,7 @@ impl BytecodeCompiler {
             ),
             specialized_symbol,
             function_index: handler.function_index(),
-            captures: rendered_captures(&bound),
+            captures: rendered_captures(bound),
             application_span,
         });
 
@@ -277,6 +314,17 @@ impl BytecodeCompiler {
     /// specialization. A registered non-generic prefix (a genuinely
     /// module-qualified concrete fn) keeps walking and ultimately returns
     /// `None` — concrete fns never take the specialization rename.
+    ///
+    /// NAMED EDGE (fix-round-1 F3, surfaced not fixed): the walk cannot
+    /// distinguish mono-rename suffixes from module qualification, so a
+    /// CONCRETE module-qualified fn `foo::bar` whose module name collides
+    /// with a registered TOP-LEVEL GENERIC fn `foo<T>` would false-positive
+    /// the G8 rejection (LOUD, wrongly-attributed sentence naming `foo` —
+    /// fail-closed, never a silent accept). Whether a module and a generic
+    /// fn can share a name in one compilation unit is unverified; if it
+    /// can, the fix is teaching the walk that mono-rename segments are
+    /// mono-keys, not arbitrary idents. Tracked in the slice-2 fix-round-1
+    /// report residuals.
     fn generic_origin_of_specialized_name(&self, specialized_name: &str) -> Option<&FunctionDef> {
         let mut end = specialized_name.len();
         while let Some(pos) = specialized_name[..end].rfind("::") {
@@ -730,23 +778,15 @@ victim(1)
         );
     }
 
-    // Stale/out-of-range handle at the seam is INTERNAL-ERROR-shaped (a
-    // handle can only be minted with a live just-pushed index; user code
-    // cannot spell one).
+    // Stale/out-of-range handle at the SNAPSHOT resolver is
+    // INTERNAL-ERROR-shaped (a handle can only be minted with a live
+    // just-pushed index; user code cannot spell one). Fix-round-1: the
+    // resolution moved from the per-directive apply seam to the batch
+    // snapshot at directive-loop entry — this pins the moved producer.
     #[test]
-    fn stale_handle_is_an_internal_error_at_the_seam() {
+    fn stale_handle_is_an_internal_error_at_the_snapshot() {
         crate::compiler::comptime_builtins::clear_comptime_hook_templates();
-        let program = shape_ast::parse_program("fn victim(a: int) -> int { return a }")
-            .expect("fixture parses");
-        let def = program
-            .items
-            .iter()
-            .find_map(|item| match item {
-                shape_ast::ast::Item::Function(func, _) => Some(func.clone()),
-                _ => None,
-            })
-            .expect("fixture has the victim fn");
-        let mut compiler = crate::compiler::BytecodeCompiler::new();
+        let compiler = crate::compiler::BytecodeCompiler::new();
         let site = ExpansionSite::new(
             ExpansionIdentity::new(
                 GeneratorRef::from_canonical_descriptor("annotation:hookann:post"),
@@ -760,15 +800,135 @@ victim(1)
             Span::default(),
             Span::default(),
         );
-        let mut staged = Vec::new();
+        let directives = vec![ComptimeDirective::InstallHookTemplate { template_index: 7 }];
         let err = compiler
-            .apply_install_hook_template(7, "hookann", &def, &site, &mut staged)
+            .snapshot_install_hook_template_handles(&directives, &site)
             .expect_err("a dead index must be internal-error-shaped");
         assert!(
             err.to_string().contains("internal error"),
             "internal-error-shaped: {err}"
         );
-        assert!(staged.is_empty());
+        assert!(
+            err.to_string().contains("snapshot-resolved before any directive applies"),
+            "names the snapshot discipline: {err}"
+        );
         assert!(compiler.hook_install_registry.is_empty());
+    }
+
+    // FIX-ROUND-1 REGRESSION (the stale-handle-across-runs class): applying
+    // an earlier install in the SAME directive list triggers a NESTED
+    // handler run (the polymorphic template's body fn carries an annotation;
+    // annotations survive substitution, so the specialization's nested
+    // `compile_function` re-enters `execute_comptime_handlers`), which
+    // clears + REPOPULATES the per-run template store — the nested handler
+    // deliberately pushes TWO templates so index 1 exists again. Pre-fix,
+    // the LATER install's lazy resolution of index 1 picked up the nested
+    // run's `h_noise2` ((int) -> int, Sig-compatible with the target) and
+    // installed the WRONG template SILENTLY: victim(4) = (4+5+100)*10 =
+    // 1090. The batch snapshot resolves both handles before any apply, so
+    // the second install is `h2`: (4+5)*2 = 18 → impl 180.
+    #[test]
+    fn nested_handler_run_during_processing_does_not_shift_install_handles() {
+        let src = r#"
+fn h_noise(x: int) -> int { return x + 40 }
+fn h_noise2(x: int) -> int { return x + 100 }
+fn h2(x: int) -> int { return x * 2 }
+
+annotation noise() {
+  targets: [function]
+  comptime post(target, ctx) {
+    let a = before_hook(h_noise, [])
+    let b = before_hook(h_noise2, [])
+  }
+}
+
+@noise()
+fn tmpl<Args>(args: Args) -> Args {
+    args[0] = args[0] + 5
+    return args
+}
+
+annotation hookann() {
+  targets: [function]
+  comptime post(target, ctx) {
+    install(before_hook(tmpl, []))
+    install(before_hook(h2, []))
+  }
+}
+
+@hookann()
+fn victim(a: int) -> int { return a * 10 }
+
+victim(4)
+"#;
+        let compiler = compiled_ok(src);
+        let mut vm = VirtualMachine::new(VMConfig::default());
+        vm.load_program(compiler.program.clone());
+        let value = vm
+            .execute(None)
+            .expect("program executes")
+            .as_i64()
+            .expect("top-level result is an int");
+        assert_eq!(
+            value, 180,
+            "the SECOND install must be h2 ((4+5)*2 → impl 180); the nested run's \
+             repopulated store must never leak in (stale index ⇒ h_noise2 ⇒ 1090)"
+        );
+        assert_eq!(compiler.hook_install_registry.len(), 2);
+        assert!(
+            compiler.hook_install_registry[1].template_sig.starts_with("h2 "),
+            "row 2 records the SNAPSHOT-resolved template, not the nested run's: {}",
+            compiler.hook_install_registry[1].template_sig
+        );
+    }
+
+    // FIX-ROUND-1: a handler-local binding shadowing the body fn's name is a
+    // named rejection end-to-end through the full compile (the rewrite's
+    // shadow check — comptime.rs; without it the module fn would bind
+    // silently, inverting ordinary shadowing).
+    #[test]
+    fn handler_local_shadowing_the_body_fn_rejects_end_to_end() {
+        expect_compile_reject(
+            &hook_source(
+                "fn my_hook(x: int) -> int { return x + 1 }",
+                "let my_hook = 3\n    install(before_hook(my_hook, []))",
+                "@hookann()\nfn victim(a: int) -> int { return a }\n\nvictim(1)",
+            ),
+            &[
+                "is shadowed by a handler-local binding",
+                "rename the local binding or the body fn",
+            ],
+        );
+    }
+
+    // FIX-ROUND-1 (lens item 6): the MODULE-target consumer's install
+    // rejection arm fires with the function positive twin — the sibling of
+    // `type_target_install_rejects_with_the_function_twin`
+    // (`process_comptime_directives_for_module`, statements.rs).
+    #[test]
+    fn module_target_install_rejects_with_the_function_twin() {
+        expect_compile_reject(
+            &format!(
+                r#"
+fn my_before(x: int) -> int {{ return x + 1 }}
+
+annotation hookann() {{
+  targets: [module]
+  comptime post(target, ctx) {{
+    install(before_hook(my_before, []))
+  }}
+}}
+
+@hookann()
+mod demo {{
+  fn answer() -> int {{ return 0 }}
+}}
+"#
+            ),
+            &[
+                "`install` directives are only valid when compiling function targets",
+                "apply the installing annotation to a function",
+            ],
+        );
     }
 }

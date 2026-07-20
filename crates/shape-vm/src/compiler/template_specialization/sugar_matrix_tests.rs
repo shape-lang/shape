@@ -20,10 +20,11 @@
 //! | r2  | `before` body                             | `r2_before_body_is_a_module_scope_typed_fn`                  | `before_hook(fn_ident, captures)` + `install` |
 //! | r3  | `after` body                              | `r3_after_body_is_a_module_scope_typed_fn`                   | `after_hook(fn_ident, captures)` + `install` |
 //! | r4  | application to a target (target implicit) | `r4_application_covers_before_only_after_only_and_both`      | `install(t)` — before-only / after-only / both on three targets |
-//! | r5  | stacked annotations                       | `r5_stacked_annotations_compose_in_application_order`        | repeated handler runs; both chains in application order |
+//! | r5  | stacked annotations                       | `r5_stacked_annotations_compose_as_wrapping`                 | repeated handler runs; before chain in application order, after chain in REVERSE application order (the onion/wrapping semantic — fix-round-1) |
 //! | r6  | config-conditional hook selection         | `r6_config_conditional_install_is_ordinary_control_flow`     | ordinary handler `if` around `install` |
 //! | r7  | target introspection for composition      | `r7_target_introspection_selects_the_template`               | the EXISTING frozen `target.params[i].type` surface (reused, not duplicated — S2 adds NO new inspection builtin) |
 //! | r8  | hover data                                | `r8_registry_row_carries_declaration_and_application_views`  | `hook_install_registry` rows: generic view at declaration + specialized types at application (the S8 hover substrate — sugar gets hover for free because it lowers to `install()`) |
+//! | r9  | observer hooks on zero-param / void targets | `r9_observers_cover_zero_param_and_void_targets`           | the OBSERVER template form (fix-round-1 C3-G2 growth): `before_hook`/`after_hook` over a concrete zero-signature-param void body — the entry/exit-logging blocks the declarative surface green-pins on `fn hello()` (before_after.rs `before_hook_with_empty_params`, wrapping.rs `annotation_wrapping_void_function`) |
 //!
 //! Config enters templates ONLY as `capture(name, value)` (C3-G4's
 //! [C0926]-totality premise; the a5 surviving-legit path from slice-0 §4) —
@@ -237,14 +238,19 @@ v1(4) * 10000 + v2(4) * 100 + v3(4)
     );
 }
 
-// ── r5: stacked annotations compose in application order ───────────────────
+// ── r5: stacked annotations compose as WRAPPING (onion) ────────────────────
 
 // Repeated handler runs (one per stacked annotation) accumulate installs;
-// BOTH chains weave in application order. add_ten-then-mul_two: before
-// (1+10)*2 = 22 → impl 220; after (220+10)*2 = 460. Any order flip is
-// value-distinguishing (before flipped ⇒ impl 120; after flipped ⇒ 450).
+// the weave is the WRAPPING/onion composition (fix-round-1): the
+// first-applied annotation is the OUTERMOST wrapper — before chain in
+// application order, after chain in REVERSE application order (the surviving
+// declarative surface's stacked semantics, wrapping.rs
+// stacked_after_hooks_transform_result_in_order). add_ten-then-mul_two:
+// before (1+10)*2 = 22 → impl 220; after 220*2 = 440 → +10 = 450. Any order
+// flip is value-distinguishing (before flipped ⇒ impl 120; after in
+// application order ⇒ 460).
 #[test]
-fn r5_stacked_annotations_compose_in_application_order() {
+fn r5_stacked_annotations_compose_as_wrapping() {
     let src = r#"
 fn add_ten(x: int) -> int { return x + 10 }
 fn mul_two(x: int) -> int { return x * 2 }
@@ -273,8 +279,8 @@ victim(1)
 "#;
     let (value, compiler) = top_level_i64(src);
     assert_eq!(
-        value, 460,
-        "both chains in application order: before (1+10)*2 → 220, after (220+10)*2 = 460"
+        value, 450,
+        "onion composition: before (1+10)*2 → impl 220, after (inner-first) 220*2+10 = 450"
     );
     assert_eq!(compiler.hook_install_registry.len(), 4);
 }
@@ -444,4 +450,64 @@ victim(1, 2.0)
         shape_ast::ast::Span::default(),
         "the row anchors at the real @application span (the hover anchor)"
     );
+}
+
+// ── r9: observer hooks — zero-param and void targets (fix-round-1 growth) ──
+
+// The G2 hole the round-1 gate named: the canonical declarative entry/exit-
+// logging block green-pins on `fn hello()` (0-param void:
+// before_after.rs `before_hook_with_empty_params`) and `after` on a void
+// 1-param fn (wrapping.rs `annotation_wrapping_void_function`) — shapes that
+// previously had NO public-API spelling. The OBSERVER template form (a
+// concrete zero-signature-param void body) is that spelling: ONE annotation
+// lowers to ONE pair of observer templates and applies to a 0-param void
+// target AND a 1-param void target unchanged (target-uniform, so the S4
+// lowering needs no per-target branching). Value-distinguishing execution
+// proof for observers is error-injection
+// (`weave::observer_execution_is_proven_by_an_erroring_observer_body`); this
+// row pins the green composition + rows for both target shapes.
+#[test]
+fn r9_observers_cover_zero_param_and_void_targets() {
+    let src = r#"
+fn note_in() { let x = 1 }
+fn note_out() { let x = 2 }
+
+annotation entry_exit() {
+  targets: [function]
+  comptime post(target, ctx) {
+    install(before_hook(note_in, []))
+    install(after_hook(note_out, []))
+  }
+}
+
+@entry_exit()
+fn hello() { let a = 1 }
+
+@entry_exit()
+fn log_it(msg: int) { let b = msg }
+
+hello()
+log_it(4)
+7
+"#;
+    let (value, compiler) = top_level_i64(src);
+    assert_eq!(value, 7, "both observer weaves execute cleanly");
+    assert_eq!(
+        compiler.hook_install_registry.len(),
+        4,
+        "one before + one after observer row per target"
+    );
+    for target in ["hello", "log_it"] {
+        let kinds: Vec<_> = compiler
+            .hook_install_registry
+            .iter()
+            .filter(|row| row.target_name == target)
+            .map(|row| row.hook_kind)
+            .collect();
+        assert_eq!(
+            kinds,
+            vec![TemplateHookKind::Before, TemplateHookKind::After],
+            "target {target} carries the before+after observer pair"
+        );
+    }
 }

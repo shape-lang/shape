@@ -3589,6 +3589,18 @@ impl BytecodeCompiler {
         staged_hook_installs: &mut Vec<StagedHookInstall>,
     ) -> Result<bool> {
         let mut removed = false;
+        // ADR-009 C3 #14 (fix-round-1): SNAPSHOT-resolve every install
+        // handle BEFORE any directive applies — applying a directive below
+        // (a polymorphic `specialize_template`'s nested `compile_function`,
+        // an `ExtendItems` compile) can trigger a NESTED annotation-handler
+        // run that clears + repopulates the per-run execute-populated
+        // stores, so a LATER install's lazy index resolution would read
+        // across store generations (miss → misdiagnosed internal error;
+        // repopulated store → the WRONG template installed silently). Same
+        // snapshot discipline `take_comptime_directives` applies to the
+        // directive buffer, extended to the handles the directives carry.
+        let mut resolved_install_templates =
+            self.snapshot_install_hook_template_handles(&directives, site)?;
         for directive in directives {
             match directive {
                 super::comptime_builtins::ComptimeDirective::Extend(extend) => {
@@ -3745,13 +3757,13 @@ impl BytecodeCompiler {
                         "`replace module` directives are only valid when compiling module targets",
                     ));
                 }
-                super::comptime_builtins::ComptimeDirective::InstallHookTemplate {
-                    template_index,
-                } => {
+                super::comptime_builtins::ComptimeDirective::InstallHookTemplate { .. } => {
                     // ADR-009 C3 #14 (slice 2, S2b): the AUTHORITATIVE apply
-                    // seam — resolve the per-run handle, run the G8/driver
-                    // rejections, compose `specialize_template` with the
-                    // ALREADY-OPEN C2 install transaction (`compile_in_place`,
+                    // seam — pop the SNAPSHOT-resolved handle (fix-round-1:
+                    // resolved at loop entry, never a live store read here),
+                    // run the G8/driver rejections, compose
+                    // `specialize_template` with the ALREADY-OPEN C2 install
+                    // transaction (`compile_in_place`,
                     // compiler_impl_reference_model.rs:1985-1996, opens the
                     // journal at :1986 BEFORE the inner driver this consumer
                     // runs inside — E1-D6b, never a second transaction), bind
@@ -3759,8 +3771,17 @@ impl BytecodeCompiler {
                     // accumulator, and write one journaled registry row. Full
                     // sequence + rationale:
                     // `template_specialization::install_registry` module docs.
+                    let bound = resolved_install_templates.pop_front().ok_or_else(|| {
+                        ShapeError::RuntimeError {
+                            message: "internal error: InstallHookTemplate directive without a \
+                                      snapshot-resolved template (the batch snapshot resolves \
+                                      one per install directive at loop entry)"
+                                .to_string(),
+                            location: None,
+                        }
+                    })?;
                     self.apply_install_hook_template(
-                        template_index,
+                        &bound,
                         annotation_name,
                         func_def,
                         site,

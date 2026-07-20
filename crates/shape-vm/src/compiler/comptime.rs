@@ -1896,59 +1896,87 @@ fn rewrite_comptime_type_symbol_args_expr_scoped(
 /// reached only through this rewrite.
 ///
 /// Misuse is a NAMED rejection with a positive twin: a non-identifier body
-/// argument (string / closure / call / any expression), and an identifier
+/// argument (string / closure / call / any expression), an identifier
 /// that resolves to no module-scope fn (which also covers comptime-local and
 /// nested fns — a disclosed S2 narrowing of C3-G3's comptime-local wording;
-/// the E-track quote/splice surface is the named later producer for those).
+/// the E-track quote/splice surface is the named later producer for those),
+/// and (fix-round-1) an identifier SHADOWED by a handler-local binding —
+/// without the check, `let my_hook = 3; before_hook(my_hook, [])` would
+/// silently bind the MODULE fn `my_hook`, inverting ordinary shadowing.
+///
+/// The shadow check is a CONSERVATIVE flat set (fix-round-1, documented
+/// narrowing): handler-local `let`/`for` binder names accumulate lexically
+/// and are never popped at scope exit, so a local declared in one branch
+/// also flags a later use — the over-approximation only ever produces the
+/// LOUD named rejection (rename one side), never a silent misbind.
+/// Match-arm and closure-parameter bindings are outside the tracked set
+/// (closure interiors are not recursed by this rewrite at all).
 fn rewrite_template_hook_body_args(
     stmt: &mut Statement,
     lookup: &dyn Fn(&str) -> Option<FunctionDef>,
 ) -> Result<()> {
+    let mut locals: std::collections::HashSet<String> = std::collections::HashSet::new();
+    rewrite_template_hook_body_args_stmt(stmt, lookup, &mut locals)
+}
+
+/// Statement face of the walk ([`rewrite_template_hook_body_args`] is the
+/// entry wrapper owning the handler-local binding set).
+fn rewrite_template_hook_body_args_stmt(
+    stmt: &mut Statement,
+    lookup: &dyn Fn(&str) -> Option<FunctionDef>,
+    locals: &mut std::collections::HashSet<String>,
+) -> Result<()> {
     match stmt {
-        Statement::Expression(expr, _) => rewrite_template_hook_body_args_expr(expr, lookup)?,
-        Statement::Return(Some(expr), _) => rewrite_template_hook_body_args_expr(expr, lookup)?,
+        Statement::Expression(expr, _) => {
+            rewrite_template_hook_body_args_expr(expr, lookup, locals)?
+        }
+        Statement::Return(Some(expr), _) => {
+            rewrite_template_hook_body_args_expr(expr, lookup, locals)?
+        }
         Statement::Return(None, _) | Statement::Break(_) | Statement::Continue(_) => {}
         Statement::VariableDecl(decl, _) => {
             if let Some(init) = &mut decl.value {
-                rewrite_template_hook_body_args_expr(init, lookup)?;
+                rewrite_template_hook_body_args_expr(init, lookup, locals)?;
             }
+            locals.extend(decl.pattern.get_identifiers());
         }
         Statement::Assignment(assign, _) => {
-            rewrite_template_hook_body_args_expr(&mut assign.value, lookup)?;
+            rewrite_template_hook_body_args_expr(&mut assign.value, lookup, locals)?;
         }
         Statement::For(for_loop, _) => {
             match &mut for_loop.init {
-                shape_ast::ast::ForInit::ForIn { iter, .. } => {
-                    rewrite_template_hook_body_args_expr(iter, lookup)?;
+                shape_ast::ast::ForInit::ForIn { pattern, iter } => {
+                    rewrite_template_hook_body_args_expr(iter, lookup, locals)?;
+                    locals.extend(pattern.get_identifiers());
                 }
                 shape_ast::ast::ForInit::ForC {
                     init,
                     condition,
                     update,
                 } => {
-                    rewrite_template_hook_body_args(init, lookup)?;
-                    rewrite_template_hook_body_args_expr(condition, lookup)?;
-                    rewrite_template_hook_body_args_expr(update, lookup)?;
+                    rewrite_template_hook_body_args_stmt(init, lookup, locals)?;
+                    rewrite_template_hook_body_args_expr(condition, lookup, locals)?;
+                    rewrite_template_hook_body_args_expr(update, lookup, locals)?;
                 }
             }
             for s in &mut for_loop.body {
-                rewrite_template_hook_body_args(s, lookup)?;
+                rewrite_template_hook_body_args_stmt(s, lookup, locals)?;
             }
         }
         Statement::While(while_loop, _) => {
-            rewrite_template_hook_body_args_expr(&mut while_loop.condition, lookup)?;
+            rewrite_template_hook_body_args_expr(&mut while_loop.condition, lookup, locals)?;
             for s in &mut while_loop.body {
-                rewrite_template_hook_body_args(s, lookup)?;
+                rewrite_template_hook_body_args_stmt(s, lookup, locals)?;
             }
         }
         Statement::If(if_stmt, _) => {
-            rewrite_template_hook_body_args_expr(&mut if_stmt.condition, lookup)?;
+            rewrite_template_hook_body_args_expr(&mut if_stmt.condition, lookup, locals)?;
             for s in &mut if_stmt.then_body {
-                rewrite_template_hook_body_args(s, lookup)?;
+                rewrite_template_hook_body_args_stmt(s, lookup, locals)?;
             }
             if let Some(else_body) = &mut if_stmt.else_body {
                 for s in else_body {
-                    rewrite_template_hook_body_args(s, lookup)?;
+                    rewrite_template_hook_body_args_stmt(s, lookup, locals)?;
                 }
             }
         }
@@ -1958,11 +1986,11 @@ fn rewrite_template_hook_body_args(
         | Statement::ReplaceBodyExpr { expression, .. }
         | Statement::ReplaceModuleExpr { expression, .. }
         | Statement::ExtendItemsExpr { expression, .. } => {
-            rewrite_template_hook_body_args_expr(expression, lookup)?;
+            rewrite_template_hook_body_args_expr(expression, lookup, locals)?;
         }
         Statement::ReplaceBody { body, .. } => {
             for s in body {
-                rewrite_template_hook_body_args(s, lookup)?;
+                rewrite_template_hook_body_args_stmt(s, lookup, locals)?;
             }
         }
         // Directives with no embedded expression / already-parsed payloads.
@@ -1997,12 +2025,29 @@ fn template_body_arg_shape_word(expr: &Expr) -> &'static str {
 fn rewrite_template_hook_body_args_expr(
     expr: &mut Expr,
     lookup: &dyn Fn(&str) -> Option<FunctionDef>,
+    locals: &mut std::collections::HashSet<String>,
 ) -> Result<()> {
     if let Expr::FunctionCall { name, args, .. } = expr {
         if (name == "before_hook" || name == "after_hook") && !args.is_empty() {
             let builtin = name.clone();
             match &mut args[0] {
                 Expr::Identifier(ident, ident_span) => {
+                    // Fix-round-1: a handler-local binding of the same name
+                    // SHADOWS the module fn under ordinary scoping — resolving
+                    // the module fn anyway would silently invert shadowing, so
+                    // reject loudly (conservative flat-set check; fn docs).
+                    if locals.contains(ident.as_str()) {
+                        return Err(ShapeError::SemanticError {
+                            message: format!(
+                                "`{builtin}` body fn `{ident}` is shadowed by a handler-local \
+                                 binding named `{ident}`; a template body is referenced by its \
+                                 bare module-scope fn name (C3-G3), and the handler-local \
+                                 binding would be silently ignored — rename the local binding \
+                                 or the body fn so the reference is unambiguous"
+                            ),
+                            location: None,
+                        });
+                    }
                     let Some(def) = lookup(ident) else {
                         return Err(ShapeError::SemanticError {
                             message: format!(
@@ -2051,17 +2096,16 @@ fn rewrite_template_hook_body_args_expr(
         }
     }
 
-    let recur =
-        |child: &mut Expr| -> Result<()> { rewrite_template_hook_body_args_expr(child, lookup) };
+    // Child recursion (direct calls — the handler-local set threads through).
     match expr {
         Expr::FunctionCall {
             args, named_args, ..
         } => {
             for a in args.iter_mut() {
-                recur(a)?;
+                rewrite_template_hook_body_args_expr(a, lookup, locals)?;
             }
             for (_, a) in named_args.iter_mut() {
-                recur(a)?;
+                rewrite_template_hook_body_args_expr(a, lookup, locals)?;
             }
         }
         Expr::MethodCall {
@@ -2070,73 +2114,73 @@ fn rewrite_template_hook_body_args_expr(
             named_args,
             ..
         } => {
-            recur(receiver)?;
+            rewrite_template_hook_body_args_expr(receiver, lookup, locals)?;
             for a in args.iter_mut() {
-                recur(a)?;
+                rewrite_template_hook_body_args_expr(a, lookup, locals)?;
             }
             for (_, a) in named_args.iter_mut() {
-                recur(a)?;
+                rewrite_template_hook_body_args_expr(a, lookup, locals)?;
             }
         }
         Expr::QualifiedFunctionCall {
             args, named_args, ..
         } => {
             for a in args.iter_mut() {
-                recur(a)?;
+                rewrite_template_hook_body_args_expr(a, lookup, locals)?;
             }
             for (_, a) in named_args.iter_mut() {
-                recur(a)?;
+                rewrite_template_hook_body_args_expr(a, lookup, locals)?;
             }
         }
-        Expr::PropertyAccess { object, .. } => recur(object)?,
+        Expr::PropertyAccess { object, .. } => rewrite_template_hook_body_args_expr(object, lookup, locals)?,
         Expr::IndexAccess {
             object,
             index,
             end_index,
             ..
         } => {
-            recur(object)?;
-            recur(index)?;
+            rewrite_template_hook_body_args_expr(object, lookup, locals)?;
+            rewrite_template_hook_body_args_expr(index, lookup, locals)?;
             if let Some(end) = end_index {
-                recur(end)?;
+                rewrite_template_hook_body_args_expr(end, lookup, locals)?;
             }
         }
         Expr::BinaryOp { left, right, .. } | Expr::FuzzyComparison { left, right, .. } => {
-            recur(left)?;
-            recur(right)?;
+            rewrite_template_hook_body_args_expr(left, lookup, locals)?;
+            rewrite_template_hook_body_args_expr(right, lookup, locals)?;
         }
-        Expr::UnaryOp { operand, .. } => recur(operand)?,
+        Expr::UnaryOp { operand, .. } => rewrite_template_hook_body_args_expr(operand, lookup, locals)?,
         Expr::Conditional {
             condition,
             then_expr,
             else_expr,
             ..
         } => {
-            recur(condition)?;
-            recur(then_expr)?;
+            rewrite_template_hook_body_args_expr(condition, lookup, locals)?;
+            rewrite_template_hook_body_args_expr(then_expr, lookup, locals)?;
             if let Some(e) = else_expr {
-                recur(e)?;
+                rewrite_template_hook_body_args_expr(e, lookup, locals)?;
             }
         }
         Expr::Match(match_expr, _) => {
-            recur(&mut match_expr.scrutinee)?;
+            rewrite_template_hook_body_args_expr(&mut match_expr.scrutinee, lookup, locals)?;
             for arm in &mut match_expr.arms {
                 if let Some(guard) = &mut arm.guard {
-                    recur(guard)?;
+                    rewrite_template_hook_body_args_expr(guard, lookup, locals)?;
                 }
-                recur(&mut arm.body)?;
+                rewrite_template_hook_body_args_expr(&mut arm.body, lookup, locals)?;
             }
         }
         Expr::Array(elems, _) => {
             for e in elems.iter_mut() {
-                recur(e)?;
+                rewrite_template_hook_body_args_expr(e, lookup, locals)?;
             }
         }
         Expr::Object(entries, _) => {
             for entry in entries.iter_mut() {
                 match entry {
-                    shape_ast::ast::ObjectEntry::Field { value, .. } => recur(value)?,
-                    shape_ast::ast::ObjectEntry::Spread(e) => recur(e)?,
+                    shape_ast::ast::ObjectEntry::Field { value, .. } => rewrite_template_hook_body_args_expr(value, lookup, locals)?,
+                    shape_ast::ast::ObjectEntry::Spread(e) => rewrite_template_hook_body_args_expr(e, lookup, locals)?,
                 }
             }
         }
@@ -2144,16 +2188,17 @@ fn rewrite_template_hook_body_args_expr(
             for item in &mut block.items {
                 match item {
                     shape_ast::ast::BlockItem::Statement(s) => {
-                        rewrite_template_hook_body_args(s, lookup)?;
+                        rewrite_template_hook_body_args_stmt(s, lookup, locals)?;
                     }
-                    shape_ast::ast::BlockItem::Expression(e) => recur(e)?,
+                    shape_ast::ast::BlockItem::Expression(e) => rewrite_template_hook_body_args_expr(e, lookup, locals)?,
                     shape_ast::ast::BlockItem::VariableDecl(decl) => {
                         if let Some(init) = &mut decl.value {
-                            recur(init)?;
+                            rewrite_template_hook_body_args_expr(init, lookup, locals)?;
                         }
+                        locals.extend(decl.pattern.get_identifiers());
                     }
                     shape_ast::ast::BlockItem::Assignment(assign) => {
-                        recur(&mut assign.value)?;
+                        rewrite_template_hook_body_args_expr(&mut assign.value, lookup, locals)?;
                     }
                 }
             }
@@ -2162,30 +2207,30 @@ fn rewrite_template_hook_body_args_expr(
         | Expr::Await(inner, _)
         | Expr::Spread(inner, _)
         | Expr::AsyncScope(inner, _)
-        | Expr::Reference { expr: inner, .. } => recur(inner)?,
-        Expr::Return(Some(inner), _) | Expr::Break(Some(inner), _) => recur(inner)?,
+        | Expr::Reference { expr: inner, .. } => rewrite_template_hook_body_args_expr(inner, lookup, locals)?,
+        Expr::Return(Some(inner), _) | Expr::Break(Some(inner), _) => rewrite_template_hook_body_args_expr(inner, lookup, locals)?,
         Expr::For(for_expr, _) => {
-            recur(&mut for_expr.iterable)?;
-            recur(&mut for_expr.body)?;
+            rewrite_template_hook_body_args_expr(&mut for_expr.iterable, lookup, locals)?;
+            rewrite_template_hook_body_args_expr(&mut for_expr.body, lookup, locals)?;
         }
         Expr::While(while_expr, _) => {
-            recur(&mut while_expr.condition)?;
-            recur(&mut while_expr.body)?;
+            rewrite_template_hook_body_args_expr(&mut while_expr.condition, lookup, locals)?;
+            rewrite_template_hook_body_args_expr(&mut while_expr.body, lookup, locals)?;
         }
         Expr::If(if_expr, _) => {
-            recur(&mut if_expr.condition)?;
-            recur(&mut if_expr.then_branch)?;
+            rewrite_template_hook_body_args_expr(&mut if_expr.condition, lookup, locals)?;
+            rewrite_template_hook_body_args_expr(&mut if_expr.then_branch, lookup, locals)?;
             if let Some(else_branch) = &mut if_expr.else_branch {
-                recur(else_branch)?;
+                rewrite_template_hook_body_args_expr(else_branch, lookup, locals)?;
             }
         }
-        Expr::Loop(loop_expr, _) => recur(&mut loop_expr.body)?,
+        Expr::Loop(loop_expr, _) => rewrite_template_hook_body_args_expr(&mut loop_expr.body, lookup, locals)?,
         Expr::Range { start, end, .. } => {
             if let Some(s) = start {
-                recur(s)?;
+                rewrite_template_hook_body_args_expr(s, lookup, locals)?;
             }
             if let Some(e) = end {
-                recur(e)?;
+                rewrite_template_hook_body_args_expr(e, lookup, locals)?;
             }
         }
         _ => {}
@@ -2315,6 +2360,49 @@ mod template_hook_body_rewrite_tests {
         assert!(text.contains("a string literal"), "names the shape: {text}");
         assert!(
             text.contains("declare `fn my_hook(...)` at module scope and pass `my_hook`"),
+            "carries the positive twin: {text}"
+        );
+    }
+
+    // Fix-round-1: a handler-local binding sharing the body fn's name is a
+    // NAMED rejection — without it the rewrite would bind the MODULE fn and
+    // silently invert ordinary shadowing. Driven through the statement face
+    // with one shared locals set, exactly as the production Block walk
+    // threads it.
+    #[test]
+    fn handler_local_shadowing_the_body_fn_is_a_named_rejection() {
+        super::super::comptime_builtins::clear_comptime_template_body_fns();
+        let body = shape_ast::parse_program(
+            "fn outer() { let my_hook = 3\n let t = before_hook(my_hook, []) }",
+        )
+        .expect("fixture parses")
+        .items
+        .into_iter()
+        .find_map(|item| match item {
+            Item::Function(func, _) => Some(func),
+            _ => None,
+        })
+        .expect("fixture has one function")
+        .body;
+        let lookup = |name: &str| (name == "my_hook").then(|| fixture_def("my_hook"));
+        let mut locals = std::collections::HashSet::new();
+        let mut rejection = None;
+        for mut stmt in body {
+            if let Err(err) = rewrite_template_hook_body_args_stmt(&mut stmt, &lookup, &mut locals)
+            {
+                rejection = Some(err);
+                break;
+            }
+        }
+        let text = rejection
+            .expect("the shadowed body fn reference must reject")
+            .to_string();
+        assert!(
+            text.contains("is shadowed by a handler-local binding"),
+            "names the shadow: {text}"
+        );
+        assert!(
+            text.contains("rename the local binding or the body fn"),
             "carries the positive twin: {text}"
         );
     }

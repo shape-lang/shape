@@ -44,9 +44,20 @@
 //!    consumed via `ConcreteType` equality semantics, never spelling
 //!    equality — then read `m.a0..m.aN-1` as the next call's args), the
 //!    direct impl call to the shadow (awaited for async targets), then the
-//!    `after` chain threading the typed result, also in application order.
-//!    Capture values append as TYPED LITERAL trailing args per
+//!    `after` chain threading the typed result in REVERSE application order
+//!    (fix-round-1: the WRAPPING/onion semantic — the first-applied
+//!    annotation is the outermost wrapper, so its `after` runs last; this is
+//!    the surviving declarative surface's stacked-after semantic, green-
+//!    pinned at `annotations_runtime/wrapping.rs`
+//!    `stacked_after_hooks_transform_result_in_order`, and no C3 ruling
+//!    ordered a change — a dated user ruling can flip this single iteration
+//!    order). Capture values append as TYPED LITERAL trailing args per
 //!    [`CaptureBindingPlan::CallSiteArgs`] at every handler call site.
+//!    OBSERVER installs (fix-round-1 C3-G2 growth: concrete
+//!    zero-signature-param void bodies) are called at their chain position
+//!    with ONLY their capture values — the args/result flow is untouched,
+//!    which is what gives zero-param targets a `before` spelling and void
+//!    targets an `after` spelling.
 //!
 //! Wrapper-internal locals are minted under the reserved `__c3_` prefix
 //! (`__c3_w{n}`), skipping any (pathological) user parameter spelled with a
@@ -58,10 +69,11 @@
 //!   wrapper forwards parameters BY NAME to the shadow and the handlers; a
 //!   destructured parameter has no forwardable spelling. Positive twin:
 //!   bind the parameter to a name.
-//! - Internal invariants (a Before install without a carrier, an After
-//!   install on a void target, a generic def reaching the weave, a legacy
-//!   classification on a new-path target) are internal-error-shaped — the
-//!   apply seam's rejections make them unreachable from user code.
+//! - Internal invariants (a non-observer Before install without a carrier, a
+//!   result-threading After install on a void target, a generic def reaching
+//!   the weave, a legacy classification on a new-path target) are
+//!   internal-error-shaped — the apply seam's rejections make them
+//!   unreachable from user code.
 
 use std::collections::HashSet;
 
@@ -287,6 +299,15 @@ impl BytecodeCompiler {
             .filter(|install| install.hook_kind == TemplateHookKind::Before)
         {
             let symbol = handler_symbol(self, install)?;
+            // OBSERVER install: called with ONLY its capture values; the
+            // target's arguments thread through UNTOUCHED (module docs).
+            if install.handler.is_observer() {
+                stmts.push(Statement::Expression(
+                    call(&symbol, capture_args(install)),
+                    span,
+                ));
+                continue;
+            }
             let mut args = current_args.clone();
             args.extend(capture_args(install));
             match install.handler.carrier() {
@@ -323,7 +344,7 @@ impl BytecodeCompiler {
                     return Err(internal(format!(
                         "internal error: staged `before` install (via @{}) carries no \
                          mutation carrier; specialize_template always attaches one to a \
-                         before handler",
+                         non-observer before handler",
                         install.annotation_name
                     )));
                 }
@@ -351,10 +372,19 @@ impl BytecodeCompiler {
             let result_local = fresh_local(&taken);
             stmts.push(decl(&result_local, return_annotation.clone(), impl_expr));
             let mut result_expr = ident(&result_local);
-            // The `after` chain, in application order, threading the typed
-            // result.
-            for install in afters {
+            // The `after` chain, in REVERSE application order (the
+            // wrapping/onion semantic — module docs), threading the typed
+            // result; observers run at their chain position without touching
+            // it.
+            for install in afters.iter().rev() {
                 let symbol = handler_symbol(self, install)?;
+                if install.handler.is_observer() {
+                    stmts.push(Statement::Expression(
+                        call(&symbol, capture_args(install)),
+                        span,
+                    ));
+                    continue;
+                }
                 let mut args = vec![result_expr];
                 args.extend(capture_args(install));
                 let local = fresh_local(&taken);
@@ -363,15 +393,28 @@ impl BytecodeCompiler {
             }
             stmts.push(Statement::Return(Some(result_expr), span));
         } else {
-            if let Some(install) = afters.first() {
-                return Err(internal(format!(
-                    "internal error: staged `after` install (via @{}) on the void target \
-                     `{}`; specialize_template rejects after-templates on targets without a \
-                     typed result",
-                    install.annotation_name, func_def.name
-                )));
+            // A void target hosts OBSERVER afters only (fix-round-1 C3-G2
+            // growth): specialize_template rejects every result-threading
+            // after on a void target, so a non-observer here is an internal
+            // invariant break.
+            for install in &afters {
+                if !install.handler.is_observer() {
+                    return Err(internal(format!(
+                        "internal error: staged result-threading `after` install (via @{}) on \
+                         the void target `{}`; specialize_template rejects after-templates \
+                         without a typed result unless they are observers",
+                        install.annotation_name, func_def.name
+                    )));
+                }
             }
             stmts.push(Statement::Expression(impl_expr, span));
+            for install in afters.iter().rev() {
+                let symbol = handler_symbol(self, install)?;
+                stmts.push(Statement::Expression(
+                    call(&symbol, capture_args(install)),
+                    span,
+                ));
+            }
         }
 
         func_def.body = stmts;
@@ -658,10 +701,14 @@ victim(1)
         );
     }
 
-    // Two AFTER installs stack in application order too: impl(1) = 10 →
-    // +10 = 20 → *2 = 40 (reversed ⇒ 30).
+    // Two AFTER installs stack in REVERSE application order (fix-round-1:
+    // the wrapping/onion semantic — the first-applied annotation is the
+    // OUTERMOST wrapper, so its after runs LAST; the surviving declarative
+    // surface's stacked-after semantic, wrapping.rs
+    // stacked_after_hooks_transform_result_in_order): impl(1) = 10 →
+    // mul_two 20 → add_ten 30 (application order would yield 40).
     #[test]
-    fn stacked_after_installs_thread_the_result_in_application_order() {
+    fn stacked_after_installs_thread_the_result_in_reverse_application_order() {
         let src = r#"
 fn add_ten(x: int) -> int { return x + 10 }
 fn mul_two(x: int) -> int { return x * 2 }
@@ -687,7 +734,10 @@ fn victim(a: int) -> int { return a * 10 }
 victim(1)
 "#;
         let (value, _) = top_level_i64(src);
-        assert_eq!(value, 40, "after chain in application order (reversed ⇒ 30)");
+        assert_eq!(
+            value, 30,
+            "after chain in REVERSE application order (onion; application order ⇒ 40)"
+        );
     }
 
     // ── replace body + install on ONE target ───────────────────────────────
@@ -853,6 +903,99 @@ victim_a([1], 4) * 10000 + victim_b([2], 7)
             "@hookann()\nasync fn victim(a: int) -> int { return a * 10 }\n\nawait victim(4)",
         ));
         assert_eq!(value, 50, "the async weave awaits the shadow (skip ⇒ 40)");
+    }
+
+    // ── the OBSERVER form (fix-round-1 C3-G2 growth) ───────────────────────
+
+    // GREEN CONTROL: before+after observers on a ZERO-PARAM VOID target (the
+    // canonical entry/exit-logging shape — the S1c/S2 hole: this target
+    // previously could receive NO hook at all) weave and execute without
+    // corrupting the top level. Structural pins: shadow + wrapper + 2 rows.
+    #[test]
+    fn observers_on_a_zero_param_void_target_weave_and_execute() {
+        let compiler = compiled_ok(&hook_source(
+            "fn note_in() { let x = 1 }\nfn note_out() { let x = 2 }",
+            "install(before_hook(note_in, []))\n    install(after_hook(note_out, []))",
+            "@hookann()\nfn hello() { let a = 1 }\n\nhello()\n7",
+        ));
+        let value = execute_top_level(&compiler)
+            .as_i64()
+            .expect("trailing literal is the top-level value");
+        assert_eq!(value, 7, "the observer weave executes cleanly (green control)");
+        assert_eq!(shadow_entries(&compiler, "hello").len(), 1);
+        assert_eq!(compiler.hook_install_registry.len(), 2);
+        assert_eq!(
+            compiler.hook_install_registry[0].hook_kind,
+            TemplateHookKind::Before
+        );
+        assert_eq!(
+            compiler.hook_install_registry[1].hook_kind,
+            TemplateHookKind::After
+        );
+    }
+
+    // EXECUTION PROOF (the observer has no data-flow observable, so the
+    // proof is error-injection): an observer whose body errors at runtime
+    // makes the WHOLE woven program error — iff the observer actually runs.
+    // The green control above is the non-vacuity twin (same weave shape,
+    // non-erroring observer, program runs green).
+    #[test]
+    fn observer_execution_is_proven_by_an_erroring_observer_body() {
+        for (hook_stmt, kind) in [
+            ("install(before_hook(boom, []))", "before"),
+            ("install(after_hook(boom, []))", "after"),
+        ] {
+            let compiler = compiled_ok(&hook_source(
+                "fn boom() {\n\
+                 \x20   let xs = [1, 2]\n\
+                 \x20   let mut i = 0\n\
+                 \x20   while i < 9 { i = i + 1 }\n\
+                 \x20   let y = xs[i]\n\
+                 }",
+                hook_stmt,
+                "@hookann()\nfn hello() { let a = 1 }\n\nhello()\n7",
+            ));
+            let mut vm = VirtualMachine::new(VMConfig::default());
+            vm.load_program(compiler.program.clone());
+            vm.execute(None).expect_err(&format!(
+                "the woven {kind} observer must EXECUTE (its body errors at runtime)"
+            ));
+        }
+    }
+
+    // Observers are TARGET-UNIFORM and compose with mutation hooks: a before
+    // observer beside a mutating before on a param-bearing target leaves the
+    // args chain untouched — (4+1)*10 = 50 exactly as without the observer.
+    #[test]
+    fn observer_composes_with_mutation_hooks_without_touching_the_chain() {
+        let (value, compiler) = top_level_i64(&hook_source(
+            "fn note() { let x = 1 }\n\
+             fn add_one(x: int) -> int { return x + 1 }",
+            "install(before_hook(note, []))\n    install(before_hook(add_one, []))",
+            "@hookann()\nfn victim(a: int) -> int { return a * 10 }\n\nvictim(4)",
+        ));
+        assert_eq!(
+            value, 50,
+            "the observer must not disturb the mutation chain (skip-mutation ⇒ 40)"
+        );
+        assert_eq!(compiler.hook_install_registry.len(), 2);
+    }
+
+    // An observer with a CAPTURE: the weave delivers the typed literal as
+    // the observer's only call argument (delivery breakage would be an arity
+    // error at the nested wrapper compile), and the row records it.
+    #[test]
+    fn observer_with_capture_weaves_and_records_the_literal() {
+        let (value, compiler) = top_level_i64(&hook_source(
+            "fn tagged(tag: int) { let x = tag }",
+            "install(before_hook(tagged, [capture(\"tag\", 3)]))",
+            "@hookann()\nfn hello() { let a = 1 }\n\nhello()\n7",
+        ));
+        assert_eq!(value, 7);
+        assert_eq!(
+            compiler.hook_install_registry[0].captures,
+            vec![("tag".to_string(), "3".to_string())]
+        );
     }
 
     // ── rollback: a failing later install leaves NO weave residue ──────────

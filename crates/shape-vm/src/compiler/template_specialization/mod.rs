@@ -48,7 +48,10 @@
 //! S2 owns any ctx growth, with its own native smoke). No config parameters
 //! (config enters ONLY as ConstLift'd DECLARED captures — S3). A `before`
 //! template binds the target's typed parameters; an `after` template binds the
-//! target's typed result. Nothing else.
+//! target's typed result; an OBSERVER template (fix-round-1 C3-G2 growth: a
+//! concrete zero-signature-param, void-return body) binds NOTHING — it runs at
+//! the hook point with only its capture values, giving zero-param targets a
+//! `before` spelling and void targets an `after` spelling. Nothing else.
 //!
 //! # Transaction composition (E1-D6b — never a second transaction)
 //!
@@ -135,12 +138,19 @@ pub(in crate::compiler) enum MutationCarrier {
 }
 
 /// A successfully specialized handler: the template body fn's index in the
-/// current compilation, plus the mutation carrier (`Some` for `before`,
-/// `None` for `after`).
+/// current compilation, plus the mutation carrier (`Some` for a mutating
+/// `before`, `None` for `after` handlers and observers).
 #[derive(Debug)]
 pub(in crate::compiler) struct SpecializedHandler {
     function_index: u16,
     carrier: Option<MutationCarrier>,
+    /// The OBSERVER form (fix-round-1 C3-G2 growth): a CONCRETE template
+    /// body with ZERO signature parameters and no/void return observes the
+    /// hook point — the weave calls it with ONLY its capture values and the
+    /// target's args/result thread through UNCHANGED. This is the public
+    /// spelling for hooks on zero-param targets and `after` hooks on void
+    /// targets (the S1c "S2 revisits" deferral, discharged here).
+    observer: bool,
 }
 
 impl SpecializedHandler {
@@ -149,10 +159,17 @@ impl SpecializedHandler {
         self.function_index
     }
 
-    /// The mutation carrier (`Some` for `before` handlers, `None` for
-    /// `after`).
+    /// The mutation carrier (`Some` for mutating `before` handlers, `None`
+    /// for `after` handlers and observers).
     pub(in crate::compiler) fn carrier(&self) -> Option<&MutationCarrier> {
         self.carrier.as_ref()
+    }
+
+    /// True for the OBSERVER form (zero-signature-param, void-return concrete
+    /// body): the weave calls the handler with only its capture values; the
+    /// target's data flow is untouched.
+    pub(in crate::compiler) fn is_observer(&self) -> bool {
+        self.observer
     }
 }
 
@@ -290,8 +307,9 @@ impl BytecodeCompiler {
                 template,
                 target,
                 "the target declares no parameters, so a `before` template has no arguments to \
-                 receive or mutate; remove the `before` template or use an `after` template on \
-                 the target's result",
+                 receive or mutate; declare the template as a zero-parameter void observer \
+                 (`fn t() { ... }`) to observe the call, or use an `after` template on the \
+                 target's result",
             ));
         }
         let mut param_concretes = Vec::with_capacity(target.params.len());
@@ -355,6 +373,7 @@ impl BytecodeCompiler {
         Ok(SpecializedHandler {
             function_index,
             carrier: Some(carrier),
+            observer: false,
         })
     }
 
@@ -375,7 +394,8 @@ impl BytecodeCompiler {
                     template,
                     target,
                     "the target returns no value, so an `after` template has no typed result to \
-                     receive; remove the `after` template or give the target a return type",
+                     receive; declare the template as a zero-parameter void observer \
+                     (`fn t() { ... }`) to observe completion, or give the target a return type",
                 ));
             }
             Some(annotation) => annotation,
@@ -405,6 +425,7 @@ impl BytecodeCompiler {
         Ok(SpecializedHandler {
             function_index,
             carrier: None,
+            observer: false,
         })
     }
 
@@ -415,19 +436,36 @@ impl BytecodeCompiler {
     /// > 1 has NO user-spellable concrete return (the G9 aggregate is
     /// compiler-internal BY RULING) — named rejection with the polymorphic
     /// positive twin.
+    ///
+    /// The OBSERVER form (fix-round-1 C3-G2 growth, discharging the S1c
+    /// "S2 revisits" deferral): a concrete body with ZERO signature
+    /// parameters and no/void return observes the call on ANY target — the
+    /// weave calls it with only its capture values; the target's arguments
+    /// thread through unchanged. This is the public spelling for `before`
+    /// hooks on zero-param targets (the canonical entry-logging shape), and
+    /// it is target-uniform so one observer template serves every target the
+    /// installing annotation applies to.
     fn specialize_concrete_before(
         &self,
         template: &CheckedTemplate,
         target: &SpecializationTarget,
         signature: &BodySignature,
     ) -> Result<SpecializedHandler> {
+        if concrete_signature_is_observer(signature) {
+            return Ok(SpecializedHandler {
+                function_index: self.template_body_function_index(template)?,
+                carrier: None,
+                observer: true,
+            });
+        }
         match target.params.len() {
             0 => Err(self.template_application_error(
                 template,
                 target,
                 "the target declares no parameters, so a `before` template has no arguments to \
-                 receive or mutate; remove the `before` template or use an `after` template on \
-                 the target's result",
+                 receive or mutate; declare the template as a zero-parameter void observer \
+                 (`fn t() { ... }`) to observe the call, or use an `after` template on the \
+                 target's result",
             )),
             1 => {
                 let (param_name, required) = &target.params[0];
@@ -486,6 +524,7 @@ impl BytecodeCompiler {
                     carrier: Some(MutationCarrier::Single {
                         annotation: required.clone(),
                     }),
+                    observer: false,
                 })
             }
             arity => Err(self.template_application_error(
@@ -503,21 +542,36 @@ impl BytecodeCompiler {
 
     /// The C3-G4 concrete `after` case. Expected specialization signature:
     /// `(R) -> R` where `R` is the target's declared return type. A target
-    /// with no return value cannot host an `after` template — named rejection
-    /// (surface-and-stop; S2 revisits).
+    /// with no return value cannot host a RESULT-THREADING `after` template —
+    /// named rejection whose positive twin names the OBSERVER form.
+    ///
+    /// The OBSERVER form (fix-round-1 C3-G2 growth, discharging the S1c
+    /// "S2 revisits" deferral): a concrete body with ZERO signature
+    /// parameters and no/void return observes completion on ANY target
+    /// (void included — the public spelling for `after` hooks on void
+    /// targets, the canonical exit-logging shape); the target's result (if
+    /// any) threads through unchanged.
     fn specialize_concrete_after(
         &self,
         template: &CheckedTemplate,
         target: &SpecializationTarget,
         signature: &BodySignature,
     ) -> Result<SpecializedHandler> {
+        if concrete_signature_is_observer(signature) {
+            return Ok(SpecializedHandler {
+                function_index: self.template_body_function_index(template)?,
+                carrier: None,
+                observer: true,
+            });
+        }
         let required = match &target.return_type {
             Some(TypeAnnotation::Void) | None => {
                 return Err(self.template_application_error(
                     template,
                     target,
                     "the target returns no value, so an `after` template has no typed result to \
-                     receive; remove the `after` template or give the target a return type",
+                     receive; declare the template as a zero-parameter void observer \
+                     (`fn t() { ... }`) to observe completion, or give the target a return type",
                 ));
             }
             Some(annotation) => annotation,
@@ -571,6 +625,7 @@ impl BytecodeCompiler {
         Ok(SpecializedHandler {
             function_index: self.template_body_function_index(template)?,
             carrier: None,
+            observer: false,
         })
     }
 
@@ -704,6 +759,18 @@ impl BytecodeCompiler {
             location: Some(self.span_to_source_location(target.application_span)),
         }
     }
+}
+
+/// The OBSERVER predicate (fix-round-1 C3-G2 growth): a concrete template
+/// body whose SIGNATURE parameter list is empty (trailing capture parameters
+/// excluded — the S2 capture-tail split already removed them from the
+/// `BodySignature`) and whose return is absent/void. Disjoint from every
+/// mutation form (a mutating `before` declares >= 1 signature parameter; a
+/// result-threading `after` declares exactly one AND a return type), so no
+/// template classifies both ways.
+fn concrete_signature_is_observer(signature: &BodySignature) -> bool {
+    signature.params().is_empty()
+        && matches!(signature.return_type(), None | Some(TypeAnnotation::Void))
 }
 
 /// The template-side annotation at parameter `index`, or a named rejection: a
@@ -1089,8 +1156,8 @@ mod tests {
         );
     }
 
-    // NEGATIVE: `after` on a void-returning target — surface-and-stop (S2
-    // revisits).
+    // NEGATIVE: a RESULT-THREADING `after` on a void-returning target — the
+    // positive twin names BOTH ways out (the observer form + a return type).
     #[test]
     fn void_return_target_rejects_an_after_template() {
         let src = "fn post(r: int) -> int { return r }\n\
@@ -1100,18 +1167,23 @@ mod tests {
         let target = target_for(&fx, "target_fn", None);
 
         let err = specialize(&mut fx.compiler, &template, &target)
-            .expect_err("an after template on a void target must reject");
+            .expect_err("a result-threading after template on a void target must reject");
         assert!(
             err.to_string().contains("no typed result to receive"),
             "expected the named void-return rejection: {err}"
         );
         assert!(
             err.to_string().contains("give the target a return type"),
-            "rejection must carry the positive twin: {err}"
+            "rejection must carry the return-type twin: {err}"
+        );
+        assert!(
+            err.to_string().contains("zero-parameter void observer"),
+            "rejection must name the observer spelling (fix-round-1 G2 growth): {err}"
         );
     }
 
-    // NEGATIVE: `before` on a zero-param target — nothing to bind or mutate.
+    // NEGATIVE: a MUTATING `before` on a zero-param target — nothing to bind
+    // or mutate; the positive twin names the observer spelling.
     #[test]
     fn zero_param_target_rejects_a_before_template() {
         let src = "fn tmpl(x: int) -> int { return x }\n\
@@ -1121,15 +1193,87 @@ mod tests {
         let target = target_for(&fx, "target_fn", None);
 
         let err = specialize(&mut fx.compiler, &template, &target)
-            .expect_err("a before template on a zero-param target must reject");
+            .expect_err("a mutating before template on a zero-param target must reject");
         assert!(
             err.to_string().contains("declares no parameters"),
             "expected the named zero-param rejection: {err}"
         );
         assert!(
-            err.to_string()
-                .contains("remove the `before` template or use an `after` template"),
-            "rejection must carry the positive twin: {err}"
+            err.to_string().contains("zero-parameter void observer"),
+            "rejection must name the observer spelling (fix-round-1 G2 growth): {err}"
+        );
+    }
+
+    // ── the OBSERVER form (fix-round-1 C3-G2 growth) ───────────────────────
+
+    // A zero-signature-param void concrete body observes a ZERO-PARAM target
+    // as a `before` hook — the S1c/S2 hole: this target shape previously had
+    // NO installable hook at all.
+    #[test]
+    fn observer_before_specializes_on_a_zero_param_target() {
+        let src = "fn note() { let x = 1 }\n\
+                   fn target_fn() -> int { return 7 }\n";
+        let mut fx = fixture(src);
+        let template = template(&fx, TemplateHookKind::Before, "note");
+        let target = target_for(&fx, "target_fn", None);
+
+        let handler = specialize(&mut fx.compiler, &template, &target)
+            .expect("an observer before specializes on a zero-param target");
+        assert!(handler.is_observer(), "the observer flag drives the weave");
+        assert!(handler.carrier().is_none(), "observers carry no mutation carrier");
+        let expected_index = fx.compiler.find_function("note").expect("note registered");
+        assert_eq!(handler.function_index() as usize, expected_index);
+    }
+
+    // The observer `after` is the void-target exit-logging spelling (the S1c
+    // "S2 revisits" deferral, discharged).
+    #[test]
+    fn observer_after_specializes_on_a_void_target() {
+        let src = "fn note() { let x = 1 }\n\
+                   fn target_fn(a: int) { let b = a }\n";
+        let mut fx = fixture(src);
+        let template = template(&fx, TemplateHookKind::After, "note");
+        let target = target_for(&fx, "target_fn", None);
+
+        let handler = specialize(&mut fx.compiler, &template, &target)
+            .expect("an observer after specializes on a void target");
+        assert!(handler.is_observer());
+        assert!(handler.carrier().is_none());
+    }
+
+    // Observers are TARGET-UNIFORM: one observer template serves a
+    // param-bearing, value-returning target too (what lets ONE lowering of an
+    // args/result-independent declarative block serve every target).
+    #[test]
+    fn observer_specializes_on_a_param_bearing_target_for_both_kinds() {
+        let src = "fn note() { let x = 1 }\n\
+                   fn target_fn(a: int) -> int { return a }\n";
+        let mut fx = fixture(src);
+        let target = target_for(&fx, "target_fn", None);
+        for hook_kind in [TemplateHookKind::Before, TemplateHookKind::After] {
+            let template = template(&fx, hook_kind, "note");
+            let handler = specialize(&mut fx.compiler, &template, &target)
+                .expect("observers are target-uniform");
+            assert!(handler.is_observer());
+        }
+    }
+
+    // A zero-param concrete body with a VALUE return is NOT an observer (its
+    // return would be silently discarded) — the existing named rejections
+    // keep firing; the observer rule never over-accepts.
+    #[test]
+    fn zero_param_value_returning_template_is_not_an_observer() {
+        let src = "fn tmpl() -> int { return 7 }\n\
+                   fn target_fn() -> int { return 7 }\n";
+        let mut fx = fixture(src);
+        let template = template(&fx, TemplateHookKind::Before, "tmpl");
+        let target = target_for(&fx, "target_fn", None);
+
+        let err = specialize(&mut fx.compiler, &template, &target)
+            .expect_err("a value-returning zero-param template is not an observer");
+        assert!(
+            err.to_string().contains("declares no parameters"),
+            "the zero-param-target rejection still fires: {err}"
         );
     }
 
