@@ -26,6 +26,24 @@
 //! 3. `c3-carrier-aggregate-string` — the (int, string) sibling, proving the
 //!    aggregate carrier does not deopt on string-bearing signatures
 //!    (measured zero-fallback; no named-expected-fallback contingency needed).
+//! 4. `c3-api-installed-hooks-single` (S2d) — the COMPILER-GENERATED path,
+//!    SINGLE carrier: a real annotation handler installs before+after
+//!    through the PUBLIC comptime API
+//!    (`before_hook`/`after_hook`/`capture`/`install`), and the S2c weave
+//!    generates the wrapper + hygienic impl shadow. ZERO-FALLBACK — the
+//!    generated weave itself (wrapper + shadow + polymorphic specialized
+//!    handler + capture delivery) is native, discharging the cells-1..3
+//!    proxy caveat for the 1-ary installed-hook shape.
+//! 5. `c3-api-installed-hooks` (S2d) — the COMPILER-GENERATED path,
+//!    heterogeneous 2-ary AGGREGATE carrier: NAMED-EXPECTED-FALLBACK (the
+//!    C3-G6 Deep-contingency pin, loud-flip semantics). The G9 aggregate's
+//!    inline-Object annotation chain is not yet JIT-provable (measured, two
+//!    named gaps — fixture header + the S2d slice report carry them
+//!    verbatim); the deopt is LOUD and whole-program (VM==JIT stdout), and
+//!    this cell pins the exact fallback identity so it FAILS the moment S7
+//!    proves the chain — forcing the flip to the zero-fallback form. Never
+//!    vacuous in either direction. (S7 also owns depth beyond these cells:
+//!    the wider matrix, async named-expected-fallback, ctx-consuming hooks.)
 
 use super::jit_test_support::{
     assert_fixture_has_no_top_level_comptime, count_fallback_lines, run_workspace_fixture,
@@ -103,4 +121,87 @@ fn c3_carrier_aggregate_runs_natively_both_tiers() {
 #[test]
 fn c3_carrier_aggregate_string_runs_natively_both_tiers() {
     assert_c3_fixture_reaches_native_jit("c3-carrier-aggregate-string.shape", "40800\n");
+}
+
+/// Cell 4 (S2d) — the API-INSTALLED weave smoke, SINGLE carrier: the
+/// COMPILER-GENERATED wrapper + hygienic impl shadow (S2c), installed
+/// through the PUBLIC comptime API by a real annotation handler
+/// (polymorphic before with a scalar capture + concrete after), on a 1-ary
+/// int target in the 200-call hot loop. 402600 is value-distinguishing per
+/// skipped hook (before-skip 199600, after-skip 402000 — fixture header
+/// derives each). The vacuity guard proves the annotation handler is not a
+/// top-level comptime block, so a zero-fallback pass here is the GENERATED
+/// weave executing natively — pinning the runtime BEFORE S4 stacks the
+/// sugar on it.
+#[test]
+fn c3_api_installed_hooks_single_runs_natively_both_tiers() {
+    assert_c3_fixture_reaches_native_jit("c3-api-installed-hooks-single.shape", "402600\n");
+}
+
+/// Cell 5 (S2d) — the API-INSTALLED weave smoke, heterogeneous 2-ary
+/// AGGREGATE carrier: an EXPLICIT NAMED-EXPECTED-FALLBACK pin with
+/// loud-flip semantics (the C3-G6 Deep-contingency mechanism, ruled in
+/// c3-decisions.md — "the wrapper cell pinned as an EXPLICIT named-fallback
+/// with loud-flip semantics"; NOT a zero-fallback claim). Measured at S2d:
+/// the G9 compiler-internal mutation aggregate's inline-Object annotation
+/// chain is not yet JIT-provable — the first named gap
+/// (`classify_type_annotation_metadata` has no `TypeAnnotation::Object`
+/// arm → no proven `FrameDescriptor.return_kind` on the specialized
+/// handler) fires the W36 surface-and-stop at the wrapper's call site, and
+/// a second (MirToIR inline-Object field-layout proof) sits behind it
+/// (probe-measured; fixture header + slice report carry both verbatim).
+/// The deopt is LOUD and whole-program: VM==JIT==400600 (correctness
+/// preserved under the interpreter), VM mode emits zero fallback lines,
+/// and JIT mode emits EXACTLY ONE `[jit-fallback]` line whose identity this
+/// cell pins. The moment S7 proves the chain the count drops to zero, this
+/// cell FAILS, and it must be flipped to
+/// `assert_c3_fixture_reaches_native_jit` — never a silent deopt under a
+/// green smoke, never a vacuous green in either direction.
+#[test]
+fn c3_api_installed_hooks_aggregate_is_a_named_expected_fallback() {
+    let fixture = "c3-api-installed-hooks.shape";
+    assert_fixture_has_no_top_level_comptime(fixture);
+
+    let vm = run_workspace_fixture("vm", "smokes-jit-closure", fixture);
+    let jit = run_workspace_fixture("jit", "smokes-jit-closure", fixture);
+
+    assert_eq!(vm.exit_code, Some(0), "{fixture}: VM must exit 0; stderr={}", vm.stderr);
+    assert_eq!(
+        jit.exit_code,
+        Some(0),
+        "{fixture}: JIT mode must exit 0 (interpreter fallback preserves the run); stderr={}",
+        jit.stderr
+    );
+    assert_eq!(vm.stdout, "400600\n", "{fixture}: exact VM stdout");
+    assert_eq!(
+        jit.stdout, vm.stdout,
+        "{fixture}: whole-program fallback must preserve VM==JIT value equality; stderr={}",
+        jit.stderr
+    );
+    assert_eq!(
+        count_fallback_lines(&vm.stderr),
+        0,
+        "{fixture}: VM mode must never emit JIT fallback diagnostics"
+    );
+    assert_eq!(
+        count_fallback_lines(&jit.stderr),
+        1,
+        "{fixture}: the NAMED-EXPECTED-FALLBACK pin — exactly one loud fallback line. \
+         Zero means S7 (or a compiler change) proved the aggregate chain: FLIP this cell \
+         to assert_c3_fixture_reaches_native_jit; more than one is a new regression. \
+         stderr={}",
+        jit.stderr
+    );
+    let fallback_line = jit
+        .stderr
+        .lines()
+        .find(|line| line.starts_with("[jit-fallback]"))
+        .expect("count asserted above");
+    assert!(
+        fallback_line.contains("no compile-time-proven FrameDescriptor.return_kind")
+            && fallback_line.contains("c3_before_hook"),
+        "{fixture}: the fallback must be EXACTLY the named W36 return-kind gap on the \
+         specialized before-handler (a different fallback identity is a new regression, \
+         not the pinned expectation): {fallback_line}"
+    );
 }

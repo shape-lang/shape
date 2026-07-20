@@ -74,6 +74,8 @@
 pub(in crate::compiler) mod const_lift;
 pub(in crate::compiler) mod install_registry;
 pub(in crate::compiler) mod pseudo_tuple;
+#[cfg(test)]
+mod sugar_matrix_tests;
 pub(in crate::compiler) mod weave;
 
 use shape_ast::ast::{FunctionDef, Span, TypeAnnotation};

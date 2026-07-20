@@ -1,0 +1,63 @@
+// ADR-009 C3 #14 slice 2 (S2d) — the API-INSTALLED weave RUNTIME SMOKE,
+// AGGREGATE-carrier shape: the COMPILER-GENERATED specialization path (not
+// the S1a hand-written proxy). A real annotation handler installs a
+// polymorphic BEFORE template (with a scalar capture) and a concrete AFTER
+// template through the PUBLIC comptime API (before_hook / after_hook /
+// capture / install); the S2c weave generates the wrapper + hygienic impl
+// shadow.
+//
+// MEASURED S2d STATUS — NAMED-EXPECTED-FALLBACK (the C3-G6 Deep-contingency
+// pin shape, loud-flip semantics; see the CLI cell): the heterogeneous 2-ary
+// target forces the G9 compiler-internal MUTATION AGGREGATE, whose
+// inline-Object annotation chain is not yet JIT-provable — two named gaps,
+// surfaced verbatim in the S2d slice report: (1) `classify_type_annotation_
+// metadata` has no `TypeAnnotation::Object` arm, so the specialized handler
+// carries no proven FrameDescriptor.return_kind (the W36 surface-and-stop
+// fires at the wrapper's call site); (2) behind it (probe-measured), MirToIR
+// has no statically proven field layout for reads off an inline-Object-
+// annotated local (`unresolved direct field read .a0`). VM and JIT agree on
+// stdout (whole-program interpreter fallback, LOUD, never silent); the
+// SINGLE-carrier sibling (`c3-api-installed-hooks-single.shape`) is
+// zero-fallback native, attributing the gap to the aggregate carrier
+// exactly. S7 owns the proof chain; the CLI cell fails loudly the moment
+// the fallback disappears, forcing the flip to the zero-fallback form.
+//
+// Heterogeneous 2-ary (int, number) target; hot loop of 200 calls crosses
+// T1@100 (crates/shape-vm/src/tier.rs). The annotation `comptime post`
+// handler is NOT a top-level comptime block (the parse-based vacuity guard
+// distinguishes exactly this).
+//
+// Value-distinguishing arithmetic (the S1a 40x00-style convention), per call
+// i in 0..200 with b = 2.5:
+//   before: a0 = 2i + 1 (x2 + capture bump 1), a1 = 2.5 typed-preserved
+//   impl:   b > 2.0 holds → a0 * 10 = 20i + 10
+//   after:  + 3 → 20i + 13;  sum = 20*19900 + 13*200 = 400600
+// Expected stdout: 400600
+//   skipped before          → sum 10i+3   = 199600
+//   skipped after           → sum 20i+10  = 400000
+//   number slot kind-corrupt (b fails > 2.0) → sum 2i+4 = 40600
+fn boost<Args>(args: Args, bump: int) -> Args {
+  args[0] = args[0] * 2 + bump
+  return args
+}
+fn settle(r: int) -> int { return r + 3 }
+
+annotation hooked() {
+  targets: [function]
+  comptime post(target, ctx) {
+    install(before_hook(boost, [capture("bump", 1)]))
+    install(after_hook(settle, []))
+  }
+}
+
+@hooked()
+fn calc(a: int, b: number) -> int {
+  if b > 2.0 { a * 10 } else { a }
+}
+
+fn run() -> int {
+  let mut total = 0
+  for i in 0..200 { total = total + calc(i, 2.5) }
+  total
+}
+print(run())
