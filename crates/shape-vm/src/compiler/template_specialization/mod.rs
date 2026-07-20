@@ -15,14 +15,17 @@
 //! compiler-internal per-target aggregate at the weave boundary).
 //!
 //! Slice-1 staging: S1b landed the module home + the single pseudo-tuple
-//! traversal core ([`pseudo_tuple`]). THIS stage (S1c stage 3) lands the
-//! target-side glue ([`SpecializationTarget`]), the C3-G4 concrete degenerate
-//! case (match-or-error, [`BytecodeCompiler::specialize_template`]), and the
+//! traversal core ([`pseudo_tuple`]). S1c stage 3 landed the target-side glue
+//! ([`SpecializationTarget`]), the C3-G4 concrete degenerate case
+//! (match-or-error, [`BytecodeCompiler::specialize_template`]), and the
 //! application-site attribution producer
-//! ([`BytecodeCompiler::template_application_error`], C3-G10). The POLYMORPHIC
-//! arms (pseudo-tuple rewrite + `ensure_monomorphic_function_for_callsite`
-//! ride) land in the next stage — until then they are named placeholders,
-//! never a silent partial.
+//! ([`BytecodeCompiler::template_application_error`], C3-G10). S1c stage 4
+//! landed the POLYMORPHIC arms: the G9 pseudo-tuple resolution
+//! ([`pseudo_tuple::resolve_pseudo_tuple`]) riding
+//! `ensure_monomorphic_template_specialization` — the ONE monomorphization
+//! pipeline extended by an explicit plan parameter (no new pipeline, no
+//! ambient state, no new `SemanticSpecializationRequest` variant: a template
+//! plan is not call-site inference evidence).
 //!
 //! # Sig-source constraint (slice-0 report §7.4 — binding)
 //!
@@ -72,7 +75,9 @@ pub(in crate::compiler) mod pseudo_tuple;
 
 use shape_ast::ast::{FunctionDef, Span, TypeAnnotation};
 use shape_ast::error::{Result, ShapeError};
+use shape_value::v2::ConcreteType;
 
+use self::pseudo_tuple::TemplateSpecializationPlan;
 use crate::compiler::BytecodeCompiler;
 use crate::compiler::comptime_builtins::{CallableDescriptor, FrozenTypeIdentity};
 use crate::compiler::comptime_fragments::checked_body::BodySignature;
@@ -80,6 +85,8 @@ use crate::compiler::comptime_fragments::checked_template::{
     CheckedTemplate, TemplateHookKind, TemplateSig,
 };
 use crate::compiler::comptime_target::type_annotation_to_string;
+use crate::compiler::monomorphization::cache::SpecializationFailure;
+use crate::compiler::monomorphization::semantic_specialization::SemanticSpecializationRequest;
 use crate::compiler::monomorphization::type_resolution::declared_annotation_concrete_type;
 
 /// The frozen target a template specializes against: the USER-SPELLED name,
@@ -108,7 +115,7 @@ pub(in crate::compiler) struct SpecializationTarget {
 /// How a specialized `before` handler returns its typed args mutation
 /// (C3-G9). `after` handlers flow the typed result directly and carry no
 /// mutation carrier.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(in crate::compiler) enum MutationCarrier {
     /// Arity-1 target: the mutated argument flows back as the bare typed
     /// value — no aggregate exists.
@@ -221,17 +228,24 @@ impl BytecodeCompiler {
         }
 
         match template.sig() {
-            // Stage 4 territory: the pseudo-tuple rewrite + the
-            // `ensure_monomorphic_function_for_callsite` ride (EMISSION tier +
-            // MIR battery, C3-G10). Named placeholder — never a silent
-            // partial.
-            TemplateSig::PolymorphicArgs { .. } | TemplateSig::PolymorphicResult { .. } => {
-                Err(self.template_application_error(
-                    template,
-                    target,
-                    "polymorphic specialization lands in the next stage; only concrete template \
-                     bodies specialize today",
-                ))
+            // The C3-G4 polymorphic arms: the G9 pseudo-tuple resolution +
+            // per-specialization checking riding the monomorphization
+            // pipeline (EMISSION tier + MIR battery, C3-G10). The classifier
+            // derives the variant FROM the hook kind, so PolymorphicArgs is
+            // Before-only and PolymorphicResult is After-only by
+            // construction.
+            TemplateSig::PolymorphicArgs {
+                type_param,
+                args_param,
+            } => {
+                debug_assert_eq!(template.hook_kind(), TemplateHookKind::Before);
+                let type_param = type_param.clone();
+                let args_param = args_param.clone();
+                self.specialize_polymorphic_before(template, target, &type_param, &args_param)
+            }
+            TemplateSig::PolymorphicResult { .. } => {
+                debug_assert_eq!(template.hook_kind(), TemplateHookKind::After);
+                self.specialize_polymorphic_after(template, target)
             }
             TemplateSig::Concrete(signature) => match template.hook_kind() {
                 TemplateHookKind::Before => {
@@ -242,6 +256,141 @@ impl BytecodeCompiler {
                 }
             },
         }
+    }
+
+    /// The C3-G4 polymorphic `before` case: build the
+    /// [`TemplateSpecializationPlan`] (per-param carrier + G9 mutation
+    /// carrier — `Single` over the one parameter type for a 1-ary target,
+    /// the compiler-internal `Aggregate` otherwise) and ride
+    /// `ensure_monomorphic_template_specialization`. The
+    /// `ConcreteType::Tuple` type argument is the honest Sig identity for
+    /// the cache: the same template applied at the same target Sig SHARES
+    /// one specialization; a distinct Sig gets a distinct one. `Legacy` is
+    /// the correct semantic request — `Exact` facts are inference-owned
+    /// per-call-site evidence, which template application does not have.
+    ///
+    /// EVERY `SpecializationFailure` (Soft AND Hard — there is no generic
+    /// fallback for templates, the C3-G10 hard-fail posture) wraps through
+    /// [`Self::template_application_error`], preserving the inner detail
+    /// text.
+    fn specialize_polymorphic_before(
+        &mut self,
+        template: &CheckedTemplate,
+        target: &SpecializationTarget,
+        type_param: &str,
+        args_param: &str,
+    ) -> Result<SpecializedHandler> {
+        if target.params.is_empty() {
+            return Err(self.template_application_error(
+                template,
+                target,
+                "the target declares no parameters, so a `before` template has no arguments to \
+                 receive or mutate; remove the `before` template or use an `after` template on \
+                 the target's result",
+            ));
+        }
+        let mut param_concretes = Vec::with_capacity(target.params.len());
+        for (position, (param_name, annotation)) in target.params.iter().enumerate() {
+            let Some(concrete) = declared_annotation_concrete_type(self, annotation) else {
+                return Err(self.template_application_error(
+                    template,
+                    target,
+                    &format!(
+                        "parameter {} (`{param_name}`): the required specialization's type `{}` \
+                         (from the target's signature) does not resolve to a concrete type in \
+                         this compilation; annotate the target with a concrete resolvable type",
+                        position + 1,
+                        type_annotation_to_string(annotation)
+                    ),
+                ));
+            };
+            param_concretes.push(concrete);
+        }
+        let carrier = if target.params.len() == 1 {
+            MutationCarrier::Single {
+                annotation: target.params[0].1.clone(),
+            }
+        } else {
+            MutationCarrier::Aggregate {
+                fields: target
+                    .params
+                    .iter()
+                    .enumerate()
+                    .map(|(index, (_, annotation))| (format!("a{index}"), annotation.clone()))
+                    .collect(),
+            }
+        };
+        let plan = TemplateSpecializationPlan {
+            args_param: args_param.to_string(),
+            type_param: type_param.to_string(),
+            target_params: target.params.clone(),
+            carrier: carrier.clone(),
+        };
+        let function_index = self
+            .ensure_monomorphic_template_specialization(
+                template.body_fn(),
+                &[ConcreteType::Tuple(param_concretes)],
+                SemanticSpecializationRequest::Legacy,
+                &plan,
+            )
+            .map_err(|failure| {
+                let detail = specialization_failure_detail(failure);
+                self.template_application_error(template, target, &detail)
+            })?;
+        Ok(SpecializedHandler {
+            function_index,
+            carrier: Some(carrier),
+        })
+    }
+
+    /// The C3-G4 polymorphic `after` case: the specialized def IS plain
+    /// substitution of the template body at the target's result type, so it
+    /// rides the plain, UNCHANGED
+    /// `ensure_monomorphic_function_for_callsite` — no plan, no salt
+    /// (sharing a cache entry/symbol with an ordinary generic instantiation
+    /// at `R` is correct). Same hard-fail wrap as the `before` case.
+    fn specialize_polymorphic_after(
+        &mut self,
+        template: &CheckedTemplate,
+        target: &SpecializationTarget,
+    ) -> Result<SpecializedHandler> {
+        let required = match &target.return_type {
+            Some(TypeAnnotation::Void) | None => {
+                return Err(self.template_application_error(
+                    template,
+                    target,
+                    "the target returns no value, so an `after` template has no typed result to \
+                     receive; remove the `after` template or give the target a return type",
+                ));
+            }
+            Some(annotation) => annotation,
+        };
+        let Some(result_concrete) = declared_annotation_concrete_type(self, required) else {
+            return Err(self.template_application_error(
+                template,
+                target,
+                &format!(
+                    "the result type: the required specialization's type `{}` (from the \
+                     target's signature) does not resolve to a concrete type in this \
+                     compilation; annotate the target with a concrete resolvable type",
+                    type_annotation_to_string(required)
+                ),
+            ));
+        };
+        let function_index = self
+            .ensure_monomorphic_function_for_callsite(
+                template.body_fn(),
+                &[result_concrete],
+                SemanticSpecializationRequest::Legacy,
+            )
+            .map_err(|failure| {
+                let detail = specialization_failure_detail(failure);
+                self.template_application_error(template, target, &detail)
+            })?;
+        Ok(SpecializedHandler {
+            function_index,
+            carrier: None,
+        })
     }
 
     /// The C3-G4 concrete `before` case. Expected specialization signature:
@@ -566,6 +715,18 @@ fn template_param_annotation<'sig>(
     })
 }
 
+/// Extract the inner detail text of a monomorphization-ride failure so the
+/// two-signature application-site attribution PRESERVES it (C3-G10). Soft
+/// and Hard both surface — there is no generic fallback for templates.
+fn specialization_failure_detail(failure: SpecializationFailure) -> String {
+    match failure.into_error() {
+        ShapeError::SemanticError { message, .. } => message,
+        ShapeError::TypeError(message) => message,
+        ShapeError::RuntimeError { message, .. } => message,
+        other => other.to_string(),
+    }
+}
+
 /// Render the template's DECLARED form for attribution messages. The
 /// polymorphic forms render literally in their `<T>(p: T) -> T` shape (with
 /// the template's own spellings); the concrete form renders per-parameter via
@@ -641,10 +802,13 @@ mod tests {
     use std::collections::HashMap;
 
     use shape_ast::ast::{CaptureClause, FunctionDef, Item};
+    use shape_value::{KindedSlot, NativeKind, ValueSlot};
 
     use super::*;
     use crate::compiler::comptime_builtins::ParamDescriptor;
     use crate::compiler::comptime_fragments::checked_template::CheckedTemplateBuilder;
+    use crate::compiler::monomorphization::cache::TEMPLATE_SPECIALIZATION_KEY_SALT;
+    use crate::executor::{VMConfig, VirtualMachine};
 
     /// The route_tests harness pattern (`monomorphization/cache/route_tests.rs:40-83`):
     /// parse → `infer_reference_model_with_comptime_context` → fresh compiler
@@ -1115,6 +1279,443 @@ mod tests {
             "rejection must name the user-spelled target, never a mangled name: {message}"
         );
         assert!(location.is_some(), "rejection must anchor at the application site");
+    }
+
+    // =====================================================================
+    // S1c stage 4 — the polymorphic arms: G9 resolution riding the
+    // monomorphization pipeline (C3-G10), execution-proven per the S0 §2
+    // named uncertainty ("compile-proof alone is insufficient").
+    // =====================================================================
+
+    /// Route-tests-style clean-state pin (route_tests.rs:89-92).
+    fn assert_clean_specialization_state(compiler: &BytecodeCompiler) {
+        assert!(compiler.monomorphization_in_progress.is_empty());
+        assert_eq!(compiler.specialization_type_overlays.depth(), 0);
+    }
+
+    fn int_arg(value: i64) -> KindedSlot {
+        KindedSlot::new(ValueSlot::from_raw(value as u64), NativeKind::Int64)
+    }
+
+    fn number_arg(value: f64) -> KindedSlot {
+        KindedSlot::new(ValueSlot::from_raw(value.to_bits()), NativeKind::Float64)
+    }
+
+    /// EXECUTE a specialized handler in the VM (never compile-proof alone):
+    /// load the compiler's program into a fresh VM and call the handler by
+    /// its function index with typed args.
+    fn execute_specialized(
+        compiler: &BytecodeCompiler,
+        function_index: u16,
+        args: Vec<KindedSlot>,
+    ) -> KindedSlot {
+        let mut vm = VirtualMachine::new(VMConfig::default());
+        vm.load_program(compiler.program.clone());
+        vm.execute_function_by_id(function_index, args, None)
+            .expect("the specialized handler must execute in the VM")
+    }
+
+    /// Read the executed aggregate result POSITIONALLY through the typed
+    /// storage carrier (`KindedSlot::as_typed_object_storage`): slot `i` is
+    /// field `a{i}` — the positional weave contract (C3-G9). The field
+    /// NAMES are pinned at the AST level by the pseudo_tuple rewrite tests;
+    /// here the execution pin reads per-slot kind + raw bits directly (no
+    /// schema-registry projection — the fresh test VM has no comptime
+    /// registry to consult).
+    fn aggregate_slots(result: &KindedSlot) -> Vec<(NativeKind, u64)> {
+        let storage = result
+            .as_typed_object_storage()
+            .expect("the aggregate result must be the ordinary inline-schema TypedObject");
+        storage
+            .field_kinds
+            .iter()
+            .copied()
+            .zip(storage.slots().iter().map(|slot| slot.raw()))
+            .collect()
+    }
+
+    fn registered_specialized_def<'c>(
+        compiler: &'c BytecodeCompiler,
+        function_index: u16,
+    ) -> &'c FunctionDef {
+        let name = &compiler.program.functions[function_index as usize].name;
+        compiler
+            .function_defs
+            .get(name)
+            .expect("the specialized def must be registered")
+    }
+
+    // END-TO-END (2-ary aggregate): before-template mutates slot 0, passes
+    // slot 1 through; the executed result is the compiler-internal typed
+    // aggregate with a0 mutated and a1 untouched.
+    #[test]
+    fn polymorphic_before_two_ary_executes_the_aggregate_mutation() {
+        let src = "fn tmpl<Args>(args: Args) -> Args {\n\
+                   \x20   args[0] = args[0] + 1\n\
+                   \x20   return args\n\
+                   }\n\
+                   fn target_fn(a: int, b: number) -> int { return a }\n";
+        let mut fx = fixture(src);
+        let template = template(&fx, TemplateHookKind::Before, "tmpl");
+        let target = target_for(&fx, "target_fn", None);
+
+        let handler = specialize(&mut fx.compiler, &template, &target)
+            .expect("the polymorphic before template specializes");
+        match handler.carrier() {
+            Some(MutationCarrier::Aggregate { fields }) => {
+                assert_eq!(fields.len(), 2);
+                assert_eq!(fields[0].0, "a0");
+                assert_eq!(fields[1].0, "a1");
+                assert_eq!(type_annotation_to_string(&fields[0].1), "int");
+                assert_eq!(type_annotation_to_string(&fields[1].1), "number");
+            }
+            other => panic!("expected the aggregate carrier, got {:?}", other),
+        }
+
+        // The registered symbol carries the template salt; the registered
+        // def is fully resolved — the transient post-substitution Tuple
+        // annotation must never survive to checking or emission (C3-G9).
+        let index = handler.function_index();
+        let spec_def = registered_specialized_def(&fx.compiler, index);
+        assert!(
+            spec_def.name.contains("c3_before_hook"),
+            "the specialized symbol must carry the template salt: {}",
+            spec_def.name
+        );
+        assert!(
+            spec_def
+                .params
+                .iter()
+                .all(|p| !matches!(p.type_annotation, Some(TypeAnnotation::Tuple(_)))),
+            "no Tuple parameter annotation may survive resolution"
+        );
+        assert!(
+            !matches!(spec_def.return_type, Some(TypeAnnotation::Tuple(_))),
+            "no Tuple return annotation may survive resolution"
+        );
+
+        let result = execute_specialized(&fx.compiler, index, vec![int_arg(3), number_arg(4.5)]);
+        let slots = aggregate_slots(&result);
+        assert_eq!(slots.len(), 2, "the aggregate carries one slot per target parameter");
+        assert_eq!(slots[0].0, NativeKind::Int64, "a0 is the typed int slot");
+        assert_eq!(slots[0].1 as i64, 4, "a0 must carry the mutated int");
+        assert_eq!(slots[1].0, NativeKind::Float64, "a1 is the typed number slot");
+        assert_eq!(
+            f64::from_bits(slots[1].1),
+            4.5,
+            "a1 must pass the number through untouched"
+        );
+        assert_clean_specialization_state(&fx.compiler);
+    }
+
+    // END-TO-END (1-ary Single carrier): the mutated argument flows back as
+    // the bare typed value — no aggregate exists.
+    #[test]
+    fn polymorphic_before_unary_executes_with_the_single_carrier() {
+        let src = "fn tmpl<Args>(args: Args) -> Args {\n\
+                   \x20   args[0] = args[0] * 3\n\
+                   \x20   return args\n\
+                   }\n\
+                   fn target_fn(a: int) -> int { return a }\n";
+        let mut fx = fixture(src);
+        let template = template(&fx, TemplateHookKind::Before, "tmpl");
+        let target = target_for(&fx, "target_fn", None);
+
+        let handler = specialize(&mut fx.compiler, &template, &target)
+            .expect("the unary polymorphic before template specializes");
+        match handler.carrier() {
+            Some(MutationCarrier::Single { annotation }) => {
+                assert_eq!(type_annotation_to_string(annotation), "int");
+            }
+            other => panic!("expected the Single carrier, got {:?}", other),
+        }
+
+        let result =
+            execute_specialized(&fx.compiler, handler.function_index(), vec![int_arg(3)]);
+        assert_eq!(
+            result.as_i64(),
+            Some(9),
+            "the single-carrier handler must return the mutated bare int"
+        );
+        assert_clean_specialization_state(&fx.compiler);
+    }
+
+    // `args.length` resolves to the target-arity CONSTANT — executed, not
+    // just compiled: a0 = 3 + length = 5 proves the constant was 2.
+    #[test]
+    fn args_length_resolves_to_the_target_arity_constant() {
+        let src = "fn tmpl<Args>(args: Args) -> Args {\n\
+                   \x20   args[0] = args[0] + args.length\n\
+                   \x20   return args\n\
+                   }\n\
+                   fn target_fn(a: int, b: number) -> number { return b }\n";
+        let mut fx = fixture(src);
+        let template = template(&fx, TemplateHookKind::Before, "tmpl");
+        let target = target_for(&fx, "target_fn", None);
+
+        let handler = specialize(&mut fx.compiler, &template, &target)
+            .expect("the length-using template specializes");
+        let result = execute_specialized(
+            &fx.compiler,
+            handler.function_index(),
+            vec![int_arg(3), number_arg(4.5)],
+        );
+        let slots = aggregate_slots(&result);
+        assert_eq!(slots[0].0, NativeKind::Int64);
+        assert_eq!(
+            slots[0].1 as i64,
+            5,
+            "a0 = 3 + args.length proves length resolved to the constant 2"
+        );
+        assert_clean_specialization_state(&fx.compiler);
+    }
+
+    // Polymorphic AFTER at two distinct R types: distinct specializations,
+    // both executed; the plain (unsalted) monomorphization ride is correct
+    // for After — the specialized def IS plain substitution.
+    #[test]
+    fn polymorphic_after_executes_at_two_distinct_result_types() {
+        let src = "fn post<R>(result: R) -> R { return result }\n\
+                   fn target_int(a: int) -> int { return a }\n\
+                   fn target_num(a: int) -> number { return 2.0 }\n";
+        let mut fx = fixture(src);
+        let template = template(&fx, TemplateHookKind::After, "post");
+
+        let target_int = target_for(&fx, "target_int", None);
+        let handler_int = specialize(&mut fx.compiler, &template, &target_int)
+            .expect("after template specializes at int");
+        assert!(handler_int.carrier().is_none());
+
+        let target_num = target_for(&fx, "target_num", None);
+        let handler_num = specialize(&mut fx.compiler, &template, &target_num)
+            .expect("after template specializes at number");
+
+        assert_ne!(
+            handler_int.function_index(),
+            handler_num.function_index(),
+            "distinct result types get distinct specializations"
+        );
+        let int_name = &fx.compiler.program.functions[handler_int.function_index() as usize].name;
+        assert!(
+            !int_name.contains("c3_before_hook"),
+            "the After ride is unsalted — plain substitution shares with ordinary generic \
+             instantiation: {int_name}"
+        );
+
+        let result_int =
+            execute_specialized(&fx.compiler, handler_int.function_index(), vec![int_arg(7)]);
+        assert_eq!(result_int.as_i64(), Some(7));
+        let result_num = execute_specialized(
+            &fx.compiler,
+            handler_num.function_index(),
+            vec![number_arg(2.5)],
+        );
+        assert_eq!(result_num.as_f64(), Some(2.5));
+        assert_clean_specialization_state(&fx.compiler);
+    }
+
+    // CACHE identity (the honest Sig identity): same template + same target
+    // Sig ⇒ ONE shared specialization; a distinct Sig ⇒ its own. The
+    // specialized symbol carries the c3_before_hook salt.
+    #[test]
+    fn same_sig_shares_one_specialization_distinct_sig_gets_its_own() {
+        let src = "fn tmpl<Args>(args: Args) -> Args {\n\
+                   \x20   args[0] = args[0] + 1\n\
+                   \x20   return args\n\
+                   }\n\
+                   fn target_one(a: int, b: number) -> int { return a }\n\
+                   fn target_two(x: int, y: number) -> number { return y }\n\
+                   fn target_three(a: int, b: string) -> int { return a }\n";
+        let mut fx = fixture(src);
+        let template = template(&fx, TemplateHookKind::Before, "tmpl");
+
+        let target_one = target_for(&fx, "target_one", None);
+        let first = specialize(&mut fx.compiler, &template, &target_one)
+            .expect("first target specializes");
+        assert_eq!(fx.compiler.monomorphization_cache.legacy_len(), 1);
+        assert!(
+            fx.compiler.program.functions[first.function_index() as usize]
+                .name
+                .contains(TEMPLATE_SPECIALIZATION_KEY_SALT.trim_start_matches("::")),
+            "the specialized symbol must carry the salt"
+        );
+        assert_clean_specialization_state(&fx.compiler);
+
+        let target_two = target_for(&fx, "target_two", None);
+        let second = specialize(&mut fx.compiler, &template, &target_two)
+            .expect("same-Sig target specializes");
+        assert_eq!(
+            first.function_index(),
+            second.function_index(),
+            "the same template + same Sig must share ONE specialization"
+        );
+        assert_eq!(
+            fx.compiler.monomorphization_cache.legacy_len(),
+            1,
+            "a same-Sig application is a cache hit"
+        );
+        assert_clean_specialization_state(&fx.compiler);
+
+        let target_three = target_for(&fx, "target_three", None);
+        let third = specialize(&mut fx.compiler, &template, &target_three)
+            .expect("distinct-Sig target specializes");
+        assert_ne!(
+            first.function_index(),
+            third.function_index(),
+            "a distinct Sig must get its own specialization"
+        );
+        assert_eq!(fx.compiler.monomorphization_cache.legacy_len(), 2);
+        assert_clean_specialization_state(&fx.compiler);
+    }
+
+    // THE g6 FAILURE MODE FIXED (C3-G10): a body type error at
+    // specialization is a HARD error wrapped with BOTH signatures at the
+    // `@application` span — never an anonymous error deep in the hook body,
+    // never a generic fallback. Fixture = the emission-tier strict-proof
+    // class (arithmetic on a bool-typed pseudo-slot — exactly the g6
+    // per-instantiation error family). Two MEASURED near-miss fixtures are
+    // surfaced in the stage report as observations about the G10
+    // emission-tier boundary: `args[0].trim()` on an int slot and
+    // `args[0] = "boom"` into an int slot BOTH compile at this seam today
+    // (unknown-method dispatch defers to runtime; a local re-assignment
+    // re-stamps the slot kind at emission) — battery row 1 (the
+    // whole-program analyzer) does not re-run per specialization BY RULING
+    // (slice-0 §7.3), so the emission tier's strict-proof classes are the
+    // per-specialization checking surface.
+    #[test]
+    fn body_type_error_wraps_with_both_signatures_at_the_application_site() {
+        let src = "fn tmpl<Args>(args: Args) -> Args {\n\
+                   \x20   args[0] = args[0] + 1\n\
+                   \x20   return args\n\
+                   }\n\
+                   fn target_fn(a: bool) -> bool { return a }\n";
+        let mut fx = fixture(src);
+        let template = template(&fx, TemplateHookKind::Before, "tmpl");
+        let target = target_for(&fx, "target_fn", None);
+
+        let err = specialize(&mut fx.compiler, &template, &target)
+            .expect_err("arithmetic on a bool-typed pseudo-slot must hard-fail");
+        // target_fn is declared on line 5 of the fixture source.
+        assert_names_both_signatures_at_line(
+            &err,
+            "<Args>(args: Args) -> Args",
+            "(bool) -> bool",
+            5,
+        );
+        assert!(
+            err.to_string()
+                .contains("Cannot infer types for binary operation `Add`"),
+            "the inner detail text must be preserved verbatim: {err}"
+        );
+        assert_eq!(
+            fx.compiler.monomorphization_cache.legacy_len(),
+            0,
+            "a failed specialization must not leave a cache entry"
+        );
+        assert_clean_specialization_state(&fx.compiler);
+    }
+
+    // G9 out-of-range constant index: rejected at specialization naming the
+    // index, the target arity + signature, AND both signatures at the
+    // application site.
+    #[test]
+    fn out_of_range_index_rejects_naming_index_arity_and_both_signatures() {
+        let src = "fn tmpl<Args>(args: Args) -> Args {\n\
+                   \x20   args[7] = 1\n\
+                   \x20   return args\n\
+                   }\n\
+                   fn target_fn(a: int, b: number) -> int { return a }\n";
+        let mut fx = fixture(src);
+        let template = template(&fx, TemplateHookKind::Before, "tmpl");
+        let target = target_for(&fx, "target_fn", None);
+
+        let err = specialize(&mut fx.compiler, &template, &target)
+            .expect_err("an out-of-range constant index must reject at specialization");
+        assert_names_both_signatures_at_line(
+            &err,
+            "<Args>(args: Args) -> Args",
+            "(int, number) -> (int, number)",
+            5,
+        );
+        assert!(
+            err.to_string().contains("index 7 is out of range"),
+            "must quote the index: {err}"
+        );
+        assert!(
+            err.to_string().contains("declares 2 parameters"),
+            "must quote the target arity: {err}"
+        );
+        assert_eq!(
+            fx.compiler.monomorphization_cache.legacy_len(),
+            0,
+            "the rejection fires before any cache publication"
+        );
+        assert_clean_specialization_state(&fx.compiler);
+    }
+
+    // ROLLBACK PROBE (the stage-named hazard): the C2 rollback set
+    // (checked_body/mod.rs) truncates `program.functions` to the watermark
+    // but did NOT include `monomorphization_cache` — a pre-rollback cache
+    // entry would survive pointing at a truncated index, and a re-run of the
+    // SAME specialization would cache-hit the dangling index. PROBED
+    // 2026-07-20: stale-index reuse CONFIRMED (the re-specialize returned
+    // the truncated index against a shrunk function table). Fold-in applied
+    // per the disclosed protocol: `rollback_checked_body_install` now evicts
+    // every cache entry (both domains) whose index is at/above the
+    // functions watermark, so the re-run below re-registers FRESH at the
+    // same (freed) index and the cache stays index-consistent.
+    #[test]
+    fn rollback_evicts_the_specialization_cache_and_a_rerun_reregisters_fresh() {
+        let src = "fn tmpl<Args>(args: Args) -> Args {\n\
+                   \x20   args[0] = args[0] + 1\n\
+                   \x20   return args\n\
+                   }\n\
+                   fn target_fn(a: int, b: number) -> int { return a }\n";
+        let mut fx = fixture(src);
+        let template = template(&fx, TemplateHookKind::Before, "tmpl");
+        let target = target_for(&fx, "target_fn", None);
+
+        let functions_before = fx.compiler.program.functions.len();
+        let transaction = fx.compiler.begin_checked_body_install();
+        let first = fx
+            .compiler
+            .specialize_template(&template, &target)
+            .expect("the first specialization succeeds inside the transaction");
+        let first_index = first.function_index();
+        assert!(fx.compiler.program.functions.len() > functions_before);
+        assert_eq!(fx.compiler.monomorphization_cache.legacy_len(), 1);
+
+        fx.compiler.rollback_checked_body_install(transaction);
+        assert_eq!(
+            fx.compiler.program.functions.len(),
+            functions_before,
+            "rollback truncates the function table to the watermark"
+        );
+        assert_eq!(
+            fx.compiler.monomorphization_cache.legacy_len(),
+            0,
+            "rollback must evict the at/above-watermark cache entry (the fold-in)"
+        );
+
+        // Re-run the same specialization in the same compiler: a fresh
+        // registration at the freed index, executed to prove it is real.
+        let handler = specialize(&mut fx.compiler, &template, &target)
+            .expect("the re-run re-specializes fresh after rollback");
+        assert_eq!(
+            handler.function_index(),
+            first_index,
+            "the re-run re-registers at the freed watermark index"
+        );
+        assert!(fx.compiler.program.functions.len() > functions_before);
+        assert_eq!(fx.compiler.monomorphization_cache.legacy_len(), 1);
+        let result = execute_specialized(
+            &fx.compiler,
+            handler.function_index(),
+            vec![int_arg(3), number_arg(4.5)],
+        );
+        let slots = aggregate_slots(&result);
+        assert_eq!(slots[0].1 as i64, 4, "the re-specialized handler executes correctly");
+        assert_clean_specialization_state(&fx.compiler);
     }
 
     // Missing template return annotation on a concrete before body: named

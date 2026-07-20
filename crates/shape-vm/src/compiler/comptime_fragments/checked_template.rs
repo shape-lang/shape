@@ -253,7 +253,7 @@ impl CheckedTemplateBuilder<Present, Present> {
         // Typestate guarantees both were supplied; the `Option` is an
         // implementation detail of the phantom-typed transitions, never a
         // runtime completeness gate.
-        let snapshot = self
+        let mut snapshot = self
             .body_fn
             .expect("Present SigState guarantees a body fn was supplied");
         let captures = self
@@ -267,7 +267,10 @@ impl CheckedTemplateBuilder<Present, Present> {
             args_param,
         } = &snapshot.sig
         {
-            validate_pseudo_tuple_uses(&snapshot.body, args_param, type_param)?;
+            // The walker's `&mut` is traversal-uniformity with its rewrite
+            // face only; the validate face never mutates (pseudo_tuple.rs
+            // module docs).
+            validate_pseudo_tuple_uses(&mut snapshot.body, args_param, type_param)?;
         }
 
         Ok(CheckedTemplate {

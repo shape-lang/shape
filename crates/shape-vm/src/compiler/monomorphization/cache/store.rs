@@ -92,6 +92,21 @@ impl MonomorphizationCache {
             )
     }
 
+    /// ADR-009 C3 #14 (S1c rollback-probe fold-in, disclosed): drop every
+    /// entry — BOTH domains — whose compiled function index sits at/above a
+    /// truncated function-table watermark. Called from
+    /// `rollback_checked_body_install`: the C2 rollback truncates
+    /// `program.functions`, and a surviving cache entry above the watermark
+    /// would resolve a dangling (or later reused-by-another-fn) index on the
+    /// next cache hit — measured as real stale-index reuse by the S1c
+    /// rollback probe (template_specialization tests).
+    pub(crate) fn evict_at_or_above_function_index(&mut self, watermark: usize) {
+        self.entries
+            .retain(|_, index| (*index as usize) < watermark);
+        self.exact_entries
+            .retain(|_, index| (*index as usize) < watermark);
+    }
+
     pub fn keys(&self) -> impl Iterator<Item = &String> {
         self.entries
             .keys()

@@ -236,5 +236,17 @@ impl BytecodeCompiler {
         if !retain {
             self.rollback_capture_packs(&transaction);
         }
+        // ADR-009 C3 #14 (S1c rollback-probe fold-in, disclosed): the
+        // monomorphization cache maps typed keys to `program.functions`
+        // INDICES, and an install may add specializations (the template
+        // ride compiles inside this transaction). The index-keyed
+        // truncation above frees those indices, so any cache entry
+        // at/above the watermark would resolve a dangling — or
+        // later-reused — index on its next hit (measured stale-index
+        // reuse; see the template_specialization rollback-probe test).
+        // Complete the truncation over the cache in BOTH modes: a cache
+        // entry is an executable resolution, never a query reservation.
+        self.monomorphization_cache
+            .evict_at_or_above_function_index(transaction.functions_watermark);
     }
 }

@@ -26,6 +26,9 @@ use crate::compiler::BytecodeCompiler;
 use crate::compiler::monomorphization::semantic_specialization::{
     SemanticSpecializationRequest, SpecializationProgressKey,
 };
+use crate::compiler::template_specialization::pseudo_tuple::{
+    self, TemplateSpecializationPlan,
+};
 use crate::compiler::monomorphization::substitution;
 use crate::compiler::monomorphization::substitution::concrete_to_annotation;
 use crate::compiler::monomorphization::type_resolution::{
@@ -41,6 +44,21 @@ use crate::compiler::monomorphization::type_resolution::{
 /// hundreds of distinct closure types. See §3.4 of
 /// `docs/v2-closure-specialization.md` for the rationale.
 pub const DEFAULT_CLOSURE_SPECIALIZATION_BUDGET: u32 = 64;
+
+/// ADR-009 C3 #14 (S1c) — the template-specialization mono-key/symbol salt.
+///
+/// A specialized def produced under a [`TemplateSpecializationPlan`]
+/// structurally DIVERGES from plain substitution (the G9 pseudo-tuple
+/// resolution rewrites params, body, and return), so it must never share a
+/// cache entry or a registered symbol with an ordinary generic instantiation
+/// of the same body fn at the same type arguments. The salt is appended to
+/// the mono key BEFORE `prepare_semantic_specialization` consumes it (cache +
+/// cycle-detector isolation via `LegacySpecializationKey` /
+/// `SpecializationProgressKey`) and to the specialized symbol at the rename
+/// seam (name isolation — the Legacy `specialized_symbol` is a pass-through
+/// of the substituted name, so the key salt alone would not reach the
+/// registered fn name).
+pub(in crate::compiler) const TEMPLATE_SPECIALIZATION_KEY_SALT: &str = "::c3_before_hook";
 
 mod failure;
 #[cfg(test)]
@@ -206,6 +224,44 @@ impl BytecodeCompiler {
         type_args: &[ConcreteType],
         semantic_request: SemanticSpecializationRequest,
     ) -> std::result::Result<u16, SpecializationFailure> {
+        self.ensure_monomorphic_function_impl(base_fn_name, type_args, semantic_request, None)
+    }
+
+    /// ADR-009 C3 #14 (S1c) — the template-specialization entry point: the
+    /// SAME pipeline as [`Self::ensure_monomorphic_function_for_callsite`]
+    /// (substitution + registration + cache + cycle guard + the full
+    /// `compile_function` battery — the C3-G10 emission-tier + MIR authority),
+    /// extended by an explicit [`TemplateSpecializationPlan`] parameter. No
+    /// second pipeline, no ambient state: the plan rides as an argument and
+    /// conditions exactly three seams inside the shared impl (the key/symbol
+    /// salt, the const-generic guard, and the G9 pseudo-tuple resolution).
+    ///
+    /// `SemanticSpecializationRequest::Legacy` is the correct request for
+    /// template application: `Exact` facts are inference-owned per-call-site
+    /// evidence, which an `@application` site does not have (S2+ may
+    /// integrate).
+    pub(in crate::compiler) fn ensure_monomorphic_template_specialization(
+        &mut self,
+        base_fn_name: &str,
+        type_args: &[ConcreteType],
+        semantic_request: SemanticSpecializationRequest,
+        template_plan: &TemplateSpecializationPlan,
+    ) -> std::result::Result<u16, SpecializationFailure> {
+        self.ensure_monomorphic_function_impl(
+            base_fn_name,
+            type_args,
+            semantic_request,
+            Some(template_plan),
+        )
+    }
+
+    fn ensure_monomorphic_function_impl(
+        &mut self,
+        base_fn_name: &str,
+        type_args: &[ConcreteType],
+        semantic_request: SemanticSpecializationRequest,
+        template_plan: Option<&TemplateSpecializationPlan>,
+    ) -> std::result::Result<u16, SpecializationFailure> {
         // B.3 — if the callee declares any const generic parameters, auto-bind
         // them from their declared default expressions (literals only today —
         // no call-site `::<4>` turbofish syntax exists yet) and route through
@@ -226,6 +282,24 @@ impl BytecodeCompiler {
             .and_then(|d| d.type_params.clone())
         {
             if type_params.iter().any(|tp| tp.is_const()) {
+                // C3 S1c const-param guard: template bodies with const
+                // generics are S3's ConstLift integration (the `_with_consts`
+                // cache-key-incorporates-const-VALUES machinery is the S3
+                // seam), and the CheckedTemplate classifier rejects them at
+                // construction — a plan reaching this reroute is an internal
+                // invariant breach, never a reroute.
+                if template_plan.is_some() {
+                    return Err(SpecializationFailure::Hard(ShapeError::RuntimeError {
+                        message: format!(
+                            "internal error: template specialization for `{}` reached the \
+                             const-generic entry point; template bodies with const generic \
+                             parameters are S3 ConstLift territory, and the CheckedTemplate \
+                             classifier rejects them at construction",
+                            base_fn_name
+                        ),
+                        location: None,
+                    }));
+                }
                 let const_args = resolve_const_defaults_or_error(base_fn_name, &type_params)?;
                 return self.ensure_monomorphic_function_with_consts_for_callsite(
                     base_fn_name,
@@ -236,7 +310,14 @@ impl BytecodeCompiler {
             }
         }
 
-        let mono_key = build_mono_key(base_fn_name, type_args);
+        let mut mono_key = build_mono_key(base_fn_name, type_args);
+        if template_plan.is_some() {
+            // C3 S1c key salt (see TEMPLATE_SPECIALIZATION_KEY_SALT): appended
+            // BEFORE prepare_semantic_specialization consumes the key, so the
+            // salt flows into the LegacySpecializationKey cache identity and
+            // the cycle-detector SpecializationProgressKey.
+            mono_key.push_str(TEMPLATE_SPECIALIZATION_KEY_SALT);
+        }
         let semantic = self
             .prepare_semantic_specialization(
                 base_fn_name,
@@ -340,6 +421,22 @@ impl BytecodeCompiler {
         // `mono_key_from_subs`, so the new name is unique per (base, subs).
         let mut specialized_def = substitution::substitute_function_def(&original_def, &subs);
         specialized_def.name = semantic.specialized_symbol(specialized_def.name);
+        if let Some(plan) = template_plan {
+            // C3 S1c — the G9 resolution, immediately after substitution +
+            // renaming. The symbol carries the same salt as the mono key
+            // (the Legacy `specialized_symbol` is a pass-through of the
+            // substituted name, so the registered symbol needs the salt
+            // applied here to stay distinct from an ordinary generic
+            // instantiation); then the pseudo-tuple resolves away — after
+            // this call the def is a plain concrete typed AST function and
+            // everything downstream (register, cache-insert-before-compile,
+            // in-progress guard, save/restore, the overlay guard,
+            // `compile_function` = the C3-G10 battery, cache_remove-on-Err,
+            // the Hard classification) runs UNCHANGED.
+            specialized_def.name.push_str(TEMPLATE_SPECIALIZATION_KEY_SALT);
+            pseudo_tuple::resolve_pseudo_tuple(&mut specialized_def, plan)
+                .map_err(SpecializationFailure::Hard)?;
+        }
         let specialized_name = specialized_def.name.clone();
 
         // Register the new function definition in the program. This populates
