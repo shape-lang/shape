@@ -3016,7 +3016,12 @@ pub(crate) fn execute_comptime_with_annotation_handler(
     handler_params: &[AnnotationHandlerParam],
     target_value: KindedSlot,
     annotation_args: &[Expr],
-    annotation_def_param_names: &[String],
+    // ADR-009 C3 #14 (slice 4): the def-param carrier is `(name, declared
+    // type annotation)` pairs (`handler_resolution::annotation_def_params`).
+    // Legacy defs always carry `None`, so the injection below is
+    // classification-free and byte-equivalent for legacy; TypedConfig defs
+    // deliver their declared types onto the injected handler params.
+    annotation_def_params: &[(String, Option<TypeAnnotation>)],
     const_bindings: &[(String, KindedSlot)],
     comptime_helpers: &[FunctionDef],
     extensions: &[shape_runtime::module_exports::ModuleExports],
@@ -3197,8 +3202,8 @@ pub(crate) fn execute_comptime_with_annotation_handler(
     // If the handler only has (target, ctx) but the annotation definition has params,
     // inject them as extra function params so the handler body can reference them by name.
     let mut params = params;
-    if extra_handler_params == 0 && !annotation_def_param_names.is_empty() {
-        for (i, def_param_name) in annotation_def_param_names.iter().enumerate() {
+    if extra_handler_params == 0 && !annotation_def_params.is_empty() {
+        for (i, (def_param_name, def_param_type)) in annotation_def_params.iter().enumerate() {
             if let Some(arg) = annotation_args.get(i) {
                 params.push(FunctionParameter {
                     pattern: DestructurePattern::Identifier(def_param_name.clone(), Span::DUMMY),
@@ -3206,7 +3211,14 @@ pub(crate) fn execute_comptime_with_annotation_handler(
                     is_reference: false,
                     is_mut_reference: false,
                     is_out: false,
-                    type_annotation: None,
+                    // ADR-009 C3 #14 (slice 4): the injected param carries the
+                    // DECLARED config type annotation. A TypedConfig def's
+                    // handler therefore sees `times: int, label: string` as
+                    // ordinary typed params (a mismatched `@application` arg
+                    // is a loud compile-time rejection in the handler
+                    // mini-program); legacy defs carry `None` — byte-identical
+                    // to the pre-slice-4 injection.
+                    type_annotation: def_param_type.clone(),
                     default_value: None,
                 });
                 call_args.push(arg.clone());

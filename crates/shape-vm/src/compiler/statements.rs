@@ -4132,11 +4132,17 @@ impl BytecodeCompiler {
                     let access_identity = freeze
                         .identity_of(&target_name)
                         .map(|identity| (identity.high, identity.low));
+                    // ADR-009 C3 #14 (slice 4): full param definitions —
+                    // declared types ride along.
+                    let def_params =
+                        crate::compiler::functions_annotations::handler_resolution::annotation_def_params(
+                            &compiled.param_defs,
+                        );
                     let mut execution = self.execute_comptime_annotation_handler(
                         ann,
                         &handler,
                         target_value,
-                        &compiled.param_names,
+                        &def_params,
                         &[],
                         access_identity,
                         freeze,
@@ -5433,11 +5439,17 @@ impl BytecodeCompiler {
                     // freeze handle; acquire it here (no target stamping occurred,
                     // so any overlay is behavior-equivalent).
                     let freeze = self.comptime_freeze_overlay()?;
+                    // ADR-009 C3 #14 (slice 4): full param definitions —
+                    // declared types ride along.
+                    let def_params =
+                        crate::compiler::functions_annotations::handler_resolution::annotation_def_params(
+                            &compiled.param_defs,
+                        );
                     let execution = self.execute_comptime_annotation_handler(
                         ann,
                         &handler,
                         target_value,
-                        &compiled.param_names,
+                        &def_params,
                         &[],
                         // Module target: no representation authority (Dec 56).
                         None,

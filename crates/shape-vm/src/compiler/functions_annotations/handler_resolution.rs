@@ -1,9 +1,43 @@
 //! Exact annotation-handler and comptime-helper authority for prepass execution.
 
 use super::BytecodeCompiler;
-use shape_ast::ast::{Annotation, AnnotationHandler, AnnotationHandlerType, Expr, FunctionDef};
+use shape_ast::ast::{
+    Annotation, AnnotationHandler, AnnotationHandlerType, Expr, FunctionDef, FunctionParameter,
+    TypeAnnotation,
+};
 use shape_ast::error::{Result, ShapeError};
 use std::collections::{HashMap, HashSet};
+
+/// ADR-009 C3 #14 (slice 4): derive the def-param carrier — `(name,
+/// declared type annotation)` pairs — from annotation config parameter
+/// definitions. Legacy (untyped) definitions always yield `None`
+/// annotations, so every downstream seam is classification-free and
+/// byte-equivalent for legacy defs; TypedConfig definitions carry their
+/// declared types into the comptime-handler param injection
+/// (`execute_comptime_with_annotation_handler`).
+///
+/// The flat_map over `get_identifiers()` preserves the exact flattening the
+/// former `Vec<String>` names carrier used (annotation config params are
+/// always plain identifiers, so this is 1:1 in practice).
+///
+/// NOTE (serde): `CompiledAnnotation.param_defs` is `#[serde(skip)]`, like
+/// the comptime handlers that consume this carrier — a serialization-crossed
+/// carrier loses both together, so the injection seam never sees a
+/// names-without-defs carrier.
+pub(in crate::compiler) fn annotation_def_params(
+    params: &[FunctionParameter],
+) -> Vec<(String, Option<TypeAnnotation>)> {
+    params
+        .iter()
+        .flat_map(|param| {
+            param
+                .get_identifiers()
+                .into_iter()
+                .map(|name| (name, param.type_annotation.clone()))
+                .collect::<Vec<_>>()
+        })
+        .collect()
+}
 
 /// Seed every direct function-call spelling before lexical authority resolves
 /// it. Bare calls are intentionally retained: dropping them here would make a
@@ -29,7 +63,9 @@ pub(super) fn seed_function_call(expr: &Expr, names: &mut HashSet<String>) {
 #[derive(Clone, Debug)]
 pub(super) struct ComptimeAnnotationHandlers {
     pub(super) handlers: Vec<AnnotationHandler>,
-    pub(super) def_param_names: Vec<String>,
+    /// ADR-009 C3 #14 (slice 4): `(name, declared type annotation)` pairs
+    /// (see [`annotation_def_params`]); legacy defs carry `None` throughout.
+    pub(super) def_params: Vec<(String, Option<TypeAnnotation>)>,
     /// Canonical module that owns the handler body.
     pub(super) defining_module_path: Option<String>,
     pub(super) provenance: ComptimeAnnotationHandlerProvenance,
@@ -136,15 +172,11 @@ impl BytecodeCompiler {
                 return;
             }
             let exact_name = local_exact_name(&ann_def.name, module_path);
-            let def_param_names = ann_def
-                .params
-                .iter()
-                .flat_map(|param| param.get_identifiers())
-                .collect();
+            let def_params = annotation_def_params(&ann_def.params);
             map.entry(exact_name.clone())
                 .or_insert(ComptimeAnnotationHandlers {
                     handlers,
-                    def_param_names,
+                    def_params,
                     defining_module_path: defining_module_path(&exact_name),
                     provenance: ComptimeAnnotationHandlerProvenance::LocalAst,
                 });
@@ -213,7 +245,10 @@ impl BytecodeCompiler {
             map.entry(key.clone())
                 .or_insert(ComptimeAnnotationHandlers {
                     handlers,
-                    def_param_names: compiled.param_names.clone(),
+                    // Compiled provenance reads the FULL param definitions
+                    // (`param_defs`), never the flattened `param_names` — the
+                    // declared type annotations ride along (slice 4).
+                    def_params: annotation_def_params(&compiled.param_defs),
                     defining_module_path: defining_module_path(key),
                     provenance: ComptimeAnnotationHandlerProvenance::Compiled,
                 });

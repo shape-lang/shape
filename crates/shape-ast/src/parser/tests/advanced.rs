@@ -199,6 +199,130 @@ fn test_annotation_def_with_params() {
     }
 }
 
+// =========================================================================
+// ADR-009 C3 #14 (slice 4): typed annotation config params
+// =========================================================================
+
+/// Extract the sole AnnotationDef from parsed items.
+fn only_annotation_def(items: &[crate::ast::Item]) -> &crate::ast::AnnotationDef {
+    match &items[0] {
+        crate::ast::Item::AnnotationDef(ann_def, _) => ann_def,
+        other => panic!("Expected AnnotationDef, got {:?}", other),
+    }
+}
+
+#[test]
+fn test_annotation_def_with_typed_config_params() {
+    // ADR-009 C3 #14 (slice 4): `annotation retry(times: int, label: string)` —
+    // each config param's type annotation fills the EXISTING
+    // `FunctionParameter.type_annotation` field (no new AST field).
+    let content = r#"
+        annotation retry(times: int, label: string) {
+            comptime post(target, ctx) {
+                install(before_hook(body_fn, [capture("times", times)]))
+            }
+        }
+    "#;
+    let items = parse_program_helper(content).expect("typed config params parse");
+    let ann_def = only_annotation_def(&items);
+    assert_eq!(ann_def.name, "retry");
+    assert_eq!(ann_def.params.len(), 2);
+    assert_eq!(ann_def.params[0].simple_name(), Some("times"));
+    assert_eq!(
+        ann_def.params[0].type_annotation,
+        Some(crate::ast::TypeAnnotation::Basic("int".to_string()))
+    );
+    assert_eq!(ann_def.params[1].simple_name(), Some("label"));
+    assert_eq!(
+        ann_def.params[1].type_annotation,
+        Some(crate::ast::TypeAnnotation::Basic("string".to_string()))
+    );
+}
+
+#[test]
+fn test_annotation_def_with_composite_typed_config_params() {
+    // Composite ConstLift-domain spellings parse at the grammar tier
+    // (domain checking is the compiler's declaration-site check, not the
+    // parser's).
+    let content = r#"
+        annotation windowed(sizes: Array<int>, fallback: Option<int>) {
+            comptime post(target, ctx) {
+                install(before_hook(body_fn, [capture("sizes", sizes)]))
+            }
+        }
+    "#;
+    let items = parse_program_helper(content).expect("composite typed config params parse");
+    let ann_def = only_annotation_def(&items);
+    assert_eq!(ann_def.params.len(), 2);
+    // `Array<int>` normalizes to the dedicated Array variant at parse time.
+    assert!(matches!(
+        ann_def.params[0].type_annotation,
+        Some(crate::ast::TypeAnnotation::Array(_))
+    ));
+    assert!(
+        ann_def.params[1].type_annotation.is_some(),
+        "Option<int> annotation must be carried"
+    );
+}
+
+#[test]
+fn test_annotation_def_untyped_config_params_stay_unannotated() {
+    // Legacy (pre-S6) spelling: untyped params must keep parsing and produce
+    // a byte-identical AST shape — `type_annotation: None` on every param.
+    let content = r#"
+        annotation warmup(period, mode) {
+            metadata() { { warmup_period: period } }
+        }
+    "#;
+    let items = parse_program_helper(content).expect("untyped config params parse");
+    let ann_def = only_annotation_def(&items);
+    assert_eq!(ann_def.params.len(), 2);
+    assert_eq!(ann_def.params[0].simple_name(), Some("period"));
+    assert_eq!(ann_def.params[0].type_annotation, None);
+    assert_eq!(ann_def.params[1].simple_name(), Some("mode"));
+    assert_eq!(ann_def.params[1].type_annotation, None);
+}
+
+#[test]
+fn test_annotation_def_mixed_typed_untyped_params_parse() {
+    // A MIX parses at the grammar tier (the annotation is grammatically
+    // optional per param); rejecting the mix is the compiler's
+    // declaration-site classification rule (R2), which needs the parsed AST
+    // to name the first untyped param in its sentence.
+    let content = r#"
+        annotation partial(times: int, label) {
+            comptime post(target, ctx) { noop() }
+        }
+    "#;
+    let items = parse_program_helper(content).expect("mixed params parse at the grammar tier");
+    let ann_def = only_annotation_def(&items);
+    assert_eq!(ann_def.params.len(), 2);
+    assert!(ann_def.params[0].type_annotation.is_some());
+    assert!(ann_def.params[1].type_annotation.is_none());
+}
+
+#[test]
+fn test_annotation_def_typed_param_span_integrity() {
+    // The param pattern span must cover exactly the parameter NAME (the
+    // identifier), for both typed and untyped params — declaration-site
+    // rejections anchor there.
+    let content = "annotation retry(times: int, label) { metadata() { { t: times } } }";
+    let items = parse_program_helper(content).expect("fixture parses");
+    let ann_def = only_annotation_def(&items);
+    let times_span = ann_def.params[0].span();
+    assert_eq!(
+        &content[times_span.start..times_span.end],
+        "times",
+        "typed param span covers the identifier only"
+    );
+    let label_span = ann_def.params[1].span();
+    assert_eq!(
+        &content[label_span.start..label_span.end],
+        "label",
+        "untyped param span covers the identifier only"
+    );
+}
+
 #[test]
 fn test_annotation_def_with_return_in_metadata() {
     let content = r#"

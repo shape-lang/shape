@@ -18,6 +18,120 @@ pub(super) struct AnnotationInstallationPlan {
 pub(super) struct PlannedAnnotation {
     pub(super) definition: AnnotationDef,
     pub(super) allowed_targets: Vec<AnnotationTargetKind>,
+    pub(super) surface_class: AnnotationSurfaceClass,
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// ADR-009 C3 #14 (slice 4) — THE G7-COMPLIANT TRANSITIONAL CLASSIFICATION
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// This is the ONE ratified transitional duality of C3: until S6 deletes the
+// legacy declarative before/after weave, every `annotation` definition is
+// classified by a compile-time SYNTACTIC rule into exactly one of two
+// surface classes, decided AT THE DECLARATION (before any `@application`):
+//
+//   - **TypedConfig** — the definition declares >= 1 config parameter
+//     carrying a type annotation (`annotation retry(times: int, label:
+//     string)`). ALL config parameters must then be typed; a mix of typed
+//     and untyped parameters is the declaration-site rejection R2. Every
+//     typed parameter's annotation must lie within the C3-G5 ConstLift
+//     domain, checked at the declaration by the ONE domain producer
+//     `const_lift::annotation_within_lift_domain` (rejection R1) — a
+//     non-liftable config type is a named error before any application.
+//     TypedConfig definitions' declarative `before`/`after` handlers lower
+//     onto the PUBLIC comptime API (CheckedTemplate + install; the S4 sugar
+//     lowering) and must NEVER engage the legacy weave slots.
+//
+//   - **Legacy** — zero config parameters, or all parameters untyped. The
+//     declarative `before`/`after` handlers keep the BYTE-UNCHANGED legacy
+//     runtime-hook weave until S6 deletes it (C3-G7: build new path → flip
+//     the sugar → rewrite the 48 annotation pins → pure-deletion capstone).
+//
+// ZERO-PARAM RULING (resolved in S4 design): NO opt-in marker is minted —
+// zero-param definitions classify Legacy until S6, at which point the
+// Legacy arm and the untyped param spelling are DELETED and every
+// annotation (zero-param included) is new-path for free. C3-G0 forbids
+// minting throwaway grammar that S6 must then delete; new-path e2e
+// coverage in S4 uses typed-config definitions (the mixed-type shape S4
+// exists to prove), while public-API-spelled installs inside zero-param
+// definitions are already green (sugar-matrix rows r2/r3/r9).
+//
+// COMPTIME pre/post handlers are CLASSIFICATION-INDEPENDENT: they execute
+// through the comptime mini-VM on both classes (the r-matrix zero-param
+// fixtures like `annotation scaled(factor)` keep working untouched); typed
+// injection simply gives TypedConfig handler params their declared
+// annotations.
+//
+// PIN-GREENNESS (by construction): the grammar REJECTED typed config
+// params before this slice, so no pre-existing green program or pin can
+// classify TypedConfig — verified at S4b:
+// `rg "annotation \w+\([^)]*:" tools/shape-test/tests/` has zero hits.
+//
+// NAMED S6 CLOSE: S6 deletes the Legacy arm (and this enum with it, or
+// collapses it to the single new-path class), the legacy weave fns
+// (`compile_specialized_annotation_handler`,
+// `specialize_annotation_runtime_handlers`, `compile_annotation_wrapper`)
+// and the untyped-param spelling, then rewrites the 48 legacy pins onto
+// the typed surface (c3-decisions.md C3-G7; the S2 F1-F5 ledger carries
+// the per-pin arithmetic).
+//
+// SEALED (the C1 CaptureKind "constructible in ONE file" precedent): each
+// variant carries a `SurfaceClassEvidence` token whose field is private to
+// THIS module, so `AnnotationSurfaceClass::TypedConfig(..)` is
+// unconstructible outside planner.rs — the classification function below
+// is the single producer. Consumers match on `TypedConfig(_)` / `Legacy(_)`.
+
+/// Evidence token gating construction of [`AnnotationSurfaceClass`] variants
+/// to this file. The unit field is private: only planner.rs can spell
+/// `SurfaceClassEvidence(())`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(in crate::compiler) struct SurfaceClassEvidence(());
+
+/// The G7-compliant transitional surface class of one `annotation`
+/// definition. See the module-level classification doc-comment above —
+/// the rule, the zero-param ruling, and the named S6 close live there.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(in crate::compiler) enum AnnotationSurfaceClass {
+    /// >= 1 typed config param (then ALL must be typed; R2 otherwise), all
+    /// annotations inside the ConstLift domain (R1 otherwise). Declarative
+    /// before/after handlers lower onto the public comptime API.
+    TypedConfig(SurfaceClassEvidence),
+    /// Zero config params or all params untyped. Declarative before/after
+    /// handlers keep the byte-unchanged legacy weave until S6.
+    Legacy(SurfaceClassEvidence),
+}
+
+/// THE classification chokepoint (single producer of
+/// [`AnnotationSurfaceClass`]). Fires the R2 mixed-params rejection; the
+/// R1 ConstLift-domain check runs in [`plan_definition`] on TypedConfig
+/// definitions only.
+pub(in crate::compiler) fn classify_annotation_surface(
+    definition: &AnnotationDef,
+) -> std::result::Result<AnnotationSurfaceClass, MixedConfigParams> {
+    let typed_count = definition
+        .params
+        .iter()
+        .filter(|parameter| parameter.type_annotation.is_some())
+        .count();
+    if typed_count == 0 {
+        return Ok(AnnotationSurfaceClass::Legacy(SurfaceClassEvidence(())));
+    }
+    if let Some(first_untyped) = definition
+        .params
+        .iter()
+        .find(|parameter| parameter.type_annotation.is_none())
+    {
+        return Err(MixedConfigParams {
+            first_untyped: first_untyped.clone(),
+        });
+    }
+    Ok(AnnotationSurfaceClass::TypedConfig(SurfaceClassEvidence(())))
+}
+
+/// R2 payload: the first untyped parameter of a mixed definition, for the
+/// rejection sentence and its span anchor.
+pub(in crate::compiler) struct MixedConfigParams {
+    pub(in crate::compiler) first_untyped: FunctionParameter,
 }
 
 impl AnnotationInstallationPlan {
@@ -109,6 +223,54 @@ fn plan_definition(
     compiler: &BytecodeCompiler,
     definition: AnnotationDef,
 ) -> Result<PlannedAnnotation> {
+    // ADR-009 C3 #14 (slice 4): classify the surface BEFORE any application
+    // can exist — R2 (mixed typed/untyped) and R1 (config type outside the
+    // ConstLift domain) are DECLARATION-SITE named rejections (the G5
+    // sentence precedent from S3's finish()-time check).
+    let surface_class = match classify_annotation_surface(&definition) {
+        Ok(surface_class) => surface_class,
+        Err(mixed) => {
+            let untyped_name = mixed
+                .first_untyped
+                .simple_name()
+                .unwrap_or_default()
+                .to_string();
+            return Err(ShapeError::SemanticError {
+                message: format!(
+                    "annotation `{}` mixes typed and untyped config parameters; a typed-config annotation declares a type on every config parameter — annotate `{}`",
+                    definition.name, untyped_name
+                ),
+                location: Some(compiler.span_to_source_location(mixed.first_untyped.span())),
+            });
+        }
+    };
+    if matches!(surface_class, AnnotationSurfaceClass::TypedConfig(_)) {
+        for parameter in &definition.params {
+            let Some(annotation) = parameter.type_annotation.as_ref() else {
+                continue;
+            };
+            // R1: the ONE domain producer, reused at the declaration site —
+            // never re-implemented (S3's `annotation_within_lift_domain`).
+            if let Err(reason) =
+                crate::compiler::template_specialization::const_lift::annotation_within_lift_domain(
+                    annotation,
+                )
+            {
+                return Err(ShapeError::SemanticError {
+                    message: format!(
+                        "annotation `{}` declares config parameter `{}: {}`, whose type is outside the ConstLift domain ({}); {} — declare the config parameter with a liftable type",
+                        definition.name,
+                        parameter.simple_name().unwrap_or_default(),
+                        annotation.to_type_string(),
+                        reason,
+                        crate::compiler::template_specialization::const_lift::CONST_LIFT_DOMAIN_SENTENCE,
+                    ),
+                    location: Some(compiler.span_to_source_location(parameter.span())),
+                });
+            }
+        }
+    }
+
     let mut handler_kinds = BTreeSet::new();
     for handler in &definition.handlers {
         let kind = handler_kind_name(&handler.handler_type);
@@ -214,6 +376,7 @@ fn plan_definition(
     Ok(PlannedAnnotation {
         definition,
         allowed_targets,
+        surface_class,
     })
 }
 

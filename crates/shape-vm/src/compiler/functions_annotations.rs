@@ -26,7 +26,11 @@ mod generated_closure_provenance;
 use generated_closure_provenance::anchor_generated_function_decl;
 mod declaration_discovery;
 use declaration_discovery::DeclarationDiscoveryTarget;
-mod handler_resolution;
+// ADR-009 C3 #14 (slice 4): `pub(in crate::compiler)` so the def-param
+// carrier producer (`annotation_def_params`) is reachable from the type /
+// module / expression annotation-target call sites in `statements.rs` and
+// `expressions/mod.rs` — one producer, no per-site re-derivation.
+pub(in crate::compiler) mod handler_resolution;
 use handler_resolution::{ComptimeAnnotationHandlers, ComptimeHandlerHelperAuthority};
 mod original_body_shadow;
 use original_body_shadow::{PendingOriginalBodyShadow, canonical_original_callable};
@@ -452,7 +456,7 @@ impl BytecodeCompiler {
                             &handler.params,
                             target_value,
                             &ann.args,
-                            &entry.def_param_names,
+                            &entry.def_params,
                             &[],
                             &helpers,
                             extensions,
@@ -1169,10 +1173,14 @@ impl BytecodeCompiler {
         for ann in &annotations {
             if let Some((_, compiled)) = self.lookup_compiled_annotation(ann) {
                 if let Some(handler) = compiled.comptime_pre_handler {
+                    // ADR-009 C3 #14 (slice 4): the def-param carrier reads
+                    // the FULL param definitions (declared types ride along).
+                    let def_params =
+                        handler_resolution::annotation_def_params(&compiled.param_defs);
                     if self.execute_function_comptime_handler(
                         ann,
                         &handler,
-                        &compiled.param_names,
+                        &def_params,
                         func_def,
                         inferred_reference_optimizations,
                         &mut pending_original_body_shadow,
@@ -1200,10 +1208,12 @@ impl BytecodeCompiler {
                         // is shared, so both phases must surface it uniformly — a
                         // discard here would silently drop the D6 gate's provenance
                         // for the one phase that actually emits it.
+                        let def_params =
+                            handler_resolution::annotation_def_params(&compiled.param_defs);
                         if self.execute_function_comptime_handler(
                             ann,
                             &handler,
-                            &compiled.param_names,
+                            &def_params,
                             func_def,
                             inferred_reference_optimizations,
                             &mut pending_original_body_shadow,
@@ -1243,7 +1253,7 @@ impl BytecodeCompiler {
         &mut self,
         annotation: &shape_ast::ast::Annotation,
         handler: &shape_ast::ast::AnnotationHandler,
-        annotation_def_param_names: &[String],
+        annotation_def_params: &[(String, Option<TypeAnnotation>)],
         func_def: &mut FunctionDef,
         inferred_reference_optimizations: &[Option<ParamPassMode>],
         pending_original_body_shadow: &mut Option<PendingOriginalBodyShadow>,
@@ -1280,7 +1290,7 @@ impl BytecodeCompiler {
             annotation,
             handler,
             target_value,
-            annotation_def_param_names,
+            annotation_def_params,
             &const_bindings,
             // Function target: no representation authority (Dec 56).
             None,
@@ -1334,7 +1344,10 @@ impl BytecodeCompiler {
         annotation: &shape_ast::ast::Annotation,
         handler: &shape_ast::ast::AnnotationHandler,
         target_value: KindedSlot,
-        annotation_def_param_names: &[String],
+        // ADR-009 C3 #14 (slice 4): `(name, declared type annotation)` pairs
+        // (`handler_resolution::annotation_def_params`); legacy defs carry
+        // `None` throughout.
+        annotation_def_params: &[(String, Option<TypeAnnotation>)],
         const_bindings: &[(String, KindedSlot)],
         // ADR-009 B5 (Dec 56): the annotated type's frozen identity halves for
         // declaration-attached TYPE-target handlers; `None` for function /
@@ -1415,7 +1428,7 @@ impl BytecodeCompiler {
             &handler.params,
             target_value,
             &annotation.args,
-            annotation_def_param_names,
+            annotation_def_params,
             const_bindings,
             &comptime_helpers,
             &extensions,
@@ -2416,7 +2429,7 @@ impl BytecodeCompiler {
                                 &handler.params,
                                 target_value,
                                 &ann.args,
-                                &entry.def_param_names,
+                                &entry.def_params,
                                 &[],
                                 &helpers,
                                 &extensions,

@@ -145,8 +145,8 @@ annotation mark(policy) {
         Some("pkg::support")
     );
     assert_eq!(
-        rows["pkg::support::mark"].def_param_names,
-        vec!["policy".to_string()]
+        rows["pkg::support::mark"].def_params,
+        vec![("policy".to_string(), None)]
     );
 }
 

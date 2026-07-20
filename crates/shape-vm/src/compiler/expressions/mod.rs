@@ -672,11 +672,17 @@ impl BytecodeCompiler {
                 // ADR-009 E1 #17 (slice 5): the handler executor still needs a
                 // freeze handle; acquire it here (no target stamping occurred).
                 let freeze = self.comptime_freeze_overlay()?;
+                // ADR-009 C3 #14 (slice 4): the def-param carrier reads the
+                // FULL param definitions (declared types ride along).
+                let def_params =
+                    crate::compiler::functions_annotations::handler_resolution::annotation_def_params(
+                        &compiled.param_defs,
+                    );
                 let execution = self.execute_comptime_annotation_handler(
                     annotation,
                     &handler,
                     target_value,
-                    &compiled.param_names,
+                    &def_params,
                     &[],
                     // Expression target: no representation authority (Dec 56).
                     None,

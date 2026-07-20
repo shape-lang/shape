@@ -1743,6 +1743,108 @@ fn victim_c(a: int) -> int { return a + 3 }
         );
     }
 
+    // ═══ ADR-009 C3 #14 slice 4 (S4b): typed config params — the G2 e2e
+    // proof BEFORE the sugar lowering ═══════════════════════════════════════
+
+    // `annotation retry(times: int, tag: string)` with a HAND-WRITTEN
+    // comptime post handler spelling the lowering through ONLY the public
+    // API (install / before_hook / capture). The typed config params are
+    // injected into the handler as ordinary TYPED params (slice-4 typed
+    // injection); their VALUES arrive from each `@retry(...)` application's
+    // args — two applications with DIFFERENT config prove the flow is real
+    // (not a baked constant), and the mixed (int, string) captures ride the
+    // S4a per-call-site typing. This is the C3-G2 API-completeness half:
+    // the S4c sugar will lower onto a capability the API HAS — zero private
+    // side-channels.
+    #[test]
+    fn typed_config_params_flow_through_the_public_api_end_to_end() {
+        let src = r#"
+fn bump<Args>(args: Args, times: int, tag: string) -> Args {
+    args[0] = args[0] * times + tag.length()
+    return args
+}
+
+annotation retry(times: int, tag: string) {
+  targets: [function]
+  comptime post(target, ctx) {
+    install(before_hook(bump, [capture("times", times), capture("tag", tag)]))
+  }
+}
+
+@retry(3, "ab")
+fn victim_a(a: int) -> int { return a * 10 }
+
+@retry(5, "wxyz")
+fn victim_b(a: int) -> int { return a * 10 }
+
+victim_a(4) * 1000 + victim_b(4)
+"#;
+        let (value, compiler) = top_level_i64(src);
+        // a: before 4*3 + len("ab") = 14 → impl(14) = 140.
+        // b: before 4*5 + len("wxyz") = 24 → impl(24) = 240.
+        // Skip ⇒ 40; swapped configs ⇒ 240140; a dropped tag shifts both.
+        assert_eq!(
+            value, 140_240,
+            "each application's OWN typed config values drive its mutation"
+        );
+        assert_eq!(compiler.hook_install_registry.len(), 2, "both installs land");
+        assert_eq!(
+            compiler.hook_install_registry[0].captures,
+            vec![
+                ("times".to_string(), "3".to_string()),
+                ("tag".to_string(), "\"ab\"".to_string())
+            ],
+            "row a renders the first application's config"
+        );
+        assert_eq!(
+            compiler.hook_install_registry[1].captures,
+            vec![
+                ("times".to_string(), "5".to_string()),
+                ("tag".to_string(), "\"wxyz\"".to_string())
+            ],
+            "row b renders the second application's config"
+        );
+        assert_ne!(
+            compiler.hook_install_registry[0].function_index,
+            compiler.hook_install_registry[1].function_index,
+            "rule 6: differing typed config splits the baked specializations"
+        );
+    }
+
+    // Mismatched config arg: `@retry("x", "y")` feeds a string application
+    // arg to the injected `times: int` param — a LOUD compile-time
+    // rejection (contains-level per the S4 charter; exact attribution
+    // refinement is S5's). The green twin is the pin above.
+    #[test]
+    fn typed_config_mismatched_application_arg_is_a_loud_rejection() {
+        let src = r#"
+fn bump<Args>(args: Args, times: int, tag: string) -> Args {
+    args[0] = args[0] * times + tag.length()
+    return args
+}
+
+annotation retry(times: int, tag: string) {
+  targets: [function]
+  comptime post(target, ctx) {
+    install(before_hook(bump, [capture("times", times), capture("tag", tag)]))
+  }
+}
+
+@retry("x", "y")
+fn victim(a: int) -> int { return a * 10 }
+
+victim(4)
+"#;
+        let (result, _) = compile_source(src);
+        let message = result
+            .expect_err("a string application arg against `times: int` must reject loudly")
+            .to_string();
+        assert!(
+            message.contains("int") || message.contains("type"),
+            "the rejection names the type mismatch (contains-level; S5 owns attribution): {message}"
+        );
+    }
+
     // NON-VACUITY CONTROL for the scanner: a fn that GENUINELY reads a
     // top-level script binding loads it via `LoadModuleBinding` (the
     // opcode_defs.rs:951-documented load path), so the same scanner counts

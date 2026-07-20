@@ -380,8 +380,15 @@ annotation_def = {
     "annotation" ~ ident ~ ("(" ~ annotation_def_params? ~ ")")? ~ "{" ~ annotation_body ~ "}"
 }
 
+// ADR-009 C3 #14 (slice 4): a config parameter may carry a type annotation
+// (`annotation retry(times: int, label: string)`). The annotation is
+// grammatically OPTIONAL (legacy untyped params must keep parsing until the
+// S6 deletion) but semantically all-or-nothing per definition — the compiler
+// classifies a def with >= 1 typed param as TypedConfig and rejects a mix.
+annotation_def_param = { ident ~ (":" ~ type_annotation)? }
+
 annotation_def_params = {
-    ident ~ ("," ~ ident)*
+    annotation_def_param ~ ("," ~ annotation_def_param)*
 }
 
 // Annotation body contains lifecycle handlers

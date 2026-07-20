@@ -9,7 +9,7 @@ use shape_ast::error::{Result, ShapeError};
 use crate::bytecode::CompiledAnnotation;
 use crate::compiler::BytecodeCompiler;
 
-use super::planner::{handler_callable_name, PlannedAnnotation};
+use super::planner::{handler_callable_name, AnnotationSurfaceClass, PlannedAnnotation};
 
 pub(super) fn install(
     compiler: &mut BytecodeCompiler,
@@ -44,6 +44,32 @@ pub(super) fn install(
                 compiled.comptime_post_handler = Some(handler.clone());
             }
             AnnotationHandlerType::Before | AnnotationHandlerType::After => {
+                // ADR-009 C3 #14 (slice 4): the classification fork. A
+                // TypedConfig definition's declarative before/after handlers
+                // must NEVER register on the legacy weave slots
+                // (`before_handler` / `before_handler_template` — silent
+                // legacy engagement of typed params is forbidden). Until the
+                // next stage lands the sugar lowering onto the public
+                // comptime API (CheckedTemplate + install), this arm is an
+                // internal-error-shaped surface-and-stop.
+                //
+                // REPLACED NEXT COMMIT (S4c): the lowering compiles the
+                // handler body as a minted module-scope-shaped body fn and
+                // installs it through `specialize_template` + the open
+                // InstallTransaction (C3-G2/G3/G4).
+                if matches!(plan.surface_class, AnnotationSurfaceClass::TypedConfig(_)) {
+                    return Err(ShapeError::RuntimeError {
+                        message: format!(
+                            "Internal compiler error: typed-config annotation `{}` declares a declarative `{}` handler, whose lowering onto the public comptime hook-template API is not yet wired (C3 S4); the legacy weave slots are refused for typed-config definitions",
+                            definition.name,
+                            match &handler.handler_type {
+                                AnnotationHandlerType::Before => "before",
+                                _ => "after",
+                            }
+                        ),
+                        location: Some(compiler.span_to_source_location(handler.span)),
+                    });
+                }
                 let name = handler_callable_name(&definition.name, &handler.handler_type);
                 let function = placeholder_function(name, handler.return_type.clone());
                 let function_id = register_exact_function(compiler, &function)?;
