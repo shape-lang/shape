@@ -1952,6 +1952,18 @@ pub struct BytecodeCompiler {
     /// deleting a shared prelude/dependency key.
     pub(in crate::compiler) install_journal: Option<checked_body::InstallJournal>,
 
+    /// ADR-009 C3 #14 (slice 2, S2b) — the hook-template INSTALL registry:
+    /// one row per applied `install(...)` directive (annotation name, target
+    /// name, hook kind, template-Sig rendering, specialized symbol/index,
+    /// capture renderings, `@application` span). Compiler-owned query state
+    /// (the C1 slice-4 `generated_symbol_query` precedent — the S8 hover
+    /// surface reads THIS, never a text scan). Rows are written at the pass-2
+    /// apply seam and journaled through the open [`checked_body`] install
+    /// transaction (`journal_record_hook_install_row`), so a rolled-back
+    /// compile leaves no row.
+    pub(in crate::compiler) hook_install_registry:
+        Vec<template_specialization::install_registry::HookInstallRecord>,
+
     /// ADR-009 E3 (slice S1) — the generated analysis items materialized by
     /// the executed declaration-discovery pre-pass
     /// (`materialize_computed_comptime_extends`) for this compilation unit.

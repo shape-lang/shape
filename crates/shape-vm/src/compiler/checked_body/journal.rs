@@ -170,6 +170,26 @@ impl BytecodeCompiler {
         }));
     }
 
+    /// ADR-009 C3 #14 (slice 2, S2b): record the pre-write length of the
+    /// hook-install registry so a rollback truncates back to it — the
+    /// displaced-entry undo shape for an APPEND-ONLY row table (the appended
+    /// row's "displaced prior" is absence; replaying the recorded truncation
+    /// in reverse restores exactly the pre-transaction rows, never a
+    /// below-watermark row from an earlier committed compile). Executable
+    /// list: a registry row documents an executable install, not a query
+    /// reservation — it rolls back in BOTH retain modes, exactly like the
+    /// monomorphization-cache eviction (`checked_body/mod.rs:239-251`).
+    /// Call once before each row push.
+    pub(in crate::compiler) fn journal_record_hook_install_row(&mut self) {
+        if !self.install_journal_active() {
+            return;
+        }
+        let prior_len = self.hook_install_registry.len();
+        self.push_executable_undo(Box::new(move |c| {
+            c.hook_install_registry.truncate(prior_len);
+        }));
+    }
+
     /// Record a `Fresh` generated-symbol reservation so a BATCH rollback removes
     /// EXACTLY it — never a below-watermark reservation (H2). Goes on the
     /// query-retained list so the query-session retain mode keeps the

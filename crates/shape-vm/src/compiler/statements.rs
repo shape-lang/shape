@@ -5384,6 +5384,18 @@ impl BytecodeCompiler {
                         "`replace body` directives are only valid when compiling function targets",
                     ));
                 }
+                // ADR-009 C3 #14 (slice 2, S2b): a hook template installs
+                // onto a FUNCTION's before/after seam; this consumer compiles
+                // module targets — named rejection with the positive twin
+                // (same sentence as the type-target consumer,
+                // `process_comptime_directives`).
+                super::comptime_builtins::ComptimeDirective::InstallHookTemplate { .. } => {
+                    return Err(Self::directive_error(
+                        "`install` directives are only valid when compiling function targets \
+                         (a hook template attaches to a function's before/after seam); apply \
+                         the installing annotation to a function",
+                    ));
+                }
             }
         }
         Ok(outcome)

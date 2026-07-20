@@ -19,6 +19,7 @@ use super::comptime_builtins::expansion_provenance::{
     ExpansionIdentity, ExpansionSite, GeneratedNodePath, GeneratedOrigin, GeneratedSymbolTable,
     GeneratorRef, SourceAnchor, SymbolId, SymbolReservation, TargetIdentity,
 };
+use super::template_specialization::install_registry::StagedHookInstall;
 use super::{BytecodeCompiler, HygienicRole, ParamPassMode};
 
 mod generated_closure_provenance;
@@ -474,11 +475,17 @@ impl BytecodeCompiler {
                         }
                     };
                     let handler_location = self.span_to_source_location(handler.span);
+                    // ADR-009 C3 #14 (slice 2, S2b): the `@application`
+                    // anchor for the C3-G8 generic-target install rejection
+                    // (the only consumer observing the generic def's real
+                    // `type_params` — see the InstallHookTemplate arm).
+                    let application_location = self.span_to_source_location(ann.span);
                     Self::apply_signature_directives_to_analysis_function(
                         func_def,
                         execution.directives,
                         &ann.name,
                         handler_location,
+                        application_location,
                     )?;
                 }
             }
@@ -498,6 +505,9 @@ impl BytecodeCompiler {
         directives: Vec<super::comptime_builtins::ComptimeDirective>,
         annotation_name: &str,
         handler_location: SourceLocation,
+        // ADR-009 C3 #14 (slice 2, S2b): the `@application` anchor for the
+        // C3-G8 generic-target install rejection (see that arm).
+        application_location: SourceLocation,
     ) -> std::result::Result<(), ShapeError> {
         for directive in directives {
             match directive {
@@ -552,6 +562,50 @@ impl BytecodeCompiler {
                     func_def.params[param_id.index()].default_value = Some(default_value);
                 }
                 super::comptime_builtins::ComptimeDirective::SetReturnType { .. } => {}
+                // ADR-009 C3 #14 (slice 2, S2b): documented PRE-PASS no-op
+                // for the APPLY — install applies at the authoritative pass-2
+                // function-target consumer
+                // (`process_comptime_directives_for_function`) ONLY, never
+                // here; a pre-pass apply would double-install (one registry
+                // row / staged install per application, across the pre-pass +
+                // pass-2 double handler run).
+                //
+                // The ONE exception is the C3-G8 GENERIC-TARGET rejection,
+                // which fires HERE (disclosed narrowing of the "documented
+                // no-op" plan resolution): a generic def's pass-2 body
+                // compile is skipped entirely (`functions.rs`
+                // compile_function_with_generated_origin — "Skip compiling
+                // bodies of generic extend methods"), and a monomorphized
+                // specialization reaches pass-2 with `type_params` already
+                // cleared — so this pre-pass consumer is the ONLY directive
+                // consumer that observes the generic def's real
+                // `type_params`. A rejection is surface-and-stop, not an
+                // apply: nothing installs, nothing doubles. The pass-2 seam
+                // keeps two defensive twins of the same sentence
+                // (`apply_install_hook_template`).
+                super::comptime_builtins::ComptimeDirective::InstallHookTemplate {
+                    template_index,
+                } => {
+                    if func_def
+                        .type_params
+                        .as_ref()
+                        .is_some_and(|params| !params.is_empty())
+                    {
+                        let template_body_fn =
+                            super::comptime_builtins::comptime_hook_template_at(template_index)
+                                .map(|bound| bound.template.body_fn().to_string())
+                                .unwrap_or_else(|| "<template>".to_string());
+                        return Err(ShapeError::SemanticError {
+                            message: super::template_specialization::install_registry::
+                                generic_target_install_rejection_message(
+                                    &template_body_fn,
+                                    annotation_name,
+                                    func_def,
+                                ),
+                            location: Some(application_location.clone()),
+                        });
+                    }
+                }
                 _ => {}
             }
         }
@@ -1096,6 +1150,15 @@ impl BytecodeCompiler {
         );
         let mut removed = false;
         let mut pending_original_body_shadow = None;
+        // ADR-009 C3 #14 (slice 2, S2b): the per-target hook-install
+        // accumulator — installs from EVERY handler run on this target
+        // accumulate here in application order (the
+        // `pending_original_body_shadow` threading pattern: a local threaded
+        // as a parameter, never ambient state). S2c materializes the weave
+        // ONCE from this accumulator after the last handler, wrapping the
+        // final (possibly replace-body-edited) def; S2b stops at staged
+        // installs + the journaled registry rows the apply seam wrote.
+        let mut staged_hook_installs: Vec<StagedHookInstall> = Vec::new();
         let annotations = func_def.annotations.clone();
 
         // Phase 1: comptime pre
@@ -1110,6 +1173,7 @@ impl BytecodeCompiler {
                         inferred_reference_optimizations,
                         &mut pending_original_body_shadow,
                         replacement_body_origin,
+                        &mut staged_hook_installs,
                     )? {
                         removed = true;
                         break;
@@ -1140,6 +1204,7 @@ impl BytecodeCompiler {
                             inferred_reference_optimizations,
                             &mut pending_original_body_shadow,
                             replacement_body_origin,
+                            &mut staged_hook_installs,
                         )? {
                             removed = true;
                             break;
@@ -1153,9 +1218,14 @@ impl BytecodeCompiler {
             self.finalize_pending_original_body_shadow(pending)?;
         }
 
+        // ADR-009 C3 #14 (slice 2, S2b): `staged_hook_installs` drops here BY
+        // PLAN — the weave that consumes it (wrapping the final def once, in
+        // application order) is S2c territory. The applied installs remain
+        // observable through the journaled `hook_install_registry` rows.
         Ok(removed)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn execute_function_comptime_handler(
         &mut self,
         annotation: &shape_ast::ast::Annotation,
@@ -1168,6 +1238,9 @@ impl BytecodeCompiler {
         // arm, which records the REPLACEMENT's node-borne provenance for the D6
         // gate (see `execute_comptime_handlers`).
         replacement_body_origin: &mut Option<GeneratedNodeOrigin>,
+        // ADR-009 C3 #14 (slice 2, S2b): threaded to the `InstallHookTemplate`
+        // apply seam (see `execute_comptime_handlers`).
+        staged_hook_installs: &mut Vec<StagedHookInstall>,
     ) -> Result<bool> {
         // Build the target object from the function definition
         let target = super::comptime_target::ComptimeTarget::from_function(func_def);
@@ -1223,6 +1296,8 @@ impl BytecodeCompiler {
             inferred_reference_optimizations,
             pending_original_body_shadow,
             replacement_body_origin,
+            &annotation.name,
+            staged_hook_installs,
         )
         .map_err(|e| {
             // ADR-009 D1 (S4): provenance-carrying generated-decl failures
@@ -2495,6 +2570,15 @@ impl BytecodeCompiler {
                                     // substitution formerly lived here.
                                     vec![Item::Extend(extend, expansion_site.application_span())]
                                 }
+                                // ADR-009 C3 #14 (slice 2, S2b): documented
+                                // PRE-PASS no-op — an `install(...)` directive
+                                // applies at the authoritative pass-2 consumer
+                                // only (never double-install; a non-function
+                                // target's install is ALSO pass-2's named
+                                // rejection, `process_comptime_directives`).
+                                super::comptime_builtins::ComptimeDirective::InstallHookTemplate {
+                                    ..
+                                } => continue,
                                 _ => continue,
                             };
                             // ADR-009 D1 (S2), rejection row 1: generated decls
@@ -3387,6 +3471,16 @@ impl BytecodeCompiler {
                         "`replace module` directives are only valid when compiling module targets",
                     ));
                 }
+                // ADR-009 C3 #14 (slice 2, S2b): a hook template installs
+                // onto a FUNCTION's before/after seam; this consumer compiles
+                // type targets — named rejection with the positive twin.
+                super::comptime_builtins::ComptimeDirective::InstallHookTemplate { .. } => {
+                    return Err(Self::directive_error(
+                        "`install` directives are only valid when compiling function targets \
+                         (a hook template attaches to a function's before/after seam); apply \
+                         the installing annotation to a function",
+                    ));
+                }
             }
         }
         Ok(removed)
@@ -3456,6 +3550,7 @@ impl BytecodeCompiler {
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn process_comptime_directives_for_function(
         &mut self,
         directives: Vec<super::comptime_builtins::ComptimeDirective>,
@@ -3468,6 +3563,17 @@ impl BytecodeCompiler {
         // REPLACEMENT's node-borne provenance so the D6 gate authenticates the
         // swapped body (see `execute_comptime_handlers`).
         replacement_body_origin: &mut Option<GeneratedNodeOrigin>,
+        // ADR-009 C3 #14 (slice 2, S2b): the installing annotation's name
+        // (origin, parameter-threaded — never ambient) for the
+        // `InstallHookTemplate` apply seam's attribution + registry row.
+        annotation_name: &str,
+        // ADR-009 C3 #14 (slice 2, S2b): the per-target hook-install
+        // accumulator (the `pending_original_body_shadow` threading pattern —
+        // a parameter owned by `execute_comptime_handlers`, never ambient
+        // state). Installs ACCUMULATE across the target's annotations in
+        // application order; the weave materializes ONCE after the last
+        // handler (S2c — this stage stops at staged installs + registry).
+        staged_hook_installs: &mut Vec<StagedHookInstall>,
     ) -> Result<bool> {
         let mut removed = false;
         for directive in directives {
@@ -3484,6 +3590,12 @@ impl BytecodeCompiler {
                     // `replace body` provenance too (the D6 gate is skipped for
                     // removed functions, but keep the out-param consistent).
                     *replacement_body_origin = None;
+                    // ADR-009 C3 #14 (slice 2, S2b): a removed target weaves
+                    // nothing — drop its staged hook installs and their
+                    // registry rows (a row for a never-woven install would
+                    // misreport; the journaled length-undo stays correct).
+                    staged_hook_installs.clear();
+                    self.discard_hook_install_rows_for_target(&func_def.name);
                     removed = true;
                     break;
                 }
@@ -3619,6 +3731,28 @@ impl BytecodeCompiler {
                     return Err(Self::directive_error(
                         "`replace module` directives are only valid when compiling module targets",
                     ));
+                }
+                super::comptime_builtins::ComptimeDirective::InstallHookTemplate {
+                    template_index,
+                } => {
+                    // ADR-009 C3 #14 (slice 2, S2b): the AUTHORITATIVE apply
+                    // seam — resolve the per-run handle, run the G8/driver
+                    // rejections, compose `specialize_template` with the
+                    // ALREADY-OPEN C2 install transaction (`compile_in_place`,
+                    // compiler_impl_reference_model.rs:1985-1996, opens the
+                    // journal at :1986 BEFORE the inner driver this consumer
+                    // runs inside — E1-D6b, never a second transaction), bind
+                    // the capture plan, stage the install on the per-target
+                    // accumulator, and write one journaled registry row. Full
+                    // sequence + rationale:
+                    // `template_specialization::install_registry` module docs.
+                    self.apply_install_hook_template(
+                        template_index,
+                        annotation_name,
+                        func_def,
+                        site,
+                        staged_hook_installs,
+                    )?;
                 }
             }
         }

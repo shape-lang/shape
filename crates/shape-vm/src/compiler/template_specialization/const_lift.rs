@@ -101,6 +101,19 @@ impl LiftedConst {
         name == self.shape_type_name()
     }
 
+    /// A display rendering for the install registry (S2b — the S8
+    /// hover/query substrate): the value as a user would spell the literal.
+    /// Rendering only — never parsed back; the delivery carrier stays the
+    /// typed [`Self::to_literal_expr`] AST literal.
+    pub(in crate::compiler) fn render(&self) -> String {
+        match self {
+            LiftedConst::Int(value) => value.to_string(),
+            LiftedConst::Number(value) => value.to_string(),
+            LiftedConst::Bool(value) => value.to_string(),
+            LiftedConst::String(value) => format!("{value:?}"),
+        }
+    }
+
     /// The typed literal `Expr` the weave passes at a handler call site
     /// ([`CaptureBindingPlan::CallSiteArgs`]). AST-level literal — no source
     /// text ever exists.

@@ -377,6 +377,14 @@ const COMPTIME_BUILTIN_FORWARDERS: &[(
         Some("__CaptureBinding"),
         None,
     ),
+    // ADR-009 C3 #14 (slice 2, S2b): `install(template)` pushes the
+    // InstallHookTemplate directive for the annotation's target (implicit,
+    // like every directive emitter). Unit return (no named return type —
+    // same shape as warning/error); the param infers `__CheckedTemplate`
+    // from the caller's handle. Handler-scope resolution needs this row IN
+    // ADDITION to the `comptime_builtins_module_base` registration
+    // (the extend_method_literal lesson).
+    ("install", 1, "install", None, None, None),
     // The rewrite-only zero-capture lowerings (see the forwarder consts doc).
     (
         BEFORE_HOOK_NOCAPTURE_FORWARDER,

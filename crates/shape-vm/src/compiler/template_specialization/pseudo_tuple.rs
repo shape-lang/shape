@@ -115,6 +115,19 @@ pub(in crate::compiler) struct TemplateSpecializationPlan {
     /// How the mutated pack flows back (C3-G9): `Single` for a 1-ary target,
     /// the compiler-internal `Aggregate` otherwise.
     pub(in crate::compiler) carrier: MutationCarrier,
+    /// ADR-009 C3 #14 (slice 2, S2b — the capture-plan threading): the
+    /// template's TRAILING capture-parameter names, in parameter (delivery)
+    /// order. The construction chokepoint guarantees the body fn's shape is
+    /// `[args_param, <capture params>...]` with concretely-annotated
+    /// captures, so the rewrite face PRESERVES the capture tail verbatim
+    /// after the minted per-slot parameters: the specialized def is
+    /// `fn(__c3_p0..__c3_p{n-1}, <captures>...)` and the weave delivers the
+    /// capture values as typed trailing literals
+    /// (`const_lift::CaptureBindingPlan::CallSiteArgs`). Capture VALUES are
+    /// deliberately NOT part of this plan — the specialization cache key
+    /// stays value-generic (invariants resolution 5; the Dec-95 rule-6
+    /// spec-hash is S3's).
+    pub(in crate::compiler) capture_param_names: Vec<String>,
 }
 
 impl TemplateSpecializationPlan {
@@ -265,16 +278,36 @@ pub(in crate::compiler) fn resolve_pseudo_tuple(
             def.name, plan.carrier
         )));
     }
-    if def.params.len() != 1
+    // The substituted def's parameter shape is chokepoint-guaranteed:
+    // `[args_param, <capture params>...]` — the pseudo-tuple parameter first,
+    // then the concretely-annotated trailing capture parameters in the
+    // plan's (delivery) order (S2b capture-plan threading; zero captures =
+    // the original exactly-one-parameter shape).
+    let expected_params = 1 + plan.capture_param_names.len();
+    if def.params.len() != expected_params
         || def.params[0].simple_name() != Some(plan.args_param.as_str())
     {
         return Err(internal(format!(
-            "internal error: resolve_pseudo_tuple expected `{}` to carry exactly the one \
-             pseudo-tuple parameter `{}`; a PolymorphicArgs template classifies with exactly \
-             that shape at construction",
-            def.name, plan.args_param
+            "internal error: resolve_pseudo_tuple expected `{}` to carry the pseudo-tuple \
+             parameter `{}` plus {} trailing capture parameter(s); a PolymorphicArgs template \
+             classifies with exactly that shape at construction",
+            def.name,
+            plan.args_param,
+            plan.capture_param_names.len(),
         )));
     }
+    for (offset, expected_name) in plan.capture_param_names.iter().enumerate() {
+        if def.params[1 + offset].simple_name() != Some(expected_name.as_str()) {
+            return Err(internal(format!(
+                "internal error: resolve_pseudo_tuple expected `{}`'s trailing capture \
+                 parameter at position {} to be `{expected_name}`; the construction-time \
+                 capture bijection guarantees the tail order",
+                def.name,
+                offset + 2,
+            )));
+        }
+    }
+    let capture_tail: Vec<FunctionParameter> = def.params.split_off(1);
 
     // (1) The rewrite walk — same core, second face.
     let scan = Scan {
@@ -284,7 +317,11 @@ pub(in crate::compiler) fn resolve_pseudo_tuple(
     };
     walk_template_body(&scan, &mut def.body)?;
 
-    // (2) Per-slot minted parameters, typed from the target's AST side.
+    // (2) Per-slot minted parameters, typed from the target's AST side; the
+    // trailing capture parameters (already concrete — never substituted)
+    // are PRESERVED verbatim after them (S2b capture-plan threading): the
+    // weave appends the capture literals after the signature arguments at
+    // each handler call site, matching this parameter order.
     def.params = plan
         .target_params
         .iter()
@@ -299,6 +336,7 @@ pub(in crate::compiler) fn resolve_pseudo_tuple(
             default_value: None,
         })
         .collect();
+    def.params.extend(capture_tail);
 
     // (3) The mutable-local prologue.
     let mut body = Vec::with_capacity(arity + def.body.len());
@@ -1503,6 +1541,7 @@ mod tests {
             carrier: MutationCarrier::Aggregate {
                 fields: vec![("a0".into(), int_ann()), ("a1".into(), number_ann())],
             },
+            capture_param_names: Vec::new(),
         }
     }
 
@@ -1515,6 +1554,7 @@ mod tests {
             carrier: MutationCarrier::Single {
                 annotation: int_ann(),
             },
+            capture_param_names: Vec::new(),
         }
     }
 

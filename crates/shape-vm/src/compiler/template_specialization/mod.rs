@@ -72,6 +72,7 @@
 //! a mangled mono-key name.
 
 pub(in crate::compiler) mod const_lift;
+pub(in crate::compiler) mod install_registry;
 pub(in crate::compiler) mod pseudo_tuple;
 
 use shape_ast::ast::{FunctionDef, Span, TypeAnnotation};
@@ -326,6 +327,16 @@ impl BytecodeCompiler {
             type_param: type_param.to_string(),
             target_params: target.params.clone(),
             carrier: carrier.clone(),
+            // S2b capture-plan threading: the rewrite face preserves the
+            // body fn's trailing capture parameters (concrete, delivery
+            // order) after the minted per-slot parameters. NAMES only —
+            // capture values are never part of the plan or the cache key
+            // (invariants resolution 5).
+            capture_param_names: template
+                .capture_params()
+                .iter()
+                .map(|(name, _)| name.clone())
+                .collect(),
         };
         let function_index = self
             .ensure_monomorphic_template_specialization(

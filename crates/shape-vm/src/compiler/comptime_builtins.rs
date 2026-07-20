@@ -139,6 +139,20 @@ pub(crate) enum ComptimeDirective {
     ExtendItems {
         items: Vec<shape_ast::ast::Item>,
     },
+    /// ADR-009 C3 #14 (slice 2, S2b): install a constructed hook template onto
+    /// the annotation's target function. `template_index` is the opaque
+    /// `__CheckedTemplate` handle's index into the per-run
+    /// `COMPTIME_HOOK_TEMPLATES` store (execute-populated; the store stays
+    /// intact until the NEXT per-run clear, so the pass-2 consumer resolves
+    /// the index AFTER `vm.execute` returns — see the store's lifecycle doc).
+    /// The target is IMPLICIT (the annotation's target), matching every other
+    /// directive. Consumed ONLY by the authoritative pass-2 function-target
+    /// consumer (`process_comptime_directives_for_function`); the pre-pass
+    /// consumers are documented no-ops (never double-install), and every
+    /// non-function target consumer is a named rejection.
+    InstallHookTemplate {
+        template_index: usize,
+    },
 }
 
 /// A non-fatal warning emitted from inside the comptime mini-VM by
@@ -1033,6 +1047,39 @@ fn read_capture_binding_array_slot(
         }
         Ok(out)
     }
+}
+
+/// ADR-009 C3 #14 (slice 2, S2b): resolve a single `__CheckedTemplate` handle
+/// argument to its store index. Sibling of the `__CheckedItem` handle read
+/// (`parse_extend_items_slot`): schema-name-checked TypedObject + opaque
+/// `index` field; a non-handle slot (any other value or typed object) is a
+/// NAMED rejection with the positive twin naming the two producers. The index
+/// is NOT resolved against the store here — the pass-2 driver resolves it
+/// after `vm.execute` returns (the store stays intact until the next per-run
+/// clear), and a dead index there is internal-error-shaped.
+fn checked_template_index_from_slot(
+    slot: &KindedSlot,
+    builtin_name: &str,
+) -> Result<usize, String> {
+    let not_a_handle = |detail: &str| {
+        format!(
+            "{builtin_name} expects a __CheckedTemplate handle ({detail}); construct one with \
+             before_hook(body_fn, captures) or after_hook(body_fn, captures) and pass it \
+             directly"
+        )
+    };
+    let Some(storage) = slot.as_typed_object_storage() else {
+        return Err(not_a_handle(&format!("got kind {:?}", slot.kind())));
+    };
+    let schema = shape_runtime::type_schema::lookup_schema_by_id_public(storage.schema_id as u32)
+        .ok_or_else(|| not_a_handle("got a typed object with an unknown schema"))?;
+    if schema.name != "__CheckedTemplate" {
+        return Err(not_a_handle(&format!("got schema '{}'", schema.name)));
+    }
+    let index = field_slot_from_typed_object(storage, &schema, "index")?
+        .as_i64()
+        .ok_or_else(|| "__CheckedTemplate.index is not an int".to_string())?;
+    Ok(index as usize)
 }
 
 /// ADR-009 C3 #14 (slice 2): the shared `before_hook`/`after_hook` body — the
@@ -2027,6 +2074,37 @@ fn comptime_builtins_module_base(
             Ok(TypedReturn::Concrete(ConcreteReturn::OpaqueTypedObject(
                 Arc::new(heap_value_from_typed_object_slot(handle)),
             )))
+        },
+    );
+
+    // ADR-009 C3 #14 (slice 2, S2b): `install(template)` — attach a
+    // constructed hook template to the annotation's target function. The
+    // target is IMPLICIT (the annotation's target), matching every existing
+    // directive; the builtin resolves the opaque `__CheckedTemplate` handle
+    // to its store index and pushes `ComptimeDirective::InstallHookTemplate`.
+    // Directive consumption (specialize_template composition, the G8/driver
+    // rejections, registry + staging) happens at the authoritative pass-2
+    // function-target consumer — the store stays intact until the next
+    // per-run clear, so the post-execute index resolution is safe (store
+    // lifecycle doc above). C3-G13 string-tag errors (#60 routing note).
+    register_typed_function(
+        &mut module,
+        "install",
+        "Install a checked before/after hook template onto the annotation's target function",
+        vec![shape_runtime::module_exports::ModuleParam {
+            name: "template".to_string(),
+            type_name: "__CheckedTemplate".to_string(),
+            required: true,
+            ..Default::default()
+        }],
+        ConcreteType::Unit,
+        move |slots, _ctx| {
+            if slots.len() != 1 {
+                return Err(format!("install expects 1 argument, got {}", slots.len()));
+            }
+            let template_index = checked_template_index_from_slot(&slots[0], "install")?;
+            push_comptime_directive(ComptimeDirective::InstallHookTemplate { template_index })?;
+            Ok(TypedReturn::Concrete(ConcreteReturn::Unit))
         },
     );
 
