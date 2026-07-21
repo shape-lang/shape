@@ -139,6 +139,35 @@ fn scoped_contract_namespace_import_binds_bare_annotations() {
     .expect_output("ok");
 }
 
+// ADR-009 C3 #14 (slice 8, S8b) — the ordered W9 coverage re-target (S6
+// report §6.1): @remote was the trio's only stdlib exemplar, so during the
+// dark window (#68) W9 stdlib-annotation-import coverage was ZERO. This row
+// re-targets the named-import form onto the typed-comptime `@json_schema`
+// stdlib annotation (`std::serde::derive`) — the bare name resolves through
+// the same W9 named-import path the ignored trio pinned, and the generated
+// `{TypeName}_json_schema()` proves the annotation actually ran. The three
+// @remote rows above STAY #[ignore]'d — they are E4's acceptance suite.
+#[test]
+fn scoped_contract_named_stdlib_annotation_import_enables_bare_json_schema() {
+    ShapeTest::new(
+        r#"
+        from std::serde::derive use { @json_schema }
+
+        @json_schema()
+        type User {
+            id: int,
+            name: string,
+        }
+
+        print(User_json_schema())
+    "#,
+    )
+    .with_stdlib()
+    .expect_output(
+        r#"{"type": "object", "title": "User", "properties": {"id": {"type": "integer"}, "name": {"type": "string"}}, "required": ["id", "name"]}"#,
+    );
+}
+
 // These tests document the *desired* clean-break contract: builtins should
 // require explicit imports. Currently they are globally available (prelude).
 // When clean-break is implemented, flip these back to expect_run_err_contains.

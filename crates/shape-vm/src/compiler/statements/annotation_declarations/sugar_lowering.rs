@@ -221,6 +221,32 @@ pub(in crate::compiler) fn non_function_target_application_rejection(
     )
 }
 
+/// ADR-009 C3 #14 (slice 8, S8a) — the FOREIGN-target application rejection,
+/// fired at the head of `compile_foreign_function` when a compiled annotation
+/// carrying declarative hooks (`sugar_post_handler.is_some()`) is applied to
+/// an `extern "C"` / dynamic-language foreign fn. The S6 report §6.4 measured
+/// FACT this replaces: the hook compiled as a SILENT NO-OP (foreign fns never
+/// reach `execute_comptime_handlers`, and the typed weave targets ordinary
+/// `FunctionDef`s only — the deleted legacy foreign-wrapper block was already
+/// unreachable at the collapse). Hooks on foreign targets are E4/#68
+/// re-implementation territory. ONE producer; C3-G13 string-tag message text
+/// (uncoded — no new C09xx minted without a census; revisit when #60's coded
+/// path lands). `target_descriptor` renders the foreign flavor:
+/// `extern "C"` for native-ABI declarations, `foreign {language}` otherwise.
+pub(in crate::compiler) fn foreign_target_application_rejection(
+    annotation_name: &str,
+    target_descriptor: &str,
+    fn_name: &str,
+) -> String {
+    format!(
+        "annotation `@{annotation_name}` on {target_descriptor} fn `{fn_name}` is not \
+         applied — runtime hook templates weave ordinary Shape function bodies, and \
+         foreign-function targets have no typed hook surface yet (E4 re-implements \
+         hooks on foreign targets — see issue #68); apply @{annotation_name} to an \
+         ordinary Shape function or remove it"
+    )
+}
+
 /// R3: the hook-shape rejection (exact charter sentence, S6-collapsed: the
 /// former "typed config parameters select the typed hook surface" head and
 /// the "stay on the legacy surface" escape are deleted with the fork — the

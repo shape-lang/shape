@@ -20,6 +20,47 @@ impl BytecodeCompiler {
         &mut self,
         def: &shape_ast::ast::ForeignFunctionDef,
     ) -> Result<()> {
+        // ADR-009 C3 #14 (slice 8, S8a): a declarative-hook annotation on a
+        // FOREIGN target was a MEASURED silent no-op (S6 report §6.4: foreign
+        // fns never reach `execute_comptime_handlers`, and the typed weave
+        // targets ordinary `FunctionDef`s only) — a LOUD named
+        // surface-and-stop rejection anchored at the `@application` site
+        // replaces it. First hook-bearing annotation in application order
+        // fires; the ONE producer is
+        // `sugar_lowering::foreign_target_application_rejection` (C3-G13
+        // string-tag text with the #60 routing note; hooks on foreign
+        // targets are E4/#68 re-implementation territory). SCOPE FENCE
+        // (ordered, not silently widened): annotations WITHOUT declarative
+        // hooks (comptime-only, `@json_schema`-class) stay outside this
+        // rejection — their comptime handlers are ALSO measured silent
+        // no-ops on foreign targets (S8a probe), surfaced for disposition
+        // in the slice-7/8 report rather than rejected here. An
+        // unresolvable annotation name keeps the compiler's existing
+        // behavior (the G12 nested-fn precedent).
+        for ann in &def.annotations {
+            if let Some((_, compiled)) = self.lookup_compiled_annotation(ann)
+                && compiled.sugar_post_handler.is_some()
+            {
+                let target_descriptor = match &def.native_abi {
+                    Some(native) => format!("extern \"{}\"", native.abi),
+                    None => format!("foreign {}", def.language),
+                };
+                let span = if ann.span == shape_ast::ast::Span::DUMMY {
+                    def.name_span
+                } else {
+                    ann.span
+                };
+                return Err(ShapeError::SemanticError {
+                    message: crate::compiler::statements::annotation_declarations::sugar_lowering::foreign_target_application_rejection(
+                        &ann.name,
+                        &target_descriptor,
+                        &def.name,
+                    ),
+                    location: Some(self.span_to_source_location(span)),
+                });
+            }
+        }
+
         // Validate `out` params: only allowed on extern C, must be ptr, no const/&/default.
         self.validate_out_params(def)?;
 
@@ -1426,5 +1467,233 @@ mod ctype_spelling_tests {
             Some(("CView", "cview"))
         );
         assert_eq!(BytecodeCompiler::deprecated_ctype_alias_in(&lower), None);
+    }
+}
+
+#[cfg(test)]
+mod foreign_target_hook_annotation_tests {
+    //! ADR-009 C3 #14 (slice 8, S8a) — the foreign-target hook-annotation
+    //! rejection (the ordered S6 report §6.4 close-out).
+    //!
+    //! MEASURED at `26780771` before the fix (CLI probes, both flavors):
+    //! a typed declarative-hook annotation on `extern "C" fn` / `fn python`
+    //! compiled and ran with the hook a SILENT NO-OP (extern probe printed
+    //! `42` only — "before fired" never appeared). These pins convert the
+    //! silence into the LOUD named surface-and-stop rejection, anchored at
+    //! the `@application` line, with the compile-green positive twins.
+    //! SCOPE-FENCE CONTROL: a comptime-only annotation (no declarative
+    //! hooks) stays OUTSIDE the rejection — its handler is ALSO a measured
+    //! silent no-op on foreign targets (probe: `error()` in `comptime post`
+    //! never fired on an extern target), surfaced for disposition in the
+    //! slice-7/8 report, deliberately NOT widened into this rejection.
+    use crate::compiler::BytecodeCompiler;
+    use shape_ast::error::ShapeError;
+
+    fn compile_err_with_location(
+        src: &str,
+    ) -> (String, Option<shape_ast::error::SourceLocation>) {
+        let program = shape_ast::parser::parse_program(src).expect("parse failed");
+        let mut compiler = BytecodeCompiler::new();
+        compiler.allow_internal_builtins = true;
+        // The weave.rs/install_registry.rs span-asserting harness shape:
+        // source_text gives real span→line mapping.
+        compiler.source_text = Some(src.to_string());
+        match compiler.compile(&program).expect_err("fixture must reject") {
+            ShapeError::SemanticError { message, location } => (message, location),
+            other => panic!("expected a SemanticError, got: {other}"),
+        }
+    }
+
+    fn compile_ok(src: &str) -> BytecodeCompiler {
+        let program = shape_ast::parser::parse_program(src).expect("parse failed");
+        let mut compiler = BytecodeCompiler::new();
+        compiler.allow_internal_builtins = true;
+        compiler
+            .compile_in_place(&program)
+            .expect("fixture must compile");
+        compiler
+    }
+
+    fn assert_anchored_at(
+        location: Option<shape_ast::error::SourceLocation>,
+        src: &str,
+        application_head: &str,
+    ) {
+        let location = location.expect("the rejection carries the @application span");
+        let application_line = src
+            .lines()
+            .position(|line| line.trim_start().starts_with(application_head))
+            .expect("fixture has the application line")
+            + 1;
+        assert_eq!(
+            location.line, application_line,
+            "the rejection anchors at the @application site"
+        );
+    }
+
+    const TRACED_DECL: &str = r#"
+annotation traced(tag: string) {
+  targets: [function]
+  before(args) {
+    print(f"before fired: {tag}")
+    return args
+  }
+}
+"#;
+
+    // Must-reject (i): the S6 report §6.4 probe shape reproduced — typed
+    // declarative `before(args)` hook on `extern "C" fn`.
+    #[test]
+    fn s8a_hook_annotation_on_extern_c_fn_rejects_with_the_exact_sentence() {
+        let src = &format!(
+            r#"{TRACED_DECL}
+@traced("t")
+extern "C" fn labs(x: int) -> int from "c"
+
+print(labs(0 - 42))
+"#
+        );
+        let (message, location) = compile_err_with_location(src);
+        assert!(
+            message.contains(
+                "annotation `@traced` on extern \"C\" fn `labs` is not applied — runtime \
+                 hook templates weave ordinary Shape function bodies, and foreign-function \
+                 targets have no typed hook surface yet (E4 re-implements hooks on foreign \
+                 targets — see issue #68); apply @traced to an ordinary Shape function or \
+                 remove it"
+            ),
+            "the foreign-target sentence must fire verbatim, got: {message}"
+        );
+        assert_anchored_at(location, src, "@traced(");
+    }
+
+    // Must-reject (ii): dynamic-language foreign fn + `after(result)` — same
+    // seam, same no-op class, language rendered.
+    #[test]
+    fn s8a_hook_annotation_on_dynamic_language_foreign_fn_rejects_naming_the_language() {
+        let src = r#"
+annotation traced2(tag: string) {
+  targets: [function]
+  after(result) {
+    print(f"after fired: {tag}")
+    return result
+  }
+}
+
+@traced2("t")
+fn python padd(a: int, b: int) -> Result<int> {
+    return a + b
+}
+
+print("unreachable")
+"#;
+        let (message, location) = compile_err_with_location(src);
+        assert!(
+            message.contains(
+                "annotation `@traced2` on foreign python fn `padd` is not applied — runtime \
+                 hook templates weave ordinary Shape function bodies, and foreign-function \
+                 targets have no typed hook surface yet (E4 re-implements hooks on foreign \
+                 targets — see issue #68); apply @traced2 to an ordinary Shape function or \
+                 remove it"
+            ),
+            "the foreign-target sentence must render the dynamic language, got: {message}"
+        );
+        assert_anchored_at(location, src, "@traced2(");
+    }
+
+    // Must-reject (iii): two stacked hook annotations — the FIRST in
+    // application order fires (surface-and-stop; one sentence, one name).
+    #[test]
+    fn s8a_stacked_hook_annotations_on_extern_c_fn_reject_on_the_first() {
+        let src = &format!(
+            r#"{TRACED_DECL}
+annotation logged(tag: string) {{
+  targets: [function]
+  after(result) {{
+    print(f"after fired: {{tag}}")
+    return result
+  }}
+}}
+
+@traced("first")
+@logged("second")
+extern "C" fn labs(x: int) -> int from "c"
+
+print(labs(0 - 42))
+"#
+        );
+        let (message, location) = compile_err_with_location(src);
+        assert!(
+            message.contains("annotation `@traced` on extern \"C\" fn `labs` is not applied"),
+            "the FIRST stacked annotation must be the one named, got: {message}"
+        );
+        assert!(
+            !message.contains("@logged"),
+            "surface-and-stop: only the first annotation fires, got: {message}"
+        );
+        assert_anchored_at(location, src, "@traced(");
+    }
+
+    // Positive twin (iv): the same extern "C" fn WITHOUT annotations
+    // compiles (the ffi_permission_tests fixture shape; compile-only, no
+    // execution needed).
+    #[test]
+    fn s8a_twin_extern_c_fn_without_annotations_compiles() {
+        compile_ok(
+            r#"
+extern "C" fn labs(x: int) -> int from "c"
+
+print(labs(0 - 42))
+"#,
+        );
+    }
+
+    // Positive twin (v): the SAME typed-config hook annotation on an
+    // ORDINARY Shape fn weaves — compile-green with a journaled hook-install
+    // registry row (the charter execution pins cover runtime behavior; this
+    // adjacent twin proves the identical declaration is accepted and
+    // installed on the ordinary-fn seam).
+    #[test]
+    fn s8a_twin_same_hook_annotation_on_ordinary_fn_weaves() {
+        let compiler = compile_ok(&format!(
+            r#"{TRACED_DECL}
+@traced("t")
+fn double(x: int) -> int {{
+    return x * 2
+}}
+
+print(double(21))
+"#
+        ));
+        assert!(
+            !compiler.hook_install_registry.is_empty(),
+            "the ordinary-fn twin must journal a hook-install registry row"
+        );
+    }
+
+    // Scope-fence control: a comptime-only annotation (NO declarative
+    // hooks) on a foreign target stays OUTSIDE the ordered rejection —
+    // compile-green today. Its handler is a MEASURED silent no-op on
+    // foreign targets (S8a probe: `error()` in `comptime post` never fired
+    // on an extern "C" target); that finding is surfaced for supervisor
+    // disposition in the slice-7/8 report, NOT silently widened into this
+    // rejection (the ordered scope covers declarative before/after only).
+    #[test]
+    fn s8a_scope_fence_comptime_only_annotation_on_extern_c_fn_stays_unrejected() {
+        compile_ok(
+            r#"
+annotation marked() {
+  targets: [function]
+  comptime post(target, ctx) {
+    1
+  }
+}
+
+@marked()
+extern "C" fn labs(x: int) -> int from "c"
+
+print(labs(0 - 42))
+"#,
+        );
     }
 }
