@@ -285,8 +285,12 @@ pub(in crate::compiler) fn validate_capture_clause(clause: &CaptureClause) -> Re
         if seen.contains(&entry.name.as_str()) {
             return Err(ShapeError::SemanticError {
                 message: format!(
+                    // ADR-009 C3 #14 (slice 5, S5a): one-word alignment with
+                    // the planner producer's sentence ("exactly once") — the
+                    // S0 census flagged the "at most once" divergence; one
+                    // class, one phrasing.
                     "[C0907] duplicate capture declaration for '{}'; each captured binding may \
-                     be declared at most once",
+                     be declared exactly once",
                     entry.name
                 ),
                 location: None,
@@ -398,6 +402,13 @@ mod tests {
         assert!(
             err.to_string().contains("[C0907]"),
             "expected [C0907], got: {err}"
+        );
+        // S5a one-word alignment: this producer now carries the planner's
+        // "exactly once" phrasing — one class, one sentence.
+        assert!(
+            err.to_string()
+                .contains("each captured binding may be declared exactly once"),
+            "the aligned [C0907] phrasing: {err}"
         );
     }
 

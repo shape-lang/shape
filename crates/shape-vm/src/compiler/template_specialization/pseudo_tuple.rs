@@ -13,20 +13,24 @@
 //! per-target aggregate at the weave boundary (never user-visible; never the
 //! boxed `NewArray` path).
 //!
-//! # One walker, two faces (binding invariant — do not fork)
+//! # One walker, three faces (binding invariant — do not fork)
 //!
 //! This module is the single traversal core. [`Face::Validate`] is the
 //! construction face ([`validate_pseudo_tuple_uses`], run from
 //! `CheckedTemplateBuilder::finish()`); [`Face::Rewrite`] is the
 //! specialization face ([`resolve_pseudo_tuple`], run from the
-//! monomorphization ride under a [`TemplateSpecializationPlan`]). BOTH faces
-//! share every shape classifier and every named rejection — there is no
-//! second, drifting walker; the validate face takes `&mut` for traversal
-//! uniformity only and never mutates (every mutation sits behind
-//! `Face::Rewrite`). The traversal mirrors the exhaustive Statement/Expr
-//! skeleton of `monomorphization/substitution.rs` (the precedent full-AST
-//! walk): every `match` is exhaustive with no catch-all arm, so a new AST
-//! variant is a compile error here, exactly like the substitution walker.
+//! monomorphization ride under a [`TemplateSpecializationPlan`]);
+//! [`Face::AmbientScope`] is the S5 [C0926] ambient-totality face
+//! ([`scan_template_body_ambient_scope`], run from
+//! `specialize_template` BEFORE the per-kind dispatch — see the gate's doc
+//! comment in `mod.rs` for the site rationale). ALL faces share every shape
+//! classifier and every named rejection — there is no second, drifting
+//! walker; the validate/ambient faces take `&mut` for traversal uniformity
+//! only and never mutate (every mutation sits behind `Face::Rewrite`). The
+//! traversal mirrors the exhaustive Statement/Expr skeleton of
+//! `monomorphization/substitution.rs` (the precedent full-AST walk): every
+//! `match` is exhaustive with no catch-all arm, so a new AST variant is a
+//! compile error here, exactly like the substitution walker.
 //!
 //! # The G9 aggregate is ADR-006-ordinary (compliance statement)
 //!
@@ -50,11 +54,15 @@
 //!   rejection quoting the index and the target's arity + signature; the
 //!   specialization seam wraps it in the two-signature application-site
 //!   attribution.
-//! - **Interpolated f-string contents are not scanned.** A `Literal::
-//!   FormattedString` carries its interpolation as raw text until emission; a
-//!   pseudo-tuple reference inside one (`f"{args}"`) is caught downstream by
-//!   ordinary identifier resolution after the pseudo-tuple has resolved away
-//!   (the name no longer exists), never silently honored.
+//! - **Interpolated f-string contents are not scanned by the pseudo-tuple
+//!   faces.** A `Literal::FormattedString` carries its interpolation as raw
+//!   text until emission; a pseudo-tuple reference inside one (`f"{args}"`)
+//!   is caught downstream by ordinary identifier resolution after the
+//!   pseudo-tuple has resolved away (the name no longer exists), never
+//!   silently honored. The S5 [`Face::AmbientScope`] face DOES scan
+//!   interpolation interiors: an ambient module-binding name there resolves
+//!   and is SILENTLY honored at emission (unlike `args`, it does not resolve
+//!   away), so the F5 non-scanned boundary does not apply to that face.
 //!
 //! # The `__c3_` reserved prefix
 //!
@@ -95,6 +103,183 @@ fn slot_param_name(index: usize) -> String {
 /// The minted mutable local backing the i-th slot (`__c3_arg_{i}`).
 fn slot_local_name(index: usize) -> String {
     format!("{RESERVED_SPECIALIZATION_PREFIX}arg_{index}")
+}
+
+/// Unspellable sentinel names for the [`Face::AmbientScope`] scan: the
+/// ambient face classifies FREE identifiers against the module scope and
+/// never engages the pseudo-tuple surface (the template's own `args` /
+/// `Args` spellings are ordinary in-scope parameters for it), so its `Scan`
+/// carries names no Shape identifier can collide with.
+const AMBIENT_SENTINEL_ARGS: &str = "\u{1}ambient:no-args";
+const AMBIENT_SENTINEL_TYPE: &str = "\u{1}ambient:no-type";
+
+/// ADR-009 C3 #14 (slice 5, S5a) — the [C0926] ambient-totality context: the
+/// resolution environment + lexical scope stack for one template-body scan.
+///
+/// # The G4 boundary rule (verbatim, binding)
+///
+/// fn-callees at module scope are LEGIT; module-scope VALUE bindings are NOT
+/// — that is the a6 hazard. A hook template's body reads only its exact
+/// inputs (signature parameters + declared captures, C3-G4); everything that
+/// resolves ambiently to a module-scope VALUE binding (`let` / `let mut` /
+/// `var` / `const` — consts INCLUDED) is a [C0926] rejection, because the
+/// body is specialized into the APPLICATION module and resolves names there.
+///
+/// # The motivating disaster (slice-0 §4 a6, re-measured on the new path)
+///
+/// S5a probe P2c (recorded in c3-slice5-report.md): an annotation in
+/// `mod defs` with its own `pub const secret: int = 11` and a declarative
+/// hook body reading `secret`, applied in a module carrying an unrelated
+/// `let secret = 99` — the woven program SILENTLY ran with 99 (measured
+/// value 1040 vs the intent 160). The target module's binding wins over the
+/// annotation's own const with zero diagnostics. This gate makes the whole
+/// class a named rejection.
+///
+/// # The asymmetry rule (invariant 7)
+///
+/// A module-scope CONST is comptime-evaluable and therefore LEGAL in the
+/// `@application` config-arg position (the [C0931] pre-check exempts it),
+/// but ILLEGAL inside a template body — G4 exact-inputs totality covers
+/// consts; the a2b positive twin is "declare it as a capture".
+pub(in crate::compiler) struct AmbientScopeCtx<'a> {
+    compiler: &'a crate::compiler::BytecodeCompiler,
+    /// The rendered origin for the [C0926] sentence: `` fn `name` `` for
+    /// API bodies, `` the `before|after` hook of annotation `X` `` for
+    /// sugar-minted bodies — never the SOH hygienic name.
+    origin: String,
+    /// The template body's defining module (from the body fn's qualified
+    /// name, or the sugar annotation's key) — the a2b resolution trial: a
+    /// bare name in the body that resolves under the TEMPLATE's own module
+    /// is just as ambient as one resolving in the application module.
+    template_module: Option<String>,
+    /// The lexical scope stack: frame 0 = the body fn's declared parameters
+    /// (signature + trailing captures — the exact inputs); inner frames are
+    /// pushed at block/closure/arm boundaries and popped on exit, and
+    /// binders register in traversal order (sequential visibility: a use
+    /// BEFORE a same-spelled local `let` resolves ambiently and rejects).
+    scopes: std::cell::RefCell<Vec<Vec<String>>>,
+}
+
+impl<'a> AmbientScopeCtx<'a> {
+    pub(in crate::compiler) fn new(
+        compiler: &'a crate::compiler::BytecodeCompiler,
+        origin: String,
+        template_module: Option<String>,
+    ) -> Self {
+        Self {
+            compiler,
+            origin,
+            template_module,
+            scopes: std::cell::RefCell::new(Vec::new()),
+        }
+    }
+
+    fn push_frame(&self) {
+        self.scopes.borrow_mut().push(Vec::new());
+    }
+
+    fn pop_frame(&self) {
+        self.scopes.borrow_mut().pop();
+    }
+
+    fn bind(&self, name: &str) {
+        if let Some(frame) = self.scopes.borrow_mut().last_mut() {
+            frame.push(name.to_string());
+        }
+    }
+
+    fn in_scope(&self, name: &str) -> bool {
+        self.scopes
+            .borrow()
+            .iter()
+            .any(|frame| frame.iter().any(|bound| bound == name))
+    }
+
+    /// The scoped-then-bare module-binding detector, mirroring the emission
+    /// path (`expressions/mod.rs:453-459` / `identifiers.rs:350`):
+    /// `resolve_scoped_module_binding_name` (bare first, then the current
+    /// module-scope stack), THEN the template's own defining module (the a2b
+    /// trial), THEN imported `pub const`s (which inline at use sites — a
+    /// module-scope const per invariant 7).
+    fn resolve_module_value_binding(&self, name: &str) -> Option<String> {
+        if let Some(resolved) = self.compiler.resolve_scoped_module_binding_name(name) {
+            return Some(resolved);
+        }
+        if let Some(module) = &self.template_module {
+            let qualified = format!("{module}::{name}");
+            if self.compiler.module_bindings.contains_key(&qualified) {
+                return Some(qualified);
+            }
+        }
+        if self.compiler.imported_consts.contains_key(name) {
+            return Some(name.to_string());
+        }
+        None
+    }
+
+    /// Module-scope FN evidence for the call-name tie-break (G3: bodies call
+    /// helper fns; fn-as-value is code, not invocation-scope state).
+    fn is_module_fn(&self, name: &str) -> bool {
+        let compiler = self.compiler;
+        if compiler.function_defs.contains_key(name)
+            || compiler.find_function(name).is_some()
+            || compiler.stdlib_function_names.contains(name)
+        {
+            return true;
+        }
+        if let Some(module) = &self.template_module {
+            let qualified = format!("{module}::{name}");
+            if compiler.function_defs.contains_key(&qualified)
+                || compiler.find_function(&qualified).is_some()
+            {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// THE ONE [C0926] sentence producer (S5a; exact sentence, pinned
+    /// verbatim). `{origin}` never renders an SOH hygienic name.
+    fn ambient_rejection(&self, ident: &str, resolved: &str) -> ShapeError {
+        reject(format!(
+            "[C0926] hook template body {origin} references `{ident}`, which resolves to the \
+             module-scope value binding `{resolved}`; a hook template's body reads only its \
+             exact inputs — its signature parameters and its declared captures (C3-G4); module- \
+             and invocation-scope values never enter a template ambiently, because the body is \
+             specialized into the application module where an unrelated binding spelled \
+             `{ident}` silently takes over the hook's behavior — declare it as an input \
+             instead: add a typed config parameter (or capture(\"{ident}\", ...)) and reference \
+             the capture parameter",
+            origin = self.origin
+        ))
+    }
+}
+
+/// ADR-009 C3 #14 (slice 5, S5a) — the [C0926] ambient-scope scan: walk one
+/// template body fn with the AMBIENT face and reject the first free
+/// identifier that resolves to a module-scope VALUE binding. Frame 0 seeds
+/// the body fn's declared parameters (signature + trailing captures — the
+/// C3-G4 exact inputs). The walk never mutates; `&mut` is the walker's
+/// traversal-uniformity contract.
+pub(in crate::compiler) fn scan_template_body_ambient_scope(
+    def: &mut FunctionDef,
+    ctx: &AmbientScopeCtx<'_>,
+) -> Result<()> {
+    ctx.push_frame();
+    for param in &def.params {
+        for (name, _) in param.pattern.get_bindings() {
+            ctx.bind(&name);
+        }
+    }
+    let scan = Scan {
+        args_param: AMBIENT_SENTINEL_ARGS,
+        type_param: AMBIENT_SENTINEL_TYPE,
+        comptime_depth: std::cell::Cell::new(0),
+        face: Face::AmbientScope(ctx),
+    };
+    let result = walk_template_body(&scan, &mut def.body);
+    ctx.pop_frame();
+    result
 }
 
 /// Everything the monomorphization ride needs to specialize one template
@@ -237,6 +422,7 @@ pub(in crate::compiler) fn validate_pseudo_tuple_uses(
     let scan = Scan {
         args_param,
         type_param,
+        comptime_depth: std::cell::Cell::new(0),
         face: Face::Validate,
     };
     walk_template_body(&scan, body)
@@ -344,6 +530,7 @@ pub(in crate::compiler) fn resolve_pseudo_tuple(
     let scan = Scan {
         args_param: &pt.args_param,
         type_param: &pt.type_param,
+        comptime_depth: std::cell::Cell::new(0),
         face: Face::Rewrite {
             plan: pt,
             carrier_writes: &carrier_writes,
@@ -683,6 +870,13 @@ enum Face<'a> {
         plan: &'a PseudoTuplePlan,
         carrier_writes: &'a std::cell::RefCell<Vec<(usize, Expr)>>,
     },
+    /// ADR-009 C3 #14 (slice 5, S5a) — the [C0926] ambient-totality face:
+    /// classifies every FREE identifier against the lexical scope stack and
+    /// the module scope ([`AmbientScopeCtx`]); never mutates. Runs with the
+    /// unspellable sentinel template names, so the pseudo-tuple surface is
+    /// structurally disengaged (the template's own `args`/`Args` are
+    /// ordinary in-scope parameters for this face).
+    AmbientScope(&'a AmbientScopeCtx<'a>),
 }
 
 /// What the template-body interception decided for one expression node.
@@ -698,6 +892,13 @@ enum Intercept {
 struct Scan<'a> {
     args_param: &'a str,
     type_param: &'a str,
+    /// S5a Dec-65 walker arm: > 0 while inside an `Expr::Comptime` block.
+    /// The pseudo-tuple surface is NOT live there (comptime code evaluates
+    /// before the hook's runtime inputs exist), so `args`/`Args` uses inside
+    /// a comptime block reject with the named Dec-65 sentence instead of
+    /// being intercepted as legal reads (which would leak a minted
+    /// `__c3_arg_{i}` name into the mini-VM's unresolved-identifier error).
+    comptime_depth: std::cell::Cell<usize>,
     face: Face<'a>,
 }
 
@@ -830,12 +1031,159 @@ impl<'a> Scan<'a> {
         ))
     }
 
+    /// S5a Dec-65 walker arm (uncoded, G13 string-tag with the #60 routing
+    /// note): a template pseudo-tuple / type-param name read inside an
+    /// `Expr::Comptime` block. Comptime code evaluates at compile time,
+    /// before the hook's runtime inputs exist — without this arm the
+    /// rewrite face would resolve `args[i]` to a minted `__c3_arg_{i}`
+    /// local and the comptime mini-VM would leak that reserved name in a
+    /// bland unresolved-identifier error.
+    fn reject_comptime_runtime_input(&self, name: &str) -> ShapeError {
+        reject(format!(
+            "a `comptime` block inside a template body cannot read `{name}`: comptime code \
+             evaluates at compile time, before the hook's runtime inputs exist (Dec 65 — \
+             runtime values never enter a comptime evaluation position); compute with \
+             comptime-known values instead, or move the runtime work outside the `comptime` \
+             block"
+        ))
+    }
+
+    // ---------------------------------------------------------------------
+    // S5a comptime-interior tracking + ambient-face helpers
+    // ---------------------------------------------------------------------
+
+    /// True while the pseudo-tuple surface is live: outside any comptime
+    /// block. Gates every interception (reads, writes, mutation-returns) so
+    /// `args`/`Args` inside `comptime { }` fall through to the named Dec-65
+    /// rejection instead of classifying as legal runtime uses.
+    fn pseudo_tuple_surface_live(&self) -> bool {
+        self.comptime_depth.get() == 0
+    }
+
+    /// A template name (`args_param` / `type_param`) observed inside a
+    /// comptime block in TemplateBody mode → the Dec-65 rejection.
+    fn check_comptime_runtime_input(&self, name: &str, mode: ScanMode) -> Result<()> {
+        if mode == ScanMode::TemplateBody
+            && !self.pseudo_tuple_surface_live()
+            && (name == self.args_param || name == self.type_param)
+        {
+            return Err(self.reject_comptime_runtime_input(name));
+        }
+        Ok(())
+    }
+
+    fn ambient(&self) -> Option<&'a AmbientScopeCtx<'a>> {
+        match self.face {
+            Face::AmbientScope(ctx) => Some(ctx),
+            _ => None,
+        }
+    }
+
+    /// Run `f` inside a fresh lexical frame on the ambient face (no-op
+    /// otherwise). Binders registered inside pop with the frame — the
+    /// disjoint-branch shadow discipline.
+    fn ambient_frame<T>(&self, f: impl FnOnce() -> Result<T>) -> Result<T> {
+        if let Some(ctx) = self.ambient() {
+            ctx.push_frame();
+            let result = f();
+            ctx.pop_frame();
+            result
+        } else {
+            f()
+        }
+    }
+
+    /// Ambient face: register a binder in the current frame.
+    fn ambient_bind(&self, name: &str) {
+        if let Some(ctx) = self.ambient() {
+            ctx.bind(name);
+        }
+    }
+
+    /// Ambient face, VALUE position: a free identifier resolving to a
+    /// module-scope VALUE binding is [C0926]. Module bindings are checked
+    /// BEFORE fn tables — the emission path's own precedence
+    /// (`identifiers.rs:350` resolves module bindings before
+    /// `find_function`), so the gate rejects exactly what the emitted code
+    /// would silently load. Unresolvable names are left to ordinary
+    /// downstream resolution (unchanged sentences).
+    fn ambient_check_value_name(&self, name: &str) -> Result<()> {
+        let Some(ctx) = self.ambient() else {
+            return Ok(());
+        };
+        if ctx.in_scope(name) {
+            return Ok(());
+        }
+        if let Some(resolved) = ctx.resolve_module_value_binding(name) {
+            return Err(ctx.ambient_rejection(name, &resolved));
+        }
+        Ok(())
+    }
+
+    /// Ambient face, CALL-NAME position: fn-callees at module scope are
+    /// LEGIT (G3); a call name that is NOT a module fn but resolves to a
+    /// module-scope VALUE binding (a module `let` holding a closure) is
+    /// [C0926].
+    fn ambient_check_call_name(&self, name: &str) -> Result<()> {
+        let Some(ctx) = self.ambient() else {
+            return Ok(());
+        };
+        if ctx.in_scope(name) || ctx.is_module_fn(name) {
+            return Ok(());
+        }
+        if let Some(resolved) = ctx.resolve_module_value_binding(name) {
+            return Err(ctx.ambient_rejection(name, &resolved));
+        }
+        Ok(())
+    }
+
+    /// Ambient face, ASSIGNMENT-target position: a store into a module-scope
+    /// binding (`StoreModuleBinding`) is just as ambient as a read.
+    fn ambient_check_assign_target(&self, name: &str) -> Result<()> {
+        self.ambient_check_value_name(name)
+    }
+
+    /// Ambient face: scan f-string interpolation interiors (the MUST-SCAN
+    /// position the pseudo-tuple faces skip — see the module docs). Each
+    /// interpolation expression re-parses exactly as the emitter does
+    /// (`string_interpolation.rs:277`); parse failures are left to the
+    /// emitter's own error.
+    fn ambient_scan_fstring(
+        &self,
+        value: &str,
+        interp_mode: shape_ast::ast::InterpolationMode,
+        mode: ScanMode,
+    ) -> Result<()> {
+        if self.ambient().is_none() {
+            return Ok(());
+        }
+        let Ok(parts) = shape_ast::interpolation::parse_interpolation_with_mode(value, interp_mode)
+        else {
+            return Ok(());
+        };
+        for part in parts {
+            if let shape_ast::interpolation::InterpolationPart::Expression { expr, .. } = part {
+                let Ok(mut parsed) = shape_ast::parser::parse_expression_str(&expr) else {
+                    continue;
+                };
+                self.expr(&mut parsed, mode)?;
+            }
+        }
+        Ok(())
+    }
+
     // ---------------------------------------------------------------------
     // Name checks
     // ---------------------------------------------------------------------
 
     /// Any identifier spelling, in any role: the reserved-prefix check.
+    /// The ambient face SKIPS it — that face classifies module-scope
+    /// resolution only and must not tighten the (never construction-walked)
+    /// concrete-body surface beyond its [C0926] charter.
     fn check_reserved(&self, name: &str) -> Result<()> {
+        if matches!(self.face, Face::AmbientScope(_)) {
+            return Ok(());
+        }
         if name.starts_with(RESERVED_SPECIALIZATION_PREFIX) {
             return Err(self.reject_reserved_prefix(name));
         }
@@ -845,6 +1193,7 @@ impl<'a> Scan<'a> {
     /// A name in BINDING position (let/for/match/query bindings).
     fn check_binding_name(&self, name: &str, mode: ScanMode) -> Result<()> {
         self.check_reserved(name)?;
+        self.ambient_bind(name);
         match mode {
             ScanMode::ClosureInterior => {
                 if name == self.args_param || name == self.type_param {
@@ -863,6 +1212,7 @@ impl<'a> Scan<'a> {
     /// A name in ASSIGNMENT-target position (mutating an existing binding).
     fn check_assign_target_name(&self, name: &str, mode: ScanMode) -> Result<()> {
         self.check_reserved(name)?;
+        self.ambient_check_assign_target(name)?;
         match mode {
             ScanMode::ClosureInterior => {
                 if name == self.args_param || name == self.type_param {
@@ -941,8 +1291,9 @@ impl<'a> Scan<'a> {
         match stmt {
             Statement::Return(value, _) => {
                 // `return args` — the mutation-return spelling (template body
-                // only; inside a closure it is an occurrence like any other).
-                if mode == ScanMode::TemplateBody {
+                // only; inside a closure it is an occurrence like any other;
+                // inside a comptime block the surface is not live — Dec 65).
+                if mode == ScanMode::TemplateBody && self.pseudo_tuple_surface_live() {
                     if let Some(inner) = value {
                         if self.is_args_identifier(inner) {
                             if let Face::Rewrite { plan, .. } = self.face {
@@ -959,11 +1310,15 @@ impl<'a> Scan<'a> {
             Statement::VariableDecl(decl, _) => self.variable_decl(decl, mode),
             Statement::Assignment(assign, _) => self.assignment(assign, mode),
             Statement::Expression(expr, _) => self.expr(expr, mode),
-            Statement::For(for_loop, _) => {
+            Statement::For(for_loop, _) => self.ambient_frame(|| {
                 match &mut for_loop.init {
                     ForInit::ForIn { pattern, iter } => {
-                        self.destructure_pattern_binding(pattern, mode)?;
+                        // Iterable BEFORE the pattern binds: the iterable
+                        // cannot see the loop binder (order load-bearing for
+                        // the ambient face; order-independent for the
+                        // pseudo-tuple faces).
                         self.expr(iter, mode)?;
+                        self.destructure_pattern_binding(pattern, mode)?;
                     }
                     ForInit::ForC {
                         init,
@@ -976,16 +1331,16 @@ impl<'a> Scan<'a> {
                     }
                 }
                 self.statements(&mut for_loop.body, mode)
-            }
+            }),
             Statement::While(while_loop, _) => {
                 self.expr(&mut while_loop.condition, mode)?;
-                self.statements(&mut while_loop.body, mode)
+                self.ambient_frame(|| self.statements(&mut while_loop.body, mode))
             }
             Statement::If(if_stmt, _) => {
                 self.expr(&mut if_stmt.condition, mode)?;
-                self.statements(&mut if_stmt.then_body, mode)?;
+                self.ambient_frame(|| self.statements(&mut if_stmt.then_body, mode))?;
                 if let Some(else_body) = &mut if_stmt.else_body {
-                    self.statements(else_body, mode)?;
+                    self.ambient_frame(|| self.statements(else_body, mode))?;
                 }
                 Ok(())
             }
@@ -1007,11 +1362,15 @@ impl<'a> Scan<'a> {
     }
 
     fn variable_decl(&self, decl: &mut VariableDecl, mode: ScanMode) -> Result<()> {
-        self.destructure_pattern_binding(&decl.pattern, mode)?;
+        // Value/annotation BEFORE the pattern binds: `let x = x + 1`
+        // references the OUTER `x` on its right-hand side (sequential
+        // visibility — order load-bearing for the ambient face,
+        // order-independent for the pseudo-tuple faces).
         if let Some(annotation) = &decl.type_annotation {
             self.type_annotation(annotation, mode)?;
         }
-        self.opt_expr(decl.value.as_mut(), mode)
+        self.opt_expr(decl.value.as_mut(), mode)?;
+        self.destructure_pattern_binding(&decl.pattern, mode)
     }
 
     fn assignment(&self, assign: &mut Assignment, mode: ScanMode) -> Result<()> {
@@ -1031,16 +1390,18 @@ impl<'a> Scan<'a> {
         for annotation in &mut method.annotations {
             self.annotation_args(annotation, mode)?;
         }
-        for param in &mut method.params {
-            self.function_parameter(param, mode)?;
-        }
-        if let Some(when) = &mut method.when_clause {
-            self.expr(when, mode)?;
-        }
-        if let Some(ret) = &method.return_type {
-            self.type_annotation(ret, mode)?;
-        }
-        self.statements(&mut method.body, mode)
+        self.ambient_frame(|| {
+            for param in &mut method.params {
+                self.function_parameter(param, mode)?;
+            }
+            if let Some(when) = &mut method.when_clause {
+                self.expr(when, mode)?;
+            }
+            if let Some(ret) = &method.return_type {
+                self.type_annotation(ret, mode)?;
+            }
+            self.statements(&mut method.body, mode)
+        })
     }
 
     fn function_parameter(&self, param: &mut FunctionParameter, mode: ScanMode) -> Result<()> {
@@ -1278,6 +1639,10 @@ impl<'a> Scan<'a> {
                         Literal::Int(plan.arity() as i64),
                         *span,
                     )),
+                    // Unreachable: the ambient face runs with unspellable
+                    // sentinel template names, so `is_args_identifier` can
+                    // never match; `No` keeps the generic traversal total.
+                    Face::AmbientScope(_) => Intercept::No,
                 })
             }
             Expr::IndexAccess {
@@ -1293,6 +1658,8 @@ impl<'a> Scan<'a> {
                         self.checked_slot_local(slot_index, plan)?,
                         *span,
                     )),
+                    // Unreachable under the sentinel names (see above).
+                    Face::AmbientScope(_) => Intercept::No,
                 })
             }
             _ => Ok(Intercept::No),
@@ -1300,7 +1667,11 @@ impl<'a> Scan<'a> {
     }
 
     fn expr(&self, expr: &mut Expr, mode: ScanMode) -> Result<()> {
-        if mode == ScanMode::TemplateBody {
+        // S5a: the pseudo-tuple surface is live only OUTSIDE comptime blocks
+        // (Dec 65) — inside one, `args[i]` must not classify as a legal
+        // runtime read; it falls through to the named Dec-65 rejection at
+        // the identifier leaf.
+        if mode == ScanMode::TemplateBody && self.pseudo_tuple_surface_live() {
             match self.intercept_template_body_expr(expr)? {
                 Intercept::No => {}
                 Intercept::LegalKeep => return Ok(()),
@@ -1311,10 +1682,16 @@ impl<'a> Scan<'a> {
             }
         }
         match expr {
-            // Leaves. FormattedString interpolation is deliberately not
-            // scanned (see the module docs' named boundary).
-            Expr::Literal(_, _)
-            | Expr::DataRef(_, _)
+            // Leaves. FormattedString interpolation is not scanned by the
+            // pseudo-tuple faces; the AMBIENT face scans it (the module
+            // docs' named boundary + its S5 exception).
+            Expr::Literal(lit, _) => {
+                if let Literal::FormattedString { value, mode: interp_mode } = &*lit {
+                    self.ambient_scan_fstring(value, *interp_mode, mode)?;
+                }
+                Ok(())
+            }
+            Expr::DataRef(_, _)
             | Expr::DataDateTimeRef(_, _)
             | Expr::TimeRef(_, _)
             | Expr::DateTime(_, _)
@@ -1325,6 +1702,11 @@ impl<'a> Scan<'a> {
 
             Expr::Identifier(name, _) => {
                 self.check_reserved(name)?;
+                // S5a Dec-65 arm: a template name read inside a comptime
+                // block (checked BEFORE the bare-value rejection so the
+                // sentence names the real boundary).
+                self.check_comptime_runtime_input(name, mode)?;
+                self.ambient_check_value_name(name)?;
                 match mode {
                     ScanMode::TemplateBody => {
                         if name.as_str() == self.args_param {
@@ -1384,6 +1766,7 @@ impl<'a> Scan<'a> {
                 span: _,
             } => {
                 self.check_call_name(name, mode)?;
+                self.ambient_check_call_name(name)?;
                 self.exprs(const_args, mode)?;
                 self.exprs(args, mode)?;
                 self.named_exprs(named_args, mode)
@@ -1399,16 +1782,40 @@ impl<'a> Scan<'a> {
             } => {
                 self.check_call_name(namespace, mode)?;
                 self.check_call_name(function, mode)?;
+                self.ambient_check_call_name(&format!("{namespace}::{function}"))?;
                 self.exprs(const_args, mode)?;
                 self.exprs(args, mode)?;
                 self.named_exprs(named_args, mode)
             }
 
-            Expr::EnumConstructor { payload, .. } => match payload {
-                EnumConstructorPayload::Unit => Ok(()),
-                EnumConstructorPayload::Tuple(items) => self.exprs(items, mode),
-                EnumConstructorPayload::Struct(fields) => self.named_exprs(fields, mode),
-            },
+            Expr::EnumConstructor {
+                enum_name,
+                variant,
+                payload,
+                ..
+            } => {
+                // S5a ambient MUST-SCAN: a module-QUALIFIED value reference
+                // (`defs::secret`) parses as a Unit-payload enum constructor;
+                // when the joined path names a module-scope VALUE binding it
+                // is exactly as ambient as a bare reference. Genuine enum
+                // variants / comptime fields never live in `module_bindings`,
+                // so they fall through untouched.
+                if matches!(payload, EnumConstructorPayload::Unit) {
+                    if let Some(ctx) = self.ambient() {
+                        let joined = format!("{enum_name}::{variant}");
+                        if !ctx.in_scope(&joined)
+                            && ctx.compiler.module_bindings.contains_key(&joined)
+                        {
+                            return Err(ctx.ambient_rejection(&joined, &joined));
+                        }
+                    }
+                }
+                match payload {
+                    EnumConstructorPayload::Unit => Ok(()),
+                    EnumConstructorPayload::Tuple(items) => self.exprs(items, mode),
+                    EnumConstructorPayload::Struct(fields) => self.named_exprs(fields, mode),
+                }
+            }
 
             Expr::Conditional {
                 condition,
@@ -1442,18 +1849,21 @@ impl<'a> Scan<'a> {
 
             Expr::Array(items, _) => self.exprs(items, mode),
 
-            Expr::ListComprehension(comp, _) => {
+            Expr::ListComprehension(comp, _) => self.ambient_frame(|| {
                 for clause in &mut comp.clauses {
-                    self.destructure_pattern_binding(&clause.pattern, mode)?;
+                    // Iterable BEFORE the clause pattern binds: a clause's
+                    // iterable sees earlier clauses' binders but not its own
+                    // (order load-bearing for the ambient face only).
                     self.expr(&mut clause.iterable, mode)?;
+                    self.destructure_pattern_binding(&clause.pattern, mode)?;
                     if let Some(filter) = &mut clause.filter {
                         self.expr(filter, mode)?;
                     }
                 }
                 self.expr(&mut comp.element, mode)
-            }
+            }),
 
-            Expr::Block(block, _) => {
+            Expr::Block(block, _) => self.ambient_frame(|| {
                 for item in &mut block.items {
                     match item {
                         BlockItem::VariableDecl(decl) => self.variable_decl(decl, mode)?,
@@ -1463,7 +1873,7 @@ impl<'a> Scan<'a> {
                     }
                 }
                 Ok(())
-            }
+            }),
 
             Expr::TypeAssertion {
                 expr: inner,
@@ -1492,6 +1902,9 @@ impl<'a> Scan<'a> {
 
             // THE closure boundary: everything inside scans in
             // `ClosureInterior` mode — any occurrence of either name rejects.
+            // The ambient face pushes a frame (closure params/captures are
+            // closure-local binders) and keeps classifying inside — closure
+            // interiors are a [C0926] MUST-SCAN position.
             Expr::FunctionExpr {
                 params,
                 return_type,
@@ -1502,7 +1915,7 @@ impl<'a> Scan<'a> {
                 // application-site expressions, not template-body names.
                 annotations: _,
                 span: _,
-            } => {
+            } => self.ambient_frame(|| {
                 for param in params.iter_mut() {
                     self.function_parameter(param, ScanMode::ClosureInterior)?;
                 }
@@ -1515,44 +1928,54 @@ impl<'a> Scan<'a> {
                     }
                 }
                 self.statements(body, ScanMode::ClosureInterior)
-            }
+            }),
 
             Expr::Spread(inner, _) => self.expr(inner, mode),
 
             Expr::If(if_expr, _) => {
                 self.expr(&mut if_expr.condition, mode)?;
-                self.expr(&mut if_expr.then_branch, mode)?;
-                self.opt_expr(if_expr.else_branch.as_deref_mut(), mode)
+                self.ambient_frame(|| self.expr(&mut if_expr.then_branch, mode))?;
+                self.ambient_frame(|| self.opt_expr(if_expr.else_branch.as_deref_mut(), mode))
             }
 
             Expr::While(while_expr, _) => {
                 self.expr(&mut while_expr.condition, mode)?;
-                self.expr(&mut while_expr.body, mode)
+                self.ambient_frame(|| self.expr(&mut while_expr.body, mode))
             }
 
             Expr::For(for_expr, _) => {
-                self.match_pattern(&for_expr.pattern, mode)?;
+                // Iterable BEFORE the pattern binds (see the statement-form
+                // For; order load-bearing for the ambient face only).
                 self.expr(&mut for_expr.iterable, mode)?;
-                self.expr(&mut for_expr.body, mode)
+                self.ambient_frame(|| {
+                    self.match_pattern(&for_expr.pattern, mode)?;
+                    self.expr(&mut for_expr.body, mode)
+                })
             }
 
-            Expr::Loop(loop_expr, _) => self.expr(&mut loop_expr.body, mode),
+            Expr::Loop(loop_expr, _) => {
+                self.ambient_frame(|| self.expr(&mut loop_expr.body, mode))
+            }
 
             Expr::Let(let_expr, _) => {
-                self.match_pattern(&let_expr.pattern, mode)?;
                 if let Some(annotation) = &let_expr.type_annotation {
                     self.type_annotation(annotation, mode)?;
                 }
+                // Value BEFORE the pattern binds (sequential visibility).
                 self.opt_expr(let_expr.value.as_deref_mut(), mode)?;
-                self.expr(&mut let_expr.body, mode)
+                self.ambient_frame(|| {
+                    self.match_pattern(&let_expr.pattern, mode)?;
+                    self.expr(&mut let_expr.body, mode)
+                })
             }
 
             Expr::Assign(assign_expr, _) => {
                 // `args[<int literal>] = expr` — the legal per-slot mutation
                 // target. The target's own index legality is checked with the
                 // same core as the read path; the rewrite face swaps the
-                // target for the minted local.
-                if mode == ScanMode::TemplateBody {
+                // target for the minted local. Not live inside comptime
+                // blocks (Dec 65).
+                if mode == ScanMode::TemplateBody && self.pseudo_tuple_surface_live() {
                     let intercepted = match assign_expr.target.as_ref() {
                         Expr::IndexAccess {
                             object,
@@ -1596,8 +2019,9 @@ impl<'a> Scan<'a> {
 
             Expr::Return(value, _) => {
                 // The parser's expression-position `return` twin: the same
-                // authored `return args` spelling (see the fn docs).
-                if mode == ScanMode::TemplateBody {
+                // authored `return args` spelling (see the fn docs). Not
+                // live inside comptime blocks (Dec 65).
+                if mode == ScanMode::TemplateBody && self.pseudo_tuple_surface_live() {
                     if let Some(inner) = value.as_deref_mut() {
                         if self.is_args_identifier(inner) {
                             if let Face::Rewrite { plan, .. } = self.face {
@@ -1628,11 +2052,15 @@ impl<'a> Scan<'a> {
             Expr::Match(match_expr, _) => {
                 self.expr(&mut match_expr.scrutinee, mode)?;
                 for arm in &mut match_expr.arms {
-                    self.match_pattern(&arm.pattern, mode)?;
-                    if let Some(guard) = &mut arm.guard {
-                        self.expr(guard, mode)?;
-                    }
-                    self.expr(&mut arm.body, mode)?;
+                    // One frame per arm: an arm's pattern binders are not
+                    // visible in sibling arms (ambient face).
+                    self.ambient_frame(|| {
+                        self.match_pattern(&arm.pattern, mode)?;
+                        if let Some(guard) = &mut arm.guard {
+                            self.expr(guard, mode)?;
+                        }
+                        self.expr(&mut arm.body, mode)
+                    })?;
                 }
                 Ok(())
             }
@@ -1652,9 +2080,10 @@ impl<'a> Scan<'a> {
 
             Expr::WindowExpr(window, _) => self.window_expr(window, mode),
 
-            Expr::FromQuery(query, _) => {
-                self.check_binding_name(&query.variable, mode)?;
+            Expr::FromQuery(query, _) => self.ambient_frame(|| {
+                // Source BEFORE the query binder (sequential visibility).
                 self.expr(&mut query.source, mode)?;
+                self.check_binding_name(&query.variable, mode)?;
                 for clause in &mut query.clauses {
                     match clause {
                         QueryClause::Where(cond) => self.expr(cond, mode)?,
@@ -1690,13 +2119,15 @@ impl<'a> Scan<'a> {
                             }
                         }
                         QueryClause::Let { variable, value } => {
-                            self.check_binding_name(variable, mode)?;
+                            // Value BEFORE the binder (sequential
+                            // visibility for the ambient face).
                             self.expr(value, mode)?;
+                            self.check_binding_name(variable, mode)?;
                         }
                     }
                 }
                 self.expr(&mut query.select, mode)
-            }
+            }),
 
             Expr::StructLiteral { fields, .. } => self.named_exprs(fields, mode),
 
@@ -1720,21 +2151,34 @@ impl<'a> Scan<'a> {
             }
 
             Expr::AsyncLet(async_let, _) => {
-                self.check_binding_name(&async_let.name, mode)?;
-                self.expr(&mut async_let.expr, mode)
+                // Value BEFORE the binder (sequential visibility).
+                self.expr(&mut async_let.expr, mode)?;
+                self.check_binding_name(&async_let.name, mode)
             }
 
             Expr::AsyncScope(inner, _) => self.expr(inner, mode),
 
-            Expr::Comptime(stmts, _) => self.statements(stmts, mode),
+            Expr::Comptime(stmts, _) => {
+                // S5a Dec-65 boundary: the pseudo-tuple surface is not live
+                // inside a comptime block (see `comptime_depth`). The
+                // ambient face still classifies inside — a module-binding
+                // reference in a comptime block is ambient all the same.
+                self.comptime_depth.set(self.comptime_depth.get() + 1);
+                let result = self.ambient_frame(|| self.statements(stmts, mode));
+                self.comptime_depth.set(self.comptime_depth.get() - 1);
+                result
+            }
 
             Expr::ComptimeFor(comp_for, _) => {
-                for witness in &comp_for.witnesses {
-                    self.check_binding_name(witness, mode)?;
-                }
-                self.check_binding_name(&comp_for.variable, mode)?;
+                // Iterable BEFORE the binders (sequential visibility).
                 self.expr(&mut comp_for.iterable, mode)?;
-                self.statements(&mut comp_for.body, mode)
+                self.ambient_frame(|| {
+                    for witness in &comp_for.witnesses {
+                        self.check_binding_name(witness, mode)?;
+                    }
+                    self.check_binding_name(&comp_for.variable, mode)?;
+                    self.statements(&mut comp_for.body, mode)
+                })
             }
 
             Expr::Reference { expr: inner, .. } => self.expr(inner, mode),

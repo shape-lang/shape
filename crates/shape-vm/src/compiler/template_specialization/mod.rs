@@ -252,6 +252,17 @@ impl BytecodeCompiler {
                 location: None,
             });
         }
+        // ADR-009 C3 #14 (slice 5, S5a) — the [C0926] ambient-totality gate:
+        // fires HERE, before the per-kind dispatch, unconditionally
+        // (cache-hit or not), for ALL template kinds. Site rationale:
+        // construction-time (`finish()`) checking is ORDER-SENSITIVE — a
+        // module binding registered between construction and handler compile
+        // would slip through, and the pre-pass fn-lookup-miss defers to
+        // pass-2 by design — while EVERY install passes through
+        // `specialize_template`: totality by construction. The rejection
+        // anchors at the `@application` span through the ONE attribution
+        // producer (`template_application_error`).
+        self.reject_ambient_template_scope(template, target)?;
         let captures = const_lift::capture_values_in_delivery_order(template, capture_values)?;
 
         match template.sig() {
@@ -289,6 +300,87 @@ impl BytecodeCompiler {
                 }
             },
         }
+    }
+
+    /// ADR-009 C3 #14 (slice 5, S5a) — the [C0926] ambient-totality gate
+    /// (see the call site in [`Self::specialize_template`] for the site
+    /// rationale, and `pseudo_tuple::AmbientScopeCtx` for the G4 boundary
+    /// rule, the a6 motivating disaster, and the invariant-7 asymmetry
+    /// rule). Resolves the template body fn's AST, renders the sentence's
+    /// `{origin}` (`` fn `name` `` for API bodies; `` the `before|after`
+    /// hook of annotation `X` `` for sugar-minted bodies — never the SOH
+    /// hygienic name), derives the template's defining module (the a2b
+    /// resolution trial), and runs the ambient face of the ONE pseudo-tuple
+    /// walker over a clone of the body.
+    ///
+    /// A body fn absent from `function_defs` is SKIPPED, not rejected:
+    /// every downstream route (`template_body_function_index`, the
+    /// monomorphization ride's own `function_defs` lookup) internal-errors
+    /// on exactly that state, so no woven program can exist for the gate to
+    /// miss.
+    fn reject_ambient_template_scope(
+        &self,
+        template: &CheckedTemplate,
+        target: &SpecializationTarget,
+    ) -> Result<()> {
+        let body_fn = template.body_fn();
+        // Sugar reverse-lookup: minted body fns carry SOH-hygienic names;
+        // the compiled annotation holding the def supplies the user-facing
+        // origin AND the annotation's defining module.
+        let mut sugar: Option<(String, FunctionDef)> = None;
+        if body_fn.starts_with('\u{1}') {
+            for (ann_key, compiled) in &self.program.compiled_annotations {
+                if let Some(def) = compiled
+                    .sugar_body_fns
+                    .iter()
+                    .find(|def| def.name == body_fn)
+                {
+                    sugar = Some((ann_key.clone(), def.clone()));
+                    break;
+                }
+            }
+        }
+        let (origin, template_module, mut def) = match sugar {
+            Some((ann_key, def)) => {
+                let (module, display) = match ann_key.rsplit_once("::") {
+                    Some((module, display)) => (Some(module.to_string()), display.to_string()),
+                    None => (None, ann_key.clone()),
+                };
+                let word = match template.hook_kind() {
+                    TemplateHookKind::Before => "before",
+                    TemplateHookKind::After => "after",
+                };
+                (
+                    format!("the `{word}` hook of annotation `{display}`"),
+                    module,
+                    def,
+                )
+            }
+            None => {
+                let Some(def) = self.function_defs.get(body_fn).cloned() else {
+                    return Ok(());
+                };
+                let module = body_fn.rsplit_once("::").map(|(module, _)| module.to_string());
+                let origin = if body_fn.starts_with('\u{1}') {
+                    // Defensive only: a hygienic body fn outside every
+                    // compiled annotation — never render the SOH name.
+                    "the hook template body".to_string()
+                } else {
+                    format!("fn `{body_fn}`")
+                };
+                (origin, module, def)
+            }
+        };
+        let ctx = pseudo_tuple::AmbientScopeCtx::new(self, origin, template_module);
+        pseudo_tuple::scan_template_body_ambient_scope(&mut def, &ctx).map_err(|error| {
+            let detail = match error {
+                ShapeError::SemanticError { message, .. } => message,
+                ShapeError::TypeError(message) => message,
+                ShapeError::RuntimeError { message, .. } => message,
+                other => other.to_string(),
+            };
+            self.template_application_error(template, target, &detail)
+        })
     }
 
     /// The C3-G4 polymorphic `before` case: build the
@@ -842,6 +934,23 @@ impl BytecodeCompiler {
         target: &SpecializationTarget,
         detail: &str,
     ) -> ShapeError {
+        // ADR-009 C3 #14 (slice 5, S5a): the provenance note is
+        // load-bearing twice over — it is the LSDS provenance for the
+        // application site, AND it satisfies the D1 preserve predicate of
+        // `preserve_or_wrap_directive_failure` (a located-and-noted
+        // SemanticError passes through the directive-processing wrap
+        // intact), so the application-site anchor SURVIVES to the user
+        // instead of being flattened into a handler-span RuntimeError (the
+        // S0 g3 mis-anchoring class C3-G10 exists to fix). Display renders
+        // only the message, so every sentence pin is byte-unaffected.
+        let mut location = self.span_to_source_location(target.application_span);
+        location.notes.push(shape_ast::error::ErrorNote {
+            message: format!(
+                "hook template installed on `{}` from this application site",
+                target.name
+            ),
+            location: None,
+        });
         ShapeError::SemanticError {
             message: format!(
                 "annotation template `{}` (declared `{}`) cannot specialize for target `{}` \
@@ -852,7 +961,7 @@ impl BytecodeCompiler {
                 render_required_specialization_signature(template.hook_kind(), target),
                 detail
             ),
-            location: Some(self.span_to_source_location(target.application_span)),
+            location: Some(location),
         }
     }
 }
@@ -2490,5 +2599,124 @@ mod tests {
             execute_specialized(&fx.compiler, handler.function_index(), vec![int_arg(10)]);
         assert_eq!(result.as_i64(), Some(30), "the re-baked handler executes correctly");
         assert_clean_specialization_state(&fx.compiler);
+    }
+
+    // ── ADR-009 C3 #14 (slice 5, S5a): the [C0926] gate at the
+    // specialize_template seam — per-kind coverage + ordering ─────────────
+
+    /// Register a module binding named `amb` in the fixture compiler so the
+    /// gate's scoped-then-bare detector resolves it.
+    fn with_ambient_binding(fx: &mut Fixture) {
+        fx.compiler.get_or_create_module_binding("amb");
+    }
+
+    fn expect_c0926(err: shape_ast::error::ShapeError) {
+        let text = err.to_string();
+        assert!(
+            text.contains("[C0926]") && text.contains("`amb`"),
+            "expected the [C0926] ambient rejection naming `amb`: {text}"
+        );
+    }
+
+    // The gate fires for a CONCRETE before template.
+    #[test]
+    fn c0926_gate_fires_for_concrete_before() {
+        let src = "fn tmpl(x: int) -> int { return x + amb }\n\
+                   fn target_fn(a: int) -> int { return a }\n";
+        let mut fx = fixture(src);
+        with_ambient_binding(&mut fx);
+        let template = template(&fx, TemplateHookKind::Before, "tmpl");
+        let target = target_for(&fx, "target_fn", None);
+        expect_c0926(
+            specialize(&mut fx.compiler, &template, &target)
+                .expect_err("an ambient concrete before must reject"),
+        );
+    }
+
+    // The gate fires for a CONCRETE after template.
+    #[test]
+    fn c0926_gate_fires_for_concrete_after() {
+        let src = "fn tmpl(x: int) -> int { return x + amb }\n\
+                   fn target_fn(a: int) -> int { return a }\n";
+        let mut fx = fixture(src);
+        with_ambient_binding(&mut fx);
+        let template = template(&fx, TemplateHookKind::After, "tmpl");
+        let target = target_for(&fx, "target_fn", None);
+        expect_c0926(
+            specialize(&mut fx.compiler, &template, &target)
+                .expect_err("an ambient concrete after must reject"),
+        );
+    }
+
+    // The gate fires for a POLYMORPHIC (pseudo-tuple) before template.
+    #[test]
+    fn c0926_gate_fires_for_polymorphic_before() {
+        let src = "fn tmpl<Args>(args: Args) -> Args {\n\
+                   \x20   args[0] = amb\n\
+                   \x20   return args\n\
+                   }\n\
+                   fn target_fn(a: int) -> int { return a }\n";
+        let mut fx = fixture(src);
+        with_ambient_binding(&mut fx);
+        let template = template(&fx, TemplateHookKind::Before, "tmpl");
+        let target = target_for(&fx, "target_fn", None);
+        expect_c0926(
+            specialize(&mut fx.compiler, &template, &target)
+                .expect_err("an ambient polymorphic before must reject"),
+        );
+    }
+
+    // The gate fires for an OBSERVER template.
+    #[test]
+    fn c0926_gate_fires_for_observer() {
+        let src = "fn note() { let x = amb }\n\
+                   fn target_fn(a: int) -> int { return a }\n";
+        let mut fx = fixture(src);
+        with_ambient_binding(&mut fx);
+        let template = template(&fx, TemplateHookKind::Before, "note");
+        let target = target_for(&fx, "target_fn", None);
+        expect_c0926(
+            specialize(&mut fx.compiler, &template, &target)
+                .expect_err("an ambient observer must reject"),
+        );
+    }
+
+    // ORDERING: the gate fires BEFORE the per-kind dispatch — a mutating
+    // before on a zero-param target with an ambient body gets [C0926], not
+    // the zero-param rejection.
+    #[test]
+    fn c0926_gate_fires_before_per_kind_dispatch() {
+        let src = "fn tmpl(x: int) -> int { return x + amb }\n\
+                   fn target_fn() -> int { return 7 }\n";
+        let mut fx = fixture(src);
+        with_ambient_binding(&mut fx);
+        let template = template(&fx, TemplateHookKind::Before, "tmpl");
+        let target = target_for(&fx, "target_fn", None);
+        let err = specialize(&mut fx.compiler, &template, &target)
+            .expect_err("the ambient rejection precedes the per-kind checks");
+        let text = err.to_string();
+        assert!(
+            text.contains("[C0926]"),
+            "the gate fires before the per-kind dispatch: {text}"
+        );
+        assert!(
+            !text.contains("declares no parameters"),
+            "the zero-param rejection is never reached: {text}"
+        );
+    }
+
+    // NEGATIVE CONTROL: the SAME registered binding does not reject a body
+    // that never references it — the gate classifies references, not the
+    // environment.
+    #[test]
+    fn c0926_gate_ignores_unreferenced_module_bindings() {
+        let src = "fn tmpl(x: int) -> int { return x + 1 }\n\
+                   fn target_fn(a: int) -> int { return a }\n";
+        let mut fx = fixture(src);
+        with_ambient_binding(&mut fx);
+        let template = template(&fx, TemplateHookKind::Before, "tmpl");
+        let target = target_for(&fx, "target_fn", None);
+        specialize(&mut fx.compiler, &template, &target)
+            .expect("an ambient-free body specializes with the binding registered");
     }
 }

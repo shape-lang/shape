@@ -379,6 +379,187 @@ impl BytecodeCompiler {
         Ok(())
     }
 
+    /// ADR-009 C3 #14 (slice 5, S5a) — THE ONE [C0931] producer: the Dec-65
+    /// config-arg pre-check. A `@application` config argument whose free
+    /// identifier resolves (scoped-then-bare, the same detector as the
+    /// [C0926] gate) to a NON-const module binding is rejected BEFORE the
+    /// handler mini-VM runs — so the pre-pass error-swallow (the
+    /// `[comptime error]`-filtered `continue` below each execute seam)
+    /// cannot eat it, and the bland mini-VM `[C0001] Undefined variable`
+    /// failure (S5a probes P3a/P3b, recorded in c3-slice5-report.md)
+    /// upgrades to a named sentence. Diagnostic upgrade ONLY: every shape
+    /// this rejects failed loudly before (the mini-VM cannot see module
+    /// bindings at all); nothing that ran keeps running differently.
+    ///
+    /// THE ASYMMETRY RULE (invariant 7): a module-scope CONST is
+    /// comptime-evaluable and therefore LEGAL in the config-arg position —
+    /// `const_module_bindings` members, injected specialization
+    /// `const_bindings`, and imported `pub const`s are all EXEMPT — while
+    /// the SAME const is ILLEGAL inside a template body ([C0926]: G4
+    /// exact-inputs totality covers consts; the positive twin is "declare
+    /// it as a capture"). NOTE (measured, S5a probe P6): a top-level
+    /// `const` config arg is exempt here but STILL fails loudly today with
+    /// the pre-existing `[C0001] Undefined variable` — the mini-VM has no
+    /// const-injection route yet; making module consts VISIBLE in the
+    /// config position is a named follow-up, not this check's charter.
+    ///
+    /// Fires for BOTH surface classes (TypedConfig and Legacy definitions
+    /// with comptime handlers — the class-independent comptime seams are
+    /// the only routes by which config enters a comptime evaluation
+    /// position; legacy RUNTIME-hook config stays per-invocation and
+    /// untouched until S6).
+    fn reject_runtime_module_binding_config_args(
+        &self,
+        ann: &shape_ast::ast::Annotation,
+        const_bindings: &[(String, KindedSlot)],
+    ) -> Result<()> {
+        for arg in &ann.args {
+            let mut names: Vec<String> = Vec::new();
+            Self::collect_config_arg_value_names(arg, &mut names);
+            for ident in names {
+                if const_bindings.iter().any(|(name, _)| name == &ident) {
+                    continue;
+                }
+                if self.imported_consts.contains_key(&ident) {
+                    continue;
+                }
+                let Some(resolved) = self.resolve_scoped_module_binding_name(&ident) else {
+                    continue;
+                };
+                let Some(&binding_idx) = self.module_bindings.get(&resolved) else {
+                    continue;
+                };
+                if self.const_module_bindings.contains(&binding_idx) {
+                    continue;
+                }
+                return Err(ShapeError::SemanticError {
+                    message: format!(
+                        "[C0931] config argument `{ident}` for `@{}` references a runtime \
+                         module binding; annotation config is evaluated once at compile time \
+                         (Dec 65 — runtime values never enter a comptime evaluation position) \
+                         — pass a literal or a comptime const; a value that varies at runtime \
+                         cannot configure a compile-time specialization",
+                        ann.name
+                    ),
+                    location: Some(self.span_to_source_location(ann.span)),
+                });
+            }
+        }
+        Ok(())
+    }
+
+    /// The [C0931] detector's conservative free-identifier collector over a
+    /// config-arg expression: value-position identifiers only (call NAMES
+    /// are skipped — fn callees are comptime helpers, not values), plus
+    /// f-string interpolation interiors (re-parsed exactly as the emitter
+    /// does). Unrecognized expression shapes are NOT recursed — a missed
+    /// name falls through to the mini-VM's pre-existing loud unresolved
+    /// error, never a silent pass.
+    fn collect_config_arg_value_names(expr: &Expr, names: &mut Vec<String>) {
+        match expr {
+            Expr::Identifier(name, _) => names.push(name.clone()),
+            Expr::BinaryOp { left, right, .. } | Expr::FuzzyComparison { left, right, .. } => {
+                Self::collect_config_arg_value_names(left, names);
+                Self::collect_config_arg_value_names(right, names);
+            }
+            Expr::UnaryOp { operand, .. }
+            | Expr::Spread(operand, _)
+            | Expr::TryOperator(operand, _)
+            | Expr::Await(operand, _)
+            | Expr::Reference { expr: operand, .. } => {
+                Self::collect_config_arg_value_names(operand, names);
+            }
+            Expr::Conditional {
+                condition,
+                then_expr,
+                else_expr,
+                ..
+            } => {
+                Self::collect_config_arg_value_names(condition, names);
+                Self::collect_config_arg_value_names(then_expr, names);
+                if let Some(else_expr) = else_expr {
+                    Self::collect_config_arg_value_names(else_expr, names);
+                }
+            }
+            Expr::Array(items, _) => {
+                for item in items {
+                    Self::collect_config_arg_value_names(item, names);
+                }
+            }
+            Expr::Object(entries, _) => {
+                for entry in entries {
+                    match entry {
+                        ObjectEntry::Field { value, .. } | ObjectEntry::Spread(value) => {
+                            Self::collect_config_arg_value_names(value, names);
+                        }
+                    }
+                }
+            }
+            Expr::IndexAccess {
+                object,
+                index,
+                end_index,
+                ..
+            } => {
+                Self::collect_config_arg_value_names(object, names);
+                Self::collect_config_arg_value_names(index, names);
+                if let Some(end) = end_index {
+                    Self::collect_config_arg_value_names(end, names);
+                }
+            }
+            Expr::PropertyAccess { object, .. } => {
+                Self::collect_config_arg_value_names(object, names);
+            }
+            Expr::MethodCall { receiver, args, named_args, .. } => {
+                Self::collect_config_arg_value_names(receiver, names);
+                for arg in args {
+                    Self::collect_config_arg_value_names(arg, names);
+                }
+                for (_, value) in named_args {
+                    Self::collect_config_arg_value_names(value, names);
+                }
+            }
+            Expr::FunctionCall { const_args, args, named_args, .. }
+            | Expr::QualifiedFunctionCall { const_args, args, named_args, .. } => {
+                for arg in const_args {
+                    Self::collect_config_arg_value_names(arg, names);
+                }
+                for arg in args {
+                    Self::collect_config_arg_value_names(arg, names);
+                }
+                for (_, value) in named_args {
+                    Self::collect_config_arg_value_names(value, names);
+                }
+            }
+            Expr::Range { start, end, .. } => {
+                if let Some(start) = start {
+                    Self::collect_config_arg_value_names(start, names);
+                }
+                if let Some(end) = end {
+                    Self::collect_config_arg_value_names(end, names);
+                }
+            }
+            Expr::Literal(Literal::FormattedString { value, mode }, _) => {
+                let Ok(parts) =
+                    shape_ast::interpolation::parse_interpolation_with_mode(value, *mode)
+                else {
+                    return;
+                };
+                for part in parts {
+                    if let shape_ast::interpolation::InterpolationPart::Expression {
+                        expr, ..
+                    } = part
+                    {
+                        if let Ok(parsed) = shape_ast::parser::parse_expression_str(&expr) {
+                            Self::collect_config_arg_value_names(&parsed, names);
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn apply_function_comptime_signature_directives_to_function(
         &mut self,
@@ -457,6 +638,11 @@ impl BytecodeCompiler {
                                     .cloned()
                             })
                     };
+                    // ADR-009 C3 #14 (slice 5, S5a) — the [C0931] Dec-65
+                    // config-arg pre-check: returns Err BEFORE execution so
+                    // the `[comptime error]`-filtered swallow below cannot
+                    // eat it.
+                    self.reject_runtime_module_binding_config_args(ann, &[])?;
                     let prev_suppressed =
                         super::comptime_builtins::set_comptime_output_suppressed(true);
                     let execution_result =
@@ -1469,6 +1655,12 @@ impl BytecodeCompiler {
                     })
                 })
         };
+        // ADR-009 C3 #14 (slice 5, S5a) — the [C0931] Dec-65 config-arg
+        // pre-check at the authoritative pass-2 seam (the pre-pass seams
+        // check too; module bindings registered between phases make this
+        // one the totality anchor). Injected specialization
+        // `const_bindings` are exempt by name.
+        self.reject_runtime_module_binding_config_args(annotation, const_bindings)?;
         let execution = super::comptime::execute_comptime_with_annotation_handler(
             &handler.body,
             &handler.params,
@@ -2475,6 +2667,11 @@ impl BytecodeCompiler {
                                             .cloned()
                                     })
                             };
+                        // ADR-009 C3 #14 (slice 5, S5a) — the [C0931]
+                        // Dec-65 config-arg pre-check: Err BEFORE execution
+                        // so the pre-pass-limitation swallow below cannot
+                        // eat it.
+                        self.reject_runtime_module_binding_config_args(ann, &[])?;
                         let prev_suppressed =
                             super::comptime_builtins::set_comptime_output_suppressed(true);
                         let execution_result =

@@ -444,6 +444,9 @@ annotation hookann() {{
     ) -> (shape_ast::error::Result<()>, crate::compiler::BytecodeCompiler) {
         let program = shape_ast::parse_program(src).expect("fixture parses");
         let mut compiler = crate::compiler::BytecodeCompiler::new();
+        // S5a: real span→line mapping for the application-site anchoring
+        // pins (without source_text every SourceLocation degrades to 1:1).
+        compiler.source_text = Some(src.to_string());
         let result = compiler.compile_in_place(&program);
         (result, compiler)
     }
@@ -1872,6 +1875,746 @@ victim(4)
                 .any(|instr| instr.opcode == crate::bytecode::OpCode::LoadModuleBinding),
             "control: the S0-named opcode (LoadModuleBinding, 0x52) is the emitted load"
         );
+    }
+
+    // ── ADR-009 C3 #14 (slice 5, S5a): the [C0926] ambient-totality gate +
+    // the a1–a6 disposition matrix + the [C0931] Dec-65 config-arg check.
+    //
+    // THE DISPOSITION TABLE (each row pinned below; verdicts per the S5
+    // design — legit-input / declared-capture / [C0926] / [C0931] / G12):
+    //
+    // | row | shape                                        | verdict |
+    // |-----|----------------------------------------------|---------|
+    // | a1  | script top-level `let` read in template body | [C0926] |
+    // | a2  | `pub let` in a mod block                     | unchanged pre-existing const-requirement rejection (control) |
+    // | a2b | annotation's own module `pub const`          | [C0926] + the capture positive twin (the legitimate-intent case) |
+    // | a3  | binding only in the TARGET's module          | [C0926] |
+    // | a4  | nested-fn application                        | C3-G12 loud rejection (TypedConfig landed S4 — `reject_typed_config_annotations_on_nested_fn`; Legacy extension is S5b) |
+    // | a4d | runtime module binding as config arg         | [C0931] |
+    // | a5  | config-param-only body                       | LEGIT — the surviving path (executed twin) |
+    // | a6  | defs const + same-spelled target binding     | [C0926] — the headline shadow disaster |
+    //
+    // Pre-gate hole measurements (S5a probes, throwaway, reverted; recorded
+    // in c3-slice5-report.md): P1 (a1 shape) compiled + ran SILENTLY with
+    // the ambient value (110) and one LoadModuleBinding in the specialized
+    // handler; P2c (a6 sugar shape) compiled + ran SILENTLY with the
+    // application-module shadow value (1040, not 160). `ctx` stays an
+    // ordinary unresolved identifier (E4 family — no arm).
+    mod s5a_ambient_totality {
+        use super::*;
+
+        /// The exact [C0926] sentence for one (origin, ident, resolved)
+        /// triple — the pin-side mirror of the ONE producer
+        /// (`pseudo_tuple::AmbientScopeCtx::ambient_rejection`).
+        fn c0926_sentence(origin: &str, ident: &str, resolved: &str) -> String {
+            format!(
+                "[C0926] hook template body {origin} references `{ident}`, which resolves to \
+                 the module-scope value binding `{resolved}`; a hook template's body reads only \
+                 its exact inputs — its signature parameters and its declared captures (C3-G4); \
+                 module- and invocation-scope values never enter a template ambiently, because \
+                 the body is specialized into the application module where an unrelated binding \
+                 spelled `{ident}` silently takes over the hook's behavior — declare it as an \
+                 input instead: add a typed config parameter (or capture(\"{ident}\", ...)) and \
+                 reference the capture parameter"
+            )
+        }
+
+        /// Expect a rejection and return (message, location). The [C0926]
+        /// SemanticError passes through the directive-processing wrap
+        /// INTACT (the template_application_error provenance note satisfies
+        /// the D1 preserve predicate), so the location is the
+        /// `@application` anchor — never a handler-span RuntimeError.
+        fn expect_semantic_error(src: &str) -> (String, Option<shape_ast::error::SourceLocation>) {
+            let (result, _) = compile_source(src);
+            match result.expect_err("fixture must be rejected") {
+                shape_ast::error::ShapeError::SemanticError { message, location } => {
+                    (message, location)
+                }
+                other => panic!("expected a SemanticError, got: {other}"),
+            }
+        }
+
+        // a1 — SENTENCE-EXACT pin + span: the P1 silent-hole fixture now
+        // rejects with the full [C0926] sentence anchored at the
+        // `@application` line.
+        #[test]
+        fn a1_toplevel_let_in_template_body_rejects_with_the_exact_sentence() {
+            let src = r#"
+let ambient = 7
+
+fn hook(x: int) -> int { return x + ambient }
+
+annotation hookann() {
+  targets: [function]
+  comptime post(target, ctx) {
+    install(before_hook(hook, []))
+  }
+}
+
+@hookann()
+fn victim(a: int) -> int { return a * 10 }
+
+victim(4)
+"#;
+            let (message, location) = expect_semantic_error(src);
+            assert!(
+                message.contains(&c0926_sentence("fn `hook`", "ambient", "ambient")),
+                "the full [C0926] sentence must appear byte-exact: {message}"
+            );
+            let location = location.expect("the rejection carries the @application span");
+            let application_line = src
+                .lines()
+                .position(|line| line.starts_with("@hookann"))
+                .expect("fixture has the application line")
+                + 1;
+            assert_eq!(
+                location.line, application_line,
+                "the rejection anchors at the @application site, not the template body"
+            );
+        }
+
+        // a2 — CONTROL: `pub let` in a mod block keeps its pre-existing
+        // unchanged rejection (module-level variables require const).
+        #[test]
+        fn a2_mod_level_let_control_keeps_the_preexisting_rejection() {
+            let src = "mod m {\n    pub let x = 5\n}\nlet y = 1\ny";
+            let (result, _) = compile_source(src);
+            let err = result.expect_err("mod-level let is rejected today");
+            assert!(
+                err.to_string()
+                    .contains("module-level variable declarations currently require `const`"),
+                "the pre-existing const-requirement rejection is unchanged: {err}"
+            );
+            assert!(
+                !err.to_string().contains("[C0926]"),
+                "a2 is NOT a [C0926] case — the pre-existing rule owns it: {err}"
+            );
+        }
+
+        // a2b — the LEGITIMATE-INTENT case: the annotation's OWN module
+        // `pub const` read by its sugar hook body. Pre-gate this failed as a
+        // bland `Undefined variable: 'secret'` (probe P2/P2b — mod consts
+        // never resolved in fn bodies at all); the gate upgrades it to the
+        // named [C0926] whose positive twin says HOW to do it right
+        // (declare it as a capture / typed config parameter). The
+        // resolution comes from the TEMPLATE-module trial (`defs::secret`).
+        #[test]
+        fn a2b_annotations_own_module_const_rejects_with_the_capture_twin() {
+            let src = r#"
+mod defs {
+    pub const secret: int = 11
+
+    annotation hookann(times: int) {
+      targets: [function]
+      before(args) {
+        args[0] = args[0] + secret + times
+        return args
+      }
+    }
+}
+
+@defs::hookann(1)
+fn victim(a: int) -> int { return a * 10 }
+
+victim(4)
+"#;
+            let (message, _) = expect_semantic_error(src);
+            assert!(
+                message.contains(&c0926_sentence(
+                    "the `before` hook of annotation `hookann`",
+                    "secret",
+                    "defs::secret"
+                )),
+                "a2b: the sugar-origin [C0926] sentence with the defs-module resolution: \
+                 {message}"
+            );
+        }
+
+        // a3 — a binding that lives ONLY in the application module, read by
+        // the annotation's (defs-module) sugar hook body.
+        #[test]
+        fn a3_target_module_binding_rejects_c0926() {
+            let src = r#"
+let sees = 9
+
+mod defs {
+    annotation hookann(times: int) {
+      targets: [function]
+      before(args) {
+        args[0] = args[0] + sees + times
+        return args
+      }
+    }
+}
+
+@defs::hookann(1)
+fn victim(a: int) -> int { return a * 10 }
+
+victim(4)
+"#;
+            let (message, _) = expect_semantic_error(src);
+            assert!(
+                message.contains(&c0926_sentence(
+                    "the `before` hook of annotation `hookann`",
+                    "sees",
+                    "sees"
+                )),
+                "a3: the application-module binding is ambient for the defs-declared hook: \
+                 {message}"
+            );
+        }
+
+        // a6 — THE HEADLINE (the motivating disaster quoted in the
+        // producer's doc-comment): the annotation's own `defs::secret = 11`
+        // AND a same-spelled application-module `let secret = 99`. Pre-gate
+        // (probe P2c, this exact fixture): compiled and ran SILENTLY with
+        // the shadow value — 1040, not the annotation-intent 160. The
+        // committed pin asserts the rejection names the APPLICATION-module
+        // binding (`secret`) — the exact silent winner.
+        #[test]
+        fn a6_shadow_probe_rejects_naming_the_application_module_binding() {
+            let src = r#"
+mod defs {
+    pub const secret: int = 11
+
+    annotation hookann(times: int) {
+      targets: [function]
+      before(args) {
+        args[0] = args[0] + secret + times
+        return args
+      }
+    }
+}
+
+let secret = 99
+
+@defs::hookann(1)
+fn victim(a: int) -> int { return a * 10 }
+
+victim(4)
+"#;
+            let (message, _) = expect_semantic_error(src);
+            assert!(
+                message.contains(&c0926_sentence(
+                    "the `before` hook of annotation `hookann`",
+                    "secret",
+                    "secret"
+                )),
+                "a6: the rejection must name the application-module binding (the silent \
+                 winner), not the defs const: {message}"
+            );
+        }
+
+        // a5 — the SURVIVING LEGIT path, EXECUTED (config-param-only body):
+        // value-distinguishing run + the weave-tier ambient belt (the
+        // extended S3c scanner claim: post-gate, specialized handlers and
+        // generated wrappers carry ZERO module-binding loads — the
+        // genuine-module-read non-vacuity control lives above).
+        #[test]
+        fn a5_config_only_body_weaves_runs_and_stays_module_binding_free() {
+            let src = r#"
+annotation tagged(times: int) {
+  targets: [function]
+  before(args) {
+    args[0] = args[0] * times
+    return args
+  }
+}
+
+@tagged(3)
+fn victim(a: int) -> int { return a + 1 }
+
+victim(4)
+"#;
+            let (value, compiler) = top_level_i64(src);
+            assert_eq!(value, 13, "4*3 = 12 → impl(12) = 13 (skip ⇒ 5; misread times shifts)");
+            assert_eq!(compiler.hook_install_registry.len(), 1);
+            for row in &compiler.hook_install_registry {
+                let handler = &compiler.program.functions[usize::from(row.function_index)];
+                assert_eq!(
+                    module_binding_loads(&compiler, handler),
+                    0,
+                    "ambient belt: the specialized handler is module-binding-free"
+                );
+            }
+            let wrapper = function_entry(&compiler, "victim");
+            assert_eq!(
+                module_binding_loads(&compiler, wrapper),
+                0,
+                "ambient belt: the generated wrapper is module-binding-free"
+            );
+        }
+
+        // MUST-SCAN: f-string interpolation interiors (the boundary the
+        // pseudo-tuple faces skip — pre-gate an ambient name there RESOLVED
+        // and was silently honored).
+        #[test]
+        fn fstring_interpolation_interior_is_scanned() {
+            let src = r#"
+let ambient = 7
+
+fn hook(x: int) -> int {
+    let s = f"{ambient}"
+    return x + 1
+}
+
+annotation hookann() {
+  targets: [function]
+  comptime post(target, ctx) {
+    install(before_hook(hook, []))
+  }
+}
+
+@hookann()
+fn victim(a: int) -> int { return a * 10 }
+
+victim(4)
+"#;
+            let (message, _) = expect_semantic_error(src);
+            assert!(
+                message.contains("[C0926]") && message.contains("`ambient`"),
+                "an ambient name inside an f-string interpolation rejects: {message}"
+            );
+        }
+
+        // MUST-SCAN: assignment TARGETS (a store into a module binding is
+        // as ambient as a read — StoreModuleBinding).
+        #[test]
+        fn assignment_target_module_binding_is_scanned() {
+            let src = r#"
+let mut counter = 0
+
+fn hook(x: int) -> int {
+    counter = counter + 1
+    return x
+}
+
+annotation hookann() {
+  targets: [function]
+  comptime post(target, ctx) {
+    install(before_hook(hook, []))
+  }
+}
+
+@hookann()
+fn victim(a: int) -> int { return a * 10 }
+
+victim(4)
+"#;
+            let (message, _) = expect_semantic_error(src);
+            assert!(
+                message.contains("[C0926]") && message.contains("`counter`"),
+                "a module-binding assignment target rejects: {message}"
+            );
+        }
+
+        // MUST-SCAN: closure interiors.
+        #[test]
+        fn closure_interior_ambient_reference_is_scanned() {
+            let src = r#"
+let bump = 5
+
+fn hook(x: int) -> int {
+    let f = |y: int| y + bump
+    return f(x)
+}
+
+annotation hookann() {
+  targets: [function]
+  comptime post(target, ctx) {
+    install(before_hook(hook, []))
+  }
+}
+
+@hookann()
+fn victim(a: int) -> int { return a * 10 }
+
+victim(4)
+"#;
+            let (message, _) = expect_semantic_error(src);
+            assert!(
+                message.contains("[C0926]") && message.contains("`bump`"),
+                "an ambient reference inside a closure rejects: {message}"
+            );
+        }
+
+        // MUST-SCAN: module-QUALIFIED value references (`defs::secret`
+        // parses as a Unit-payload enum-constructor path).
+        #[test]
+        fn module_qualified_value_reference_is_scanned() {
+            let src = r#"
+mod defs {
+    pub const secret: int = 11
+
+    annotation hookann(times: int) {
+      targets: [function]
+      before(args) {
+        args[0] = args[0] + defs::secret + times
+        return args
+      }
+    }
+}
+
+@defs::hookann(1)
+fn victim(a: int) -> int { return a * 10 }
+
+victim(4)
+"#;
+            let (message, _) = expect_semantic_error(src);
+            assert!(
+                message.contains("[C0926]") && message.contains("`defs::secret`"),
+                "a module-qualified value reference rejects: {message}"
+            );
+        }
+
+        // NEGATIVE CONTROL: template-local bindings are NOT ambient — a
+        // local `let` of the same spelling as a module binding stays legit
+        // and the woven program runs with the LOCAL value.
+        #[test]
+        fn template_local_binding_shadows_module_binding_and_runs() {
+            let src = r#"
+let bump = 7
+
+fn hook(x: int) -> int {
+    let bump = 2
+    return x + bump
+}
+
+annotation hookann() {
+  targets: [function]
+  comptime post(target, ctx) {
+    install(before_hook(hook, []))
+  }
+}
+
+@hookann()
+fn victim(a: int) -> int { return a * 10 }
+
+victim(4)
+"#;
+            let (value, _) = top_level_i64(src);
+            assert_eq!(value, 60, "the LOCAL bump (2) drives the hook: (4+2)*10; ambient 7 ⇒ 110");
+        }
+
+        // Sequential visibility: a use BEFORE the same-spelled local `let`
+        // resolves ambiently — rejected.
+        #[test]
+        fn use_before_local_let_of_same_spelling_is_ambient() {
+            let src = r#"
+let bump = 7
+
+fn hook(x: int) -> int {
+    let y = bump
+    let bump = 2
+    return x + y + bump
+}
+
+annotation hookann() {
+  targets: [function]
+  comptime post(target, ctx) {
+    install(before_hook(hook, []))
+  }
+}
+
+@hookann()
+fn victim(a: int) -> int { return a * 10 }
+
+victim(4)
+"#;
+            let (message, _) = expect_semantic_error(src);
+            assert!(
+                message.contains("[C0926]") && message.contains("`bump`"),
+                "a use before the local let resolves ambiently and rejects: {message}"
+            );
+        }
+
+        // Disjoint-branch shadow: a local binder in one branch does NOT
+        // mask an ambient use after the branch (the frame pops).
+        #[test]
+        fn disjoint_branch_local_does_not_mask_ambient_use() {
+            let src = r#"
+let bump = 7
+
+fn hook(x: int) -> int {
+    if x > 100 {
+        let bump = 1
+        let z = bump
+    }
+    return x + bump
+}
+
+annotation hookann() {
+  targets: [function]
+  comptime post(target, ctx) {
+    install(before_hook(hook, []))
+  }
+}
+
+@hookann()
+fn victim(a: int) -> int { return a * 10 }
+
+victim(4)
+"#;
+            let (message, _) = expect_semantic_error(src);
+            assert!(
+                message.contains("[C0926]") && message.contains("`bump`"),
+                "the branch-local binder pops with its frame; the later use is ambient: \
+                 {message}"
+            );
+        }
+
+        // NEGATIVE CONTROL (the G4 boundary rule): fn-callees at module
+        // scope are LEGIT (G3 — bodies call helper fns).
+        #[test]
+        fn module_fn_callees_stay_legit_and_run() {
+            let src = r#"
+fn helper(v: int) -> int { return v + 1 }
+
+fn hook(x: int) -> int { return helper(x) }
+
+annotation hookann() {
+  targets: [function]
+  comptime post(target, ctx) {
+    install(before_hook(hook, []))
+  }
+}
+
+@hookann()
+fn victim(a: int) -> int { return a * 10 }
+
+victim(4)
+"#;
+            let (value, _) = top_level_i64(src);
+            assert_eq!(value, 50, "helper(4) = 5 → impl(5) = 50 — module fn callees are code");
+        }
+
+        // ── Dec-65: the [C0931] config-arg pre-check + the
+        // pinned-unconstructible hook-input shapes ──────────────────────────
+
+        /// The exact [C0931] sentence — the pin-side mirror of the ONE
+        /// producer (`reject_runtime_module_binding_config_args`).
+        fn c0931_sentence(ident: &str, ann: &str) -> String {
+            format!(
+                "[C0931] config argument `{ident}` for `@{ann}` references a runtime module \
+                 binding; annotation config is evaluated once at compile time (Dec 65 — \
+                 runtime values never enter a comptime evaluation position) — pass a literal \
+                 or a comptime const; a value that varies at runtime cannot configure a \
+                 compile-time specialization"
+            )
+        }
+
+        // a4d analog, TypedConfig class (probe P3a upgraded): pre-check
+        // fires with the named sentence at the @application span — the
+        // pre-gate text was the bland mini-VM `[C0001] Undefined variable:
+        // chosen`.
+        #[test]
+        fn c0931_typed_config_runtime_binding_config_arg() {
+            let src = r#"
+let chosen = 5
+
+annotation retry(times: int) {
+  targets: [function]
+  before(args) {
+    args[0] = args[0] * times
+    return args
+  }
+}
+
+@retry(chosen)
+fn victim(a: int) -> int { return a }
+
+victim(4)
+"#;
+            let (message, location) = expect_semantic_error(src);
+            assert!(
+                message.contains(&c0931_sentence("chosen", "retry")),
+                "the full [C0931] sentence must appear byte-exact: {message}"
+            );
+            let location = location.expect("the rejection carries the @application span");
+            let application_line = src
+                .lines()
+                .position(|line| line.starts_with("@retry"))
+                .expect("fixture has the application line")
+                + 1;
+            assert_eq!(location.line, application_line);
+        }
+
+        // a4d analog, LEGACY class with a comptime handler (probe P3b
+        // upgraded — the disclosed legacy diagnostic upgrade: the config
+        // enters a COMPTIME evaluation position, so the same pre-check
+        // owns it; legacy RUNTIME-hook config stays untouched until S6).
+        #[test]
+        fn c0931_legacy_comptime_runtime_binding_config_arg() {
+            let src = r#"
+let chosen = 5
+
+fn hook<Args>(args: Args, times: int) -> Args {
+    args[0] = args[0] * times
+    return args
+}
+
+annotation amb(cfg) {
+  targets: [function]
+  comptime post(target, ctx) {
+    install(before_hook(hook, [capture("times", cfg)]))
+  }
+}
+
+@amb(chosen)
+fn victim(a: int) -> int { return a }
+
+victim(4)
+"#;
+            let (message, _) = expect_semantic_error(src);
+            assert!(
+                message.contains(&c0931_sentence("chosen", "amb")),
+                "the legacy comptime class gets the same [C0931] upgrade: {message}"
+            );
+        }
+
+        // The invariant-7 CONST EXEMPTION: a top-level `const` config arg is
+        // NOT [C0931] (a const is comptime-evaluable — never "a runtime
+        // module binding"). MEASURED RESIDUAL (probe P6, disclosed): the
+        // mini-VM has no const-injection route at HEAD, so the exempted
+        // const still fails with the PRE-EXISTING loud `[C0001] Undefined
+        // variable` — pinned here so the exemption's meaning (never
+        // mis-fire) and the visibility gap (named follow-up) are both
+        // locked. The twin that RUNS today is the literal config arg (a5).
+        #[test]
+        fn c0931_const_config_arg_is_exempt_and_keeps_the_preexisting_loud_error() {
+            let src = r#"
+const n: int = 3
+
+annotation retry(times: int) {
+  targets: [function]
+  before(args) {
+    args[0] = args[0] * times
+    return args
+  }
+}
+
+@retry(n)
+fn victim(a: int) -> int { return a }
+
+victim(4)
+"#;
+            let (result, _) = compile_source(src);
+            let err = result.expect_err("the const-visibility gap keeps this loud today");
+            let text = err.to_string();
+            assert!(
+                !text.contains("[C0931]"),
+                "a comptime const must NEVER be called a runtime module binding: {text}"
+            );
+            assert!(
+                text.contains("Undefined variable: n"),
+                "the pre-existing loud mini-VM failure is unchanged (probe P6): {text}"
+            );
+        }
+
+        // Dec-65 (i) — PINNED-UNCONSTRUCTIBLE (E2-D9 precedent): a hook
+        // INPUT name (`args`) referenced in HANDLER scope dies loud in the
+        // mini-VM BEFORE any evaluation (probe P4, text locked here). No
+        // dead product arm exists for this shape.
+        #[test]
+        fn dec65_hook_input_in_handler_scope_dies_loud_preevaluation() {
+            let src = r#"
+fn hook<Args>(args: Args, x: int) -> Args {
+    args[0] = args[0] + x
+    return args
+}
+
+annotation hookann() {
+  targets: [function]
+  comptime post(target, ctx) {
+    install(before_hook(hook, [capture("x", args)]))
+  }
+}
+
+@hookann()
+fn victim(a: int) -> int { return a }
+
+victim(4)
+"#;
+            let (result, _) = compile_source(src);
+            let err = result.expect_err("hook inputs are unresolvable in handler scope");
+            assert!(
+                err.to_string().contains("Undefined variable: 'args'"),
+                "the loud pre-evaluation failure is the locked behavior: {err}"
+            );
+        }
+
+        // Dec-65 (ii) — PINNED-UNCONSTRUCTIBLE: a `comptime` block inside a
+        // template body reading a CONCRETE sig param dies loud in the fresh
+        // mini-VM (probe P5 — `execute_comptime_with_context` receives
+        // helpers only, no fn params; text locked here).
+        #[test]
+        fn dec65_comptime_block_reading_concrete_sig_param_dies_loud() {
+            let src = r#"
+fn hook(x: int) -> int {
+    comptime {
+        let y = x
+    }
+    return x + 1
+}
+
+annotation hookann() {
+  targets: [function]
+  comptime post(target, ctx) {
+    install(before_hook(hook, []))
+  }
+}
+
+@hookann()
+fn victim(a: int) -> int { return a }
+
+victim(4)
+"#;
+            let (result, _) = compile_source(src);
+            let err = result.expect_err("sig params are invisible to a comptime block");
+            assert!(
+                err.to_string().contains("Undefined variable: 'x'"),
+                "the loud pre-evaluation failure is the locked behavior: {err}"
+            );
+        }
+
+        // Dec-65 (ii), the PSEUDO-TUPLE spelling — the S5a walker arm: an
+        // `args` read inside a comptime block names the real boundary
+        // instead of leaking a minted `__c3_arg_{i}` unresolved error.
+        #[test]
+        fn dec65_comptime_block_reading_pseudo_tuple_names_the_boundary() {
+            let src = r#"
+fn tmpl<Args>(args: Args) -> Args {
+    comptime {
+        let y = args.length
+    }
+    return args
+}
+
+annotation hookann() {
+  targets: [function]
+  comptime post(target, ctx) {
+    install(before_hook(tmpl, []))
+  }
+}
+
+@hookann()
+fn victim(a: int) -> int { return a }
+
+victim(4)
+"#;
+            let (result, _) = compile_source(src);
+            let err = result.expect_err("the pseudo-tuple is not readable inside comptime");
+            assert!(
+                err.to_string().contains(
+                    "a `comptime` block inside a template body cannot read `args`"
+                ),
+                "the named Dec-65 walker sentence fires: {err}"
+            );
+            assert!(
+                !err.to_string().contains("__c3_"),
+                "no minted reserved name leaks into the diagnostic: {err}"
+            );
+        }
     }
 }
 
