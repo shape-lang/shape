@@ -1,0 +1,57 @@
+// ADR-009 C3 #14 slice 4 (S4d) — the SUGAR-DECLARED typed-config
+// zero-fallback smoke, SINGLE-carrier shape: a declarative annotation with
+// MIXED (int, string) config params installs a `before` hook through the
+// S4c sugar lowering — minted body fn + synthesized public-API handler
+// (`install(before_hook(<minted>, [capture("times", times),
+// capture("tag", tag)]))`), config bound as ConstLift'd declared captures
+// (C3-G4/G5) via the S4b typed injection, baked by the S3b ConstLift into
+// the specialized handler's `let mut times: int = 3` / `let mut tag:
+// string = "ab"` prologue constants. The mixed-type shape is EXACTLY the
+// #66 item-1 capability S4a unlocked (per-call-site capture value typing).
+//
+// The target is 1-ary (MutationCarrier::Single) — deliberately OFF the
+// known S2d aggregate-carrier gap, which stays S7's named follow-up with
+// its measurement; this cell isolates sugar+mixed-config JIT behavior.
+//
+// STRING-CONSUMPTION SPELLING (measured S4d): the hook body consumes the
+// baked string via an EQUALITY BRANCH (`if tag == "ab"`), the same spelling
+// the S1a (int, string) aggregate cell proved native — a scalar-returning
+// string method (`tag.length()`) instead hits the PRE-EXISTING named
+// STAGE-StringJIT whole-program deopt (`jit-string-scalar-method-deopt`,
+// loud surface-and-stop, unrelated to the sugar path; the in-process S4
+// unit pins keep the `.length()` spelling on the VM tier).
+//
+// Hot loop of 200 calls crosses T1@100 (`crates/shape-vm/src/tier.rs`).
+// The annotation's declarative hook and its synthesized `comptime post`
+// handler are NOT top-level comptime blocks (parse-based vacuity guard in
+// the cell).
+//
+// Value-distinguishing arithmetic, per call i in 0..200:
+//   before: a0 = i * times + (tag == "ab" ? 2 : 0) = 3i + 2
+//   impl:   * 10                                   → 30i + 20
+//   sum = 30 * 19900 + 20 * 200 = 601000
+// Expected stdout: 601000
+//   skipped before               → sum 10i   = 199000
+//   tag misread (branch false)   → 30i       = 597000
+//   times misread as 1           → 10i + 20  = 203000
+annotation boosted(times: int, tag: string) {
+  targets: [function]
+  before(args) {
+    if tag == "ab" {
+      args[0] = args[0] * times + 2
+    } else {
+      args[0] = args[0] * times
+    }
+    return args
+  }
+}
+
+@boosted(3, "ab")
+fn calc(a: int) -> int { a * 10 }
+
+fn run() -> int {
+  let mut total = 0
+  for i in 0..200 { total = total + calc(i) }
+  total
+}
+print(run())

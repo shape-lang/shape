@@ -26,6 +26,12 @@ use crate::compiler::BytecodeCompiler;
 use crate::compiler::monomorphization::semantic_specialization::{
     SemanticSpecializationRequest, SpecializationProgressKey,
 };
+use crate::compiler::template_specialization::const_lift::{
+    self, LiftedConst, structural_key_segment,
+};
+use crate::compiler::template_specialization::pseudo_tuple::{
+    self, TemplateSpecializationPlan,
+};
 use crate::compiler::monomorphization::substitution;
 use crate::compiler::monomorphization::substitution::concrete_to_annotation;
 use crate::compiler::monomorphization::type_resolution::{
@@ -41,6 +47,87 @@ use crate::compiler::monomorphization::type_resolution::{
 /// hundreds of distinct closure types. See §3.4 of
 /// `docs/v2-closure-specialization.md` for the rationale.
 pub const DEFAULT_CLOSURE_SPECIALIZATION_BUDGET: u32 = 64;
+
+/// ADR-009 C3 #14 (S1c) — the template-specialization mono-key/symbol salt.
+///
+/// A specialized def produced under a [`TemplateSpecializationPlan`]
+/// structurally DIVERGES from plain substitution (the G9 pseudo-tuple
+/// resolution rewrites params, body, and return), so it must never share a
+/// cache entry or a registered symbol with an ordinary generic instantiation
+/// of the same body fn at the same type arguments. The salt is applied (as
+/// the head of [`template_specialization_key_suffix`]) to the mono key
+/// BEFORE `prepare_semantic_specialization` consumes it (cache +
+/// cycle-detector isolation via `LegacySpecializationKey` /
+/// `SpecializationProgressKey`) and to the specialized symbol at the rename
+/// seam (name isolation — the Legacy `specialized_symbol` is a pass-through
+/// of the substituted name, so the key salt alone would not reach the
+/// registered fn name).
+pub(in crate::compiler) const TEMPLATE_SPECIALIZATION_KEY_SALT: &str = "::c3_before_hook";
+
+/// ADR-009 C3 #14 (S1 verify-1 fix + S3b rule 6) — the INJECTIVE
+/// template-seam key/symbol suffix: the salt, a Sig disambiguator, and (S3b)
+/// the Dec-95 rule-6 CONFIG SEGMENT.
+///
+/// `ConcreteType::Tuple::mono_key()` renders a FLAT, non-delimited join
+/// (`"tuple_" + parts.join("_")`), which is NON-INJECTIVE when a target
+/// parameter is itself a bracket-tuple type: parameter types can
+/// redistribute across the arity boundary. Concrete user-expressible
+/// colliding pair: the Sigs of `fn a(x: [int, int, int], y: number)` and
+/// `fn b(x: [int, int], y: int, z: number)` BOTH render
+/// `tuple_tuple_i64_i64_i64_f64`, so the flat key alone would let the
+/// second target cache-hit (and symbol-collide with) the first target's
+/// compiled handler — an UNCHECKED body against the wrong Sig, a 2-param
+/// handler for a 3-param target, `args.length` frozen at the wrong constant
+/// (the C3-G10 per-specialization-checking violation). The suffix therefore
+/// appends, per type argument, the Sig arity (`::a{n}`) AND the DELIMITED
+/// `Display` rendering (the `"( , )"` form — injective by parenthesization),
+/// restoring "same Sig = same entry; distinct Sig = new entry" for every
+/// expressible Sig. Scoped to the template seam ONLY: making
+/// `Tuple::mono_key` itself delimited is the root fix but would shift every
+/// ordinary tuple cache key in the program and needs its own regression
+/// pass (named follow-up in `docs/design/typed-comptime/c3-slice1-report.md`).
+///
+/// # The S3b config segment (Dec-95 rule 6 — lifted-constant identity)
+///
+/// When the plan carries capture values, the suffix additionally appends
+/// `::cfg#{count}` followed by `::{structural_key_segment(v)}` per value in
+/// delivery (trailing-parameter) order. Structurally EQUAL config therefore
+/// shares a specialization; structurally DIFFERENT config gets a distinct
+/// one. Injectivity argument (extends the S3a `structural_key_segment`
+/// in-doc argument): `'#'` is not an identifier character, so no
+/// `ConcreteType` Display / type-name rendering can produce the `cfg#`
+/// head — the segment boundary against the Sig segments is unambiguous; the
+/// count prefix pins top-level arity; each value segment is the netstring
+/// rendering (tagged, length/count-prefixed — NEVER a flat join, never
+/// `Tuple::mono_key`, never the lossy `const_value_mono_segment`). ZERO
+/// captures append NOTHING — zero-capture keys/symbols are byte-identical
+/// to S1/S2 (the pinned identity discipline).
+///
+/// NAMED RESIDUAL (disclosed in the slice report): large string/array
+/// configs produce long keys/symbols — correctness-first by charter; a
+/// measured-pathology follow-up MAY move the config segment to a SHA-256 of
+/// the rendering (Dec-95 rule 6 itself sanctions lifted-constant HASHES),
+/// but never silently within this slice.
+pub(in crate::compiler) fn template_specialization_key_suffix(
+    type_args: &[ConcreteType],
+    captures: &[(String, LiftedConst)],
+) -> String {
+    use std::fmt::Write as _;
+    let mut suffix = String::from(TEMPLATE_SPECIALIZATION_KEY_SALT);
+    for arg in type_args {
+        if let ConcreteType::Tuple(elems) = arg {
+            let _ = write!(suffix, "::a{}", elems.len());
+        }
+        let _ = write!(suffix, "::{arg}");
+    }
+    if !captures.is_empty() {
+        let _ = write!(suffix, "::cfg#{}", captures.len());
+        for (_, value) in captures {
+            let _ = write!(suffix, "::{}", structural_key_segment(value));
+        }
+    }
+    suffix
+}
 
 mod failure;
 #[cfg(test)]
@@ -206,6 +293,49 @@ impl BytecodeCompiler {
         type_args: &[ConcreteType],
         semantic_request: SemanticSpecializationRequest,
     ) -> std::result::Result<u16, SpecializationFailure> {
+        self.ensure_monomorphic_function_impl(base_fn_name, type_args, semantic_request, None)
+    }
+
+    /// ADR-009 C3 #14 (S1c) — the template-specialization entry point: the
+    /// SAME pipeline as [`Self::ensure_monomorphic_function_for_callsite`]
+    /// (substitution + registration + cache + cycle guard + the full
+    /// `compile_function` battery — the C3-G10 emission-tier + MIR authority),
+    /// extended by an explicit [`TemplateSpecializationPlan`] parameter. No
+    /// second pipeline, no ambient state: the plan rides as an argument and
+    /// conditions exactly five seams inside the shared impl — the key/symbol
+    /// suffix (salt + Sig disambiguator + the S3b rule-6 `::cfg#` config
+    /// segment), the const-generic guard, the G9 pseudo-tuple resolution
+    /// (`pseudo_tuple: Some` plans only), the S3b capture BAKE
+    /// (`const_lift::bake_captures_into_def`), and the S3b-gated
+    /// declares-no-type-params rejection (concrete with-capture routes ride
+    /// with `type_args = []`).
+    ///
+    /// `SemanticSpecializationRequest::Legacy` is the correct request for
+    /// template application: `Exact` facts are inference-owned per-call-site
+    /// evidence, which an `@application` site does not have (S2+ may
+    /// integrate).
+    pub(in crate::compiler) fn ensure_monomorphic_template_specialization(
+        &mut self,
+        base_fn_name: &str,
+        type_args: &[ConcreteType],
+        semantic_request: SemanticSpecializationRequest,
+        template_plan: &TemplateSpecializationPlan,
+    ) -> std::result::Result<u16, SpecializationFailure> {
+        self.ensure_monomorphic_function_impl(
+            base_fn_name,
+            type_args,
+            semantic_request,
+            Some(template_plan),
+        )
+    }
+
+    fn ensure_monomorphic_function_impl(
+        &mut self,
+        base_fn_name: &str,
+        type_args: &[ConcreteType],
+        semantic_request: SemanticSpecializationRequest,
+        template_plan: Option<&TemplateSpecializationPlan>,
+    ) -> std::result::Result<u16, SpecializationFailure> {
         // B.3 — if the callee declares any const generic parameters, auto-bind
         // them from their declared default expressions (literals only today —
         // no call-site `::<4>` turbofish syntax exists yet) and route through
@@ -226,6 +356,24 @@ impl BytecodeCompiler {
             .and_then(|d| d.type_params.clone())
         {
             if type_params.iter().any(|tp| tp.is_const()) {
+                // C3 S1c const-param guard: template bodies with const
+                // generics are S3's ConstLift integration (the `_with_consts`
+                // cache-key-incorporates-const-VALUES machinery is the S3
+                // seam), and the CheckedTemplate classifier rejects them at
+                // construction — a plan reaching this reroute is an internal
+                // invariant breach, never a reroute.
+                if template_plan.is_some() {
+                    return Err(SpecializationFailure::Hard(ShapeError::RuntimeError {
+                        message: format!(
+                            "internal error: template specialization for `{}` reached the \
+                             const-generic entry point; template bodies with const generic \
+                             parameters are S3 ConstLift territory, and the CheckedTemplate \
+                             classifier rejects them at construction",
+                            base_fn_name
+                        ),
+                        location: None,
+                    }));
+                }
                 let const_args = resolve_const_defaults_or_error(base_fn_name, &type_params)?;
                 return self.ensure_monomorphic_function_with_consts_for_callsite(
                     base_fn_name,
@@ -236,7 +384,20 @@ impl BytecodeCompiler {
             }
         }
 
-        let mono_key = build_mono_key(base_fn_name, type_args);
+        // C3 S1c key suffix + S3b rule-6 config segment (see
+        // template_specialization_key_suffix — the salt + the injective Sig
+        // disambiguator + the `::cfg#` lifted-constant identity): appended
+        // BEFORE prepare_semantic_specialization consumes the key, so it
+        // flows into the LegacySpecializationKey cache identity and the
+        // cycle-detector SpecializationProgressKey. Computed once and reused
+        // at the symbol rename seam below so key and symbol stay
+        // identity-locked.
+        let template_suffix = template_plan
+            .map(|plan| template_specialization_key_suffix(type_args, &plan.captures));
+        let mut mono_key = build_mono_key(base_fn_name, type_args);
+        if let Some(suffix) = &template_suffix {
+            mono_key.push_str(suffix);
+        }
         let semantic = self
             .prepare_semantic_specialization(
                 base_fn_name,
@@ -270,7 +431,15 @@ impl BytecodeCompiler {
                     .collect()
             })
             .unwrap_or_default();
-        if declared_type_params.is_empty() {
+        // C3 S3b (the disclosed 4th plan-conditional seam): the
+        // declares-no-type-params Soft rejection is gated on
+        // `template_plan.is_none()` — the CONCRETE/observer with-captures
+        // template routes ride this pipeline with `type_args = []` on a
+        // non-generic body fn (substitution with empty subs is a clone; the
+        // key is base name + salt + cfg segment). A plan-less caller keeps
+        // the S1 rejection byte-unchanged, and a plan WITH type args on a
+        // non-generic callee still fails the arity check below.
+        if declared_type_params.is_empty() && template_plan.is_none() {
             return Err(SpecializationFailure::Soft(ShapeError::SemanticError {
                 message: format!(
                     "ensure_monomorphic_function: '{}' declares no type parameters but {} type arguments were supplied",
@@ -340,6 +509,52 @@ impl BytecodeCompiler {
         // `mono_key_from_subs`, so the new name is unique per (base, subs).
         let mut specialized_def = substitution::substitute_function_def(&original_def, &subs);
         specialized_def.name = semantic.specialized_symbol(specialized_def.name);
+        if let Some(plan) = template_plan {
+            // C3 S1c — the G9 resolution, immediately after substitution +
+            // renaming. The symbol carries the same injective suffix as the
+            // mono key (the Legacy `specialized_symbol` is a pass-through of
+            // the substituted name, so the registered symbol needs the
+            // suffix applied here to stay distinct from an ordinary generic
+            // instantiation AND from a colliding-flat-rendering sibling
+            // Sig); then the pseudo-tuple resolves away (PolymorphicArgs
+            // plans only — S3b: concrete/observer/PolymorphicResult
+            // with-capture plans carry `pseudo_tuple: None`).
+            specialized_def.name.push_str(
+                template_suffix
+                    .as_deref()
+                    .expect("template_suffix is Some exactly when template_plan is Some"),
+            );
+            if plan.pseudo_tuple.is_some() {
+                pseudo_tuple::resolve_pseudo_tuple(&mut specialized_def, plan, self)
+                    .map_err(SpecializationFailure::Hard)?;
+            }
+            // C3 S3b — the heap-constant BAKE, immediately after the G9
+            // resolution and BEFORE register + compile_function so the
+            // C3-G10 battery checks the BAKED body: the trailing capture
+            // parameters strip away and the capture VALUES become `let mut
+            // {name}: {annotation} = {literal}` prologue constants riding
+            // the established per-function constant pool / typed-array /
+            // Option literal emission (const_lift module docs — one bake
+            // producer, no second constant store, no `Constant::Value`).
+            // After this the def is a plain concrete typed AST function and
+            // everything downstream (register, cache-insert-before-compile,
+            // in-progress guard, save/restore, the overlay guard,
+            // `compile_function` = the C3-G10 battery, cache_remove-on-Err,
+            // the Hard classification) runs UNCHANGED.
+            if !plan.captures.is_empty() {
+                let capture_params = const_lift::declared_capture_params_from_tail(
+                    &specialized_def,
+                    &plan.captures,
+                )
+                .map_err(SpecializationFailure::Hard)?;
+                const_lift::bake_captures_into_def(
+                    &mut specialized_def,
+                    &plan.captures,
+                    &capture_params,
+                )
+                .map_err(SpecializationFailure::Hard)?;
+            }
+        }
         let specialized_name = specialized_def.name.clone();
 
         // Register the new function definition in the program. This populates

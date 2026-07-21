@@ -983,69 +983,29 @@ impl BytecodeCompiler {
                 .as_deref()
                 .is_some_and(|module_path| module_path.starts_with("std::"));
 
-        // Check for annotation-based wrapping BEFORE compiling
-        let annotations = self.find_compiled_annotations(&effective_def);
-        let body_pass_modes = self.effective_function_like_pass_modes(
-            Some(&effective_def.name),
-            &effective_def.params,
-            Some(&effective_def.body),
-        );
-        // WF-1A Item 3 (anno-jit-parity): the runtime before/after hooks are
-        // woven into the function's OWN bytecode by `compile_wrapped_function`
-        // / `compile_chained_annotations` below, NOT into a separate wrapper
-        // fn. The MIR cached into `Function.mir_data` further down was lowered
-        // from the UNWRAPPED body (`effective_def.body`) before this weave, so
-        // it does NOT contain the hooks. If the JIT compiled the callee from
-        // that MIR it would run the impl WITHOUT the before/after hooks,
-        // diverging from `--mode vm` (which runs the wrapped bytecode). Suppress
-        // mir_data for such functions so the JIT has no body for the wrapper and
-        // callers trampoline to / deopt onto the wrapped VM bytecode that DOES
-        // carry the hooks. `find_compiled_annotations` only returns annotations
-        // with a `before_handler`/`after_handler`, so a non-empty list means the
-        // wrapper carries runtime hooks.
-        let has_runtime_annotation_hooks = !annotations.is_empty();
-        if annotations.len() == 1 {
-            // SAFETY invariant: the `len() == 1` guard above guarantees
-            // `.next()` yields `Some`. This is a compile-time structural
-            // invariant, not a runtime condition, so `expect` is appropriate.
-            self.compile_wrapped_function(
-                &effective_def,
-                annotations.into_iter().next().expect("checked len == 1"),
-                &inferred_reference_optimizations,
-                &body_pass_modes,
-            )?;
-        } else if annotations.len() > 1 {
-            self.compile_chained_annotations(
-                &effective_def,
-                annotations,
-                &inferred_reference_optimizations,
-                &body_pass_modes,
-            )?;
-        } else {
-            self.compile_function_body_with_inferred_reference_optimizations(
-                &effective_def,
-                &inferred_reference_optimizations,
-            )?;
-        }
+        // ADR-009 C3 #14 (S6 capstone): ONE compilation path. Runtime
+        // before/after hooks are woven as an ordinary typed AST wrapper by
+        // `materialize_hook_template_weave` BEFORE this point (bytecode AND
+        // MIR derive from the same wrapped definition — the C3-G6 SMALL
+        // shape), so no selector and no mir_data suppression exist here. The
+        // deleted legacy raw-bytecode weave (deletion-fate: the S6 capstone)
+        // is the ONLY shape that ever needed either.
+        self.compile_function_body_with_inferred_reference_optimizations(
+            &effective_def,
+            &inferred_reference_optimizations,
+        )?;
 
         // Restore previous flag (safe for nested compilation).
         self.allow_internal_builtins = saved_allow_internal;
 
         // Cache MIR data in the Function struct for JIT v2 (MirToIR compilation).
         // Clone from the compiler's caches so both the compiler (for diagnostics/LSP)
-        // and the JIT (via Function.mir_data) have access.
-        //
-        // WF-1A Item 3 (anno-jit-parity): skip mir_data for annotation-wrapper
-        // functions. Their MIR is the UNWRAPPED body (lowered above from
-        // `effective_def.body`), while the bytecode compiled under this name is
-        // the wrapper carrying the before/after hooks. Shipping the unwrapped MIR
-        // to the JIT would run the impl without the hooks — a VM/JIT divergence.
-        // Leaving mir_data as `None` forces the JIT to trampoline / deopt onto the
-        // wrapped VM bytecode. The compiler's own MIR caches
-        // (`self.mir_functions` etc.) are left intact for diagnostics/LSP.
-        if has_runtime_annotation_hooks {
-            // Intentionally leave `Function.mir_data` as `None` for the wrapper.
-        } else if let Some(func_idx) = self.find_function(&effective_def.name) {
+        // and the JIT (via Function.mir_data) have access. Hook-carrying
+        // functions need no special case: the typed weave rewrote the body
+        // BEFORE lowering, so this MIR is the wrapper's own (weave.rs pin:
+        // `concrete_before_mutation_is_observed_in_output` asserts
+        // `wrapper.mir_data.is_some()`).
+        if let Some(func_idx) = self.find_function(&effective_def.name) {
             let mir_opt = self.mir_functions.get(&effective_def.name).cloned();
             let borrow_opt = self.mir_borrow_analyses.get(&effective_def.name).cloned();
             let storage_opt = self.mir_storage_plans.get(&effective_def.name).cloned();
@@ -2927,7 +2887,7 @@ mod tests {
     #[ignore = "Phase-2c comptime emit surface: set-return directive still depends on deleted host argument conversion"]
     fn test_comptime_after_receives_annotation_args() {
         let code = r#"
-            annotation set_return_type_from_annotation(type_name) {
+            annotation set_return_type_from_annotation(type_name: string) {
                 comptime post(target, ctx, ty) {
                     if ty == "int" {
                         set return int

@@ -122,6 +122,7 @@ match dead {
 }
 
 #[test]
+#[ignore = "dark window: E4 re-implements @remote on typed HookDecision — see issue #68"]
 fn remote_snapshot_returns_receiver_hash_over_remote_call() {
     let _guard = lock_process();
     let server = start_serve("none", None, &[]);
@@ -228,6 +229,7 @@ match r {
 }
 
 #[test]
+#[ignore = "dark window: E4 re-implements @remote on typed HookDecision — see issue #68"]
 fn remote_extern_c_transfer_executes_and_strict_node_refuses_ffi() {
     let _guard = lock_process();
     let env = IsolatedEnv::new("shape-remote-c-e2e-");
@@ -264,11 +266,13 @@ print(f"REMOTE_C_ABS={remote_abs(-42)}")
 }
 
 #[test]
+#[ignore = "dark window: E4 re-implements @remote on typed HookDecision — see issue #68"]
 fn remote_python_transfer_self_skips_without_extension_and_refuses_without_opt_in() {
     remote_polyglot_transfer("python", "PY_REMOTE=105", "return x + 5", 100);
 }
 
 #[test]
+#[ignore = "dark window: E4 re-implements @remote on typed HookDecision — see issue #68"]
 fn remote_typescript_transfer_self_skips_without_extension_and_refuses_without_opt_in() {
     remote_polyglot_transfer("typescript", "TS_REMOTE=21", "return x + 1;", 20);
 }
@@ -400,6 +404,7 @@ fn tls_remote_call_user_surface_over_shape_serve() {
 }
 
 #[test]
+#[ignore = "dark window: E4 re-implements @remote on typed HookDecision — see issue #68"]
 fn remote_snapshot_hash_is_saved_in_selected_receiver_store() {
     let _guard = lock_process();
     let env = IsolatedEnv::new("shape-remote-snapshot-resume-e2e-");
@@ -441,6 +446,7 @@ print(f"REMOTE_SNAPSHOT={remote_snapshot_hash()}")
 }
 
 #[test]
+#[ignore = "dark window: E4 re-implements @remote on typed HookDecision — see issue #68"]
 fn remote_snapshot_hash_can_be_resumed_from_receiver_store() {
     let _guard = lock_process();
     let env = IsolatedEnv::new("shape-remote-snapshot-resume-e2e-");

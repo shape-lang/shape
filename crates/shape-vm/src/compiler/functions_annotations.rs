@@ -1,10 +1,8 @@
 //! Annotation lifecycle and comptime handler compilation
 
 use crate::bytecode::{Constant, Instruction, OpCode, Operand};
-use crate::executor::typed_object_ops::field_type_to_tag;
 use shape_ast::ast::{
-    DestructurePattern, Expr, FunctionDef, GeneratedNodeOrigin, Literal, ObjectEntry, Span,
-    Spanned, Statement, TypeAnnotation,
+    Expr, FunctionDef, GeneratedNodeOrigin, Literal, ObjectEntry, Span, Statement, TypeAnnotation,
 };
 use shape_ast::error::{Result, ShapeError, SourceLocation};
 use shape_runtime::annotation_context::TargetOwner;
@@ -19,16 +17,28 @@ use super::comptime_builtins::expansion_provenance::{
     ExpansionIdentity, ExpansionSite, GeneratedNodePath, GeneratedOrigin, GeneratedSymbolTable,
     GeneratorRef, SourceAnchor, SymbolId, SymbolReservation, TargetIdentity,
 };
+use super::template_specialization::install_registry::StagedHookInstall;
 use super::{BytecodeCompiler, HygienicRole, ParamPassMode};
 
 mod generated_closure_provenance;
 use generated_closure_provenance::anchor_generated_function_decl;
 mod declaration_discovery;
 use declaration_discovery::DeclarationDiscoveryTarget;
-mod handler_resolution;
+// ADR-009 C3 #14 (slice 4): `pub(in crate::compiler)` so the def-param
+// carrier producer (`annotation_def_params`) is reachable from the type /
+// module / expression annotation-target call sites in `statements.rs` and
+// `expressions/mod.rs` — one producer, no per-site re-derivation.
+pub(in crate::compiler) mod handler_resolution;
 use handler_resolution::{ComptimeAnnotationHandlers, ComptimeHandlerHelperAuthority};
 mod original_body_shadow;
 use original_body_shadow::{PendingOriginalBodyShadow, canonical_original_callable};
+
+/// ADR-009 C3 #14 (slice 5, S5b): the unspellable mark under which the shared
+/// scoped-name collector records a VALUE-position install-family reference
+/// (`let f = before_hook`) for the static C3-G8 scan. SOH-prefixed so it can
+/// NEVER resolve in any fn table — helper collection sees a lookup miss and
+/// skips it, byte-equivalent to the pre-S5b behavior.
+const INSTALL_FAMILY_VALUE_MARK: &str = "\u{1}install-family-value:";
 
 #[cfg(test)]
 #[path = "functions_annotations/imported_handler_resolution_tests.rs"]
@@ -257,7 +267,11 @@ fn generated_extend_method_content(
 }
 
 /// Canonical structural content encoding of a generated free function.
-fn generated_free_fn_content(func_def: &FunctionDef) -> CanonicalHash {
+/// (`pub(in crate::compiler)`: the S2c hook-template weave shadow
+/// reservation in `template_specialization/weave.rs` encodes its shadow def
+/// through the SAME encoder — visibility-only widening, byte-identical
+/// behavior.)
+pub(in crate::compiler) fn generated_free_fn_content(func_def: &FunctionDef) -> CanonicalHash {
     CanonicalHash::from_canonical_decl_encoding(&format!("fn:{func_def:?}"))
 }
 
@@ -292,6 +306,13 @@ impl BytecodeCompiler {
             .unwrap_or("")
             .to_string();
 
+        // ADR-009 C3 #14 (slice 5, S5b): the syntactic fn table for the
+        // static C3-G8 scan — collected ONCE per pre-pass run, from the same
+        // analysis items the handler_map ingested (scan-only; see
+        // `collect_pre_pass_ast_function_defs`).
+        let mut ast_fn_defs = HashMap::new();
+        Self::collect_pre_pass_ast_function_defs(&program.items, None, &mut ast_fn_defs);
+
         Self::apply_function_comptime_signature_directives_to_items(
             self,
             &handler_map,
@@ -300,10 +321,12 @@ impl BytecodeCompiler {
             &known_type_symbols,
             &ctx_module_path,
             &ctx_file,
+            &ast_fn_defs,
             &mut program.items,
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn apply_function_comptime_signature_directives_to_items(
         compiler: &mut BytecodeCompiler,
         handler_map: &HashMap<String, ComptimeAnnotationHandlers>,
@@ -312,6 +335,7 @@ impl BytecodeCompiler {
         known_type_symbols: &HashSet<String>,
         ctx_module_path: &str,
         ctx_file: &str,
+        ast_fn_defs: &HashMap<String, FunctionDef>,
         items: &mut [shape_ast::ast::Item],
     ) -> Result<()> {
         use shape_ast::ast::{ExportItem, Item};
@@ -326,6 +350,7 @@ impl BytecodeCompiler {
                         known_type_symbols,
                         ctx_module_path,
                         ctx_file,
+                        ast_fn_defs,
                         func,
                     )?;
                 }
@@ -338,6 +363,7 @@ impl BytecodeCompiler {
                             known_type_symbols,
                             ctx_module_path,
                             ctx_file,
+                            ast_fn_defs,
                             func,
                         )?;
                     }
@@ -359,6 +385,7 @@ impl BytecodeCompiler {
                                 known_type_symbols,
                                 &module_path,
                                 ctx_file,
+                                ast_fn_defs,
                                 &mut module.items,
                             )
                         },
@@ -370,6 +397,501 @@ impl BytecodeCompiler {
         Ok(())
     }
 
+    /// ADR-009 C3 #14 (slice 5, S5a) — THE ONE [C0931] producer: the Dec-65
+    /// config-arg pre-check. A `@application` config argument whose free
+    /// identifier resolves (scoped-then-bare, the same detector as the
+    /// [C0926] gate) to a NON-const module binding is rejected BEFORE the
+    /// handler mini-VM runs — so the pre-pass error-swallow (the
+    /// `[comptime error]`-filtered `continue` below each execute seam)
+    /// cannot eat it, and the bland mini-VM `[C0001] Undefined variable`
+    /// failure (S5a probes P3a/P3b, recorded in c3-slice5-report.md)
+    /// upgrades to a named sentence. Diagnostic upgrade ONLY: every shape
+    /// this rejects failed loudly before (the mini-VM cannot see module
+    /// bindings at all); nothing that ran keeps running differently.
+    ///
+    /// THE ASYMMETRY RULE (invariant 7): a module-scope CONST is
+    /// comptime-evaluable and therefore LEGAL in the config-arg position —
+    /// `const_module_bindings` members, injected specialization
+    /// `const_bindings`, and imported `pub const`s are all EXEMPT — while
+    /// the SAME const is ILLEGAL inside a template body ([C0926]: G4
+    /// exact-inputs totality covers consts; the positive twin is "declare
+    /// it as a capture"). NOTE (measured, S5a probe P6): a top-level
+    /// `const` config arg is exempt here but STILL fails loudly today with
+    /// the pre-existing `[C0001] Undefined variable` — the mini-VM has no
+    /// const-injection route yet; making module consts VISIBLE in the
+    /// config position is a named follow-up, not this check's charter.
+    ///
+    /// Fires for BOTH surface classes (TypedConfig and Legacy definitions
+    /// with comptime handlers — the class-independent comptime seams are
+    /// the only routes by which config enters a comptime evaluation
+    /// position; legacy RUNTIME-hook config stays per-invocation and
+    /// untouched until S6).
+    fn reject_runtime_module_binding_config_args(
+        &self,
+        ann: &shape_ast::ast::Annotation,
+        const_bindings: &[(String, KindedSlot)],
+    ) -> Result<()> {
+        for arg in &ann.args {
+            let mut names: Vec<String> = Vec::new();
+            Self::collect_config_arg_value_names(arg, &mut names);
+            for ident in names {
+                if const_bindings.iter().any(|(name, _)| name == &ident) {
+                    continue;
+                }
+                if self.imported_consts.contains_key(&ident) {
+                    continue;
+                }
+                let Some(resolved) = self.resolve_scoped_module_binding_name(&ident) else {
+                    continue;
+                };
+                let Some(&binding_idx) = self.module_bindings.get(&resolved) else {
+                    continue;
+                };
+                if self.const_module_bindings.contains(&binding_idx) {
+                    continue;
+                }
+                return Err(ShapeError::SemanticError {
+                    message: format!(
+                        "[C0931] config argument `{ident}` for `@{}` references a runtime \
+                         module binding; annotation config is evaluated once at compile time \
+                         (Dec 65 — runtime values never enter a comptime evaluation position) \
+                         — pass a literal or a comptime const; a value that varies at runtime \
+                         cannot configure a compile-time specialization",
+                        ann.name
+                    ),
+                    location: Some(self.span_to_source_location(ann.span)),
+                });
+            }
+        }
+        Ok(())
+    }
+
+    /// The [C0931] detector's conservative free-identifier collector over a
+    /// config-arg expression: value-position identifiers only (call NAMES
+    /// are skipped — fn callees are comptime helpers, not values), plus
+    /// f-string interpolation interiors (re-parsed exactly as the emitter
+    /// does). Unrecognized expression shapes are NOT recursed — a missed
+    /// name falls through to the mini-VM's pre-existing loud unresolved
+    /// error, never a silent pass.
+    fn collect_config_arg_value_names(expr: &Expr, names: &mut Vec<String>) {
+        match expr {
+            Expr::Identifier(name, _) => names.push(name.clone()),
+            Expr::BinaryOp { left, right, .. } | Expr::FuzzyComparison { left, right, .. } => {
+                Self::collect_config_arg_value_names(left, names);
+                Self::collect_config_arg_value_names(right, names);
+            }
+            Expr::UnaryOp { operand, .. }
+            | Expr::Spread(operand, _)
+            | Expr::TryOperator(operand, _)
+            | Expr::Await(operand, _)
+            | Expr::Reference { expr: operand, .. } => {
+                Self::collect_config_arg_value_names(operand, names);
+            }
+            Expr::Conditional {
+                condition,
+                then_expr,
+                else_expr,
+                ..
+            } => {
+                Self::collect_config_arg_value_names(condition, names);
+                Self::collect_config_arg_value_names(then_expr, names);
+                if let Some(else_expr) = else_expr {
+                    Self::collect_config_arg_value_names(else_expr, names);
+                }
+            }
+            Expr::Array(items, _) => {
+                for item in items {
+                    Self::collect_config_arg_value_names(item, names);
+                }
+            }
+            Expr::Object(entries, _) => {
+                for entry in entries {
+                    match entry {
+                        ObjectEntry::Field { value, .. } | ObjectEntry::Spread(value) => {
+                            Self::collect_config_arg_value_names(value, names);
+                        }
+                    }
+                }
+            }
+            Expr::IndexAccess {
+                object,
+                index,
+                end_index,
+                ..
+            } => {
+                Self::collect_config_arg_value_names(object, names);
+                Self::collect_config_arg_value_names(index, names);
+                if let Some(end) = end_index {
+                    Self::collect_config_arg_value_names(end, names);
+                }
+            }
+            Expr::PropertyAccess { object, .. } => {
+                Self::collect_config_arg_value_names(object, names);
+            }
+            Expr::MethodCall { receiver, args, named_args, .. } => {
+                Self::collect_config_arg_value_names(receiver, names);
+                for arg in args {
+                    Self::collect_config_arg_value_names(arg, names);
+                }
+                for (_, value) in named_args {
+                    Self::collect_config_arg_value_names(value, names);
+                }
+            }
+            Expr::FunctionCall { const_args, args, named_args, .. }
+            | Expr::QualifiedFunctionCall { const_args, args, named_args, .. } => {
+                for arg in const_args {
+                    Self::collect_config_arg_value_names(arg, names);
+                }
+                for arg in args {
+                    Self::collect_config_arg_value_names(arg, names);
+                }
+                for (_, value) in named_args {
+                    Self::collect_config_arg_value_names(value, names);
+                }
+            }
+            Expr::Range { start, end, .. } => {
+                if let Some(start) = start {
+                    Self::collect_config_arg_value_names(start, names);
+                }
+                if let Some(end) = end {
+                    Self::collect_config_arg_value_names(end, names);
+                }
+            }
+            Expr::Literal(Literal::FormattedString { value, mode }, _) => {
+                let Ok(parts) =
+                    shape_ast::interpolation::parse_interpolation_with_mode(value, *mode)
+                else {
+                    return;
+                };
+                for part in parts {
+                    if let shape_ast::interpolation::InterpolationPart::Expression {
+                        expr, ..
+                    } = part
+                    {
+                        if let Ok(parsed) = shape_ast::parser::parse_expression_str(&expr) {
+                            Self::collect_config_arg_value_names(&parsed, names);
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// ADR-009 C3 #14 (slice 5, S5b) — THE STATIC C3-G8 ARM.
+    ///
+    /// The measured hole (S5b probe P-G8b, recorded in c3-slice5-report.md):
+    /// an API-path installing annotation on an UNCALLED generic target in a
+    /// single-module unit was a SILENT NO-OP — the pre-pass handler run fails
+    /// (body-fn lookup precedes function registration there), the
+    /// `[comptime error]`-filtered swallow defers to pass-2, and pass-2 skips
+    /// a generic def's body compile entirely, so no consumer ever observed
+    /// the install. This check is STATIC: it keys on the target's
+    /// `type_params` and a SYNTACTIC template-engagement classification of
+    /// the resolved annotation entry — NO handler-run dependence — and fires
+    /// at the `@application` span through the EXISTING ONE C3-G8 sentence
+    /// producer (`generic_target_install_rejection_message`, wording
+    /// byte-unchanged). The three dynamic firing sites (the pre-pass
+    /// directive arm + the two `apply_install_hook_template` twins) REMAIN
+    /// as layered backstops.
+    ///
+    /// Concrete targets are untouched (the `type_params` key). LEGACY-weave
+    /// annotations (declarative hooks, no typed config, no install-family
+    /// references in their comptime handlers) are NOT template-engaging —
+    /// the S0 g1/g2/g4/g5 accidental-working class keeps working until S6
+    /// (deliberate; the C3-G11 defections.md entry covers it).
+    fn reject_template_engaging_annotation_on_generic_target(
+        &self,
+        ann: &shape_ast::ast::Annotation,
+        entry: &ComptimeAnnotationHandlers,
+        func_def: &FunctionDef,
+        ctx_module_path: &str,
+        ast_fn_defs: &HashMap<String, FunctionDef>,
+    ) -> Result<()> {
+        if !func_def
+            .type_params
+            .as_ref()
+            .is_some_and(|params| !params.is_empty())
+        {
+            return Ok(());
+        }
+        let Some(body_fn_hint) =
+            self.template_engaging_install_reference(entry, ctx_module_path, ast_fn_defs)
+        else {
+            return Ok(());
+        };
+        Err(ShapeError::SemanticError {
+            message: super::template_specialization::install_registry::
+                generic_target_install_rejection_message(&body_fn_hint, &ann.name, func_def),
+            location: Some(self.span_to_source_location(ann.span)),
+        })
+    }
+
+    /// The STATIC template-engagement classification (conservative,
+    /// syntactic — the Lens-2 F4 conservative-set precedent: an
+    /// over-approximation is only ever the LOUD C3-G8 rejection, never a
+    /// silent accept). An entry is template-engaging iff:
+    ///
+    /// (a) sugar path — its `sugar_body_fns` is non-empty (a
+    ///     TypedConfig-with-hooks definition's synthesized install handler
+    ///     exists by construction); the hint is the first minted body fn
+    ///     (the same name the dynamic directive arm renders); OR
+    /// (b) API path — a syntactic scan of its comptime handler bodies AND
+    ///     their transitive comptime helpers finds the `install` name in
+    ///     CALL-NAME or VALUE position — value position included so
+    ///     `let f = install; f(t)` cannot dodge the scan (S5b probe P-G8d
+    ///     measured the value-position dodge silent on a generic target).
+    ///     ENGAGEMENT keys on `install` ONLY (the sole installer — the
+    ///     other family names `before_hook`/`after_hook`/`*_nocapture`
+    ///     CONSTRUCT template handles and cannot install anything): C3-G8
+    ///     withdraws INSTALLS on generic targets, and a construct-only
+    ///     handler on a generic target is legal load-bearing machinery
+    ///     (the fix-round-1 F5 store-lifecycle refuter annotates a
+    ///     polymorphic template BODY fn with a handler that pushes two
+    ///     templates and installs nothing — measured-green baseline pin
+    ///     `nested_handler_run_during_processing_does_not_shift_install_
+    ///     handles`; a five-name key rejected it, disclosed in the slice-5
+    ///     report). The constructor names still feed the body-fn HINT.
+    ///
+    /// Helper transitivity: `collect_authorized_comptime_helpers` IS
+    /// worklist-transitive over `self.function_defs`, and is reused verbatim
+    /// — but in a single-module unit BOTH pre-passes run before function
+    /// registration (the S2b measured reach), so the registered table is
+    /// empty exactly where the uncalled-generic hole lives. The scan
+    /// therefore ALSO closes over `ast_fn_defs`, the SYNTACTIC fn table
+    /// collected from the analysis program's own items (bare +
+    /// module-qualified names) — a disclosed S5b addition, scan-only (never
+    /// an execution surface).
+    ///
+    /// The hint is the first hook-constructor's first argument when it is a
+    /// bare identifier (`before_hook(my_before, …)` → `my_before` — the
+    /// name the dynamic pass-2 seam would have rendered); otherwise the
+    /// established `"<template>"` placeholder (the directive-arm precedent).
+    /// Best-effort ONLY for the hint; engagement never depends on it.
+    fn template_engaging_install_reference(
+        &self,
+        entry: &ComptimeAnnotationHandlers,
+        ctx_module_path: &str,
+        ast_fn_defs: &HashMap<String, FunctionDef>,
+    ) -> Option<String> {
+        if let Some(first) = entry.sugar_body_fns.first() {
+            return Some(first.name.clone());
+        }
+        let handler_module_path = entry
+            .defining_module_path
+            .as_deref()
+            .unwrap_or(ctx_module_path);
+        let mut engaged = false;
+        let mut hint: Option<String> = None;
+        let mut pending: Vec<String> = Vec::new();
+        let absorb = |names: HashSet<String>, pending: &mut Vec<String>, engaged: &mut bool| {
+            for name in names {
+                if Self::scoped_name_engages_install(&name) {
+                    *engaged = true;
+                }
+                pending.push(name);
+            }
+        };
+        for handler in &entry.handlers {
+            let mut seeds = HashSet::new();
+            Self::collect_scoped_names_in_expr(&handler.body, &mut seeds);
+            absorb(seeds, &mut pending, &mut engaged);
+            if hint.is_none() {
+                hint = Self::hook_constructor_hint_in_expr(&handler.body);
+            }
+            // (reused, transitive) — the authoritative registered-table
+            // closure, exactly what handler execution would authorize.
+            for helper in
+                self.collect_authorized_comptime_helpers(&handler.body, entry.helper_authority())
+            {
+                for statement in &helper.body {
+                    let mut nested = HashSet::new();
+                    Self::collect_scoped_names_in_statement(statement, &mut nested);
+                    absorb(nested, &mut pending, &mut engaged);
+                    if hint.is_none() {
+                        hint = Self::hook_constructor_hint_in_statement(statement);
+                    }
+                }
+            }
+        }
+        // The AST-side syntactic closure (pre-registration complement).
+        let mut visited: HashSet<String> = HashSet::new();
+        while let Some(name) = pending.pop() {
+            if !visited.insert(name.clone()) {
+                continue;
+            }
+            let definition = ast_fn_defs.get(&name).or_else(|| {
+                ast_fn_defs.get(&Self::qualify_module_symbol(handler_module_path, &name))
+            });
+            let Some(definition) = definition else {
+                continue;
+            };
+            for statement in &definition.body {
+                let mut nested = HashSet::new();
+                Self::collect_scoped_names_in_statement(statement, &mut nested);
+                absorb(nested, &mut pending, &mut engaged);
+                if hint.is_none() {
+                    hint = Self::hook_constructor_hint_in_statement(statement);
+                }
+            }
+        }
+        engaged.then(|| hint.unwrap_or_else(|| "<template>".to_string()))
+    }
+
+    /// The ENGAGEMENT test over ONE collected scoped name (S5b static
+    /// C3-G8): the `install` name — the sole installer — matched bare, as
+    /// the last `::` segment of a qualified call name, or under the
+    /// [`INSTALL_FAMILY_VALUE_MARK`] the shared collector stamps on
+    /// VALUE-position references. Within the install key,
+    /// over-approximation (e.g. a user fn spelled `install` referenced from
+    /// a handler) is only ever the LOUD C3-G8 rejection (the Lens-2 F4
+    /// conservative-set precedent); the constructor family names do NOT
+    /// engage (see `template_engaging_install_reference`).
+    fn scoped_name_engages_install(name: &str) -> bool {
+        if let Some(marked) = name.strip_prefix(INSTALL_FAMILY_VALUE_MARK) {
+            return marked == "install";
+        }
+        let last = name.rsplit("::").next().unwrap_or(name);
+        last == "install"
+    }
+
+    /// The five install-family spellings (`comptime.rs` forwarder rows; the
+    /// SOH-prefixed nocapture forwarders are unspellable, so their PLAIN
+    /// builtin names are the reachable surface). Used by the shared
+    /// collector's VALUE-position mark arm; ENGAGEMENT itself keys on
+    /// `install` only (`scoped_name_engages_install`).
+    fn is_install_family_name(name: &str) -> bool {
+        matches!(
+            name,
+            "install"
+                | "before_hook"
+                | "after_hook"
+                | "before_hook_nocapture"
+                | "after_hook_nocapture"
+        )
+    }
+
+    /// Best-effort body-fn HINT for the static C3-G8 sentence: the first
+    /// hook-constructor call whose first argument is a bare identifier
+    /// (`before_hook(my_before, …)` → `my_before`). Covers the realistic
+    /// handler spellings (block/expression statements, let-initializers,
+    /// nested call arguments, if/else branches); anything more exotic falls
+    /// back to `"<template>"` at the caller — the hint can be less specific,
+    /// never wrong, and ENGAGEMENT never depends on it.
+    fn hook_constructor_hint_in_expr(expr: &Expr) -> Option<String> {
+        match expr {
+            Expr::FunctionCall { name, args, .. } => {
+                if matches!(name.as_str(), "before_hook" | "after_hook") {
+                    if let Some(Expr::Identifier(body_fn, _)) = args.first() {
+                        return Some(body_fn.clone());
+                    }
+                }
+                args.iter().find_map(Self::hook_constructor_hint_in_expr)
+            }
+            Expr::QualifiedFunctionCall { function, args, .. } => {
+                if matches!(function.as_str(), "before_hook" | "after_hook") {
+                    if let Some(Expr::Identifier(body_fn, _)) = args.first() {
+                        return Some(body_fn.clone());
+                    }
+                }
+                args.iter().find_map(Self::hook_constructor_hint_in_expr)
+            }
+            Expr::Block(block, _) => block.items.iter().find_map(|item| match item {
+                shape_ast::ast::BlockItem::VariableDecl(decl) => decl
+                    .value
+                    .as_ref()
+                    .and_then(Self::hook_constructor_hint_in_expr),
+                shape_ast::ast::BlockItem::Assignment(assign) => {
+                    Self::hook_constructor_hint_in_expr(&assign.value)
+                }
+                shape_ast::ast::BlockItem::Statement(statement) => {
+                    Self::hook_constructor_hint_in_statement(statement)
+                }
+                shape_ast::ast::BlockItem::Expression(expr) => {
+                    Self::hook_constructor_hint_in_expr(expr)
+                }
+            }),
+            Expr::If(if_expr, _) => Self::hook_constructor_hint_in_expr(&if_expr.then_branch)
+                .or_else(|| {
+                    if_expr
+                        .else_branch
+                        .as_deref()
+                        .and_then(Self::hook_constructor_hint_in_expr)
+                }),
+            _ => None,
+        }
+    }
+
+    fn hook_constructor_hint_in_statement(statement: &Statement) -> Option<String> {
+        match statement {
+            Statement::Expression(expr, _) | Statement::Return(Some(expr), _) => {
+                Self::hook_constructor_hint_in_expr(expr)
+            }
+            Statement::VariableDecl(decl, _) => decl
+                .value
+                .as_ref()
+                .and_then(Self::hook_constructor_hint_in_expr),
+            Statement::Assignment(assign, _) => {
+                Self::hook_constructor_hint_in_expr(&assign.value)
+            }
+            Statement::If(if_stmt, _) => if_stmt
+                .then_body
+                .iter()
+                .find_map(Self::hook_constructor_hint_in_statement)
+                .or_else(|| {
+                    if_stmt.else_body.as_ref().and_then(|body| {
+                        body.iter()
+                            .find_map(Self::hook_constructor_hint_in_statement)
+                    })
+                }),
+            _ => None,
+        }
+    }
+
+    /// Collect the analysis program's fn definitions into a SYNTACTIC name
+    /// table for the static C3-G8 scan (S5b): top-level + `export` fns under
+    /// their bare names, module fns under their qualified names, recursively.
+    /// Scan-only — never consulted for execution or registration.
+    fn collect_pre_pass_ast_function_defs(
+        items: &[shape_ast::ast::Item],
+        module_path: Option<&str>,
+        table: &mut HashMap<String, FunctionDef>,
+    ) {
+        use shape_ast::ast::{ExportItem, Item};
+        for item in items {
+            match item {
+                Item::Function(func, _) => {
+                    let name = match module_path {
+                        Some(module) => Self::qualify_module_symbol(module, &func.name),
+                        None => func.name.clone(),
+                    };
+                    table.entry(name).or_insert_with(|| func.clone());
+                }
+                Item::Export(export, _) => {
+                    if let ExportItem::Function(func) = &export.item {
+                        let name = match module_path {
+                            Some(module) => Self::qualify_module_symbol(module, &func.name),
+                            None => func.name.clone(),
+                        };
+                        table.entry(name).or_insert_with(|| func.clone());
+                    }
+                }
+                Item::Module(module, _) => {
+                    let nested = match module_path {
+                        Some(parent) => Self::qualify_module_symbol(parent, &module.name),
+                        None => module.name.clone(),
+                    };
+                    Self::collect_pre_pass_ast_function_defs(
+                        &module.items,
+                        Some(&nested),
+                        table,
+                    );
+                }
+                _ => {}
+            }
+        }
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn apply_function_comptime_signature_directives_to_function(
         &mut self,
@@ -379,11 +901,32 @@ impl BytecodeCompiler {
         known_type_symbols: &HashSet<String>,
         ctx_module_path: &str,
         ctx_file: &str,
+        ast_fn_defs: &HashMap<String, FunctionDef>,
         func_def: &mut FunctionDef,
     ) -> Result<()> {
         use shape_ast::ast::AnnotationHandlerType;
 
         let annotations = func_def.annotations.clone();
+        // ADR-009 C3 #14 (slice 5, S5b): the static C3-G8 arm fires FIRST —
+        // per `@application`, before any handler execution, with no
+        // handler-run dependence (see the arm's doc). Resolution here is a
+        // pure map lookup, never execution.
+        for ann in &annotations {
+            let Some((_, entry)) = self.resolve_comptime_annotation_handlers(
+                handler_map,
+                ann,
+                (!ctx_module_path.is_empty()).then_some(ctx_module_path),
+            ) else {
+                continue;
+            };
+            self.reject_template_engaging_annotation_on_generic_target(
+                ann,
+                entry,
+                func_def,
+                ctx_module_path,
+                ast_fn_defs,
+            )?;
+        }
         let phases = [
             AnnotationHandlerType::ComptimePre,
             AnnotationHandlerType::ComptimePost,
@@ -425,6 +968,34 @@ impl BytecodeCompiler {
                         entry.helper_authority(),
                     );
 
+                    // ADR-009 C3 #14 (slice 2): the hook-template body-fn
+                    // lookup (same AST fn table as the helper collection;
+                    // threaded as a parameter). A root fn not yet registered
+                    // at this pre-pass simply misses here and the named
+                    // rejection defers this handler to pass-2 (the
+                    // established pre-pass fallback below).
+                    //
+                    // S4c: the entry's MINTED sugar body fns resolve FIRST
+                    // (hygienic names — no user fn can collide).
+                    let function_defs = &self.function_defs;
+                    let sugar_body_fns = &entry.sugar_body_fns;
+                    let template_body_fn_lookup = move |name: &str| -> Option<FunctionDef> {
+                        sugar_body_fns
+                            .iter()
+                            .find(|def| def.name == name)
+                            .cloned()
+                            .or_else(|| function_defs.get(name).cloned())
+                            .or_else(|| {
+                                function_defs
+                                    .get(&Self::qualify_module_symbol(handler_module_path, name))
+                                    .cloned()
+                            })
+                    };
+                    // ADR-009 C3 #14 (slice 5, S5a) — the [C0931] Dec-65
+                    // config-arg pre-check: returns Err BEFORE execution so
+                    // the `[comptime error]`-filtered swallow below cannot
+                    // eat it.
+                    self.reject_runtime_module_binding_config_args(ann, &[])?;
                     let prev_suppressed =
                         super::comptime_builtins::set_comptime_output_suppressed(true);
                     let execution_result =
@@ -433,7 +1004,7 @@ impl BytecodeCompiler {
                             &handler.params,
                             target_value,
                             &ann.args,
-                            &entry.def_param_names,
+                            &entry.def_params,
                             &[],
                             &helpers,
                             extensions,
@@ -444,6 +1015,7 @@ impl BytecodeCompiler {
                             freeze,
                             // Function-target handler: no representation authority.
                             None,
+                            &template_body_fn_lookup,
                         );
                     super::comptime_builtins::set_comptime_output_suppressed(prev_suppressed);
 
@@ -459,11 +1031,17 @@ impl BytecodeCompiler {
                         }
                     };
                     let handler_location = self.span_to_source_location(handler.span);
+                    // ADR-009 C3 #14 (slice 2, S2b): the `@application`
+                    // anchor for the C3-G8 generic-target install rejection
+                    // (the only consumer observing the generic def's real
+                    // `type_params` — see the InstallHookTemplate arm).
+                    let application_location = self.span_to_source_location(ann.span);
                     Self::apply_signature_directives_to_analysis_function(
                         func_def,
                         execution.directives,
                         &ann.name,
                         handler_location,
+                        application_location,
                     )?;
                 }
             }
@@ -483,6 +1061,9 @@ impl BytecodeCompiler {
         directives: Vec<super::comptime_builtins::ComptimeDirective>,
         annotation_name: &str,
         handler_location: SourceLocation,
+        // ADR-009 C3 #14 (slice 2, S2b): the `@application` anchor for the
+        // C3-G8 generic-target install rejection (see that arm).
+        application_location: SourceLocation,
     ) -> std::result::Result<(), ShapeError> {
         for directive in directives {
             match directive {
@@ -537,6 +1118,50 @@ impl BytecodeCompiler {
                     func_def.params[param_id.index()].default_value = Some(default_value);
                 }
                 super::comptime_builtins::ComptimeDirective::SetReturnType { .. } => {}
+                // ADR-009 C3 #14 (slice 2, S2b): documented PRE-PASS no-op
+                // for the APPLY — install applies at the authoritative pass-2
+                // function-target consumer
+                // (`process_comptime_directives_for_function`) ONLY, never
+                // here; a pre-pass apply would double-install (one registry
+                // row / staged install per application, across the pre-pass +
+                // pass-2 double handler run).
+                //
+                // The ONE exception is the C3-G8 GENERIC-TARGET rejection,
+                // which fires HERE (disclosed narrowing of the "documented
+                // no-op" plan resolution): a generic def's pass-2 body
+                // compile is skipped entirely (`functions.rs`
+                // compile_function_with_generated_origin — "Skip compiling
+                // bodies of generic extend methods"), and a monomorphized
+                // specialization reaches pass-2 with `type_params` already
+                // cleared — so this pre-pass consumer is the ONLY directive
+                // consumer that observes the generic def's real
+                // `type_params`. A rejection is surface-and-stop, not an
+                // apply: nothing installs, nothing doubles. The pass-2 seam
+                // keeps two defensive twins of the same sentence
+                // (`apply_install_hook_template`).
+                super::comptime_builtins::ComptimeDirective::InstallHookTemplate {
+                    template_index,
+                } => {
+                    if func_def
+                        .type_params
+                        .as_ref()
+                        .is_some_and(|params| !params.is_empty())
+                    {
+                        let template_body_fn =
+                            super::comptime_builtins::comptime_hook_template_at(template_index)
+                                .map(|bound| bound.template.body_fn().to_string())
+                                .unwrap_or_else(|| "<template>".to_string());
+                        return Err(ShapeError::SemanticError {
+                            message: super::template_specialization::install_registry::
+                                generic_target_install_rejection_message(
+                                    &template_body_fn,
+                                    annotation_name,
+                                    func_def,
+                                ),
+                            location: Some(application_location.clone()),
+                        });
+                    }
+                }
                 _ => {}
             }
         }
@@ -609,7 +1234,11 @@ impl BytecodeCompiler {
         }
     }
 
-    fn annotation_param_type_annotation(
+    // ADR-009 C3 S1c: visibility widened from private `fn` so the
+    // `template_specialization` target glue can bind Sig types from the
+    // AST/inference side (slice-0 report §7.4). Shared helper — NOT part of
+    // the C3-G7 deletion set; behavior byte-unchanged.
+    pub(in crate::compiler) fn annotation_param_type_annotation(
         &self,
         func_def: &FunctionDef,
         param_idx: usize,
@@ -626,149 +1255,6 @@ impl BytecodeCompiler {
         };
         let annotation = params.get(param_idx)?.to_annotation()?;
         (!Self::annotation_type_is_unknown(&annotation)).then_some(annotation)
-    }
-
-    fn annotation_arg_array_element_annotation(
-        &self,
-        func_def: &FunctionDef,
-    ) -> Result<TypeAnnotation> {
-        if func_def.params.is_empty() {
-            return Ok(TypeAnnotation::Basic("int".to_string()));
-        }
-
-        let mut resolved: Option<TypeAnnotation> = None;
-        for (idx, param) in func_def.params.iter().enumerate() {
-            let annotation = self
-                .annotation_param_type_annotation(func_def, idx, param)
-                .ok_or_else(|| ShapeError::SemanticError {
-                    message: format!(
-                        "cannot build annotation args for function '{}': parameter #{} has no \
-                         statically proven typed-array element carrier. Add a concrete parameter \
-                         annotation or avoid runtime before/after annotations for this function.",
-                        func_def.name,
-                        idx + 1
-                    ),
-                    location: Some(self.span_to_source_location(param.span())),
-                })?;
-
-            match resolved.as_ref() {
-                Some(prev) if prev != &annotation => {
-                    return Err(ShapeError::SemanticError {
-                        message: format!(
-                            "cannot build annotation args for function '{}': parameters have \
-                             heterogeneous element types. Runtime annotation args require a \
-                             single statically proven element type.",
-                            func_def.name
-                        ),
-                        location: Some(self.span_to_source_location(param.span())),
-                    });
-                }
-                Some(_) => {}
-                None => resolved = Some(annotation),
-            }
-        }
-
-        resolved.ok_or_else(|| ShapeError::RuntimeError {
-            message: format!(
-                "Internal error: annotation arg element type for '{}' was not resolved",
-                func_def.name
-            ),
-            location: None,
-        })
-    }
-
-    fn annotation_arg_array_kind(
-        &self,
-        func_def: &FunctionDef,
-        impl_idx: u16,
-    ) -> Result<crate::compiler::v2_typed_emission::TypedArrayKind> {
-        use crate::compiler::v2_typed_emission::{
-            TypedArrayKind, should_use_typed_array_from_slot_kind,
-        };
-        use shape_ast::ast::TypeAnnotation;
-        use shape_value::HeapKind;
-
-        if func_def.params.is_empty() {
-            return Ok(TypedArrayKind::I64);
-        }
-
-        let impl_hints = self
-            .program
-            .function_local_storage_hints
-            .get(impl_idx as usize);
-        let mut resolved = None;
-        for (idx, param) in func_def.params.iter().enumerate() {
-            let kind = impl_hints
-                .and_then(|hints| hints.get(idx).copied())
-                .and_then(|hint| match hint {
-                    shape_value::NativeKind::Ptr(HeapKind::TypedArray) => {
-                        Some(TypedArrayKind::TypedArray)
-                    }
-                    other => should_use_typed_array_from_slot_kind(other),
-                })
-                .or_else(|| {
-                    let ann = self.annotation_param_type_annotation(func_def, idx, param)?;
-                    let array_ann = TypeAnnotation::Array(Box::new(ann.clone()));
-                    self.resolve_typed_array_kind_from_annotation(&array_ann)
-                })
-                .ok_or_else(|| ShapeError::SemanticError {
-                    message: format!(
-                        "cannot build annotation args for function '{}': parameter #{} has no \
-                         statically proven typed-array element carrier. Add a concrete parameter \
-                         annotation or avoid runtime before/after annotations for this function.",
-                        func_def.name,
-                        idx + 1
-                    ),
-                    location: Some(self.span_to_source_location(param.span())),
-                })?;
-
-            match resolved {
-                Some(prev) if prev != kind => {
-                    return Err(ShapeError::SemanticError {
-                        message: format!(
-                            "cannot build annotation args for function '{}': parameters have \
-                             heterogeneous storage carriers. Runtime annotation args require a \
-                             single statically proven typed-array element carrier.",
-                            func_def.name
-                        ),
-                        location: Some(self.span_to_source_location(param.span())),
-                    });
-                }
-                Some(_) => {}
-                None => resolved = Some(kind),
-            }
-        }
-
-        Ok(resolved.expect("non-empty params set a kind"))
-    }
-
-    fn emit_annotation_args_array(
-        &mut self,
-        func_def: &FunctionDef,
-        wrapper_ref_params: &[bool],
-        impl_idx: u16,
-    ) -> Result<()> {
-        let kind = self.annotation_arg_array_kind(func_def, impl_idx)?;
-        self.emit(Instruction::new(
-            kind.new_opcode(),
-            Some(Operand::Count(func_def.params.len() as u16)),
-        ));
-        for (i, _param) in func_def.params.iter().enumerate() {
-            self.emit(Instruction::simple(OpCode::Dup));
-            if wrapper_ref_params.get(i).copied().unwrap_or(false) {
-                self.emit(Instruction::new(
-                    OpCode::DerefLoad,
-                    Some(Operand::Local(i as u16)),
-                ));
-            } else {
-                self.emit(Instruction::new(
-                    OpCode::LoadLocal,
-                    Some(Operand::Local(i as u16)),
-                ));
-            }
-            self.emit(Instruction::simple(kind.push_opcode()));
-        }
-        Ok(())
     }
 
     pub(super) fn emit_annotation_lifecycle_calls(&mut self, func_def: &FunctionDef) -> Result<()> {
@@ -1077,20 +1563,34 @@ impl BytecodeCompiler {
         );
         let mut removed = false;
         let mut pending_original_body_shadow = None;
+        // ADR-009 C3 #14 (slice 2, S2b): the per-target hook-install
+        // accumulator — installs from EVERY handler run on this target
+        // accumulate here in application order (the
+        // `pending_original_body_shadow` threading pattern: a local threaded
+        // as a parameter, never ambient state). S2c materializes the weave
+        // ONCE from this accumulator after the last handler, wrapping the
+        // final (possibly replace-body-edited) def; S2b stops at staged
+        // installs + the journaled registry rows the apply seam wrote.
+        let mut staged_hook_installs: Vec<StagedHookInstall> = Vec::new();
         let annotations = func_def.annotations.clone();
 
         // Phase 1: comptime pre
         for ann in &annotations {
             if let Some((_, compiled)) = self.lookup_compiled_annotation(ann) {
                 if let Some(handler) = compiled.comptime_pre_handler {
+                    // ADR-009 C3 #14 (slice 4): the def-param carrier reads
+                    // the FULL param definitions (declared types ride along).
+                    let def_params =
+                        handler_resolution::annotation_def_params(&compiled.param_defs);
                     if self.execute_function_comptime_handler(
                         ann,
                         &handler,
-                        &compiled.param_names,
+                        &def_params,
                         func_def,
                         inferred_reference_optimizations,
                         &mut pending_original_body_shadow,
                         replacement_body_origin,
+                        &mut staged_hook_installs,
                     )? {
                         removed = true;
                         break;
@@ -1101,29 +1601,55 @@ impl BytecodeCompiler {
 
         // Phase 2: comptime post
         if !removed {
-            for ann in &annotations {
+            'post: for ann in &annotations {
                 if let Some((_, compiled)) = self.lookup_compiled_annotation(ann) {
-                    if let Some(handler) = compiled.comptime_post_handler {
-                        // Propagate the SAME `replace body` provenance out-param as
-                        // phase 1: both handler phases route through the one shared
-                        // `process_comptime_directives_for_function`, which is where
-                        // a `replace body` directive is processed and its
-                        // replacement origin recorded. A `replace body` is a
-                        // post-handler directive today, but the directive processor
-                        // is shared, so both phases must surface it uniformly — a
-                        // discard here would silently drop the D6 gate's provenance
-                        // for the one phase that actually emits it.
+                    // Propagate the SAME `replace body` provenance out-param as
+                    // phase 1: both handler phases route through the one shared
+                    // `process_comptime_directives_for_function`, which is where
+                    // a `replace body` directive is processed and its
+                    // replacement origin recorded. A `replace body` is a
+                    // post-handler directive today, but the directive processor
+                    // is shared, so both phases must surface it uniformly — a
+                    // discard here would silently drop the D6 gate's provenance
+                    // for the one phase that actually emits it.
+                    let def_params =
+                        handler_resolution::annotation_def_params(&compiled.param_defs);
+                    // ADR-009 C3 #14 (slice 4, S4c): the user comptime post
+                    // handler runs FIRST, then the sugar lowering's
+                    // SYNTHESIZED public-API handler (a TypedConfig
+                    // definition's declarative hooks) — coexistence is
+                    // allowed and ordered, matching the handler-map append
+                    // order both pre-pass provenances use.
+                    // S4c: the MINTED sugar body fns join the AST fn table
+                    // (module-scope-shaped, C3-G3) before the handlers run,
+                    // so the mono cache (`ensure_monomorphic_function`) can
+                    // record + specialize them — the SAME `function_defs`
+                    // contract hand-written and imported body fns already
+                    // ride. Names are hygienic/unspellable (no user
+                    // collision, unreachable from user code); `or_insert`
+                    // keeps nested/re-entrant handler runs idempotent.
+                    for def in &compiled.sugar_body_fns {
+                        self.function_defs
+                            .entry(def.name.clone())
+                            .or_insert_with(|| def.clone());
+                    }
+                    let post_handlers = [
+                        compiled.comptime_post_handler.clone(),
+                        compiled.sugar_post_handler.clone(),
+                    ];
+                    for handler in post_handlers.into_iter().flatten() {
                         if self.execute_function_comptime_handler(
                             ann,
                             &handler,
-                            &compiled.param_names,
+                            &def_params,
                             func_def,
                             inferred_reference_optimizations,
                             &mut pending_original_body_shadow,
                             replacement_body_origin,
+                            &mut staged_hook_installs,
                         )? {
                             removed = true;
-                            break;
+                            break 'post;
                         }
                     }
                 }
@@ -1134,14 +1660,28 @@ impl BytecodeCompiler {
             self.finalize_pending_original_body_shadow(pending)?;
         }
 
+        // ADR-009 C3 #14 (slice 2, S2c): materialize the accumulated hook
+        // installs ONCE, after the target's LAST handler + body directives
+        // (and after a `replace body`'s original-body shadow finalized above,
+        // so the weave wraps the FINAL — possibly replace-body-edited — def):
+        // move the final body under the journaled hygienic weave shadow,
+        // compile the shadow through the ordinary pipeline, and swap the
+        // generated typed-AST wrapper into `func_def`, which then continues
+        // through `compile_function_inner`'s ordinary tail (bytecode AND MIR
+        // from the same wrapped definition — the C3-G6 SMALL shape). See
+        // `template_specialization::weave` for the full contract.
+        if !removed && !staged_hook_installs.is_empty() {
+            self.materialize_hook_template_weave(func_def, &staged_hook_installs)?;
+        }
         Ok(removed)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn execute_function_comptime_handler(
         &mut self,
         annotation: &shape_ast::ast::Annotation,
         handler: &shape_ast::ast::AnnotationHandler,
-        annotation_def_param_names: &[String],
+        annotation_def_params: &[(String, Option<TypeAnnotation>)],
         func_def: &mut FunctionDef,
         inferred_reference_optimizations: &[Option<ParamPassMode>],
         pending_original_body_shadow: &mut Option<PendingOriginalBodyShadow>,
@@ -1149,6 +1689,9 @@ impl BytecodeCompiler {
         // arm, which records the REPLACEMENT's node-borne provenance for the D6
         // gate (see `execute_comptime_handlers`).
         replacement_body_origin: &mut Option<GeneratedNodeOrigin>,
+        // ADR-009 C3 #14 (slice 2, S2b): threaded to the `InstallHookTemplate`
+        // apply seam (see `execute_comptime_handlers`).
+        staged_hook_installs: &mut Vec<StagedHookInstall>,
     ) -> Result<bool> {
         // Build the target object from the function definition
         let target = super::comptime_target::ComptimeTarget::from_function(func_def);
@@ -1175,7 +1718,7 @@ impl BytecodeCompiler {
             annotation,
             handler,
             target_value,
-            annotation_def_param_names,
+            annotation_def_params,
             &const_bindings,
             // Function target: no representation authority (Dec 56).
             None,
@@ -1204,6 +1747,8 @@ impl BytecodeCompiler {
             inferred_reference_optimizations,
             pending_original_body_shadow,
             replacement_body_origin,
+            &annotation.name,
+            staged_hook_installs,
         )
         .map_err(|e| {
             // ADR-009 D1 (S4): provenance-carrying generated-decl failures
@@ -1227,7 +1772,10 @@ impl BytecodeCompiler {
         annotation: &shape_ast::ast::Annotation,
         handler: &shape_ast::ast::AnnotationHandler,
         target_value: KindedSlot,
-        annotation_def_param_names: &[String],
+        // ADR-009 C3 #14 (slice 4): `(name, declared type annotation)` pairs
+        // (`handler_resolution::annotation_def_params`); legacy defs carry
+        // `None` throughout.
+        annotation_def_params: &[(String, Option<TypeAnnotation>)],
         const_bindings: &[(String, KindedSlot)],
         // ADR-009 B5 (Dec 56): the annotated type's frozen identity halves for
         // declaration-attached TYPE-target handlers; `None` for function /
@@ -1287,12 +1835,48 @@ impl BytecodeCompiler {
         // `overlay` — the SAME `Arc` used to stamp this target's `type_ref`
         // identities — not a freshly minted one, so the stamp and resolve share
         // one composite memo.
+        //
+        // ADR-009 C3 #14 (slice 2): the hook-template body-fn lookup — the
+        // SAME AST fn table `collect_authorized_comptime_helpers` reads
+        // (`self.function_defs`; bare name first, then qualified under the
+        // handler's defining module), threaded as a PARAMETER into the
+        // executor's emit-side rewrite. Never ambient state.
+        //
+        // S4c: the annotation's STORED sugar body fns (installer-attached to
+        // the `CompiledAnnotation` carrier) resolve FIRST — this is how the
+        // synthesized sugar post handler reaches its minted hook bodies at
+        // pass-2 (hygienic names — no user fn can collide).
+        let sugar_body_fns: Vec<FunctionDef> = self
+            .lookup_compiled_annotation(annotation)
+            .map(|(_, compiled)| compiled.sugar_body_fns)
+            .unwrap_or_default();
+        let function_defs = &self.function_defs;
+        let template_body_fn_lookup = move |name: &str| -> Option<FunctionDef> {
+            sugar_body_fns
+                .iter()
+                .find(|def| def.name == name)
+                .cloned()
+                .or_else(|| function_defs.get(name).cloned())
+                .or_else(|| {
+                    defining_module_path.and_then(|module| {
+                        function_defs
+                            .get(&Self::qualify_module_symbol(module, name))
+                            .cloned()
+                    })
+                })
+        };
+        // ADR-009 C3 #14 (slice 5, S5a) — the [C0931] Dec-65 config-arg
+        // pre-check at the authoritative pass-2 seam (the pre-pass seams
+        // check too; module bindings registered between phases make this
+        // one the totality anchor). Injected specialization
+        // `const_bindings` are exempt by name.
+        self.reject_runtime_module_binding_config_args(annotation, const_bindings)?;
         let execution = super::comptime::execute_comptime_with_annotation_handler(
             &handler.body,
             &handler.params,
             target_value,
             &annotation.args,
-            annotation_def_param_names,
+            annotation_def_params,
             const_bindings,
             &comptime_helpers,
             &extensions,
@@ -1304,6 +1888,7 @@ impl BytecodeCompiler {
             // ADR-009 B5 (Dec 56): forward the caller-supplied type identity
             // (Some for a declaration-attached type-target hook; None otherwise).
             access_identity,
+            &template_body_fn_lookup,
         )
         .map_err(|e| self.build_comptime_failure(&e, handler_span, &context))?;
         // §4.4: re-emit any `warning()` output anchored at this handler site.
@@ -1716,6 +2301,16 @@ impl BytecodeCompiler {
                         Self::collect_scoped_names_in_expr(elem, names);
                     }
                 }
+            }
+            // ADR-009 C3 #14 (slice 5, S5b): a VALUE-position install-family
+            // reference (`let f = before_hook`) is recorded under the
+            // unspellable [`INSTALL_FAMILY_VALUE_MARK`] so the static C3-G8
+            // scan sees it (P-G8d measured that shape SILENT on a generic
+            // target). The mark can never resolve in any fn table, so
+            // helper collection is byte-equivalent to before; every OTHER
+            // identifier stays uncollected (the pre-S5b leaf behavior).
+            Expr::Identifier(name, _) if Self::is_install_family_name(name) => {
+                names.insert(format!("{INSTALL_FAMILY_VALUE_MARK}{name}"));
             }
             Expr::Literal(..)
             | Expr::Identifier(..)
@@ -2268,6 +2863,35 @@ impl BytecodeCompiler {
                             .as_deref()
                             .and_then(|name| freeze.identity_of(name))
                             .map(|identity| (identity.high, identity.low));
+                        // ADR-009 C3 #14 (slice 2): the hook-template body-fn
+                        // lookup (same table, threaded as a parameter; a
+                        // pre-pass miss defers to pass-2 like every other
+                        // pre-pass limitation below).
+                        //
+                        // S4c: entry-minted sugar body fns resolve FIRST.
+                        let function_defs = &self.function_defs;
+                        let sugar_body_fns = &entry.sugar_body_fns;
+                        let template_body_fn_lookup =
+                            move |name: &str| -> Option<FunctionDef> {
+                                sugar_body_fns
+                                    .iter()
+                                    .find(|def| def.name == name)
+                                    .cloned()
+                                    .or_else(|| function_defs.get(name).cloned())
+                                    .or_else(|| {
+                                        function_defs
+                                            .get(&Self::qualify_module_symbol(
+                                                handler_module_path,
+                                                name,
+                                            ))
+                                            .cloned()
+                                    })
+                            };
+                        // ADR-009 C3 #14 (slice 5, S5a) — the [C0931]
+                        // Dec-65 config-arg pre-check: Err BEFORE execution
+                        // so the pre-pass-limitation swallow below cannot
+                        // eat it.
+                        self.reject_runtime_module_binding_config_args(ann, &[])?;
                         let prev_suppressed =
                             super::comptime_builtins::set_comptime_output_suppressed(true);
                         let execution_result =
@@ -2276,7 +2900,7 @@ impl BytecodeCompiler {
                                 &handler.params,
                                 target_value,
                                 &ann.args,
-                                &entry.def_param_names,
+                                &entry.def_params,
                                 &[],
                                 &helpers,
                                 &extensions,
@@ -2286,6 +2910,7 @@ impl BytecodeCompiler {
                                 trait_impls.clone(),
                                 freeze,
                                 access_identity,
+                                &template_body_fn_lookup,
                             );
                         super::comptime_builtins::set_comptime_output_suppressed(prev_suppressed);
                         let mut execution = match execution_result {
@@ -2442,6 +3067,15 @@ impl BytecodeCompiler {
                                     // substitution formerly lived here.
                                     vec![Item::Extend(extend, expansion_site.application_span())]
                                 }
+                                // ADR-009 C3 #14 (slice 2, S2b): documented
+                                // PRE-PASS no-op — an `install(...)` directive
+                                // applies at the authoritative pass-2 consumer
+                                // only (never double-install; a non-function
+                                // target's install is ALSO pass-2's named
+                                // rejection, `process_comptime_directives`).
+                                super::comptime_builtins::ComptimeDirective::InstallHookTemplate {
+                                    ..
+                                } => continue,
                                 _ => continue,
                             };
                             // ADR-009 D1 (S2), rejection row 1: generated decls
@@ -3334,6 +3968,16 @@ impl BytecodeCompiler {
                         "`replace module` directives are only valid when compiling module targets",
                     ));
                 }
+                // ADR-009 C3 #14 (slice 2, S2b): a hook template installs
+                // onto a FUNCTION's before/after seam; this consumer compiles
+                // type targets — named rejection with the positive twin.
+                super::comptime_builtins::ComptimeDirective::InstallHookTemplate { .. } => {
+                    return Err(Self::directive_error(
+                        "`install` directives are only valid when compiling function targets \
+                         (a hook template attaches to a function's before/after seam); apply \
+                         the installing annotation to a function",
+                    ));
+                }
             }
         }
         Ok(removed)
@@ -3349,35 +3993,6 @@ impl BytecodeCompiler {
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
         func_name.hash(&mut hasher);
         self.mint_hygienic_fn_name_stable(HygienicRole::OriginalBodyShadow, hasher.finish())
-    }
-
-    /// ADR-009 E3 (S4, U11): the unspellable HYGIENIC registry name of the
-    /// before/after wrapped ORIGINAL body of `func_name` (former
-    /// `{func_name}___impl`). The nonce is a stable digest of `func_name`, so
-    /// the body re-registers idempotently (one impl body per annotated function
-    /// — `register_function` dedups by name) instead of minting a fresh orphan
-    /// on recompile. Unspellable, so a user function literally named
-    /// `{func_name}___impl` neither collides with nor resolves to this slot
-    /// (rejection-matrix rows 1/2).
-    fn annotation_hook_impl_name(&self, func_name: &str) -> String {
-        use std::hash::{Hash, Hasher};
-        let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        func_name.hash(&mut hasher);
-        self.mint_hygienic_fn_name_stable(HygienicRole::AnnotationHookImplBody, hasher.finish())
-    }
-
-    /// ADR-009 E3 (S4, U11): the unspellable HYGIENIC registry name of an
-    /// intermediate before/after chain wrapper (former
-    /// `{func_name}___{ann_name}`). The nonce is a stable digest of BOTH the
-    /// annotated function name and the wrapping annotation name, so a function
-    /// carrying several annotations gets one distinct, idempotent wrapper per
-    /// annotation. Unspellable (rejection-matrix rows 1/2).
-    fn annotation_hook_wrapper_name(&self, func_name: &str, ann_name: &str) -> String {
-        use std::hash::{Hash, Hasher};
-        let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        func_name.hash(&mut hasher);
-        ann_name.hash(&mut hasher);
-        self.mint_hygienic_fn_name_stable(HygienicRole::AnnotationHookWrapper, hasher.finish())
     }
 
     /// ADR-009 E3 (S3, U11): build the typed `ctx.original` capability. The
@@ -3403,6 +4018,7 @@ impl BytecodeCompiler {
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn process_comptime_directives_for_function(
         &mut self,
         directives: Vec<super::comptime_builtins::ComptimeDirective>,
@@ -3415,8 +4031,31 @@ impl BytecodeCompiler {
         // REPLACEMENT's node-borne provenance so the D6 gate authenticates the
         // swapped body (see `execute_comptime_handlers`).
         replacement_body_origin: &mut Option<GeneratedNodeOrigin>,
+        // ADR-009 C3 #14 (slice 2, S2b): the installing annotation's name
+        // (origin, parameter-threaded — never ambient) for the
+        // `InstallHookTemplate` apply seam's attribution + registry row.
+        annotation_name: &str,
+        // ADR-009 C3 #14 (slice 2, S2b): the per-target hook-install
+        // accumulator (the `pending_original_body_shadow` threading pattern —
+        // a parameter owned by `execute_comptime_handlers`, never ambient
+        // state). Installs ACCUMULATE across the target's annotations in
+        // application order; the weave materializes ONCE after the last
+        // handler (S2c — this stage stops at staged installs + registry).
+        staged_hook_installs: &mut Vec<StagedHookInstall>,
     ) -> Result<bool> {
         let mut removed = false;
+        // ADR-009 C3 #14 (fix-round-1): SNAPSHOT-resolve every install
+        // handle BEFORE any directive applies — applying a directive below
+        // (a polymorphic `specialize_template`'s nested `compile_function`,
+        // an `ExtendItems` compile) can trigger a NESTED annotation-handler
+        // run that clears + repopulates the per-run execute-populated
+        // stores, so a LATER install's lazy index resolution would read
+        // across store generations (miss → misdiagnosed internal error;
+        // repopulated store → the WRONG template installed silently). Same
+        // snapshot discipline `take_comptime_directives` applies to the
+        // directive buffer, extended to the handles the directives carry.
+        let mut resolved_install_templates =
+            self.snapshot_install_hook_template_handles(&directives, site)?;
         for directive in directives {
             match directive {
                 super::comptime_builtins::ComptimeDirective::Extend(extend) => {
@@ -3431,6 +4070,12 @@ impl BytecodeCompiler {
                     // `replace body` provenance too (the D6 gate is skipped for
                     // removed functions, but keep the out-param consistent).
                     *replacement_body_origin = None;
+                    // ADR-009 C3 #14 (slice 2, S2b): a removed target weaves
+                    // nothing — drop its staged hook installs and their
+                    // registry rows (a row for a never-woven install would
+                    // misreport; the journaled length-undo stays correct).
+                    staged_hook_installs.clear();
+                    self.discard_hook_install_rows_for_target(&func_def.name);
                     removed = true;
                     break;
                 }
@@ -3567,6 +4212,37 @@ impl BytecodeCompiler {
                         "`replace module` directives are only valid when compiling module targets",
                     ));
                 }
+                super::comptime_builtins::ComptimeDirective::InstallHookTemplate { .. } => {
+                    // ADR-009 C3 #14 (slice 2, S2b): the AUTHORITATIVE apply
+                    // seam — pop the SNAPSHOT-resolved handle (fix-round-1:
+                    // resolved at loop entry, never a live store read here),
+                    // run the G8/driver rejections, compose
+                    // `specialize_template` with the ALREADY-OPEN C2 install
+                    // transaction (`compile_in_place`,
+                    // compiler_impl_reference_model.rs:1985-1996, opens the
+                    // journal at :1986 BEFORE the inner driver this consumer
+                    // runs inside — E1-D6b, never a second transaction), bind
+                    // the capture plan, stage the install on the per-target
+                    // accumulator, and write one journaled registry row. Full
+                    // sequence + rationale:
+                    // `template_specialization::install_registry` module docs.
+                    let bound = resolved_install_templates.pop_front().ok_or_else(|| {
+                        ShapeError::RuntimeError {
+                            message: "internal error: InstallHookTemplate directive without a \
+                                      snapshot-resolved template (the batch snapshot resolves \
+                                      one per install directive at loop entry)"
+                                .to_string(),
+                            location: None,
+                        }
+                    })?;
+                    self.apply_install_hook_template(
+                        &bound,
+                        annotation_name,
+                        func_def,
+                        site,
+                        staged_hook_installs,
+                    )?;
+                }
             }
         }
         Ok(removed)
@@ -3669,1019 +4345,6 @@ impl BytecodeCompiler {
                 func_def.name_span,
             )?;
         }
-        Ok(())
-    }
-
-    /// Find ALL compiled annotations with before/after handlers on self function.
-    /// Returns them in declaration order (first annotation = outermost wrapper).
-    pub(super) fn find_compiled_annotations(
-        &self,
-        func_def: &FunctionDef,
-    ) -> Vec<crate::bytecode::CompiledAnnotation> {
-        let mut result = Vec::new();
-        for ann in &func_def.annotations {
-            if let Some((_, compiled)) = self.lookup_compiled_annotation(ann) {
-                if compiled.before_handler.is_some() || compiled.after_handler.is_some() {
-                    result.push(compiled.clone());
-                }
-            }
-        }
-        result
-    }
-
-    /// Compile a function with multiple chained annotations.
-    ///
-    /// For `@a @b function foo(x) { body }`:
-    /// 1. Compile original body as `foo___impl`
-    /// 2. Wrap with `@b`: compile wrapper as `foo___b` calling `foo___impl`
-    /// 3. Wrap with `@a`: compile wrapper as `foo` calling `foo___b`
-    ///
-    /// Annotations are applied inside-out: last annotation wraps first.
-    pub(super) fn compile_chained_annotations(
-        &mut self,
-        func_def: &FunctionDef,
-        annotations: Vec<crate::bytecode::CompiledAnnotation>,
-        inferred_reference_optimizations: &[Option<ParamPassMode>],
-        effective_pass_modes: &[ParamPassMode],
-    ) -> Result<()> {
-        assert_eq!(
-            func_def.params.len(),
-            inferred_reference_optimizations.len(),
-            "runtime annotation provenance must stay slot-aligned"
-        );
-        assert_eq!(
-            func_def.params.len(),
-            effective_pass_modes.len(),
-            "runtime annotation pass modes must stay slot-aligned"
-        );
-        // Step 1: Compile the raw function body as a hygienic impl-body slot
-        // (former user-spellable `{name}___impl`, ADR-009 E3 S4/U11).
-        let impl_name = self.annotation_hook_impl_name(&func_def.name);
-        let impl_def = FunctionDef {
-            name: impl_name.clone(),
-            name_span: func_def.name_span,
-            declaring_module_path: func_def.declaring_module_path.clone(),
-            doc_comment: None,
-            params: func_def.params.clone(),
-            return_type: func_def.return_type.clone(),
-            body: func_def.body.clone(),
-            type_params: func_def.type_params.clone(),
-            annotations: Vec::new(),
-            where_clause: func_def.where_clause.clone(),
-            is_async: func_def.is_async,
-            is_comptime: func_def.is_comptime,
-        };
-        self.register_function(&impl_def)?;
-        let impl_idx = self
-            .find_function(&impl_name)
-            .ok_or_else(|| ShapeError::RuntimeError {
-                message: format!("Impl function '{}' not found after registration", impl_name),
-                location: None,
-            })?;
-        self.refresh_authoritative_emission_metadata(
-            impl_idx,
-            &impl_def,
-            &func_def.name,
-            effective_pass_modes,
-        )?;
-        self.with_body_analysis_authority(impl_idx, func_def, &impl_def, |compiler| {
-            compiler.compile_function_body_with_inferred_reference_optimizations(
-                &impl_def,
-                inferred_reference_optimizations,
-            )
-        })?;
-
-        let mut current_impl_idx = impl_idx as u16;
-
-        // Step 2: Apply annotations inside-out (last annotation wraps first)
-        // For @a @b @c: wrap order is c(impl) -> b(c_wrapper) -> a(b_wrapper)
-        let reversed: Vec<_> = annotations.into_iter().rev().collect();
-        let total = reversed.len();
-
-        for (i, ann) in reversed.into_iter().enumerate() {
-            let is_last = i == total - 1;
-            let wrapper_name = if is_last {
-                // The outermost annotation gets the original function name
-                func_def.name.clone()
-            } else {
-                // Intermediate wrappers get unspellable hygienic names (former
-                // user-spellable `{name}___{annotation}`, ADR-009 E3 S4/U11).
-                self.annotation_hook_wrapper_name(&func_def.name, &ann.name)
-            };
-
-            // Find the annotation arg expressions from the original function def
-            let ann_arg_exprs =
-                self.annotation_args_for_compiled_name(&func_def.annotations, &ann.name);
-
-            // Register the intermediate wrapper function (outermost already registered)
-            let wrapper_func_idx = if is_last {
-                self.find_function(&func_def.name)
-                    .ok_or_else(|| ShapeError::RuntimeError {
-                        message: format!("Function '{}' not found", func_def.name),
-                        location: None,
-                    })?
-            } else {
-                // Create a placeholder function entry for the intermediate wrapper
-                let wrapper_def = FunctionDef {
-                    name: wrapper_name.clone(),
-                    name_span: func_def.name_span,
-                    declaring_module_path: func_def.declaring_module_path.clone(),
-                    doc_comment: None,
-                    params: func_def.params.clone(),
-                    return_type: func_def.return_type.clone(),
-                    body: Vec::new(), // placeholder
-                    type_params: func_def.type_params.clone(),
-                    annotations: Vec::new(),
-                    is_async: func_def.is_async,
-                    is_comptime: func_def.is_comptime,
-                    where_clause: None,
-                };
-                self.register_function(&wrapper_def)?;
-                self.find_function(&wrapper_name)
-                    .expect("function was just registered")
-            };
-
-            // Compile the wrapper that wraps current_impl_idx with self annotation
-            self.compile_annotation_wrapper(
-                func_def,
-                wrapper_func_idx,
-                current_impl_idx,
-                &ann,
-                &ann_arg_exprs,
-            )?;
-
-            current_impl_idx = wrapper_func_idx as u16;
-        }
-
-        Ok(())
-    }
-
-    /// Compile a function that has a single before/after annotation hook.
-    ///
-    /// 1. Compile original body as `{name}___impl`
-    /// 2. Compile a wrapper under the original name that calls before/impl/after
-    pub(super) fn compile_wrapped_function(
-        &mut self,
-        func_def: &FunctionDef,
-        compiled_ann: crate::bytecode::CompiledAnnotation,
-        inferred_reference_optimizations: &[Option<ParamPassMode>],
-        effective_pass_modes: &[ParamPassMode],
-    ) -> Result<()> {
-        assert_eq!(
-            func_def.params.len(),
-            inferred_reference_optimizations.len(),
-            "runtime annotation provenance must stay slot-aligned"
-        );
-        assert_eq!(
-            func_def.params.len(),
-            effective_pass_modes.len(),
-            "runtime annotation pass modes must stay slot-aligned"
-        );
-        // Find the annotation on the function to get the arg expressions
-        let ann = func_def
-            .annotations
-            .iter()
-            .find(|a| self.annotation_matches_compiled_name(a, &compiled_ann.name))
-            .ok_or_else(|| ShapeError::RuntimeError {
-                message: format!("Annotation '{}' not found on function", compiled_ann.name),
-                location: None,
-            })?;
-        let ann_arg_exprs = ann.args.clone();
-
-        // Step 1: Compile original body into a hygienic impl-body slot (former
-        // user-spellable `{name}___impl`, ADR-009 E3 S4/U11).
-        let impl_name = self.annotation_hook_impl_name(&func_def.name);
-        let impl_def = FunctionDef {
-            name: impl_name.clone(),
-            name_span: func_def.name_span,
-            declaring_module_path: func_def.declaring_module_path.clone(),
-            doc_comment: None,
-            params: func_def.params.clone(),
-            return_type: func_def.return_type.clone(),
-            body: func_def.body.clone(),
-            type_params: func_def.type_params.clone(),
-            annotations: Vec::new(),
-            where_clause: func_def.where_clause.clone(),
-            is_async: func_def.is_async,
-            is_comptime: func_def.is_comptime,
-        };
-        self.register_function(&impl_def)?;
-        let impl_idx = self
-            .find_function(&impl_name)
-            .ok_or_else(|| ShapeError::RuntimeError {
-                message: format!("Impl function '{}' not found after registration", impl_name),
-                location: None,
-            })?;
-        self.refresh_authoritative_emission_metadata(
-            impl_idx,
-            &impl_def,
-            &func_def.name,
-            effective_pass_modes,
-        )?;
-        self.with_body_analysis_authority(impl_idx, func_def, &impl_def, |compiler| {
-            compiler.compile_function_body_with_inferred_reference_optimizations(
-                &impl_def,
-                inferred_reference_optimizations,
-            )
-        })?;
-
-        // Step 2: Compile the wrapper
-        let func_idx =
-            self.find_function(&func_def.name)
-                .ok_or_else(|| ShapeError::RuntimeError {
-                    message: format!("Function '{}' not found", func_def.name),
-                    location: None,
-                })?;
-
-        self.compile_annotation_wrapper(
-            func_def,
-            func_idx,
-            impl_idx as u16,
-            &compiled_ann,
-            &ann_arg_exprs,
-        )
-    }
-
-    /// §4.1.5 runtime-hook `ctx` type. Field order MUST match the ctx object
-    /// schema built in `compile_annotation_wrapper` (`target`, `state`,
-    /// `event_log`) so typed field access resolves the right offsets. `target`
-    /// is typed as a function value carrying the annotated function's exact
-    /// signature, so `ctx.target(...)` is an ordinary typed call and passing
-    /// `ctx.target` to a builtin carries its type.
-    fn annotation_ctx_type_annotation(&self, func_def: &FunctionDef) -> TypeAnnotation {
-        let target_params: Vec<shape_ast::ast::types::FunctionParam> = func_def
-            .params
-            .iter()
-            .map(|p| shape_ast::ast::types::FunctionParam {
-                name: p.simple_name().map(|s| s.to_string()),
-                optional: false,
-                type_annotation: p
-                    .type_annotation
-                    .clone()
-                    .unwrap_or_else(|| TypeAnnotation::Basic("unknown".to_string())),
-            })
-            .collect();
-        let target_returns = func_def.return_type.clone().unwrap_or(TypeAnnotation::Void);
-        TypeAnnotation::Object(vec![
-            shape_ast::ast::ObjectTypeField {
-                name: "target".to_string(),
-                optional: false,
-                type_annotation: TypeAnnotation::Function {
-                    params: target_params,
-                    returns: Box::new(target_returns),
-                },
-                annotations: vec![],
-            },
-            shape_ast::ast::ObjectTypeField {
-                name: "state".to_string(),
-                optional: false,
-                type_annotation: TypeAnnotation::Basic("unknown".to_string()),
-                annotations: vec![],
-            },
-            shape_ast::ast::ObjectTypeField {
-                name: "event_log".to_string(),
-                optional: false,
-                type_annotation: TypeAnnotation::Array(Box::new(TypeAnnotation::Basic(
-                    "unknown".to_string(),
-                ))),
-                annotations: vec![],
-            },
-        ])
-    }
-
-    fn annotation_result_type_annotation(&self, func_def: &FunctionDef) -> TypeAnnotation {
-        if let Some(annotation) = func_def.return_type.as_ref() {
-            if !Self::annotation_type_is_unknown(annotation) {
-                return annotation.clone();
-            }
-        }
-
-        if let Some(shape_runtime::type_system::Type::Function { returns, .. }) =
-            self.inference_facts.function_signature(&func_def.name)
-            && let Some(annotation) = returns.to_annotation()
-            && !Self::annotation_type_is_unknown(&annotation)
-        {
-            return annotation;
-        }
-
-        TypeAnnotation::Void
-    }
-
-    fn annotation_literal_type_annotation(literal: &Literal) -> Option<TypeAnnotation> {
-        let name = match literal {
-            Literal::Int(_) => "int",
-            Literal::UInt(_) => "u64",
-            Literal::TypedInt(_, width) => match width {
-                shape_ast::IntWidth::I8 => "i8",
-                shape_ast::IntWidth::U8 => "u8",
-                shape_ast::IntWidth::I16 => "i16",
-                shape_ast::IntWidth::U16 => "u16",
-                shape_ast::IntWidth::I32 => "i32",
-                shape_ast::IntWidth::U32 => "u32",
-                shape_ast::IntWidth::U64 => "u64",
-            },
-            Literal::Number(_) => "number",
-            Literal::Decimal(_) => "decimal",
-            Literal::String(_) | Literal::FormattedString { .. } => "string",
-            Literal::Char(_) => "char",
-            Literal::Bool(_) => "bool",
-            Literal::None => "null",
-            Literal::Unit => "void",
-            Literal::Timeframe(_) => "timeframe",
-        };
-        Some(TypeAnnotation::Basic(name.to_string()))
-    }
-
-    fn annotation_expr_type_annotation(&mut self, expr: &Expr) -> Option<TypeAnnotation> {
-        if let Expr::Literal(literal, _) = expr {
-            return Self::annotation_literal_type_annotation(literal);
-        }
-
-        if let Ok(inferred) = self.infer_expr_type(expr)
-            && let Some(annotation) = inferred.to_annotation()
-            && !Self::annotation_type_is_unknown(&annotation)
-        {
-            return Some(annotation);
-        }
-
-        let concrete =
-            crate::compiler::monomorphization::type_resolution::concrete_type_for_expr(self, expr)?;
-        let annotation =
-            crate::compiler::expressions::closures::concrete_type_to_type_annotation(&concrete)?;
-        (!Self::annotation_type_is_unknown(&annotation)).then_some(annotation)
-    }
-
-    fn simple_annotation_parameter(
-        name: String,
-        type_annotation: Option<TypeAnnotation>,
-    ) -> shape_ast::ast::FunctionParameter {
-        shape_ast::ast::FunctionParameter {
-            pattern: DestructurePattern::Identifier(name, Span::DUMMY),
-            is_const: false,
-            is_reference: false,
-            is_mut_reference: false,
-            is_out: false,
-            type_annotation,
-            default_value: None,
-        }
-    }
-
-    fn compile_specialized_annotation_handler(
-        &mut self,
-        func_def: &FunctionDef,
-        _wrapper_func_idx: usize,
-        compiled_ann: &crate::bytecode::CompiledAnnotation,
-        handler: &shape_ast::ast::AnnotationHandler,
-        ann_arg_exprs: &[shape_ast::ast::Expr],
-    ) -> Result<u16> {
-        let mut params = vec![Self::simple_annotation_parameter(
-            "self".to_string(),
-            Some(TypeAnnotation::Basic("number".to_string())),
-        )];
-
-        let ann_param_count = compiled_ann.param_defs.len().max(ann_arg_exprs.len());
-        for idx in 0..ann_param_count {
-            let mut param = compiled_ann
-                .param_defs
-                .get(idx)
-                .cloned()
-                .unwrap_or_else(|| {
-                    let name = compiled_ann
-                        .param_names
-                        .get(idx)
-                        .cloned()
-                        .unwrap_or_else(|| format!("__ann_arg_{}", idx));
-                    Self::simple_annotation_parameter(name, None)
-                });
-            if param.type_annotation.is_none()
-                && let Some(expr) = ann_arg_exprs.get(idx)
-            {
-                param.type_annotation = self.annotation_expr_type_annotation(expr);
-            }
-            params.push(param);
-        }
-
-        let args_annotation = TypeAnnotation::Array(Box::new(
-            self.annotation_arg_array_element_annotation(func_def)?,
-        ));
-        let result_annotation = self.annotation_result_type_annotation(func_def);
-        let ctx_annotation = self.annotation_ctx_type_annotation(func_def);
-
-        for handler_param in &handler.params {
-            let type_annotation = match handler_param.name.as_str() {
-                "args" => Some(args_annotation.clone()),
-                "result" => Some(result_annotation.clone()),
-                "ctx" => Some(ctx_annotation.clone()),
-                _ => None,
-            };
-            params.push(Self::simple_annotation_parameter(
-                handler_param.name.clone(),
-                type_annotation,
-            ));
-        }
-
-        // ADR-009 E3 (S2, U10): the specialized runtime handler is a HYGIENIC
-        // generated function whose role is bound by its compiler-issued token
-        // — never the former `__ann_{name}_{before|after}_wrapper_{n}`
-        // spelling. The name enters the outer function table only to bridge
-        // `register_function` -> `find_function` -> the handler INDEX stored on
-        // the CompiledAnnotation; it is never resolved by users. The compiler
-        // nonce disambiguates before/after and every application so distinct
-        // handlers never share a slot name.
-        let func_name = self.mint_hygienic_fn_name(HygienicRole::SpecializedAnnotationHandler);
-        let declaring_module_path = compiled_ann
-            .name
-            .rsplit_once("::")
-            .map(|(module_path, _)| module_path.to_string());
-        let func_def = FunctionDef {
-            name: func_name.clone(),
-            // ADR-009 D1 (S3): the wrapper IS the compiled handler body, so
-            // it anchors at the handler definition — the generator's real
-            // span — never Span::DUMMY (Decision 68).
-            name_span: handler.span,
-            declaring_module_path: declaring_module_path.clone(),
-            doc_comment: None,
-            params,
-            return_type: handler.return_type.clone(),
-            body: vec![Statement::Return(
-                Some(handler.body.clone()),
-                handler.body.span(),
-            )],
-            type_params: Some(Vec::new()),
-            annotations: Vec::new(),
-            where_clause: None,
-            is_async: false,
-            is_comptime: false,
-        };
-
-        self.register_function(&func_def)?;
-        let func_idx = self
-            .find_function(&func_name)
-            .ok_or_else(|| ShapeError::RuntimeError {
-                message: format!(
-                    "Internal error: specialized annotation handler '{}' was not registered",
-                    func_name
-                ),
-                location: None,
-            })?;
-        if let Some(module_path) = declaring_module_path {
-            self.module_scope_stack.push(module_path);
-            let result = self.compile_function(&func_def);
-            self.module_scope_stack.pop();
-            result?;
-        } else {
-            self.compile_function(&func_def)?;
-        }
-        Ok(func_idx as u16)
-    }
-
-    fn specialize_annotation_runtime_handlers(
-        &mut self,
-        func_def: &FunctionDef,
-        wrapper_func_idx: usize,
-        compiled_ann: &crate::bytecode::CompiledAnnotation,
-        ann_arg_exprs: &[shape_ast::ast::Expr],
-    ) -> Result<crate::bytecode::CompiledAnnotation> {
-        let mut specialized = compiled_ann.clone();
-
-        if let Some(handler) = compiled_ann.before_handler_template.clone() {
-            specialized.before_handler = Some(self.compile_specialized_annotation_handler(
-                func_def,
-                wrapper_func_idx,
-                compiled_ann,
-                &handler,
-                ann_arg_exprs,
-            )?);
-        }
-
-        if let Some(handler) = compiled_ann.after_handler_template.clone() {
-            specialized.after_handler = Some(self.compile_specialized_annotation_handler(
-                func_def,
-                wrapper_func_idx,
-                compiled_ann,
-                &handler,
-                ann_arg_exprs,
-            )?);
-        }
-
-        Ok(specialized)
-    }
-
-    /// Core annotation wrapper compilation.
-    ///
-    /// Emits bytecode for a wrapper function at `wrapper_func_idx` that:
-    /// - Builds args array from function params
-    /// - Calls before(self, ...ann_params, args, ctx) if present
-    /// - Calls the impl function at `impl_idx` with (possibly modified) args
-    /// - Calls after(self, ...ann_params, args, result, ctx) if present
-    /// - Returns result
-    pub(super) fn compile_annotation_wrapper(
-        &mut self,
-        func_def: &FunctionDef,
-        wrapper_func_idx: usize,
-        impl_idx: u16,
-        compiled_ann: &crate::bytecode::CompiledAnnotation,
-        ann_arg_exprs: &[shape_ast::ast::Expr],
-    ) -> Result<()> {
-        let runtime_ann = self.specialize_annotation_runtime_handlers(
-            func_def,
-            wrapper_func_idx,
-            compiled_ann,
-            ann_arg_exprs,
-        )?;
-        let compiled_ann = &runtime_ann;
-
-        let jump_over = if self.current_function.is_none() {
-            Some(self.emit_jump(OpCode::Jump, 0))
-        } else {
-            None
-        };
-
-        let saved_function = self.current_function;
-        let saved_next_local = self.next_local;
-        let saved_locals = std::mem::take(&mut self.locals);
-        let saved_is_async = self.current_function_is_async;
-
-        self.current_function = Some(wrapper_func_idx);
-        self.current_function_is_async = func_def.is_async;
-        self.locals = vec![HashMap::new()];
-        self.type_tracker.clear_locals();
-        self.push_scope();
-        self.next_local = 0;
-
-        self.program.functions[wrapper_func_idx].entry_point = self.program.current_offset();
-
-        // Start blob builder for this wrapper function.
-        let saved_blob_builder = self.current_blob_builder.take();
-        let wrapper_blob_name = self.program.functions[wrapper_func_idx].name.clone();
-        self.current_blob_builder = Some(super::FunctionBlobBuilder::new(
-            wrapper_blob_name,
-            self.program.current_offset(),
-            self.program.constants.len(),
-            self.program.strings.len(),
-        ));
-
-        // Bind original function params as locals
-        for param in &func_def.params {
-            for name in param.get_identifiers() {
-                self.declare_local(&name)?;
-            }
-        }
-
-        // Declare locals for wrapper internal state
-        let args_local = self.declare_local("__args")?;
-        let result_local = self.declare_local("__result")?;
-        let ctx_local = self.declare_local("__ctx")?;
-
-        // --- Build args array from function params ---
-        // The wrapper function may have ref-inferred params (inherited from
-        // the original function definition). Callers emit MakeRef for those
-        // params, so local slots contain TAG_REF values. We must DerefLoad
-        // to get the actual values before putting them in the args array.
-        let wrapper_ref_params = self.program.functions[wrapper_func_idx].ref_params.clone();
-        self.emit_annotation_args_array(func_def, &wrapper_ref_params, impl_idx)?;
-        self.emit(Instruction::new(
-            OpCode::StoreLocal,
-            Some(Operand::Local(args_local)),
-        ));
-
-        // --- Build ctx object: { target: Function, state: {}, event_log: [] } ---
-        // Push fields in schema order: target, state, event_log.
-        // §4.1.5: `ctx.target` is a typed function value statically bound to
-        // the annotated function's ORIGINAL implementation (the same referent
-        // the `replace body` capability reaches through `ctx.original`). A
-        // runtime `before`/`after` hook reads it as an ordinary typed field and
-        // may call it or pass it on (WF-2C's `@remote` hard-depends on exactly
-        // this — no stringly `ctx["__impl"]` lookup).
-        let impl_ref_const = self
-            .program
-            .add_constant(Constant::Function(impl_idx as u16));
-        self.emit(Instruction::new(
-            OpCode::PushConst,
-            Some(Operand::Const(impl_ref_const)),
-        ));
-        // W17.2-C §4.D.5 migration: empty-fields case uses the typed
-        // variant directly.
-        let empty_schema_id = self.type_tracker.register_inline_object_schema_typed(&[]);
-        self.emit(Instruction::new(
-            OpCode::NewTypedObject,
-            Some(Operand::TypedObjectAlloc {
-                schema_id: empty_schema_id as u16,
-                field_count: 0,
-            }),
-        ));
-
-        self.emit_empty_annotation_event_log();
-
-        let ctx_schema_id = self.type_tracker.register_inline_object_schema_typed(&[
-            ("target", FieldType::Any),
-            ("state", FieldType::Any),
-            ("event_log", FieldType::Array(Box::new(FieldType::Any))),
-        ]);
-        self.emit(Instruction::new(
-            OpCode::NewTypedObject,
-            Some(Operand::TypedObjectAlloc {
-                schema_id: ctx_schema_id as u16,
-                field_count: 3,
-            }),
-        ));
-        self.emit(Instruction::new(
-            OpCode::StoreLocal,
-            Some(Operand::Local(ctx_local)),
-        ));
-
-        // --- Call before handler if present ---
-        let mut short_circuit_jump: Option<usize> = None;
-        if let Some(before_id) = compiled_ann.before_handler {
-            let fn_ref = self
-                .program
-                .add_constant(Constant::Number(wrapper_func_idx as f64));
-            self.emit(Instruction::new(
-                OpCode::PushConst,
-                Some(Operand::Const(fn_ref)),
-            ));
-
-            for ann_arg in ann_arg_exprs {
-                self.compile_expr(ann_arg)?;
-            }
-
-            self.emit(Instruction::new(
-                OpCode::LoadLocal,
-                Some(Operand::Local(args_local)),
-            ));
-            self.emit(Instruction::new(
-                OpCode::LoadLocal,
-                Some(Operand::Local(ctx_local)),
-            ));
-
-            let before_arg_count = 1 + ann_arg_exprs.len() + 2;
-            let before_ac = self
-                .program
-                .add_constant(Constant::Int(before_arg_count as i64));
-            self.emit(Instruction::new(
-                OpCode::PushConst,
-                Some(Operand::Const(before_ac)),
-            ));
-            self.emit(Instruction::new(
-                OpCode::Call,
-                Some(Operand::Function(shape_value::FunctionId(before_id))),
-            ));
-            self.record_blob_call(before_id);
-
-            let before_result = self.declare_local("__before_result")?;
-            self.emit(Instruction::new(
-                OpCode::StoreLocal,
-                Some(Operand::Local(before_result)),
-            ));
-
-            // Check if before_result is an array → replace args
-            self.emit(Instruction::new(
-                OpCode::LoadLocal,
-                Some(Operand::Local(before_result)),
-            ));
-            let one_const = self.program.add_constant(Constant::Int(1));
-            self.emit(Instruction::new(
-                OpCode::PushConst,
-                Some(Operand::Const(one_const)),
-            ));
-            self.emit(Instruction::new(
-                OpCode::BuiltinCall,
-                Some(Operand::Builtin(crate::bytecode::BuiltinFunction::IsArray)),
-            ));
-
-            let skip_array = self.emit_jump(OpCode::JumpIfFalse, 0);
-
-            self.emit(Instruction::new(
-                OpCode::LoadLocal,
-                Some(Operand::Local(before_result)),
-            ));
-            self.emit(Instruction::new(
-                OpCode::StoreLocal,
-                Some(Operand::Local(args_local)),
-            ));
-            let skip_obj_check = self.emit_jump(OpCode::Jump, 0);
-
-            self.patch_jump(skip_array);
-
-            // Check if before_result is an object → extract "args" and "state"
-            self.emit(Instruction::new(
-                OpCode::LoadLocal,
-                Some(Operand::Local(before_result)),
-            ));
-            let one_const2 = self.program.add_constant(Constant::Int(1));
-            self.emit(Instruction::new(
-                OpCode::PushConst,
-                Some(Operand::Const(one_const2)),
-            ));
-            self.emit(Instruction::new(
-                OpCode::BuiltinCall,
-                Some(Operand::Builtin(crate::bytecode::BuiltinFunction::IsObject)),
-            ));
-
-            let skip_obj = self.emit_jump(OpCode::JumpIfFalse, 0);
-
-            // Strict contract: before-handler object form uses typed fields
-            // {args, result, state}. The `result` field enables short-circuit:
-            // if the before handler returns { result: value }, skip the impl call.
-            let before_contract_schema_id =
-                self.type_tracker.register_inline_object_schema_typed(&[
-                    ("args", FieldType::Any),
-                    ("result", FieldType::Any),
-                    ("state", FieldType::Any),
-                ]);
-            if before_contract_schema_id > u16::MAX as u32 {
-                return Err(ShapeError::RuntimeError {
-                    message: "Internal error: before-handler schema id overflow".to_string(),
-                    location: None,
-                });
-            }
-            let (args_operand, state_operand, result_operand) = {
-                let schema = self
-                    .type_tracker
-                    .schema_registry()
-                    .get_by_id(before_contract_schema_id)
-                    .ok_or_else(|| ShapeError::RuntimeError {
-                        message: "Internal error: missing before-handler schema".to_string(),
-                        location: None,
-                    })?;
-                let args_field =
-                    schema
-                        .get_field("args")
-                        .ok_or_else(|| ShapeError::RuntimeError {
-                            message: "Internal error: before-handler schema missing 'args'"
-                                .to_string(),
-                            location: None,
-                        })?;
-                let state_field =
-                    schema
-                        .get_field("state")
-                        .ok_or_else(|| ShapeError::RuntimeError {
-                            message: "Internal error: before-handler schema missing 'state'"
-                                .to_string(),
-                            location: None,
-                        })?;
-                let result_field =
-                    schema
-                        .get_field("result")
-                        .ok_or_else(|| ShapeError::RuntimeError {
-                            message: "Internal error: before-handler schema missing 'result'"
-                                .to_string(),
-                            location: None,
-                        })?;
-                if args_field.offset > u16::MAX as usize
-                    || state_field.offset > u16::MAX as usize
-                    || result_field.offset > u16::MAX as usize
-                {
-                    return Err(ShapeError::RuntimeError {
-                        message: "Internal error: before-handler field offset/index overflow"
-                            .to_string(),
-                        location: None,
-                    });
-                }
-                (
-                    Operand::TypedField {
-                        type_id: before_contract_schema_id as u16,
-                        field_idx: args_field.index as u16,
-                        field_type_tag: field_type_to_tag(&args_field.field_type),
-                    },
-                    Operand::TypedField {
-                        type_id: before_contract_schema_id as u16,
-                        field_idx: state_field.index as u16,
-                        field_type_tag: field_type_to_tag(&state_field.field_type),
-                    },
-                    Operand::TypedField {
-                        type_id: before_contract_schema_id as u16,
-                        field_idx: result_field.index as u16,
-                        field_type_tag: field_type_to_tag(&result_field.field_type),
-                    },
-                )
-            };
-
-            // Check `result` field for short-circuit: if non-null, skip impl call
-            self.emit(Instruction::new(
-                OpCode::LoadLocal,
-                Some(Operand::Local(before_result)),
-            ));
-            self.emit(Instruction::new(
-                OpCode::GetFieldTyped,
-                Some(result_operand),
-            ));
-            // Stage 2.6.5.2: typed IsNull replaces `PushNull; Eq`.
-            self.emit(Instruction::simple(OpCode::Dup));
-            self.emit(Instruction::simple(OpCode::IsNull));
-            let skip_short_circuit = self.emit_jump(OpCode::JumpIfTrue, 0);
-            // result is non-null → store it and jump past impl call
-            self.emit(Instruction::new(
-                OpCode::StoreLocal,
-                Some(Operand::Local(result_local)),
-            ));
-            short_circuit_jump = Some(self.emit_jump(OpCode::Jump, 0));
-            self.patch_jump(skip_short_circuit);
-            self.emit(Instruction::simple(OpCode::Pop)); // discard null result
-
-            self.emit(Instruction::new(
-                OpCode::LoadLocal,
-                Some(Operand::Local(before_result)),
-            ));
-            self.emit(Instruction::new(OpCode::GetFieldTyped, Some(args_operand)));
-            // Stage 2.6.5.2: typed IsNull replaces `PushNull; Eq`.
-            self.emit(Instruction::simple(OpCode::Dup));
-            self.emit(Instruction::simple(OpCode::IsNull));
-            let skip_args_replace = self.emit_jump(OpCode::JumpIfTrue, 0);
-            self.emit(Instruction::new(
-                OpCode::StoreLocal,
-                Some(Operand::Local(args_local)),
-            ));
-            let skip_pop_args = self.emit_jump(OpCode::Jump, 0);
-            self.patch_jump(skip_args_replace);
-            self.emit(Instruction::simple(OpCode::Pop));
-            self.patch_jump(skip_pop_args);
-
-            self.emit(Instruction::new(
-                OpCode::LoadLocal,
-                Some(Operand::Local(before_result)),
-            ));
-            self.emit(Instruction::new(OpCode::GetFieldTyped, Some(state_operand)));
-            // Stage 2.6.5.2: typed IsNull replaces `PushNull; Eq`.
-            self.emit(Instruction::simple(OpCode::Dup));
-            self.emit(Instruction::simple(OpCode::IsNull));
-            let skip_state = self.emit_jump(OpCode::JumpIfTrue, 0);
-            self.emit_empty_annotation_event_log();
-            self.emit(Instruction::new(
-                OpCode::NewTypedObject,
-                Some(Operand::TypedObjectAlloc {
-                    schema_id: ctx_schema_id as u16,
-                    field_count: 2,
-                }),
-            ));
-            self.emit(Instruction::new(
-                OpCode::StoreLocal,
-                Some(Operand::Local(ctx_local)),
-            ));
-            let skip_pop_state = self.emit_jump(OpCode::Jump, 0);
-            self.patch_jump(skip_state);
-            self.emit(Instruction::simple(OpCode::Pop));
-            self.patch_jump(skip_pop_state);
-
-            self.patch_jump(skip_obj);
-            self.patch_jump(skip_obj_check);
-        }
-
-        // --- Call impl function with (possibly modified) args ---
-        // The impl function may have ref-inferred parameters (borrow inference
-        // marks unannotated heap-like params as references). We must wrap those
-        // args with MakeRef so the impl's DerefLoad/DerefStore opcodes find
-        // TAG_REF values in the local slots.
-        let impl_ref_params = self.program.functions[impl_idx as usize].ref_params.clone();
-        for i in 0..func_def.params.len() {
-            self.emit(Instruction::new(
-                OpCode::LoadLocal,
-                Some(Operand::Local(args_local)),
-            ));
-            let idx_const = self.program.add_constant(Constant::Number(i as f64));
-            self.emit(Instruction::new(
-                OpCode::PushConst,
-                Some(Operand::Const(idx_const)),
-            ));
-            self.emit(Instruction::simple(OpCode::GetProp));
-            if impl_ref_params.get(i).copied().unwrap_or(false) {
-                let temp = self.declare_temp_local("__ref_wrap_")?;
-                self.emit(Instruction::new(
-                    OpCode::StoreLocal,
-                    Some(Operand::Local(temp)),
-                ));
-                self.emit(Instruction::new(
-                    OpCode::MakeRef,
-                    Some(Operand::Local(temp)),
-                ));
-            }
-        }
-        let impl_ac = self
-            .program
-            .add_constant(Constant::Int(func_def.params.len() as i64));
-        self.emit(Instruction::new(
-            OpCode::PushConst,
-            Some(Operand::Const(impl_ac)),
-        ));
-        self.emit(Instruction::new(
-            OpCode::Call,
-            Some(Operand::Function(shape_value::FunctionId(impl_idx))),
-        ));
-        self.record_blob_call(impl_idx);
-
-        // For void functions, the impl returns null (the implicit return sentinel).
-        // The after handler's `result` parameter would then trip the "missing
-        // required argument guard" because null is the sentinel for "parameter not
-        // provided". Replace null with Unit so the guard doesn't fire.
-        // We only do this for explicitly void functions (return_type: Void) to avoid
-        // clobbering valid return values from functions with unspecified return types.
-        if compiled_ann.after_handler.is_some() {
-            let is_explicit_void = matches!(
-                func_def.return_type,
-                Some(shape_ast::ast::TypeAnnotation::Void)
-            );
-            if is_explicit_void {
-                // Void function: always replace null with Unit
-                self.emit(Instruction::simple(OpCode::Pop));
-                self.emit_unit();
-            } else if func_def.return_type.is_none() {
-                // Unspecified return type: replace null with Unit at runtime
-                // (if the function actually returned a value, it won't be null).
-                // Stage 2.6.5.2: typed IsNull replaces `PushNull; Eq`.
-                self.emit(Instruction::simple(OpCode::Dup));
-                self.emit(Instruction::simple(OpCode::IsNull));
-                let skip_replace = self.emit_jump(OpCode::JumpIfFalse, 0);
-                // Replace the null on stack with Unit
-                self.emit(Instruction::simple(OpCode::Pop));
-                self.emit_unit();
-                self.patch_jump(skip_replace);
-            }
-        }
-
-        // Store result
-        self.emit(Instruction::new(
-            OpCode::StoreLocal,
-            Some(Operand::Local(result_local)),
-        ));
-
-        // Patch short-circuit jump: lands here, after impl call + result store
-        if let Some(jump_addr) = short_circuit_jump {
-            self.patch_jump(jump_addr);
-        }
-
-        // --- Call after handler if present ---
-        if let Some(after_id) = compiled_ann.after_handler {
-            let fn_ref = self
-                .program
-                .add_constant(Constant::Number(wrapper_func_idx as f64));
-            self.emit(Instruction::new(
-                OpCode::PushConst,
-                Some(Operand::Const(fn_ref)),
-            ));
-
-            for ann_arg in ann_arg_exprs {
-                self.compile_expr(ann_arg)?;
-            }
-
-            self.emit(Instruction::new(
-                OpCode::LoadLocal,
-                Some(Operand::Local(args_local)),
-            ));
-            self.emit(Instruction::new(
-                OpCode::LoadLocal,
-                Some(Operand::Local(result_local)),
-            ));
-            self.emit(Instruction::new(
-                OpCode::LoadLocal,
-                Some(Operand::Local(ctx_local)),
-            ));
-
-            let after_arg_count = 1 + ann_arg_exprs.len() + 3;
-            let after_ac = self
-                .program
-                .add_constant(Constant::Int(after_arg_count as i64));
-            self.emit(Instruction::new(
-                OpCode::PushConst,
-                Some(Operand::Const(after_ac)),
-            ));
-            self.emit(Instruction::new(
-                OpCode::Call,
-                Some(Operand::Function(shape_value::FunctionId(after_id))),
-            ));
-            self.record_blob_call(after_id);
-
-            self.emit(Instruction::new(
-                OpCode::StoreLocal,
-                Some(Operand::Local(result_local)),
-            ));
-        }
-
-        // Return the result
-        self.emit(Instruction::new(
-            OpCode::LoadLocal,
-            Some(Operand::Local(result_local)),
-        ));
-        self.emit(Instruction::simple(OpCode::ReturnValue));
-
-        // Update function locals count
-        self.program.functions[wrapper_func_idx].locals_count = self.next_local;
-        self.capture_function_local_storage_hints(wrapper_func_idx);
-
-        // Finalize blob and restore the parent blob builder.
-        self.finalize_current_blob(wrapper_func_idx);
-        self.current_blob_builder = saved_blob_builder;
-
-        // Restore state
-        self.pop_scope();
-        self.locals = saved_locals;
-        self.current_function = saved_function;
-        self.current_function_is_async = saved_is_async;
-        self.next_local = saved_next_local;
-
-        if let Some(jump_addr) = jump_over {
-            self.patch_jump(jump_addr);
-        }
-
         Ok(())
     }
 }
@@ -5449,64 +5112,11 @@ fn main() -> int { generated_flag() }
         }
     }
 
-    /// The specialized annotation-handler WRAPPER function (the compiled
-    /// `before`/`after` handler body) anchors at the handler definition —
-    /// the generator's real span — for both its name span and its
-    /// synthesized `Return` statement.
-    #[test]
-    fn annotation_handler_wrapper_anchors_at_the_handler_definition() {
-        let source = r#"
-annotation logged() {
-  before(args, ctx) {
-    args
-  }
-}
-
-@logged()
-fn work(x: int) -> int { x + 1 }
-
-let out = work(2)
-"#;
-        let compiler = compiled_with_source(source);
-        let handler_line = line_of(source, "before(args, ctx)");
-        // ADR-009 E3 (S2, U10): the specialized handler is registered under a
-        // HYGIENIC (unspellable, SOH-prefixed) name — role bound by identity,
-        // not spelling. Find it by that hygienic marker + its handler-line
-        // anchor, never by a `*_wrapper` substring (which no longer exists).
-        let (name, wrapper) = compiler
-            .function_defs
-            .iter()
-            .find(|(name, wrapper)| {
-                name.starts_with('\u{1}')
-                    && resolved_line(&compiler, wrapper.name_span) == handler_line
-            })
-            .expect("before-handler wrapper is registered under a hygienic name");
-        assert!(
-            !compiler
-                .function_defs
-                .keys()
-                .any(|name| name.contains("_wrapper")),
-            "rejection row 2: no `*_wrapper` synthetic spelling may enter the function table"
-        );
-        assert_eq!(
-            resolved_line(&compiler, wrapper.name_span),
-            handler_line,
-            "wrapper `{name}` name span must resolve to the handler definition line"
-        );
-        let return_span = wrapper
-            .body
-            .iter()
-            .find_map(|statement| match statement {
-                shape_ast::ast::Statement::Return(_, span) => Some(*span),
-                _ => None,
-            })
-            .expect("wrapper body is a synthesized Return");
-        assert_eq!(
-            resolved_line(&compiler, return_span),
-            handler_line,
-            "wrapper Return statement must anchor at the handler body"
-        );
-    }
+    // ADR-009 C3-S6 completion: `annotation_handler_wrapper_anchors_at_the_
+    // handler_definition` DELETED — it anchored the LEGACY specialized
+    // before-handler (a zero-param `logged()` + `before(args, ctx)` fixture
+    // that no longer compiles post-collapse). The typed weave carries its own
+    // span-anchoring pins (template_specialization/weave.rs).
 }
 
 // ADR-009 ticket D1 (slice S4) — the shared compiler query surface for

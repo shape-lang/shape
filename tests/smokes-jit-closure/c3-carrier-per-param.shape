@@ -1,0 +1,19 @@
+// ADR-009 C3 #14 slice 1 (S1a) — the C3-G9 per-param carrier RUNTIME PIN,
+// 1-ary target. Hand-written specialized-handler shape (the S0 §2 item 5
+// measured-green proxy, committed of-record): before-hook mutates the typed
+// arg -> direct impl call -> after-hook mutates the typed result. BOTH hook
+// kinds execute inside a hot loop of 200 calls, crossing the T1@100 tier
+// threshold (crates/shape-vm/src/tier.rs). Expected stdout: 40800
+// (sum over i in 0..200 of 2*(i+1)+3 = 2*19900 + 5*200).
+// No async, trait/impl, closure, or top-level comptime — JIT == VM natively
+// (zero [jit-fallback]).
+fn calc_impl(a: int) -> int { a * 2 }
+fn hook_before(a: int) -> int { a + 1 }
+fn hook_after(r: int) -> int { r + 3 }
+fn calc(a: int) -> int { hook_after(calc_impl(hook_before(a))) }
+fn run() -> int {
+  let mut total = 0
+  for i in 0..200 { total = total + calc(i) }
+  total
+}
+print(run())

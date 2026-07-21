@@ -154,6 +154,9 @@ impl Stamper<'_> {
                 // Capture clauses are authored by the generator; stamping only
                 // attaches provenance and never rewrites the declaration.
                 captures: _,
+                // C3-G12 nested-fn annotation carrier: provenance stamping
+                // never rewrites annotations.
+                annotations: _,
                 span: _,
             } => {
                 let closure_path = self.paths.next_closure();

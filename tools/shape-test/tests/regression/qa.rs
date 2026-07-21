@@ -487,7 +487,7 @@ fn regression_high_9_annotation_after_void() {
     ShapeTest::new(
         r#"
         annotation log() {
-            after(fn, args, result) {
+            after() {
                 print("done")
             }
         }

@@ -25,6 +25,12 @@ use shape_value::v2::typed_array::{ELEM_TYPE_STRING, TypedArray, read_elem_type}
 use shape_value::{KindedSlot, NativeKind};
 // ADR-009 E2 #18 (slice 2): the typed `item_fn` carrier (E2-D10).
 use super::comptime_fragments::CheckedItem;
+// ADR-009 C3 #14 (slice 2): the public hook-template comptime API —
+// `before_hook`/`after_hook` are PRODUCERS of the S1 `CheckedTemplate`
+// carrier through its typestate chokepoint (never a second carrier), and
+// `capture` lifts declared capture values through the S2 ConstLift seam.
+use super::comptime_fragments::checked_template::{CheckedTemplate, CheckedTemplateBuilder, TemplateHookKind};
+use super::template_specialization::const_lift::{self, LiftedConst};
 use std::cell::RefCell;
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -48,6 +54,14 @@ pub(crate) use type_reflection::{
     FrozenTypeCategory, FrozenTypeIdentity, build_frozen_type_category_heap_value,
     build_frozen_type_ref_heap_value, frozen_type_category_from_ref, frozen_type_from_ref,
 };
+// ADR-009 C3 S1c: the frozen callable-signature descriptor (payloads.rs:83),
+// re-exported visibility-only so `template_specialization` can carry it for
+// Sig IDENTITY/equality ONLY (slice-0 report §7.4 — never a type source).
+pub(in crate::compiler) use type_reflection::payloads::CallableDescriptor;
+// Test-only sibling: `template_specialization` tests fabricate descriptors
+// per the `type_reflection/tests.rs:1779` pattern.
+#[cfg(test)]
+pub(in crate::compiler) use type_reflection::payloads::ParamDescriptor;
 // Legacy-path confinement (ADR-009 §4.1 "one kind vocabulary", ticket A1 S5):
 // `type_reflection::build_type_info_heap_value` is deliberately NOT
 // re-exported. The legacy `type_info` intrinsic below is its only caller
@@ -125,6 +139,25 @@ pub(crate) enum ComptimeDirective {
     ExtendItems {
         items: Vec<shape_ast::ast::Item>,
     },
+    /// ADR-009 C3 #14 (slice 2, S2b): install a constructed hook template onto
+    /// the annotation's target function. `template_index` is the opaque
+    /// `__CheckedTemplate` handle's index into the per-run
+    /// `COMPTIME_HOOK_TEMPLATES` store (execute-populated; the store stays
+    /// intact until the NEXT per-run clear). Fix-round-1: the pass-2 consumer
+    /// SNAPSHOT-resolves every install index to its `BoundTemplate` at
+    /// directive-loop ENTRY (`snapshot_install_hook_template_handles`),
+    /// before any directive applies — a directive apply can trigger a NESTED
+    /// handler run that clears + repopulates this store, so lazy
+    /// per-directive resolution would cross store generations (see the
+    /// store's lifecycle doc). The target is IMPLICIT (the annotation's
+    /// target), matching every other directive. Consumed ONLY by the
+    /// authoritative pass-2 function-target consumer
+    /// (`process_comptime_directives_for_function`); the pre-pass consumers
+    /// are documented no-ops (never double-install), and every non-function
+    /// target consumer is a named rejection.
+    InstallHookTemplate {
+        template_index: usize,
+    },
 }
 
 /// A non-fatal warning emitted from inside the comptime mini-VM by
@@ -194,6 +227,56 @@ thread_local! {
     /// handle) is EXECUTE-populated with a different source and is untouched; only
     /// the `ComptimeDirective::Extend` transport moves off JSON.
     static COMPTIME_EXTEND_STATEMENTS: RefCell<Vec<shape_ast::ast::ExtendStatement>> =
+        const { RefCell::new(Vec::new()) };
+    /// ADR-009 C3 #14 (slice 2): the hook-template BODY-FN store. The
+    /// `before_hook`/`after_hook` body argument is a bare module-scope fn
+    /// identifier transported by an emit-side rewrite
+    /// (`rewrite_template_hook_body_args`, comptime.rs — the type_ref/
+    /// trait_ref identity-literal-transport precedent): the rewrite resolves
+    /// the identifier against the compiler's AST fn table (threaded as a
+    /// PARAMETER into `execute_comptime_with_annotation_handler`), stashes the
+    /// `FunctionDef` here, and rewrites the arg to the index literal. So this
+    /// store is COMPILE-populated (during the handler-body rewrite, BEFORE the
+    /// inner compile) and shares the `COMPTIME_REPLACE_BODIES` lifecycle:
+    /// CLEARED at `execute_comptime_with_annotation_handler` ENTRY, NOT at the
+    /// pre-execute clear point where the execute-populated stores clear —
+    /// clearing there would wipe the compile-time stash before the builtin
+    /// reads it. Indices start fresh per handler run (pre-pass and pass-2 each
+    /// index a fresh store); the read clones, leaving the store intact until
+    /// the next per-run clear.
+    static COMPTIME_TEMPLATE_BODY_FNS: RefCell<Vec<shape_ast::ast::FunctionDef>> =
+        const { RefCell::new(Vec::new()) };
+    /// ADR-009 C3 #14 (slice 2): the constructed hook-template store. The
+    /// `before_hook`/`after_hook` builtins run the FULL `CheckedTemplate`
+    /// typestate chokepoint EAGERLY at execute time and stash the resulting
+    /// [`BoundTemplate`] (template + lifted capture values) here, returning a
+    /// `__CheckedTemplate` handle carrying its INDEX (the E2 `__CheckedItem`
+    /// opaque-index pattern). EXECUTE-populated ⇒ shares the
+    /// `COMPTIME_CHECKED_ITEMS` lifecycle: cleared at the pre-execute clear
+    /// point (`comptime.rs`, beside `clear_comptime_checked_items`) so indices
+    /// are fresh per run; reads clone, and the store stays intact until the
+    /// NEXT per-run clear. Fix-round-1 CAVEAT (why the pass-2 consumer
+    /// snapshot-resolves): "the next per-run clear" can arrive DURING the
+    /// current run's directive PROCESSING — applying a directive can trigger
+    /// a nested annotation-handler run (a polymorphic template
+    /// specialization's nested `compile_function` re-enters
+    /// `execute_comptime_handlers`; an `ExtendItems` compile does the same),
+    /// which clears + repopulates this store. So the driver resolves EVERY
+    /// install handle at directive-loop entry
+    /// (`snapshot_install_hook_template_handles`, install_registry.rs) —
+    /// the same value-snapshot discipline `take_comptime_directives` applies
+    /// to the directive buffer — and never reads this store lazily
+    /// per-directive.
+    static COMPTIME_HOOK_TEMPLATES: RefCell<Vec<BoundTemplate>> = const { RefCell::new(Vec::new()) };
+    /// ADR-009 C3 #14 (slice 2; S3b compositional): the capture-binding
+    /// store. `capture(name, value)` lifts the value through the ConstLift
+    /// seam (`const_lift::lift_capture_value` — since S3b the full C3-G5
+    /// compositional domain) and stashes `(name, LiftedConst)` here,
+    /// returning a `__CaptureBinding` handle carrying its INDEX.
+    /// EXECUTE-populated ⇒ same lifecycle as `COMPTIME_HOOK_TEMPLATES` /
+    /// `COMPTIME_CHECKED_ITEMS`: cleared at the pre-execute clear point,
+    /// fresh indices per run, reads clone.
+    static COMPTIME_CAPTURE_BINDINGS: RefCell<Vec<(String, LiftedConst)>> =
         const { RefCell::new(Vec::new()) };
     /// True while the §4.5.1 whole-program pre-pass speculatively runs a
     /// type-target comptime handler to materialize generated function
@@ -359,6 +442,106 @@ pub(crate) fn push_comptime_extend_statement(extend: shape_ast::ast::ExtendState
 /// (cloned; the store stays intact until the next per-run clear).
 fn comptime_extend_statement_at(index: usize) -> Option<shape_ast::ast::ExtendStatement> {
     COMPTIME_EXTEND_STATEMENTS.with(|extends| extends.borrow().get(index).cloned())
+}
+
+/// ADR-009 C3 #14 (slice 2): a constructed hook template BOUND to its lifted
+/// capture values — `CheckedTemplate` (the ONE S1 carrier, produced through
+/// its typestate chokepoint) + the `(name, LiftedConst)` values `capture()`
+/// lifted through the ConstLift seam (the full C3-G5 compositional domain
+/// since S3b). Lives beside the template store (`COMPTIME_HOOK_TEMPLATES`);
+/// the S2b install consumer resolves a `__CheckedTemplate` handle's index
+/// back to this pair and feeds the values into `specialize_template` — the
+/// rule-6 identity + the const_lift BAKE (S3b; no call-site delivery).
+#[derive(Debug, Clone)]
+pub(in crate::compiler) struct BoundTemplate {
+    /// The checked template (construction-validated: classification, capture
+    /// bijection, pseudo-tuple uses).
+    pub(in crate::compiler) template: CheckedTemplate,
+    /// The lifted capture values, validated against the template's declared
+    /// trailing capture-parameter types
+    /// (`const_lift::validate_capture_value_types`).
+    pub(in crate::compiler) capture_values: Vec<(String, LiftedConst)>,
+}
+
+/// ADR-009 C3 #14 (slice 2): clear the hook-template body-fn store at
+/// `execute_comptime_with_annotation_handler` ENTRY — BEFORE the handler-body
+/// rewrite stashes into it and thus BEFORE its VM run reads it by index. Same
+/// compile-populated lifecycle as [`clear_comptime_replace_bodies`] (cleared at
+/// run entry, NOT at the pre-execute clear point — a pre-execute clear would
+/// wipe the compile-time stash).
+pub(crate) fn clear_comptime_template_body_fns() {
+    COMPTIME_TEMPLATE_BODY_FNS.with(|fns| fns.borrow_mut().clear());
+}
+
+/// Stash a resolved template body `FunctionDef` and return the index the
+/// rewritten `before_hook`/`after_hook` body argument carries. Called from the
+/// emit-side rewrite (`rewrite_template_hook_body_args`, comptime.rs) at
+/// handler-body rewrite time; the index refers to the CURRENT handler run's
+/// store (cleared at that run's entry), and the returned index is exactly the
+/// just-pushed slot.
+pub(crate) fn push_comptime_template_body_fn(def: shape_ast::ast::FunctionDef) -> usize {
+    COMPTIME_TEMPLATE_BODY_FNS.with(|fns| {
+        let mut fns = fns.borrow_mut();
+        fns.push(def);
+        fns.len() - 1
+    })
+}
+
+/// Resolve a template-body index back to its stashed `FunctionDef` (cloned;
+/// the store stays intact until the next per-run clear).
+fn comptime_template_body_fn_at(index: usize) -> Option<shape_ast::ast::FunctionDef> {
+    COMPTIME_TEMPLATE_BODY_FNS.with(|fns| fns.borrow().get(index).cloned())
+}
+
+/// ADR-009 C3 #14 (slice 2): clear the constructed hook-template store before
+/// a comptime run (called from `comptime.rs` beside
+/// `clear_comptime_checked_items` — the execute-populated clear point), so
+/// each execution's `__CheckedTemplate` handles index a fresh store.
+pub(crate) fn clear_comptime_hook_templates() {
+    COMPTIME_HOOK_TEMPLATES.with(|templates| templates.borrow_mut().clear());
+}
+
+/// Stash a constructed [`BoundTemplate`] and return the index the
+/// `__CheckedTemplate` handle carries (exactly the just-pushed slot).
+fn push_comptime_hook_template(template: BoundTemplate) -> usize {
+    COMPTIME_HOOK_TEMPLATES.with(|templates| {
+        let mut templates = templates.borrow_mut();
+        templates.push(template);
+        templates.len() - 1
+    })
+}
+
+/// Resolve a `__CheckedTemplate` handle's index back to its [`BoundTemplate`]
+/// (cloned; the store stays intact until the next per-run clear — which can
+/// arrive DURING directive processing via a nested handler run, so the S2b
+/// install consumer SNAPSHOT-resolves all indices at directive-loop entry,
+/// fix-round-1: `snapshot_install_hook_template_handles`).
+pub(in crate::compiler) fn comptime_hook_template_at(index: usize) -> Option<BoundTemplate> {
+    COMPTIME_HOOK_TEMPLATES.with(|templates| templates.borrow().get(index).cloned())
+}
+
+/// ADR-009 C3 #14 (slice 2): clear the capture-binding store before a comptime
+/// run (beside [`clear_comptime_hook_templates`] at the pre-execute clear
+/// point), so each execution's `__CaptureBinding` handles index a fresh store.
+pub(crate) fn clear_comptime_capture_bindings() {
+    COMPTIME_CAPTURE_BINDINGS.with(|bindings| bindings.borrow_mut().clear());
+}
+
+/// Stash a lifted capture binding and return the index the `__CaptureBinding`
+/// handle carries (exactly the just-pushed slot).
+fn push_comptime_capture_binding(binding: (String, LiftedConst)) -> usize {
+    COMPTIME_CAPTURE_BINDINGS.with(|bindings| {
+        let mut bindings = bindings.borrow_mut();
+        bindings.push(binding);
+        bindings.len() - 1
+    })
+}
+
+/// Resolve a `__CaptureBinding` handle's index back to its `(name,
+/// LiftedConst)` pair (cloned; the store stays intact until the next per-run
+/// clear).
+fn comptime_capture_binding_at(index: usize) -> Option<(String, LiftedConst)> {
+    COMPTIME_CAPTURE_BINDINGS.with(|bindings| bindings.borrow().get(index).cloned())
 }
 
 fn parse_type_annotation_payload(payload: &str) -> Result<shape_ast::ast::TypeAnnotation, String> {
@@ -803,6 +986,204 @@ fn read_comptime_string_array_slot(slot: &KindedSlot, arg_name: &str) -> Result<
         }
         Ok(out)
     }
+}
+
+/// ADR-009 C3 #14 (slice 2): read an `Array<__CaptureBinding>` comptime-builtin
+/// argument into the resolved `(name, LiftedConst)` bindings. Sibling of
+/// [`read_comptime_string_array_slot`]: kind witness + non-null + element-type
+/// stamp guard, then `TypedArray::as_slice` over `*const TypedObjectStorage`;
+/// each element is schema-name-checked (`__CaptureBinding`) and its opaque
+/// `index` handle resolved against the per-run capture-binding store.
+fn read_capture_binding_array_slot(
+    slot: &KindedSlot,
+    builtin_name: &str,
+) -> Result<Vec<(String, LiftedConst)>, String> {
+    use shape_value::v2::typed_array::ELEM_TYPE_TYPED_OBJECT;
+
+    if slot.kind() != NativeKind::Ptr(HeapKind::TypedArray) {
+        return Err(format!(
+            "{builtin_name} expects captures as an Array<__CaptureBinding> built from \
+             capture(name, value) calls; got {:?}",
+            slot.kind()
+        ));
+    }
+    let ptr = slot.raw() as *const TypedArray<*const TypedObjectStorage>;
+    if ptr.is_null() {
+        return Err(format!("{builtin_name} received a null captures array"));
+    }
+    // SAFETY: kind witness (Ptr(TypedArray)) + non-null prove a live
+    // TypedArray header; `len` sits at a T-independent offset (repr(C),
+    // pointer-sized `data`), so the empty-array read is layout-safe under any
+    // element stamp. Non-empty arrays additionally require the
+    // ELEM_TYPE_TYPED_OBJECT stamp before the element slice is read; each
+    // element is a borrowed `*const TypedObjectStorage` (no ownership taken).
+    unsafe {
+        if (*ptr).len == 0 {
+            return Ok(Vec::new());
+        }
+        if read_elem_type(ptr as *const u8) != ELEM_TYPE_TYPED_OBJECT {
+            return Err(format!(
+                "{builtin_name} expects captures as an Array<__CaptureBinding> built from \
+                 capture(name, value) calls (element type mismatch)"
+            ));
+        }
+        let slice = TypedArray::<*const TypedObjectStorage>::as_slice(ptr);
+        let mut out = Vec::with_capacity(slice.len());
+        for (i, &elem) in slice.iter().enumerate() {
+            if elem.is_null() {
+                return Err(format!(
+                    "{builtin_name} received a null element at captures[{i}]"
+                ));
+            }
+            let storage = &*elem;
+            let schema =
+                shape_runtime::type_schema::lookup_schema_by_id_public(storage.schema_id as u32)
+                    .ok_or_else(|| {
+                        format!(
+                            "{builtin_name}: captures[{i}] is not a __CaptureBinding handle \
+                             (unknown schema); build each element with capture(name, value)"
+                        )
+                    })?;
+            if schema.name != "__CaptureBinding" {
+                return Err(format!(
+                    "{builtin_name}: captures[{i}] is not a __CaptureBinding handle (got \
+                     schema '{}'); build each element with capture(name, value)",
+                    schema.name
+                ));
+            }
+            let index = field_slot_from_typed_object(storage, &schema, "index")?
+                .as_i64()
+                .ok_or_else(|| "__CaptureBinding.index is not an int".to_string())?;
+            let binding = comptime_capture_binding_at(index as usize).ok_or_else(|| {
+                format!(
+                    "internal error: {builtin_name} capture-binding index {index} is not live \
+                     in this comptime execution"
+                )
+            })?;
+            out.push(binding);
+        }
+        Ok(out)
+    }
+}
+
+/// ADR-009 C3 #14 (slice 2, S2b): resolve a single `__CheckedTemplate` handle
+/// argument to its store index. Sibling of the `__CheckedItem` handle read
+/// (`parse_extend_items_slot`): schema-name-checked TypedObject + opaque
+/// `index` field; a non-handle slot (any other value or typed object) is a
+/// NAMED rejection with the positive twin naming the two producers. The index
+/// is NOT resolved against the store here — the pass-2 driver resolves it
+/// after `vm.execute` returns (the store stays intact until the next per-run
+/// clear), and a dead index there is internal-error-shaped.
+fn checked_template_index_from_slot(
+    slot: &KindedSlot,
+    builtin_name: &str,
+) -> Result<usize, String> {
+    let not_a_handle = |detail: &str| {
+        format!(
+            "{builtin_name} expects a __CheckedTemplate handle ({detail}); construct one with \
+             before_hook(body_fn, captures) or after_hook(body_fn, captures) and pass it \
+             directly"
+        )
+    };
+    let Some(storage) = slot.as_typed_object_storage() else {
+        return Err(not_a_handle(&format!("got kind {:?}", slot.kind())));
+    };
+    let schema = shape_runtime::type_schema::lookup_schema_by_id_public(storage.schema_id as u32)
+        .ok_or_else(|| not_a_handle("got a typed object with an unknown schema"))?;
+    if schema.name != "__CheckedTemplate" {
+        return Err(not_a_handle(&format!("got schema '{}'", schema.name)));
+    }
+    let index = field_slot_from_typed_object(storage, &schema, "index")?
+        .as_i64()
+        .ok_or_else(|| "__CheckedTemplate.index is not an int".to_string())?;
+    Ok(index as usize)
+}
+
+/// ADR-009 C3 #14 (slice 2): the shared `before_hook`/`after_hook` body — the
+/// EAGER construction path through the S1 typestate chokepoint. The API is a
+/// PRODUCER of the ONE `CheckedTemplate` carrier, never a second carrier:
+///
+/// 1. the body argument arrives as a template-body INDEX (an `Int64` literal
+///    minted by the emit-side rewrite; a bare fn identifier is the only
+///    user-spellable form — C3-G3, code is code);
+/// 2. the captures array resolves to `(name, LiftedConst)` bindings;
+/// 3. `CheckedTemplateBuilder::new(kind).body_fn(&def)?.captures(clause)
+///    .finish()?` runs the FULL construction validation (classification, the
+///    capture-tail bijection, [C0902]/[C0907] via the reused validator,
+///    pseudo-tuple uses);
+/// 4. the lifted values are validated against the declared trailing
+///    capture-parameter types (`const_lift::validate_capture_value_types`);
+/// 5. the [`BoundTemplate`] is stashed and the opaque-index
+///    `__CheckedTemplate` handle returned (the E2 `item_fn` pattern).
+///
+/// A constructed-never-installed template is a no-op; install is the S2b
+/// `install` builtin + directive consumer.
+///
+/// Errors are C3-G13 string-tag message-text (the ruled E1 precedent for
+/// comptime-builtin-layer diagnostics): every comptime builtin surfaces
+/// failures as `Err(String)` — there is no coded-diagnostic path for a
+/// comptime builtin today. Routing this family through a coded path is the
+/// named pre-existing follow-up on record (#60); revisit the tags when #60's
+/// coded path lands. S5 owns C09xx minting from C0931+; S2 mints NO codes.
+fn build_hook_template(
+    hook_kind: TemplateHookKind,
+    body_slot: &KindedSlot,
+    bindings: Vec<(String, LiftedConst)>,
+    builtin_name: &str,
+) -> Result<TypedReturn, String> {
+    let Some(body_index) = body_slot.as_i64() else {
+        return Err(format!(
+            "{builtin_name} expects its body argument as a bare module-scope fn identifier \
+             (transported by the compile-time rewrite; got kind {:?}); declare \
+             `fn my_hook(...)` at module scope and pass `my_hook` — a string, closure, call, \
+             or computed value is not a template body (code is code)",
+            body_slot.kind()
+        ));
+    };
+    let def = comptime_template_body_fn_at(body_index as usize).ok_or_else(|| {
+        format!(
+            "internal error: {builtin_name} body-template index {body_index} is not live in \
+             this handler run"
+        )
+    })?;
+
+    // The declared capture set: one C1 value-snapshot (`move`) entry per
+    // binding, in ARRAY order. Borrow modes are structurally unconstructible
+    // through `capture()` — [C0902] stays reachable only as defense via the
+    // reused `validate_capture_clause`; duplicates reject there as [C0907].
+    let clause = shape_ast::ast::CaptureClause {
+        entries: bindings
+            .iter()
+            .map(|(name, _)| shape_ast::ast::CaptureEntry {
+                mode: shape_ast::ast::CaptureMode::Move,
+                name: name.clone(),
+                span: shape_ast::ast::Span::default(),
+                name_span: shape_ast::ast::Span::default(),
+            })
+            .collect(),
+        span: shape_ast::ast::Span::default(),
+    };
+
+    let template = CheckedTemplateBuilder::new(hook_kind)
+        .body_fn(&def)
+        .map_err(|e| e.to_string())?
+        .captures(clause)
+        .finish()
+        .map_err(|e| e.to_string())?;
+
+    const_lift::validate_capture_value_types(&def.name, template.capture_params(), &bindings)?;
+
+    let index = push_comptime_hook_template(BoundTemplate {
+        template,
+        capture_values: bindings,
+    });
+    let handle = typed_object_for_named_schema(
+        "__CheckedTemplate",
+        &[("index", KindedSlot::from_int(index as i64))],
+    );
+    Ok(TypedReturn::Concrete(ConcreteReturn::OpaqueTypedObject(
+        Arc::new(heap_value_from_typed_object_slot(handle)),
+    )))
 }
 
 /// ADR-009 E2 #18 (slice 4.5, condition 1 — BOUNDED HOLE GRAMMAR): a self-field
@@ -1525,6 +1906,222 @@ fn comptime_builtins_module_base(
             Ok(TypedReturn::Concrete(ConcreteReturn::OpaqueTypedObject(
                 Arc::new(heap_value_from_typed_object_slot(handle)),
             )))
+        },
+    );
+
+    // ADR-009 C3 #14 (slice 2): the PUBLIC hook-template comptime API — the
+    // C3-G1 metaprogramming primitive for annotation runtime hooks.
+    // `before_hook`/`after_hook` reference an ordinary typed Shape fn as a
+    // hook-template BODY (C3-G3) with DECLARED captures and construct the S1
+    // `CheckedTemplate` EAGERLY through its typestate chokepoint
+    // (`build_hook_template` — the API is a PRODUCER of the one carrier,
+    // never a second carrier). The `body` argument is a bare fn IDENTIFIER
+    // transported by the emit-side rewrite (`rewrite_template_hook_body_args`,
+    // comptime.rs — identity-literal transport; never a string). Like every
+    // comptime builtin, handler-scope resolution requires the paired
+    // forwarder rows in `COMPTIME_BUILTIN_FORWARDERS` IN ADDITION to these
+    // registrations, or the names are `[C0001] Undefined function` in
+    // handlers (the extend_method_literal lesson).
+    //
+    // C3-G13: failures are string-tag message-text (`Err(String)`) — see the
+    // #60 routing note on `build_hook_template`.
+    register_typed_function(
+        &mut module,
+        "before_hook",
+        "Construct a checked before-hook template from a module-scope body fn and its declared captures",
+        vec![
+            shape_runtime::module_exports::ModuleParam {
+                // Post-rewrite this is the template-body index literal; the
+                // user-facing form is a bare module-scope fn identifier.
+                name: "body".to_string(),
+                type_name: "unknown".to_string(),
+                required: true,
+                ..Default::default()
+            },
+            shape_runtime::module_exports::ModuleParam {
+                name: "captures".to_string(),
+                type_name: "Array<__CaptureBinding>".to_string(),
+                required: true,
+                ..Default::default()
+            },
+        ],
+        ConcreteType::OpaqueTypedObject("__CheckedTemplate".to_string()),
+        move |slots, _ctx| {
+            if slots.len() != 2 {
+                return Err(format!(
+                    "before_hook expects 2 arguments, got {}",
+                    slots.len()
+                ));
+            }
+            let bindings = read_capture_binding_array_slot(&slots[1], "before_hook")?;
+            build_hook_template(TemplateHookKind::Before, &slots[0], bindings, "before_hook")
+        },
+    );
+
+    register_typed_function(
+        &mut module,
+        "after_hook",
+        "Construct a checked after-hook template from a module-scope body fn and its declared captures",
+        vec![
+            shape_runtime::module_exports::ModuleParam {
+                name: "body".to_string(),
+                type_name: "unknown".to_string(),
+                required: true,
+                ..Default::default()
+            },
+            shape_runtime::module_exports::ModuleParam {
+                name: "captures".to_string(),
+                type_name: "Array<__CaptureBinding>".to_string(),
+                required: true,
+                ..Default::default()
+            },
+        ],
+        ConcreteType::OpaqueTypedObject("__CheckedTemplate".to_string()),
+        move |slots, _ctx| {
+            if slots.len() != 2 {
+                return Err(format!(
+                    "after_hook expects 2 arguments, got {}",
+                    slots.len()
+                ));
+            }
+            let bindings = read_capture_binding_array_slot(&slots[1], "after_hook")?;
+            build_hook_template(TemplateHookKind::After, &slots[0], bindings, "after_hook")
+        },
+    );
+
+    // The ZERO-CAPTURE variants — reached ONLY through the emit-side
+    // rewrite's empty-array lowering (`rewrite_template_hook_body_args`,
+    // comptime.rs: `before_hook(f, [])` rewrites the call to the unspellable
+    // arity-1 nocapture forwarder). An empty array literal at a
+    // call-argument position has no element to prove a type from — there is
+    // no untyped runtime array — so the empty-captures spelling is
+    // transported structurally instead.
+    register_typed_function(
+        &mut module,
+        "before_hook_nocapture",
+        "Construct a checked before-hook template with an empty capture set (the empty-captures-array lowering)",
+        vec![shape_runtime::module_exports::ModuleParam {
+            name: "body".to_string(),
+            type_name: "unknown".to_string(),
+            required: true,
+            ..Default::default()
+        }],
+        ConcreteType::OpaqueTypedObject("__CheckedTemplate".to_string()),
+        move |slots, _ctx| {
+            if slots.len() != 1 {
+                return Err(format!(
+                    "before_hook_nocapture expects 1 argument, got {}",
+                    slots.len()
+                ));
+            }
+            build_hook_template(
+                TemplateHookKind::Before,
+                &slots[0],
+                Vec::new(),
+                "before_hook",
+            )
+        },
+    );
+
+    register_typed_function(
+        &mut module,
+        "after_hook_nocapture",
+        "Construct a checked after-hook template with an empty capture set (the empty-captures-array lowering)",
+        vec![shape_runtime::module_exports::ModuleParam {
+            name: "body".to_string(),
+            type_name: "unknown".to_string(),
+            required: true,
+            ..Default::default()
+        }],
+        ConcreteType::OpaqueTypedObject("__CheckedTemplate".to_string()),
+        move |slots, _ctx| {
+            if slots.len() != 1 {
+                return Err(format!(
+                    "after_hook_nocapture expects 1 argument, got {}",
+                    slots.len()
+                ));
+            }
+            build_hook_template(TemplateHookKind::After, &slots[0], Vec::new(), "after_hook")
+        },
+    );
+
+    // `capture(name, value)` — one declared capture binding (the C1
+    // value-snapshot mode implicitly; borrow modes are structurally
+    // unconstructible through this builtin). The value rides the KindedSlot
+    // substrate and is lifted EAGERLY through the ConstLift seam
+    // (`const_lift::lift_capture_value` — S3b: the full C3-G5 compositional
+    // domain, recursively; never-liftables and out-of-domain kinds reject
+    // at the capture() call with the named class arms, not later.
+    register_typed_function(
+        &mut module,
+        "capture",
+        "Declare one named capture binding (value snapshot) for a hook template",
+        vec![
+            shape_runtime::module_exports::ModuleParam {
+                name: "name".to_string(),
+                type_name: "string".to_string(),
+                required: true,
+                ..Default::default()
+            },
+            shape_runtime::module_exports::ModuleParam {
+                name: "value".to_string(),
+                type_name: "unknown".to_string(),
+                required: true,
+                ..Default::default()
+            },
+        ],
+        ConcreteType::OpaqueTypedObject("__CaptureBinding".to_string()),
+        move |slots, _ctx| {
+            if slots.len() != 2 {
+                return Err(format!("capture expects 2 arguments, got {}", slots.len()));
+            }
+            let name = slots[0].as_str().ok_or_else(|| {
+                format!(
+                    "capture expects a string capture name (got kind {:?}); spell the binding \
+                     capture(\"name\", value)",
+                    slots[0].kind()
+                )
+            })?;
+            let lifted = const_lift::lift_capture_value(name, &slots[1])?;
+            let index = push_comptime_capture_binding((name.to_string(), lifted));
+            let handle = typed_object_for_named_schema(
+                "__CaptureBinding",
+                &[("index", KindedSlot::from_int(index as i64))],
+            );
+            Ok(TypedReturn::Concrete(ConcreteReturn::OpaqueTypedObject(
+                Arc::new(heap_value_from_typed_object_slot(handle)),
+            )))
+        },
+    );
+
+    // ADR-009 C3 #14 (slice 2, S2b): `install(template)` — attach a
+    // constructed hook template to the annotation's target function. The
+    // target is IMPLICIT (the annotation's target), matching every existing
+    // directive; the builtin resolves the opaque `__CheckedTemplate` handle
+    // to its store index and pushes `ComptimeDirective::InstallHookTemplate`.
+    // Directive consumption (specialize_template composition, the G8/driver
+    // rejections, registry + staging) happens at the authoritative pass-2
+    // function-target consumer — the store stays intact until the next
+    // per-run clear, so the post-execute index resolution is safe (store
+    // lifecycle doc above). C3-G13 string-tag errors (#60 routing note).
+    register_typed_function(
+        &mut module,
+        "install",
+        "Install a checked before/after hook template onto the annotation's target function",
+        vec![shape_runtime::module_exports::ModuleParam {
+            name: "template".to_string(),
+            type_name: "__CheckedTemplate".to_string(),
+            required: true,
+            ..Default::default()
+        }],
+        ConcreteType::Unit,
+        move |slots, _ctx| {
+            if slots.len() != 1 {
+                return Err(format!("install expects 1 argument, got {}", slots.len()));
+            }
+            let template_index = checked_template_index_from_slot(&slots[0], "install")?;
+            push_comptime_directive(ComptimeDirective::InstallHookTemplate { template_index })?;
+            Ok(TypedReturn::Concrete(ConcreteReturn::Unit))
         },
     );
 
@@ -2751,6 +3348,365 @@ mod e1_extend_carrier_tests {
     fn missing_extend_index_resolves_to_none() {
         clear_comptime_extend_statements();
         assert!(comptime_extend_statement_at(7).is_none());
+    }
+}
+
+// ADR-009 C3 #14 (slice 2): the three hook-template stores' lifecycle pins —
+// the same per-run-clear no-stale-leak discipline as the E2/E1 carriers above.
+// The body-fn store is COMPILE-populated (cleared at handler-run ENTRY beside
+// the replace-body carrier); the template + capture-binding stores are
+// EXECUTE-populated (cleared at the pre-execute point beside the checked-items
+// store).
+#[cfg(test)]
+mod hook_template_store_tests {
+    use super::*;
+
+    fn def_of(src: &str) -> shape_ast::ast::FunctionDef {
+        shape_ast::parse_program(src)
+            .expect("fixture parses")
+            .items
+            .into_iter()
+            .find_map(|item| match item {
+                shape_ast::ast::Item::Function(func, _) => Some(func),
+                _ => None,
+            })
+            .expect("fixture has one function")
+    }
+
+    fn bound_template(src: &str) -> BoundTemplate {
+        let def = def_of(src);
+        let template = CheckedTemplateBuilder::new(TemplateHookKind::Before)
+            .body_fn(&def)
+            .expect("fixture classifies")
+            .captures(shape_ast::ast::CaptureClause {
+                entries: Vec::new(),
+                span: shape_ast::ast::Span::default(),
+            })
+            .finish()
+            .expect("fixture finishes");
+        BoundTemplate {
+            template,
+            capture_values: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn body_fn_store_index_restarts_per_run_no_stale_leak() {
+        let a = def_of("fn a(x: int) -> int { return x }");
+        let b = def_of("fn b(x: int) -> int { return x + 1 }");
+        assert_ne!(a, b, "fixtures are distinct");
+
+        clear_comptime_template_body_fns();
+        assert_eq!(push_comptime_template_body_fn(a.clone()), 0);
+        assert_eq!(comptime_template_body_fn_at(0).as_ref(), Some(&a));
+
+        clear_comptime_template_body_fns();
+        assert_eq!(
+            push_comptime_template_body_fn(b.clone()),
+            0,
+            "index restarts per run"
+        );
+        let resolved = comptime_template_body_fn_at(0).expect("live in this run");
+        assert_eq!(resolved, b, "index 0 resolves to THIS run's def");
+        assert_ne!(resolved, a, "no stale def leaks across the per-run clear");
+    }
+
+    #[test]
+    fn hook_template_store_index_restarts_per_run_and_reads_clone() {
+        let a = bound_template("fn ta(x: int) -> int { return x }");
+        let b = bound_template("fn tb(x: int) -> int { return x }");
+
+        clear_comptime_hook_templates();
+        assert_eq!(push_comptime_hook_template(a), 0);
+        assert_eq!(
+            comptime_hook_template_at(0).expect("live").template.body_fn(),
+            "ta"
+        );
+        // Reads clone: the store stays intact until the next per-run clear —
+        // the driver resolves template indices AFTER vm.execute returns.
+        assert!(comptime_hook_template_at(0).is_some());
+
+        clear_comptime_hook_templates();
+        assert_eq!(push_comptime_hook_template(b), 0, "index restarts per run");
+        assert_eq!(
+            comptime_hook_template_at(0).expect("live").template.body_fn(),
+            "tb",
+            "index 0 resolves to THIS run's template"
+        );
+    }
+
+    #[test]
+    fn capture_binding_store_index_restarts_per_run() {
+        use crate::compiler::template_specialization::const_lift::LiftedConst;
+
+        clear_comptime_capture_bindings();
+        assert_eq!(
+            push_comptime_capture_binding(("a".to_string(), LiftedConst::Int(1))),
+            0
+        );
+        assert_eq!(
+            push_comptime_capture_binding(("b".to_string(), LiftedConst::Bool(true))),
+            1
+        );
+        assert_eq!(
+            comptime_capture_binding_at(0),
+            Some(("a".to_string(), LiftedConst::Int(1)))
+        );
+
+        clear_comptime_capture_bindings();
+        assert_eq!(
+            push_comptime_capture_binding(("c".to_string(), LiftedConst::Int(2))),
+            0,
+            "index restarts per run"
+        );
+        assert_eq!(
+            comptime_capture_binding_at(0),
+            Some(("c".to_string(), LiftedConst::Int(2))),
+            "index 0 resolves to THIS run's binding"
+        );
+        assert!(comptime_capture_binding_at(1).is_none());
+    }
+}
+
+// ADR-009 C3 #14 (slice 2): the PUBLIC-API reachability pins — construction
+// green paths and named rejections exercised THROUGH the public builtins over
+// the full compile path (parse → annotation handler → emit-side rewrite →
+// forwarder → mini-VM → builtin → the S1 chokepoint). S1 had no production
+// caller, so representative S1 classification / pseudo-tuple sentences are
+// pinned here as REACHABLE through `before_hook`/`after_hook`/`capture`.
+// A constructed-never-installed template is a no-op — every green fixture
+// must still compile and run its program (install is S2b).
+#[cfg(test)]
+mod hook_template_builtin_tests {
+    use super::*;
+
+    /// A whole program: `body_fns` at module scope, an annotation whose
+    /// comptime post handler runs `handler_stmts`, applied to a victim fn.
+    fn hook_program(body_fns: &str, handler_stmts: &str) -> String {
+        format!(
+            r#"
+{body_fns}
+
+annotation hookann() {{
+  targets: [function]
+  comptime post(target, ctx) {{
+    {handler_stmts}
+  }}
+}}
+
+@hookann()
+fn victim(a: int) -> int {{ return a }}
+
+victim(1)
+"#
+        )
+    }
+
+    fn compile(src: &str) -> shape_ast::error::Result<()> {
+        let program = shape_ast::parse_program(src).expect("fixture parses");
+        let mut compiler = crate::compiler::BytecodeCompiler::new();
+        compiler.compile_in_place(&program).map(|_| ())
+    }
+
+    fn expect_compile_reject(src: &str, needle: &str) {
+        let err = compile(src).expect_err("fixture must reject");
+        let text = err.to_string();
+        assert!(
+            text.contains(needle),
+            "expected rejection containing {needle:?}, got: {text}"
+        );
+    }
+
+    // ── GREEN construction paths ────────────────────────────────────────────
+
+    #[test]
+    fn concrete_no_capture_before_constructs_through_the_public_api() {
+        compile(&hook_program(
+            "fn my_before(x: int) -> int { return x + 1 }",
+            "let t = before_hook(my_before, [])",
+        ))
+        .expect("a concrete no-capture before-template constructs and the program compiles");
+    }
+
+    #[test]
+    fn concrete_with_captures_constructs_through_the_public_api() {
+        compile(&hook_program(
+            "fn my_before(x: int, threshold: int) -> int { return x + threshold }",
+            "let t = before_hook(my_before, [capture(\"threshold\", 5)])",
+        ))
+        .expect("a concrete before-template with a scalar capture constructs");
+    }
+
+    #[test]
+    fn polymorphic_before_with_captures_constructs_through_the_public_api() {
+        compile(&hook_program(
+            "fn my_before<Args>(args: Args, factor: int) -> Args { return args }",
+            "let t = before_hook(my_before, [capture(\"factor\", 3)])",
+        ))
+        .expect("a polymorphic before-template with a scalar capture constructs");
+    }
+
+    #[test]
+    fn polymorphic_after_constructs_through_the_public_api() {
+        compile(&hook_program(
+            "fn my_after<R>(result: R) -> R { return result }",
+            "let t = after_hook(my_after, [])",
+        ))
+        .expect("a polymorphic after-template constructs");
+    }
+
+    // ── Named rejections through the public API ─────────────────────────────
+
+    #[test]
+    fn string_body_arg_is_rejected_code_is_code() {
+        expect_compile_reject(
+            &hook_program(
+                "fn my_before(x: int) -> int { return x }",
+                "let t = before_hook(\"my_before\", [])",
+            ),
+            "bare module-scope fn identifier",
+        );
+    }
+
+    #[test]
+    fn unresolvable_body_fn_is_rejected_with_module_scope_twin() {
+        expect_compile_reject(
+            &hook_program(
+                "fn unrelated(x: int) -> int { return x }",
+                "let t = before_hook(nope, [])",
+            ),
+            "does not resolve to a module-scope fn",
+        );
+    }
+
+    // REACHABILITY PIN: the S1 classification sentences surface through the
+    // public builtin (S1 had no production caller).
+    #[test]
+    fn s1_classification_sentence_two_type_params_reaches_through_the_api() {
+        expect_compile_reject(
+            &hook_program(
+                "fn bad<A, B>(x: A) -> A { return x }",
+                "let t = before_hook(bad, [])",
+            ),
+            "declares 2 type parameters",
+        );
+    }
+
+    #[test]
+    fn s1_classification_sentence_non_t_return_reaches_through_the_api() {
+        expect_compile_reject(
+            &hook_program(
+                "fn bad<R>(result: R) -> int { return 0 }",
+                "let t = after_hook(bad, [])",
+            ),
+            "returns `int`",
+        );
+    }
+
+    // REACHABILITY PIN: the S1 pseudo-tuple sentences surface through the
+    // public builtin.
+    #[test]
+    fn s1_pseudo_tuple_sentence_reaches_through_the_api() {
+        expect_compile_reject(
+            &hook_program(
+                "fn bad<Args>(args: Args) -> Args {\n  let i = 0\n  args[i] = 1\n  return args\n}",
+                "let t = before_hook(bad, [])",
+            ),
+            "compile-time-constant index",
+        );
+    }
+
+    #[test]
+    fn duplicate_capture_rejects_c0907_through_the_api() {
+        expect_compile_reject(
+            &hook_program(
+                "fn my_before(x: int, cfg: int) -> int { return x }",
+                "let t = before_hook(my_before, [capture(\"cfg\", 1), capture(\"cfg\", 2)])",
+            ),
+            "[C0907]",
+        );
+    }
+
+    #[test]
+    fn capture_bijection_miss_rejects_through_the_api() {
+        expect_compile_reject(
+            &hook_program(
+                "fn my_before(x: int, cfg: int) -> int { return x }",
+                "let t = before_hook(my_before, [capture(\"wrong\", 1)])",
+            ),
+            "matches none of its 1 trailing capture parameter(s) [cfg]",
+        );
+    }
+
+    #[test]
+    fn capture_value_type_mismatch_rejects_naming_both_sides() {
+        expect_compile_reject(
+            &hook_program(
+                "fn my_before(x: int, cfg: string) -> int { return x }",
+                "let t = before_hook(my_before, [capture(\"cfg\", 1)])",
+            ),
+            "holds a int value but the matching trailing capture parameter is annotated `string`",
+        );
+    }
+
+    // S3b PIN FLIP (ordered by the slice-3 charter), RE-TARGETED in S4a: a
+    // non-liftable heap value rejects through the S3 out-of-domain producer,
+    // naming the kind and the closed C3-G5 domain — proven end-to-end
+    // through the public API with a HashMap capture value (statically typed,
+    // so the S4a generic `capture<T>` forwarder instantiates and the value
+    // REACHES the execute-time lift wall). The S3-era spelling used the
+    // handler's own `target` descriptor; its inline-Object annotation is
+    // outside the `ConcreteType` algebra, so under per-call-site value
+    // typing that spelling now rejects EARLIER at the capture call site —
+    // locked by the sibling pin below. (#65 note: an INLINE array-literal
+    // capture value `[capture("cfg", [1, 2])]` still trips the PRE-EXISTING
+    // `pending_variable_typed_array_kind` leak — the S3b composite fixtures
+    // hoist to a local first; #65 itself is not fixed in S3.)
+    #[test]
+    fn non_liftable_capture_value_rejects_with_the_s3_domain_sentence() {
+        expect_compile_reject(
+            &hook_program(
+                "fn my_before(x: int, cfg: int) -> int { return x }",
+                "let m: HashMap<string, int> = HashMap()\n    \
+                 let t = before_hook(my_before, [capture(\"cfg\", m)])",
+            ),
+            "outside the ConstLift domain (kind Ptr(HashMap))",
+        );
+    }
+
+    // S4a (#66 item 1) DISCLOSED CONSEQUENCE of per-call-site capture value
+    // typing: a capture VALUE whose static type does not resolve in the
+    // `ConcreteType` algebra (here the handler's `target` param — its inline
+    // `TypeAnnotation::Object` annotation is the S2d-measured proof-gap (a)
+    // family, S7's named follow-up) can no longer instantiate the generic
+    // `capture<T>` forwarder, so the rejection fires LOUDLY at COMPILE time
+    // with the established generic-inference sentence instead of reaching
+    // the execute-time S3 lift wall. Still surface-and-stop — never a
+    // silent narrowing; the S3 value-tier producers stay reachable for
+    // resolvable-typed values (the pin above) and are unit-locked per class
+    // arm in `const_lift.rs`.
+    #[test]
+    fn target_descriptor_capture_value_is_a_loud_compile_time_inference_rejection() {
+        expect_compile_reject(
+            &hook_program(
+                "fn my_before(x: int, cfg: int) -> int { return x }",
+                "let t = before_hook(my_before, [capture(\"cfg\", target)])",
+            ),
+            "cannot infer type argument(s) for generic function 'capture'",
+        );
+    }
+
+    // The compile-populated body-fn store SURVIVES to execute: proven by every
+    // green path above (the builtin resolves the def stashed at rewrite time
+    // during vm.execute). This control additionally proves two templates in
+    // ONE handler run get distinct indices.
+    #[test]
+    fn two_templates_in_one_handler_run_both_construct() {
+        compile(&hook_program(
+            "fn h1(x: int) -> int { return x }\nfn h2<R>(result: R) -> R { return result }",
+            "let a = before_hook(h1, [])\n    let b = after_hook(h2, [])",
+        ))
+        .expect("two templates in one run construct with distinct store indices");
     }
 }
 

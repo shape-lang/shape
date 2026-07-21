@@ -1057,10 +1057,14 @@ fn substitute_const_in_expr(expr: &Expr, const_subs: &HashMap<String, ComptimeCo
             body,
             generated_origin,
             captures,
+            annotations,
             span,
         } => Expr::FunctionExpr {
             generated_origin: generated_origin.clone(),
             captures: captures.clone(),
+            // C3-G12 nested-fn annotation carrier: cloned verbatim through
+            // substitution (the compiler-side G12 check reads it post-mono).
+            annotations: annotations.clone(),
             // Closure params may have default-value exprs that reference
             // const generics; walk those but leave patterns/annotations alone.
             params: params
@@ -1953,10 +1957,14 @@ fn substitute_expr(expr: &Expr, subs: &HashMap<String, ConcreteType>) -> Expr {
             body,
             generated_origin,
             captures,
+            annotations,
             span,
         } => Expr::FunctionExpr {
             generated_origin: generated_origin.clone(),
             captures: captures.clone(),
+            // C3-G12 nested-fn annotation carrier: cloned verbatim through
+            // substitution (the compiler-side G12 check reads it post-mono).
+            annotations: annotations.clone(),
             params: params
                 .iter()
                 .map(|p| substitute_function_parameter(p, subs))
@@ -4104,6 +4112,7 @@ mod tests {
             )],
             generated_origin: None,
             captures: None,
+            annotations: None,
             span: Span::default(),
         };
         let stmt = Statement::Expression(closure, Span::default());

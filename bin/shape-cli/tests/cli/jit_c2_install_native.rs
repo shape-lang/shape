@@ -19,24 +19,9 @@
 //! 3. `c2-regression-generated-move` — a generated method declaring a `move`
 //!    capture STILL JITs natively post-C2 (the regression net vs the C1 matrix).
 
-use super::jit_test_support::{count_fallback_lines, run_workspace_fixture, workspace_fixture_path};
-
-/// In-harness vacuity guard: a top-level `comptime` block silently excludes a
-/// fixture from native JIT, so a zero-fallback assertion would pass vacuously.
-/// (An annotation `comptime post` handler is NOT a top-level comptime block —
-/// the C2 generation fixtures rely on exactly that distinction.)
-fn assert_fixture_has_no_top_level_comptime(fixture: &str) {
-    let path = workspace_fixture_path("smokes-jit-closure", fixture);
-    let source = std::fs::read_to_string(&path).unwrap_or_else(|error| {
-        panic!("{fixture}: failed to read fixture {}: {error}", path.display())
-    });
-    let program = shape_ast::parser::parse_program(&source)
-        .unwrap_or_else(|error| panic!("{fixture}: failed to parse fixture: {error}"));
-    assert!(
-        !shape_vm::compiler::program_has_top_level_comptime(&program),
-        "{fixture}: top-level comptime silently excludes the fixture from native JIT"
-    );
-}
+use super::jit_test_support::{
+    assert_fixture_has_no_top_level_comptime, count_fallback_lines, run_workspace_fixture,
+};
 
 /// Zero-fallback proof: VM and JIT exit 0, produce identical stdout equal to
 /// `expected_stdout`, and neither emits a `[jit-fallback]` line — i.e. the

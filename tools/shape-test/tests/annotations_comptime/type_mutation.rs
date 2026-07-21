@@ -156,7 +156,7 @@ print(p.info())
 fn annotation_with_param_used_in_generated_method() {
     ShapeTest::new(
         r#"
-annotation with_default(default_val) {
+annotation with_default(default_val: int) {
   targets: [type]
   comptime post(target, ctx) {
     extend target {

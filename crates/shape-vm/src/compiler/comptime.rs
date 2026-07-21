@@ -9,7 +9,8 @@ use crate::compiler::comptime_builtins::expansion_provenance::{HygienicRole, Hyg
 use crate::executor::{VMConfig, VirtualMachine};
 use shape_ast::ast::{
     AnnotationHandlerParam, DestructurePattern, Expr, FunctionDef, FunctionParameter, Item,
-    ObjectEntry, ObjectTypeField, Program, Span, Statement, TypeAnnotation, VarKind, VariableDecl,
+    ObjectEntry, ObjectTypeField, Program, Span, Statement, TypeAnnotation, TypeParam, VarKind,
+    VariableDecl,
 };
 use shape_ast::error::{Result, ShapeError};
 use shape_value::heap_value::{HeapKind, HeapValue};
@@ -67,6 +68,21 @@ const TYPE_CONSTRUCTOR_FORWARDER: &str = "\u{1}comptime:forward-type-constructor
 const APPLY_FORWARDER: &str = "\u{1}comptime:forward-apply";
 const REFINE_FORWARDER: &str = "\u{1}comptime:forward-refine";
 const TYPE_ARGUMENT_FORWARDER: &str = "\u{1}comptime:forward-type-argument";
+
+// ADR-009 C3 #14 (slice 2): the ZERO-CAPTURE hook-template forwarders. An
+// EMPTY captures array literal (`before_hook(f, [])`) has no element to
+// prove a type from and no annotation context at a call-argument position —
+// strict typing would surface the empty-array rejection (there is no untyped
+// runtime array). The emit-side rewrite (`rewrite_template_hook_body_args`)
+// therefore lowers the empty-literal spelling to these UNSPELLABLE arity-1
+// forwarders (the `type_ref` name-rewrite precedent): only the rewrite can
+// reach them, the transported arg is the body-fn index literal, and the
+// builtin constructs the template with an empty capture set. A NON-empty
+// captures array types itself (each element is a `capture(...)` call with a
+// declared `__CaptureBinding` return) and flows through the spellable
+// arity-2 forwarders unchanged.
+const BEFORE_HOOK_NOCAPTURE_FORWARDER: &str = "\u{1}comptime:forward-before-hook-nocapture";
+const AFTER_HOOK_NOCAPTURE_FORWARDER: &str = "\u{1}comptime:forward-after-hook-nocapture";
 
 /// `refine`'s forwarder return annotation: `Option<AppliedType-carrier>`. Must
 /// stay byte-identical to `format!("Option<{COMPTIME_APPLIED_TYPE_SCHEMA}>")` —
@@ -319,6 +335,78 @@ const COMPTIME_BUILTIN_FORWARDERS: &[(
     // registration, or `extend_method_literal(...)` is `[C0001] Undefined function`
     // in a handler.
     ("extend_method_literal", 4, "extend_method_literal", None, None, None),
+    // ADR-009 C3 #14 (slice 2): the public hook-template API (the C3-G1
+    // metaprogramming primitive). `before_hook`/`after_hook` construct the S1
+    // `CheckedTemplate` through its chokepoint; their `body` argument is a
+    // bare module-scope fn identifier reached ONLY through the site rewrite
+    // (`rewrite_template_hook_body_args` — the type_ref/trait_ref
+    // identity-literal transport precedent), arriving here as an index
+    // literal. `capture` lifts one declared capture value through the S2
+    // ConstLift seam. Same carrier shape as item_fn (opaque-index
+    // `__CheckedTemplate` / `__CaptureBinding` OpaqueTypedObject handles; no
+    // return-schema marker; forwarder params unannotated — inference flows
+    // from the caller). Handler-scope resolution needs these rows IN ADDITION
+    // to the `comptime_builtins_module_base` registrations, or the names are
+    // `[C0001] Undefined function` in a handler (the extend_method_literal
+    // lesson).
+    (
+        "before_hook",
+        2,
+        "before_hook",
+        None,
+        Some("__CheckedTemplate"),
+        None,
+    ),
+    (
+        "after_hook",
+        2,
+        "after_hook",
+        None,
+        Some("__CheckedTemplate"),
+        None,
+    ),
+    // `capture`'s DECLARED return type is load-bearing: a captures array
+    // literal `[capture(...), ...]` proves its element type from the
+    // forwarder's declared `__CaptureBinding` struct return (the
+    // `array_elements_all_typed_object` producer-side proof) — without it,
+    // strict typing rejects the literal as element-type-unprovable.
+    // S4a (#66 item 1): this row generates as the ONE GENERIC forwarder
+    // (`capture<T>(name, value: T)` — see the named special-case in
+    // `comptime_builtin_forwarders`) so capture VALUES type per call site
+    // and mixed-type captures in one handler are legal.
+    (
+        "capture",
+        2,
+        "capture",
+        None,
+        Some("__CaptureBinding"),
+        None,
+    ),
+    // ADR-009 C3 #14 (slice 2, S2b): `install(template)` pushes the
+    // InstallHookTemplate directive for the annotation's target (implicit,
+    // like every directive emitter). Unit return (no named return type —
+    // same shape as warning/error); the param infers `__CheckedTemplate`
+    // from the caller's handle. Handler-scope resolution needs this row IN
+    // ADDITION to the `comptime_builtins_module_base` registration
+    // (the extend_method_literal lesson).
+    ("install", 1, "install", None, None, None),
+    // The rewrite-only zero-capture lowerings (see the forwarder consts doc).
+    (
+        BEFORE_HOOK_NOCAPTURE_FORWARDER,
+        1,
+        "before_hook_nocapture",
+        None,
+        Some("__CheckedTemplate"),
+        None,
+    ),
+    (
+        AFTER_HOOK_NOCAPTURE_FORWARDER,
+        1,
+        "after_hook_nocapture",
+        None,
+        Some("__CheckedTemplate"),
+        None,
+    ),
     // Comptime-excellence §4.5.7.4 — `string_lit(s)` renders a computed string
     // as a Shape source literal for embedding into `extend (expr)` output.
     ("string_lit", 1, "string_lit", None, None, None),
@@ -539,11 +627,63 @@ fn comptime_target_param_type() -> TypeAnnotation {
     ])
 }
 
+/// ADR-009 C3 #14 (slice 2): the hook-template carrier types as mini-VM
+/// struct items, so `before_hook`/`after_hook`/`capture` results TYPE inside
+/// handler code (`let t = before_hook(...)`; a `[capture(...), ...]` array
+/// literal proves its element type from `capture`'s declared return). The
+/// injected-payload-model precedent (`frozen_type_payload_model_items`): the
+/// declared field set mirrors the reserved runtime schema (an opaque `index`
+/// handle — builtin_schemas.rs), and the VALUE carriers are still built by
+/// the builtins via `typed_object_for_named_schema`; handles are opaque —
+/// handler code passes them around, it never reads their fields.
+fn hook_template_carrier_items() -> Vec<Item> {
+    use shape_ast::ast::{StructField, StructTypeDef};
+    let carrier = |name: &str| {
+        Item::StructType(
+            StructTypeDef {
+                name: name.to_string(),
+                doc_comment: None,
+                type_params: None,
+                fields: vec![StructField {
+                    annotations: Vec::new(),
+                    is_comptime: false,
+                    name: "index".to_string(),
+                    span: Span::DUMMY,
+                    doc_comment: None,
+                    type_annotation: TypeAnnotation::Basic("int".to_string()),
+                    default_value: None,
+                }],
+                methods: Vec::new(),
+                annotations: Vec::new(),
+                native_layout: None,
+            },
+            Span::DUMMY,
+        )
+    };
+    vec![carrier("__CheckedTemplate"), carrier("__CaptureBinding")]
+}
+
 fn comptime_builtin_forwarders() -> Vec<Item> {
     let mut items = vec![frozen_type_category_enum_item()];
     items.extend(frozen_type_payload_model_items());
+    items.extend(hook_template_carrier_items());
     items.extend(COMPTIME_BUILTIN_FORWARDERS.iter().map(
         |(name, arity, target_method, return_fields, named_return_type, param_annotations)| {
+            // ADR-009 C3 #14 (slice 4, S4a — #66 item 1): `capture` is the
+            // ONE generic forwarder — `fn capture<T>(name, value: T) ->
+            // __CaptureBinding`. A monomorphic forwarder gives the VALUE
+            // param a single shared inference site, so every `capture()`
+            // call in one handler unifies against the same var and
+            // mixed-type captures (int + string, int + Array<int>) fail
+            // with `[C0001] Could not solve type constraints` — exactly the
+            // shape S4's typed config params lower to (the G2 sugar test).
+            // Making the forwarder generic types the value PER CALL SITE
+            // via the language's own generic-call inference +
+            // monomorphization; each mono body still calls the variadic
+            // kind-agnostic `__comptime__.capture`. Param 0 (name) stays
+            // UNANNOTATED so the builtin's own "capture expects a string
+            // capture name" sentence stays reachable.
+            let is_generic_capture_forwarder = *name == "capture";
             let params: Vec<shape_ast::ast::FunctionParameter> = (0..*arity)
                 .map(|i| shape_ast::ast::FunctionParameter {
                     pattern: shape_ast::ast::DestructurePattern::Identifier(
@@ -556,7 +696,11 @@ fn comptime_builtin_forwarders() -> Vec<Item> {
                     is_out: false,
                     type_annotation: param_annotations
                         .and_then(|annotations| annotations.get(i))
-                        .map(|annotation| TypeAnnotation::Basic((*annotation).to_string())),
+                        .map(|annotation| TypeAnnotation::Basic((*annotation).to_string()))
+                        .or_else(|| {
+                            (is_generic_capture_forwarder && i == 1)
+                                .then(|| TypeAnnotation::Basic("T".to_string()))
+                        }),
                     default_value: None,
                 })
                 .collect();
@@ -631,7 +775,17 @@ fn comptime_builtin_forwarders() -> Vec<Item> {
                     params,
                     return_type,
                     body: vec![Statement::Return(Some(body_expr), Span::DUMMY)],
-                    type_params: Some(Vec::new()),
+                    type_params: Some(if is_generic_capture_forwarder {
+                        vec![TypeParam::Type {
+                            name: "T".to_string(),
+                            span: Span::DUMMY,
+                            doc_comment: None,
+                            default_type: None,
+                            trait_bounds: Vec::new(),
+                        }]
+                    } else {
+                        Vec::new()
+                    }),
                     annotations: Vec::new(),
                     where_clause: None,
                     is_async: false,
@@ -1760,6 +1914,560 @@ fn rewrite_comptime_type_symbol_args_expr_scoped(
     Ok(())
 }
 
+/// ADR-009 C3 #14 (slice 2): the emit-side BODY-FN transport for the public
+/// hook-template builtins (`before_hook` / `after_hook`).
+///
+/// Model: `rewrite_comptime_type_symbol_args` (above) and the forwarder
+/// table's identity-literal-transport note — the body argument is a BARE
+/// MODULE-SCOPE FN IDENTIFIER (C3-G3: code is code; never a string, never a
+/// hand-built AST). This walk runs over the handler body statement at
+/// `execute_comptime_with_annotation_handler`, resolving the identifier
+/// through the `lookup` PARAMETER (threaded from the caller's AST fn table —
+/// the same table `collect_authorized_comptime_helpers` reads; never ambient
+/// state), stashing the resolved `FunctionDef` in the per-run
+/// `COMPTIME_TEMPLATE_BODY_FNS` store (compile-populated lifecycle), and
+/// rewriting the argument to the store index literal — the intrinsic is
+/// reached only through this rewrite.
+///
+/// Misuse is a NAMED rejection with a positive twin: a non-identifier body
+/// argument (string / closure / call / any expression), an identifier
+/// that resolves to no module-scope fn (which also covers comptime-local and
+/// nested fns — a disclosed S2 narrowing of C3-G3's comptime-local wording;
+/// the E-track quote/splice surface is the named later producer for those),
+/// and (fix-round-1) an identifier SHADOWED by a handler-local binding —
+/// without the check, `let my_hook = 3; before_hook(my_hook, [])` would
+/// silently bind the MODULE fn `my_hook`, inverting ordinary shadowing.
+///
+/// The shadow check is a CONSERVATIVE flat set (fix-round-1, documented
+/// narrowing): handler-local `let`/`for` binder names accumulate lexically
+/// and are never popped at scope exit, so a local declared in one branch
+/// also flags a later use — the over-approximation only ever produces the
+/// LOUD named rejection (rename one side), never a silent misbind.
+/// Match-arm and closure-parameter bindings are outside the tracked set
+/// (closure interiors are not recursed by this rewrite at all).
+fn rewrite_template_hook_body_args(
+    stmt: &mut Statement,
+    lookup: &dyn Fn(&str) -> Option<FunctionDef>,
+) -> Result<()> {
+    let mut locals: std::collections::HashSet<String> = std::collections::HashSet::new();
+    rewrite_template_hook_body_args_stmt(stmt, lookup, &mut locals)
+}
+
+/// Statement face of the walk ([`rewrite_template_hook_body_args`] is the
+/// entry wrapper owning the handler-local binding set).
+fn rewrite_template_hook_body_args_stmt(
+    stmt: &mut Statement,
+    lookup: &dyn Fn(&str) -> Option<FunctionDef>,
+    locals: &mut std::collections::HashSet<String>,
+) -> Result<()> {
+    match stmt {
+        Statement::Expression(expr, _) => {
+            rewrite_template_hook_body_args_expr(expr, lookup, locals)?
+        }
+        Statement::Return(Some(expr), _) => {
+            rewrite_template_hook_body_args_expr(expr, lookup, locals)?
+        }
+        Statement::Return(None, _) | Statement::Break(_) | Statement::Continue(_) => {}
+        Statement::VariableDecl(decl, _) => {
+            if let Some(init) = &mut decl.value {
+                rewrite_template_hook_body_args_expr(init, lookup, locals)?;
+            }
+            locals.extend(decl.pattern.get_identifiers());
+        }
+        Statement::Assignment(assign, _) => {
+            rewrite_template_hook_body_args_expr(&mut assign.value, lookup, locals)?;
+        }
+        Statement::For(for_loop, _) => {
+            match &mut for_loop.init {
+                shape_ast::ast::ForInit::ForIn { pattern, iter } => {
+                    rewrite_template_hook_body_args_expr(iter, lookup, locals)?;
+                    locals.extend(pattern.get_identifiers());
+                }
+                shape_ast::ast::ForInit::ForC {
+                    init,
+                    condition,
+                    update,
+                } => {
+                    rewrite_template_hook_body_args_stmt(init, lookup, locals)?;
+                    rewrite_template_hook_body_args_expr(condition, lookup, locals)?;
+                    rewrite_template_hook_body_args_expr(update, lookup, locals)?;
+                }
+            }
+            for s in &mut for_loop.body {
+                rewrite_template_hook_body_args_stmt(s, lookup, locals)?;
+            }
+        }
+        Statement::While(while_loop, _) => {
+            rewrite_template_hook_body_args_expr(&mut while_loop.condition, lookup, locals)?;
+            for s in &mut while_loop.body {
+                rewrite_template_hook_body_args_stmt(s, lookup, locals)?;
+            }
+        }
+        Statement::If(if_stmt, _) => {
+            rewrite_template_hook_body_args_expr(&mut if_stmt.condition, lookup, locals)?;
+            for s in &mut if_stmt.then_body {
+                rewrite_template_hook_body_args_stmt(s, lookup, locals)?;
+            }
+            if let Some(else_body) = &mut if_stmt.else_body {
+                for s in else_body {
+                    rewrite_template_hook_body_args_stmt(s, lookup, locals)?;
+                }
+            }
+        }
+        Statement::SetParamValue { expression, .. }
+        | Statement::SetParamTypeExpr { expression, .. }
+        | Statement::SetReturnExpr { expression, .. }
+        | Statement::ReplaceBodyExpr { expression, .. }
+        | Statement::ReplaceModuleExpr { expression, .. }
+        | Statement::ExtendItemsExpr { expression, .. } => {
+            rewrite_template_hook_body_args_expr(expression, lookup, locals)?;
+        }
+        Statement::ReplaceBody { body, .. } => {
+            for s in body {
+                rewrite_template_hook_body_args_stmt(s, lookup, locals)?;
+            }
+        }
+        // Directives with no embedded expression / already-parsed payloads.
+        Statement::Extend(_, _)
+        | Statement::RemoveTarget(_)
+        | Statement::SetParamType { .. }
+        | Statement::SetReturnType { .. } => {}
+    }
+    Ok(())
+}
+
+/// A one-word description of a rejected `before_hook`/`after_hook` body
+/// argument shape, for the named rejection's message.
+fn template_body_arg_shape_word(expr: &Expr) -> &'static str {
+    match expr {
+        Expr::Literal(shape_ast::ast::Literal::String(_), _) => "a string literal",
+        Expr::Literal(_, _) => "a literal value",
+        Expr::FunctionExpr { .. } => "a closure",
+        Expr::FunctionCall { .. }
+        | Expr::MethodCall { .. }
+        | Expr::QualifiedFunctionCall { .. } => "a call result",
+        Expr::PropertyAccess { .. } => "a property access",
+        _ => "an expression",
+    }
+}
+
+/// Expression face of [`rewrite_template_hook_body_args`]: the arg-0 rewrite
+/// on `before_hook`/`after_hook` call positions, then child recursion with the
+/// SAME arm coverage as the type-symbol rewrite above (nested constructions
+/// like `install(before_hook(f, [...]))` and template calls inside
+/// block/if/for expressions are reached).
+fn rewrite_template_hook_body_args_expr(
+    expr: &mut Expr,
+    lookup: &dyn Fn(&str) -> Option<FunctionDef>,
+    locals: &mut std::collections::HashSet<String>,
+) -> Result<()> {
+    if let Expr::FunctionCall { name, args, .. } = expr {
+        if (name == "before_hook" || name == "after_hook") && !args.is_empty() {
+            let builtin = name.clone();
+            match &mut args[0] {
+                Expr::Identifier(ident, ident_span) => {
+                    // Fix-round-1: a handler-local binding of the same name
+                    // SHADOWS the module fn under ordinary scoping — resolving
+                    // the module fn anyway would silently invert shadowing, so
+                    // reject loudly (conservative flat-set check; fn docs).
+                    if locals.contains(ident.as_str()) {
+                        return Err(ShapeError::SemanticError {
+                            message: format!(
+                                "`{builtin}` body fn `{ident}` is shadowed by a handler-local \
+                                 binding named `{ident}`; a template body is referenced by its \
+                                 bare module-scope fn name (C3-G3), and the handler-local \
+                                 binding would be silently ignored — rename the local binding \
+                                 or the body fn so the reference is unambiguous"
+                            ),
+                            location: None,
+                        });
+                    }
+                    let Some(def) = lookup(ident) else {
+                        return Err(ShapeError::SemanticError {
+                            message: format!(
+                                "`{builtin}` body fn `{ident}` does not resolve to a \
+                                 module-scope fn in this compilation; declare `fn {ident}(...)` \
+                                 at module scope and pass `{ident}` (module-scope and \
+                                 previously generated module fns are supported; \
+                                 comptime-local/nested fns are not a template body in this \
+                                 slice)"
+                            ),
+                            location: None,
+                        });
+                    };
+                    let index = super::comptime_builtins::push_comptime_template_body_fn(def);
+                    let ident_span = *ident_span;
+                    args[0] =
+                        Expr::Literal(shape_ast::ast::Literal::Int(index as i64), ident_span);
+                }
+                other => {
+                    return Err(ShapeError::SemanticError {
+                        message: format!(
+                            "`{builtin}` expects a bare module-scope fn identifier as its body \
+                             argument, got {}; code is code (C3-G3) — declare \
+                             `fn my_hook(...)` at module scope and pass `my_hook`",
+                            template_body_arg_shape_word(other),
+                        ),
+                        location: None,
+                    });
+                }
+            }
+            // The ZERO-CAPTURE lowering (see the nocapture forwarder consts):
+            // an EMPTY captures array literal cannot prove an element type at
+            // a call-argument position, so the spelling lowers to the
+            // unspellable arity-1 forwarder carrying just the body index —
+            // reached only through this rewrite. Non-empty literals and
+            // non-literal expressions pass through and type themselves.
+            if args.len() == 2 && matches!(&args[1], Expr::Array(elems, _) if elems.is_empty()) {
+                let body_index = args[0].clone();
+                *name = if builtin == "before_hook" {
+                    BEFORE_HOOK_NOCAPTURE_FORWARDER.to_string()
+                } else {
+                    AFTER_HOOK_NOCAPTURE_FORWARDER.to_string()
+                };
+                *args = vec![body_index];
+            }
+        }
+    }
+
+    // Child recursion (direct calls — the handler-local set threads through).
+    match expr {
+        Expr::FunctionCall {
+            args, named_args, ..
+        } => {
+            for a in args.iter_mut() {
+                rewrite_template_hook_body_args_expr(a, lookup, locals)?;
+            }
+            for (_, a) in named_args.iter_mut() {
+                rewrite_template_hook_body_args_expr(a, lookup, locals)?;
+            }
+        }
+        Expr::MethodCall {
+            receiver,
+            args,
+            named_args,
+            ..
+        } => {
+            rewrite_template_hook_body_args_expr(receiver, lookup, locals)?;
+            for a in args.iter_mut() {
+                rewrite_template_hook_body_args_expr(a, lookup, locals)?;
+            }
+            for (_, a) in named_args.iter_mut() {
+                rewrite_template_hook_body_args_expr(a, lookup, locals)?;
+            }
+        }
+        Expr::QualifiedFunctionCall {
+            args, named_args, ..
+        } => {
+            for a in args.iter_mut() {
+                rewrite_template_hook_body_args_expr(a, lookup, locals)?;
+            }
+            for (_, a) in named_args.iter_mut() {
+                rewrite_template_hook_body_args_expr(a, lookup, locals)?;
+            }
+        }
+        Expr::PropertyAccess { object, .. } => rewrite_template_hook_body_args_expr(object, lookup, locals)?,
+        Expr::IndexAccess {
+            object,
+            index,
+            end_index,
+            ..
+        } => {
+            rewrite_template_hook_body_args_expr(object, lookup, locals)?;
+            rewrite_template_hook_body_args_expr(index, lookup, locals)?;
+            if let Some(end) = end_index {
+                rewrite_template_hook_body_args_expr(end, lookup, locals)?;
+            }
+        }
+        Expr::BinaryOp { left, right, .. } | Expr::FuzzyComparison { left, right, .. } => {
+            rewrite_template_hook_body_args_expr(left, lookup, locals)?;
+            rewrite_template_hook_body_args_expr(right, lookup, locals)?;
+        }
+        Expr::UnaryOp { operand, .. } => rewrite_template_hook_body_args_expr(operand, lookup, locals)?,
+        Expr::Conditional {
+            condition,
+            then_expr,
+            else_expr,
+            ..
+        } => {
+            rewrite_template_hook_body_args_expr(condition, lookup, locals)?;
+            rewrite_template_hook_body_args_expr(then_expr, lookup, locals)?;
+            if let Some(e) = else_expr {
+                rewrite_template_hook_body_args_expr(e, lookup, locals)?;
+            }
+        }
+        Expr::Match(match_expr, _) => {
+            rewrite_template_hook_body_args_expr(&mut match_expr.scrutinee, lookup, locals)?;
+            for arm in &mut match_expr.arms {
+                if let Some(guard) = &mut arm.guard {
+                    rewrite_template_hook_body_args_expr(guard, lookup, locals)?;
+                }
+                rewrite_template_hook_body_args_expr(&mut arm.body, lookup, locals)?;
+            }
+        }
+        Expr::Array(elems, _) => {
+            for e in elems.iter_mut() {
+                rewrite_template_hook_body_args_expr(e, lookup, locals)?;
+            }
+        }
+        Expr::Object(entries, _) => {
+            for entry in entries.iter_mut() {
+                match entry {
+                    shape_ast::ast::ObjectEntry::Field { value, .. } => rewrite_template_hook_body_args_expr(value, lookup, locals)?,
+                    shape_ast::ast::ObjectEntry::Spread(e) => rewrite_template_hook_body_args_expr(e, lookup, locals)?,
+                }
+            }
+        }
+        Expr::Block(block, _) => {
+            for item in &mut block.items {
+                match item {
+                    shape_ast::ast::BlockItem::Statement(s) => {
+                        rewrite_template_hook_body_args_stmt(s, lookup, locals)?;
+                    }
+                    shape_ast::ast::BlockItem::Expression(e) => rewrite_template_hook_body_args_expr(e, lookup, locals)?,
+                    shape_ast::ast::BlockItem::VariableDecl(decl) => {
+                        if let Some(init) = &mut decl.value {
+                            rewrite_template_hook_body_args_expr(init, lookup, locals)?;
+                        }
+                        locals.extend(decl.pattern.get_identifiers());
+                    }
+                    shape_ast::ast::BlockItem::Assignment(assign) => {
+                        rewrite_template_hook_body_args_expr(&mut assign.value, lookup, locals)?;
+                    }
+                }
+            }
+        }
+        Expr::TryOperator(inner, _)
+        | Expr::Await(inner, _)
+        | Expr::Spread(inner, _)
+        | Expr::AsyncScope(inner, _)
+        | Expr::Reference { expr: inner, .. } => rewrite_template_hook_body_args_expr(inner, lookup, locals)?,
+        Expr::Return(Some(inner), _) | Expr::Break(Some(inner), _) => rewrite_template_hook_body_args_expr(inner, lookup, locals)?,
+        Expr::For(for_expr, _) => {
+            rewrite_template_hook_body_args_expr(&mut for_expr.iterable, lookup, locals)?;
+            rewrite_template_hook_body_args_expr(&mut for_expr.body, lookup, locals)?;
+        }
+        Expr::While(while_expr, _) => {
+            rewrite_template_hook_body_args_expr(&mut while_expr.condition, lookup, locals)?;
+            rewrite_template_hook_body_args_expr(&mut while_expr.body, lookup, locals)?;
+        }
+        Expr::If(if_expr, _) => {
+            rewrite_template_hook_body_args_expr(&mut if_expr.condition, lookup, locals)?;
+            rewrite_template_hook_body_args_expr(&mut if_expr.then_branch, lookup, locals)?;
+            if let Some(else_branch) = &mut if_expr.else_branch {
+                rewrite_template_hook_body_args_expr(else_branch, lookup, locals)?;
+            }
+        }
+        Expr::Loop(loop_expr, _) => rewrite_template_hook_body_args_expr(&mut loop_expr.body, lookup, locals)?,
+        Expr::Range { start, end, .. } => {
+            if let Some(s) = start {
+                rewrite_template_hook_body_args_expr(s, lookup, locals)?;
+            }
+            if let Some(e) = end {
+                rewrite_template_hook_body_args_expr(e, lookup, locals)?;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+/// ADR-009 C3 #14 (slice 2): unit pins for the emit-side hook-template body-fn
+/// rewrite — the identity-literal transport (bare identifier → per-run store
+/// index literal) and its two named rejections. The full compile-path exercise
+/// is `comptime_builtins::hook_template_builtin_tests`.
+#[cfg(test)]
+mod template_hook_body_rewrite_tests {
+    use super::*;
+
+    fn fixture_def(name: &str) -> FunctionDef {
+        let src = format!("fn {name}(x: int) -> int {{ return x }}");
+        shape_ast::parse_program(&src)
+            .expect("fixture parses")
+            .items
+            .into_iter()
+            .find_map(|item| match item {
+                Item::Function(func, _) => Some(func),
+                _ => None,
+            })
+            .expect("fixture has one function")
+    }
+
+    /// Parse `src` as a whole program and return its first top-level
+    /// statement/expression wrapped the way the executor wraps handler
+    /// bodies.
+    fn stmt_of(src: &str) -> Statement {
+        shape_ast::parse_program(src)
+            .expect("fixture parses")
+            .items
+            .into_iter()
+            .find_map(|item| match item {
+                Item::Expression(expr, _) => Some(Statement::Return(Some(expr), Span::DUMMY)),
+                Item::Statement(stmt, _) => Some(stmt),
+                _ => None,
+            })
+            .expect("fixture has one expression/statement item")
+    }
+
+    fn first_call_args(stmt: &Statement) -> &[Expr] {
+        match stmt {
+            Statement::Return(Some(Expr::FunctionCall { args, .. }), _)
+            | Statement::Expression(Expr::FunctionCall { args, .. }, _) => args,
+            other => panic!("fixture shape changed: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn bare_identifier_rewrites_to_the_store_index_literal() {
+        super::super::comptime_builtins::clear_comptime_template_body_fns();
+        let mut stmt = stmt_of("before_hook(my_hook, [])");
+        let lookup = |name: &str| (name == "my_hook").then(|| fixture_def("my_hook"));
+        rewrite_template_hook_body_args(&mut stmt, &lookup).expect("bare identifier rewrites");
+        match &first_call_args(&stmt)[0] {
+            Expr::Literal(shape_ast::ast::Literal::Int(0), _) => {}
+            other => panic!("expected the index-0 literal, got {other:?}"),
+        }
+        // The EMPTY captures literal additionally lowers the call to the
+        // unspellable arity-1 nocapture forwarder (structural transport — an
+        // empty array has no element to prove a type from).
+        match stmt {
+            Statement::Expression(Expr::FunctionCall { ref name, ref args, .. }, _)
+            | Statement::Return(Some(Expr::FunctionCall { ref name, ref args, .. }), _) => {
+                assert_eq!(name, BEFORE_HOOK_NOCAPTURE_FORWARDER);
+                assert_eq!(args.len(), 1, "the empty captures array was dropped");
+            }
+            ref other => panic!("fixture shape changed: {other:?}"),
+        }
+    }
+
+    // A NON-empty captures array literal keeps the spellable arity-2 call —
+    // only its body identifier is rewritten; the array types itself from the
+    // `capture(...)` elements' declared return.
+    #[test]
+    fn non_empty_captures_array_keeps_the_spellable_call() {
+        super::super::comptime_builtins::clear_comptime_template_body_fns();
+        let mut stmt = stmt_of("before_hook(my_hook, [capture(\"cfg\", 1)])");
+        let lookup = |name: &str| (name == "my_hook").then(|| fixture_def("my_hook"));
+        rewrite_template_hook_body_args(&mut stmt, &lookup).expect("rewrite passes");
+        match stmt {
+            Statement::Expression(Expr::FunctionCall { ref name, ref args, .. }, _)
+            | Statement::Return(Some(Expr::FunctionCall { ref name, ref args, .. }), _) => {
+                assert_eq!(name, "before_hook");
+                assert_eq!(args.len(), 2);
+            }
+            ref other => panic!("fixture shape changed: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn unresolvable_identifier_is_a_named_rejection_with_positive_twin() {
+        super::super::comptime_builtins::clear_comptime_template_body_fns();
+        let mut stmt = stmt_of("before_hook(nope, [])");
+        let err = rewrite_template_hook_body_args(&mut stmt, &|_| None)
+            .expect_err("an unresolvable body fn must reject");
+        let text = err.to_string();
+        assert!(
+            text.contains("does not resolve to a module-scope fn"),
+            "names the resolution failure: {text}"
+        );
+        assert!(
+            text.contains("declare `fn nope(...)` at module scope"),
+            "carries the positive twin: {text}"
+        );
+        assert!(
+            text.contains("comptime-local/nested fns are not a template body in this slice"),
+            "names the comptime-local narrowing: {text}"
+        );
+    }
+
+    #[test]
+    fn non_identifier_body_arg_is_a_named_rejection() {
+        super::super::comptime_builtins::clear_comptime_template_body_fns();
+        let mut stmt = stmt_of("after_hook(\"my_hook\", [])");
+        let err = rewrite_template_hook_body_args(&mut stmt, &|_| None)
+            .expect_err("a string body arg must reject — code is code (C3-G3)");
+        let text = err.to_string();
+        assert!(
+            text.contains("bare module-scope fn identifier"),
+            "names the contract: {text}"
+        );
+        assert!(text.contains("a string literal"), "names the shape: {text}");
+        assert!(
+            text.contains("declare `fn my_hook(...)` at module scope and pass `my_hook`"),
+            "carries the positive twin: {text}"
+        );
+    }
+
+    // Fix-round-1: a handler-local binding sharing the body fn's name is a
+    // NAMED rejection — without it the rewrite would bind the MODULE fn and
+    // silently invert ordinary shadowing. Driven through the statement face
+    // with one shared locals set, exactly as the production Block walk
+    // threads it.
+    #[test]
+    fn handler_local_shadowing_the_body_fn_is_a_named_rejection() {
+        super::super::comptime_builtins::clear_comptime_template_body_fns();
+        let body = shape_ast::parse_program(
+            "fn outer() { let my_hook = 3\n let t = before_hook(my_hook, []) }",
+        )
+        .expect("fixture parses")
+        .items
+        .into_iter()
+        .find_map(|item| match item {
+            Item::Function(func, _) => Some(func),
+            _ => None,
+        })
+        .expect("fixture has one function")
+        .body;
+        let lookup = |name: &str| (name == "my_hook").then(|| fixture_def("my_hook"));
+        let mut locals = std::collections::HashSet::new();
+        let mut rejection = None;
+        for mut stmt in body {
+            if let Err(err) = rewrite_template_hook_body_args_stmt(&mut stmt, &lookup, &mut locals)
+            {
+                rejection = Some(err);
+                break;
+            }
+        }
+        let text = rejection
+            .expect("the shadowed body fn reference must reject")
+            .to_string();
+        assert!(
+            text.contains("is shadowed by a handler-local binding"),
+            "names the shadow: {text}"
+        );
+        assert!(
+            text.contains("rename the local binding or the body fn"),
+            "carries the positive twin: {text}"
+        );
+    }
+
+    #[test]
+    fn nested_call_positions_are_reached() {
+        // `let t = before_hook(h, [])` inside a block expression — the arg-0
+        // rewrite fires through the Block/VariableDecl recursion arms.
+        super::super::comptime_builtins::clear_comptime_template_body_fns();
+        let expr = shape_ast::parse_program("fn outer() { let t = before_hook(h, []) }")
+            .expect("fixture parses")
+            .items
+            .into_iter()
+            .find_map(|item| match item {
+                Item::Function(func, _) => Some(func),
+                _ => None,
+            })
+            .expect("fixture has one function")
+            .body;
+        let mut stmt = expr.into_iter().next().expect("one body statement");
+        let lookup = |name: &str| (name == "h").then(|| fixture_def("h"));
+        rewrite_template_hook_body_args(&mut stmt, &lookup)
+            .expect("nested call position rewrites");
+        let rendered = format!("{stmt:?}");
+        assert!(
+            rendered.contains("Int(0)") && !rendered.contains("Identifier(\"h\""),
+            "the nested body identifier was rewritten to the index literal: {rendered}"
+        );
+    }
+}
+
 /// Execute statements at compile time (comptime) and return the result.
 ///
 /// Used for meta function methods with statement bodies. The statements are
@@ -2260,6 +2968,9 @@ pub(crate) fn execute_comptime_with_target(
         // No representation authority on this convenience path (used by the
         // reflect-annotation self-test; not a type-target declaration hook).
         None,
+        // No AST fn table on this test-only convenience path: a hook-template
+        // body identifier resolves to nothing (the named rejection fires).
+        &|_| None,
     )
 }
 
@@ -2305,7 +3016,12 @@ pub(crate) fn execute_comptime_with_annotation_handler(
     handler_params: &[AnnotationHandlerParam],
     target_value: KindedSlot,
     annotation_args: &[Expr],
-    annotation_def_param_names: &[String],
+    // ADR-009 C3 #14 (slice 4): the def-param carrier is `(name, declared
+    // type annotation)` pairs (`handler_resolution::annotation_def_params`).
+    // Legacy defs always carry `None`, so the injection below is
+    // classification-free and byte-equivalent for legacy; TypedConfig defs
+    // deliver their declared types onto the injected handler params.
+    annotation_def_params: &[(String, Option<TypeAnnotation>)],
     const_bindings: &[(String, KindedSlot)],
     comptime_helpers: &[FunctionDef],
     extensions: &[shape_runtime::module_exports::ModuleExports],
@@ -2326,6 +3042,12 @@ pub(crate) fn execute_comptime_with_annotation_handler(
     // enters scope, so user code can never obtain one. Function/module/expression
     // targets pass `None`.
     access_identity: Option<(i64, i64)>,
+    // ADR-009 C3 #14 (slice 2): resolves a bare `before_hook`/`after_hook`
+    // body-fn identifier against the caller's AST fn table (the same table
+    // `collect_authorized_comptime_helpers` reads) for the emit-side rewrite
+    // (`rewrite_template_hook_body_args`). Threaded as a PARAMETER — never
+    // ambient compiler state.
+    template_body_fn_lookup: &dyn Fn(&str) -> Option<FunctionDef>,
 ) -> Result<ComptimeExecutionResult> {
     if handler_params.iter().filter(|p| p.is_variadic).count() > 1 {
         return Err(ShapeError::RuntimeError {
@@ -2363,6 +3085,12 @@ pub(crate) fn execute_comptime_with_annotation_handler(
     // ADR-009 E1 #17 (slice 4): the direct-block extend carrier shares the same
     // compile-populated lifecycle — cleared here at run entry too.
     super::comptime_builtins::clear_comptime_extend_statements();
+    // ADR-009 C3 #14 (slice 2): the hook-template body-fn store shares the
+    // compile-populated lifecycle (the emit-side rewrite below stashes into it
+    // BEFORE the inner compile, and the VM run reads it by index) — cleared
+    // here at run entry, NOT at the pre-execute clear point, because a
+    // pre-execute clear would wipe the compile-time stash before the read.
+    super::comptime_builtins::clear_comptime_template_body_fns();
 
     let params: Vec<FunctionParameter> = handler_params
         .iter()
@@ -2474,8 +3202,8 @@ pub(crate) fn execute_comptime_with_annotation_handler(
     // If the handler only has (target, ctx) but the annotation definition has params,
     // inject them as extra function params so the handler body can reference them by name.
     let mut params = params;
-    if extra_handler_params == 0 && !annotation_def_param_names.is_empty() {
-        for (i, def_param_name) in annotation_def_param_names.iter().enumerate() {
+    if extra_handler_params == 0 && !annotation_def_params.is_empty() {
+        for (i, (def_param_name, def_param_type)) in annotation_def_params.iter().enumerate() {
             if let Some(arg) = annotation_args.get(i) {
                 params.push(FunctionParameter {
                     pattern: DestructurePattern::Identifier(def_param_name.clone(), Span::DUMMY),
@@ -2483,7 +3211,14 @@ pub(crate) fn execute_comptime_with_annotation_handler(
                     is_reference: false,
                     is_mut_reference: false,
                     is_out: false,
-                    type_annotation: None,
+                    // ADR-009 C3 #14 (slice 4): the injected param carries the
+                    // DECLARED config type annotation. A TypedConfig def's
+                    // handler therefore sees `times: int, label: string` as
+                    // ordinary typed params (a mismatched `@application` arg
+                    // is a loud compile-time rejection in the handler
+                    // mini-program); legacy defs carry `None` — byte-identical
+                    // to the pre-slice-4 injection.
+                    type_annotation: def_param_type.clone(),
                     default_value: None,
                 });
                 call_args.push(arg.clone());
@@ -2514,6 +3249,12 @@ pub(crate) fn execute_comptime_with_annotation_handler(
     // compiler-issued identity forwarder resolved against the shared freeze.
     let mut body_statement = Statement::Return(Some(handler_body.clone()), Span::DUMMY);
     rewrite_comptime_type_symbol_args(&mut body_statement, freeze.as_ref())?;
+    // ADR-009 C3 #14 (slice 2): the hook-template BODY-FN rewrite — bare
+    // `before_hook`/`after_hook` fn-identifier args resolve through the
+    // threaded lookup, stash into the per-run body-fn store (cleared at this
+    // function's entry above), and rewrite to index literals (identity-literal
+    // transport; misuse is a named rejection).
+    rewrite_template_hook_body_args(&mut body_statement, template_body_fn_lookup)?;
 
     // Wrap the handler body in a function that takes the target parameter.
     // ADR-009 E3 (S2, U10): HYGIENIC generated wrapper — role bound by the
@@ -2675,6 +3416,17 @@ fn execute_in_runtime_with_module_bindings(
         // ADR-009 E2 #18 (slice 2): reset the `item_fn` carrier store so this
         // run's `__CheckedItem` handles index a fresh store.
         super::comptime_builtins::clear_comptime_checked_items();
+        // ADR-009 C3 #14 (slice 2): the hook-template + capture-binding stores
+        // are EXECUTE-populated (`before_hook`/`after_hook`/`capture` push
+        // during `vm.execute`), so they clear here beside the checked-items
+        // store — indices are fresh per run, and the stores stay intact until
+        // the NEXT per-run clear, which lets the driver resolve a
+        // `__CheckedTemplate` handle AFTER `vm.execute` returns
+        // (`take_comptime_directives` below runs before any next handler run
+        // on this thread). The body-fn store is compile-populated and clears
+        // at `execute_comptime_with_annotation_handler` ENTRY instead.
+        super::comptime_builtins::clear_comptime_hook_templates();
+        super::comptime_builtins::clear_comptime_capture_bindings();
         let value = vm.execute(None).map_err(|e| ShapeError::RuntimeError {
             message: format!("Comptime handler execution failed: {}", e),
             location: None,
@@ -3126,7 +3878,11 @@ fn typed_object_to_object_expr(
 /// bits are a heap pointer that needs retain-on-read, mirroring the
 /// `stack_read_kinded` retain discipline (ADR-006 §2.7.7 / Q9 — kind
 /// drives clone/drop dispatch).
-fn read_typed_object_field(
+// Visibility widened for ADR-009 C3 S3b: `template_specialization::
+// const_lift::lift_value` reuses this exact owned-share read for the
+// `__Option` runtime-carrier payload (one retain producer, never a second
+// field-read implementation).
+pub(in crate::compiler) fn read_typed_object_field(
     slot: shape_value::ValueSlot,
     kind: NativeKind,
     heap_mask: u64,

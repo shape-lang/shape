@@ -71,6 +71,7 @@ fn scoped_contract_namespace_function_calls_use_double_colon() {
 // (compiler_impl_reference_model.rs), all three forms resolve and the
 // `@remote` `before` handler runs successfully.
 #[test]
+#[ignore = "dark window: E4 re-implements @remote on typed HookDecision — see issue #68"]
 fn scoped_contract_namespace_annotation_refs_use_double_colon() {
     ShapeTest::new(
         r#"
@@ -87,6 +88,7 @@ fn scoped_contract_namespace_annotation_refs_use_double_colon() {
 }
 
 #[test]
+#[ignore = "dark window: E4 re-implements @remote on typed HookDecision — see issue #68"]
 fn scoped_contract_named_annotation_import_enables_bare_annotation() {
     ShapeTest::new(
         r#"
@@ -121,6 +123,7 @@ fn scoped_contract_namespace_import_does_not_bind_bare_regular_names() {
 // disposition path (i): the namespace-import path now registers
 // annotation defs from the imported module so bare `@remote` resolves.
 #[test]
+#[ignore = "dark window: E4 re-implements @remote on typed HookDecision — see issue #68"]
 fn scoped_contract_namespace_import_binds_bare_annotations() {
     ShapeTest::new(
         r#"
@@ -134,6 +137,35 @@ fn scoped_contract_namespace_import_binds_bare_annotations() {
     )
     .with_stdlib()
     .expect_output("ok");
+}
+
+// ADR-009 C3 #14 (slice 8, S8b) — the ordered W9 coverage re-target (S6
+// report §6.1): @remote was the trio's only stdlib exemplar, so during the
+// dark window (#68) W9 stdlib-annotation-import coverage was ZERO. This row
+// re-targets the named-import form onto the typed-comptime `@json_schema`
+// stdlib annotation (`std::serde::derive`) — the bare name resolves through
+// the same W9 named-import path the ignored trio pinned, and the generated
+// `{TypeName}_json_schema()` proves the annotation actually ran. The three
+// @remote rows above STAY #[ignore]'d — they are E4's acceptance suite.
+#[test]
+fn scoped_contract_named_stdlib_annotation_import_enables_bare_json_schema() {
+    ShapeTest::new(
+        r#"
+        from std::serde::derive use { @json_schema }
+
+        @json_schema()
+        type User {
+            id: int,
+            name: string,
+        }
+
+        print(User_json_schema())
+    "#,
+    )
+    .with_stdlib()
+    .expect_output(
+        r#"{"type": "object", "title": "User", "properties": {"id": {"type": "integer"}, "name": {"type": "string"}}, "required": ["id", "name"]}"#,
+    );
 }
 
 // These tests document the *desired* clean-break contract: builtins should

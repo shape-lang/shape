@@ -38,14 +38,12 @@ fn compiled_annotation(exact_name: &str, def: &AnnotationDef) -> CompiledAnnotat
             .flat_map(|param| param.get_identifiers())
             .collect(),
         param_defs: def.params.clone(),
-        before_handler: None,
-        after_handler: None,
         on_define_handler: None,
         metadata_handler: None,
         comptime_pre_handler,
         comptime_post_handler,
-        before_handler_template: None,
-        after_handler_template: None,
+        sugar_post_handler: None,
+        sugar_body_fns: Vec::new(),
         allowed_targets: def.allowed_targets.clone().unwrap_or_default(),
     }
 }
@@ -102,7 +100,7 @@ mod outer {
     );
     let imported = annotation_def(
         r#"
-annotation mark(policy) {
+annotation mark(policy: string) {
   targets: [function]
   comptime post(target, ctx) { error("IMPORTED") }
 }
@@ -145,8 +143,11 @@ annotation mark(policy) {
         Some("pkg::support")
     );
     assert_eq!(
-        rows["pkg::support::mark"].def_param_names,
-        vec!["policy".to_string()]
+        rows["pkg::support::mark"].def_params,
+        vec![(
+            "policy".to_string(),
+            Some(shape_ast::ast::TypeAnnotation::Basic("string".to_string()))
+        )]
     );
 }
 

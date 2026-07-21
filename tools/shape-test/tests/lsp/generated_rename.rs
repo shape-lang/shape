@@ -244,7 +244,7 @@ fn rename_on_colliding_ordinary_call_edits_the_ordinary_declaration() {
 /// generated symbol kept its old name while every call site used the new
 /// one (a corrupting partial rename).
 const APPLICATION_BINDER_PROGRAM: &str = r#"
-annotation gen(mname) {
+annotation gen(mname: string) {
   targets: [type]
   comptime post(target, ctx) {
     extend (extend_method_literal(target.name, mname, "int", 1))

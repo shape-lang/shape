@@ -193,6 +193,22 @@ pub enum Expr {
         /// allocates nothing and `Some(empty)` remains distinct from `None`.
         #[serde(default)]
         captures: Option<Box<super::captures::CaptureClause>>,
+        /// ADR-009 C3 #14 (slice 4, C3-G12): annotations spelled on a
+        /// fn-local NESTED `fn` declaration. The parser desugars a nested
+        /// `@ann fn name(...) { ... }` statement to `let name = fn(...) {...}`
+        /// and formerly DROPPED the annotations silently (S0 a4/a4c — the
+        /// traced drop sites are `parser/statements.rs` Rule::function_def and
+        /// `parser/expressions/control_flow/loops.rs` Rule::function_def).
+        /// They are now carried here so the COMPILER can fire the loud C3-G12
+        /// rejection when an annotation resolves to a typed-config
+        /// (hook-template) definition; legacy-classified annotations keep the
+        /// pre-slice-4 silent drop until S5's rejection matrix owns the class
+        /// (recorded residual). `None` = no annotations (closure literals and
+        /// generated code — the only producers are the two desugar sites).
+        /// Kept indirect for the same recursive-AST stack budget as its
+        /// sibling cold fields.
+        #[serde(default)]
+        annotations: Option<Box<Vec<super::functions::Annotation>>>,
         span: Span,
     },
     /// Duration literal: 30d, 1h, 15m

@@ -4079,6 +4079,25 @@ impl BytecodeCompiler {
         let mut removed = false;
         for ann in &struct_def.annotations {
             if let Some((_, compiled)) = self.lookup_compiled_annotation(ann) {
+                // ADR-009 C3 #14 (slice 5, S5b): a TypedConfig-with-hooks
+                // annotation applied to a TYPE target — this seam runs only
+                // the comptime pre/post handlers, never the synthesized
+                // sugar post handler, so the declarative hooks could never
+                // fire (measured silent no-op, probe P-NFT-mixed). Named
+                // application-tier rejection; ONE producer in
+                // `sugar_lowering`. Reachable only through a mixed
+                // `targets: [function, type]` definition.
+                if compiled.sugar_post_handler.is_some() {
+                    return Err(ShapeError::SemanticError {
+                        message: crate::compiler::statements::annotation_declarations::
+                            sugar_lowering::non_function_target_application_rejection(
+                                &ann.name,
+                                "type",
+                                &struct_def.name,
+                            ),
+                        location: Some(self.span_to_source_location(ann.span)),
+                    });
+                }
                 let handlers = [
                     compiled.comptime_pre_handler,
                     compiled.comptime_post_handler,
@@ -4132,11 +4151,17 @@ impl BytecodeCompiler {
                     let access_identity = freeze
                         .identity_of(&target_name)
                         .map(|identity| (identity.high, identity.low));
+                    // ADR-009 C3 #14 (slice 4): full param definitions —
+                    // declared types ride along.
+                    let def_params =
+                        crate::compiler::functions_annotations::handler_resolution::annotation_def_params(
+                            &compiled.param_defs,
+                        );
                     let mut execution = self.execute_comptime_annotation_handler(
                         ann,
                         &handler,
                         target_value,
-                        &compiled.param_names,
+                        &def_params,
                         &[],
                         access_identity,
                         freeze,
@@ -5384,6 +5409,18 @@ impl BytecodeCompiler {
                         "`replace body` directives are only valid when compiling function targets",
                     ));
                 }
+                // ADR-009 C3 #14 (slice 2, S2b): a hook template installs
+                // onto a FUNCTION's before/after seam; this consumer compiles
+                // module targets — named rejection with the positive twin
+                // (same sentence as the type-target consumer,
+                // `process_comptime_directives`).
+                super::comptime_builtins::ComptimeDirective::InstallHookTemplate { .. } => {
+                    return Err(Self::directive_error(
+                        "`install` directives are only valid when compiling function targets \
+                         (a hook template attaches to a function's before/after seam); apply \
+                         the installing annotation to a function",
+                    ));
+                }
             }
         }
         Ok(outcome)
@@ -5398,6 +5435,21 @@ impl BytecodeCompiler {
         let mut outcome = ModuleDirectiveOutcome::default();
         for ann in &module_def.annotations {
             if let Some((_, compiled)) = self.lookup_compiled_annotation(ann) {
+                // ADR-009 C3 #14 (slice 5, S5b): the MODULE-target sibling of
+                // the type-seam rejection above (`execute_struct_comptime_
+                // handlers`) — this seam never runs the sugar post handler
+                // (measured silent no-op, probe P-NFT-mod).
+                if compiled.sugar_post_handler.is_some() {
+                    return Err(ShapeError::SemanticError {
+                        message: crate::compiler::statements::annotation_declarations::
+                            sugar_lowering::non_function_target_application_rejection(
+                                &ann.name,
+                                "module",
+                                module_path,
+                            ),
+                        location: Some(self.span_to_source_location(ann.span)),
+                    });
+                }
                 let handlers = [
                     compiled.comptime_pre_handler,
                     compiled.comptime_post_handler,
@@ -5421,11 +5473,17 @@ impl BytecodeCompiler {
                     // freeze handle; acquire it here (no target stamping occurred,
                     // so any overlay is behavior-equivalent).
                     let freeze = self.comptime_freeze_overlay()?;
+                    // ADR-009 C3 #14 (slice 4): full param definitions —
+                    // declared types ride along.
+                    let def_params =
+                        crate::compiler::functions_annotations::handler_resolution::annotation_def_params(
+                            &compiled.param_defs,
+                        );
                     let execution = self.execute_comptime_annotation_handler(
                         ann,
                         &handler,
                         target_value,
-                        &compiled.param_names,
+                        &def_params,
                         &[],
                         // Module target: no representation authority (Dec 56).
                         None,
@@ -8123,12 +8181,15 @@ mod tests {
 
     #[test]
     fn test_annotation_def_compiles_handlers() {
+        // ADR-009 C3-S6 completion: declarative hooks LOWER onto the public
+        // comptime API (the sugar carrier) — the legacy weave slots stay
+        // `None` for every definition (one implementation).
         let code = r#"
-            annotation warmup(period) {
-                before(args, ctx) {
+            annotation warmup(period: int) {
+                before(args) {
                     args
                 }
-                after(args, result, ctx) {
+                after(result) {
                     result
                 }
             }
@@ -8151,21 +8212,29 @@ mod tests {
 
         let compiled = bytecode.compiled_annotations.get("warmup").unwrap();
         assert!(
-            compiled.before_handler.is_some(),
-            "Should have before handler"
+            compiled.sugar_post_handler.is_some(),
+            "Declarative hooks lower onto the sugar carrier"
         );
-        assert!(
-            compiled.after_handler.is_some(),
-            "Should have after handler"
+        assert_eq!(
+            compiled.sugar_body_fns.len(),
+            2,
+            "One minted body fn per declarative hook"
         );
+        // (The C3-G7/S6 "legacy weave slots never populated" assert retired
+        // with the fields themselves — deleted from `CompiledAnnotation` at
+        // the S6 capstone; the absence sentinel guards re-introduction.)
     }
 
     #[test]
     fn test_exported_annotation_def_compiles_handlers() {
+        // Observer form: the applied target declares no parameters, so a
+        // polymorphic `before(args)` template has nothing to receive (the
+        // weave's named rejection covers that shape) — the zero-param
+        // observer is the fitting hook.
         let code = r#"
-            pub annotation warmup(period) {
-                before(args, ctx) {
-                    args
+            pub annotation warmup(period: int) {
+                before() {
+                    let p = period
                 }
             }
 
@@ -8189,9 +8258,13 @@ mod tests {
 
     #[test]
     fn test_annotation_handler_function_names() {
+        // ADR-009 C3-S6 completion (flip of the legacy `{name}___before`
+        // naming pin): declarative hooks consume NO handler slot and NO
+        // `{name}___before` callable — only lifecycle handlers reserve
+        // `{name}___{kind}` names (see the transaction/identity pins).
         let code = r#"
-            annotation my_ann(x) {
-                before(args, ctx) {
+            annotation my_ann(x: int) {
+                before(args) {
                     args
                 }
             }
@@ -8202,18 +8275,13 @@ mod tests {
             .compile(&program)
             .expect("Failed to compile");
 
-        // Handler should be compiled as an internal function
-        let compiled = bytecode.compiled_annotations.get("my_ann").unwrap();
-        let handler_id = compiled.before_handler.unwrap() as usize;
+        let _compiled = bytecode.compiled_annotations.get("my_ann").unwrap();
         assert!(
-            handler_id < bytecode.functions.len(),
-            "Handler function ID should be valid"
-        );
-
-        let handler_fn = &bytecode.functions[handler_id];
-        assert_eq!(
-            handler_fn.name, "my_ann___before",
-            "Handler function should be named my_ann___before"
+            !bytecode
+                .functions
+                .iter()
+                .any(|f| f.name == "my_ann___before"),
+            "No `{{name}}___before` callable may enter the function table"
         );
     }
 
@@ -8222,13 +8290,13 @@ mod tests {
     #[test]
     fn test_annotated_function_generates_wrapper() {
         let code = r#"
-            annotation tracked(label) {
-                before(args, ctx) {
+            annotation tracked(label: string) {
+                before(args) {
                     args
                 }
             }
             @tracked("my_func")
-            function compute(x) {
+            function compute(x: int) {
                 return x * 2
             }
             function test() { return 1; }
@@ -8299,20 +8367,20 @@ mod tests {
         // Two annotations on the same function should generate chained wrappers
         let code = r#"
             annotation first() {
-                before(args, ctx) {
+                before(args) {
                     return args
                 }
             }
 
             annotation second() {
-                before(args, ctx) {
+                before(args) {
                     return args
                 }
             }
 
             @first
             @second
-            function compute(x) {
+            function compute(x: int) {
                 return x * 2
             }
         "#;
@@ -8358,7 +8426,7 @@ mod tests {
         // An annotation with before/after should have allowed_targets = [Function]
         let code = r#"
             annotation traced() {
-                before(args, ctx) {
+                before(args) {
                     return args
                 }
             }
@@ -8383,11 +8451,14 @@ mod tests {
     #[test]
     fn test_annotation_allowed_targets_explicit_override() {
         // Explicit `targets: [...]` should override inferred defaults.
+        // ADR-009 C3-S6: a HOOKS-bearing def with function-less targets now
+        // rejects at the declaration (S5b), so the override subject rides a
+        // comptime handler instead.
         let code = r#"
             annotation traced() {
                 targets: [type]
-                before(args, ctx) {
-                    return args
+                comptime post(target, ctx) {
+                    1
                 }
             }
         "#;
@@ -8457,7 +8528,7 @@ mod tests {
         // Function-only annotation applied to a type should fail.
         let code = r#"
             annotation traced() {
-                before(args, ctx) { return args }
+                before(args) { return args }
             }
 
             @traced()

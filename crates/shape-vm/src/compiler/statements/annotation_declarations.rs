@@ -116,7 +116,15 @@ pub(super) fn terminal_error() -> ShapeError {
 }
 
 mod installer;
-mod planner;
+// ADR-009 C3 #14 (slice 4; S6 completion): the S4 classification chokepoint
+// (`classify_annotation_surface` / `classify_annotation_params` + the sealed
+// `AnnotationSurfaceClass` evidence enum) is DELETED with the collapse — one
+// surface, no classification. The module visibility stays widened for the
+// planner's declaration-site rejection producers.
+pub(in crate::compiler) mod planner;
+// ADR-009 C3 #14 (slice 4, S4c): the sugar lowering producer — reachable by
+// the LocalAst handler-resolution provenance (`sugar_lowering_for_def`).
+pub(in crate::compiler) mod sugar_lowering;
 mod transaction;
 
 #[cfg(test)]

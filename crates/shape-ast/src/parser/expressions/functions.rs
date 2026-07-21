@@ -141,6 +141,8 @@ pub fn parse_pipe_lambda(pair: Pair<Rule>) -> Result<Expr> {
         generated_origin: None,
         // ADR-009 C1 (slice 3): producer #1 of the declared-capture carrier.
         captures,
+        // Closure literals carry no annotations (C3-G12 nested-fn carrier).
+        annotations: None,
         span,
     })
 }
@@ -217,6 +219,8 @@ pub fn parse_arrow_function(pair: Pair<Rule>) -> Result<Expr> {
         // Arrow-function syntax has no capture clause (the form is retired for
         // new code; the grammar reaches it only through legacy paths).
         captures: None,
+        // Closure literals carry no annotations (C3-G12 nested-fn carrier).
+        annotations: None,
         span,
     })
 }
@@ -275,6 +279,8 @@ pub fn parse_regular_function_expr(pair: Pair<Rule>) -> Result<Expr> {
         generated_origin: None,
         // ADR-009 C1 (slice 3): producer #1 of the declared-capture carrier.
         captures,
+        // Closure literals carry no annotations (C3-G12 nested-fn carrier).
+        annotations: None,
         span,
     })
 }

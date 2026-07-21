@@ -41,22 +41,40 @@ pub fn parse_annotation_def(pair: Pair<Rule>) -> Result<AnnotationDef> {
     for part in inner {
         match part.as_rule() {
             Rule::annotation_def_params => {
+                // ADR-009 C3 #14 (slice 4): each config parameter is an
+                // `annotation_def_param` pair — `ident ~ (":" ~
+                // type_annotation)?`. The optional annotation fills the
+                // EXISTING `FunctionParameter.type_annotation` field (no new
+                // AST field: `AnnotationDef.params` is already
+                // `Vec<FunctionParameter>`); untyped params keep `None`, so
+                // legacy definitions produce byte-identical ASTs.
                 for param_pair in part.into_inner() {
-                    if param_pair.as_rule() == Rule::ident {
-                        let pattern = crate::ast::DestructurePattern::Identifier(
-                            param_pair.as_str().to_string(),
-                            pair_span(&param_pair),
-                        );
-                        params.push(FunctionParameter {
-                            pattern,
-                            is_const: false,
-                            is_reference: false,
-                            is_mut_reference: false,
-                            is_out: false,
-                            type_annotation: None,
-                            default_value: None,
-                        });
+                    if param_pair.as_rule() != Rule::annotation_def_param {
+                        continue;
                     }
+                    let mut param_inner = param_pair.into_inner();
+                    let ident_pair =
+                        param_inner.next().ok_or_else(|| ShapeError::ParseError {
+                            message: "Missing annotation config parameter name".to_string(),
+                            location: None,
+                        })?;
+                    let pattern = crate::ast::DestructurePattern::Identifier(
+                        ident_pair.as_str().to_string(),
+                        pair_span(&ident_pair),
+                    );
+                    let type_annotation = param_inner
+                        .next()
+                        .map(parse_type_annotation)
+                        .transpose()?;
+                    params.push(FunctionParameter {
+                        pattern,
+                        is_const: false,
+                        is_reference: false,
+                        is_mut_reference: false,
+                        is_out: false,
+                        type_annotation,
+                        default_value: None,
+                    });
                 }
             }
             Rule::annotation_body => {

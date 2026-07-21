@@ -79,6 +79,8 @@ impl TypeInferenceEngine {
                 body,
                 generated_origin: _,
                 captures: _,
+                // C3-G12 nested-fn annotation carrier: inert to inference.
+                annotations: _,
                 span: _span,
             } => self.check_function_expr_against(params, return_type.as_ref(), body, expected),
 

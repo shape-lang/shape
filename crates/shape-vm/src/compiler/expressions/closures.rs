@@ -3074,6 +3074,44 @@ fn closure_body_terminal_expr(body: &[shape_ast::ast::Statement]) -> Option<&Exp
 }
 
 impl BytecodeCompiler {
+    /// ADR-009 C3 #14 (slice 4, C3-G12; slice 5 S5b extension; S6-collapsed
+    /// to the single phrase): the nested-fn annotation check.
+    ///
+    /// Annotations on a fn-local nested `fn` are carried by the parser desugar
+    /// (`Expr::FunctionExpr.annotations` — the S0 a4/a4c drop sites now
+    /// preserve them) and reach here at the ONE closure-compilation dispatch.
+    /// Any annotation resolving to a compiled definition is a LOUD named
+    /// rejection at the application site — a hook-template install on a
+    /// nested fn has no weave seam yet (follow-up #62), and the pre-S5b
+    /// silent drop was the S0 a4/a4c measured hazard. The S4/S5
+    /// class-conditional phrase fork died with the classification collapse
+    /// (one surface, one sentence). An UNRESOLVABLE annotation name keeps
+    /// today's `continue` (outside the matrix's scope — recorded in the
+    /// slice-5 report).
+    pub(in crate::compiler) fn reject_typed_config_annotations_on_nested_fn(
+        &self,
+        annotations: &[shape_ast::ast::Annotation],
+    ) -> Result<()> {
+        for annotation in annotations {
+            if self.lookup_compiled_annotation(annotation).is_none() {
+                continue;
+            }
+            let fn_name = self
+                .pending_variable_name
+                .clone()
+                .unwrap_or_else(|| "<nested fn>".to_string());
+            return Err(ShapeError::SemanticError {
+                message: format!(
+                    "annotation `@{ann}` on fn-local nested function `{fn_name}` is not \
+                     applied — annotations on nested functions are not \
+                     supported yet (#62); apply @{ann} to a module-scope function",
+                    ann = annotation.name,
+                ),
+                location: Some(self.span_to_source_location(annotation.span)),
+            });
+        }
+        Ok(())
+    }
     pub(crate) fn callable_return_hint_name_for_expr(&self, expr: &Expr) -> Option<String> {
         callable_selection_arity(expr)?;
         let function_name = self.current_body_semantic_owner_key()?.to_string();

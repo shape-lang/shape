@@ -30,8 +30,8 @@ annotation duplicate() { targets: [type] }
 
 #[test]
 fn changed_definition_returns_original_error_then_quarantines_queries() {
-    let first = parse("annotation stable() { before(args, ctx) { args } }");
-    let changed = parse("annotation stable() { after(args, result, ctx) { result } }");
+    let first = parse("annotation stable() { before(args) { args } }");
+    let changed = parse("annotation stable() { after(result) { result } }");
     let mut compiler = BytecodeCompiler::new();
     compiler
         .prepare_annotation_scope(&first.items)

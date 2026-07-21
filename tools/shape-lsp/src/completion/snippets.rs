@@ -126,7 +126,11 @@ pub fn snippet_completions() -> Vec<CompletionItem> {
         create_snippet(
             "annotation-def",
             "Annotation Definition",
-            "annotation ${1:name}(${2:param}) {\n  before(fn, args, ctx) {\n    ${3}\n  }\n}",
+            // ADR-009 C3-S6: the collapsed annotation surface — typed config
+            // params + the before(args)/after(result)/observer hook forms
+            // (the untyped-param + before(fn, args, ctx) legacy spelling is
+            // deleted and would no longer compile).
+            "annotation ${1:name}(${2:param}: ${3:int}) {\n  before(args) {\n    ${4}\n    args\n  }\n}",
             "Define a custom annotation",
         ),
         create_snippet(

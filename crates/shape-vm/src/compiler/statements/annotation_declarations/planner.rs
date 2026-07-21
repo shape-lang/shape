@@ -18,7 +18,51 @@ pub(super) struct AnnotationInstallationPlan {
 pub(super) struct PlannedAnnotation {
     pub(super) definition: AnnotationDef,
     pub(super) allowed_targets: Vec<AnnotationTargetKind>,
+    /// ADR-009 C3 #14 (slice 4, S4c; S6 completion): the sugar lowering's
+    /// artifacts for a definition with declarative hooks — validated (R3)
+    /// and built HERE at planning, stored on `CompiledAnnotation` by the
+    /// installer. `None` for definitions without declarative hooks.
+    pub(super) sugar: Option<super::sugar_lowering::SugarLowering>,
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// ADR-009 C3 #14 (S6 completion) — THE COLLAPSED CLASSIFICATION (one surface)
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// The S4 transitional TypedConfig/Legacy fork is DELETED (C3-G7/S6): there
+// is exactly ONE annotation surface. Decided AT THE DECLARATION (before any
+// `@application` exists):
+//
+//   - Every config parameter DECLARES ITS TYPE. An untyped config parameter
+//     is the named declaration-site rejection in `plan_definition` below
+//     (single producer; the former R2 mixed-params refinement folds into
+//     it — "mixed" is just "an untyped parameter is present"). Every
+//     declared type must lie within the C3-G5 ConstLift domain, checked by
+//     the ONE domain producer `const_lift::annotation_within_lift_domain`
+//     (rejection R1) — a non-liftable config type is a named error before
+//     any application.
+//
+//   - Declarative `before`/`after` handlers LOWER onto the PUBLIC comptime
+//     API (CheckedTemplate + install; the S4c sugar lowering — see
+//     `sugar_lowering` for the BINDING RULES: `before(args)` /
+//     `after(result)` polymorphic forms, `before()` / `after()` observers,
+//     and the R3 shape rejection). Zero-param definitions route this same
+//     path — there is no other.
+//
+//   - COMPTIME pre/post handlers run through the comptime mini-VM; typed
+//     injection gives handler params their declared annotations.
+//
+//   - `on_define`/`metadata` LIFECYCLE handlers register through the
+//     installer's lifecycle arm (compile-time-fired definition hooks — not
+//     part of the deleted runtime before/after weave). They reserve the
+//     `{name}___{kind}` callables below. S6-completion disposition
+//     (Risk-1): lifecycle survives the collapse and now accepts typed
+//     config params (the former R3-family rejection existed to keep typed
+//     params off the legacy surface, which no longer exists).
+//
+// The legacy weave slots and their machinery are GONE (deleted from
+// `CompiledAnnotation` and the compiler at the S6 capstone) — declarative
+// hooks travel exclusively on the sugar carrier above.
 
 impl AnnotationInstallationPlan {
     pub(super) fn is_empty(&self) -> bool {
@@ -68,15 +112,21 @@ pub(super) fn build(
         }
     }
 
-    let runtime_handler_count = pending
+    // ADR-009 C3 #14 (S6 completion): only LIFECYCLE handlers
+    // (`on_define`/`metadata`) register handler function slots and reserve
+    // `{name}___{kind}` callables. Declarative before/after handlers lower
+    // onto the public comptime API (installed per-target through
+    // `specialize_template`) — they consume NO reserved slot and no callable
+    // name.
+    let lifecycle_handler_count = pending
         .iter()
-        .map(|plan| runtime_handler_count(&plan.definition))
+        .map(|plan| lifecycle_handler_count(&plan.definition))
         .sum::<usize>();
     let end = compiler
         .program
         .functions
         .len()
-        .checked_add(runtime_handler_count)
+        .checked_add(lifecycle_handler_count)
         .ok_or_else(function_id_capacity_error)?;
     if end > usize::from(u16::MAX) + 1 {
         return Err(function_id_capacity_error());
@@ -85,7 +135,7 @@ pub(super) fn build(
     let mut planned_callable_names = BTreeSet::new();
     for plan in &pending {
         for handler in &plan.definition.handlers {
-            if is_runtime_handler(&handler.handler_type) {
+            if is_lifecycle_handler(&handler.handler_type) {
                 let name = handler_callable_name(&plan.definition.name, &handler.handler_type);
                 if !planned_callable_names.insert(name.clone())
                     || !callable_name_is_vacant(compiler, &name)
@@ -109,6 +159,68 @@ fn plan_definition(
     compiler: &BytecodeCompiler,
     definition: AnnotationDef,
 ) -> Result<PlannedAnnotation> {
+    // ADR-009 C3 #14 (S6 completion): the collapsed declaration-site checks,
+    // BEFORE any application can exist — an untyped config parameter (the
+    // named rejection below, which the former R2 mixed-params refinement
+    // folds into) and R1 (config type outside the ConstLift domain) are
+    // DECLARATION-SITE named rejections (the G5 sentence precedent from
+    // S3's finish()-time check).
+    if let Some(untyped) = definition
+        .params
+        .iter()
+        .find(|parameter| parameter.type_annotation.is_none())
+    {
+        let untyped_name = untyped.simple_name().unwrap_or_default().to_string();
+        return Err(ShapeError::SemanticError {
+            message: format!(
+                "annotation `{}` declares config parameter `{}` without a type; every annotation config parameter declares its type (the untyped config surface is deleted, C3-G7/S6) — annotate `{}` with a ConstLift-liftable type",
+                definition.name, untyped_name, untyped_name
+            ),
+            location: Some(compiler.span_to_source_location(untyped.span())),
+        });
+    }
+    for parameter in &definition.params {
+        let Some(annotation) = parameter.type_annotation.as_ref() else {
+            continue;
+        };
+        // R1: the ONE domain producer, reused at the declaration site —
+        // never re-implemented (S3's `annotation_within_lift_domain`).
+        if let Err(reason) =
+            crate::compiler::template_specialization::const_lift::annotation_within_lift_domain(
+                annotation,
+            )
+        {
+            return Err(ShapeError::SemanticError {
+                message: format!(
+                    "annotation `{}` declares config parameter `{}: {}`, whose type is outside the ConstLift domain ({}); {} — declare the config parameter with a liftable type",
+                    definition.name,
+                    parameter.simple_name().unwrap_or_default(),
+                    annotation.to_type_string(),
+                    reason,
+                    crate::compiler::template_specialization::const_lift::CONST_LIFT_DOMAIN_SENTENCE,
+                ),
+                location: Some(compiler.span_to_source_location(parameter.span())),
+            });
+        }
+    }
+
+    // ADR-009 C3 #14 (slice 4, S4c; S6 completion): the sugar lowering —
+    // validated (R3, exact sentences from the ONE producer in
+    // `sugar_lowering`) and BUILT at the declaration, before any
+    // `@application` exists, for EVERY definition (zero-param included).
+    // The installer stores the artifacts on the `CompiledAnnotation`
+    // carrier.
+    let sugar =
+        match super::sugar_lowering::lower_typed_config_declarative_hooks(compiler, &definition) {
+            Ok(sugar) => sugar,
+            Err(rejection) => {
+                return Err(ShapeError::SemanticError {
+                    message: rejection.message,
+                    location: Some(compiler.span_to_source_location(rejection.span)),
+                });
+            }
+        };
+
     let mut handler_kinds = BTreeSet::new();
     for handler in &definition.handlers {
         let kind = handler_kind_name(&handler.handler_type);
@@ -186,6 +298,26 @@ fn plan_definition(
         }
     });
 
+    // ADR-009 C3 #14 (slice 5, S5b): the declaration-tier non-function-target
+    // rejection (S4 residual 7) — a TypedConfig-with-hooks definition whose
+    // explicit targets exclude `function` can never fire its hooks (the
+    // non-function consumer seams run only comptime pre/post handlers).
+    // Empty `allowed_targets` means "no restriction" (function applications
+    // stay legal), so only a non-empty function-less set rejects. ONE
+    // sentence producer in `sugar_lowering`.
+    if sugar.is_some()
+        && !allowed_targets.is_empty()
+        && !allowed_targets.contains(&AnnotationTargetKind::Function)
+    {
+        return Err(ShapeError::SemanticError {
+            message: super::sugar_lowering::non_function_targets_declaration_rejection(
+                &definition.name,
+                &allowed_targets,
+            ),
+            location: Some(compiler.span_to_source_location(definition.span)),
+        });
+    }
+
     if has_lifecycle {
         if allowed_targets.is_empty() {
             return Err(ShapeError::SemanticError {
@@ -214,6 +346,7 @@ fn plan_definition(
     Ok(PlannedAnnotation {
         definition,
         allowed_targets,
+        sugar,
     })
 }
 
@@ -258,11 +391,22 @@ fn is_runtime_handler(handler: &AnnotationHandlerType) -> bool {
     )
 }
 
-fn runtime_handler_count(definition: &AnnotationDef) -> usize {
+/// The handlers that register compiled handler functions and reserve
+/// `{name}___{kind}` callables post-collapse: the `on_define`/`metadata`
+/// lifecycle pair. Declarative before/after handlers lower onto the public
+/// comptime API and consume no slot (S6 completion).
+fn is_lifecycle_handler(handler: &AnnotationHandlerType) -> bool {
+    matches!(
+        handler,
+        AnnotationHandlerType::OnDefine | AnnotationHandlerType::Metadata
+    )
+}
+
+fn lifecycle_handler_count(definition: &AnnotationDef) -> usize {
     definition
         .handlers
         .iter()
-        .filter(|handler| is_runtime_handler(&handler.handler_type))
+        .filter(|handler| is_lifecycle_handler(&handler.handler_type))
         .count()
 }
 

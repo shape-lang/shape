@@ -47,6 +47,16 @@ mod no_dynamic;
 // literals live inside the sentinel, assembled from fragments; this comment
 // names the targets by role so it does not itself trip the scan.
 mod no_json_comptime_protocol;
+// ADR-009 C3 #14 slice-6 absence sentinel: the deleted legacy
+// runtime-annotation weave (specialized-handler compiler, per-target
+// handler specializer, raw-bytecode wrapper emitter, homogeneous-args
+// derivation, the compiled handler-id slots + handler-template carrier
+// fields, the S4 surface classification) must not reappear, and
+// std::core/remote.shape must stay annotation-free through the C3-G14
+// dark window (#68). Needle literals live inside the sentinel, assembled
+// from fragments; this comment names the targets by role so it does not
+// itself trip the scan.
+mod no_legacy_annotation_weave;
 mod declared_capture_teardown;
 // GC Phase 4 — end-of-program teardown sweep (Finding #82). Reclaims
 // module-scope closure-capture cycles at VM teardown; memory-only.

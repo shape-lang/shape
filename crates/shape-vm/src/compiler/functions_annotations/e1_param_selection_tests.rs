@@ -45,6 +45,9 @@ fn set_param_type_on_a_declared_param_resolves_and_applies() {
         directives,
         "mark",
         loc(),
+        // ADR-009 C3 #14 (slice 2, S2b): the `@application` anchor param
+        // added for the C3-G8 generic-target install rejection.
+        loc(),
     )
     .expect("a declared param resolves and the type applies");
     assert_eq!(
@@ -66,6 +69,9 @@ fn set_param_type_on_an_undeclared_param_is_c0930_not_a_silent_skip() {
         &mut fd,
         directives,
         "mark",
+        loc(),
+        // ADR-009 C3 #14 (slice 2, S2b): the `@application` anchor param
+        // added for the C3-G8 generic-target install rejection.
         loc(),
     )
     .expect_err("an undeclared param spelling is a hard error, not a silent skip");
@@ -91,6 +97,9 @@ fn set_param_value_on_an_undeclared_param_is_c0930() {
         &mut fd,
         directives,
         "mark",
+        loc(),
+        // ADR-009 C3 #14 (slice 2, S2b): the `@application` anchor param
+        // added for the C3-G8 generic-target install rejection.
         loc(),
     )
     .expect_err("an undeclared param spelling is a hard error for the value arm too");
@@ -165,14 +174,12 @@ fn compiled_annotation(exact_name: &str, def: &AnnotationDef) -> CompiledAnnotat
             .flat_map(|param| param.get_identifiers())
             .collect(),
         param_defs: def.params.clone(),
-        before_handler: None,
-        after_handler: None,
         on_define_handler: None,
         metadata_handler: None,
         comptime_pre_handler,
         comptime_post_handler,
-        before_handler_template: None,
-        after_handler_template: None,
+        sugar_post_handler: None,
+        sugar_body_fns: Vec::new(),
         allowed_targets: def.allowed_targets.clone().unwrap_or_default(),
     }
 }

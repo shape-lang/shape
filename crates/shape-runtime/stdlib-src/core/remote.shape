@@ -162,30 +162,13 @@ enum RemoteError {
     Remote { message: string },
 }
 
-/// Ship execution to a remote `shape serve` node.
-///
-/// When applied to a function, calling that function will transparently
-/// execute it on the specified remote server instead of locally.
-///
-/// # Example
-///
-/// ```shape
-/// use std::core::remote
-///
-/// @remote("worker:9527")
-/// fn compute(data) { /* ... */ }
-///
-/// let result = compute([1, 2, 3])
-/// ```
-pub annotation remote(addr) {
-    targets: [function]
-    before(args, ctx) {
-        // §4.1.5 / OQ-12: `ctx.target` is a typed function value statically
-        // bound to the annotated function's original implementation. No
-        // stringly `ctx["__impl"]` lookup and NO `?? args[0]` fallback — an
-        // unavailable target binding is an annotation-machinery bug that must
-        // fail loudly, never silently misdispatch a call argument as the callee.
-        let result = __call_raising(addr, ctx.target, args)
-        { result: result }
-    }
-}
+// DARK WINDOW (ADR-009 C3-G14 A′, user-ratified 2026-07-21): the `@remote`
+// annotation's implementation rode the deleted legacy runtime-hook surface
+// (untyped config + `ctx.target` + the `{result:}` before-short-circuit — the
+// HookDecision-protocol precursor, E4's charter). It is REMOVED with the C3-S6
+// classification collapse; `@remote` is dark until E4 (#20) re-implements it on
+// the typed HookDecision protocol as its first acceptance consumer — see
+// GitHub issue #68. The distributed e2e tests that ride `@remote` are
+// #[ignore]'d with the same pointer; they are E4's acceptance suite.
+// `remote.execute` / `remote.ping` / `remote::call` / `remote::call_async`
+// (and the compiler-elaborated `__call_*` siblings above) remain fully live.

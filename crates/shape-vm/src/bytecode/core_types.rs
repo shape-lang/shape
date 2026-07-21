@@ -1136,10 +1136,14 @@ pub struct Function {
 
 /// A compiled annotation definition.
 ///
-/// Stores the annotation's parameter names and the function IDs
-/// for each lifecycle handler (before, after, on_define, metadata).
-/// The comptime handler is stored as AST (not compiled to bytecode)
-/// since it executes at compile time when the annotation is applied.
+/// Stores the annotation's parameter names and the function IDs for the
+/// lifecycle handlers (on_define, metadata). Declarative `before`/`after`
+/// hooks carry NO handler IDs here: they lower onto the sugar carrier
+/// (`sugar_post_handler` + `sugar_body_fns`) and are woven per target as
+/// ordinary typed AST (ADR-009 C3 #14; the legacy per-annotation handler
+/// slots were deleted at the S6 capstone). The comptime handler is stored
+/// as AST (not compiled to bytecode) since it executes at compile time
+/// when the annotation is applied.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CompiledAnnotation {
     pub name: String,
@@ -1149,10 +1153,6 @@ pub struct CompiledAnnotation {
     /// declaration shape, not only the flattened names.
     #[serde(skip, default)]
     pub param_defs: Vec<shape_ast::ast::FunctionParameter>,
-    /// Function ID for `before(args, ctx)` handler (if defined)
-    pub before_handler: Option<u16>,
-    /// Function ID for `after(args, result, ctx)` handler (if defined)
-    pub after_handler: Option<u16>,
     /// Function ID for `on_define(target, ctx)` handler (if defined)
     pub on_define_handler: Option<u16>,
     /// Function ID for `metadata(target, ctx)` handler (if defined)
@@ -1163,14 +1163,22 @@ pub struct CompiledAnnotation {
     /// AST for `comptime post(target, ctx) { ... }` (executed after function inference/compilation)
     #[serde(skip, default)]
     pub comptime_post_handler: Option<shape_ast::ast::AnnotationHandler>,
-    /// Runtime `before` handler template. This is compiled per annotated
-    /// target after the target's parameter/result types are statically known.
+    /// ADR-009 C3 #14 (slice 4, S4c): the sugar lowering's SYNTHESIZED
+    /// `comptime post`-shaped handler for a TypedConfig definition with
+    /// declarative before/after hooks — its body is EXACTLY the public-API
+    /// program (`install(before_hook(<minted>, [capture(..)…]))` per hook in
+    /// declaration order; C3-G2 zero private side-channels). Runs AFTER any
+    /// user comptime post handler (coexistence). Serde-skip beside the
+    /// comptime handlers it composes with — a serialization-crossed carrier
+    /// loses the whole comptime family together.
     #[serde(skip, default)]
-    pub before_handler_template: Option<shape_ast::ast::AnnotationHandler>,
-    /// Runtime `after` handler template. This is compiled per annotated
-    /// target after the target's parameter/result types are statically known.
+    pub sugar_post_handler: Option<shape_ast::ast::AnnotationHandler>,
+    /// ADR-009 C3 #14 (slice 4, S4c): the MINTED module-scope-shaped hook
+    /// body fns the synthesized handler references (hygienic names — see
+    /// `sugar_lowering`). Threaded into `template_body_fn_lookup` at every
+    /// handler-executor call site; entry-minted defs resolve FIRST.
     #[serde(skip, default)]
-    pub after_handler_template: Option<shape_ast::ast::AnnotationHandler>,
+    pub sugar_body_fns: Vec<shape_ast::ast::FunctionDef>,
     /// Allowed target kinds for this annotation.
     /// Inferred from handler types: before/after → Function only;
     /// metadata/comptime only → any target.

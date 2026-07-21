@@ -1650,26 +1650,6 @@ impl BytecodeCompiler {
         Some((resolved_name, compiled))
     }
 
-    pub(crate) fn annotation_matches_compiled_name(
-        &self,
-        annotation: &shape_ast::ast::Annotation,
-        compiled_name: &str,
-    ) -> bool {
-        self.resolve_compiled_annotation_name(annotation).as_deref() == Some(compiled_name)
-    }
-
-    pub(crate) fn annotation_args_for_compiled_name(
-        &self,
-        annotations: &[shape_ast::ast::Annotation],
-        compiled_name: &str,
-    ) -> Vec<shape_ast::ast::Expr> {
-        annotations
-            .iter()
-            .find(|annotation| self.annotation_matches_compiled_name(annotation, compiled_name))
-            .map(|annotation| annotation.args.clone())
-            .unwrap_or_default()
-    }
-
     pub(crate) fn is_definition_annotation_target(
         target_kind: shape_ast::ast::functions::AnnotationTargetKind,
     ) -> bool {

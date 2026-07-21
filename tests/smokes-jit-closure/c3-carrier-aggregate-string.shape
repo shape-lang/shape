@@ -1,0 +1,22 @@
+// ADR-009 C3 #14 slice 1 (S1a) — the C3-G9 aggregate pin, (int, string)
+// heterogeneous target: the string-bearing sibling of c3-carrier-aggregate.
+// Same PROXY RELATION (disclosed): the user-declared `type HookOutS` stands in
+// for the compiler-internal per-target mutation aggregate (same runtime shape,
+// NewTypedObject with fully typed fields). The impl branches on the string so
+// the string param is genuinely consumed, not dead. Hot loop of 200 calls
+// crosses T1@100. Expected stdout: 40800
+// (per call (i+1)*2 + 3 = 2i+5; 2*19900 + 5*200).
+type HookOutS { a0: int, a1: string }
+fn calc_impl(a: int, s: string) -> int { if s == "k" { a * 2 } else { 0 } }
+fn hook_before(a: int, s: string) -> HookOutS { HookOutS { a0: a + 1, a1: s } }
+fn hook_after(r: int) -> int { r + 3 }
+fn calc(a: int, s: string) -> int {
+  let m = hook_before(a, s)
+  hook_after(calc_impl(m.a0, m.a1))
+}
+fn run() -> int {
+  let mut total = 0
+  for i in 0..200 { total = total + calc(i, "k") }
+  total
+}
+print(run())

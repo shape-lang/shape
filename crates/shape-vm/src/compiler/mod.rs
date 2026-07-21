@@ -77,6 +77,11 @@ pub use comptime_builtins::expansion_provenance::{
     HygienicSymbol, SourceAnchor, SymbolId,
 };
 pub use generation_reachability::program_may_generate;
+// ADR-009 C3 #14 (S8c): the hook-install hover/query surface — tooling
+// reads the compiler-owned install registry through this display-safe
+// projection (`BytecodeCompiler::hook_install_query`), never a text scan
+// and never a hand-written parallel table.
+pub use template_specialization::install_registry::HookInstallView;
 pub(crate) mod comptime_concrete;
 pub(crate) mod comptime_diagnostics;
 pub(crate) mod comptime_target;
@@ -84,6 +89,7 @@ mod control_flow;
 mod body_analysis_authority;
 mod checked_body;
 mod comptime_fragments;
+mod template_specialization;
 mod expressions;
 mod functions;
 mod functions_annotations;
@@ -1934,6 +1940,19 @@ pub struct BytecodeCompiler {
     /// membership is the table's derived `contains_name` view.
     pub(crate) generated_symbols: comptime_builtins::expansion_provenance::GeneratedSymbolTable,
 
+    /// ADR-009 C3 #14 (S6 completion) — the hygienic names of hook-template
+    /// weave IMPL SHADOWS (`template_weave_impl_name`). A shadow is a
+    /// GENERATED declaration by reservation (journaled, D1-navigable) whose
+    /// BODY is the user's own source carried verbatim, so its interior
+    /// closures are legitimately UNSTAMPED (they keep ordinary capture
+    /// inference — the gate-totality G4 negative-control contract). The
+    /// capture-surface debug crosscheck ("a generated declaration's closures
+    /// are stamped", capture_plan/surface.rs) consults this set to exclude
+    /// the class where its name-view heuristic is unsound. Advisory only —
+    /// node-borne provenance stays the authority; stale entries after a
+    /// rollback are harmless (the crosscheck is debug-tier).
+    pub(in crate::compiler) template_weave_shadow_names: HashSet<String>,
+
     /// ADR-009 C2 #13 (slice 1) — when set, a rolled-back generated-body
     /// install (see [`checked_body`]) retains the generated-query reservation
     /// tables (`generated_symbols`, `closure_capture_packs`) after a recoverable
@@ -1950,6 +1969,19 @@ pub struct BytecodeCompiler {
     /// records its displaced prior here so a rollback restores it rather than
     /// deleting a shared prelude/dependency key.
     pub(in crate::compiler) install_journal: Option<checked_body::InstallJournal>,
+
+    /// ADR-009 C3 #14 (slice 2, S2b) — the hook-template INSTALL registry:
+    /// one row per applied `install(...)` directive (annotation name, target
+    /// name, hook kind, template-Sig rendering, specialized symbol/index,
+    /// capture renderings, `@application` span). Compiler-owned query state
+    /// (the C1 slice-4 `generated_symbol_query` precedent — the S8 hover
+    /// surface reads THIS, never a text scan; projected display-safe via
+    /// `BytecodeCompiler::hook_install_query`). Rows are written at the pass-2
+    /// apply seam and journaled through the open [`checked_body`] install
+    /// transaction (`journal_record_hook_install_row`), so a rolled-back
+    /// compile leaves no row.
+    pub(in crate::compiler) hook_install_registry:
+        Vec<template_specialization::install_registry::HookInstallRecord>,
 
     /// ADR-009 E3 (slice S1) — the generated analysis items materialized by
     /// the executed declaration-discovery pre-pass

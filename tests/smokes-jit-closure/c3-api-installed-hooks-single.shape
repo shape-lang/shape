@@ -1,0 +1,46 @@
+// ADR-009 C3 #14 slice 2 (S2d) — the API-INSTALLED weave RUNTIME SMOKE,
+// SINGLE-carrier shape: the COMPILER-GENERATED specialization path on a
+// 1-ary target (MutationCarrier::Single — no compiler-internal aggregate,
+// no inline-Object annotation anywhere in the generated code). A real
+// annotation handler installs a polymorphic BEFORE template (with a scalar
+// capture) and a concrete AFTER template through the PUBLIC comptime API;
+// the S2c weave generates the wrapper + hygienic impl shadow. Paired with
+// `c3-api-installed-hooks.shape` (the 2-ary AGGREGATE sibling, pinned as a
+// named-expected-fallback), this cell attributes the JIT gap EXACTLY: the
+// generated weave itself (wrapper + shadow + specialized handler + capture
+// delivery) is native; only the aggregate carrier's inline-Object proof
+// chain deopts (S7 territory).
+//
+// Hot loop of 200 calls crosses T1@100. The annotation `comptime post`
+// handler is NOT a top-level comptime block (parse-based vacuity guard).
+//
+// Value-distinguishing arithmetic, per call i in 0..200:
+//   before: a0 = 2i + 2 (x2 + capture bump 2)
+//   impl:   * 10 → 20i + 20
+//   after:  + 3 → 20i + 23;  sum = 20*19900 + 23*200 = 402600
+// Expected stdout: 402600
+//   skipped before → sum 10i+3  = 199600
+//   skipped after  → sum 20i+20 = 402000
+fn boost<Args>(args: Args, bump: int) -> Args {
+  args[0] = args[0] * 2 + bump
+  return args
+}
+fn settle(r: int) -> int { return r + 3 }
+
+annotation hooked() {
+  targets: [function]
+  comptime post(target, ctx) {
+    install(before_hook(boost, [capture("bump", 2)]))
+    install(after_hook(settle, []))
+  }
+}
+
+@hooked()
+fn calc(a: int) -> int { a * 10 }
+
+fn run() -> int {
+  let mut total = 0
+  for i in 0..200 { total = total + calc(i) }
+  total
+}
+print(run())

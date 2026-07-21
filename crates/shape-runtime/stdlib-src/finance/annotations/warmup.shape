@@ -26,5 +26,8 @@
 /// pub fn sma(data: Column<number>, period: number) -> number {
 ///     return data.rolling(period).mean();
 /// }
-pub annotation warmup(period) {
+// ADR-009 C3-S6: config params declare their type on the collapsed
+// annotation surface. `number` matches the indicator signatures' own
+// `period: number` params (the documentary `@warmup(period)` spelling).
+pub annotation warmup(period: number) {
 }

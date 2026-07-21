@@ -5,12 +5,8 @@
 use shape_ast::ast::{Expr, Span};
 use shape_ast::error::{Result, ShapeError};
 
-use super::{
-    BorrowMode, BytecodeCompiler, ExprReferenceResult, ExprResultMode, HygienicRole,
-};
-use crate::bytecode::{Constant, Instruction, OpCode, Operand};
-use crate::executor::typed_object_ops::field_type_to_tag;
-use shape_runtime::type_schema::FieldType;
+use super::{BorrowMode, BytecodeCompiler, ExprReferenceResult, ExprResultMode};
+use crate::bytecode::{Instruction, OpCode, Operand};
 
 /// U4-4: return TYPE of a compiler-internal builtin / `__intrinsic_*` math
 /// function, by bare name. These builtins' bodies are never walked by the
@@ -644,6 +640,33 @@ impl BytecodeCompiler {
         target_kind: shape_ast::ast::functions::AnnotationTargetKind,
     ) -> Result<bool> {
         if let Some((_, compiled)) = self.lookup_compiled_annotation(annotation) {
+            // ADR-009 C3 #14 (slice 5, S5b): the EXPRESSION-target sibling of
+            // the type/module-seam rejections (`execute_struct_comptime_
+            // handlers` / `execute_module_comptime_handlers`) — this seam
+            // never runs the sugar post handler, so a TypedConfig-with-hooks
+            // annotation's declarative hooks could never fire here (measured
+            // silent no-op, probe P-NFT-expr). ONE producer in
+            // `sugar_lowering`.
+            if compiled.sugar_post_handler.is_some() {
+                let target_kind_word = format!("{target_kind:?}").to_lowercase();
+                let target_name = {
+                    let name = Self::annotation_target_name(target);
+                    if name.is_empty() {
+                        "target".to_string()
+                    } else {
+                        name
+                    }
+                };
+                return Err(ShapeError::SemanticError {
+                    message: crate::compiler::statements::annotation_declarations::
+                        sugar_lowering::non_function_target_application_rejection(
+                            &annotation.name,
+                            &target_kind_word,
+                            &target_name,
+                        ),
+                    location: Some(self.span_to_source_location(annotation.span)),
+                });
+            }
             let handlers = [
                 compiled.comptime_pre_handler,
                 compiled.comptime_post_handler,
@@ -672,11 +695,17 @@ impl BytecodeCompiler {
                 // ADR-009 E1 #17 (slice 5): the handler executor still needs a
                 // freeze handle; acquire it here (no target stamping occurred).
                 let freeze = self.comptime_freeze_overlay()?;
+                // ADR-009 C3 #14 (slice 4): the def-param carrier reads the
+                // FULL param definitions (declared types ride along).
+                let def_params =
+                    crate::compiler::functions_annotations::handler_resolution::annotation_def_params(
+                        &compiled.param_defs,
+                    );
                 let execution = self.execute_comptime_annotation_handler(
                     annotation,
                     &handler,
                     target_value,
-                    &compiled.param_names,
+                    &def_params,
                     &[],
                     // Expression target: no representation authority (Dec 56).
                     None,
@@ -710,245 +739,6 @@ impl BytecodeCompiler {
         Ok(false)
     }
 
-    /// Apply the before-handler result contract.
-    ///
-    /// The before handler can return:
-    /// - An array → replaces args
-    /// - An object `{ args?, state?, result? }` → updates args/state, and if
-    ///   `result` is non-null, short-circuits (skips impl call / expression eval)
-    ///
-    /// When `result_local` is `Some`, the `result` field is extracted and stored
-    /// there, and a short-circuit jump is emitted. The returned `Option<usize>`
-    /// is the jump address that must be patched by the caller to skip past the
-    /// impl call / expression evaluation.
-    fn apply_before_result_contract(
-        &mut self,
-        before_result_local: u16,
-        args_local: u16,
-        ctx_local: u16,
-        ctx_schema_id: u32,
-    ) -> Result<()> {
-        self.apply_before_result_contract_inner(
-            before_result_local,
-            args_local,
-            ctx_local,
-            ctx_schema_id,
-            None,
-        )
-        .map(|_| ())
-    }
-
-    /// Like `apply_before_result_contract` but with short-circuit support.
-    ///
-    /// When `short_circuit_result_local` is provided, the `result` field of the
-    /// before-handler object is extracted. If non-null, the value is stored in
-    /// the given local and a jump is emitted. The returned `Option<usize>` is
-    /// the jump that must be patched to skip past the impl/expression.
-    fn apply_before_result_contract_with_short_circuit(
-        &mut self,
-        before_result_local: u16,
-        args_local: u16,
-        ctx_local: u16,
-        ctx_schema_id: u32,
-        short_circuit_result_local: u16,
-    ) -> Result<Option<usize>> {
-        self.apply_before_result_contract_inner(
-            before_result_local,
-            args_local,
-            ctx_local,
-            ctx_schema_id,
-            Some(short_circuit_result_local),
-        )
-    }
-
-    fn apply_before_result_contract_inner(
-        &mut self,
-        before_result_local: u16,
-        args_local: u16,
-        ctx_local: u16,
-        ctx_schema_id: u32,
-        short_circuit_result_local: Option<u16>,
-    ) -> Result<Option<usize>> {
-        self.emit(Instruction::new(
-            OpCode::LoadLocal,
-            Some(Operand::Local(before_result_local)),
-        ));
-        let one_const = self.program.add_constant(Constant::Int(1));
-        self.emit(Instruction::new(
-            OpCode::PushConst,
-            Some(Operand::Const(one_const)),
-        ));
-        self.emit(Instruction::new(
-            OpCode::BuiltinCall,
-            Some(Operand::Builtin(crate::bytecode::BuiltinFunction::IsArray)),
-        ));
-        let skip_array = self.emit_jump(OpCode::JumpIfFalse, 0);
-        self.emit(Instruction::new(
-            OpCode::LoadLocal,
-            Some(Operand::Local(before_result_local)),
-        ));
-        self.emit(Instruction::new(
-            OpCode::StoreLocal,
-            Some(Operand::Local(args_local)),
-        ));
-        let skip_obj_check = self.emit_jump(OpCode::Jump, 0);
-        self.patch_jump(skip_array);
-
-        self.emit(Instruction::new(
-            OpCode::LoadLocal,
-            Some(Operand::Local(before_result_local)),
-        ));
-        let one_const2 = self.program.add_constant(Constant::Int(1));
-        self.emit(Instruction::new(
-            OpCode::PushConst,
-            Some(Operand::Const(one_const2)),
-        ));
-        self.emit(Instruction::new(
-            OpCode::BuiltinCall,
-            Some(Operand::Builtin(crate::bytecode::BuiltinFunction::IsObject)),
-        ));
-        let skip_obj = self.emit_jump(OpCode::JumpIfFalse, 0);
-
-        // Schema includes `result` field for short-circuit support
-        let before_contract_schema_id = self.type_tracker.register_inline_object_schema_typed(&[
-            ("args", FieldType::Any),
-            ("result", FieldType::Any),
-            ("state", FieldType::Any),
-        ]);
-        let (args_operand, state_operand, result_operand) = {
-            let schema = self
-                .type_tracker
-                .schema_registry()
-                .get_by_id(before_contract_schema_id)
-                .ok_or_else(|| ShapeError::RuntimeError {
-                    message: "Internal error: missing before-handler schema".to_string(),
-                    location: None,
-                })?;
-            let args_field = schema
-                .get_field("args")
-                .ok_or_else(|| ShapeError::RuntimeError {
-                    message: "Internal error: before-handler schema missing 'args'".to_string(),
-                    location: None,
-                })?;
-            let state_field =
-                schema
-                    .get_field("state")
-                    .ok_or_else(|| ShapeError::RuntimeError {
-                        message: "Internal error: before-handler schema missing 'state'"
-                            .to_string(),
-                        location: None,
-                    })?;
-            let result_field =
-                schema
-                    .get_field("result")
-                    .ok_or_else(|| ShapeError::RuntimeError {
-                        message: "Internal error: before-handler schema missing 'result'"
-                            .to_string(),
-                        location: None,
-                    })?;
-            if args_field.offset > u16::MAX as usize
-                || state_field.offset > u16::MAX as usize
-                || result_field.offset > u16::MAX as usize
-            {
-                return Err(ShapeError::RuntimeError {
-                    message: "Internal error: before-handler field offset/index overflow"
-                        .to_string(),
-                    location: None,
-                });
-            }
-            (
-                Operand::TypedField {
-                    type_id: before_contract_schema_id as u16,
-                    field_idx: args_field.index as u16,
-                    field_type_tag: field_type_to_tag(&args_field.field_type),
-                },
-                Operand::TypedField {
-                    type_id: before_contract_schema_id as u16,
-                    field_idx: state_field.index as u16,
-                    field_type_tag: field_type_to_tag(&state_field.field_type),
-                },
-                Operand::TypedField {
-                    type_id: before_contract_schema_id as u16,
-                    field_idx: result_field.index as u16,
-                    field_type_tag: field_type_to_tag(&result_field.field_type),
-                },
-            )
-        };
-
-        // Check `result` field for short-circuit
-        let mut short_circuit_jump = None;
-        if let Some(sc_local) = short_circuit_result_local {
-            self.emit(Instruction::new(
-                OpCode::LoadLocal,
-                Some(Operand::Local(before_result_local)),
-            ));
-            self.emit(Instruction::new(
-                OpCode::GetFieldTyped,
-                Some(result_operand),
-            ));
-            // Stage 2.6.5.2: typed IsNull replaces `PushNull; Eq`.
-            self.emit(Instruction::simple(OpCode::Dup));
-            self.emit(Instruction::simple(OpCode::IsNull));
-            let skip_short_circuit = self.emit_jump(OpCode::JumpIfTrue, 0);
-            // result is non-null → store it and jump past impl
-            self.emit(Instruction::new(
-                OpCode::StoreLocal,
-                Some(Operand::Local(sc_local)),
-            ));
-            short_circuit_jump = Some(self.emit_jump(OpCode::Jump, 0));
-            self.patch_jump(skip_short_circuit);
-            self.emit(Instruction::simple(OpCode::Pop)); // discard null result
-        }
-
-        self.emit(Instruction::new(
-            OpCode::LoadLocal,
-            Some(Operand::Local(before_result_local)),
-        ));
-        self.emit(Instruction::new(OpCode::GetFieldTyped, Some(args_operand)));
-        // Stage 2.6.5.2: typed IsNull replaces `PushNull; Eq`.
-        self.emit(Instruction::simple(OpCode::Dup));
-        self.emit(Instruction::simple(OpCode::IsNull));
-        let skip_args_replace = self.emit_jump(OpCode::JumpIfTrue, 0);
-        self.emit(Instruction::new(
-            OpCode::StoreLocal,
-            Some(Operand::Local(args_local)),
-        ));
-        let skip_pop_args = self.emit_jump(OpCode::Jump, 0);
-        self.patch_jump(skip_args_replace);
-        self.emit(Instruction::simple(OpCode::Pop));
-        self.patch_jump(skip_pop_args);
-
-        self.emit(Instruction::new(
-            OpCode::LoadLocal,
-            Some(Operand::Local(before_result_local)),
-        ));
-        self.emit(Instruction::new(OpCode::GetFieldTyped, Some(state_operand)));
-        // Stage 2.6.5.2: typed IsNull replaces `PushNull; Eq`.
-        self.emit(Instruction::simple(OpCode::Dup));
-        self.emit(Instruction::simple(OpCode::IsNull));
-        let skip_state = self.emit_jump(OpCode::JumpIfTrue, 0);
-        self.emit(Instruction::new(OpCode::NewArray, Some(Operand::Count(0))));
-        self.emit(Instruction::new(
-            OpCode::NewTypedObject,
-            Some(Operand::TypedObjectAlloc {
-                schema_id: ctx_schema_id as u16,
-                field_count: 2,
-            }),
-        ));
-        self.emit(Instruction::new(
-            OpCode::StoreLocal,
-            Some(Operand::Local(ctx_local)),
-        ));
-        let skip_pop_state = self.emit_jump(OpCode::Jump, 0);
-        self.patch_jump(skip_state);
-        self.emit(Instruction::simple(OpCode::Pop));
-        self.patch_jump(skip_pop_state);
-
-        self.patch_jump(skip_obj);
-        self.patch_jump(skip_obj_check);
-        Ok(short_circuit_jump)
-    }
-
     fn compile_annotated_expr(
         &mut self,
         annotation: &shape_ast::ast::Annotation,
@@ -960,167 +750,6 @@ impl BytecodeCompiler {
         self.validate_annotation_target_usage(annotation, target_kind, ann_span)?;
         if self.run_comptime_annotation_handlers_for_target(annotation, target, target_kind)? {
             return Ok(());
-        }
-
-        if let Some(compiled) = self
-            .program
-            .compiled_annotations
-            .get(&annotation.name)
-            .cloned()
-        {
-            if compiled.before_handler.is_some() || compiled.after_handler.is_some() {
-                self.push_scope();
-                let args_local = self.declare_hygienic_local(HygienicRole::AnnotationArgs)?;
-                let ctx_local = self.declare_hygienic_local(HygienicRole::AnnotationCtx)?;
-                let result_local = self.declare_hygienic_local(HygienicRole::AnnotationResult)?;
-
-                // Build args array for expression annotations.
-                self.emit(Instruction::new(OpCode::NewArray, Some(Operand::Count(0))));
-                self.emit(Instruction::new(
-                    OpCode::StoreLocal,
-                    Some(Operand::Local(args_local)),
-                ));
-
-                // Build ctx object: { state: {}, event_log: [] }.
-                // W17.2-C §4.D.5 migration: empty-fields case uses typed variant.
-                let empty_schema_id = self.type_tracker.register_inline_object_schema_typed(&[]);
-                self.emit(Instruction::new(
-                    OpCode::NewTypedObject,
-                    Some(Operand::TypedObjectAlloc {
-                        schema_id: empty_schema_id as u16,
-                        field_count: 0,
-                    }),
-                ));
-                self.emit(Instruction::new(OpCode::NewArray, Some(Operand::Count(0))));
-                let ctx_schema_id = self.type_tracker.register_inline_object_schema_typed(&[
-                    ("state", FieldType::Any),
-                    ("event_log", FieldType::Array(Box::new(FieldType::Any))),
-                ]);
-                self.emit(Instruction::new(
-                    OpCode::NewTypedObject,
-                    Some(Operand::TypedObjectAlloc {
-                        schema_id: ctx_schema_id as u16,
-                        field_count: 2,
-                    }),
-                ));
-                self.emit(Instruction::new(
-                    OpCode::StoreLocal,
-                    Some(Operand::Local(ctx_local)),
-                ));
-
-                if let Some(before_id) = compiled.before_handler {
-                    let self_ref = self.program.add_constant(Constant::Number(0.0));
-                    self.emit(Instruction::new(
-                        OpCode::PushConst,
-                        Some(Operand::Const(self_ref)),
-                    ));
-                    for ann_arg in &annotation.args {
-                        self.compile_expr(ann_arg)?;
-                    }
-                    self.emit(Instruction::new(
-                        OpCode::LoadLocal,
-                        Some(Operand::Local(args_local)),
-                    ));
-                    self.emit(Instruction::new(
-                        OpCode::LoadLocal,
-                        Some(Operand::Local(ctx_local)),
-                    ));
-                    let before_arg_count = 1 + annotation.args.len() + 2;
-                    let count_const = self
-                        .program
-                        .add_constant(Constant::Int(before_arg_count as i64));
-                    self.emit(Instruction::new(
-                        OpCode::PushConst,
-                        Some(Operand::Const(count_const)),
-                    ));
-                    self.emit(Instruction::new(
-                        OpCode::Call,
-                        Some(Operand::Function(shape_value::FunctionId(before_id))),
-                    ));
-                    self.record_blob_call(before_id);
-
-                    let before_result_local =
-                        self.declare_hygienic_local(HygienicRole::AnnotationBeforeResult)?;
-                    self.emit(Instruction::new(
-                        OpCode::StoreLocal,
-                        Some(Operand::Local(before_result_local)),
-                    ));
-                    self.apply_before_result_contract(
-                        before_result_local,
-                        args_local,
-                        ctx_local,
-                        ctx_schema_id,
-                    )?;
-                }
-
-                if let Expr::Annotated {
-                    annotation: inner_annotation,
-                    target: inner_target,
-                    span: inner_span,
-                } = target
-                {
-                    self.compile_annotated_expr(
-                        inner_annotation,
-                        inner_target,
-                        *inner_span,
-                        forced_kind,
-                    )?;
-                } else {
-                    self.compile_expr(target)?;
-                }
-                self.emit(Instruction::new(
-                    OpCode::StoreLocal,
-                    Some(Operand::Local(result_local)),
-                ));
-
-                if let Some(after_id) = compiled.after_handler {
-                    let self_ref = self.program.add_constant(Constant::Number(0.0));
-                    self.emit(Instruction::new(
-                        OpCode::PushConst,
-                        Some(Operand::Const(self_ref)),
-                    ));
-                    for ann_arg in &annotation.args {
-                        self.compile_expr(ann_arg)?;
-                    }
-                    self.emit(Instruction::new(
-                        OpCode::LoadLocal,
-                        Some(Operand::Local(args_local)),
-                    ));
-                    self.emit(Instruction::new(
-                        OpCode::LoadLocal,
-                        Some(Operand::Local(result_local)),
-                    ));
-                    self.emit(Instruction::new(
-                        OpCode::LoadLocal,
-                        Some(Operand::Local(ctx_local)),
-                    ));
-                    let after_arg_count = 1 + annotation.args.len() + 3;
-                    let count_const = self
-                        .program
-                        .add_constant(Constant::Int(after_arg_count as i64));
-                    self.emit(Instruction::new(
-                        OpCode::PushConst,
-                        Some(Operand::Const(count_const)),
-                    ));
-                    self.emit(Instruction::new(
-                        OpCode::Call,
-                        Some(Operand::Function(shape_value::FunctionId(after_id))),
-                    ));
-                    self.record_blob_call(after_id);
-                    self.emit(Instruction::new(
-                        OpCode::StoreLocal,
-                        Some(Operand::Local(result_local)),
-                    ));
-                }
-
-                self.emit(Instruction::new(
-                    OpCode::LoadLocal,
-                    Some(Operand::Local(result_local)),
-                ));
-                self.stamp_awaited_future_payload_type(target);
-                self.pop_scope();
-                return Ok(());
-            }
         }
 
         if let Expr::Annotated {
@@ -1146,184 +775,6 @@ impl BytecodeCompiler {
 
         if self.run_comptime_annotation_handlers_for_target(annotation, target, target_kind)? {
             return Ok(());
-        }
-
-        if let Some(compiled) = self
-            .program
-            .compiled_annotations
-            .get(&annotation.name)
-            .cloned()
-        {
-            if compiled.before_handler.is_some() || compiled.after_handler.is_some() {
-                self.push_scope();
-                let args_local = self.declare_hygienic_local(HygienicRole::AnnotationArgs)?;
-                let ctx_local = self.declare_hygienic_local(HygienicRole::AnnotationCtx)?;
-                let subject_local = self.declare_hygienic_local(HygienicRole::AnnotationSubject)?;
-                let result_local = self.declare_hygienic_local(HygienicRole::AnnotationResult)?;
-
-                // W17.2-C §4.D.5 migration: empty-fields case uses typed variant.
-                let empty_schema_id = self.type_tracker.register_inline_object_schema_typed(&[]);
-                self.emit(Instruction::new(
-                    OpCode::NewTypedObject,
-                    Some(Operand::TypedObjectAlloc {
-                        schema_id: empty_schema_id as u16,
-                        field_count: 0,
-                    }),
-                ));
-                self.emit(Instruction::new(OpCode::NewArray, Some(Operand::Count(0))));
-                let ctx_schema_id = self.type_tracker.register_inline_object_schema_typed(&[
-                    ("state", FieldType::Any),
-                    ("event_log", FieldType::Array(Box::new(FieldType::Any))),
-                ]);
-                self.emit(Instruction::new(
-                    OpCode::NewTypedObject,
-                    Some(Operand::TypedObjectAlloc {
-                        schema_id: ctx_schema_id as u16,
-                        field_count: 2,
-                    }),
-                ));
-                self.emit(Instruction::new(
-                    OpCode::StoreLocal,
-                    Some(Operand::Local(ctx_local)),
-                ));
-
-                // Initialize args as empty array (before handler gets annotation
-                // args + ctx, not the evaluated expression)
-                self.emit(Instruction::new(OpCode::NewArray, Some(Operand::Count(0))));
-                self.emit(Instruction::new(
-                    OpCode::StoreLocal,
-                    Some(Operand::Local(args_local)),
-                ));
-
-                // Call before handler FIRST (before evaluating inner expression).
-                // This allows short-circuit: if before returns { result: value },
-                // we skip the inner expression eval + await entirely.
-                let mut short_circuit_jump = None;
-                if let Some(before_id) = compiled.before_handler {
-                    let self_ref = self.program.add_constant(Constant::Number(0.0));
-                    self.emit(Instruction::new(
-                        OpCode::PushConst,
-                        Some(Operand::Const(self_ref)),
-                    ));
-                    for ann_arg in &annotation.args {
-                        self.compile_expr(ann_arg)?;
-                    }
-                    self.emit(Instruction::new(
-                        OpCode::LoadLocal,
-                        Some(Operand::Local(args_local)),
-                    ));
-                    self.emit(Instruction::new(
-                        OpCode::LoadLocal,
-                        Some(Operand::Local(ctx_local)),
-                    ));
-                    let before_arg_count = 1 + annotation.args.len() + 2;
-                    let count_const = self
-                        .program
-                        .add_constant(Constant::Int(before_arg_count as i64));
-                    self.emit(Instruction::new(
-                        OpCode::PushConst,
-                        Some(Operand::Const(count_const)),
-                    ));
-                    self.emit(Instruction::new(
-                        OpCode::Call,
-                        Some(Operand::Function(shape_value::FunctionId(before_id))),
-                    ));
-                    self.record_blob_call(before_id);
-
-                    let before_result_local =
-                        self.declare_hygienic_local(HygienicRole::AnnotationBeforeResult)?;
-                    self.emit(Instruction::new(
-                        OpCode::StoreLocal,
-                        Some(Operand::Local(before_result_local)),
-                    ));
-                    short_circuit_jump = self.apply_before_result_contract_with_short_circuit(
-                        before_result_local,
-                        args_local,
-                        ctx_local,
-                        ctx_schema_id,
-                        result_local,
-                    )?;
-                }
-
-                // --- Normal path: evaluate inner expression + await ---
-                if let Expr::Annotated {
-                    annotation: inner_annotation,
-                    target: inner_target,
-                    span: inner_span,
-                } = target
-                {
-                    self.compile_annotated_await_expr(inner_annotation, inner_target, *inner_span)?;
-                } else {
-                    self.compile_expr(target)?;
-                }
-                self.emit(Instruction::new(
-                    OpCode::StoreLocal,
-                    Some(Operand::Local(subject_local)),
-                ));
-
-                self.emit(Instruction::new(
-                    OpCode::LoadLocal,
-                    Some(Operand::Local(subject_local)),
-                ));
-                self.emit(Instruction::simple(OpCode::Await));
-                self.emit(Instruction::new(
-                    OpCode::StoreLocal,
-                    Some(Operand::Local(result_local)),
-                ));
-
-                // Patch the short-circuit jump to land here (after await, at result usage)
-                if let Some(jump_addr) = short_circuit_jump {
-                    self.patch_jump(jump_addr);
-                }
-
-                if let Some(after_id) = compiled.after_handler {
-                    let self_ref = self.program.add_constant(Constant::Number(0.0));
-                    self.emit(Instruction::new(
-                        OpCode::PushConst,
-                        Some(Operand::Const(self_ref)),
-                    ));
-                    for ann_arg in &annotation.args {
-                        self.compile_expr(ann_arg)?;
-                    }
-                    self.emit(Instruction::new(
-                        OpCode::LoadLocal,
-                        Some(Operand::Local(args_local)),
-                    ));
-                    self.emit(Instruction::new(
-                        OpCode::LoadLocal,
-                        Some(Operand::Local(result_local)),
-                    ));
-                    self.emit(Instruction::new(
-                        OpCode::LoadLocal,
-                        Some(Operand::Local(ctx_local)),
-                    ));
-                    let after_arg_count = 1 + annotation.args.len() + 3;
-                    let count_const = self
-                        .program
-                        .add_constant(Constant::Int(after_arg_count as i64));
-                    self.emit(Instruction::new(
-                        OpCode::PushConst,
-                        Some(Operand::Const(count_const)),
-                    ));
-                    self.emit(Instruction::new(
-                        OpCode::Call,
-                        Some(Operand::Function(shape_value::FunctionId(after_id))),
-                    ));
-                    self.record_blob_call(after_id);
-                    self.emit(Instruction::new(
-                        OpCode::StoreLocal,
-                        Some(Operand::Local(result_local)),
-                    ));
-                }
-
-                self.emit(Instruction::new(
-                    OpCode::LoadLocal,
-                    Some(Operand::Local(result_local)),
-                ));
-                self.stamp_awaited_future_payload_type(target);
-                self.pop_scope();
-                return Ok(());
-            }
         }
 
         if let Expr::Annotated {
@@ -1785,15 +1236,26 @@ impl BytecodeCompiler {
                 body,
                 generated_origin,
                 captures,
+                annotations,
                 span,
                 ..
-            } => self.compile_expr_closure(
-                params,
-                body,
-                captures.as_deref(),
-                generated_origin.as_deref(),
-                *span,
-            ),
+            } => {
+                // ADR-009 C3 #14 (slice 4, C3-G12): annotations on a fn-local
+                // NESTED `fn` (carried by the parser desugar) — a TypedConfig
+                // (hook-template) annotation is a LOUD named rejection at the
+                // application site; legacy-classified annotations keep the
+                // pre-slice-4 silent drop until S5's matrix owns the class.
+                if let Some(annotations) = annotations.as_deref() {
+                    self.reject_typed_config_annotations_on_nested_fn(annotations)?;
+                }
+                self.compile_expr_closure(
+                    params,
+                    body,
+                    captures.as_deref(),
+                    generated_origin.as_deref(),
+                    *span,
+                )
+            }
 
             // Conditionals
             Expr::Conditional {

@@ -393,17 +393,14 @@ pub enum HygienicRole {
     /// The comptime handler's compile-context module binding (former
     /// `__ctx_arg__`).
     ComptimeCtxBinding,
-    /// The annotation before/after args local (former `__ann_args`).
-    AnnotationArgs,
-    /// The annotation before/after ctx local (former `__ann_ctx`).
-    AnnotationCtx,
-    /// The annotation-on-await subject local (former `__ann_subject`).
-    AnnotationSubject,
-    /// The annotation before/after result local (former `__ann_result`).
-    AnnotationResult,
-    /// The annotation before-handler result local (former
-    /// `__ann_before_result`).
-    AnnotationBeforeResult,
+    // (The ADR-009 C3-S6 capstone deleted the legacy runtime-hook local /
+    // handler / wrapper roles that lived here — the before/after
+    // args-array, ctx, subject, result and before-result locals, the
+    // specialized-handler registry slots and the foreign-fn wrapper label,
+    // plus the S4 hook-chain identities further down. Runtime hooks are
+    // woven as ordinary typed AST; their identities are
+    // `TemplateWeaveImplBody` + `AnnotationSugarHookBody` below.)
+    //
     // ── slice S2 (U10) — hygienic generated FUNCTION / HANDLER / WRAPPER
     // registry names. Each variant replaces one former synthetic function
     // spelling that entered a function table by name; the wrapper's ROLE is
@@ -417,16 +414,6 @@ pub enum HygienicRole {
     /// `__comptime_handler_fn__`). Program-isolated: minted once per
     /// mini-program.
     ComptimeHandlerWrapper,
-    /// A specialized annotation before/after runtime handler registered in the
-    /// outer function table (former `__ann_{name}_{before|after}_wrapper_{n}`).
-    /// Disambiguated by the compiler nonce so before/after and every
-    /// application register distinct slots (a name collision would make
-    /// `find_function` return the wrong index).
-    SpecializedAnnotationHandler,
-    /// The foreign-function annotation wrapper slot name (former
-    /// `{name}___ann_wrapper`). Cosmetic slot label — referenced by index —
-    /// but must not be a user-spellable function name.
-    ForeignAnnotationWrapper,
     // ── slice S3 (U11) — hygienic generated FUNCTION identity for the
     // pre-annotation body a `replace body` directive shadows. Replaces the
     // deleted `__original__{fn}` shadow spelling + the
@@ -437,19 +424,36 @@ pub enum HygienicRole {
     // shadow per annotated function, `register_function` dedups by name).
     /// The `replace body` pre-annotation body shadow (former `__original__{fn}`).
     OriginalBodyShadow,
-    // ── slice S4 (U11) — hygienic generated FUNCTION identities for the
-    // before/after runtime-hook wrapper CHAIN. Each replaces one former
-    // user-spellable `{name}___…` chain name that entered the function table by
-    // a guessable spelling; the wrapper's ROLE is now bound by the
-    // compiler-issued token, and its unspellable rendering keeps a user
-    // function of the former spelling (`compute___impl`, `compute___b`) from
-    // colliding with — or being resolved to — the generated wrapper. The nonce
-    // is a stable digest of the annotated function's name (+ the annotation
-    // name for the intermediate wrapper) so re-registration is idempotent.
-    /// The before/after wrapped original body (former `{name}___impl`).
-    AnnotationHookImplBody,
-    /// An intermediate before/after chain wrapper (former `{name}___{annotation}`).
-    AnnotationHookWrapper,
+    // ── ADR-009 C3 #14 (slice 2, S2c) — the typed hook-template weave's
+    // hygienic impl identity: the target's FINAL body (post-directives,
+    // post-`replace body`) moved under an unspellable shadow name so the
+    // generated typed-AST wrapper compiled under the target's own name can
+    // call it directly (the C3-G6 SMALL shape — bytecode AND MIR from the
+    // same wrapped definition). The C3 successor of the deleted legacy
+    // hook-impl shadow role (S6 capstone). The nonce is a stable digest of
+    // the target function's name so re-registration is idempotent.
+    /// The hook-template weave's impl body (the target's final body under
+    /// the weave shadow).
+    TemplateWeaveImplBody,
+    // ── ADR-009 C3 #14 (slice 4, S4c) — the sugar lowering's MINTED
+    // module-scope-shaped hook-template BODY FN (C3-G3): a TypedConfig
+    // annotation's declarative `before`/`after` block lowers to an ordinary
+    // typed Shape fn referenced by the synthesized public-API install
+    // handler. The name is hygienic so user code can neither shadow nor
+    // resolve to it (Lens-2 F4 shadow tracking is structurally disengaged
+    // for synthesized handlers). The nonce is a stable digest of the
+    // annotation's exact name + the hook kind + the handler index, so one
+    // definition mints ONE identity per hook across every handler run —
+    // which is what lets Dec-95 rule 6 SHARE a specialization across two
+    // applications with equal config (same body fn name, same spec-hash).
+    /// A sugar-lowered declarative hook's minted template body fn.
+    AnnotationSugarHookBody,
+    /// The minted polymorphic body fn's `Args`/`R` TYPE parameter. Hygienic
+    /// so the minted generic param can never capture/shadow a USER nominal
+    /// type spelled inside the verbatim hook body (`let x: Args = …` keeps
+    /// meaning the user's type). Same stable-nonce derivation as the body
+    /// fn it belongs to.
+    AnnotationSugarTypeParam,
 }
 
 impl HygienicRole {
@@ -462,18 +466,12 @@ impl HygienicRole {
             }
             Self::ComptimeTargetBinding => "role:comptime-target-binding".to_string(),
             Self::ComptimeCtxBinding => "role:comptime-ctx-binding".to_string(),
-            Self::AnnotationArgs => "role:annotation-args".to_string(),
-            Self::AnnotationCtx => "role:annotation-ctx".to_string(),
-            Self::AnnotationSubject => "role:annotation-subject".to_string(),
-            Self::AnnotationResult => "role:annotation-result".to_string(),
-            Self::AnnotationBeforeResult => "role:annotation-before-result".to_string(),
             Self::ComptimeBlockWrapper => "role:comptime-block-wrapper".to_string(),
             Self::ComptimeHandlerWrapper => "role:comptime-handler-wrapper".to_string(),
-            Self::SpecializedAnnotationHandler => "role:specialized-annotation-handler".to_string(),
-            Self::ForeignAnnotationWrapper => "role:foreign-annotation-wrapper".to_string(),
             Self::OriginalBodyShadow => "role:original-body-shadow".to_string(),
-            Self::AnnotationHookImplBody => "role:annotation-hook-impl-body".to_string(),
-            Self::AnnotationHookWrapper => "role:annotation-hook-wrapper".to_string(),
+            Self::TemplateWeaveImplBody => "role:template-weave-impl-body".to_string(),
+            Self::AnnotationSugarHookBody => "role:annotation-sugar-hook-body".to_string(),
+            Self::AnnotationSugarTypeParam => "role:annotation-sugar-type-param".to_string(),
         }
     }
 }
@@ -1363,18 +1361,18 @@ mod tests {
     fn hygienic_symbol_mint_is_deterministic_distinct_and_unspellable() {
         // Determinism: same role + same nonce agree (a parameter declaration
         // and its reference within one generated wrapper must render equal).
-        let a = HygienicSymbol::mint(HygienicRole::AnnotationArgs, 7);
-        let b = HygienicSymbol::mint(HygienicRole::AnnotationArgs, 7);
+        let a = HygienicSymbol::mint(HygienicRole::ComptimeTargetBinding, 7);
+        let b = HygienicSymbol::mint(HygienicRole::ComptimeTargetBinding, 7);
         assert_eq!(a, b, "same role+nonce mints one identity");
         assert_eq!(a.unspellable_descriptor(), b.unspellable_descriptor());
 
         // Distinct across nonces: two applications of one annotation.
-        let c = HygienicSymbol::mint(HygienicRole::AnnotationArgs, 8);
+        let c = HygienicSymbol::mint(HygienicRole::ComptimeTargetBinding, 8);
         assert_ne!(a, c, "distinct nonces mint distinct tokens");
         assert_ne!(a.unspellable_descriptor(), c.unspellable_descriptor());
 
         // Distinct across roles at one nonce (role bound by position/type).
-        let ctx = HygienicSymbol::mint(HygienicRole::AnnotationCtx, 7);
+        let ctx = HygienicSymbol::mint(HygienicRole::ComptimeCtxBinding, 7);
         assert_ne!(a, ctx, "distinct roles mint distinct tokens");
 
         // Distinct across forwarder-param indices.
@@ -1392,7 +1390,7 @@ mod tests {
             "descriptor must be SOH-prefixed: {desc:?}"
         );
         assert_ne!(
-            desc, "__ann_args",
+            desc, "__target_arg__",
             "unspellable descriptor never equals the former spelling"
         );
         assert!(
@@ -1401,21 +1399,24 @@ mod tests {
         );
     }
 
-    // U10 (slice S2): the four hygienic FUNCTION / HANDLER / WRAPPER roles
-    // mint distinct, unspellable identities. Each replaces one former
-    // synthetic function spelling that entered a function table by name; the
-    // unspellable rendering guarantees a user function of the former spelling
-    // can neither collide with nor be resolved to the generated wrapper.
+    // U10 (slice S2, roster updated at the C3-S6 capstone): the hygienic
+    // FUNCTION / HANDLER / WRAPPER roles mint distinct, unspellable
+    // identities. Each replaces one former synthetic function spelling that
+    // entered a function table by name; the unspellable rendering guarantees
+    // a user function of the former spelling can neither collide with nor be
+    // resolved to the generated wrapper. (The deleted legacy runtime-hook
+    // roles this test once exercised are gone; the surviving weave/sugar
+    // identities stand in — same properties, same layer.)
     #[test]
     fn hygienic_function_roles_mint_distinct_unspellable_identities() {
         let block = HygienicSymbol::mint(HygienicRole::ComptimeBlockWrapper, 0);
         let handler = HygienicSymbol::mint(HygienicRole::ComptimeHandlerWrapper, 0);
-        let specialized = HygienicSymbol::mint(HygienicRole::SpecializedAnnotationHandler, 0);
-        let foreign = HygienicSymbol::mint(HygienicRole::ForeignAnnotationWrapper, 0);
+        let weave_impl = HygienicSymbol::mint(HygienicRole::TemplateWeaveImplBody, 0);
+        let sugar_body = HygienicSymbol::mint(HygienicRole::AnnotationSugarHookBody, 0);
 
         // The four roles are pairwise distinct at one nonce (role bound by
         // position/type, not spelling).
-        let ids = [block, handler, specialized, foreign];
+        let ids = [block, handler, weave_impl, sugar_body];
         for (i, a) in ids.iter().enumerate() {
             for b in ids.iter().skip(i + 1) {
                 assert_ne!(a, b, "distinct function roles mint distinct tokens");
@@ -1431,22 +1432,24 @@ mod tests {
              wrapper must render equal"
         );
 
-        // Outer-registry wrappers are disambiguated by the compiler nonce so
-        // before/after and every application register distinct slots.
-        let specialized_next = HygienicSymbol::mint(HygienicRole::SpecializedAnnotationHandler, 1);
+        // Outer-registry identities are disambiguated by the compiler nonce
+        // so every hook of every definition mints its own distinct body-fn
+        // slot (Dec-95 rule 6 sharing rides EQUAL nonces, never collisions).
+        let sugar_body_next = HygienicSymbol::mint(HygienicRole::AnnotationSugarHookBody, 1);
         assert_ne!(
-            specialized, specialized_next,
-            "distinct nonces mint distinct specialized-handler slots"
+            sugar_body, sugar_body_next,
+            "distinct nonces mint distinct sugar hook-body slots"
         );
 
         // Every rendering is UNSPELLABLE (SOH-prefixed) and never equals the
         // former synthetic spelling — rejection row 2 (no magic spelling in a
-        // symbol table) proven at the identity layer.
+        // symbol table) proven at the identity layer. (`compute___impl` is
+        // the deleted legacy chain spelling TemplateWeaveImplBody succeeded.)
         for (id, former) in [
             (block, "__comptime_block__"),
             (handler, "__comptime_handler_fn__"),
-            (specialized, "__ann_logged_before_wrapper_0"),
-            (foreign, "work___ann_wrapper"),
+            (weave_impl, "compute___impl"),
+            (sugar_body, "compute___before"),
         ] {
             let desc = id.unspellable_descriptor();
             assert!(

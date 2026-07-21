@@ -1703,7 +1703,7 @@ mod tests {
         // @annotation expr should compile (annotation is metadata, target is compiled)
         // Use simple expression to avoid undefined function errors
         let code = r#"
-            annotation timeout(duration) {}
+            annotation timeout(duration: int) {}
             async function with_anno() {
                 await @timeout(5s) 42
             }

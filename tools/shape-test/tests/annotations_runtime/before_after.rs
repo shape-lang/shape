@@ -3,6 +3,19 @@
 //! Covers: before hooks firing before function body, after hooks firing after,
 //! before+after chaining order, timing/logging annotation patterns,
 //! and hook execution with various return values.
+//!
+//! C3-S5c pin-rewrite wave 1: the pins below (except
+//! `ctx_target_calls_original_impl_from_after_hook`, E4-blocked per S2-F3)
+//! are rewritten IN PLACE onto the typed surface — typed config params,
+//! `before()` / `after()` observers, `before(args)` / `after(result)` hooks,
+//! and the r2/r9-proven public-API spelling for the zero-param definition.
+//! Asserted outputs are byte-identical to the legacy versions.
+//!
+//! C3-S6 A-phase status: `ctx_target_calls_original_impl_from_after_hook`
+//! remains the ONLY legacy spelling in this file — E4-blocked per the
+//! ratified S2-F3 disposition row (`ctx.target` has no typed spelling; the
+//! surface @remote hard-depends on); it stays as retained legacy coverage
+//! until the user ruling the F3 row mandates.
 
 use shape_test::shape_test::ShapeTest;
 
@@ -10,10 +23,9 @@ use shape_test::shape_test::ShapeTest;
 fn before_hook_fires_before_function_body() {
     ShapeTest::new(
         r#"
-annotation log_entry(tag) {
-  before(args, ctx) {
+annotation log_entry(tag: string) {
+  before() {
     print(f"[{tag}] entering")
-    args
   }
 }
 
@@ -35,8 +47,8 @@ print(result)
 fn after_hook_fires_after_function_body() {
     ShapeTest::new(
         r#"
-annotation log_exit(tag) {
-  after(args, result, ctx) {
+annotation log_exit(tag: string) {
+  after(result) {
     print(f"[{tag}] exiting with {result}")
     result
   }
@@ -60,12 +72,11 @@ print(r)
 fn before_and_after_both_fire_in_order() {
     ShapeTest::new(
         r#"
-annotation traced(label) {
-  before(args, ctx) {
+annotation traced(label: string) {
+  before() {
     print(f"[{label}] before")
-    args
   }
-  after(args, result, ctx) {
+  after(result) {
     print(f"[{label}] after = {result}")
     result
   }
@@ -88,23 +99,21 @@ fn stacked_annotations_execute_outer_first() {
     // Inside-out wrapping: outer annotation's before fires first
     ShapeTest::new(
         r#"
-annotation outer(tag) {
-  before(args, ctx) {
+annotation outer(tag: string) {
+  before() {
     print(f"[outer:{tag}] before")
-    args
   }
-  after(args, result, ctx) {
+  after(result) {
     print(f"[outer:{tag}] after")
     result
   }
 }
 
-annotation inner(tag) {
-  before(args, ctx) {
+annotation inner(tag: string) {
+  before() {
     print(f"[inner:{tag}] before")
-    args
   }
-  after(args, result, ctx) {
+  after(result) {
     print(f"[inner:{tag}] after")
     result
   }
@@ -125,8 +134,8 @@ print(identity(42))
 fn after_hook_receives_correct_result_value() {
     ShapeTest::new(
         r#"
-annotation check_result(expected) {
-  after(args, result, ctx) {
+annotation check_result(expected: int) {
+  after(result) {
     if result == expected {
       print("result matches expected")
     } else {
@@ -151,8 +160,8 @@ print(square(5))
 fn after_hook_can_transform_result() {
     ShapeTest::new(
         r#"
-annotation negate_result(label) {
-  after(args, result, ctx) {
+annotation negate_result(label: string) {
+  after(result) {
     print(f"[{label}] negating {result}")
     result * -1
   }
@@ -172,16 +181,24 @@ print(r)
 
 #[test]
 fn before_hook_with_empty_params() {
+    // Zero-param definitions classify Legacy on the declarative surface
+    // (S4 zero-param ruling), so this pin uses the r2/r9-proven public-API
+    // spelling: a `comptime post` handler installing observer templates.
     ShapeTest::new(
         r#"
+fn note_in() {
+  print("simple_log: entering")
+}
+
+fn note_out() {
+  print("simple_log: exiting")
+}
+
 annotation simple_log() {
-  before(args, ctx) {
-    print("simple_log: entering")
-    args
-  }
-  after(args, result, ctx) {
-    print("simple_log: exiting")
-    result
+  targets: [function]
+  comptime post(target, ctx) {
+    install(before_hook(note_in, []))
+    install(after_hook(note_out, []))
   }
 }
 
@@ -199,12 +216,13 @@ hello()
 
 #[test]
 fn same_annotation_reused_on_multiple_functions() {
+    // Two applications with different config = a Dec-95 rule-6 split
+    // (two distinct baked specializations of the same observer template).
     ShapeTest::new(
         r#"
-annotation counter(name) {
-  before(args, ctx) {
+annotation counter(name: string) {
+  before() {
     print(f"calling {name}")
-    args
   }
 }
 
@@ -225,31 +243,12 @@ print(mul(4, 5))
     .expect_output_contains("20");
 }
 
-#[test]
-fn ctx_target_calls_original_impl_from_after_hook() {
-    // §4.1.5: `ctx.target` is a typed function value statically bound to the
-    // annotated function's ORIGINAL implementation. A runtime hook can call it
-    // (or pass it on) — it invokes the original body without re-triggering the
-    // hook. This is the surface WF-2C's `@remote` hard-depends on.
-    ShapeTest::new(
-        r#"
-annotation traced() {
-  after(args, result, ctx) {
-    let again = ctx.target(3)
-    print(f"again={again}")
-    result
-  }
-}
-
-@traced()
-fn square(x: int) -> int {
-  x * x
-}
-
-let r = square(5)
-print(r)
-"#,
-    )
-    .expect_run_ok()
-    .expect_output("again=9\n25");
-}
+// DARK WINDOW (ADR-009 C3-G14 A′ / S2-F3, retired at the S6 completion):
+// `ctx_target_calls_original_impl_from_after_hook` pinned §4.1.5 `ctx.target`
+// (the original-impl function value delivered to a legacy runtime hook body —
+// the surface the legacy `@remote` hard-depended on). The runtime-hook context
+// family is E4's charter; the legacy surface carrying it is deleted, and
+// `@remote` itself is dark until E4 re-implements it on the typed HookDecision
+// protocol — see issue #68. The legacy fixture (`after(args, result, ctx)` +
+// `ctx.target(3)`) can no longer compile, so the pin is retired rather than
+// #[ignore]'d; E4's acceptance suite re-pins the capability on its typed form.

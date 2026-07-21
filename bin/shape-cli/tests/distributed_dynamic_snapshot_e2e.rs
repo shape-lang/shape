@@ -5,6 +5,7 @@ use std::time::Duration;
 use support::*;
 
 #[test]
+#[ignore = "dark window: E4 re-implements @remote on typed HookDecision — see issue #68"]
 fn remote_python_snapshot_hash_can_be_resumed_from_receiver_store() {
     remote_dynamic_snapshot_resume(
         "python",
@@ -19,6 +20,7 @@ fn remote_python_snapshot_hash_can_be_resumed_from_receiver_store() {
 }
 
 #[test]
+#[ignore = "dark window: E4 re-implements @remote on typed HookDecision — see issue #68"]
 fn remote_typescript_snapshot_hash_can_be_resumed_from_receiver_store() {
     remote_dynamic_snapshot_resume(
         "typescript",

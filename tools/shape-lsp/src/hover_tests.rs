@@ -1937,3 +1937,67 @@ fn test_span_contains_offset() {
     assert!(!span_contains_offset(span, 9));
     assert!(!span_contains_offset(span, 20)); // half-open
 }
+
+// ═══ ADR-009 C3 #14 (S8c): hook-install hover — the LSP-tier no-SOH machine pin ═══
+//
+// The compiler-tier twin (shape-vm `install_registry.rs`,
+// `s8c_sugar_row_projection_is_display_safe_and_carries_both_views`) proves
+// the RAW registry identity of this exact fixture IS the `\u{1}`-hygienic
+// mint — the built-in planted needle. These pins assert the FULL hover
+// markdown at the LSP tier: the hook section renders (non-vacuity) and no
+// SOH byte survives to display.
+
+#[test]
+fn s8c_sugar_application_hover_renders_hook_rows_with_no_soh_byte() {
+    let text = "annotation traced(factor: int) {\n  targets: [function]\n  before(args) {\n    args[0] = args[0] * factor\n    return args\n  }\n}\n\n@traced(3)\nfn victim(a: int) -> int { return a }\n\nvictim(1)\n";
+    let hover = get_hover(
+        text,
+        Position {
+            line: 8,
+            character: 2,
+        },
+        None,
+        None,
+        None,
+    )
+    .expect("annotation application hover renders");
+    let HoverContents::Markup(markup) = hover.contents else {
+        panic!("markdown hover expected");
+    };
+    // Non-vacuity: the hook rows actually rendered.
+    assert!(
+        markup.value.contains("hook of annotation"),
+        "hook rows must render: {}",
+        markup.value
+    );
+    assert!(markup.value.contains("<Args>(args: Args) -> Args"));
+    assert!(markup.value.contains("factor = 3"));
+    assert!(
+        !markup.value.contains('\u{1}'),
+        "SOH hygienic mint leaked into hover markdown: {}",
+        markup.value
+    );
+}
+
+#[test]
+fn s8c_api_body_fn_hover_renders_generic_view_with_no_soh_byte() {
+    let text = "fn tmpl<Args>(args: Args) -> Args {\n  args[0] = args[0] * 2\n  return args\n}\n\nannotation hookann() {\n  targets: [function]\n  comptime post(target, ctx) {\n    install(before_hook(tmpl, []))\n  }\n}\n\n@hookann()\nfn victim(a: int) -> int { return a }\n\nvictim(1)\n";
+    let hover = get_hover(
+        text,
+        Position {
+            line: 0,
+            character: 4,
+        },
+        None,
+        None,
+        None,
+    )
+    .expect("body-fn hover renders");
+    let HoverContents::Markup(markup) = hover.contents else {
+        panic!("markdown hover expected");
+    };
+    assert!(markup.value.contains("Hook template"));
+    assert!(markup.value.contains("<Args>(args: Args) -> Args"));
+    assert!(markup.value.contains("victim"));
+    assert!(!markup.value.contains('\u{1}'));
+}

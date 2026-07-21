@@ -36,6 +36,15 @@ use crate::compiler::comptime_builtins::expansion_provenance::SymbolId;
 /// consumed by E1 slices 3/4/5, which add the re-export at their wiring site.
 pub(in crate::compiler) mod checked_body;
 
+/// ADR-009 C3 #14 (slice 1) — the typed template carrier for annotation
+/// runtime hooks (`CheckedTemplate` + `CheckedTemplateBuilder`), discharging
+/// the `checked_body.rs:52-56` semantic Sig/Captures deferral as carried
+/// semantic data (`TemplateSig` + the C1 `CaptureClause`). Construction
+/// chokepoint only; the specialization/install side is
+/// `crate::compiler::template_specialization` (see the submodule docs for the
+/// construction/install split).
+pub(in crate::compiler) mod checked_template;
+
 /// A comptime-generated module replacement, checked at construction: its items
 /// carry generated closure provenance and each generated declaration owns a
 /// reserved hygienic export identity (`Exports`). Built ONLY by

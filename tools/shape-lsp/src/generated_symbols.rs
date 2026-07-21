@@ -1309,7 +1309,7 @@ let x = p.answer()
     /// handler splices into the extend snippet) is an explicit source
     /// binder; the binder span sits inside the application anchor.
     const APPLICATION_BINDER_PROGRAM: &str = r#"
-annotation gen(mname) {
+annotation gen(mname: string) {
   targets: [type]
   comptime post(target, ctx) {
     extend (extend_method_literal(target.name, mname, "int", 1))

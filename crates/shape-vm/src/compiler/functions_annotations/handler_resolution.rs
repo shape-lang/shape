@@ -1,9 +1,43 @@
 //! Exact annotation-handler and comptime-helper authority for prepass execution.
 
 use super::BytecodeCompiler;
-use shape_ast::ast::{Annotation, AnnotationHandler, AnnotationHandlerType, Expr, FunctionDef};
+use shape_ast::ast::{
+    Annotation, AnnotationHandler, AnnotationHandlerType, Expr, FunctionDef, FunctionParameter,
+    TypeAnnotation,
+};
 use shape_ast::error::{Result, ShapeError};
 use std::collections::{HashMap, HashSet};
+
+/// ADR-009 C3 #14 (slice 4): derive the def-param carrier — `(name,
+/// declared type annotation)` pairs — from annotation config parameter
+/// definitions. Legacy (untyped) definitions always yield `None`
+/// annotations, so every downstream seam is classification-free and
+/// byte-equivalent for legacy defs; TypedConfig definitions carry their
+/// declared types into the comptime-handler param injection
+/// (`execute_comptime_with_annotation_handler`).
+///
+/// The flat_map over `get_identifiers()` preserves the exact flattening the
+/// former `Vec<String>` names carrier used (annotation config params are
+/// always plain identifiers, so this is 1:1 in practice).
+///
+/// NOTE (serde): `CompiledAnnotation.param_defs` is `#[serde(skip)]`, like
+/// the comptime handlers that consume this carrier — a serialization-crossed
+/// carrier loses both together, so the injection seam never sees a
+/// names-without-defs carrier.
+pub(in crate::compiler) fn annotation_def_params(
+    params: &[FunctionParameter],
+) -> Vec<(String, Option<TypeAnnotation>)> {
+    params
+        .iter()
+        .flat_map(|param| {
+            param
+                .get_identifiers()
+                .into_iter()
+                .map(|name| (name, param.type_annotation.clone()))
+                .collect::<Vec<_>>()
+        })
+        .collect()
+}
 
 /// Seed every direct function-call spelling before lexical authority resolves
 /// it. Bare calls are intentionally retained: dropping them here would make a
@@ -28,8 +62,19 @@ pub(super) fn seed_function_call(expr: &Expr, names: &mut HashSet<String>) {
 /// One annotation's comptime handlers, keyed by its exact semantic name.
 #[derive(Clone, Debug)]
 pub(super) struct ComptimeAnnotationHandlers {
+    /// User comptime handlers in declaration order, with a TypedConfig
+    /// definition's SYNTHESIZED sugar post handler (S4c) appended AFTER them
+    /// — coexistence is allowed and ordered: user handlers first.
     pub(super) handlers: Vec<AnnotationHandler>,
-    pub(super) def_param_names: Vec<String>,
+    /// ADR-009 C3 #14 (slice 4): `(name, declared type annotation)` pairs
+    /// (see [`annotation_def_params`]); legacy defs carry `None` throughout.
+    pub(super) def_params: Vec<(String, Option<TypeAnnotation>)>,
+    /// ADR-009 C3 #14 (slice 4, S4c): the sugar lowering's MINTED hook body
+    /// fns for this entry. Threaded into `template_body_fn_lookup` at every
+    /// executor call site; entry-minted defs resolve FIRST (their hygienic
+    /// names are unspellable, so no user fn can collide). Empty for legacy
+    /// definitions and TypedConfig definitions without declarative hooks.
+    pub(super) sugar_body_fns: Vec<FunctionDef>,
     /// Canonical module that owns the handler body.
     pub(super) defining_module_path: Option<String>,
     pub(super) provenance: ComptimeAnnotationHandlerProvenance,
@@ -117,11 +162,12 @@ impl BytecodeCompiler {
         }
 
         fn ingest_local(
+            compiler: &BytecodeCompiler,
             map: &mut HashMap<String, ComptimeAnnotationHandlers>,
             ann_def: &shape_ast::ast::AnnotationDef,
             module_path: Option<&str>,
         ) {
-            let handlers: Vec<_> = ann_def
+            let mut handlers: Vec<_> = ann_def
                 .handlers
                 .iter()
                 .filter(|handler| {
@@ -132,25 +178,37 @@ impl BytecodeCompiler {
                 })
                 .cloned()
                 .collect();
+            // ADR-009 C3 #14 (slice 4, S4c): the LocalAst provenance derives
+            // the sugar lowering from the local AST definition (same ONE
+            // producer the planner/installer use) and appends the synthesized
+            // handler AFTER any user comptime handlers. R2/R3 rejections are
+            // NOT fired here — `sugar_lowering_for_def` defers them to the
+            // declaration-site planner (one attribution site); a rejecting
+            // definition simply contributes no sugar to the pre-pass.
+            let sugar = crate::compiler::statements::annotation_declarations::sugar_lowering::
+                sugar_lowering_for_def(compiler, ann_def);
+            let (sugar_post_handler, sugar_body_fns) = match sugar {
+                Some(sugar) => (Some(sugar.post_handler), sugar.body_fns),
+                None => (None, Vec::new()),
+            };
+            handlers.extend(sugar_post_handler);
             if handlers.is_empty() {
                 return;
             }
             let exact_name = local_exact_name(&ann_def.name, module_path);
-            let def_param_names = ann_def
-                .params
-                .iter()
-                .flat_map(|param| param.get_identifiers())
-                .collect();
+            let def_params = annotation_def_params(&ann_def.params);
             map.entry(exact_name.clone())
                 .or_insert(ComptimeAnnotationHandlers {
                     handlers,
-                    def_param_names,
+                    def_params,
+                    sugar_body_fns,
                     defining_module_path: defining_module_path(&exact_name),
                     provenance: ComptimeAnnotationHandlerProvenance::LocalAst,
                 });
         }
 
         fn ingest_local_items(
+            compiler: &BytecodeCompiler,
             map: &mut HashMap<String, ComptimeAnnotationHandlers>,
             items: &[Item],
             parent_module_path: Option<&str>,
@@ -158,11 +216,11 @@ impl BytecodeCompiler {
             for item in items {
                 match item {
                     Item::AnnotationDef(ann_def, _) => {
-                        ingest_local(map, ann_def, parent_module_path)
+                        ingest_local(compiler, map, ann_def, parent_module_path)
                     }
                     Item::Export(export, _) => {
                         if let ExportItem::Annotation(ann_def) = &export.item {
-                            ingest_local(map, ann_def, parent_module_path);
+                            ingest_local(compiler, map, ann_def, parent_module_path);
                         }
                     }
                     Item::Module(module, _) => {
@@ -172,7 +230,7 @@ impl BytecodeCompiler {
                             }
                             None => module.name.clone(),
                         };
-                        ingest_local_items(map, &module.items, Some(&module_path));
+                        ingest_local_items(compiler, map, &module.items, Some(&module_path));
                     }
                     _ => {}
                 }
@@ -181,6 +239,7 @@ impl BytecodeCompiler {
 
         let mut map = HashMap::new();
         ingest_local_items(
+            self,
             &mut map,
             &program.items,
             self.module_scope_stack.last().map(String::as_str),
@@ -200,9 +259,14 @@ impl BytecodeCompiler {
                 });
             }
 
+            // ADR-009 C3 #14 (slice 4, S4c): the Compiled provenance reads
+            // the sugar lowering's STORED artifacts (installer-attached) and
+            // appends the synthesized handler AFTER the user comptime
+            // handlers — same order as the LocalAst provenance.
             let handlers: Vec<_> = [
                 compiled.comptime_pre_handler.clone(),
                 compiled.comptime_post_handler.clone(),
+                compiled.sugar_post_handler.clone(),
             ]
             .into_iter()
             .flatten()
@@ -213,7 +277,11 @@ impl BytecodeCompiler {
             map.entry(key.clone())
                 .or_insert(ComptimeAnnotationHandlers {
                     handlers,
-                    def_param_names: compiled.param_names.clone(),
+                    // Compiled provenance reads the FULL param definitions
+                    // (`param_defs`), never the flattened `param_names` — the
+                    // declared type annotations ride along (slice 4).
+                    def_params: annotation_def_params(&compiled.param_defs),
+                    sugar_body_fns: compiled.sugar_body_fns.clone(),
                     defining_module_path: defining_module_path(key),
                     provenance: ComptimeAnnotationHandlerProvenance::Compiled,
                 });

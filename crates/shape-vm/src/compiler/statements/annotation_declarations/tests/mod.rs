@@ -24,4 +24,5 @@ fn only_definition(program: &Program) -> AnnotationDef {
 
 mod identity;
 mod phase;
+mod surface_class;
 mod transaction;
