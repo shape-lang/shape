@@ -13,7 +13,7 @@
 //! per-target aggregate at the weave boundary (never user-visible; never the
 //! boxed `NewArray` path).
 //!
-//! # One walker, three faces (binding invariant — do not fork)
+//! # One walker, four faces (binding invariant — do not fork)
 //!
 //! This module is the single traversal core. [`Face::Validate`] is the
 //! construction face ([`validate_pseudo_tuple_uses`], run from
@@ -23,10 +23,15 @@
 //! [`Face::AmbientScope`] is the S5 [C0926] ambient-totality face
 //! ([`scan_template_body_ambient_scope`], run from
 //! `specialize_template` BEFORE the per-kind dispatch — see the gate's doc
-//! comment in `mod.rs` for the site rationale). ALL faces share every shape
+//! comment in `mod.rs` for the site rationale);
+//! [`Face::AfterReturnScan`] is the S6 after-side return-kind collection
+//! face ([`guard_after_template_return_kind`], run from
+//! `specialize_polymorphic_after` BEFORE the ride — the S2c analog for the
+//! `(R) -> R` bound). ALL faces share every shape
 //! classifier and every named rejection — there is no second, drifting
-//! walker; the validate/ambient faces take `&mut` for traversal uniformity
-//! only and never mutate (every mutation sits behind `Face::Rewrite`). The
+//! walker; the validate/ambient/after-return faces take `&mut` for
+//! traversal uniformity only and never mutate (every mutation sits behind
+//! `Face::Rewrite`). The
 //! traversal mirrors the exhaustive Statement/Expr skeleton of
 //! `monomorphization/substitution.rs` (the precedent full-AST walk): every
 //! `match` is exhaustive with no catch-all arm, so a new AST variant is a
@@ -590,8 +595,12 @@ pub(in crate::compiler) fn resolve_pseudo_tuple(
     let capture_tail: Vec<FunctionParameter> = def.params.split_off(1);
 
     // (1) The rewrite walk — same core, second face. The walk COLLECTS every
-    // per-slot mutation's rewritten RHS for the aggregate-kind guard below.
+    // per-slot mutation's rewritten RHS for the aggregate-kind guard below,
+    // plus the S6 provable-locals events (binding-position names with their
+    // post-rewrite initializers, and every whole-name assignment target).
     let carrier_writes = std::cell::RefCell::new(Vec::new());
+    let local_bindings = std::cell::RefCell::new(Vec::new());
+    let assigned_locals = std::cell::RefCell::new(std::collections::HashSet::new());
     let scan = Scan {
         args_param: &pt.args_param,
         type_param: &pt.type_param,
@@ -599,6 +608,8 @@ pub(in crate::compiler) fn resolve_pseudo_tuple(
         face: Face::Rewrite {
             plan: pt,
             carrier_writes: &carrier_writes,
+            local_bindings: &local_bindings,
+            assigned_locals: &assigned_locals,
         },
     };
     walk_template_body(&scan, &mut def.body)?;
@@ -619,7 +630,14 @@ pub(in crate::compiler) fn resolve_pseudo_tuple(
     // (return `ConcreteType`s register from DECLARED annotations only), so
     // the guard proves the writes at the only point where the declared
     // types and the write expressions are both in hand.
-    guard_carrier_write_kinds(compiler, pt, &capture_tail, &carrier_writes.into_inner())?;
+    guard_carrier_write_kinds(
+        compiler,
+        pt,
+        &capture_tail,
+        &carrier_writes.into_inner(),
+        &local_bindings.into_inner(),
+        &assigned_locals.into_inner(),
+    )?;
 
     // (2) Per-slot minted parameters, typed from the target's AST side; the
     // trailing capture parameters (already concrete — never substituted)
@@ -683,6 +701,8 @@ fn guard_carrier_write_kinds(
     plan: &PseudoTuplePlan,
     capture_tail: &[FunctionParameter],
     writes: &[(usize, Expr)],
+    local_bindings: &[(String, Option<Expr>)],
+    assigned_locals: &std::collections::HashSet<String>,
 ) -> Result<()> {
     use crate::compiler::monomorphization::type_resolution::declared_annotation_concrete_type;
     use shape_value::v2::ConcreteType;
@@ -718,10 +738,21 @@ fn guard_carrier_write_kinds(
         })
         .collect();
 
+    // S6 (supervisor-ordered guard growth): resolve the provable-initializer
+    // locals BEFORE the write loop, so a hoisted local (`let t = args[0]`)
+    // joins the provable write-RHS set — transitively, at its binding.
+    let locals = resolve_provable_locals(
+        compiler,
+        &declared_slots,
+        &captures,
+        local_bindings,
+        assigned_locals,
+    );
+
     for (slot, expr) in writes {
         let (param_name, annotation) = &plan.target_params[*slot];
         let required = &declared_slots[*slot];
-        match carrier_write_concrete_type(compiler, &declared_slots, &captures, expr) {
+        match carrier_write_concrete_type(compiler, &declared_slots, &captures, &locals, expr) {
             Some(proven) if &proven == required => {}
             Some(proven) => {
                 return Err(reject(format!(
@@ -740,8 +771,8 @@ fn guard_carrier_write_kinds(
                      typed mutation carrier requires every per-slot write to prove the \
                      declared parameter type `{ann}` (parameter `{param_name}`) — assign an \
                      expression whose type is provable at specialization (a literal, another \
-                     `{args}[i]` slot, a declared capture, a typed fn's result, or arithmetic \
-                     over those)",
+                     `{args}[i]` slot, a declared capture, a local bound to a provable \
+                     initializer, a typed fn's result, or arithmetic over those)",
                     args = plan.args_param,
                     ann = annotation.to_type_string(),
                 )));
@@ -751,10 +782,286 @@ fn guard_carrier_write_kinds(
     Ok(())
 }
 
+/// ADR-009 C3 #14 (S6 soundness fixlet, supervisor-ordered) — the
+/// PROVABLE-INITIALIZER LOCALS resolution: a local whose initializer
+/// expression is provable under the existing guard rules joins the provable
+/// set at its binding, transitively (`let t = args[0]; let u = t + 1`).
+///
+/// The map is FLAT (name → proof) with STICKY POISONING, which is what makes
+/// final-state evaluation sound against scoping and loop re-execution:
+///
+/// - a name EVER assigned after binding (`assigned_locals`) is poisoned
+///   outright — a textual walk cannot bound re-execution order under loops,
+///   so a mutated local never joins the set;
+/// - a name bound more than once stays provable ONLY if every binding proves
+///   the SAME type (a conflicting or unprovable rebind poisons the name for
+///   the WHOLE body — earlier-collected writes included, since the write
+///   loop evaluates against this final map);
+/// - a name colliding with a declared capture parameter is poisoned (the
+///   flat map cannot tell a pre-shadow capture read from a post-shadow local
+///   read, so neither meaning is blessed);
+/// - every non-`let name = expr` binding construct arrives as an
+///   unprovable-by-construction `None` event (see
+///   [`Scan::note_binding_event`]).
+///
+/// Bindings are processed in textual walk order, so an initializer sees
+/// exactly the names bound before it (locals never hoist); `Some(T)` in the
+/// FINAL map therefore means every runtime value any same-spelled binding
+/// ever holds has type `T` — the invariant the write loop consumes.
+/// Poisoned names fall back to the PRE-S6 resolution for an unknown
+/// identifier (per-occurrence span-keyed inference facts, then the module
+/// resolvers — see the evaluator's Identifier arm), never to the capture
+/// env: the provable set only ever GROWS relative to the pre-S6 guard, and
+/// an unprovable name still rejects with the existing named sentence.
+fn resolve_provable_locals(
+    compiler: &crate::compiler::BytecodeCompiler,
+    declared_slots: &[shape_value::v2::ConcreteType],
+    captures: &[(String, shape_value::v2::ConcreteType)],
+    local_bindings: &[(String, Option<Expr>)],
+    assigned_locals: &std::collections::HashSet<String>,
+) -> std::collections::HashMap<String, Option<shape_value::v2::ConcreteType>> {
+    let mut locals: std::collections::HashMap<String, Option<shape_value::v2::ConcreteType>> =
+        std::collections::HashMap::new();
+    for (name, init) in local_bindings {
+        let proof = if assigned_locals.contains(name)
+            || captures.iter().any(|(capture, _)| capture == name)
+        {
+            None
+        } else {
+            init.as_ref().and_then(|expr| {
+                carrier_write_concrete_type(compiler, declared_slots, captures, &locals, expr)
+            })
+        };
+        match locals.entry(name.clone()) {
+            std::collections::hash_map::Entry::Vacant(entry) => {
+                entry.insert(proof);
+            }
+            std::collections::hash_map::Entry::Occupied(mut entry) => {
+                let keep = matches!((entry.get(), &proof), (Some(existing), Some(new)) if existing == new);
+                if !keep {
+                    entry.insert(None);
+                }
+            }
+        }
+    }
+    locals
+}
+
+/// One value-producing exit of a polymorphic `after` template body: either a
+/// concrete expression the guard must prove, or a provably value-less
+/// completion path (a bare `return`, a missing else branch or non-value
+/// final statement in tail position).
+enum ResultLeaf {
+    Value(Expr),
+    NoValue,
+}
+
+/// Decompose one return-position expression into its VALUE LEAVES: `if` /
+/// `match` / block tails recurse into their branch results (so a
+/// conditional body like `if c { capture_val } else { result }` proves per
+/// branch); everything else IS a leaf. A missing else branch in a
+/// value-producing position is a [`ResultLeaf::NoValue`] completion. A
+/// nested `return` expression contributes nothing here — the walker
+/// collected its value as its own return-position event.
+fn collect_result_value_leaves(expr: &Expr, leaves: &mut Vec<ResultLeaf>) {
+    match expr {
+        Expr::If(if_expr, _) => {
+            collect_result_value_leaves(&if_expr.then_branch, leaves);
+            match &if_expr.else_branch {
+                Some(else_branch) => collect_result_value_leaves(else_branch, leaves),
+                None => leaves.push(ResultLeaf::NoValue),
+            }
+        }
+        // The parser's second conditional spelling (`if c { a } else { b }`
+        // in expression position parses as `Expr::Conditional`).
+        Expr::Conditional {
+            then_expr,
+            else_expr,
+            ..
+        } => {
+            collect_result_value_leaves(then_expr, leaves);
+            match else_expr {
+                Some(else_expr) => collect_result_value_leaves(else_expr, leaves),
+                None => leaves.push(ResultLeaf::NoValue),
+            }
+        }
+        Expr::Match(match_expr, _) => {
+            for arm in &match_expr.arms {
+                collect_result_value_leaves(&arm.body, leaves);
+            }
+        }
+        Expr::Block(block, _) => match block.items.last() {
+            Some(BlockItem::Expression(inner)) => collect_result_value_leaves(inner, leaves),
+            Some(BlockItem::Statement(Statement::Return(_, _))) => {}
+            Some(BlockItem::Statement(stmt)) => {
+                collect_tail_leaves_of_statements(std::slice::from_ref(stmt), leaves)
+            }
+            Some(BlockItem::VariableDecl(_)) | Some(BlockItem::Assignment(_)) | None => {
+                leaves.push(ResultLeaf::NoValue)
+            }
+        },
+        Expr::Return(_, _) => {}
+        other => leaves.push(ResultLeaf::Value(other.clone())),
+    }
+}
+
+/// The statement-tail twin of [`collect_result_value_leaves`]: the FINAL
+/// statement of a statement list is the implicit-return position. An
+/// expression statement recurses into its value leaves; a `return` statement
+/// contributes nothing (collected by the walker); a tail `if` STATEMENT
+/// recurses per branch (a missing else = a value-less fall-through);
+/// anything else (loops, declarations, assignments, an empty body) is a
+/// value-less completion.
+fn collect_tail_leaves_of_statements(body: &[Statement], leaves: &mut Vec<ResultLeaf>) {
+    match body.last() {
+        Some(Statement::Expression(expr, _)) => collect_result_value_leaves(expr, leaves),
+        Some(Statement::Return(_, _)) => {}
+        Some(Statement::If(if_stmt, _)) => {
+            collect_tail_leaves_of_statements(&if_stmt.then_body, leaves);
+            match &if_stmt.else_body {
+                Some(else_body) => collect_tail_leaves_of_statements(else_body, leaves),
+                None => leaves.push(ResultLeaf::NoValue),
+            }
+        }
+        _ => leaves.push(ResultLeaf::NoValue),
+    }
+}
+
+/// ADR-009 C3 #14 (S6 soundness fixlet, supervisor-ordered) — the AFTER-side
+/// return-kind gate: the analog of the S2c aggregate-kind guard for
+/// polymorphic `after` templates. The G4 bound is `(R) -> R`, but before
+/// this gate nothing ever checked the body's ACTUAL return type against the
+/// bound `R` — a type-changing body (`after(result) { f"{prefix}: {result}"
+/// }` on an int target) specialized, wove, and ran, printing the string's
+/// HEAP POINTER as the int result (the measured S6 A-phase leak; the exact
+/// heap-pointer-reinterpretation class the strict-typing program exists to
+/// kill).
+///
+/// Fires at the specialization seam (`specialize_polymorphic_after`, BEFORE
+/// the monomorphization ride) for both the zero-capture and with-capture
+/// routes, sugar and API paths alike. Every value-producing exit of the body
+/// — the implicit-return tail plus every `return` (statement and expression
+/// forms), with `if`/`match`/block tails decomposed per branch — must PROVE
+/// the bound result type under the same bounded evaluator the S2c guard
+/// runs ([`carrier_write_concrete_type`]: the `result` parameter at `R`, the
+/// declared captures, the S6 provable-initializer locals, literals,
+/// arithmetic, typed calls). Proven-divergent and unprovable exits are both
+/// NAMED rejections (surface-and-stop — CLAUDE.md "if the type can't be
+/// proven, it is a compile error"), which the seam wraps through
+/// `template_application_error` with both signatures at the `@application`
+/// site — the established two-signature attribution.
+///
+/// KNOWN BOUNDARY (named, deliberate): the gate proves the type of every
+/// value-producing exit it can see; path-completeness (a body that can fall
+/// through with no value — bare `return`, missing else in tail position, a
+/// non-value final statement) rejects via [`ResultLeaf::NoValue`], but
+/// exhaustive control-flow reachability (e.g. `loop` breaks) stays with the
+/// downstream compile battery, exactly like the before-side guard.
+pub(in crate::compiler) fn guard_after_template_return_kind(
+    compiler: &crate::compiler::BytecodeCompiler,
+    def: &FunctionDef,
+    result_param: &str,
+    required: &shape_value::v2::ConcreteType,
+    required_spelling: &str,
+    capture_params: &[(String, TypeAnnotation)],
+) -> Result<()> {
+    use crate::compiler::monomorphization::type_resolution::declared_annotation_concrete_type;
+
+    // The proof environment: the result parameter at the bound `R`, plus the
+    // declared trailing captures (concretely annotated at construction; an
+    // unresolvable annotation simply stays out of the env — the affected
+    // exit then rejects as unprovable, never a guess).
+    let mut captures: Vec<(String, shape_value::v2::ConcreteType)> =
+        vec![(result_param.to_string(), required.clone())];
+    for (name, annotation) in capture_params {
+        if let Some(concrete) = declared_annotation_concrete_type(compiler, annotation) {
+            captures.push((name.clone(), concrete));
+        }
+    }
+
+    // Collection walk — the ONE walker, fourth face, under the unspellable
+    // sentinel names (an `after` body has no pseudo-tuple surface; the walk
+    // never mutates and never rejects on its own).
+    let local_bindings = std::cell::RefCell::new(Vec::new());
+    let assigned_locals = std::cell::RefCell::new(std::collections::HashSet::new());
+    let returns = std::cell::RefCell::new(Vec::new());
+    let mut body = def.body.clone();
+    let scan = Scan {
+        args_param: AMBIENT_SENTINEL_ARGS,
+        type_param: AMBIENT_SENTINEL_TYPE,
+        comptime_depth: std::cell::Cell::new(0),
+        face: Face::AfterReturnScan {
+            local_bindings: &local_bindings,
+            assigned_locals: &assigned_locals,
+            returns: &returns,
+        },
+    };
+    scan.statements(&mut body, ScanMode::TemplateBody)?;
+
+    let locals = resolve_provable_locals(
+        compiler,
+        &[],
+        &captures,
+        &local_bindings.into_inner(),
+        &assigned_locals.into_inner(),
+    );
+
+    let mut leaves = Vec::new();
+    collect_tail_leaves_of_statements(&body, &mut leaves);
+    for return_value in returns.into_inner() {
+        match return_value {
+            Some(expr) => collect_result_value_leaves(&expr, &mut leaves),
+            None => leaves.push(ResultLeaf::NoValue),
+        }
+    }
+
+    for leaf in leaves {
+        match leaf {
+            ResultLeaf::NoValue => {
+                return Err(reject(format!(
+                    "the template body can complete without returning a value, but the \
+                     required specialization returns `{required_spelling}` (an `after` \
+                     template returns the typed result); end the body with the result value, \
+                     or `return` one on every path"
+                )));
+            }
+            ResultLeaf::Value(expr) => {
+                match carrier_write_concrete_type(compiler, &[], &captures, &locals, &expr) {
+                    Some(proven) if &proven == required => {}
+                    Some(proven) => {
+                        return Err(reject(format!(
+                            "the template body returns `{proven}` but the required \
+                             specialization returns `{required_spelling}` (the target's \
+                             declared result type) — a kind-divergent result would make the \
+                             woven wrapper reinterpret the hook's raw return bits as \
+                             `{required_spelling}` at its typed read; return a \
+                             `{required_spelling}` value (or change the target's declared \
+                             return type)"
+                        )));
+                    }
+                    None => {
+                        return Err(reject(format!(
+                            "cannot prove the type of a value the template body returns: the \
+                             typed result requires every return-position expression to prove \
+                             the target's declared result type `{required_spelling}` — return \
+                             an expression whose type is provable at specialization (the \
+                             typed `{result_param}` parameter, a literal, a declared capture, \
+                             a local bound to a provable initializer, a typed fn's result, or \
+                             arithmetic over those)"
+                        )));
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 /// The guard's bounded, template-owned type evaluator: resolve the
 /// `ConcreteType` an expression PROVES inside a rewritten specialized
 /// template body. Knows exactly the template's own vocabulary — the minted
-/// carrier locals (declared slot types), the declared trailing captures, and
+/// carrier locals (declared slot types), the declared trailing captures, the
+/// S6 provable-initializer locals ([`resolve_provable_locals`]), and
 /// structural arithmetic/comparison composition over those — and delegates
 /// every other leaf to the compiler's existing
 /// [`concrete_type_for_expr`](crate::compiler::monomorphization::type_resolution::concrete_type_for_expr)
@@ -764,6 +1071,7 @@ fn carrier_write_concrete_type(
     compiler: &crate::compiler::BytecodeCompiler,
     declared_slots: &[shape_value::v2::ConcreteType],
     captures: &[(String, shape_value::v2::ConcreteType)],
+    locals: &std::collections::HashMap<String, Option<shape_value::v2::ConcreteType>>,
     expr: &Expr,
 ) -> Option<shape_value::v2::ConcreteType> {
     use crate::compiler::monomorphization::type_resolution::concrete_type_for_expr;
@@ -793,6 +1101,23 @@ fn carrier_write_concrete_type(
                     return Some(concrete.clone());
                 }
             }
+            // S6: the provable-initializer locals — consulted BEFORE the
+            // capture env (a template-body `let` shadows a same-spelled
+            // parameter). A provable entry IS the proof. A poisoned entry
+            // (`Some(None)` — mutated, conflictingly rebound, or bound to
+            // an initializer this evaluator cannot prove) SKIPS the capture
+            // env (the flat map cannot tell a pre-shadow capture read from
+            // a post-shadow local read) and falls through to
+            // `concrete_type_for_expr` — exactly the pre-S6 resolution for
+            // an unknown identifier: its span-keyed inference facts are
+            // per-occurrence (shadow-correct for analyzer-visited API
+            // bodies), and a sugar-minted body has no facts, so the name
+            // stays unprovable and the guard's named rejection stands.
+            match locals.get(name.as_str()) {
+                Some(Some(proof)) => return Some(proof.clone()),
+                Some(None) => return concrete_type_for_expr(compiler, expr),
+                None => {}
+            }
             if let Some((_, concrete)) = captures.iter().find(|(n, _)| n == name) {
                 return Some(concrete.clone());
             }
@@ -814,7 +1139,7 @@ fn carrier_write_concrete_type(
             receiver, method, ..
         } => concrete_type_for_expr(compiler, expr).or_else(|| {
             let receiver_ct =
-                carrier_write_concrete_type(compiler, declared_slots, captures, receiver)?;
+                carrier_write_concrete_type(compiler, declared_slots, captures, locals, receiver)?;
             crate::compiler::monomorphization::type_resolution::
                 method_return_for_receiver_concrete_type(compiler, &receiver_ct, method)
         }),
@@ -827,7 +1152,7 @@ fn carrier_write_concrete_type(
             end_index: None,
             ..
         } => concrete_type_for_expr(compiler, expr).or_else(|| {
-            match carrier_write_concrete_type(compiler, declared_slots, captures, object)? {
+            match carrier_write_concrete_type(compiler, declared_slots, captures, locals, object)? {
                 ConcreteType::Array(element) => Some(*element),
                 _ => None,
             }
@@ -835,8 +1160,9 @@ fn carrier_write_concrete_type(
         Expr::BinaryOp {
             left, op, right, ..
         } => {
-            let lt = carrier_write_concrete_type(compiler, declared_slots, captures, left)?;
-            let rt = carrier_write_concrete_type(compiler, declared_slots, captures, right)?;
+            let lt = carrier_write_concrete_type(compiler, declared_slots, captures, locals, left)?;
+            let rt =
+                carrier_write_concrete_type(compiler, declared_slots, captures, locals, right)?;
             match op {
                 BinaryOp::Add => {
                     (lt == rt && (is_numeric(&lt) || lt == ConcreteType::String))
@@ -871,7 +1197,8 @@ fn carrier_write_concrete_type(
             }
         }
         Expr::UnaryOp { op, operand, .. } => {
-            let inner = carrier_write_concrete_type(compiler, declared_slots, captures, operand)?;
+            let inner =
+                carrier_write_concrete_type(compiler, declared_slots, captures, locals, operand)?;
             match op {
                 UnaryOp::Neg => is_numeric(&inner).then(|| inner.clone()),
                 UnaryOp::Not => (inner == ConcreteType::Bool).then_some(ConcreteType::Bool),
@@ -930,10 +1257,20 @@ enum Face<'a> {
     /// node replacements. `carrier_writes` collects every per-slot mutation
     /// (`args[i] = expr`, post-rewrite RHS) for the S2c aggregate-kind guard
     /// (`guard_carrier_write_kinds`) — the walk only COLLECTS; the guard's
-    /// comparison runs once after the walk.
+    /// comparison runs once after the walk. `local_bindings` /
+    /// `assigned_locals` are the S6 provable-initializer-locals events (the
+    /// supervisor-ordered S2c guard growth): every binding-position name is
+    /// recorded in textual order (with its post-rewrite initializer for the
+    /// simple `let name = expr` shape, `None` for every other binding
+    /// construct), and every whole-name assignment target is recorded so a
+    /// mutated local can be excluded from the provable set
+    /// ([`resolve_provable_locals`] — evaluation happens once at guard time,
+    /// never mid-walk, so loop-carried re-execution cannot outrun the proof).
     Rewrite {
         plan: &'a PseudoTuplePlan,
         carrier_writes: &'a std::cell::RefCell<Vec<(usize, Expr)>>,
+        local_bindings: &'a std::cell::RefCell<Vec<(String, Option<Expr>)>>,
+        assigned_locals: &'a std::cell::RefCell<std::collections::HashSet<String>>,
     },
     /// ADR-009 C3 #14 (slice 5, S5a) — the [C0926] ambient-totality face:
     /// classifies every FREE identifier against the lexical scope stack and
@@ -942,6 +1279,21 @@ enum Face<'a> {
     /// structurally disengaged (the template's own `args`/`Args` are
     /// ordinary in-scope parameters for this face).
     AmbientScope(&'a AmbientScopeCtx<'a>),
+    /// ADR-009 C3 #14 (S6 soundness fixlet) — the AFTER-side return-kind
+    /// collection face ([`guard_after_template_return_kind`]): walks a
+    /// polymorphic `after` template body under the unspellable sentinel
+    /// names (the pseudo-tuple surface is structurally disengaged — an
+    /// `after` body has none) and COLLECTS the same provable-locals events
+    /// as the rewrite face plus every `return`-position value expression;
+    /// never mutates, never rejects on its own (evaluation and the named
+    /// rejections run once after the walk, at the guard).
+    AfterReturnScan {
+        local_bindings: &'a std::cell::RefCell<Vec<(String, Option<Expr>)>>,
+        assigned_locals: &'a std::cell::RefCell<std::collections::HashSet<String>>,
+        /// Every `return` statement/expression's value (`None` = a bare
+        /// `return` — a no-value exit the guard rejects against `(R) -> R`).
+        returns: &'a std::cell::RefCell<Vec<Option<Expr>>>,
+    },
 }
 
 /// What the template-body interception decided for one expression node.
@@ -1263,9 +1615,15 @@ impl<'a> Scan<'a> {
     /// Any identifier spelling, in any role: the reserved-prefix check.
     /// The ambient face SKIPS it — that face classifies module-scope
     /// resolution only and must not tighten the (never construction-walked)
-    /// concrete-body surface beyond its [C0926] charter.
+    /// concrete-body surface beyond its [C0926] charter. The S6
+    /// after-return face skips it for the same reason: `after` bodies are
+    /// never construction-walked, and the return-kind gate must not
+    /// introduce rejections outside its return-type charter.
     fn check_reserved(&self, name: &str) -> Result<()> {
-        if matches!(self.face, Face::AmbientScope(_)) {
+        if matches!(
+            self.face,
+            Face::AmbientScope(_) | Face::AfterReturnScan { .. }
+        ) {
             return Ok(());
         }
         if name.starts_with(RESERVED_SPECIALIZATION_PREFIX) {
@@ -1274,10 +1632,68 @@ impl<'a> Scan<'a> {
         Ok(())
     }
 
+    /// ADR-009 C3 #14 (S6): record one binding-position name for the
+    /// provable-locals resolution ([`resolve_provable_locals`]). `init` is
+    /// `Some` ONLY for the simple `let name = expr` shape (the post-rewrite
+    /// initializer on the rewrite face); every other binding construct
+    /// (destructures, loop/match/query/closure binders, no-initializer
+    /// declarations) records `None` — unprovable by construction, so a
+    /// same-spelled shadow can never be blessed through the flat map.
+    fn note_binding_event(&self, name: &str, init: Option<&Expr>) {
+        match self.face {
+            Face::Rewrite { local_bindings, .. }
+            | Face::AfterReturnScan { local_bindings, .. } => {
+                local_bindings
+                    .borrow_mut()
+                    .push((name.to_string(), init.cloned()));
+            }
+            Face::Validate | Face::AmbientScope(_) => {}
+        }
+    }
+
+    /// ADR-009 C3 #14 (S6): record one whole-name assignment target. A name
+    /// that is EVER assigned after binding is excluded from the provable
+    /// set entirely (conservative — re-execution order under loops cannot be
+    /// bounded by a textual walk, so a mutated local never joins the set).
+    fn note_assigned_local(&self, name: &str) {
+        match self.face {
+            Face::Rewrite {
+                assigned_locals, ..
+            }
+            | Face::AfterReturnScan {
+                assigned_locals, ..
+            } => {
+                assigned_locals.borrow_mut().insert(name.to_string());
+            }
+            Face::Validate | Face::AmbientScope(_) => {}
+        }
+    }
+
+    /// ADR-009 C3 #14 (S6): record one `return`-position value expression
+    /// (`None` = a bare `return`) for the after-side return-kind guard.
+    fn note_return_value(&self, value: Option<&Expr>) {
+        if let Face::AfterReturnScan { returns, .. } = self.face {
+            returns.borrow_mut().push(value.cloned());
+        }
+    }
+
     /// A name in BINDING position (let/for/match/query bindings).
     fn check_binding_name(&self, name: &str, mode: ScanMode) -> Result<()> {
+        self.check_binding_name_tracked(name, mode, None)
+    }
+
+    /// [`Self::check_binding_name`] with the S6 provable-initializer event:
+    /// the `variable_decl` simple-identifier path passes its (post-rewrite)
+    /// initializer; every other caller records the unprovable default.
+    fn check_binding_name_tracked(
+        &self,
+        name: &str,
+        mode: ScanMode,
+        init: Option<&Expr>,
+    ) -> Result<()> {
         self.check_reserved(name)?;
         self.ambient_bind(name);
+        self.note_binding_event(name, init);
         match mode {
             ScanMode::ClosureInterior => {
                 if name == self.args_param || name == self.type_param {
@@ -1297,6 +1713,7 @@ impl<'a> Scan<'a> {
     fn check_assign_target_name(&self, name: &str, mode: ScanMode) -> Result<()> {
         self.check_reserved(name)?;
         self.ambient_check_assign_target(name)?;
+        self.note_assigned_local(name);
         match mode {
             ScanMode::ClosureInterior => {
                 if name == self.args_param || name == self.type_param {
@@ -1388,6 +1805,9 @@ impl<'a> Scan<'a> {
                         }
                     }
                 }
+                // S6 after-return face: every return-position value (a bare
+                // `return` records `None` — a no-value exit).
+                self.note_return_value(value.as_ref());
                 self.opt_expr(value.as_mut(), mode)
             }
             Statement::Break(_) | Statement::Continue(_) | Statement::RemoveTarget(_) => Ok(()),
@@ -1454,7 +1874,17 @@ impl<'a> Scan<'a> {
             self.type_annotation(annotation, mode)?;
         }
         self.opt_expr(decl.value.as_mut(), mode)?;
-        self.destructure_pattern_binding(&decl.pattern, mode)
+        // S6 provable-initializer locals: the simple `let name = expr` shape
+        // records its POST-rewrite initializer (the value walk above already
+        // resolved any `args[i]` reads to minted slot locals); every other
+        // pattern shape records the unprovable default through
+        // `check_binding_name`.
+        match &decl.pattern {
+            DestructurePattern::Identifier(name, _) => {
+                self.check_binding_name_tracked(name, mode, decl.value.as_ref())
+            }
+            other => self.destructure_pattern_binding(other, mode),
+        }
     }
 
     fn assignment(&self, assign: &mut Assignment, mode: ScanMode) -> Result<()> {
@@ -1723,10 +2153,11 @@ impl<'a> Scan<'a> {
                         Literal::Int(plan.arity() as i64),
                         *span,
                     )),
-                    // Unreachable: the ambient face runs with unspellable
-                    // sentinel template names, so `is_args_identifier` can
-                    // never match; `No` keeps the generic traversal total.
-                    Face::AmbientScope(_) => Intercept::No,
+                    // Unreachable: the ambient/after-return faces run with
+                    // unspellable sentinel template names, so
+                    // `is_args_identifier` can never match; `No` keeps the
+                    // generic traversal total.
+                    Face::AmbientScope(_) | Face::AfterReturnScan { .. } => Intercept::No,
                 })
             }
             Expr::IndexAccess {
@@ -1743,7 +2174,7 @@ impl<'a> Scan<'a> {
                         *span,
                     )),
                     // Unreachable under the sentinel names (see above).
-                    Face::AmbientScope(_) => Intercept::No,
+                    Face::AmbientScope(_) | Face::AfterReturnScan { .. } => Intercept::No,
                 })
             }
             _ => Ok(Intercept::No),
@@ -2089,6 +2520,7 @@ impl<'a> Scan<'a> {
                         if let Face::Rewrite {
                             plan,
                             carrier_writes,
+                            ..
                         } = self.face
                         {
                             *assign_expr.target = Expr::Identifier(
@@ -2108,6 +2540,15 @@ impl<'a> Scan<'a> {
                         }
                         return self.expr(&mut assign_expr.value, mode);
                     }
+                }
+                // S6: an expression-position whole-name assignment (`name =
+                // e` reaching here as `Expr::Assign` rather than the
+                // statement form) mutates the binding — record the target so
+                // the provable-locals resolution excludes it. Compound
+                // targets (index/property writes) do not rebind the local's
+                // type and are not recorded.
+                if let Expr::Identifier(name, _) = assign_expr.target.as_ref() {
+                    self.note_assigned_local(name);
                 }
                 self.expr(&mut assign_expr.target, mode)?;
                 self.expr(&mut assign_expr.value, mode)
@@ -2130,6 +2571,9 @@ impl<'a> Scan<'a> {
                         }
                     }
                 }
+                // S6 after-return face: the expression-position `return`
+                // twin records exactly like the statement form.
+                self.note_return_value(value.as_deref());
                 self.opt_expr(value.as_deref_mut(), mode)
             }
 

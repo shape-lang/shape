@@ -287,9 +287,10 @@ impl BytecodeCompiler {
                     captures,
                 )
             }
-            TemplateSig::PolymorphicResult { .. } => {
+            TemplateSig::PolymorphicResult { result_param, .. } => {
                 debug_assert_eq!(template.hook_kind(), TemplateHookKind::After);
-                self.specialize_polymorphic_after(template, target, captures)
+                let result_param = result_param.clone();
+                self.specialize_polymorphic_after(template, target, &result_param, captures)
             }
             TemplateSig::Concrete(signature) => match template.hook_kind() {
                 TemplateHookKind::Before => {
@@ -507,6 +508,7 @@ impl BytecodeCompiler {
         &mut self,
         template: &CheckedTemplate,
         target: &SpecializationTarget,
+        result_param: &str,
         captures: Vec<(String, LiftedConst)>,
     ) -> Result<SpecializedHandler> {
         let required = match &target.return_type {
@@ -533,6 +535,18 @@ impl BytecodeCompiler {
                 ),
             ));
         };
+        // ADR-009 C3 #14 (S6 soundness fixlet) — the AFTER-side return-kind
+        // gate (the S2c analog): the body's ACTUAL return type is checked
+        // against the bound `R` BEFORE the ride, on both capture routes
+        // (see `pseudo_tuple::guard_after_template_return_kind` for the
+        // measured heap-pointer leak this closes).
+        self.reject_after_template_return_divergence(
+            template,
+            target,
+            result_param,
+            required,
+            &result_concrete,
+        )?;
         let function_index = if captures.is_empty() {
             self.ensure_monomorphic_function_for_callsite(
                 template.body_fn(),
@@ -563,6 +577,63 @@ impl BytecodeCompiler {
             function_index,
             carrier: None,
             observer: false,
+        })
+    }
+
+    /// ADR-009 C3 #14 (S6 soundness fixlet) — the AFTER-side return-kind
+    /// gate's seam wrapper: resolve the template body fn's AST (the ordinary
+    /// registry first; the sugar-minted store as the fallback, mirroring the
+    /// S5a ambient gate's resolution) and run
+    /// [`pseudo_tuple::guard_after_template_return_kind`] against the bound
+    /// result type. A body fn absent from BOTH stores is SKIPPED, not
+    /// rejected — every downstream route internal-errors on exactly that
+    /// state, so no woven program can exist for the gate to miss. A guard
+    /// rejection wraps through [`Self::template_application_error`] — the
+    /// established two-signature application-site attribution, same as the
+    /// before-side S2c guard's seam wrap.
+    fn reject_after_template_return_divergence(
+        &self,
+        template: &CheckedTemplate,
+        target: &SpecializationTarget,
+        result_param: &str,
+        required_annotation: &TypeAnnotation,
+        required_concrete: &ConcreteType,
+    ) -> Result<()> {
+        let body_fn = template.body_fn();
+        let def = match self.function_defs.get(body_fn) {
+            Some(def) => def.clone(),
+            None => {
+                let sugar = self.program.compiled_annotations.iter().find_map(
+                    |(_, compiled)| {
+                        compiled
+                            .sugar_body_fns
+                            .iter()
+                            .find(|def| def.name == body_fn)
+                            .cloned()
+                    },
+                );
+                match sugar {
+                    Some(def) => def,
+                    None => return Ok(()),
+                }
+            }
+        };
+        pseudo_tuple::guard_after_template_return_kind(
+            self,
+            &def,
+            result_param,
+            required_concrete,
+            &type_annotation_to_string(required_annotation),
+            template.capture_params(),
+        )
+        .map_err(|error| {
+            let detail = match error {
+                ShapeError::SemanticError { message, .. } => message,
+                ShapeError::TypeError(message) => message,
+                ShapeError::RuntimeError { message, .. } => message,
+                other => other.to_string(),
+            };
+            self.template_application_error(template, target, &detail)
         })
     }
 

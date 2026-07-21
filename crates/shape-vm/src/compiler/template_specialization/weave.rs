@@ -933,6 +933,207 @@ victim_a([1], 4) * 10000 + victim_b([2], 7)
         );
     }
 
+    // ── S6 supervisor-ordered guard growth: provable-initializer locals ────
+
+    // The A-phase finding-1 shape: an exchange has no temp-free spelling, so
+    // a hoisted local (`let t = args[0]`) must join the provable write-RHS
+    // set at its binding. victim(3, 10) with swapped args = sub(10, 3) = 7
+    // (an unswapped run yields -7 — value-distinguishing).
+    #[test]
+    fn hoisted_local_exchange_write_is_provable_and_weaves() {
+        let (value, compiler) = top_level_i64(&hook_source(
+            "fn tmpl<Args>(args: Args) -> Args {\n\
+             \x20   let t = args[0]\n\
+             \x20   args[0] = args[1]\n\
+             \x20   args[1] = t\n\
+             \x20   return args\n\
+             }",
+            "install(before_hook(tmpl, []))",
+            "@hookann()\nfn victim(a: int, b: int) -> int { return a - b }\n\nvictim(3, 10)",
+        ));
+        assert_eq!(value, 7, "the exchange must be observed (unswapped ⇒ -7)");
+        assert_eq!(compiler.hook_install_registry.len(), 1);
+    }
+
+    // Transitivity: a local bound to arithmetic over another provable local
+    // is itself provable.
+    #[test]
+    fn transitively_provable_local_write_weaves() {
+        let (value, _) = top_level_i64(&hook_source(
+            "fn tmpl<Args>(args: Args) -> Args {\n\
+             \x20   let t = args[0]\n\
+             \x20   let u = t + 1\n\
+             \x20   args[0] = u\n\
+             \x20   return args\n\
+             }",
+            "install(before_hook(tmpl, []))",
+            "@hookann()\nfn victim(a: int) -> int { return a * 10 }\n\nvictim(4)",
+        ));
+        assert_eq!(value, 50, "the transitive local mutation must be observed (skip ⇒ 40)");
+    }
+
+    // An UNPROVABLE initializer keeps the local outside the provable set —
+    // the existing named sentence stands (the ordered fix's boundary).
+    #[test]
+    fn unprovable_initializer_local_write_still_rejects() {
+        let (result, _) = compile_source(&hook_source(
+            "fn tmpl<Args>(args: Args) -> Args {\n\
+             \x20   let t = args[0].trim()\n\
+             \x20   args[0] = t\n\
+             \x20   return args\n\
+             }",
+            "install(before_hook(tmpl, []))",
+            "@hookann()\nfn victim(a: int, b: number) -> int { return a }\n\nvictim(1, 2.0)",
+        ));
+        let text = result
+            .expect_err("an unprovable-initializer local write must reject at specialization")
+            .to_string();
+        assert!(
+            text.contains("cannot prove the type of the value assigned to `args[0]`"),
+            "names the unprovable write: {text}"
+        );
+    }
+
+    // A local that is ASSIGNED after binding never joins the provable set
+    // (a textual walk cannot bound loop re-execution order, so mutation is
+    // conservative poison — sugar-minted bodies have no per-occurrence
+    // inference facts to fall back to).
+    #[test]
+    fn reassigned_local_stays_outside_the_provable_write_set() {
+        let (result, _) = compile_source(&hook_source(
+            "fn tmpl<Args>(args: Args) -> Args {\n\
+             \x20   let mut t = args[0]\n\
+             \x20   t = args[0].trim()\n\
+             \x20   args[0] = t\n\
+             \x20   return args\n\
+             }",
+            "install(before_hook(tmpl, []))",
+            "@hookann()\nfn victim(a: int, b: number) -> int { return a }\n\nvictim(1, 2.0)",
+        ));
+        let text = result
+            .expect_err("a mutated local must stay outside the provable write set")
+            .to_string();
+        assert!(
+            text.contains("cannot prove the type of the value assigned to `args[0]`"),
+            "names the unprovable write: {text}"
+        );
+    }
+
+    // ── S6 soundness fixlet: the AFTER-side return-kind gate ───────────────
+
+    // The measured A-phase heap-pointer leak, API-path spelling: a
+    // polymorphic `after` body whose actual return is a string, installed on
+    // an int-returning target, previously specialized and RAN — printing the
+    // string's heap pointer as the int result. The gate makes it the
+    // established two-signature application-site rejection (the S2c analog).
+    // The capture rides the with-captures route through
+    // `ensure_monomorphic_template_specialization`; the gate fires BEFORE
+    // the ride on both routes.
+    #[test]
+    fn after_template_type_changing_body_is_a_named_rejection() {
+        let (result, compiler) = compile_source(&hook_source(
+            "fn stringy<R>(result: R, tag: string) -> R { return f\"{tag}: {result}\" }",
+            "let t: string = \"pfx\"\n    install(after_hook(stringy, [capture(\"tag\", t)]))",
+            "@hookann()\nfn victim(a: int, b: int) -> int { return a + b }\n\nvictim(3, 4)",
+        ));
+        let text = result
+            .expect_err("a type-changing after body must reject at specialization")
+            .to_string();
+        assert!(
+            text.contains("the template body returns `string`")
+                && text.contains("returns `int` (the target's declared result type)"),
+            "names the proven and the required result kind: {text}"
+        );
+        assert!(
+            text.contains("<R>(result: R) -> R") && text.contains("(int) -> int"),
+            "wrapped with both signatures at the application site: {text}"
+        );
+        assert!(
+            compiler.hook_install_registry.is_empty(),
+            "a rejected install leaves no registry row"
+        );
+    }
+
+    // Zero-capture route twin of the rejection above (rides the plain
+    // `ensure_monomorphic_function_for_callsite` path).
+    #[test]
+    fn after_template_type_changing_body_rejects_on_the_zero_capture_route() {
+        let (result, _) = compile_source(&hook_source(
+            "fn stringy<R>(result: R) -> R { return \"xx\" }",
+            "install(after_hook(stringy, []))",
+            "@hookann()\nfn victim(a: int) -> int { return a * 10 }\n\nvictim(4)",
+        ));
+        let text = result
+            .expect_err("the bare-string after body must reject at specialization")
+            .to_string();
+        assert!(
+            text.contains("the template body returns `string`"),
+            "names the proven kind: {text}"
+        );
+    }
+
+    // Positive twin: a bound-honoring `(R) -> R` body (branchy, with a
+    // provable local) still specializes, weaves, and threads the result.
+    #[test]
+    fn after_template_return_gate_positive_twin_specializes_and_runs() {
+        let (value, compiler) = top_level_i64(&hook_source(
+            "fn post<R>(result: R) -> R {\n\
+             \x20   let keep = result\n\
+             \x20   if true { return keep }\n\
+             \x20   return result\n\
+             }",
+            "install(after_hook(post, []))",
+            "@hookann()\nfn victim(a: int) -> int { return a * 10 }\n\nvictim(4)",
+        ));
+        assert_eq!(value, 40, "the bound-honoring after body threads the result");
+        assert_eq!(compiler.hook_install_registry.len(), 1);
+    }
+
+    // A body that can complete WITHOUT a value (`(R) -> R` declared, no
+    // value-producing exit) never leaks unit bits as `R`. On the
+    // analyzer-visited API path the DEFINITION-time check fires first
+    // ("must return a value" — pinned here); the gate's own
+    // `can complete without returning a value` arm backstops the
+    // never-analyzer-visited sugar path (pinned in
+    // `tools/shape-test/tests/annotations_runtime/wrapping.rs`).
+    #[test]
+    fn after_template_body_without_a_return_value_is_a_named_rejection() {
+        let (result, _) = compile_source(&hook_source(
+            "fn observer_ish<R>(result: R) -> R { let x = result }",
+            "install(after_hook(observer_ish, []))",
+            "@hookann()\nfn victim(a: int) -> int { return a * 10 }\n\nvictim(4)",
+        ));
+        let text = result
+            .expect_err("a value-less after body must reject before any weave")
+            .to_string();
+        assert!(
+            text.contains("must return a value"),
+            "the definition-time value-less rejection fires: {text}"
+        );
+    }
+
+    // The CONCRETE after twin is covered UPSTREAM (verified, pinned here):
+    // a concrete template body is an ordinary analyzer-visited module fn, so
+    // a body-vs-declared-return lie dies at DEFINITION with the constraint
+    // solver's sentence — before any install/specialization runs. (The
+    // declared-vs-required match at the application site is the existing
+    // `require_specialization_position_match` pin family.)
+    #[test]
+    fn concrete_after_body_return_lie_rejects_at_definition() {
+        let (result, _) = compile_source(&hook_source(
+            "fn bad(result: int) -> int { return \"xx\" }",
+            "install(after_hook(bad, []))",
+            "@hookann()\nfn victim(a: int) -> int { return a * 10 }\n\nvictim(4)",
+        ));
+        let text = result
+            .expect_err("a concrete body return lie must reject at definition compile")
+            .to_string();
+        assert!(
+            text.contains("is not compatible with"),
+            "the analyzer's constraint sentence fires: {text}"
+        );
+    }
+
     // ── a void target hosts a before-only weave ────────────────────────────
 
     #[test]

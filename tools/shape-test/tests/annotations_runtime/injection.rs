@@ -7,13 +7,13 @@
 //! surface. The C3-S6 A-phase wave rewrote three of the args-MUTATION family
 //! (`before_hook_doubles_first_argument`, `before_hook_clamps_argument_to_range`,
 //! `chained_before_hooks_modify_args_sequentially`) onto typed per-slot
-//! `args[i] = expr` mutation. Remaining legacy spellings (2):
-//! `before_hook_swaps_arguments` — BLOCKED on the surfaced S2c guard gap
-//! (hoisted locals are outside the provable write-RHS set; an exchange has
-//! no temp-free spelling), and `before_hook_passes_ctx_info` — E4-blocked
-//! per the ratified S2-F3 disposition row (the typed surface has no `ctx`
-//! by design). Both stay as retained legacy coverage pending supervisor/user
-//! rulings.
+//! `args[i] = expr` mutation. The C3-S6 soundness fixlet (supervisor-ordered)
+//! taught the S2c guard PROVABLE-INITIALIZER LOCALS, so
+//! `before_hook_swaps_arguments` is now rewritten typed (the hoisted-local
+//! exchange spelling the A-phase surfaced as guard-blocked). Remaining
+//! legacy spelling (1): `before_hook_passes_ctx_info` — E4-blocked per the
+//! ratified S2-F3 disposition row (the typed surface has no `ctx` by
+//! design); stays as retained legacy coverage pending its ruling.
 
 use shape_test::shape_test::ShapeTest;
 
@@ -76,24 +76,23 @@ print(greet("Bob"))
     .expect_output_contains("Hello, Bob!");
 }
 
-// C3-S6 A-phase PROBE FINDING (2026-07-21, surfaced — NOT rewritten): the
-// typed spelling (`let t = args[0]; args[0] = args[1]; args[1] = t; args`)
-// is REJECTED by the S2c aggregate-kind guard — a hoisted LOCAL is outside
-// the guard's provable write-RHS set ("a literal, another `args[i]` slot, a
-// declared capture, a typed fn's result, or arithmetic over those"), and an
-// exchange has no temp-free spelling (the arithmetic swap trick would be an
-// overflow-unsafe rewrite-around, refused per the probe discipline). The
-// exchange semantic is therefore INEXPRESSIBLE on the typed surface until
-// the guard learns provable-initializer locals — surfaced for supervisor
-// disposition; this pin stays on the legacy spelling as retained coverage.
+// C3-S6 soundness fixlet: the A-phase finding-1 rewrite, executed. The S2c
+// guard now admits PROVABLE-INITIALIZER LOCALS (a local whose initializer is
+// provable joins the provable write-RHS set at its binding, transitively),
+// so the exchange's hoisted-local spelling — the only temp-free-less shape
+// an exchange has — is expressible on the typed surface. The refused
+// arithmetic-swap rewrite-around stays refused (overflow-unsafe).
 #[test]
 fn before_hook_swaps_arguments() {
     ShapeTest::new(
         r#"
-annotation swap_args(label) {
-  before(args, ctx) {
+annotation swap_args(label: string) {
+  before(args) {
     print(f"[{label}] swapping args")
-    [args[1], args[0]]
+    let t = args[0]
+    args[0] = args[1]
+    args[1] = t
+    args
   }
 }
 
@@ -107,6 +106,7 @@ print(sub(3, 10))
 "#,
     )
     .expect_run_ok()
+    .expect_output_contains("[swap] swapping args")
     .expect_output_contains("7");
 }
 

@@ -6,13 +6,14 @@
 //! C3-S5c pin-rewrite wave 1: six pins rewritten IN PLACE onto the typed
 //! surface (asserted outputs byte-identical). C3-S6 A-phase wave:
 //! `stacked_after_hooks_transform_result_in_order` rewritten typed (the F2
-//! onion preserves the asserted value 12). Remaining legacy spelling (1):
-//! `after_hook_wraps_result_in_string` — the planned F4 rejection-pin
-//! conversion is BLOCKED on the surfaced after-return soundness gap (the
-//! polymorphic `after(result)` sugar path does not check the body's actual
-//! return type against the bound `(R) -> R`; a type-changing body leaks a
-//! heap pointer as the scalar result). Stays as retained legacy coverage
-//! pending supervisor disposition.
+//! onion preserves the asserted value 12). C3-S6 soundness fixlet
+//! (supervisor-ordered): the AFTER-side return-kind gate landed (the S2c
+//! analog at the specialization seam), so the A-phase-blocked F4 conversion
+//! executed — `after_hook_wraps_result_in_string` is now the REJECTION pin
+//! it was meant to be, with the measured heap-pointer-leak fixture as a
+//! MUST-REJECT control, the sugar-path value-less-body backstop pin, and
+//! the type-correct positive twin. Zero legacy spellings remain in this
+//! file.
 
 use shape_test::shape_test::ShapeTest;
 
@@ -39,23 +40,20 @@ print(r)
     .expect_output_contains("30");
 }
 
-// C3-S6 A-phase PROBE FINDING (2026-07-21, surfaced — NOT converted): the
-// planned F4 rejection-pin conversion (typed `stringify(prefix: string)` +
-// `after(result) { f"{prefix}: {result}" }` on an int target, expecting the
-// per-specialization body-vs-Sig rejection) does NOT reject at HEAD — the
-// polymorphic `after(result)` sugar path never checks the body's ACTUAL
-// return type against the bound `(R) -> R`, the woven program runs, and the
-// string's HEAP POINTER prints as the int result (measured: `97366122325584`;
-// a bare `"xx"` return leaks the same way). SOUNDNESS HOLE surfaced for
-// supervisor disposition; the F4 dated withdrawal cannot execute until the
-// after-return gate exists, so this pin stays on the legacy spelling as
-// retained coverage.
+// C3-S6 soundness fixlet: the F4 rejection-pin conversion the A-phase
+// surfaced as BLOCKED, now executed. A type-changing `after(result)` body
+// (string f-string on an int-returning target) previously specialized and
+// RAN, printing the string's HEAP POINTER as the int result (A-phase
+// measured `97366122325584`). The AFTER-side return-kind gate (the S2c
+// analog at the specialization seam) makes it the established two-signature
+// application-site rejection. A green run here would mean the gate is
+// bypassed — the run-err expectation IS the leak refuter.
 #[test]
 fn after_hook_wraps_result_in_string() {
     ShapeTest::new(
         r#"
-annotation stringify(prefix) {
-  after(args, result, ctx) {
+annotation stringify(prefix: string) {
+  after(result) {
     f"{prefix}: {result}"
   }
 }
@@ -66,8 +64,79 @@ fn add(a: int, b: int) -> int { a + b }
 print(add(3, 4))
 "#,
     )
+    .expect_run_err_contains("the template body returns `string`")
+    .expect_run_err_contains("returns `int` (the target's declared result type)");
+}
+
+// The exact measured heap-pointer-leak fixture shape as a MUST-REJECT
+// control: a bare string-returning `after` body on an int target (the
+// A-phase measured the same pointer leak for `"xx"` — not f-string
+// specific). With the gate present this fails at compile; a runtime
+// heap-pointer print means the gate is bypassed and this expectation fails.
+#[test]
+fn after_hook_type_changing_bare_string_body_must_reject() {
+    ShapeTest::new(
+        r#"
+annotation wrongify(tag: string) {
+  after(result) {
+    "xx"
+  }
+}
+
+@wrongify("t")
+fn add(a: int, b: int) -> int { a + b }
+
+print(add(3, 4))
+"#,
+    )
+    .expect_run_err_contains("the template body returns `string`")
+    .expect_run_err_contains("cannot specialize for target `add`");
+}
+
+// The gate's value-less-completion backstop on the never-analyzer-visited
+// sugar path (the API-path twin dies at definition with "must return a
+// value" — pinned in `weave.rs`): an `after(result)` body with no
+// value-producing exit must never leak unit bits as the int result.
+#[test]
+fn after_hook_value_less_body_must_reject() {
+    ShapeTest::new(
+        r#"
+annotation swallow(tag: string) {
+  after(result) {
+    let x = result
+  }
+}
+
+@swallow("t")
+fn add(a: int, b: int) -> int { a + b }
+
+print(add(3, 4))
+"#,
+    )
+    .expect_run_err_contains("can complete without returning a value");
+}
+
+// Positive twin of the rejection pins above: the SAME stringify shape with
+// the bound `(R) -> R` honored (string body on a string-returning target)
+// still specializes, weaves, and runs.
+#[test]
+fn after_hook_string_body_on_string_target_specializes_and_runs() {
+    ShapeTest::new(
+        r#"
+annotation stringify(prefix: string) {
+  after(result) {
+    f"{prefix}: {result}"
+  }
+}
+
+@stringify("Result")
+fn shout(name: string) -> string { f"hi {name}" }
+
+print(shout("Bob"))
+"#,
+    )
     .expect_run_ok()
-    .expect_output_contains("Result: 7");
+    .expect_output_contains("Result: hi Bob");
 }
 
 // C3-S6 A-phase typed rewrite. The typed after-chain applies in REVERSE
