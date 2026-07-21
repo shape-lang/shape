@@ -187,6 +187,23 @@ disposition 2026-07-20 (satisfies the scope-reclaim rule).
   trampolining; never compile-failure demotion; async hooks =
   named-expected-fallback; S7 cells MUST execute hook paths.
 
+- **C3-G14 (the @remote cut — A′; USER-RATIFIED 2026-07-21).** The S6
+  classification collapse surfaced that autoloaded `std::core/remote.shape`
+  (`pub annotation remote(addr)`: untyped config + `ctx.target` + the
+  `{result:}` short-circuit) rides capabilities with no typed C3 spelling —
+  the short-circuit is the HookDecision protocol, E4's charter, and a hook
+  API without it is genuinely incomplete for the flagship patterns
+  (cache/retry/remote). User principle applied: legacy earns nothing by
+  incumbency; CUT cleanly and re-imagine on the sound design. Ruling:
+  **A′ — C3's capstone deletes EVERYTHING including remote.shape's current
+  implementation; @remote goes DARK; the distributed e2e tests that ride it
+  are #[ignore]'d pointing at #68 (they are E4's acceptance suite); E4 #20
+  re-implements @remote on the properly-designed typed HookDecision
+  protocol as its first acceptance consumer and closes #68.** Zero legacy
+  survives C3; no rushed protocol design inside C3; the E4 fence stands.
+  Consequence for the S2-F3 E4-blocked ctx pins: retired at the capstone
+  with the same #68 pointer (they pinned legacy-surface E4 capabilities).
+
 ## Operating rules
 
 The E1/E2-proven pipeline carries over wholesale (AGENTS.md C3 row):
