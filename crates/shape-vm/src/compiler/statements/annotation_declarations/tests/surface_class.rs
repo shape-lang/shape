@@ -276,3 +276,108 @@ fn legacy_untyped_declarative_before_handler_still_compiles() {
     compile_ok("annotation once() { before(args, ctx) { args } }");
 }
 
+// ── S5b: the DECLARATION-tier non-function-target rejection (S4 residual 7)
+// A TypedConfig-with-hooks definition whose EXPLICIT targets exclude
+// `function` can never fire its hooks (the non-function consumer seams run
+// only comptime pre/post handlers — measured silent no-op, probe P-NFT) —
+// rejected at the declaration, ZERO applications needed. The application
+// tier (mixed targets) is pinned in sugar_matrix_tests.
+
+#[test]
+fn s5b_nonfn_type_only_targets_with_hooks_reject_at_declaration() {
+    let message = compile_err(
+        "annotation deco(times: int) {\n\
+         \x20 targets: [type]\n\
+         \x20 before(args) { return args }\n\
+         }",
+    );
+    assert!(
+        message.contains(
+            "annotation `deco` declares declarative before/after hooks, but its targets \
+             ([type]) do not include function; hook templates attach to a function's call \
+             seam and can never fire — add function to targets or remove the hooks"
+        ),
+        "the declaration-tier sentence must fire verbatim, got: {message}"
+    );
+}
+
+#[test]
+fn s5b_nonfn_multi_nonfn_targets_render_the_full_list() {
+    let message = compile_err(
+        "annotation deco(times: int) {\n\
+         \x20 targets: [type, module]\n\
+         \x20 after(result) { return result }\n\
+         }",
+    );
+    assert!(
+        message.contains("its targets ([type, module]) do not include function"),
+        "the rendered target list must name every declared kind, got: {message}"
+    );
+}
+
+#[test]
+fn s5b_nonfn_declaration_twins_compile() {
+    // Twin 1: mixed targets INCLUDING function — legal at the declaration
+    // (the fn application weaves; the type application is the
+    // application-tier rejection, pinned in sugar_matrix_tests).
+    compile_ok(
+        "annotation deco(times: int) {\n\
+         \x20 targets: [function, type]\n\
+         \x20 before(args) { return args }\n\
+         }",
+    );
+    // Twin 2: a HOOK-FREE TypedConfig def with non-function targets stays
+    // legal — comptime handlers run on type targets; only declarative
+    // hooks demand a function seam.
+    compile_ok(
+        "annotation info(times: int) {\n\
+         \x20 targets: [type]\n\
+         \x20 comptime post(target, ctx) { 1 }\n\
+         }",
+    );
+    // Twin 3: a LEGACY (untyped) def with non-function targets is outside
+    // the sugar surface entirely — untouched.
+    compile_ok(
+        "annotation legacy_deco() {\n\
+         \x20 targets: [type]\n\
+         \x20 comptime post(target, ctx) { 1 }\n\
+         }",
+    );
+}
+
+// ── S5b lifecycle angle (charter item 4-i): a MIXED TypedConfig definition
+// (typed config + declarative hook + lifecycle handler) rejects with the
+// R3-family sentence REGARDLESS of handler order — the lowering loop
+// rejects OnDefine/Metadata before its empty-hooks early return, so the
+// R3-family declaration rejection is TOTAL: TypedConfig lifecycle handlers
+// can NEVER receive typed config params.
+
+#[test]
+fn s5b_r3_family_mixed_def_rejects_in_both_handler_orders() {
+    for source in [
+        // lifecycle handler AFTER the declarative hook
+        "annotation typedcfg(times: int) {\n\
+         \x20 targets: [function]\n\
+         \x20 before(args) { return args }\n\
+         \x20 on_define(target) { 1 }\n\
+         }",
+        // lifecycle handler BEFORE the declarative hook
+        "annotation typedcfg(times: int) {\n\
+         \x20 targets: [function]\n\
+         \x20 on_define(target) { 1 }\n\
+         \x20 before(args) { return args }\n\
+         }",
+    ] {
+        let message = compile_err(source);
+        assert!(
+            message.contains("is a runtime-lifecycle hook with no typed-surface form yet"),
+            "the R3-family rejection must fire regardless of handler order, got: {message}"
+        );
+        assert!(
+            message.contains("the runtime-hook context family is E4's charter")
+                && message.contains("deleted at C3-S6"),
+            "the E4/S6 fence must be cited, got: {message}"
+        );
+    }
+}
+

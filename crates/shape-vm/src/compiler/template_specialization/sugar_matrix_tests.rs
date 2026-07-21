@@ -922,6 +922,53 @@ victim(1)
     );
 }
 
+// ADR-009 C3 #14 (slice 5, S5b) — pin (i): the STATIC G8 arm through the
+// SUGAR path on an UNCALLED generic target. Fires at the pre-pass
+// application-site check (sugar_body_fns non-empty => template-engaging by
+// construction), BEFORE any handler execution — no reliance on the target
+// being called, zero registry rows. (Measured note, slice-5 report: the
+// sugar shape was already loud pre-S5b through the DYNAMIC pre-pass
+// directive arm — P-G8a — because the minted body fns resolve through
+// `sugar_body_fns` without function registration; the static arm makes the
+// rejection execution-independent, and the API-path twin (P-G8b, the
+// install_registry pins) was the genuinely silent hole.)
+#[test]
+fn s5b_static_g8_sugar_on_uncalled_generic_rejects() {
+    let src = r#"
+annotation retry_g(times: int) {
+  targets: [function]
+  before(args) {
+    args[0] = args[0] * times
+    return args
+  }
+}
+
+@retry_g(3)
+fn id<T>(x: T) -> T { return x }
+
+7
+"#;
+    let (result, compiler) = compile_source(src);
+    let message = result
+        .expect_err("a sugar install on an UNCALLED generic target must reject (C3-G8/S5b)")
+        .to_string();
+    for fragment in [
+        "(via @retry_g) on `id`",
+        "the target is generic — `fn id<T>(x: T) -> T`",
+        "withdrawn until #59 (the monomorphization-origin re-arm)",
+        "apply @retry_g to a concrete function",
+    ] {
+        assert!(
+            message.contains(fragment),
+            "the G8 sentence must fire on the uncalled generic; missing {fragment:?}: {message}"
+        );
+    }
+    assert!(
+        compiler.hook_install_registry.is_empty(),
+        "a rejected install leaves no registry row"
+    );
+}
+
 // C3-G12: a TypedConfig (hook-template) annotation on a fn-local NESTED fn
 // is a LOUD named rejection at the application site (the parser desugar
 // formerly dropped it SILENTLY — S0 a4/a4c; the annotations now ride
@@ -980,13 +1027,14 @@ scaled(4)
     assert_eq!(value, 12, "the module-scope twin weaves (skip ⇒ 4)");
 }
 
-// C3-G12 residual control: a LEGACY-classified annotation on a nested fn
-// keeps the PRE-slice-4 behavior BYTE-identical — silently dropped (the
-// recorded residual until S5's matrix owns the class). Value-distinguishing:
-// an APPLIED legacy before would replace the args with [99] ⇒ 99; the
-// silent drop keeps 4.
+// C3-G12 LEGACY EXTENSION (S5b — the PRE-DECLARED pin flip of the S4c
+// silent-drop control): a LEGACY-classified annotation on a nested fn now
+// rejects LOUDLY with the class-conditional sentence (same producer as the
+// TypedConfig arm, "hook-template " dropped). Pre-flip this fixture ran
+// silently to 4 (the S0 a4/a4c drop hazard: an APPLIED legacy before would
+// give 99).
 #[test]
-fn s4c_g12_legacy_annotation_on_nested_fn_stays_silently_dropped() {
+fn s5b_g12_legacy_annotation_on_nested_fn_rejects_loudly() {
     let src = r#"
 annotation legacy_n() {
   targets: [function]
@@ -1001,11 +1049,186 @@ fn outer() -> int {
 
 outer()
 "#;
-    let (value, compiler) = top_level_i64(src);
-    assert_eq!(
-        value, 4,
-        "the legacy annotation on the nested fn stays silently dropped (S5 owns the class)"
+    let (result, compiler) = compile_source(src);
+    let message = result
+        .expect_err("a legacy annotation on a nested fn must reject loudly (C3-G12/S5b)")
+        .to_string();
+    assert!(
+        message.contains(
+            "annotation `@legacy_n` on fn-local nested function `inner` is not applied — \
+             annotations on nested functions are not supported yet (#62); \
+             apply @legacy_n to a module-scope function"
+        ),
+        "the G12 Legacy sentence must fire verbatim, got: {message}"
     );
+    assert!(compiler.hook_install_registry.is_empty());
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// ADR-009 C3 #14 (slice 5, S5b) — NON-FUNCTION-TARGET TypedConfig-with-hooks
+// (S4 residual 7, dispositioned REJECT, two tiers). Measured pre-fix (probe
+// wave, slice-5 report §S5b): P-NFT (`targets: [type]` + declarative hooks,
+// applied to a type) compiled and ran SILENTLY with zero registry rows;
+// P-NFT-mod and P-NFT-expr likewise on module/expression targets. The
+// declaration tier (targets exclude `function` entirely) is pinned in
+// `annotation_declarations/tests/surface_class.rs`; the pins here are the
+// APPLICATION-tier arm — reachable only through a MIXED
+// `targets: [function, …]` definition — plus the fn-application twin.
+// ═══════════════════════════════════════════════════════════════════════════
+
+// The mixed-targets TWIN: the def compiles, and the FUNCTION application
+// weaves value-distinguishing (4*3=12) with one registry row.
+#[test]
+fn s5b_nonfn_mixed_targets_fn_application_weaves() {
+    let src = r#"
+annotation deco(times: int) {
+  targets: [function, type]
+  before(args) {
+    args[0] = args[0] * times
+    return args
+  }
+}
+
+@deco(3)
+fn scaled(x: int) -> int { return x }
+
+scaled(4)
+"#;
+    let (value, compiler) = top_level_i64(src);
+    assert_eq!(value, 12, "the fn application weaves (skip => 4)");
+    assert_eq!(compiler.hook_install_registry.len(), 1);
+}
+
+// The TYPE application of the same mixed def rejects with the named
+// application-tier sentence (pre-fix: silent no-op, P-NFT-mixed).
+#[test]
+fn s5b_nonfn_mixed_targets_type_application_rejects() {
+    let src = r#"
+annotation deco(times: int) {
+  targets: [function, type]
+  before(args) {
+    args[0] = args[0] * times
+    return args
+  }
+}
+
+@deco(3)
+type Widget {
+  w: int
+}
+
+7
+"#;
+    let (result, compiler) = compile_source(src);
+    let message = result
+        .expect_err("a hooks-carrying annotation on a type target must reject (S5b)")
+        .to_string();
+    assert!(
+        message.contains(
+            "annotation `@deco` declares declarative before/after hooks, but is applied to \
+             the type `Widget`; hook templates attach to a function's call seam and never \
+             fire on type targets — apply @deco to a function, or move the type-target \
+             work into a comptime handler"
+        ),
+        "the application-tier sentence must fire verbatim, got: {message}"
+    );
+    assert!(compiler.hook_install_registry.is_empty());
+}
+
+// The MODULE sibling (pre-fix: silent no-op, P-NFT-mod).
+#[test]
+fn s5b_nonfn_module_application_rejects() {
+    let src = r#"
+annotation deco(times: int) {
+  targets: [function, module]
+  before(args) {
+    args[0] = args[0] * times
+    return args
+  }
+}
+
+@deco(3)
+mod demo {
+  pub fn helper() -> int { return 1 }
+}
+
+7
+"#;
+    let (result, compiler) = compile_source(src);
+    let message = result
+        .expect_err("a hooks-carrying annotation on a module target must reject (S5b)")
+        .to_string();
+    assert!(
+        message.contains(
+            "annotation `@deco` declares declarative before/after hooks, but is applied to \
+             the module `demo`; hook templates attach to a function's call seam and never \
+             fire on module targets"
+        ),
+        "the module application-tier sentence must fire, got: {message}"
+    );
+    assert!(compiler.hook_install_registry.is_empty());
+}
+
+// The EXPRESSION sibling (pre-fix: silent no-op, P-NFT-expr). An expression
+// target has no name — the established `target` placeholder renders.
+#[test]
+fn s5b_nonfn_expression_application_rejects() {
+    let src = r#"
+annotation deco(times: int) {
+  targets: [function, expression]
+  before(args) {
+    args[0] = args[0] * times
+    return args
+  }
+}
+
+let x = @deco(3) 1
+
+x
+"#;
+    let (result, compiler) = compile_source(src);
+    let message = result
+        .expect_err("a hooks-carrying annotation on an expression target must reject (S5b)")
+        .to_string();
+    assert!(
+        message.contains(
+            "annotation `@deco` declares declarative before/after hooks, but is applied to \
+             the expression `target`; hook templates attach to a function's call seam and \
+             never fire on expression targets"
+        ),
+        "the expression application-tier sentence must fire, got: {message}"
+    );
+    assert!(compiler.hook_install_registry.is_empty());
+}
+
+// ═══ S5b lifecycle angle (charter item 4): the LEGACY lifecycle twin ═══
+// A ZERO-PARAM (Legacy) definition with on_define + metadata handlers
+// applied to a function stays byte-unchanged green THROUGH EXECUTION
+// (P-LC-legacy / P-LC-legacy-od measured 7) — only TYPED-CONFIG lifecycle
+// declarations are the R3-family rejection (which is TOTAL: the planner
+// runs the lowering for every TypedConfig def, and the lowering rejects
+// OnDefine/Metadata before its empty-hooks early return — see
+// surface_class.rs for the order pins).
+#[test]
+fn s5b_legacy_lifecycle_twin_zero_param_def_executes_green() {
+    let src = r#"
+annotation traced() {
+  targets: [function]
+  on_define(target) {
+    1
+  }
+  metadata(target) {
+    { version: 1 }
+  }
+}
+
+@traced()
+fn tagged(x: int) -> int { return x }
+
+tagged(7)
+"#;
+    let (value, compiler) = top_level_i64(src);
+    assert_eq!(value, 7, "the Legacy lifecycle surface stays green until S6");
     assert!(compiler.hook_install_registry.is_empty());
 }
 

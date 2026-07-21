@@ -56,9 +56,9 @@
 //! stored on `CompiledAnnotation` by the installer — carry identity.)
 
 use shape_ast::ast::{
-    AnnotationDef, AnnotationHandler, AnnotationHandlerParam, AnnotationHandlerType, BlockExpr,
-    BlockItem, DestructurePattern, Expr, FunctionDef, FunctionParameter, Literal, Span, Spanned,
-    Statement, TypeAnnotation, TypeParam,
+    AnnotationDef, AnnotationHandler, AnnotationHandlerParam, AnnotationHandlerType,
+    AnnotationTargetKind, BlockExpr, BlockItem, DestructurePattern, Expr, FunctionDef,
+    FunctionParameter, Literal, Span, Spanned, Statement, TypeAnnotation, TypeParam,
 };
 
 use crate::compiler::{BytecodeCompiler, HygienicRole};
@@ -177,6 +177,56 @@ pub(in crate::compiler) fn sugar_lowering_for_def(
         }
         _ => None,
     }
+}
+
+/// ADR-009 C3 #14 (slice 5, S5b) — the DECLARATION-tier non-function-target
+/// rejection (S4 residual 7, dispositioned REJECT): declarative before/after
+/// hooks attach to a FUNCTION's call seam; a TypedConfig-with-hooks
+/// definition whose EXPLICIT targets exclude `function` could never fire its
+/// hooks (the type/module/expression consumer seams run only comptime
+/// pre/post handlers — measured silent no-op, S5b probe P-NFT). One
+/// producer; the planner fires it after `allowed_targets` is computed.
+///
+/// The conceivable alternative semantic — "wrap every method of the type" —
+/// is NAMED-NOT-BUILT: it would need its own ruling (recorded in the
+/// slice-5 report).
+pub(in crate::compiler) fn non_function_targets_declaration_rejection(
+    definition_name: &str,
+    targets: &[AnnotationTargetKind],
+) -> String {
+    let rendered = targets
+        .iter()
+        .map(|kind| format!("{kind:?}").to_lowercase())
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "annotation `{definition_name}` declares declarative before/after hooks, but its \
+         targets ([{rendered}]) do not include function; hook templates attach to a \
+         function's call seam and can never fire — add function to targets or remove the \
+         hooks"
+    )
+}
+
+/// ADR-009 C3 #14 (slice 5, S5b) — the APPLICATION-tier non-function-target
+/// rejection, fired at the three non-function consumer seams (type:
+/// `execute_struct_comptime_handlers`; module:
+/// `execute_module_comptime_handlers`; expression:
+/// `run_comptime_annotation_handlers_for_target`) when the compiled
+/// annotation carries sugar (`sugar_post_handler.is_some()`) — reachable
+/// only through a MIXED `targets: [function, …]` definition (a targets-set
+/// without `function` already rejected at the declaration).
+pub(in crate::compiler) fn non_function_target_application_rejection(
+    annotation_name: &str,
+    target_kind_word: &str,
+    target_name: &str,
+) -> String {
+    format!(
+        "annotation `@{annotation_name}` declares declarative before/after hooks, but is \
+         applied to the {target_kind_word} `{target_name}`; hook templates attach to a \
+         function's call seam and never fire on {target_kind_word} targets — apply \
+         @{annotation_name} to a function, or move the {target_kind_word}-target work into \
+         a comptime handler"
+    )
 }
 
 /// R3: the typed-surface hook-shape rejection (exact charter sentence).

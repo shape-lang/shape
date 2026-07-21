@@ -644,6 +644,33 @@ impl BytecodeCompiler {
         target_kind: shape_ast::ast::functions::AnnotationTargetKind,
     ) -> Result<bool> {
         if let Some((_, compiled)) = self.lookup_compiled_annotation(annotation) {
+            // ADR-009 C3 #14 (slice 5, S5b): the EXPRESSION-target sibling of
+            // the type/module-seam rejections (`execute_struct_comptime_
+            // handlers` / `execute_module_comptime_handlers`) — this seam
+            // never runs the sugar post handler, so a TypedConfig-with-hooks
+            // annotation's declarative hooks could never fire here (measured
+            // silent no-op, probe P-NFT-expr). ONE producer in
+            // `sugar_lowering`.
+            if compiled.sugar_post_handler.is_some() {
+                let target_kind_word = format!("{target_kind:?}").to_lowercase();
+                let target_name = {
+                    let name = Self::annotation_target_name(target);
+                    if name.is_empty() {
+                        "target".to_string()
+                    } else {
+                        name
+                    }
+                };
+                return Err(ShapeError::SemanticError {
+                    message: crate::compiler::statements::annotation_declarations::
+                        sugar_lowering::non_function_target_application_rejection(
+                            &annotation.name,
+                            &target_kind_word,
+                            &target_name,
+                        ),
+                    location: Some(self.span_to_source_location(annotation.span)),
+                });
+            }
             let handlers = [
                 compiled.comptime_pre_handler,
                 compiled.comptime_post_handler,

@@ -331,3 +331,304 @@ the implementation + pins). No probe text ships.
 - Census post-mint: [C0926] product-code mint = the one pseudo_tuple.rs
   producer; [C0931] = the one functions_annotations.rs producer; no
   other code minted or touched (C0913–C0921 untouched).
+
+## S5b — the static G8 arm + G12 Legacy extension + non-function-target rejections + lifecycle pins + the G11 defections entry
+
+### The holes, measured first (throwaway probes; BOTH waves reverted
+### byte-clean — `git status --porcelain` empty before implementation)
+
+Probe modules appended to `sugar_matrix_tests.rs`, run via the lane,
+outputs verbatim:
+
+- **P-G8a (sugar TypedConfig-with-hooks, UNCALLED generic)** — `compile
+  error: … cannot install hook template `hygienic:888e6770b1fa80de62edd6ea
+  99e86301` (via @retry_g) on `id`: the target is generic — `fn id<T>(x:
+  T) -> T` — …` — the sugar shape was ALREADY LOUD pre-S5b through the
+  DYNAMIC pre-pass directive arm (the minted body fns resolve through
+  `sugar_body_fns` with no function-registration dependence, so the
+  pre-pass handler run succeeds and the directive arm fires). The charter's
+  expectation that this shape was silent did not reproduce; the genuinely
+  silent hole was the API path.
+- **P-G8b (API-path direct install, UNCALLED generic — THE HEADLINE)** —
+  `compiles, run=Ok(Some(7)), registry_rows=0` — SILENT no-op (the S2b
+  residual, alive at HEAD).
+- **P-G8c (helper-mediated install, uncalled generic)** — `compile error:
+  Semantic error: Undefined function: 'before_hook'` — loud-but-bland
+  PRE-EXISTING failure at the HELPER's own pass-2 compile (module fns
+  cannot spell the comptime forwarders); same text on the concrete
+  control (**P-G8c-ctl**). The helper-mediated class is therefore
+  unconstructible-silent today; the static arm upgrades the GENERIC case
+  to the named G8 sentence at the `@application` site (disclosed
+  diagnostic-tier change below).
+- **P-G8d (value-position `let f = before_hook; install(f(…))`, uncalled
+  generic)** — `compiles, run=Ok(Some(7)), registry_rows=0` — SILENT.
+  Concrete control (**P-G8d-ctl**): loud pre-existing `[C0001] Undefined
+  variable: 'my_before'` (handler execution reaches the unresolvable
+  fn-as-value first).
+- **P-G8e (sugar, CALLED generic — anchor)** — same G8 sentence as P-G8a.
+- **P-NFT (`targets: [type]` TypedConfig-with-hooks applied to a type)** —
+  `compiles, run=Ok(Some(7)), registry_rows=0` — SILENT (S4 residual 7
+  confirmed). **P-NFT-mixed** (`targets: [function, type]`): fn
+  application weaves (12, one row); type application silent.
+  **P-NFT-mod** / **P-NFT-expr**: module and expression siblings both
+  silent (`registry_rows=0`).
+- **P-LEGGEN (legacy declarative weave on CALLED generic)** — `compiles,
+  run=Ok(Some(10))` — the g1/g4 accidental-working class confirmed at
+  HEAD. **P-LEGGEN-unc** (uncalled): silent 7 (legacy class untouched
+  until S6, per G11). **P-CONC-unc** (API install on an uncalled CONCRETE
+  fn): `registry_rows=1` — installs regardless of calledness.
+  **P-LC-legacy / P-LC-legacy-od** (zero-param metadata / on_define
+  applied): green through execution.
+
+### 1. The static G8 arm (the S2 supervisor obligation — CLOSED)
+
+- **Site**: the TOP of the signature-directive pre-pass per-annotation
+  loop (`apply_function_comptime_signature_directives_to_function`) —
+  BEFORE the phases loop, before any handler execution; the pre-pass
+  walks ALL items incl. Export fns and nested modules, so every
+  `@application` is visited regardless of calledness. Resolution
+  (`resolve_comptime_annotation_handlers`) is a pure map lookup.
+- **Rule**: `func_def.type_params` non-empty AND the entry is
+  TEMPLATE-ENGAGING ⇒ `Err` with the EXISTING ONE producer
+  `generic_target_install_rejection_message` (sentence byte-unchanged)
+  at the `@application` span. Concrete targets: zero cost beyond the
+  `type_params` check.
+- **Template-engaging classification (static, conservative — the Lens-2
+  F4 precedent)**: (a) sugar path — `entry.sugar_body_fns` non-empty
+  (hint = first minted body fn, the same name the dynamic arm renders);
+  (b) API path — a syntactic scan of the entry's comptime handler bodies
+  AND their transitive helpers for the **`install` name** in call-name OR
+  value position (bare, qualified-last-segment, or the marked value
+  form). ENGAGEMENT keys on `install` ONLY — the sole installer; the
+  constructor names (`before_hook`/`after_hook`/`*_nocapture`) feed the
+  body-fn HINT but do not engage. MEASURED NARROWING of the charter's
+  five-name set: with all five engaging, the fix-round-1 F5
+  store-lifecycle refuter — a MEASURED-GREEN baseline pin
+  (`nested_handler_run_during_processing_does_not_shift_install_handles`)
+  whose `@noise` annotation on a polymorphic template BODY fn
+  constructs two handles and installs nothing — was rejected
+  (`cannot install hook template `h_noise` … on `tmpl``). C3-G8
+  withdraws INSTALLS on generic targets; construction is not
+  installation and the construct-only class is load-bearing (the batch
+  snapshot machinery exists for exactly its nested-run shape). Locked by
+  the `s5b_static_g8_construct_only_handler_on_generic_stays_green`
+  control. Dodge-resistance is unweakened: `install` is the ONLY route
+  to an install directive, and every spelling of it (call, qualified,
+  method, value, helper-transitive) engages.
+- **`collect_authorized_comptime_helpers` transitivity VERIFIED** (the
+  charter's check): it worklist-closes helpers-calling-helpers over
+  `self.function_defs`; reused verbatim for the scan. DISCLOSED
+  ADDITION: in a single-module unit both pre-passes run BEFORE function
+  registration (the S2b measured reach), so the registered table is
+  empty exactly where the uncalled-generic hole lives — the scan
+  therefore also closes over `collect_pre_pass_ast_function_defs`, a
+  SCAN-ONLY syntactic fn table from the analysis program's own items
+  (bare + module-qualified names; threaded as a parameter, built once
+  per pre-pass run). Never an execution surface.
+- **Value-position coverage without a second walker**: the shared
+  scoped-name collector (`collect_scoped_names_in_expr` — the ONE
+  established walker over handler bodies) grew ONE guarded arm: an
+  `Expr::Identifier` naming an install-family member (all five, for the
+  mark; engagement then filters to `install`) is recorded under the
+  unspellable SOH `INSTALL_FAMILY_VALUE_MARK` prefix. The mark can
+  never resolve in any fn table, so helper collection is byte-equivalent
+  to pre-S5b (lookup miss → skip); every other identifier stays
+  uncollected. No walker fork.
+- **The body-fn hint** is best-effort (`hook_constructor_hint_in_expr` —
+  first `before_hook`/`after_hook` call with a bare-identifier first
+  arg; realistic spellings only), falling back to the established
+  `"<template>"` placeholder. Engagement NEVER depends on the hint. The
+  hint keeps the pre-existing S2b pin
+  (`generic_target_install_rejects_with_the_g8_sentence`, CALLED generic
+  — previously fired at the pass-2 mono seam) byte-identical: the static
+  arm now fires first with the same `my_before` rendering.
+- **The three dynamic firing sites remain** (layered, not deleted): the
+  pre-pass directive arm + the two `apply_install_hook_template` twins.
+- **Pins** (install_registry.rs + sugar_matrix_tests.rs): (i) sugar
+  uncalled (`s5b_static_g8_sugar_on_uncalled_generic_rejects`); (ii) API
+  uncalled with @application-line span assert
+  (`…api_install_on_uncalled_generic_rejects_at_the_application_site`);
+  (iii) helper-mediated (`…helper_mediated_install_…`) + concrete
+  control locking the pre-existing `Undefined function: 'before_hook'`;
+  (iv) value-position (`…value_position_reference_…`) + the
+  mark-arm-isolation pin (`…value_position_reference_alone_engages_…`,
+  handler body = `let f = install` only) + the construct-only
+  engagement-key control (`…construct_only_handler_on_generic_stays_
+  green`); (v) uncalled-concrete twin installs (row 1); (vi)
+  legacy-weave-on-generic control executes 10.
+- **Proven-biting neuter refuter** (throwaway `return Ok(())` at the arm
+  entry, run against the FINAL narrowed arm, REVERTED byte-clean):
+  exactly the 4 API-path pins FAIL — api_install (`fixture must reject:
+  ()`, the fixture compiles and runs silently: the P-G8b hole verbatim),
+  value_position + value_position_alone (silent, P-G8d), and
+  helper_mediated (falls back to the bland pre-existing `Undefined
+  function: 'before_hook'`, failing the G8-fragment assert) — while all
+  5 controls/twins stay green (construct-only, helper-concrete,
+  legacy-on-generic, uncalled-concrete, and the sugar uncalled pin —
+  the dynamic directive arm covers the sugar path, consistent with
+  P-G8a).
+
+### 2. G12 Legacy extension (`reject_typed_config_annotations_on_nested_fn`)
+
+Same producer, class-conditional wording via `classify_annotation_params`:
+TypedConfig keeps the S4 sentence BYTE-UNCHANGED (`{class_phrase}` =
+"hook-template annotations"); Legacy now rejects loudly with
+"annotations on nested functions are not supported yet (#62)".
+Unresolvable annotation names keep today's `continue` (out of matrix
+scope); a mixed classification is unconstructible (R2 fires at the
+declaration) — defensive skip. THE PRE-DECLARED PIN FLIP executed: the
+S4c silent-drop control (`s4c_g12_legacy_annotation_on_nested_fn_stays_
+silently_dropped`, asserted silent 4) is now
+`s5b_g12_legacy_annotation_on_nested_fn_rejects_loudly` (asserts the
+Legacy sentence verbatim, zero rows). The S4 TypedConfig pin + twin are
+untouched and green.
+
+### 3. Non-function-target TypedConfig-with-hooks (S4 residual 7 — REJECT, two tiers)
+
+No legitimate semantic found: hooks attach to a FUNCTION's call seam;
+the type/module/expression consumer seams run ONLY
+`comptime_pre_handler`/`comptime_post_handler`, never the sugar post
+handler. NAMED-NOT-BUILT alternative: a "wrap every method of the type"
+semantic is conceivable but would need its own ruling — recorded here,
+not improvised.
+
+- **(a) Declaration tier** (planner.rs, after `allowed_targets` is
+  computed): `sugar.is_some()` AND non-empty targets excluding
+  `function` ⇒ the named sentence (ONE producer
+  `non_function_targets_declaration_rejection` in sugar_lowering.rs).
+  Empty `allowed_targets` = "no restriction" — function applications
+  stay legal, so no rejection. Pins: `s5b_nonfn_type_only_targets_…`
+  (byte-exact), `…multi_nonfn_targets_render_the_full_list`
+  (`[type, module]`), and three declaration twins (mixed-with-function /
+  hook-free TypedConfig on `[type]` / Legacy on `[type]`).
+- **(b) Application tier** at the three seams (type:
+  `execute_struct_comptime_handlers`; module:
+  `execute_module_comptime_handlers`; expression:
+  `run_comptime_annotation_handlers_for_target`):
+  `compiled.sugar_post_handler.is_some()` ⇒ the named sentence (ONE
+  producer `non_function_target_application_rejection`), anchored at
+  `ann.span`. Reachable only through MIXED `targets: [function, …]`
+  definitions. Pins: mixed fn-application WEAVES (12, one row — the
+  twin) / type application rejects byte-exact / module + expression
+  siblings ({kind} = "module"/"expression"; an expression target
+  renders the established `target` placeholder).
+
+### 4. Lifecycle verify+pin (charter item 4)
+
+- **(i)** `s5b_r3_family_mixed_def_rejects_in_both_handler_orders`: a
+  TypedConfig def with BOTH a declarative hook and `on_define` rejects
+  with the R3-family sentence in BOTH handler orders (the lowering loop
+  rejects OnDefine/Metadata before its empty-hooks early return).
+- **(ii)** `s5b_legacy_lifecycle_twin_zero_param_def_executes_green`:
+  zero-param def + `on_define` + `metadata` applied to a fn — compiles
+  AND executes green (7), zero registry rows.
+- **RECORDED**: TypedConfig lifecycle handlers can NEVER receive typed
+  config params — the R3-family declaration rejection is TOTAL
+  (`plan_definition` runs the lowering for EVERY TypedConfig def; the
+  handler loop hits the OnDefine/Metadata arm before the
+  `body_fns.is_empty()` early return, so a lifecycle handler in a
+  TypedConfig def always rejects at the declaration, hooks or no hooks).
+
+### 5. The G11 defections.md entry
+
+Landed as the dated append-only entry "2026-07-21 — ADR009-C3 (#14) S5:
+C3-G8/G11 deliberate capability withdrawal — generic-target hook
+installs" in `docs/defections.md`: names the withdrawn g1/g2/g4/g5
+working class + the homogeneous-args accident; the g3/g6 failure modes
+the rejection strictly improves; the #59 re-arm lift condition (installs
+re-arm per specialization origin); the S5b static arm closing the
+uncalled silent no-op; the positive twin; and FOUR
+considered-and-rejected compromises (handler-run-dependent G8 only;
+construction-time-only [C0926]; exact-name-only scan;
+registered-table-only helper closure).
+
+### Deviations / disclosures (S5b)
+
+1. **P-G8a did not reproduce the charter's "sugar uncalled = silent"
+   expectation** — the sugar path was already loud through the dynamic
+   directive arm (measured; the minted `sugar_body_fns` resolve without
+   function registration). The static arm still fires FIRST (execution-
+   independent totality); the proven-biting refuter binds to the API
+   path, where the silence was real.
+2. **Helper-mediated GENERIC case: diagnostic-tier change** — pre-S5b it
+   failed loud-but-bland at the helper's pass-2 compile (`Undefined
+   function: 'before_hook'`); the static arm's G8 sentence now preempts
+   it at the `@application` site. The CONCRETE sibling keeps the
+   pre-existing text byte-unchanged (control pin). Nothing that ran
+   keeps running differently.
+3. **The scan-only AST fn table** (`collect_pre_pass_ast_function_defs`)
+   — a disclosed addition beyond "reuse collect_authorized_comptime_
+   helpers", required because the registered table is empty at the
+   pre-pass in single-module units (P-G8c would otherwise stay
+   uncovered at the static site). Scan-only; never resolution/execution.
+4. **The shared collector's marked value arm** — `collect_scoped_names_
+   in_expr` now records install-family VALUE-position identifiers under
+   an unspellable SOH mark. Helper collection is byte-equivalent (the
+   mark can never resolve); no second walker was forked. All other
+   identifiers stay uncollected.
+5. **The hint walker is best-effort by design** (realistic spellings:
+   blocks, let-initializers, nested call args, if/else) — exotic shapes
+   render the established `"<template>"` placeholder; engagement never
+   depends on the hint.
+5b. **The charter's five-name engagement set was narrowed to `install`**
+   (measured collateral: the five-name key rejected the F5
+   store-lifecycle baseline pin — see the classification bullet in §1).
+   The four constructor names still feed the value-position MARK and the
+   HINT; engagement (the thing that fires G8) keys on the one name that
+   can actually install. Plan-invariant-5 reading: the F5 pin is a
+   baseline member with no pre-declared flip, and the construct-only
+   class is load-bearing product behavior — narrowing preserved both
+   without weakening dodge-resistance (`install` is the only installer).
+6. **`apply_function_comptime_signature_directives_to_items` /
+   `_to_function` grew one threaded parameter** (`ast_fn_defs`) — the
+   pre-pass entry builds the table once per run. Internal signatures;
+   no public surface.
+7. **The `type_target_install_rejects_with_the_function_twin` pin
+   (S2b)** keeps firing its pass-2 `install`-directive sentence: its
+   fixture is a ZERO-PARAM (Legacy-classified) annotation whose comptime
+   handler installs on a `targets: [type]` def — no sugar, so the new
+   declaration/application tiers do not engage; the directive-level
+   rejection remains that class's owner.
+8. **Expression-seam kind rendering** reuses the established
+   `format!("{:?}").to_lowercase()` spelling (`expression`, `block`,
+   `binding`, `awaitexpr`) — the pinned sibling uses `expression`; the
+   exotic kinds ride the same producer unpinned.
+
+### Throwaway probes — reverted-clean confirmation
+
+Three throwaway edits shipped nothing: probe wave 1 (`s5b_probes`,
+sugar_matrix_tests.rs), probe wave 2 (`s5b_probes2`, same file), and the
+static-arm neuter (`return Ok(())` in functions_annotations.rs) were
+each reverted byte-clean before commit (`git status --porcelain` clean /
+diff-inspected). No probe text ships.
+
+### Gates at the S5b close (lane, `-j1` / `--test-threads=1`)
+
+- Stage filter (`install_registry surface_class sugar_matrix
+  template_specialization closures`): **257/257** (0 failed; includes
+  the 7 new static-G8 pins + construct-only control, the G12 flip, the
+  6 non-function-target pins, the 2 lifecycle pins, the sugar-uncalled
+  pin, and every pre-existing pin in those modules).
+- Full shape-vm `--lib --test-threads=1`: **FAILED set == the S0 7-name
+  baseline EXACTLY** (3462 passed; 34 ignored; the nested_exact flap
+  pair GREEN this run).
+- shape-test: `annotations_runtime` **24/24**; `annotation_targets`
+  **24/24** (the 48 legacy pins untouched this stage);
+  `annotations_comptime` FAILED == the 10-name S0 set (116 passed);
+  `comptime` FAILED == the 3-name S0 set (261 passed). lsp / shape-lsp
+  / cli_tests deferred to the S5c close per the blast-radius discipline
+  (no LSP/CLI surface touched in S5b).
+- `cargo check -p shape-vm --all-targets`: zero errors; the dead-code
+  warning set was diffed against base `314ffada` via stash (12 at base,
+  12 with the S5b diff — all pre-existing).
+- `just check-clean` exit 0. `just check-no-dynamic` exit 0 (plus its
+  pre-existing informational closure-capture counter note).
+- Refused-regex grep (the CLAUDE.md broader-family regex, space/`[ _-]`
+  widened) over the full `314ffada..` working diff: zero hits.
+- Legacy weave byte-check: the `functions_annotations.rs` hunks contain
+  ZERO occurrences of `compile_specialized_annotation_handler` /
+  `specialize_annotation_runtime_handlers` /
+  `compile_annotation_wrapper`.
+- C09xx discipline: S5b mints NO code (the minted set stays exactly
+  S5a's [C0926] + [C0931]); the new S5b sentences are G13
+  string-tag-uncoded with the #60 routing posture.

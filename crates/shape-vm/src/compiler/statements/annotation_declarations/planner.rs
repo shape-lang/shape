@@ -395,6 +395,26 @@ fn plan_definition(
         }
     });
 
+    // ADR-009 C3 #14 (slice 5, S5b): the declaration-tier non-function-target
+    // rejection (S4 residual 7) — a TypedConfig-with-hooks definition whose
+    // explicit targets exclude `function` can never fire its hooks (the
+    // non-function consumer seams run only comptime pre/post handlers).
+    // Empty `allowed_targets` means "no restriction" (function applications
+    // stay legal), so only a non-empty function-less set rejects. ONE
+    // sentence producer in `sugar_lowering`.
+    if sugar.is_some()
+        && !allowed_targets.is_empty()
+        && !allowed_targets.contains(&AnnotationTargetKind::Function)
+    {
+        return Err(ShapeError::SemanticError {
+            message: super::sugar_lowering::non_function_targets_declaration_rejection(
+                &definition.name,
+                &allowed_targets,
+            ),
+            location: Some(compiler.span_to_source_location(definition.span)),
+        });
+    }
+
     if has_lifecycle {
         if allowed_targets.is_empty() {
             return Err(ShapeError::SemanticError {

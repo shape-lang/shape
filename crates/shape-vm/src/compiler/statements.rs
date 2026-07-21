@@ -4079,6 +4079,25 @@ impl BytecodeCompiler {
         let mut removed = false;
         for ann in &struct_def.annotations {
             if let Some((_, compiled)) = self.lookup_compiled_annotation(ann) {
+                // ADR-009 C3 #14 (slice 5, S5b): a TypedConfig-with-hooks
+                // annotation applied to a TYPE target — this seam runs only
+                // the comptime pre/post handlers, never the synthesized
+                // sugar post handler, so the declarative hooks could never
+                // fire (measured silent no-op, probe P-NFT-mixed). Named
+                // application-tier rejection; ONE producer in
+                // `sugar_lowering`. Reachable only through a mixed
+                // `targets: [function, type]` definition.
+                if compiled.sugar_post_handler.is_some() {
+                    return Err(ShapeError::SemanticError {
+                        message: crate::compiler::statements::annotation_declarations::
+                            sugar_lowering::non_function_target_application_rejection(
+                                &ann.name,
+                                "type",
+                                &struct_def.name,
+                            ),
+                        location: Some(self.span_to_source_location(ann.span)),
+                    });
+                }
                 let handlers = [
                     compiled.comptime_pre_handler,
                     compiled.comptime_post_handler,
@@ -5416,6 +5435,21 @@ impl BytecodeCompiler {
         let mut outcome = ModuleDirectiveOutcome::default();
         for ann in &module_def.annotations {
             if let Some((_, compiled)) = self.lookup_compiled_annotation(ann) {
+                // ADR-009 C3 #14 (slice 5, S5b): the MODULE-target sibling of
+                // the type-seam rejection above (`execute_struct_comptime_
+                // handlers`) — this seam never runs the sugar post handler
+                // (measured silent no-op, probe P-NFT-mod).
+                if compiled.sugar_post_handler.is_some() {
+                    return Err(ShapeError::SemanticError {
+                        message: crate::compiler::statements::annotation_declarations::
+                            sugar_lowering::non_function_target_application_rejection(
+                                &ann.name,
+                                "module",
+                                module_path,
+                            ),
+                        location: Some(self.span_to_source_location(ann.span)),
+                    });
+                }
                 let handlers = [
                     compiled.comptime_pre_handler,
                     compiled.comptime_post_handler,

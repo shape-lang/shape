@@ -636,17 +636,14 @@ annotation hookann() {{
 
     // C3-G8: install on a GENERIC target is a named rejection — target name
     // + generic signature + the #59 re-arm cite + the concrete-target
-    // positive twin — and no row lands. MEASURED REACH (disclosed): in a
-    // single-module unit both pre-passes run BEFORE function registration,
-    // so the body-fn rewrite defers every install handler to pass-2, and
-    // pass-2 skips a generic def's body compile — the generic target's
-    // handler therefore runs ONLY on the monomorphized specialization at a
-    // CALL SITE (annotations survive substitution), where the seam's
-    // specialization-origin twin fires naming the ORIGINAL generic
-    // signature. (On graph-compiled units with an imported annotation +
-    // body fn the pre-pass consumer arm fires the same sentence earlier;
-    // an UNCALLED generic target in a single-module unit stays a silent
-    // no-op — surfaced in the stage report for supervisor disposition.)
+    // positive twin — and no row lands. REACH UPDATE (S5b): the STATIC
+    // application-site arm (`reject_template_engaging_annotation_on_
+    // generic_target`, functions_annotations.rs) now fires FIRST at the
+    // signature-directive pre-pass — per `@application`, before any handler
+    // execution — closing the S2b residual (an UNCALLED generic target in a
+    // single-module unit was a SILENT no-op; probe P-G8b, slice-5 report).
+    // The dynamic sites (the pre-pass directive arm + this seam's two
+    // twins) remain as layered backstops.
     #[test]
     fn generic_target_install_rejects_with_the_g8_sentence() {
         let compiler = expect_compile_reject(
@@ -665,6 +662,305 @@ annotation hookann() {{
         assert!(
             compiler.hook_install_registry.is_empty(),
             "a rejected install leaves no registry row"
+        );
+    }
+
+    // ═══ ADR-009 C3 #14 (slice 5, S5b) — THE STATIC C3-G8 ARM ═══
+    //
+    // The S2b supervisor obligation closed: a @application of a
+    // template-engaging annotation on a generic target rejects STATICALLY at
+    // the application site, with NO reliance on the target being called and
+    // NO handler-run dependence — through both the sugar path (the
+    // sugar_matrix pin) and the API path (here). Pre-fix measurements
+    // (probe wave, slice-5 report §S5b): P-G8b (API direct, uncalled
+    // generic) compiled and ran SILENTLY with zero registry rows; P-G8d
+    // (value-position `let f = before_hook`) likewise. The pins below are
+    // the closed holes; the neuter refuter is recorded in the report.
+
+    /// Span-asserting compile (the weave.rs S5a harness shape: source_text
+    /// gives real span→line mapping).
+    fn expect_semantic_error_with_line(
+        src: &str,
+    ) -> (
+        String,
+        Option<shape_ast::error::SourceLocation>,
+        crate::compiler::BytecodeCompiler,
+    ) {
+        let program = shape_ast::parse_program(src).expect("fixture parses");
+        let mut compiler = crate::compiler::BytecodeCompiler::new();
+        compiler.source_text = Some(src.to_string());
+        let result = compiler.compile_in_place(&program);
+        match result.expect_err("fixture must reject") {
+            ShapeError::SemanticError { message, location } => (message, location, compiler),
+            other => panic!("expected a SemanticError, got: {other}"),
+        }
+    }
+
+    // THE HEADLINE (pin ii): an API-path installing annotation on an
+    // UNCALLED generic target in a single-module unit — measured SILENT
+    // pre-fix (P-G8b: `compiles, run=Ok(Some(7)), registry_rows=0`) — now
+    // rejects with the byte-unchanged G8 sentence (the ONE producer),
+    // anchored at the `@application` line, zero registry rows.
+    #[test]
+    fn s5b_static_g8_api_install_on_uncalled_generic_rejects_at_the_application_site() {
+        let src = r#"
+fn my_before(x: int) -> int { return x + 1 }
+
+annotation hookann() {
+  targets: [function]
+  comptime post(target, ctx) {
+    install(before_hook(my_before, []))
+  }
+}
+
+@hookann()
+fn victim<T>(x: T) -> T { return x }
+
+7
+"#;
+        let (message, location, compiler) = expect_semantic_error_with_line(src);
+        for needle in [
+            "cannot install hook template `my_before` (via @hookann) on `victim`",
+            "fn victim<T>(x: T) -> T",
+            "withdrawn until #59 (the monomorphization-origin re-arm)",
+            "apply @hookann to a concrete function",
+        ] {
+            assert!(
+                message.contains(needle),
+                "the G8 sentence must fire statically on the UNCALLED generic; \
+                 missing {needle:?}: {message}"
+            );
+        }
+        let location = location.expect("the rejection carries the @application span");
+        let application_line = src
+            .lines()
+            .position(|line| line.starts_with("@hookann"))
+            .expect("fixture has the application line")
+            + 1;
+        assert_eq!(
+            location.line, application_line,
+            "the static arm anchors at the @application site"
+        );
+        assert!(
+            compiler.hook_install_registry.is_empty(),
+            "a rejected install leaves no registry row"
+        );
+    }
+
+    // Pin (iii): helper-mediated install — the handler calls a module helper
+    // whose body installs; the static scan's transitive closure (authorized
+    // helpers + the AST-side syntactic table) sees through the indirection.
+    // DISCLOSED behavior change on the GENERIC target only: pre-fix this
+    // fixture failed LOUD-BUT-BLAND at the helper's own pass-2 compile
+    // (P-G8c: `Undefined function: 'before_hook'` — module fns cannot spell
+    // the comptime forwarders); the named G8 sentence now preempts it at the
+    // @application site.
+    #[test]
+    fn s5b_static_g8_helper_mediated_install_on_uncalled_generic_rejects() {
+        let compiler = expect_compile_reject(
+            r#"
+fn my_before(x: int) -> int { return x + 1 }
+
+fn do_install() {
+  install(before_hook(my_before, []))
+}
+
+annotation hookann() {
+  targets: [function]
+  comptime post(target, ctx) {
+    do_install()
+  }
+}
+
+@hookann()
+fn victim<T>(x: T) -> T { return x }
+
+7
+"#,
+            &[
+                "cannot install hook template `my_before` (via @hookann) on `victim`",
+                "fn victim<T>(x: T) -> T",
+                "withdrawn until #59 (the monomorphization-origin re-arm)",
+            ],
+        );
+        assert!(compiler.hook_install_registry.is_empty());
+    }
+
+    // Pin (iii) CONTROL: the same helper-mediated shape on a CONCRETE
+    // target keeps the PRE-EXISTING loud failure byte-unchanged (the static
+    // arm keys on `type_params` and never touches concrete targets).
+    #[test]
+    fn s5b_static_g8_helper_mediated_concrete_control_keeps_the_preexisting_loud_error() {
+        expect_compile_reject(
+            r#"
+fn my_before(x: int) -> int { return x + 1 }
+
+fn do_install() {
+  install(before_hook(my_before, []))
+}
+
+annotation hookann() {
+  targets: [function]
+  comptime post(target, ctx) {
+    do_install()
+  }
+}
+
+@hookann()
+fn victim(x: int) -> int { return x }
+
+victim(7)
+"#,
+            &["Undefined function: 'before_hook'"],
+        );
+    }
+
+    // Pin (iv): a VALUE-position install-family reference cannot dodge the
+    // scan — `let f = before_hook; install(f(...))` on an uncalled generic
+    // was SILENT pre-fix (P-G8d). The hint falls back to the established
+    // `<template>` placeholder (no hook-constructor call-shape to name).
+    #[test]
+    fn s5b_static_g8_value_position_reference_on_uncalled_generic_rejects() {
+        let compiler = expect_compile_reject(
+            r#"
+fn my_before(x: int) -> int { return x + 1 }
+
+annotation hookann() {
+  targets: [function]
+  comptime post(target, ctx) {
+    let f = before_hook
+    install(f(my_before, []))
+  }
+}
+
+@hookann()
+fn victim<T>(x: T) -> T { return x }
+
+7
+"#,
+            &[
+                "cannot install hook template `<template>` (via @hookann) on `victim`",
+                "withdrawn until #59 (the monomorphization-origin re-arm)",
+            ],
+        );
+        assert!(compiler.hook_install_registry.is_empty());
+    }
+
+    // Pin (iv) isolation: the VALUE-position arm ALONE engages — a handler
+    // whose ONLY `install` reference is `let f = install` (no call
+    // anywhere) still classifies template-engaging. Without the S5b marked
+    // value arm in the shared collector this fixture compiles silently.
+    #[test]
+    fn s5b_static_g8_value_position_reference_alone_engages_the_scan() {
+        let compiler = expect_compile_reject(
+            r#"
+annotation hookann() {
+  targets: [function]
+  comptime post(target, ctx) {
+    let f = install
+  }
+}
+
+@hookann()
+fn victim<T>(x: T) -> T { return x }
+
+7
+"#,
+            &[
+                "cannot install hook template `<template>` (via @hookann) on `victim`",
+                "apply @hookann to a concrete function",
+            ],
+        );
+        assert!(compiler.hook_install_registry.is_empty());
+    }
+
+    // ENGAGEMENT-KEY CONTROL: a CONSTRUCT-only handler (`before_hook`
+    // handles built, nothing installed) on a generic target is NOT
+    // template-engaging — C3-G8 withdraws INSTALLS; construction is legal
+    // load-bearing machinery (the F5 store-lifecycle refuter class below,
+    // `nested_handler_run_during_processing_does_not_shift_install_handles`,
+    // annotates a polymorphic template body fn exactly so).
+    #[test]
+    fn s5b_static_g8_construct_only_handler_on_generic_stays_green() {
+        let compiler = compiled_ok(
+            r#"
+fn h_noise(x: int) -> int { return x + 40 }
+
+annotation noise() {
+  targets: [function]
+  comptime post(target, ctx) {
+    let a = before_hook(h_noise, [])
+  }
+}
+
+@noise()
+fn tmpl<Args>(args: Args) -> Args { return args }
+
+7
+"#,
+        );
+        assert!(
+            compiler.hook_install_registry.is_empty(),
+            "a construct-only handler installs nothing"
+        );
+    }
+
+    // Pin (v): the concrete-target twin — the SAME API-path annotation on an
+    // UNCALLED CONCRETE fn compiles and installs (P-CONC-unc measured one
+    // registry row; concrete pass-2 body compile runs regardless of
+    // calledness). The static arm's `type_params` key never brushes it.
+    #[test]
+    fn s5b_static_g8_uncalled_concrete_twin_still_installs() {
+        let compiler = compiled_ok(&hook_source(
+            "fn my_before(x: int) -> int { return x + 1 }",
+            "install(before_hook(my_before, []))",
+            "@hookann()\nfn victim(x: int) -> int { return x }\n\n7",
+        ));
+        assert_eq!(
+            compiler.hook_install_registry.len(),
+            1,
+            "the uncalled CONCRETE target still installs"
+        );
+        assert_eq!(compiler.hook_install_registry[0].target_name, "victim");
+    }
+
+    // Pin (vi) CONTROL: a LEGACY-weave annotation (declarative hooks, no
+    // typed config, no install-family references) on a generic target keeps
+    // today's behavior until S6 — the S0 g1/g4 accidental-working class
+    // (P-LEGGEN measured 10 = 5*2 through the legacy homogeneous-args
+    // weave). The C3-G11 defections.md entry names this class's deliberate
+    // withdrawal AT S6, not before.
+    #[test]
+    fn s5b_static_g8_legacy_weave_on_generic_control_keeps_working() {
+        let compiler = compiled_ok(
+            r#"
+annotation dbl() {
+  targets: [function]
+  before(args, ctx) {
+    [args[0] * 2]
+  }
+}
+
+@dbl()
+fn id<T>(x: T) -> T { return x }
+
+id(5)
+"#,
+        );
+        let mut vm = VirtualMachine::new(VMConfig::default());
+        vm.load_program(compiler.program.clone());
+        let value = vm
+            .execute(None)
+            .expect("program executes")
+            .as_i64()
+            .expect("top-level int");
+        assert_eq!(
+            value, 10,
+            "the legacy accidental-working class stays working until S6 (skip => 5)"
+        );
+        assert!(
+            compiler.hook_install_registry.is_empty(),
+            "the legacy weave never lands template-registry rows"
         );
     }
 

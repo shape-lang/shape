@@ -35,6 +35,13 @@ use handler_resolution::{ComptimeAnnotationHandlers, ComptimeHandlerHelperAuthor
 mod original_body_shadow;
 use original_body_shadow::{PendingOriginalBodyShadow, canonical_original_callable};
 
+/// ADR-009 C3 #14 (slice 5, S5b): the unspellable mark under which the shared
+/// scoped-name collector records a VALUE-position install-family reference
+/// (`let f = before_hook`) for the static C3-G8 scan. SOH-prefixed so it can
+/// NEVER resolve in any fn table — helper collection sees a lookup miss and
+/// skips it, byte-equivalent to the pre-S5b behavior.
+const INSTALL_FAMILY_VALUE_MARK: &str = "\u{1}install-family-value:";
+
 #[cfg(test)]
 #[path = "functions_annotations/imported_handler_resolution_tests.rs"]
 mod imported_handler_resolution_tests;
@@ -301,6 +308,13 @@ impl BytecodeCompiler {
             .unwrap_or("")
             .to_string();
 
+        // ADR-009 C3 #14 (slice 5, S5b): the syntactic fn table for the
+        // static C3-G8 scan — collected ONCE per pre-pass run, from the same
+        // analysis items the handler_map ingested (scan-only; see
+        // `collect_pre_pass_ast_function_defs`).
+        let mut ast_fn_defs = HashMap::new();
+        Self::collect_pre_pass_ast_function_defs(&program.items, None, &mut ast_fn_defs);
+
         Self::apply_function_comptime_signature_directives_to_items(
             self,
             &handler_map,
@@ -309,10 +323,12 @@ impl BytecodeCompiler {
             &known_type_symbols,
             &ctx_module_path,
             &ctx_file,
+            &ast_fn_defs,
             &mut program.items,
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn apply_function_comptime_signature_directives_to_items(
         compiler: &mut BytecodeCompiler,
         handler_map: &HashMap<String, ComptimeAnnotationHandlers>,
@@ -321,6 +337,7 @@ impl BytecodeCompiler {
         known_type_symbols: &HashSet<String>,
         ctx_module_path: &str,
         ctx_file: &str,
+        ast_fn_defs: &HashMap<String, FunctionDef>,
         items: &mut [shape_ast::ast::Item],
     ) -> Result<()> {
         use shape_ast::ast::{ExportItem, Item};
@@ -335,6 +352,7 @@ impl BytecodeCompiler {
                         known_type_symbols,
                         ctx_module_path,
                         ctx_file,
+                        ast_fn_defs,
                         func,
                     )?;
                 }
@@ -347,6 +365,7 @@ impl BytecodeCompiler {
                             known_type_symbols,
                             ctx_module_path,
                             ctx_file,
+                            ast_fn_defs,
                             func,
                         )?;
                     }
@@ -368,6 +387,7 @@ impl BytecodeCompiler {
                                 known_type_symbols,
                                 &module_path,
                                 ctx_file,
+                                ast_fn_defs,
                                 &mut module.items,
                             )
                         },
@@ -560,6 +580,320 @@ impl BytecodeCompiler {
         }
     }
 
+    /// ADR-009 C3 #14 (slice 5, S5b) — THE STATIC C3-G8 ARM.
+    ///
+    /// The measured hole (S5b probe P-G8b, recorded in c3-slice5-report.md):
+    /// an API-path installing annotation on an UNCALLED generic target in a
+    /// single-module unit was a SILENT NO-OP — the pre-pass handler run fails
+    /// (body-fn lookup precedes function registration there), the
+    /// `[comptime error]`-filtered swallow defers to pass-2, and pass-2 skips
+    /// a generic def's body compile entirely, so no consumer ever observed
+    /// the install. This check is STATIC: it keys on the target's
+    /// `type_params` and a SYNTACTIC template-engagement classification of
+    /// the resolved annotation entry — NO handler-run dependence — and fires
+    /// at the `@application` span through the EXISTING ONE C3-G8 sentence
+    /// producer (`generic_target_install_rejection_message`, wording
+    /// byte-unchanged). The three dynamic firing sites (the pre-pass
+    /// directive arm + the two `apply_install_hook_template` twins) REMAIN
+    /// as layered backstops.
+    ///
+    /// Concrete targets are untouched (the `type_params` key). LEGACY-weave
+    /// annotations (declarative hooks, no typed config, no install-family
+    /// references in their comptime handlers) are NOT template-engaging —
+    /// the S0 g1/g2/g4/g5 accidental-working class keeps working until S6
+    /// (deliberate; the C3-G11 defections.md entry covers it).
+    fn reject_template_engaging_annotation_on_generic_target(
+        &self,
+        ann: &shape_ast::ast::Annotation,
+        entry: &ComptimeAnnotationHandlers,
+        func_def: &FunctionDef,
+        ctx_module_path: &str,
+        ast_fn_defs: &HashMap<String, FunctionDef>,
+    ) -> Result<()> {
+        if !func_def
+            .type_params
+            .as_ref()
+            .is_some_and(|params| !params.is_empty())
+        {
+            return Ok(());
+        }
+        let Some(body_fn_hint) =
+            self.template_engaging_install_reference(entry, ctx_module_path, ast_fn_defs)
+        else {
+            return Ok(());
+        };
+        Err(ShapeError::SemanticError {
+            message: super::template_specialization::install_registry::
+                generic_target_install_rejection_message(&body_fn_hint, &ann.name, func_def),
+            location: Some(self.span_to_source_location(ann.span)),
+        })
+    }
+
+    /// The STATIC template-engagement classification (conservative,
+    /// syntactic — the Lens-2 F4 conservative-set precedent: an
+    /// over-approximation is only ever the LOUD C3-G8 rejection, never a
+    /// silent accept). An entry is template-engaging iff:
+    ///
+    /// (a) sugar path — its `sugar_body_fns` is non-empty (a
+    ///     TypedConfig-with-hooks definition's synthesized install handler
+    ///     exists by construction); the hint is the first minted body fn
+    ///     (the same name the dynamic directive arm renders); OR
+    /// (b) API path — a syntactic scan of its comptime handler bodies AND
+    ///     their transitive comptime helpers finds the `install` name in
+    ///     CALL-NAME or VALUE position — value position included so
+    ///     `let f = install; f(t)` cannot dodge the scan (S5b probe P-G8d
+    ///     measured the value-position dodge silent on a generic target).
+    ///     ENGAGEMENT keys on `install` ONLY (the sole installer — the
+    ///     other family names `before_hook`/`after_hook`/`*_nocapture`
+    ///     CONSTRUCT template handles and cannot install anything): C3-G8
+    ///     withdraws INSTALLS on generic targets, and a construct-only
+    ///     handler on a generic target is legal load-bearing machinery
+    ///     (the fix-round-1 F5 store-lifecycle refuter annotates a
+    ///     polymorphic template BODY fn with a handler that pushes two
+    ///     templates and installs nothing — measured-green baseline pin
+    ///     `nested_handler_run_during_processing_does_not_shift_install_
+    ///     handles`; a five-name key rejected it, disclosed in the slice-5
+    ///     report). The constructor names still feed the body-fn HINT.
+    ///
+    /// Helper transitivity: `collect_authorized_comptime_helpers` IS
+    /// worklist-transitive over `self.function_defs`, and is reused verbatim
+    /// — but in a single-module unit BOTH pre-passes run before function
+    /// registration (the S2b measured reach), so the registered table is
+    /// empty exactly where the uncalled-generic hole lives. The scan
+    /// therefore ALSO closes over `ast_fn_defs`, the SYNTACTIC fn table
+    /// collected from the analysis program's own items (bare +
+    /// module-qualified names) — a disclosed S5b addition, scan-only (never
+    /// an execution surface).
+    ///
+    /// The hint is the first hook-constructor's first argument when it is a
+    /// bare identifier (`before_hook(my_before, …)` → `my_before` — the
+    /// name the dynamic pass-2 seam would have rendered); otherwise the
+    /// established `"<template>"` placeholder (the directive-arm precedent).
+    /// Best-effort ONLY for the hint; engagement never depends on it.
+    fn template_engaging_install_reference(
+        &self,
+        entry: &ComptimeAnnotationHandlers,
+        ctx_module_path: &str,
+        ast_fn_defs: &HashMap<String, FunctionDef>,
+    ) -> Option<String> {
+        if let Some(first) = entry.sugar_body_fns.first() {
+            return Some(first.name.clone());
+        }
+        let handler_module_path = entry
+            .defining_module_path
+            .as_deref()
+            .unwrap_or(ctx_module_path);
+        let mut engaged = false;
+        let mut hint: Option<String> = None;
+        let mut pending: Vec<String> = Vec::new();
+        let absorb = |names: HashSet<String>, pending: &mut Vec<String>, engaged: &mut bool| {
+            for name in names {
+                if Self::scoped_name_engages_install(&name) {
+                    *engaged = true;
+                }
+                pending.push(name);
+            }
+        };
+        for handler in &entry.handlers {
+            let mut seeds = HashSet::new();
+            Self::collect_scoped_names_in_expr(&handler.body, &mut seeds);
+            absorb(seeds, &mut pending, &mut engaged);
+            if hint.is_none() {
+                hint = Self::hook_constructor_hint_in_expr(&handler.body);
+            }
+            // (reused, transitive) — the authoritative registered-table
+            // closure, exactly what handler execution would authorize.
+            for helper in
+                self.collect_authorized_comptime_helpers(&handler.body, entry.helper_authority())
+            {
+                for statement in &helper.body {
+                    let mut nested = HashSet::new();
+                    Self::collect_scoped_names_in_statement(statement, &mut nested);
+                    absorb(nested, &mut pending, &mut engaged);
+                    if hint.is_none() {
+                        hint = Self::hook_constructor_hint_in_statement(statement);
+                    }
+                }
+            }
+        }
+        // The AST-side syntactic closure (pre-registration complement).
+        let mut visited: HashSet<String> = HashSet::new();
+        while let Some(name) = pending.pop() {
+            if !visited.insert(name.clone()) {
+                continue;
+            }
+            let definition = ast_fn_defs.get(&name).or_else(|| {
+                ast_fn_defs.get(&Self::qualify_module_symbol(handler_module_path, &name))
+            });
+            let Some(definition) = definition else {
+                continue;
+            };
+            for statement in &definition.body {
+                let mut nested = HashSet::new();
+                Self::collect_scoped_names_in_statement(statement, &mut nested);
+                absorb(nested, &mut pending, &mut engaged);
+                if hint.is_none() {
+                    hint = Self::hook_constructor_hint_in_statement(statement);
+                }
+            }
+        }
+        engaged.then(|| hint.unwrap_or_else(|| "<template>".to_string()))
+    }
+
+    /// The ENGAGEMENT test over ONE collected scoped name (S5b static
+    /// C3-G8): the `install` name — the sole installer — matched bare, as
+    /// the last `::` segment of a qualified call name, or under the
+    /// [`INSTALL_FAMILY_VALUE_MARK`] the shared collector stamps on
+    /// VALUE-position references. Within the install key,
+    /// over-approximation (e.g. a user fn spelled `install` referenced from
+    /// a handler) is only ever the LOUD C3-G8 rejection (the Lens-2 F4
+    /// conservative-set precedent); the constructor family names do NOT
+    /// engage (see `template_engaging_install_reference`).
+    fn scoped_name_engages_install(name: &str) -> bool {
+        if let Some(marked) = name.strip_prefix(INSTALL_FAMILY_VALUE_MARK) {
+            return marked == "install";
+        }
+        let last = name.rsplit("::").next().unwrap_or(name);
+        last == "install"
+    }
+
+    /// The five install-family spellings (`comptime.rs` forwarder rows; the
+    /// SOH-prefixed nocapture forwarders are unspellable, so their PLAIN
+    /// builtin names are the reachable surface). Used by the shared
+    /// collector's VALUE-position mark arm; ENGAGEMENT itself keys on
+    /// `install` only (`scoped_name_engages_install`).
+    fn is_install_family_name(name: &str) -> bool {
+        matches!(
+            name,
+            "install"
+                | "before_hook"
+                | "after_hook"
+                | "before_hook_nocapture"
+                | "after_hook_nocapture"
+        )
+    }
+
+    /// Best-effort body-fn HINT for the static C3-G8 sentence: the first
+    /// hook-constructor call whose first argument is a bare identifier
+    /// (`before_hook(my_before, …)` → `my_before`). Covers the realistic
+    /// handler spellings (block/expression statements, let-initializers,
+    /// nested call arguments, if/else branches); anything more exotic falls
+    /// back to `"<template>"` at the caller — the hint can be less specific,
+    /// never wrong, and ENGAGEMENT never depends on it.
+    fn hook_constructor_hint_in_expr(expr: &Expr) -> Option<String> {
+        match expr {
+            Expr::FunctionCall { name, args, .. } => {
+                if matches!(name.as_str(), "before_hook" | "after_hook") {
+                    if let Some(Expr::Identifier(body_fn, _)) = args.first() {
+                        return Some(body_fn.clone());
+                    }
+                }
+                args.iter().find_map(Self::hook_constructor_hint_in_expr)
+            }
+            Expr::QualifiedFunctionCall { function, args, .. } => {
+                if matches!(function.as_str(), "before_hook" | "after_hook") {
+                    if let Some(Expr::Identifier(body_fn, _)) = args.first() {
+                        return Some(body_fn.clone());
+                    }
+                }
+                args.iter().find_map(Self::hook_constructor_hint_in_expr)
+            }
+            Expr::Block(block, _) => block.items.iter().find_map(|item| match item {
+                shape_ast::ast::BlockItem::VariableDecl(decl) => decl
+                    .value
+                    .as_ref()
+                    .and_then(Self::hook_constructor_hint_in_expr),
+                shape_ast::ast::BlockItem::Assignment(assign) => {
+                    Self::hook_constructor_hint_in_expr(&assign.value)
+                }
+                shape_ast::ast::BlockItem::Statement(statement) => {
+                    Self::hook_constructor_hint_in_statement(statement)
+                }
+                shape_ast::ast::BlockItem::Expression(expr) => {
+                    Self::hook_constructor_hint_in_expr(expr)
+                }
+            }),
+            Expr::If(if_expr, _) => Self::hook_constructor_hint_in_expr(&if_expr.then_branch)
+                .or_else(|| {
+                    if_expr
+                        .else_branch
+                        .as_deref()
+                        .and_then(Self::hook_constructor_hint_in_expr)
+                }),
+            _ => None,
+        }
+    }
+
+    fn hook_constructor_hint_in_statement(statement: &Statement) -> Option<String> {
+        match statement {
+            Statement::Expression(expr, _) | Statement::Return(Some(expr), _) => {
+                Self::hook_constructor_hint_in_expr(expr)
+            }
+            Statement::VariableDecl(decl, _) => decl
+                .value
+                .as_ref()
+                .and_then(Self::hook_constructor_hint_in_expr),
+            Statement::Assignment(assign, _) => {
+                Self::hook_constructor_hint_in_expr(&assign.value)
+            }
+            Statement::If(if_stmt, _) => if_stmt
+                .then_body
+                .iter()
+                .find_map(Self::hook_constructor_hint_in_statement)
+                .or_else(|| {
+                    if_stmt.else_body.as_ref().and_then(|body| {
+                        body.iter()
+                            .find_map(Self::hook_constructor_hint_in_statement)
+                    })
+                }),
+            _ => None,
+        }
+    }
+
+    /// Collect the analysis program's fn definitions into a SYNTACTIC name
+    /// table for the static C3-G8 scan (S5b): top-level + `export` fns under
+    /// their bare names, module fns under their qualified names, recursively.
+    /// Scan-only — never consulted for execution or registration.
+    fn collect_pre_pass_ast_function_defs(
+        items: &[shape_ast::ast::Item],
+        module_path: Option<&str>,
+        table: &mut HashMap<String, FunctionDef>,
+    ) {
+        use shape_ast::ast::{ExportItem, Item};
+        for item in items {
+            match item {
+                Item::Function(func, _) => {
+                    let name = match module_path {
+                        Some(module) => Self::qualify_module_symbol(module, &func.name),
+                        None => func.name.clone(),
+                    };
+                    table.entry(name).or_insert_with(|| func.clone());
+                }
+                Item::Export(export, _) => {
+                    if let ExportItem::Function(func) = &export.item {
+                        let name = match module_path {
+                            Some(module) => Self::qualify_module_symbol(module, &func.name),
+                            None => func.name.clone(),
+                        };
+                        table.entry(name).or_insert_with(|| func.clone());
+                    }
+                }
+                Item::Module(module, _) => {
+                    let nested = match module_path {
+                        Some(parent) => Self::qualify_module_symbol(parent, &module.name),
+                        None => module.name.clone(),
+                    };
+                    Self::collect_pre_pass_ast_function_defs(
+                        &module.items,
+                        Some(&nested),
+                        table,
+                    );
+                }
+                _ => {}
+            }
+        }
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn apply_function_comptime_signature_directives_to_function(
         &mut self,
@@ -569,11 +903,32 @@ impl BytecodeCompiler {
         known_type_symbols: &HashSet<String>,
         ctx_module_path: &str,
         ctx_file: &str,
+        ast_fn_defs: &HashMap<String, FunctionDef>,
         func_def: &mut FunctionDef,
     ) -> Result<()> {
         use shape_ast::ast::AnnotationHandlerType;
 
         let annotations = func_def.annotations.clone();
+        // ADR-009 C3 #14 (slice 5, S5b): the static C3-G8 arm fires FIRST —
+        // per `@application`, before any handler execution, with no
+        // handler-run dependence (see the arm's doc). Resolution here is a
+        // pure map lookup, never execution.
+        for ann in &annotations {
+            let Some((_, entry)) = self.resolve_comptime_annotation_handlers(
+                handler_map,
+                ann,
+                (!ctx_module_path.is_empty()).then_some(ctx_module_path),
+            ) else {
+                continue;
+            };
+            self.reject_template_engaging_annotation_on_generic_target(
+                ann,
+                entry,
+                func_def,
+                ctx_module_path,
+                ast_fn_defs,
+            )?;
+        }
         let phases = [
             AnnotationHandlerType::ComptimePre,
             AnnotationHandlerType::ComptimePost,
@@ -2091,6 +2446,16 @@ impl BytecodeCompiler {
                         Self::collect_scoped_names_in_expr(elem, names);
                     }
                 }
+            }
+            // ADR-009 C3 #14 (slice 5, S5b): a VALUE-position install-family
+            // reference (`let f = before_hook`) is recorded under the
+            // unspellable [`INSTALL_FAMILY_VALUE_MARK`] so the static C3-G8
+            // scan sees it (P-G8d measured that shape SILENT on a generic
+            // target). The mark can never resolve in any fn table, so
+            // helper collection is byte-equivalent to before; every OTHER
+            // identifier stays uncollected (the pre-S5b leaf behavior).
+            Expr::Identifier(name, _) if Self::is_install_family_name(name) => {
+                names.insert(format!("{INSTALL_FAMILY_VALUE_MARK}{name}"));
             }
             Expr::Literal(..)
             | Expr::Identifier(..)
