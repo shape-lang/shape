@@ -297,10 +297,10 @@ NOT fire in this stage's final sweep.
 | ctx/HookDecision/@remote/foreign-target hooks + the 21-test `#[ignore]` acceptance suite + the 3 @remote W9 import rows | #68 / E4 #20 |
 | Book full-universe enablement (10 untyped-config fences on 4 pages + everything else outside annotations.mdx) | #23 (F1) |
 | Aggregate inline-Object MirToIR field-layout proof (cell 5 loud-flip pin) | #70 |
-| Zero-param observer W36 return-kind deopt (§9.1) | needs issue/disposition |
+| Zero-param observer W36 return-kind deopt (§9.1) | issue #69/disposition |
 | Diagnostic-tier SOH mint rendering (§9.2) | needs disposition |
 | Comptime-only annotations silent on foreign targets (probe C) | supervisor disposition (§3) |
-| C0902 provenance drop (2 `#[ignore]`'d reference-provenance pins) | needs issue (S6 report §6.6) |
+| C0902 provenance drop (2 `#[ignore]`'d reference-provenance pins) | issue #69 (S6 report §6.6) |
 | `scoped_contract_snapshot_requires_explicit_import` red | pre-existing main-merge (stash-differential-proven) |
 | String scalar-method whole-program deopt | STAGE-StringJIT (pre-existing, untouched) |
 | Async range-iterator `op_iter_done` SURFACE inside async fns | pre-existing async-lowering surface (§2.2) |

@@ -11,9 +11,9 @@
 //! taught the S2c guard PROVABLE-INITIALIZER LOCALS, so
 //! `before_hook_swaps_arguments` is now rewritten typed (the hoisted-local
 //! exchange spelling the A-phase surfaced as guard-blocked). Remaining
-//! legacy spelling (1): `before_hook_passes_ctx_info` — E4-blocked per the
-//! ratified S2-F3 disposition row (the typed surface has no `ctx` by
-//! design); stays as retained legacy coverage pending its ruling. Fixlet
+//! legacy spelling: none — `before_hook_passes_ctx_info` was RETIRED at the
+//! S6 capstone per C3-G14 A-prime (tombstone below; ctx re-arrives with E4's
+//! typed protocol — issue #68). Fixlet
 //! round 2 adds the before-side F1 `?`-exit MUST-REJECT pin (measured
 //! silent corruption of the woven call on the round-1 state). Fixlet
 //! round 3 (F3, the before-side exit gate) adds the sugar MUST-REJECT pins

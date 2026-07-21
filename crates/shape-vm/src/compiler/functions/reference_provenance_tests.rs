@@ -476,7 +476,7 @@ fn assert_explicit_reference_is_c0902(
 // shadow re-registration is its own workstream; the ReplaceBody route (no
 // runtime weave) still passes below.
 #[test]
-#[ignore = "S6-completion finding: weave impl shadow drops inferred pass-mode provenance for stamped declared-capture closures (C0902) — needs shadow provenance threading (slice-6 report)"]
+#[ignore = "issue #69: weave impl shadow drops inferred pass-mode provenance for stamped declared-capture closures (C0902) — needs shadow provenance threading"]
 fn single_runtime_annotation_preserves_shared_reference_provenance() {
     assert_inferred_reference_is_not_true_reference(
         AnnotationRoute::SingleRuntime,
@@ -496,7 +496,7 @@ fn single_runtime_annotation_preserves_shared_reference_provenance() {
 }
 
 #[test]
-#[ignore = "S6-completion finding: weave impl shadow drops inferred pass-mode provenance for stamped declared-capture closures (C0902) — needs shadow provenance threading (slice-6 report)"]
+#[ignore = "issue #69: weave impl shadow drops inferred pass-mode provenance for stamped declared-capture closures (C0902) — needs shadow provenance threading"]
 fn chained_runtime_annotations_preserve_exclusive_reference_provenance() {
     assert_inferred_reference_is_not_true_reference(
         AnnotationRoute::ChainedRuntime,
