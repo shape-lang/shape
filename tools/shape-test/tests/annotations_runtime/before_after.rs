@@ -10,6 +10,12 @@
 //! `before()` / `after()` observers, `before(args)` / `after(result)` hooks,
 //! and the r2/r9-proven public-API spelling for the zero-param definition.
 //! Asserted outputs are byte-identical to the legacy versions.
+//!
+//! C3-S6 A-phase status: `ctx_target_calls_original_impl_from_after_hook`
+//! remains the ONLY legacy spelling in this file — E4-blocked per the
+//! ratified S2-F3 disposition row (`ctx.target` has no typed spelling; the
+//! surface @remote hard-depends on); it stays as retained legacy coverage
+//! until the user ruling the F3 row mandates.
 
 use shape_test::shape_test::ShapeTest;
 

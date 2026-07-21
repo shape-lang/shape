@@ -4,12 +4,15 @@
 //! conditional result transformation, and composition of wrapping annotations.
 //!
 //! C3-S5c pin-rewrite wave 1: six pins rewritten IN PLACE onto the typed
-//! surface (asserted outputs byte-identical). S6-ONLY remainder:
-//! `after_hook_wraps_result_in_string` (F4 RULED withdrawal — int->string is
-//! inexpressible on the typed `(R) -> R` after surface; S6 carries the dated
-//! disposition) and `stacked_after_hooks_transform_result_in_order` (legacy
-//! chain-order coverage; per the F2 ledger its value 12 survives a future
-//! rewrite).
+//! surface (asserted outputs byte-identical). C3-S6 A-phase wave:
+//! `stacked_after_hooks_transform_result_in_order` rewritten typed (the F2
+//! onion preserves the asserted value 12). Remaining legacy spelling (1):
+//! `after_hook_wraps_result_in_string` — the planned F4 rejection-pin
+//! conversion is BLOCKED on the surfaced after-return soundness gap (the
+//! polymorphic `after(result)` sugar path does not check the body's actual
+//! return type against the bound `(R) -> R`; a type-changing body leaks a
+//! heap pointer as the scalar result). Stays as retained legacy coverage
+//! pending supervisor disposition.
 
 use shape_test::shape_test::ShapeTest;
 
@@ -36,6 +39,17 @@ print(r)
     .expect_output_contains("30");
 }
 
+// C3-S6 A-phase PROBE FINDING (2026-07-21, surfaced — NOT converted): the
+// planned F4 rejection-pin conversion (typed `stringify(prefix: string)` +
+// `after(result) { f"{prefix}: {result}" }` on an int target, expecting the
+// per-specialization body-vs-Sig rejection) does NOT reject at HEAD — the
+// polymorphic `after(result)` sugar path never checks the body's ACTUAL
+// return type against the bound `(R) -> R`, the woven program runs, and the
+// string's HEAP POINTER prints as the int result (measured: `97366122325584`;
+// a bare `"xx"` return leaks the same way). SOUNDNESS HOLE surfaced for
+// supervisor disposition; the F4 dated withdrawal cannot execute until the
+// after-return gate exists, so this pin stays on the legacy spelling as
+// retained coverage.
 #[test]
 fn after_hook_wraps_result_in_string() {
     ShapeTest::new(
@@ -56,20 +70,24 @@ print(add(3, 4))
     .expect_output_contains("Result: 7");
 }
 
+// C3-S6 A-phase typed rewrite. The typed after-chain applies in REVERSE
+// application order (the S2-F2 onion: nearest-the-fn annotation innermost),
+// which reproduces the legacy inner-first order exactly — the asserted
+// value 12 is preserved by design (the F2 ledger).
 #[test]
 fn stacked_after_hooks_transform_result_in_order() {
     // Inner after fires first, outer after fires second
     ShapeTest::new(
         r#"
-annotation add_one(label) {
-  after(args, result, ctx) {
+annotation add_one(label: string) {
+  after(result) {
     print(f"[{label}] {result} + 1")
     result + 1
   }
 }
 
-annotation times_two(label) {
-  after(args, result, ctx) {
+annotation times_two(label: string) {
+  after(result) {
     print(f"[{label}] {result} * 2")
     result * 2
   }

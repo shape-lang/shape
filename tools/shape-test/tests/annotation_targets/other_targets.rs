@@ -3,27 +3,27 @@
 //! Covers: annotations on expressions, blocks, let bindings, modules.
 //! Most of these are TDD since not all target kinds are implemented.
 //!
-//! C3-S5c pin-rewrite wave 1: the two green fn-target pins
+//! C3-S5c pin-rewrite wave 1 rewrote the two green fn-target pins
 //! (`targets_declaration_function_on_function_works`,
-//! `annotation_on_module_item`) are rewritten onto the typed surface.
-//! The legacy-def target-validation rejection pins
-//! (`annotation_on_expression_is_rejected`, `annotation_on_let_binding`,
-//! `annotation_on_block_statement`, `targets_function_applied_to_type_errors`)
-//! stay on the legacy spelling as retained legacy coverage — trivial S6
-//! rewrites. The comptime pre/post pins are surface-class-independent
-//! (unaffected; new-path-for-free at S6's Legacy-arm deletion).
+//! `annotation_on_module_item`); the C3-S6 A-phase wave rewrote the four
+//! target-validation rejection pins (`annotation_on_expression_is_rejected`,
+//! `annotation_on_let_binding`, `annotation_on_block_statement`,
+//! `targets_function_applied_to_type_errors`) onto typed defs. The comptime
+//! pre/post pins are surface-class-independent (unaffected). No legacy
+//! spellings remain in this file.
 
 use shape_test::shape_test::ShapeTest;
 
 // TDD: annotation on expression is explicitly rejected (ct_07 in existing tests)
+// C3-S6 A-phase typed rewrite (observer `before()`; the rejection semantics
+// are the pin, not the hook body).
 #[test]
 fn annotation_on_expression_is_rejected() {
     ShapeTest::new(
         r#"
-annotation log_expr(label) {
-  before(args, ctx) {
+annotation log_expr(label: string) {
+  before() {
     print(f"[{label}] evaluating")
-    args
   }
 }
 
@@ -35,14 +35,14 @@ print(value)
 }
 
 // TDD: annotation on let binding parse error "expected something else, found identifier `print`"
+// C3-S6 A-phase typed rewrite (observer `before()`).
 #[test]
 fn annotation_on_let_binding() {
     ShapeTest::new(
         r#"
-annotation validate(label) {
-  before(args, ctx) {
+annotation validate(label: string) {
+  before() {
     print(f"[{label}] binding created")
-    args
   }
 }
 
@@ -55,18 +55,17 @@ print(x)
 }
 
 // Annotation on block statement is rejected with "cannot be applied to a block"
+// C3-S6 A-phase typed rewrite (observer pair).
 #[test]
 fn annotation_on_block_statement() {
     ShapeTest::new(
         r#"
-annotation timed(label) {
-  before(args, ctx) {
+annotation timed(label: string) {
+  before() {
     print(f"[{label}] block start")
-    args
   }
-  after(args, result, ctx) {
+  after() {
     print(f"[{label}] block end")
-    result
   }
 }
 
@@ -126,19 +125,21 @@ print(e.id_str())
 }
 
 // TDD: annotation target mismatch error not yet reported at compile time
+// C3-S6 A-phase typed rewrite: the def gains a typed config param (`tag`) so
+// it classifies TypedConfig; the pin's semantic — `targets: [function]`
+// applied to a type is a NAMED rejection mentioning targets — is unchanged.
 #[test]
 fn targets_function_applied_to_type_errors() {
     ShapeTest::new(
         r#"
-annotation fn_only() {
+annotation fn_only(tag: string) {
   targets: [function]
-  before(args, ctx) {
-    print("should not reach")
-    args
+  before() {
+    print(f"[{tag}] should not reach")
   }
 }
 
-@fn_only()
+@fn_only("t")
 type Wrong { x: int }
 
 print("after")

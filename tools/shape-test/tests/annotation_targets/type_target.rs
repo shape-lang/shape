@@ -192,11 +192,15 @@ print("enum annotation defined")
 }
 
 // TDD: annotations on trait definitions parse error "expected an expression, found identifier `trait`"
+// C3-S6 A-phase LEDGER CORRECTION: the S5c report listed this pin among the
+// 10 "unaffected", but `documented(desc)` declared an UNTYPED config param —
+// typed here (`desc: string`; the comptime handler ignores it) so the pin is
+// genuinely classification-independent.
 #[test]
 fn annotation_on_trait_definition() {
     ShapeTest::new(
         r#"
-annotation documented(desc) {
+annotation documented(desc: string) {
   targets: [type]
   comptime post(target, ctx) {
     // no-op, just metadata registration

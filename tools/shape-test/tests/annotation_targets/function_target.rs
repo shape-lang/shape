@@ -4,10 +4,11 @@
 //! various signatures, on recursive functions, on void functions, and
 //! on functions with the `targets: [function]` declaration.
 //!
-//! C3-S5c pin-rewrite wave 1: every pin except
-//! `annotation_on_multi_param_function` (F5 whole-args `{args}` boundary —
-//! S6-ONLY retained legacy coverage) is rewritten IN PLACE onto the typed
-//! surface with byte-identical asserted outputs.
+//! C3-S5c pin-rewrite wave 1 rewrote every pin except
+//! `annotation_on_multi_param_function`; the C3-S6 A-phase wave rewrote that
+//! one too (the F5 whole-args `{args}` rendering is replaced by per-element
+//! reads; the asserted line is unchanged). No legacy spellings remain in
+//! this file.
 
 use shape_test::shape_test::ShapeTest;
 
@@ -107,16 +108,24 @@ print(factorial(4))
     .expect_output_contains("24");
 }
 
+// C3-S6 A-phase typed rewrite. F5 DISCLOSURE: whole-args rendering
+// (`f"{args}"`) has no typed spelling (bare `args` in value position is a
+// named rejection); the UNASSERTED args line becomes per-element
+// interpolation via hoisted reads. The asserted "[math] result =" line is
+// unchanged.
 #[test]
 fn annotation_on_multi_param_function() {
     ShapeTest::new(
         r#"
-annotation trace(label) {
-  before(args, ctx) {
-    print(f"[{label}] args = {args}")
+annotation trace(label: string) {
+  before(args) {
+    let a0 = args[0]
+    let a1 = args[1]
+    let a2 = args[2]
+    print(f"[{label}] args = {a0}, {a1}, {a2}")
     args
   }
-  after(args, result, ctx) {
+  after(result) {
     print(f"[{label}] result = {result}")
     result
   }

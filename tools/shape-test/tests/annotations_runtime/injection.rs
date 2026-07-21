@@ -3,27 +3,36 @@
 //! Covers: before hooks modifying argument arrays, injecting extra context,
 //! conditional argument transformation, and argument inspection.
 //!
-//! C3-S5c pin-rewrite wave 1: the two READ-ONLY pins are rewritten onto the
-//! typed surface. The args-MUTATION family (`before_hook_doubles_first_argument`,
-//! `before_hook_swaps_arguments`, `before_hook_clamps_argument_to_range`,
-//! `chained_before_hooks_modify_args_sequentially`) is S6-ONLY (reserved for
-//! S6's A-phase typed args-mutation rewrite), and `before_hook_passes_ctx_info`
-//! is E4-blocked (S2-F3) — those five stay on the legacy spelling as retained
-//! legacy coverage until S6.
+//! C3-S5c pin-rewrite wave 1 rewrote the two READ-ONLY pins onto the typed
+//! surface. The C3-S6 A-phase wave rewrote three of the args-MUTATION family
+//! (`before_hook_doubles_first_argument`, `before_hook_clamps_argument_to_range`,
+//! `chained_before_hooks_modify_args_sequentially`) onto typed per-slot
+//! `args[i] = expr` mutation. Remaining legacy spellings (2):
+//! `before_hook_swaps_arguments` — BLOCKED on the surfaced S2c guard gap
+//! (hoisted locals are outside the provable write-RHS set; an exchange has
+//! no temp-free spelling), and `before_hook_passes_ctx_info` — E4-blocked
+//! per the ratified S2-F3 disposition row (the typed surface has no `ctx`
+//! by design). Both stay as retained legacy coverage pending supervisor/user
+//! rulings.
 
 use shape_test::shape_test::ShapeTest;
 
 // Previously: before hook arg modification caused int->number type coercion.
 // The int->number coercion bug has been fixed.
+// C3-S6 A-phase typed rewrite: single-slot `args[0] = expr` mutation (the
+// pseudo-tuple's legal write form, proven by the s4c sugar-mutation pin);
+// the interior read hoists to a local before f-string interpolation (the F5
+// non-scanned boundary). Asserted output unchanged.
 #[test]
 fn before_hook_doubles_first_argument() {
     ShapeTest::new(
         r#"
-annotation double_first(label) {
-  before(args, ctx) {
-    print(f"[{label}] original args[0] = {args[0]}")
-    let modified = [args[0] * 2, args[1]]
-    modified
+annotation double_first(label: string) {
+  before(args) {
+    let v = args[0]
+    print(f"[{label}] original args[0] = {v}")
+    args[0] = args[0] * 2
+    args
   }
 }
 
@@ -67,7 +76,16 @@ print(greet("Bob"))
     .expect_output_contains("Hello, Bob!");
 }
 
-// TDD: before hook arg modification causes int->number type coercion
+// C3-S6 A-phase PROBE FINDING (2026-07-21, surfaced — NOT rewritten): the
+// typed spelling (`let t = args[0]; args[0] = args[1]; args[1] = t; args`)
+// is REJECTED by the S2c aggregate-kind guard — a hoisted LOCAL is outside
+// the guard's provable write-RHS set ("a literal, another `args[i]` slot, a
+// declared capture, a typed fn's result, or arithmetic over those"), and an
+// exchange has no temp-free spelling (the arithmetic swap trick would be an
+// overflow-unsafe rewrite-around, refused per the probe discipline). The
+// exchange semantic is therefore INEXPRESSIBLE on the typed surface until
+// the guard learns provable-initializer locals — surfaced for supervisor
+// disposition; this pin stays on the legacy spelling as retained coverage.
 #[test]
 fn before_hook_swaps_arguments() {
     ShapeTest::new(
@@ -119,21 +137,23 @@ print(upper("hello"))
     .expect_output_contains("hello");
 }
 
-// TDD: before hook arg modification causes int->number type coercion
+// C3-S6 A-phase typed rewrite: CONDITIONAL per-slot mutation — `args[0]`
+// written inside `if`/`else if` branches, then the unconditional `args`
+// tail. This pin is the coverage anchor for the branch-conditional-write
+// corner (previously unpinned).
 #[test]
 fn before_hook_clamps_argument_to_range() {
     ShapeTest::new(
         r#"
-annotation clamp_first(min_val, max_val) {
-  before(args, ctx) {
+annotation clamp_first(min_val: int, max_val: int) {
+  before(args) {
     let val = args[0]
     if val < min_val {
-      [min_val]
+      args[0] = min_val
     } else if val > max_val {
-      [max_val]
-    } else {
-      args
+      args[0] = max_val
     }
+    args
   }
 }
 
@@ -177,22 +197,29 @@ noop()
     .expect_output_contains("noop");
 }
 
-// TDD: before hook arg modification causes int->number type coercion
+// C3-S6 A-phase typed rewrite: STACKED mutating befores (proven by the s4c
+// stacked-sugar pin). ORDER DISCLOSURE: the typed before-chain runs in
+// APPLICATION order (first-applied outermost, S2-F2 onion) where the legacy
+// weave ran nearest-first — the fixture's additions are commutative, so the
+// asserted value 16 is identical; only the UNASSERTED print interleaving
+// flips ("[first]" now precedes "[second]").
 #[test]
 fn chained_before_hooks_modify_args_sequentially() {
     ShapeTest::new(
         r#"
-annotation add_ten(label) {
-  before(args, ctx) {
+annotation add_ten(label: string) {
+  before(args) {
     print(f"[{label}] adding 10")
-    [args[0] + 10]
+    args[0] = args[0] + 10
+    args
   }
 }
 
-annotation add_five(label) {
-  before(args, ctx) {
+annotation add_five(label: string) {
+  before(args) {
     print(f"[{label}] adding 5")
-    [args[0] + 5]
+    args[0] = args[0] + 5
+    args
   }
 }
 
@@ -200,7 +227,7 @@ annotation add_five(label) {
 @add_five("second")
 fn show(x: int) -> int { x }
 
-// Original 1 -> +5 -> +10 (inside-out) = 16
+// 1 -> +10 -> +5 (application order) = 16
 print(show(1))
 "#,
     )
