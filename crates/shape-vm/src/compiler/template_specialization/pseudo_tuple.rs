@@ -951,6 +951,14 @@ fn collect_tail_leaves_of_statements(body: &[Statement], leaves: &mut Vec<Result
 /// `template_application_error` with both signatures at the `@application`
 /// site — the established two-signature attribution.
 ///
+/// S6 fixlet round 2: the walk itself carries the F1 `?`-exit rejection
+/// (`?` early-returns the propagated failure carrier from the specialized
+/// body — never provable against the bound `R`; see
+/// [`Scan::reject_try_operator_exit`] for the measured leak), and the
+/// return collection is BODY-LEVEL only (closure-interior / comptime-block
+/// returns never reach the specialized body's exit — the F2 filter at
+/// [`Scan::note_return_value`]).
+///
 /// KNOWN BOUNDARY (named, deliberate): the gate proves the type of every
 /// value-producing exit it can see; path-completeness (a body that can fall
 /// through with no value — bare `return`, missing else in tail position, a
@@ -1284,9 +1292,14 @@ enum Face<'a> {
     /// polymorphic `after` template body under the unspellable sentinel
     /// names (the pseudo-tuple surface is structurally disengaged — an
     /// `after` body has none) and COLLECTS the same provable-locals events
-    /// as the rewrite face plus every `return`-position value expression;
-    /// never mutates, never rejects on its own (evaluation and the named
-    /// rejections run once after the walk, at the guard).
+    /// as the rewrite face plus every BODY-LEVEL `return`-position value
+    /// expression (closure-interior and comptime-block returns are not body
+    /// exits and are filtered — S6 fixlet round 2, F2); never mutates.
+    /// Round-2 F1 amendment: the walk carries ONE named rejection of its
+    /// own — a body-level `?` exit ([`Scan::reject_try_operator_exit`]),
+    /// whose propagated failure carrier is never provable at the guard;
+    /// every other named rejection still runs once after the walk, at the
+    /// guard.
     AfterReturnScan {
         local_bindings: &'a std::cell::RefCell<Vec<(String, Option<Expr>)>>,
         assigned_locals: &'a std::cell::RefCell<std::collections::HashSet<String>>,
@@ -1446,6 +1459,43 @@ impl<'a> Scan<'a> {
             args = self.args_param,
             tp = self.type_param
         ))
+    }
+
+    /// ADR-009 C3 #14 (S6 fixlet round 2, F1) — a body-level `?` exit. The
+    /// `?` operator's failure path is an UNCONDITIONAL early return of the
+    /// propagated failure carrier (`expressions/advanced.rs::
+    /// compile_expr_try_operator`), bypassing the typed exit contract each
+    /// specialization-time gate proves. MEASURED on the round-1 gate
+    /// (2026-07-21 round-2 probes): after side — the Err carrier escaped a
+    /// `(int) -> int` specialization as `R` and `add(3, 4) + 1` printed the
+    /// pointer bits `102997035238305` (the heap-pointer-reinterpretation
+    /// class); before side — the Err carrier reached the weave's aggregate
+    /// consumption and silently corrupted the woven call (`1` where `8`).
+    /// The propagated carrier's type is never provable at the scan, so this
+    /// is a NAMED surface-and-stop rejection (CLAUDE.md: "if the type can't
+    /// be proven, it is a compile error"), with the explicit-`match`
+    /// positive twin.
+    fn reject_try_operator_exit(&self) -> ShapeError {
+        match self.face {
+            Face::AfterReturnScan { .. } => reject(
+                "the `?` operator cannot be used in an `after` template body: its failure \
+                 path propagates the `Err` value as the specialized body's early return, and \
+                 the propagated `Err` carrier can never prove the target's declared result \
+                 type (an `after` template returns the typed result on every path) — handle \
+                 the `Result` explicitly (`match f() { Ok(v) => ..., Err(e) => ... }`) and \
+                 return a result-typed value on every path"
+                    .to_string(),
+            ),
+            _ => reject(format!(
+                "the `?` operator cannot be used in a `before` template body: its failure \
+                 path propagates the `Err` value as the specialized body's early return, and \
+                 the propagated `Err` carrier can never prove the typed argument pack the \
+                 weave consumes (a `before` template's exits deliver the typed `{args}` \
+                 pack) — handle the `Result` explicitly (`match f() {{ Ok(v) => ..., \
+                 Err(e) => ... }}`) and return the `{args}` pack on every path",
+                args = self.args_param
+            )),
+        }
     }
 
     /// S5a Dec-65 walker arm (uncoded, G13 string-tag with the #60 routing
@@ -1671,7 +1721,21 @@ impl<'a> Scan<'a> {
 
     /// ADR-009 C3 #14 (S6): record one `return`-position value expression
     /// (`None` = a bare `return`) for the after-side return-kind guard.
-    fn note_return_value(&self, value: Option<&Expr>) {
+    ///
+    /// S6 fixlet round 2, F2: BODY-LEVEL returns only. A closure's own
+    /// `return` exits the CLOSURE frame, and a comptime block's `return`
+    /// ends the compile-time mini-VM evaluation (Dec 65) — neither reaches
+    /// the specialized body's typed exit, so neither enters the guard
+    /// (before this filter a closure helper's non-`R` internal return
+    /// inside a type-correct `after` body false-positively rejected the
+    /// install — MEASURED round-2 probe). Tail-position closures/comptime
+    /// blocks are unaffected: they arrive at the guard as ordinary
+    /// [`ResultLeaf::Value`] leaves and prove (or conservatively reject) as
+    /// whole expressions.
+    fn note_return_value(&self, value: Option<&Expr>, mode: ScanMode) {
+        if mode == ScanMode::ClosureInterior || self.comptime_depth.get() > 0 {
+            return;
+        }
         if let Face::AfterReturnScan { returns, .. } = self.face {
             returns.borrow_mut().push(value.cloned());
         }
@@ -1805,9 +1869,10 @@ impl<'a> Scan<'a> {
                         }
                     }
                 }
-                // S6 after-return face: every return-position value (a bare
-                // `return` records `None` — a no-value exit).
-                self.note_return_value(value.as_ref());
+                // S6 after-return face: every BODY-LEVEL return-position
+                // value (a bare `return` records `None` — a no-value exit;
+                // closure-interior/comptime returns are filtered — F2).
+                self.note_return_value(value.as_ref(), mode);
                 self.opt_expr(value.as_mut(), mode)
             }
             Statement::Break(_) | Statement::Continue(_) | Statement::RemoveTarget(_) => Ok(()),
@@ -2572,8 +2637,9 @@ impl<'a> Scan<'a> {
                     }
                 }
                 // S6 after-return face: the expression-position `return`
-                // twin records exactly like the statement form.
-                self.note_return_value(value.as_deref());
+                // twin records exactly like the statement form (body-level
+                // only — the F2 filter).
+                self.note_return_value(value.as_deref(), mode);
                 self.opt_expr(value.as_deref_mut(), mode)
             }
 
@@ -2614,7 +2680,31 @@ impl<'a> Scan<'a> {
 
             Expr::TimeframeContext { expr: inner, .. } => self.expr(inner, mode),
 
-            Expr::TryOperator(inner, _) => self.expr(inner, mode),
+            Expr::TryOperator(inner, _) => {
+                // ADR-009 C3 #14 (S6 fixlet round 2, F1): `?` compiles to an
+                // UNCONDITIONAL early return of the propagated failure
+                // carrier (`expressions/advanced.rs::compile_expr_try_operator`
+                // — `TryUnwrap` returns from the whole frame on `Err`/`None`),
+                // so a body-level `?` exits the specialized body OUTSIDE the
+                // typed exit contract the gates prove — named rejection on
+                // both specialization-time scans (Rewrite = before,
+                // AfterReturnScan = after; see `reject_try_operator_exit`).
+                // Closure interiors stay transparent (`?` there returns from
+                // the CLOSURE frame) and so do comptime blocks (compile-time
+                // evaluation, Dec 65) and the construction/ambient faces
+                // (specialization is the total chokepoint — the S2c/after-
+                // gate site rationale).
+                if mode == ScanMode::TemplateBody
+                    && self.pseudo_tuple_surface_live()
+                    && matches!(
+                        self.face,
+                        Face::Rewrite { .. } | Face::AfterReturnScan { .. }
+                    )
+                {
+                    return Err(self.reject_try_operator_exit());
+                }
+                self.expr(inner, mode)
+            }
 
             Expr::UsingImpl { expr: inner, .. } => self.expr(inner, mode),
 
@@ -3363,6 +3453,61 @@ fn t<Args>(args: Args) -> Args {
             &aggregate_plan(),
             "no first-class value",
         );
+    }
+
+    // ── S6 fixlet round 2, F1: the body-level `?`-exit arm ────────────────
+
+    // NEGATIVE (rewrite face = the before side): a body-level `?` early-
+    // returns the propagated failure carrier past the typed args-pack exit
+    // (round-2 probe: the Err carrier consumed as the weave aggregate
+    // silently corrupted the woven call — `1` where `8`). Named rejection.
+    #[test]
+    fn rewrite_face_rejects_body_level_try_operator() {
+        expect_resolve_reject(
+            r#"
+fn t<Args>(args: Args) -> Args {
+    let x = helper()?
+    return args
+}
+"#,
+            &aggregate_plan(),
+            "the `?` operator cannot be used in a `before` template body",
+        );
+    }
+
+    // POSITIVE twin of the arm's closure filter: a `?` INSIDE a closure
+    // returns from the closure frame, not the template body — transparent
+    // on the rewrite face (the closure itself touches no pseudo-tuple name).
+    #[test]
+    fn try_operator_inside_a_closure_is_transparent_on_the_rewrite_face() {
+        resolve(
+            r#"
+fn t<Args>(args: Args) -> Args {
+    let f = |x: int| { helper(x)? }
+    return args
+}
+"#,
+            &aggregate_plan(),
+        )
+        .expect("a closure-interior `?` is not a template-body exit");
+    }
+
+    // DELIBERATE SITE CHOICE (pinned): construction (the validate face)
+    // stays permissive for `?` — specialization is the total chokepoint
+    // (every install passes the specialization-time scans; the S2c/after-
+    // gate site rationale), so the named rejection fires there, with the
+    // two-signature application-site attribution.
+    #[test]
+    fn try_operator_is_construction_transparent() {
+        validate(
+            r#"
+fn t<Args>(args: Args) -> Args {
+    let x = helper()?
+    return args
+}
+"#,
+        )
+        .expect("construction stays permissive; the specialization scans own the rejection");
     }
 
     // INTERNAL INVARIANT: a def that does not carry exactly the pseudo-tuple

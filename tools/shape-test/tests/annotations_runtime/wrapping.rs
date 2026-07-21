@@ -13,7 +13,10 @@
 //! it was meant to be, with the measured heap-pointer-leak fixture as a
 //! MUST-REJECT control, the sugar-path value-less-body backstop pin, and
 //! the type-correct positive twin. Zero legacy spellings remain in this
-//! file.
+//! file. Fixlet round 2 adds the F1 `?`-exit MUST-REJECT pin (the exact
+//! traced shape — measured Err-carrier pointer leak on the round-1 gate),
+//! the F2 closure-helper-internal-return green pin (fixed false positive),
+//! and the body-level-return control.
 
 use shape_test::shape_test::ShapeTest;
 
@@ -114,6 +117,95 @@ print(add(3, 4))
 "#,
     )
     .expect_run_err_contains("can complete without returning a value");
+}
+
+// C3-S6 fixlet round 2, F1 — the EXACT traced shape as a MUST-REJECT pin:
+// a body-level `?` inside an `after` body (`let x = fallible()?; result`).
+// `?` compiles to an unconditional early return of the propagated Err
+// carrier (expressions/advanced.rs), bypassing the round-1 return-kind gate
+// (the scan traversed `Expr::TryOperator` transparently) — MEASURED on the
+// round-1 gate: this fixture ran, `add(3, 4)` escaped as `Err("boom")`, and
+// the int consumer `add(3, 4) + 1` printed the Err carrier's pointer bits
+// `102997035238305` (the heap-pointer-reinterpretation class). A green run
+// here means the `?`-exit arm is bypassed.
+#[test]
+fn after_hook_try_operator_exit_must_reject() {
+    ShapeTest::new(
+        r#"
+fn fallible(flag: int) -> Result<int, string> {
+  if flag == 1 { Ok(5) } else { Err("boom") }
+}
+
+annotation tryhook(tag: string) {
+  after(result) {
+    let x = fallible(0)?
+    result
+  }
+}
+
+@tryhook("t")
+fn add(a: int, b: int) -> int { a + b }
+
+print(add(3, 4))
+"#,
+    )
+    .expect_run_err_contains("the `?` operator cannot be used in an `after` template body");
+}
+
+// C3-S6 fixlet round 2, F2 — the fixed false positive: a closure helper's
+// own internal return (`return "s"` inside `|x: int| { ... }`) is a
+// CLOSURE-frame exit, not a template-body exit. Before the body-level-only
+// filter on the return collection, this type-correct after body (tail =
+// `result`, proving the bound int) was rejected with "the template body
+// returns `string`" (MEASURED round-2 probe). Now specializes green.
+#[test]
+fn after_hook_closure_helper_internal_return_specializes_green() {
+    ShapeTest::new(
+        r#"
+annotation withhelper(tag: string) {
+  after(result) {
+    let helper = |x: int| { return "s" }
+    let s = helper(1)
+    print(f"[{tag}] {s}")
+    result
+  }
+}
+
+@withhelper("t")
+fn add(a: int, b: int) -> int { a + b }
+
+print(add(3, 4))
+"#,
+    )
+    .expect_run_ok()
+    .expect_output_contains("[t] s")
+    .expect_output_contains("7");
+}
+
+// Control for the F2 filter: a BODY-LEVEL return (statement form, non-tail)
+// still enters the return-kind guard — a divergent body-level `return`
+// rejects exactly as before the filter landed.
+#[test]
+fn after_hook_body_level_return_still_scans_and_rejects() {
+    ShapeTest::new(
+        r#"
+annotation wrongret(tag: string) {
+  after(result) {
+    if result > 0 {
+      return "xx"
+    }
+    result
+  }
+}
+
+@wrongret("t")
+fn add(a: int, b: int) -> int { a + b }
+
+print(add(3, 4))
+"#,
+    )
+    .expect_run_err_contains("the template body returns `string`")
+    .expect_run_err_contains("returns `int` (the target's declared result type)");
 }
 
 // Positive twin of the rejection pins above: the SAME stringify shape with

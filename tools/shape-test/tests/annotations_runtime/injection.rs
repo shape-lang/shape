@@ -13,7 +13,9 @@
 //! exchange spelling the A-phase surfaced as guard-blocked). Remaining
 //! legacy spelling (1): `before_hook_passes_ctx_info` — E4-blocked per the
 //! ratified S2-F3 disposition row (the typed surface has no `ctx` by
-//! design); stays as retained legacy coverage pending its ruling.
+//! design); stays as retained legacy coverage pending its ruling. Fixlet
+//! round 2 adds the before-side F1 `?`-exit MUST-REJECT pin (measured
+//! silent corruption of the woven call on the round-1 state).
 
 use shape_test::shape_test::ShapeTest;
 
@@ -74,6 +76,38 @@ print(greet("Bob"))
     .expect_run_ok()
     .expect_output_contains("[info] arg count = 1")
     .expect_output_contains("Hello, Bob!");
+}
+
+// C3-S6 fixlet round 2, F1 (before side) — MUST-REJECT: a body-level `?`
+// inside a `before` body early-returns the propagated Err carrier past the
+// typed args-pack exit the weave consumes. MEASURED on the round-1 state:
+// this fixture ran and the Err carrier, consumed as the args aggregate,
+// silently corrupted the woven call (`add(3, 4) + 1` printed `1` instead of
+// `8`). The same `?`-exit arm as the after side fires on the before-side
+// specialization scan; a green run here means the arm is bypassed.
+#[test]
+fn before_hook_try_operator_exit_must_reject() {
+    ShapeTest::new(
+        r#"
+fn fallible(flag: int) -> Result<int, string> {
+  if flag == 1 { Ok(5) } else { Err("boom") }
+}
+
+annotation trybefore(tag: string) {
+  before(args) {
+    let x = fallible(0)?
+    args
+  }
+}
+
+@trybefore("t")
+fn add(a: int, b: int) -> int { a + b }
+
+let r = add(3, 4)
+print(r + 1)
+"#,
+    )
+    .expect_run_err_contains("the `?` operator cannot be used in a `before` template body");
 }
 
 // C3-S6 soundness fixlet: the A-phase finding-1 rewrite, executed. The S2c

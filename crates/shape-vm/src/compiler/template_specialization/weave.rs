@@ -1134,6 +1134,98 @@ victim_a([1], 4) * 10000 + victim_b([2], 7)
         );
     }
 
+    // ── S6 fixlet round 2: the `?`-exit arm (F1) + body-level-only returns
+    // ── (F2), API-path twins ───────────────────────────────────────────────
+
+    // F1, after side, API path — covered UPSTREAM (verified, pinned): an
+    // API-path template body is an ordinary analyzer-visited module fn, so
+    // a body-level `?` in a `<R>(result: R) -> R` body dies at DEFINITION
+    // with the analyzer's Result/Option constraint — before any install or
+    // specialization runs (the same layering as the value-less-body pin
+    // above). The scan's own `?`-exit arm backstops the never-analyzer-
+    // visited sugar path, where the round-2 probe MEASURED the Err carrier
+    // escaping as `R` (`add(3, 4) + 1` printed the pointer bits
+    // `102997035238305`) — pinned in
+    // `tools/shape-test/tests/annotations_runtime/wrapping.rs`.
+    #[test]
+    fn after_template_try_operator_exit_is_a_named_rejection() {
+        let (result, compiler) = compile_source(&hook_source(
+            "fn fallible(flag: int) -> Result<int, string> {\n\
+             \x20   if flag == 1 { return Ok(5) }\n\
+             \x20   return Err(\"boom\")\n\
+             }\n\
+             fn post<R>(result: R) -> R {\n\
+             \x20   let x = fallible(0)?\n\
+             \x20   return result\n\
+             }",
+            "install(after_hook(post, []))",
+            "@hookann()\nfn victim(a: int) -> int { return a * 10 }\n\nvictim(4)",
+        ));
+        let text = result
+            .expect_err("a body-level `?` in an after template body must reject")
+            .to_string();
+        assert!(
+            text.contains("operator '?' requires the function to return Result or Option"),
+            "the definition-time Result/Option constraint fires first on the API path: {text}"
+        );
+        assert!(
+            compiler.hook_install_registry.is_empty(),
+            "a rejected program leaves no registry row"
+        );
+    }
+
+    // F1, before side, API path — the same upstream definition-time
+    // coverage for a `<Args>(args: Args) -> Args` body with a body-level
+    // `?`; the scan arm's before-side backstop (the sugar path, where the
+    // probe MEASURED silent corruption of the woven call: `1` where `8`)
+    // is pinned in `tools/shape-test/tests/annotations_runtime/injection.rs`
+    // and on the rewrite face directly in `pseudo_tuple.rs`.
+    #[test]
+    fn before_template_try_operator_exit_is_a_named_rejection() {
+        let (result, _) = compile_source(&hook_source(
+            "fn fallible(flag: int) -> Result<int, string> {\n\
+             \x20   if flag == 1 { return Ok(5) }\n\
+             \x20   return Err(\"boom\")\n\
+             }\n\
+             fn tmpl<Args>(args: Args) -> Args {\n\
+             \x20   let x = fallible(0)?\n\
+             \x20   return args\n\
+             }",
+            "install(before_hook(tmpl, []))",
+            "@hookann()\nfn victim(a: int, b: int) -> int { return a - b }\n\nvictim(3, 10)",
+        ));
+        let text = result
+            .expect_err("a body-level `?` in a before template body must reject")
+            .to_string();
+        assert!(
+            text.contains("operator '?' requires the function to return Result or Option"),
+            "the definition-time Result/Option constraint fires first on the API path: {text}"
+        );
+    }
+
+    // F2, fixed case (API path): a closure helper's own internal return is
+    // NOT a template-body exit — before the filter, its non-`R` return
+    // false-positively rejected this type-correct after body (MEASURED
+    // round-2 probe on the sugar twin). The `?` inside a closure is likewise
+    // closure-frame-local (pinned on the rewrite face in pseudo_tuple.rs).
+    #[test]
+    fn after_template_closure_internal_return_stays_green() {
+        let (value, compiler) = top_level_i64(&hook_source(
+            "fn post<R>(result: R) -> R {\n\
+             \x20   let f = |x: int| { return \"s\" }\n\
+             \x20   let s = f(1)\n\
+             \x20   return result\n\
+             }",
+            "install(after_hook(post, []))",
+            "@hookann()\nfn victim(a: int) -> int { return a * 10 }\n\nvictim(4)",
+        ));
+        assert_eq!(
+            value, 40,
+            "the closure's internal return must not enter the return-kind guard"
+        );
+        assert_eq!(compiler.hook_install_registry.len(), 1);
+    }
+
     // ── a void target hosts a before-only weave ────────────────────────────
 
     #[test]
