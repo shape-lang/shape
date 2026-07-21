@@ -104,7 +104,7 @@ mod outer {
     );
     let imported = annotation_def(
         r#"
-annotation mark(policy) {
+annotation mark(policy: string) {
   targets: [function]
   comptime post(target, ctx) { error("IMPORTED") }
 }
@@ -148,7 +148,10 @@ annotation mark(policy) {
     );
     assert_eq!(
         rows["pkg::support::mark"].def_params,
-        vec![("policy".to_string(), None)]
+        vec![(
+            "policy".to_string(),
+            Some(shape_ast::ast::TypeAnnotation::Basic("string".to_string()))
+        )]
     );
 }
 

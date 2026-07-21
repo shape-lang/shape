@@ -226,6 +226,14 @@ impl BytecodeCompiler {
             }
         }
 
+        // The shadow's body is USER source carried verbatim: its interior
+        // closures keep ordinary capture inference (unstamped — the
+        // gate-totality G4 negative-control contract). Record the shadow
+        // name so the capture-surface debug crosscheck excludes this class
+        // (generated-by-reservation, user-source-by-content) from its
+        // "generated decls carry stamped closures" name-view heuristic.
+        self.template_weave_shadow_names.insert(shadow_name.clone());
+
         // Register + compile the shadow through the ordinary NESTED
         // `compile_function` (the monomorphization-ride pattern, cache.rs:
         // save/restore the per-function ephemeral state around the nested
@@ -2972,38 +2980,11 @@ victim(4)
             assert_eq!(location.line, application_line);
         }
 
-        // a4d analog, LEGACY class with a comptime handler (probe P3b
-        // upgraded — the disclosed legacy diagnostic upgrade: the config
-        // enters a COMPTIME evaluation position, so the same pre-check
-        // owns it; legacy RUNTIME-hook config stays untouched until S6).
-        #[test]
-        fn c0931_legacy_comptime_runtime_binding_config_arg() {
-            let src = r#"
-let chosen = 5
-
-fn hook<Args>(args: Args, times: int) -> Args {
-    args[0] = args[0] * times
-    return args
-}
-
-annotation amb(cfg) {
-  targets: [function]
-  comptime post(target, ctx) {
-    install(before_hook(hook, [capture("times", cfg)]))
-  }
-}
-
-@amb(chosen)
-fn victim(a: int) -> int { return a }
-
-victim(4)
-"#;
-            let (message, _) = expect_semantic_error(src);
-            assert!(
-                message.contains(&c0931_sentence("chosen", "amb")),
-                "the legacy comptime class gets the same [C0931] upgrade: {message}"
-            );
-        }
+        // ADR-009 C3-S6 completion: `c0931_legacy_comptime_runtime_binding_
+        // config_arg` RETIRED — its untyped `annotation amb(cfg)` fixture now
+        // rejects at the DECLARATION (the collapsed untyped-config rejection,
+        // surface_class.rs) before [C0931] can fire; the typed sibling above
+        // carries the [C0931] class.
 
         // The invariant-7 CONST EXEMPTION: a top-level `const` config arg is
         // NOT [C0931] (a const is comptime-evaluable — never "a runtime

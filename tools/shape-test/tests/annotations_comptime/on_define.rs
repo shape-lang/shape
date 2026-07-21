@@ -131,7 +131,7 @@ fn comptime_post_with_annotation_param_in_method() {
     // ordinary generated methods.
     ShapeTest::new(
         r#"
-annotation add_label(label_text) {
+annotation add_label(label_text: string) {
   targets: [type]
   comptime post(target, ctx) {
     extend target {
@@ -156,7 +156,7 @@ fn comptime_post_set_param_default() {
     // The call omits `y`, proving the directive-installed default is used.
     ShapeTest::new(
         r#"
-annotation default_y(val) {
+annotation default_y(val: int) {
   targets: [function]
   comptime post(target, ctx) {
     set param y = val

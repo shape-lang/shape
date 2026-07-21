@@ -987,10 +987,33 @@ impl BytecodeCompiler {
     }
 
     /// Resolve the template body fn's index in the current compilation.
-    /// Concrete template bodies compile at definition through the ordinary
-    /// pipeline, so a registered template ALWAYS has an entry — a miss is an
-    /// internal invariant error, never a user rejection.
-    fn template_body_function_index(&self, template: &CheckedTemplate) -> Result<u16> {
+    /// HAND-WRITTEN concrete template bodies are module-scope items and
+    /// compile at definition through the ordinary pipeline, so they always
+    /// have an entry. ADR-009 C3-S6 completion: a SUGAR-MINTED concrete body
+    /// fn (an observer of a ZERO-config definition — reachable since the
+    /// classification collapse routes zero-param definitions through the
+    /// lowering) lives only in `function_defs` until first use, because the
+    /// zero-capture install path takes no bake (a config-carrying install
+    /// registers its baked `::cfg#` copy through the capture path instead).
+    /// Register + compile it here on first specialization through the
+    /// ordinary NESTED `compile_function` (the weave-shadow/monomorphization
+    /// ride pattern: save/restore the per-function ephemeral state). A miss
+    /// with no `function_defs` entry stays the internal invariant error.
+    fn template_body_function_index(&mut self, template: &CheckedTemplate) -> Result<u16> {
+        if self.find_function(template.body_fn()).is_none()
+            && let Some(minted) = self.function_defs.get(template.body_fn()).cloned()
+        {
+            self.register_function(&minted)?;
+            let saved_closure_function_ids = std::mem::take(&mut self.closure_function_ids);
+            let saved_local_concrete_facts =
+                std::mem::take(&mut self.current_function_local_concrete_facts);
+            let saved_local_binding_spans = std::mem::take(&mut self.local_binding_spans);
+            let minted_result = self.compile_function(&minted);
+            self.closure_function_ids = saved_closure_function_ids;
+            self.current_function_local_concrete_facts = saved_local_concrete_facts;
+            self.local_binding_spans = saved_local_binding_spans;
+            minted_result?;
+        }
         let index = self
             .find_function(template.body_fn())
             .ok_or_else(|| ShapeError::RuntimeError {

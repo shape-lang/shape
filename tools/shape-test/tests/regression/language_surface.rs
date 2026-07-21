@@ -73,15 +73,21 @@ print(render(User { name: "Ada" }))
 }
 
 #[test]
-fn expression_annotation_before_after_hooks_surface_on_deleted_empty_arg_array() {
+fn expression_annotation_before_after_hooks_reject_at_the_declaration() {
+    // ADR-009 C3-S6 (PRE-DECLARED expectation flip): pre-collapse this
+    // zero-param legacy fixture ran to the deleted-empty-arg-array runtime
+    // surface ("op_new_array(0): SURFACE"). Post-collapse declarative hooks
+    // carry sugar for every definition, so the S5b DECLARATION-tier
+    // non-function-target rejection fires first — hooks on an
+    // expression-only targets set can never reach a function call seam.
     let code = r#"
 annotation trace_expr() {
   targets: [expression]
-  before(args, ctx) {
+  before(args) {
     print("before")
     args
   }
-  after(args, result, ctx) {
+  after(result) {
     print("after")
     result
   }
@@ -92,8 +98,7 @@ print(x)
 "#;
 
     ShapeTest::new(code)
-        .expect_no_semantic_diagnostics()
-        .expect_run_err_contains("op_new_array(0): SURFACE");
+        .expect_run_err_contains("do not include function");
 }
 
 #[test]

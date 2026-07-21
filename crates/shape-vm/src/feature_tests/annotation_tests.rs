@@ -20,7 +20,7 @@ pub const TESTS: &[FeatureTest] = &[
     FeatureTest {
         name: "annotation_with_args",
         covers: &["annotation", "annotation_args", "annotation_name"],
-        code: r#"annotation timeout(ms) {} @timeout(5000) function test() { return 42; }"#,
+        code: r#"annotation timeout(ms: int) {} @timeout(5000) function test() { return 42; }"#,
         function: "test",
         category: FeatureCategory::Function,
         requires_data: false,
@@ -28,7 +28,7 @@ pub const TESTS: &[FeatureTest] = &[
     FeatureTest {
         name: "annotation_multiple_args",
         covers: &["annotation", "annotation_args"],
-        code: r#"annotation config(name, value) {} @config("option1", 100) function test() { return 42; }"#,
+        code: r#"annotation config(name: string, value: int) {} @config("option1", 100) function test() { return 42; }"#,
         function: "test",
         category: FeatureCategory::Function,
         requires_data: false,
@@ -46,7 +46,7 @@ pub const TESTS: &[FeatureTest] = &[
         name: "annotation_def_simple",
         covers: &["annotation_def", "annotation_def_params"],
         code: r#"
-            annotation warmup(amount) {
+            annotation warmup(amount: int) {
                 return amount;
             }
             function test() { return 42; }
@@ -59,7 +59,7 @@ pub const TESTS: &[FeatureTest] = &[
         name: "annotation_def_multiple_params",
         covers: &["annotation_def", "annotation_def_params"],
         code: r#"
-            annotation range(min, max) {
+            annotation range(min: int, max: int) {
                 return min + max;
             }
             function test() { return 42; }

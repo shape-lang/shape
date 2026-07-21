@@ -18,139 +18,51 @@ pub(super) struct AnnotationInstallationPlan {
 pub(super) struct PlannedAnnotation {
     pub(super) definition: AnnotationDef,
     pub(super) allowed_targets: Vec<AnnotationTargetKind>,
-    pub(super) surface_class: AnnotationSurfaceClass,
-    /// ADR-009 C3 #14 (slice 4, S4c): the sugar lowering's artifacts for a
-    /// TypedConfig definition with declarative hooks — validated (R3) and
-    /// built HERE at planning, stored on `CompiledAnnotation` by the
-    /// installer. `None` for Legacy definitions and for TypedConfig
-    /// definitions without declarative hooks.
+    /// ADR-009 C3 #14 (slice 4, S4c; S6 completion): the sugar lowering's
+    /// artifacts for a definition with declarative hooks — validated (R3)
+    /// and built HERE at planning, stored on `CompiledAnnotation` by the
+    /// installer. `None` for definitions without declarative hooks.
     pub(super) sugar: Option<super::sugar_lowering::SugarLowering>,
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// ADR-009 C3 #14 (slice 4) — THE G7-COMPLIANT TRANSITIONAL CLASSIFICATION
+// ADR-009 C3 #14 (S6 completion) — THE COLLAPSED CLASSIFICATION (one surface)
 // ═══════════════════════════════════════════════════════════════════════════
 //
-// This is the ONE ratified transitional duality of C3: until S6 deletes the
-// legacy declarative before/after weave, every `annotation` definition is
-// classified by a compile-time SYNTACTIC rule into exactly one of two
-// surface classes, decided AT THE DECLARATION (before any `@application`):
+// The S4 transitional TypedConfig/Legacy fork is DELETED (C3-G7/S6): there
+// is exactly ONE annotation surface. Decided AT THE DECLARATION (before any
+// `@application` exists):
 //
-//   - **TypedConfig** — the definition declares >= 1 config parameter
-//     carrying a type annotation (`annotation retry(times: int, label:
-//     string)`). ALL config parameters must then be typed; a mix of typed
-//     and untyped parameters is the declaration-site rejection R2. Every
-//     typed parameter's annotation must lie within the C3-G5 ConstLift
-//     domain, checked at the declaration by the ONE domain producer
-//     `const_lift::annotation_within_lift_domain` (rejection R1) — a
-//     non-liftable config type is a named error before any application.
-//     TypedConfig definitions' declarative `before`/`after` handlers lower
-//     onto the PUBLIC comptime API (CheckedTemplate + install; the S4c
-//     sugar lowering — see `sugar_lowering` for the BINDING RULES of the
-//     typed hook surface: `before(args)` / `after(result)` polymorphic
-//     forms, `before()` / `after()` observers, the R3 shape rejection, and
-//     the R3-family lifecycle-hook rejection) and must NEVER engage the
-//     legacy weave slots.
+//   - Every config parameter DECLARES ITS TYPE. An untyped config parameter
+//     is the named declaration-site rejection in `plan_definition` below
+//     (single producer; the former R2 mixed-params refinement folds into
+//     it — "mixed" is just "an untyped parameter is present"). Every
+//     declared type must lie within the C3-G5 ConstLift domain, checked by
+//     the ONE domain producer `const_lift::annotation_within_lift_domain`
+//     (rejection R1) — a non-liftable config type is a named error before
+//     any application.
 //
-//   - **Legacy** — zero config parameters, or all parameters untyped. The
-//     declarative `before`/`after` handlers keep the BYTE-UNCHANGED legacy
-//     runtime-hook weave until S6 deletes it (C3-G7: build new path → flip
-//     the sugar → rewrite the 48 annotation pins → pure-deletion capstone).
+//   - Declarative `before`/`after` handlers LOWER onto the PUBLIC comptime
+//     API (CheckedTemplate + install; the S4c sugar lowering — see
+//     `sugar_lowering` for the BINDING RULES: `before(args)` /
+//     `after(result)` polymorphic forms, `before()` / `after()` observers,
+//     and the R3 shape rejection). Zero-param definitions route this same
+//     path — there is no other.
 //
-// ZERO-PARAM RULING (resolved in S4 design): NO opt-in marker is minted —
-// zero-param definitions classify Legacy until S6, at which point the
-// Legacy arm and the untyped param spelling are DELETED and every
-// annotation (zero-param included) is new-path for free. C3-G0 forbids
-// minting throwaway grammar that S6 must then delete; new-path e2e
-// coverage in S4 uses typed-config definitions (the mixed-type shape S4
-// exists to prove), while public-API-spelled installs inside zero-param
-// definitions are already green (sugar-matrix rows r2/r3/r9).
+//   - COMPTIME pre/post handlers run through the comptime mini-VM; typed
+//     injection gives handler params their declared annotations.
 //
-// COMPTIME pre/post handlers are CLASSIFICATION-INDEPENDENT: they execute
-// through the comptime mini-VM on both classes (the r-matrix zero-param
-// fixtures like `annotation scaled(factor)` keep working untouched); typed
-// injection simply gives TypedConfig handler params their declared
-// annotations.
+//   - `on_define`/`metadata` LIFECYCLE handlers register through the
+//     installer's lifecycle arm (compile-time-fired definition hooks — not
+//     part of the deleted runtime before/after weave). They reserve the
+//     `{name}___{kind}` callables below. S6-completion disposition
+//     (Risk-1): lifecycle survives the collapse and now accepts typed
+//     config params (the former R3-family rejection existed to keep typed
+//     params off the legacy surface, which no longer exists).
 //
-// PIN-GREENNESS (by construction): the grammar REJECTED typed config
-// params before this slice, so no pre-existing green program or pin can
-// classify TypedConfig — verified at S4b:
-// `rg "annotation \w+\([^)]*:" tools/shape-test/tests/` has zero hits.
-//
-// NAMED S6 CLOSE: S6 deletes the Legacy arm (and this enum with it, or
-// collapses it to the single new-path class), the legacy weave fns
-// (`compile_specialized_annotation_handler`,
-// `specialize_annotation_runtime_handlers`, `compile_annotation_wrapper`)
-// and the untyped-param spelling, then rewrites the 48 legacy pins onto
-// the typed surface (c3-decisions.md C3-G7; the S2 F1-F5 ledger carries
-// the per-pin arithmetic).
-//
-// SEALED (the C1 CaptureKind "constructible in ONE file" precedent): each
-// variant carries a `SurfaceClassEvidence` token whose field is private to
-// THIS module, so `AnnotationSurfaceClass::TypedConfig(..)` is
-// unconstructible outside planner.rs — the classification function below
-// is the single producer. Consumers match on `TypedConfig(_)` / `Legacy(_)`.
-
-/// Evidence token gating construction of [`AnnotationSurfaceClass`] variants
-/// to this file. The unit field is private: only planner.rs can spell
-/// `SurfaceClassEvidence(())`.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(in crate::compiler) struct SurfaceClassEvidence(());
-
-/// The G7-compliant transitional surface class of one `annotation`
-/// definition. See the module-level classification doc-comment above —
-/// the rule, the zero-param ruling, and the named S6 close live there.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(in crate::compiler) enum AnnotationSurfaceClass {
-    /// >= 1 typed config param (then ALL must be typed; R2 otherwise), all
-    /// annotations inside the ConstLift domain (R1 otherwise). Declarative
-    /// before/after handlers lower onto the public comptime API.
-    TypedConfig(SurfaceClassEvidence),
-    /// Zero config params or all params untyped. Declarative before/after
-    /// handlers keep the byte-unchanged legacy weave until S6.
-    Legacy(SurfaceClassEvidence),
-}
-
-/// THE classification chokepoint (single producer of
-/// [`AnnotationSurfaceClass`]). Fires the R2 mixed-params rejection; the
-/// R1 ConstLift-domain check runs in [`plan_definition`] on TypedConfig
-/// definitions only.
-pub(in crate::compiler) fn classify_annotation_surface(
-    definition: &AnnotationDef,
-) -> std::result::Result<AnnotationSurfaceClass, MixedConfigParams> {
-    classify_annotation_params(&definition.params)
-}
-
-/// The same classification rule keyed on the PARAM DEFINITIONS alone — for
-/// consumers holding a `CompiledAnnotation.param_defs` carrier instead of an
-/// AST definition (the C3-G12 nested-fn check). Same single-file sealing;
-/// [`classify_annotation_surface`] delegates here.
-pub(in crate::compiler) fn classify_annotation_params(
-    params: &[FunctionParameter],
-) -> std::result::Result<AnnotationSurfaceClass, MixedConfigParams> {
-    let typed_count = params
-        .iter()
-        .filter(|parameter| parameter.type_annotation.is_some())
-        .count();
-    if typed_count == 0 {
-        return Ok(AnnotationSurfaceClass::Legacy(SurfaceClassEvidence(())));
-    }
-    if let Some(first_untyped) = params
-        .iter()
-        .find(|parameter| parameter.type_annotation.is_none())
-    {
-        return Err(MixedConfigParams {
-            first_untyped: first_untyped.clone(),
-        });
-    }
-    Ok(AnnotationSurfaceClass::TypedConfig(SurfaceClassEvidence(())))
-}
-
-/// R2 payload: the first untyped parameter of a mixed definition, for the
-/// rejection sentence and its span anchor.
-pub(in crate::compiler) struct MixedConfigParams {
-    pub(in crate::compiler) first_untyped: FunctionParameter,
-}
+// The legacy weave slots (`before_handler` / `after_handler` /
+// `*_handler_template`) are NEVER populated — nothing routes the legacy
+// weave; the S6 capstone deletes the dead machinery and the carrier fields.
 
 impl AnnotationInstallationPlan {
     pub(super) fn is_empty(&self) -> bool {
@@ -200,23 +112,21 @@ pub(super) fn build(
         }
     }
 
-    // ADR-009 C3 #14 (slice 4, S4c): only LEGACY-classified declarative
-    // handlers register legacy runtime-handler function slots and reserve
-    // `{name}___{kind}` callables. TypedConfig before/after handlers lower
+    // ADR-009 C3 #14 (S6 completion): only LIFECYCLE handlers
+    // (`on_define`/`metadata`) register handler function slots and reserve
+    // `{name}___{kind}` callables. Declarative before/after handlers lower
     // onto the public comptime API (installed per-target through
     // `specialize_template`) — they consume NO reserved slot and no callable
-    // name; TypedConfig lifecycle handlers were R3-family-rejected in
-    // `plan_definition` before reaching this loop.
-    let runtime_handler_count = pending
+    // name.
+    let lifecycle_handler_count = pending
         .iter()
-        .filter(|plan| matches!(plan.surface_class, AnnotationSurfaceClass::Legacy(_)))
-        .map(|plan| runtime_handler_count(&plan.definition))
+        .map(|plan| lifecycle_handler_count(&plan.definition))
         .sum::<usize>();
     let end = compiler
         .program
         .functions
         .len()
-        .checked_add(runtime_handler_count)
+        .checked_add(lifecycle_handler_count)
         .ok_or_else(function_id_capacity_error)?;
     if end > usize::from(u16::MAX) + 1 {
         return Err(function_id_capacity_error());
@@ -224,11 +134,8 @@ pub(super) fn build(
 
     let mut planned_callable_names = BTreeSet::new();
     for plan in &pending {
-        if !matches!(plan.surface_class, AnnotationSurfaceClass::Legacy(_)) {
-            continue;
-        }
         for handler in &plan.definition.handlers {
-            if is_runtime_handler(&handler.handler_type) {
+            if is_lifecycle_handler(&handler.handler_type) {
                 let name = handler_callable_name(&plan.definition.name, &handler.handler_type);
                 if !planned_callable_names.insert(name.clone())
                     || !callable_name_is_vacant(compiler, &name)
@@ -252,59 +159,58 @@ fn plan_definition(
     compiler: &BytecodeCompiler,
     definition: AnnotationDef,
 ) -> Result<PlannedAnnotation> {
-    // ADR-009 C3 #14 (slice 4): classify the surface BEFORE any application
-    // can exist — R2 (mixed typed/untyped) and R1 (config type outside the
-    // ConstLift domain) are DECLARATION-SITE named rejections (the G5
-    // sentence precedent from S3's finish()-time check).
-    let surface_class = match classify_annotation_surface(&definition) {
-        Ok(surface_class) => surface_class,
-        Err(mixed) => {
-            let untyped_name = mixed
-                .first_untyped
-                .simple_name()
-                .unwrap_or_default()
-                .to_string();
+    // ADR-009 C3 #14 (S6 completion): the collapsed declaration-site checks,
+    // BEFORE any application can exist — an untyped config parameter (the
+    // named rejection below, which the former R2 mixed-params refinement
+    // folds into) and R1 (config type outside the ConstLift domain) are
+    // DECLARATION-SITE named rejections (the G5 sentence precedent from
+    // S3's finish()-time check).
+    if let Some(untyped) = definition
+        .params
+        .iter()
+        .find(|parameter| parameter.type_annotation.is_none())
+    {
+        let untyped_name = untyped.simple_name().unwrap_or_default().to_string();
+        return Err(ShapeError::SemanticError {
+            message: format!(
+                "annotation `{}` declares config parameter `{}` without a type; every annotation config parameter declares its type (the untyped config surface is deleted, C3-G7/S6) — annotate `{}` with a ConstLift-liftable type",
+                definition.name, untyped_name, untyped_name
+            ),
+            location: Some(compiler.span_to_source_location(untyped.span())),
+        });
+    }
+    for parameter in &definition.params {
+        let Some(annotation) = parameter.type_annotation.as_ref() else {
+            continue;
+        };
+        // R1: the ONE domain producer, reused at the declaration site —
+        // never re-implemented (S3's `annotation_within_lift_domain`).
+        if let Err(reason) =
+            crate::compiler::template_specialization::const_lift::annotation_within_lift_domain(
+                annotation,
+            )
+        {
             return Err(ShapeError::SemanticError {
                 message: format!(
-                    "annotation `{}` mixes typed and untyped config parameters; a typed-config annotation declares a type on every config parameter — annotate `{}`",
-                    definition.name, untyped_name
+                    "annotation `{}` declares config parameter `{}: {}`, whose type is outside the ConstLift domain ({}); {} — declare the config parameter with a liftable type",
+                    definition.name,
+                    parameter.simple_name().unwrap_or_default(),
+                    annotation.to_type_string(),
+                    reason,
+                    crate::compiler::template_specialization::const_lift::CONST_LIFT_DOMAIN_SENTENCE,
                 ),
-                location: Some(compiler.span_to_source_location(mixed.first_untyped.span())),
+                location: Some(compiler.span_to_source_location(parameter.span())),
             });
-        }
-    };
-    if matches!(surface_class, AnnotationSurfaceClass::TypedConfig(_)) {
-        for parameter in &definition.params {
-            let Some(annotation) = parameter.type_annotation.as_ref() else {
-                continue;
-            };
-            // R1: the ONE domain producer, reused at the declaration site —
-            // never re-implemented (S3's `annotation_within_lift_domain`).
-            if let Err(reason) =
-                crate::compiler::template_specialization::const_lift::annotation_within_lift_domain(
-                    annotation,
-                )
-            {
-                return Err(ShapeError::SemanticError {
-                    message: format!(
-                        "annotation `{}` declares config parameter `{}: {}`, whose type is outside the ConstLift domain ({}); {} — declare the config parameter with a liftable type",
-                        definition.name,
-                        parameter.simple_name().unwrap_or_default(),
-                        annotation.to_type_string(),
-                        reason,
-                        crate::compiler::template_specialization::const_lift::CONST_LIFT_DOMAIN_SENTENCE,
-                    ),
-                    location: Some(compiler.span_to_source_location(parameter.span())),
-                });
-            }
         }
     }
 
-    // ADR-009 C3 #14 (slice 4, S4c): the sugar lowering — validated (R3 /
-    // R3-family, exact sentences from the ONE producer in `sugar_lowering`)
-    // and BUILT at the declaration, before any `@application` exists. The
-    // installer stores the artifacts on the `CompiledAnnotation` carrier.
-    let sugar = if matches!(surface_class, AnnotationSurfaceClass::TypedConfig(_)) {
+    // ADR-009 C3 #14 (slice 4, S4c; S6 completion): the sugar lowering —
+    // validated (R3, exact sentences from the ONE producer in
+    // `sugar_lowering`) and BUILT at the declaration, before any
+    // `@application` exists, for EVERY definition (zero-param included).
+    // The installer stores the artifacts on the `CompiledAnnotation`
+    // carrier.
+    let sugar =
         match super::sugar_lowering::lower_typed_config_declarative_hooks(compiler, &definition) {
             Ok(sugar) => sugar,
             Err(rejection) => {
@@ -313,10 +219,7 @@ fn plan_definition(
                     location: Some(compiler.span_to_source_location(rejection.span)),
                 });
             }
-        }
-    } else {
-        None
-    };
+        };
 
     let mut handler_kinds = BTreeSet::new();
     for handler in &definition.handlers {
@@ -443,7 +346,6 @@ fn plan_definition(
     Ok(PlannedAnnotation {
         definition,
         allowed_targets,
-        surface_class,
         sugar,
     })
 }
@@ -489,11 +391,22 @@ fn is_runtime_handler(handler: &AnnotationHandlerType) -> bool {
     )
 }
 
-fn runtime_handler_count(definition: &AnnotationDef) -> usize {
+/// The handlers that register compiled handler functions and reserve
+/// `{name}___{kind}` callables post-collapse: the `on_define`/`metadata`
+/// lifecycle pair. Declarative before/after handlers lower onto the public
+/// comptime API and consume no slot (S6 completion).
+fn is_lifecycle_handler(handler: &AnnotationHandlerType) -> bool {
+    matches!(
+        handler,
+        AnnotationHandlerType::OnDefine | AnnotationHandlerType::Metadata
+    )
+}
+
+fn lifecycle_handler_count(definition: &AnnotationDef) -> usize {
     definition
         .handlers
         .iter()
-        .filter(|handler| is_runtime_handler(&handler.handler_type))
+        .filter(|handler| is_lifecycle_handler(&handler.handler_type))
         .count()
 }
 

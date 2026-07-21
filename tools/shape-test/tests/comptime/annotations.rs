@@ -13,12 +13,11 @@ use shape_test::shape_test::ShapeTest;
 #[test]
 fn ct_05_annotation_traced() {
     let code = r#"
-annotation traced(tag) {
-  before(args, ctx) {
+annotation traced(tag: string) {
+  before() {
     print(f"[{tag}] before")
-    args
   }
-  after(args, result, ctx) {
+  after(result) {
     print(f"[{tag}] after")
     result
   }
@@ -39,23 +38,21 @@ print(add(3, 4))
 #[test]
 fn ct_13_multi_annotations() {
     let code = r#"
-annotation log_a(tag) {
-  before(args, ctx) {
+annotation log_a(tag: string) {
+  before() {
     print(f"[A:{tag}] before")
-    args
   }
-  after(args, result, ctx) {
+  after(result) {
     print(f"[A:{tag}] after")
     result
   }
 }
 
-annotation log_b(tag) {
-  before(args, ctx) {
+annotation log_b(tag: string) {
+  before() {
     print(f"[B:{tag}] before")
-    args
   }
-  after(args, result, ctx) {
+  after(result) {
     print(f"[B:{tag}] after")
     result
   }
@@ -80,15 +77,15 @@ print(multiply(3, 5))
 
 #[test]
 fn ct_14b_annotation_empty_params() {
+    // Zero-param definition + observer hooks (the void target has no result
+    // to thread — the F1 observer pair).
     let code = r#"
 annotation simple() {
-  before(args, ctx) {
+  before() {
     print("simple before")
-    args
   }
-  after(args, result, ctx) {
+  after() {
     print("simple after")
-    result
   }
 }
 
@@ -107,11 +104,8 @@ greet()
 #[test]
 fn ct_16_annotation_modify_result() {
     let code = r#"
-annotation double_result(label) {
-  before(args, ctx) {
-    args
-  }
-  after(args, result, ctx) {
+annotation double_result(label: string) {
+  after(result) {
     print(f"[{label}] original result = {result}")
     result * 2
   }
@@ -136,12 +130,11 @@ print(f"final result = {r}")
 #[test]
 fn ct_25_expand_comptime() {
     let code = r#"
-annotation logged(name) {
-  before(args, ctx) {
+annotation logged(name: string) {
+  before() {
     print(f"[{name}] calling")
-    args
   }
-  after(args, result, ctx) {
+  after(result) {
     print(f"[{name}] done")
     result
   }
@@ -168,10 +161,9 @@ print(subtract(10, 3))
 #[test]
 fn ct_31_annotation_only_before() {
     let code = r#"
-annotation before_only(tag) {
-  before(args, ctx) {
+annotation before_only(tag: string) {
+  before() {
     print(f"[{tag}] before only")
-    args
   }
 }
 
@@ -193,8 +185,8 @@ print(square(5))
 #[test]
 fn ct_32_annotation_only_after() {
     let code = r#"
-annotation after_only(tag) {
-  after(args, result, ctx) {
+annotation after_only(tag: string) {
+  after(result) {
     print(f"[{tag}] after only, result = {result}")
     result
   }
@@ -218,17 +210,17 @@ print(cube(3))
 #[test]
 fn ct_36_annotation_three_stack() {
     let code = r#"
-annotation layer1(n) {
-  before(args, ctx) { print(f"L1 before {n}"); args }
-  after(args, result, ctx) { print(f"L1 after {n}"); result }
+annotation layer1(n: string) {
+  before() { print(f"L1 before {n}") }
+  after(result) { print(f"L1 after {n}"); result }
 }
-annotation layer2(n) {
-  before(args, ctx) { print(f"L2 before {n}"); args }
-  after(args, result, ctx) { print(f"L2 after {n}"); result }
+annotation layer2(n: string) {
+  before() { print(f"L2 before {n}") }
+  after(result) { print(f"L2 after {n}"); result }
 }
-annotation layer3(n) {
-  before(args, ctx) { print(f"L3 before {n}"); args }
-  after(args, result, ctx) { print(f"L3 after {n}"); result }
+annotation layer3(n: string) {
+  before() { print(f"L3 before {n}") }
+  after(result) { print(f"L3 after {n}"); result }
 }
 
 @layer1("a")
@@ -290,14 +282,10 @@ print("after phantom definition")
 #[test]
 fn ct_43_annotation_targets_decl() {
     let code = r#"
-annotation fn_only(tag) {
+annotation fn_only(tag: string) {
   targets: [function]
-  before(args, ctx) {
+  before() {
     print(f"[{tag}] fn called")
-    args
-  }
-  after(args, result, ctx) {
-    result
   }
 }
 
@@ -319,13 +307,12 @@ hello()
 #[test]
 fn ct_43b_annotation_targets_returning() {
     let code = r#"
-annotation fn_only(tag) {
+annotation fn_only(tag: string) {
   targets: [function]
-  before(args, ctx) {
+  before() {
     print(f"[{tag}] fn called")
-    args
   }
-  after(args, result, ctx) {
+  after(result) {
     print(f"[{tag}] done")
     result
   }
@@ -396,10 +383,9 @@ print(compute(5))
 #[test]
 fn ct_47_annotation_void_fn_workaround() {
     let code = r#"
-annotation log_call(tag) {
-  before(args, ctx) {
+annotation log_call(tag: string) {
+  before() {
     print(f"[{tag}] called")
-    args
   }
 }
 
@@ -421,12 +407,11 @@ say_hi()
 #[test]
 fn ct_50_annotation_reuse() {
     let code = r#"
-annotation track(name) {
-  before(args, ctx) {
+annotation track(name: string) {
+  before() {
     print(f"[{name}] called")
-    args
   }
-  after(args, result, ctx) {
+  after(result) {
     print(f"[{name}] returned {result}")
     result
   }
@@ -456,12 +441,11 @@ print(mul(4, 5))
 #[test]
 fn ct_07_annotation_on_expr() {
     let code = r#"
-annotation log_expr(label) {
-  before(args, ctx) {
+annotation log_expr(label: string) {
+  before() {
     print(f"[{label}] evaluating")
-    args
   }
-  after(args, result, ctx) {
+  after(result) {
     print(f"[{label}] result = {result}")
     result
   }
@@ -487,13 +471,11 @@ print(value)
 fn ct_14_annotation_no_params() {
     let code = r#"
 annotation simple {
-  before(args, ctx) {
+  before() {
     print("simple before")
-    args
   }
-  after(args, result, ctx) {
+  after() {
     print("simple after")
-    result
   }
 }
 
@@ -515,13 +497,13 @@ greet()
 #[test]
 fn ct_15_annotation_modify_args() {
     let code = r#"
-annotation double_first(label) {
-  before(args, ctx) {
+annotation double_first(label: string) {
+  before(args) {
     print(f"[{label}] modifying args")
-    let modified = [args[0] * 2, args[1]]
-    modified
+    args[0] = args[0] * 2
+    args
   }
-  after(args, result, ctx) {
+  after(result) {
     print(f"[{label}] result = {result}")
     result
   }
@@ -547,12 +529,11 @@ print(add(5, 3))
 
 fn ct_23_annotation_on_method() {
     let code = r#"
-annotation trace_method(name) {
-  before(args, ctx) {
+annotation trace_method(name: string) {
+  before() {
     print(f"[{name}] method called")
-    args
   }
-  after(args, result, ctx) {
+  after(result) {
     print(f"[{name}] method returned")
     result
   }
@@ -583,12 +564,11 @@ print(c.add(5))
 
 fn ct_23b_annotation_on_type_method() {
     let code = r#"
-annotation trace_method(name) {
-  before(args, ctx) {
+annotation trace_method(name: string) {
+  before() {
     print(f"[{name}] method called")
-    args
   }
-  after(args, result, ctx) {
+  after(result) {
     print(f"[{name}] method returned")
     result
   }
@@ -614,7 +594,7 @@ print(c.add(5))
 #[test]
 fn ct_45_annotation_set_param() {
     let code = r#"
-annotation default_b(val) {
+annotation default_b(val: int) {
   targets: [function]
   comptime post(target, ctx) {
     set param b = val

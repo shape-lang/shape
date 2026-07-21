@@ -26,7 +26,7 @@
 /// and the function can never drift, because the schema IS the signature. A
 /// missing return type, an unannotated parameter, or a parameter whose type has
 /// no JSON mapping is a compile error naming the exact offender.
-pub annotation llm_tool(description) {
+pub annotation llm_tool(description: string) {
     targets: [function]
     comptime post(target, ctx) {
         if target.return_type == None {
@@ -78,7 +78,7 @@ pub annotation llm_tool(description) {
 /// `{placeholder}` in the template must name a parameter of the annotated
 /// function; a typo (`{audence}` for `{audience}`) is a compile error naming
 /// the placeholder and the function, long before any model is called.
-pub annotation prompt(template) {
+pub annotation prompt(template: string) {
     targets: [function]
     comptime post(target, ctx) {
         let parts = template.split("{")

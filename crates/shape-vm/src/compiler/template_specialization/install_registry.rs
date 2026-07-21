@@ -924,20 +924,22 @@ fn tmpl<Args>(args: Args) -> Args { return args }
         assert_eq!(compiler.hook_install_registry[0].target_name, "victim");
     }
 
-    // Pin (vi) CONTROL: a LEGACY-weave annotation (declarative hooks, no
-    // typed config, no install-family references) on a generic target keeps
-    // today's behavior until S6 — the S0 g1/g4 accidental-working class
-    // (P-LEGGEN measured 10 = 5*2 through the legacy homogeneous-args
-    // weave). The C3-G11 defections.md entry names this class's deliberate
-    // withdrawal AT S6, not before.
+    // Pin (vi) — S6 FLIP of the S5b legacy-weave control: the C3-G11
+    // DELIBERATE CAPABILITY WITHDRAWAL lands with the collapse. A zero-param
+    // hook definition now routes the typed weave, so a hook on a GENERIC
+    // target is the G8 named rejection at the application site (the S0
+    // g1/g4 accidental-working class worked only by accident of the deleted
+    // homogeneous-args representation; the defections.md C3-G11 entry names
+    // the withdrawal and the #59 re-arm).
     #[test]
-    fn s5b_static_g8_legacy_weave_on_generic_control_keeps_working() {
-        let compiler = compiled_ok(
+    fn s6_static_g8_zero_param_hook_on_generic_target_now_rejects() {
+        let (result, compiler) = compile_source(
             r#"
 annotation dbl() {
   targets: [function]
-  before(args, ctx) {
-    [args[0] * 2]
+  before(args) {
+    args[0] = args[0] * 2
+    return args
   }
 }
 
@@ -947,20 +949,16 @@ fn id<T>(x: T) -> T { return x }
 id(5)
 "#,
         );
-        let mut vm = VirtualMachine::new(VMConfig::default());
-        vm.load_program(compiler.program.clone());
-        let value = vm
-            .execute(None)
-            .expect("program executes")
-            .as_i64()
-            .expect("top-level int");
-        assert_eq!(
-            value, 10,
-            "the legacy accidental-working class stays working until S6 (skip => 5)"
+        let message = result
+            .expect_err("a zero-param hook on a generic target must reject (C3-G8/G11)")
+            .to_string();
+        assert!(
+            message.contains("withdrawn until #59"),
+            "the G8 sentence must fire on the generic target, got: {message}"
         );
         assert!(
             compiler.hook_install_registry.is_empty(),
-            "the legacy weave never lands template-registry rows"
+            "a rejected install leaves no registry row"
         );
     }
 
@@ -993,41 +991,13 @@ type Widget {{
         );
     }
 
-    // Mixed legacy + new weave: ONE weave owner per target until S6.
-    #[test]
-    fn mixed_legacy_weave_target_rejects_the_install() {
-        expect_compile_reject(
-            &format!(
-                r#"
-fn my_before(x: int) -> int {{ return x + 1 }}
-
-annotation legacy_hook() {{
-  before(args, ctx) {{
-    args
-  }}
-}}
-
-annotation hookann() {{
-  targets: [function]
-  comptime post(target, ctx) {{
-    install(before_hook(my_before, []))
-  }}
-}}
-
-@legacy_hook()
-@hookann()
-fn victim(a: int) -> int {{ return a }}
-
-victim(1)
-"#
-            ),
-            &[
-                "engages the legacy before/after runtime-hook weave",
-                "exactly one weave owner",
-                "typed hook-template surface",
-            ],
-        );
-    }
+    // ADR-009 C3-S6 completion: `mixed_legacy_weave_target_rejects_the_
+    // install` RETIRED — the mixed-legacy state is UNCONSTRUCTIBLE after the
+    // classification collapse (its `legacy_hook()` + `before(args, ctx)`
+    // fixture now rejects at the declaration, and no definition can populate
+    // the legacy weave slots the product rejection reads). The dead
+    // one-weave-owner rejection block itself is the S6 capstone's deletion
+    // territory.
 
     // The install builtin's own misuse rejection: a non-handle argument is
     // named with the producer twin.

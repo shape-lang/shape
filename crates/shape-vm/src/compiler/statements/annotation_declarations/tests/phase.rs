@@ -76,7 +76,7 @@ pub annotation mark() { metadata(target) { { version: 1 } } }
 
 #[test]
 fn repeated_validated_scope_is_an_exact_no_op() {
-    let program = parse("annotation once() { before(args, ctx) { args } }");
+    let program = parse("annotation once() { before(args) { args } }");
     let mut compiler = BytecodeCompiler::new();
     compiler
         .prepare_annotation_scope(&program.items)

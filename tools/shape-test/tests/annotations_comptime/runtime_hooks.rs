@@ -4,13 +4,15 @@ use shape_test::shape_test::ShapeTest;
 
 #[test]
 fn before_hook_preserves_a_typed_array_parameter() {
-    // The wrapper packs `data: Array<int>` into an outer `Array<Array<int>>`.
-    // Returning args makes the implementation consume that nested carrier.
+    // ADR-009 C3-S6: the typed weave delivers `data: Array<int>` as a
+    // per-param carrier (the C3-G9 pseudo-tuple; the legacy
+    // `Array<Array<int>>` nested packing is deleted). Returning args makes
+    // the implementation consume the woven carrier end-to-end.
     ShapeTest::new(
         r#"
 annotation preserve_args() {
   targets: [function]
-  before(args, ctx) {
+  before(args) {
     args
   }
 }

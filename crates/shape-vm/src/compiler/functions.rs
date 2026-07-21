@@ -2927,7 +2927,7 @@ mod tests {
     #[ignore = "Phase-2c comptime emit surface: set-return directive still depends on deleted host argument conversion"]
     fn test_comptime_after_receives_annotation_args() {
         let code = r#"
-            annotation set_return_type_from_annotation(type_name) {
+            annotation set_return_type_from_annotation(type_name: string) {
                 comptime post(target, ctx, ty) {
                     if ty == "int" {
                         set return int

@@ -59,7 +59,7 @@ fn annotation_replace_body_generates_constant_function() {
     // replacement body.
     ShapeTest::new(
         r#"
-annotation stub_return(val) {
+annotation stub_return(val: string) {
   targets: [function]
   comptime post(target, ctx) {
     replace body {

@@ -37,7 +37,12 @@ impl BytecodeCompiler {
 
         // Cross-check the legacy generated-declaration name view only where it
         // was sound. Node provenance remains the authority for nested,
-        // monomorphized, and replace-body generated closures.
+        // monomorphized, and replace-body generated closures. ADR-009 C3-S6:
+        // the hook-template weave's IMPL SHADOW is excluded — it is a
+        // generated declaration by reservation whose body is the USER's own
+        // source carried verbatim, so its closures are legitimately unstamped
+        // (they keep ordinary capture inference; the name-view heuristic is
+        // unsound for that class).
         debug_assert!(
             {
                 let enclosing_is_generated_decl = self
@@ -45,6 +50,9 @@ impl BytecodeCompiler {
                     .and_then(|idx| self.program.functions.get(idx))
                     .is_some_and(|function| {
                         self.generated_symbols.contains_name(function.name.as_str())
+                            && !self
+                                .template_weave_shadow_names
+                                .contains(function.name.as_str())
                     });
                 !enclosing_is_generated_decl || generated_origin.is_some()
             },

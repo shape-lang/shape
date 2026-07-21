@@ -9,7 +9,7 @@ use shape_test::shape_test::ShapeTest;
 fn set_param_value_supplies_default_for_omitted_arg() {
     ShapeTest::new(
         r#"
-annotation default_y(val) {
+annotation default_y(val: int) {
   targets: [function]
   comptime post(target, ctx) {
     set param y = val
@@ -32,7 +32,7 @@ print(add(5))
 fn set_param_value_explicit_arg_still_overrides_generated_default() {
     ShapeTest::new(
         r#"
-annotation default_y(val) {
+annotation default_y(val: int) {
   targets: [function]
   comptime post(target, ctx) {
     set param y = val
@@ -81,7 +81,7 @@ print(add(5))
 fn set_param_value_string_default_is_supported() {
     ShapeTest::new(
         r#"
-annotation default_suffix(val) {
+annotation default_suffix(val: string) {
   targets: [function]
   comptime post(target, ctx) {
     set param suffix = val
@@ -104,7 +104,7 @@ print(shout("shape"))
 fn set_param_value_bool_default_is_supported() {
     ShapeTest::new(
         r#"
-annotation default_flag(val) {
+annotation default_flag(val: bool) {
   targets: [function]
   comptime post(target, ctx) {
     set param flag = val
@@ -127,7 +127,7 @@ print(label())
 fn set_param_value_number_default_is_supported() {
     ShapeTest::new(
         r#"
-annotation default_limit(val) {
+annotation default_limit(val: number) {
   targets: [function]
   comptime post(target, ctx) {
     set param limit = val

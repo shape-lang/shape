@@ -8181,12 +8181,15 @@ mod tests {
 
     #[test]
     fn test_annotation_def_compiles_handlers() {
+        // ADR-009 C3-S6 completion: declarative hooks LOWER onto the public
+        // comptime API (the sugar carrier) — the legacy weave slots stay
+        // `None` for every definition (one implementation).
         let code = r#"
-            annotation warmup(period) {
-                before(args, ctx) {
+            annotation warmup(period: int) {
+                before(args) {
                     args
                 }
-                after(args, result, ctx) {
+                after(result) {
                     result
                 }
             }
@@ -8209,21 +8212,30 @@ mod tests {
 
         let compiled = bytecode.compiled_annotations.get("warmup").unwrap();
         assert!(
-            compiled.before_handler.is_some(),
-            "Should have before handler"
+            compiled.sugar_post_handler.is_some(),
+            "Declarative hooks lower onto the sugar carrier"
+        );
+        assert_eq!(
+            compiled.sugar_body_fns.len(),
+            2,
+            "One minted body fn per declarative hook"
         );
         assert!(
-            compiled.after_handler.is_some(),
-            "Should have after handler"
+            compiled.before_handler.is_none() && compiled.after_handler.is_none(),
+            "The legacy weave slots must NEVER be populated (C3-G7/S6)"
         );
     }
 
     #[test]
     fn test_exported_annotation_def_compiles_handlers() {
+        // Observer form: the applied target declares no parameters, so a
+        // polymorphic `before(args)` template has nothing to receive (the
+        // weave's named rejection covers that shape) — the zero-param
+        // observer is the fitting hook.
         let code = r#"
-            pub annotation warmup(period) {
-                before(args, ctx) {
-                    args
+            pub annotation warmup(period: int) {
+                before() {
+                    let p = period
                 }
             }
 
@@ -8247,9 +8259,13 @@ mod tests {
 
     #[test]
     fn test_annotation_handler_function_names() {
+        // ADR-009 C3-S6 completion (flip of the legacy `{name}___before`
+        // naming pin): declarative hooks consume NO handler slot and NO
+        // `{name}___before` callable — only lifecycle handlers reserve
+        // `{name}___{kind}` names (see the transaction/identity pins).
         let code = r#"
-            annotation my_ann(x) {
-                before(args, ctx) {
+            annotation my_ann(x: int) {
+                before(args) {
                     args
                 }
             }
@@ -8260,18 +8276,17 @@ mod tests {
             .compile(&program)
             .expect("Failed to compile");
 
-        // Handler should be compiled as an internal function
         let compiled = bytecode.compiled_annotations.get("my_ann").unwrap();
-        let handler_id = compiled.before_handler.unwrap() as usize;
         assert!(
-            handler_id < bytecode.functions.len(),
-            "Handler function ID should be valid"
+            compiled.before_handler.is_none(),
+            "No legacy handler slot may be populated"
         );
-
-        let handler_fn = &bytecode.functions[handler_id];
-        assert_eq!(
-            handler_fn.name, "my_ann___before",
-            "Handler function should be named my_ann___before"
+        assert!(
+            !bytecode
+                .functions
+                .iter()
+                .any(|f| f.name == "my_ann___before"),
+            "No `{{name}}___before` callable may enter the function table"
         );
     }
 
@@ -8280,13 +8295,13 @@ mod tests {
     #[test]
     fn test_annotated_function_generates_wrapper() {
         let code = r#"
-            annotation tracked(label) {
-                before(args, ctx) {
+            annotation tracked(label: string) {
+                before(args) {
                     args
                 }
             }
             @tracked("my_func")
-            function compute(x) {
+            function compute(x: int) {
                 return x * 2
             }
             function test() { return 1; }
@@ -8357,20 +8372,20 @@ mod tests {
         // Two annotations on the same function should generate chained wrappers
         let code = r#"
             annotation first() {
-                before(args, ctx) {
+                before(args) {
                     return args
                 }
             }
 
             annotation second() {
-                before(args, ctx) {
+                before(args) {
                     return args
                 }
             }
 
             @first
             @second
-            function compute(x) {
+            function compute(x: int) {
                 return x * 2
             }
         "#;
@@ -8416,7 +8431,7 @@ mod tests {
         // An annotation with before/after should have allowed_targets = [Function]
         let code = r#"
             annotation traced() {
-                before(args, ctx) {
+                before(args) {
                     return args
                 }
             }
@@ -8441,11 +8456,14 @@ mod tests {
     #[test]
     fn test_annotation_allowed_targets_explicit_override() {
         // Explicit `targets: [...]` should override inferred defaults.
+        // ADR-009 C3-S6: a HOOKS-bearing def with function-less targets now
+        // rejects at the declaration (S5b), so the override subject rides a
+        // comptime handler instead.
         let code = r#"
             annotation traced() {
                 targets: [type]
-                before(args, ctx) {
-                    return args
+                comptime post(target, ctx) {
+                    1
                 }
             }
         "#;
@@ -8515,7 +8533,7 @@ mod tests {
         // Function-only annotation applied to a type should fail.
         let code = r#"
             annotation traced() {
-                before(args, ctx) { return args }
+                before(args) { return args }
             }
 
             @traced()

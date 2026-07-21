@@ -807,7 +807,7 @@ let x = p.answer()
     /// "no edits inside generated ranges" guard must not cancel
     /// application-anchored binder edits — they are source text.
     const APPLICATION_BINDER_PROGRAM: &str = r#"
-annotation gen(mname) {
+annotation gen(mname: string) {
   targets: [type]
   comptime post(target, ctx) {
     extend (extend_method_literal(target.name, mname, "int", 1))

@@ -1,16 +1,24 @@
-//! ADR-009 C3 #14 (slice 4) — the G7-compliant transitional classification
-//! (`AnnotationSurfaceClass`) + the declaration-site checks R1 (ConstLift
-//! domain, the ONE `const_lift::annotation_within_lift_domain` producer
-//! reused) and R2 (mixed typed/untyped config params), all firing AT THE
-//! DECLARATION — before any `@application` exists.
+//! ADR-009 C3 #14 (S6 completion) — the COLLAPSED declaration surface.
 //!
-//! The classification rule, the zero-param ruling, and the named S6 close
-//! are documented at the classifier (`planner.rs`).
+//! The S4 transitional TypedConfig/Legacy classification is deleted: there
+//! is ONE annotation surface. These pins cover the declaration-site checks,
+//! all firing BEFORE any `@application` exists:
+//!
+//!   - THE untyped-config rejection (the collapse's named producer in
+//!     `planner::plan_definition`; the former R2 mixed-params refinement
+//!     folds into it) + its positive twins.
+//!   - R1 (ConstLift domain, the ONE `const_lift::annotation_within_lift_
+//!     domain` producer reused).
+//!   - R3 (hook shape — now fires for EVERY definition, zero-param
+//!     included; the "stay on the legacy surface" escape is deleted).
+//!   - The lifecycle handlers' post-collapse contract: `on_define`/
+//!     `metadata` register for zero-param AND typed-config definitions
+//!     (the S6-completion Risk-1 disposition — the former R3-family
+//!     rejection guarded the deleted legacy surface).
+//!   - The S5b non-function-target declaration rejection (unchanged
+//!     producer, now also reachable from zero-param hook definitions).
 
 use super::*;
-use crate::compiler::statements::annotation_declarations::planner::{
-    classify_annotation_surface, AnnotationSurfaceClass,
-};
 
 fn compile_err(source: &str) -> String {
     let program = parse(source);
@@ -27,73 +35,69 @@ fn compile_ok(source: &str) {
         .expect("fixture must compile");
 }
 
-// ── the classification rule (sealed single-producer chokepoint) ────────────
+// ── THE untyped-config declaration-site rejection (the collapse) ───────────
 
 #[test]
-fn zero_param_definition_classifies_legacy() {
-    // ZERO-PARAM RULING: no opt-in marker is minted; zero-param defs stay
-    // Legacy until S6 deletes the Legacy arm (then every annotation is
-    // new-path for free).
-    let program = parse("annotation plain() { targets: [function] }");
-    let definition = only_definition(&program);
-    assert!(matches!(
-        classify_annotation_surface(&definition),
-        Ok(AnnotationSurfaceClass::Legacy(_))
-    ));
-}
-
-#[test]
-fn all_untyped_params_classify_legacy() {
-    let program = parse("annotation warmup(period, mode) { targets: [function] }");
-    let definition = only_definition(&program);
-    assert!(matches!(
-        classify_annotation_surface(&definition),
-        Ok(AnnotationSurfaceClass::Legacy(_))
-    ));
-}
-
-#[test]
-fn all_typed_params_classify_typed_config() {
-    let program =
-        parse("annotation retry(times: int, label: string) { targets: [function] }");
-    let definition = only_definition(&program);
-    assert!(matches!(
-        classify_annotation_surface(&definition),
-        Ok(AnnotationSurfaceClass::TypedConfig(_))
-    ));
-}
-
-#[test]
-fn mixed_params_are_a_classification_error_naming_the_first_untyped() {
-    let program = parse("annotation partial(times: int, label) { targets: [function] }");
-    let definition = only_definition(&program);
-    let mixed = classify_annotation_surface(&definition)
-        .err()
-        .expect("mixed params must not classify");
-    assert_eq!(mixed.first_untyped.simple_name(), Some("label"));
-}
-
-// ── R2: the mixed typed/untyped declaration-site rejection ─────────────────
-
-#[test]
-fn r2_mixed_config_params_reject_at_declaration_with_the_exact_sentence() {
+fn untyped_config_param_rejects_at_declaration_with_the_exact_sentence() {
     // Fires with ZERO applications in the program — declaration-site.
+    let message =
+        compile_err("annotation warmup(period) { comptime post(target, ctx) { 1 } }");
+    assert!(
+        message.contains(
+            "annotation `warmup` declares config parameter `period` without a type; \
+             every annotation config parameter declares its type (the untyped config \
+             surface is deleted, C3-G7/S6) — annotate `period` with a ConstLift-liftable \
+             type"
+        ),
+        "the untyped-config sentence must fire verbatim, got: {message}"
+    );
+}
+
+#[test]
+fn untyped_config_rejection_names_the_first_untyped_of_a_mixed_definition() {
+    // The former R2 "mixed typed/untyped" refinement folds into the ONE
+    // untyped-config rejection: `label` (the first untyped param) is named.
     let message = compile_err(
         "annotation partial(times: int, label) { comptime post(target, ctx) { 1 } }",
     );
     assert!(
         message.contains(
-            "annotation `partial` mixes typed and untyped config parameters; \
-             a typed-config annotation declares a type on every config parameter \
-             — annotate `label`"
+            "annotation `partial` declares config parameter `label` without a type"
         ),
-        "R2 sentence must fire verbatim, got: {message}"
+        "the first untyped param must be named, got: {message}"
     );
 }
 
 #[test]
-fn r2_positive_twin_all_typed_definition_compiles() {
+fn untyped_config_rejection_fires_for_declarative_hook_definitions_too() {
+    let message = compile_err(
+        "annotation traced(tag) {\n\
+         \x20 targets: [function]\n\
+         \x20 before(args) { return args }\n\
+         }",
+    );
+    assert!(
+        message.contains("annotation `traced` declares config parameter `tag` without a type"),
+        "hook-bearing untyped definitions reject identically, got: {message}"
+    );
+}
+
+#[test]
+fn untyped_config_positive_twin_all_typed_definition_compiles() {
     compile_ok("annotation retry(times: int, label: string) { comptime post(target, ctx) { 1 } }");
+}
+
+#[test]
+fn untyped_config_positive_twin_zero_param_definition_compiles() {
+    // Zero config params = nothing to type — the definition routes the ONE
+    // (new) path for free; there is no opt-in marker and no legacy arm.
+    compile_ok("annotation plain() { targets: [function] }");
+    compile_ok(
+        "annotation observer() {\n\
+         \x20 targets: [function]\n\
+         \x20 before() { 1 }\n\
+         }",
+    );
 }
 
 // ── R1: the declaration-site ConstLift domain check ────────────────────────
@@ -167,85 +171,73 @@ fn r1_positive_twins_every_liftable_spelling_compiles() {
     );
 }
 
-// ── R3: the typed-surface hook-shape declaration-site rejection (S4c) ──────
-// The S4b installer surface-and-stop is REPLACED by the real lowering; its
-// two pins re-target here onto R3 (the same fixtures now reject EARLIER, at
-// planning, with the typed-surface shape sentence — never silent legacy
-// engagement, and never the legacy weave slots).
+// ── R3: the hook-shape declaration-site rejection (S6-collapsed sentence) ──
+// Fires for EVERY definition — the former "typed config parameters select
+// the typed hook surface" head and the "remove the parameter types" escape
+// are deleted with the classification fork.
 
 #[test]
-fn r3_typed_config_before_with_legacy_params_rejects_with_the_exact_sentence() {
+fn r3_before_with_legacy_params_rejects_with_the_exact_sentence() {
     let message =
         compile_err("annotation typedcfg(times: int) { before(args, ctx) { args } }");
     assert!(
         message.contains(
-            "annotation `typedcfg` declares typed config parameters, which selects the \
-             typed hook surface, but its `before` handler declares (args, ctx); \
-             typed-surface hooks are before(args) / after(result) / zero-param observers \
-             before() / after() — or remove the parameter types to stay on the legacy \
-             surface until it is deleted (C3-G7/S6)"
+            "annotation `typedcfg`'s `before` handler declares (args, ctx); \
+             declarative hooks are before(args) / after(result) / zero-param observers \
+             before() / after()"
         ),
         "R3 must fire verbatim, got: {message}"
     );
 }
 
 #[test]
-fn r3_typed_config_after_with_legacy_params_rejects_with_the_exact_sentence() {
+fn r3_after_with_legacy_params_rejects_with_the_exact_sentence() {
     let message = compile_err(
         "annotation typedcfg(times: int) { after(args, result, ctx) { result } }",
     );
     assert!(
         message.contains(
-            "but its `after` handler declares (args, result, ctx); typed-surface hooks are"
+            "`after` handler declares (args, result, ctx); declarative hooks are"
         ),
         "R3 must fire naming the after shape, got: {message}"
     );
 }
 
 #[test]
+fn r3_zero_param_definition_with_legacy_hook_shape_rejects() {
+    // The collapse's behavior flip: a zero-param definition's declarative
+    // hooks route the ONE path, so the former legacy `before(args, ctx)`
+    // spelling now rejects at the declaration instead of engaging the
+    // deleted weave (pre-collapse twin: this exact fixture compiled Legacy).
+    let message = compile_err("annotation once() { before(args, ctx) { args } }");
+    assert!(
+        message.contains(
+            "annotation `once`'s `before` handler declares (args, ctx); \
+             declarative hooks are before(args) / after(result)"
+        ),
+        "the zero-param R3 rejection must fire, got: {message}"
+    );
+}
+
+#[test]
 fn r3_single_param_magic_spellings_reject() {
-    // A SINGLE param named `fn` or `ctx` is a legacy magic spelling, not a
-    // pseudo-tuple binder — R3, so the legacy meaning can never silently
-    // change under the typed surface.
+    // A SINGLE param named `fn` or `ctx` is a deleted-legacy magic spelling,
+    // not a pseudo-tuple binder — R3, so the legacy meaning can never
+    // silently change on the collapsed surface.
     for source in [
         "annotation typedcfg(times: int) { before(ctx) { ctx } }",
         "annotation typedcfg(times: int) { after(fn) { 1 } }",
     ] {
         let message = compile_err(source);
         assert!(
-            message.contains("typed-surface hooks are before(args) / after(result)"),
+            message.contains("declarative hooks are before(args) / after(result)"),
             "R3 must fire on the magic single param, got: {message}"
         );
     }
 }
 
 #[test]
-fn r3_family_lifecycle_hooks_reject_citing_the_e4_s6_fence() {
-    for (source, kind) in [
-        (
-            "annotation typedcfg(times: int) { on_define(target) { 1 } }",
-            "`on_define`",
-        ),
-        (
-            "annotation typedcfg(times: int) { metadata(target) { 1 } }",
-            "`metadata`",
-        ),
-    ] {
-        let message = compile_err(source);
-        assert!(
-            message.contains("is a runtime-lifecycle hook with no typed-surface form yet"),
-            "the R3-family {kind} rejection must fire, got: {message}"
-        );
-        assert!(
-            message.contains("the runtime-hook context family is E4's charter")
-                && message.contains("deleted at C3-S6"),
-            "the E4/S6 fence must be cited, got: {message}"
-        );
-    }
-}
-
-#[test]
-fn r3_positive_twins_all_four_typed_surface_forms_compile() {
+fn r3_positive_twins_all_four_hook_forms_compile() {
     // before(args) / after(result) / before() / after() — with a body that
     // satisfies each form's shape — all pass the declaration checks.
     compile_ok(
@@ -269,19 +261,83 @@ fn r3_positive_twins_all_four_typed_surface_forms_compile() {
     );
 }
 
+// ── Lifecycle handlers on the collapsed surface (Risk-1 disposition) ───────
+// `on_define`/`metadata` are compile-time-fired definition hooks registered
+// through the installer's lifecycle arm — NOT part of the deleted runtime
+// before/after weave. They register for zero-param AND typed-config
+// definitions; the former R3-family rejection ("no typed-surface form yet
+// … remove the parameter types") died with the legacy surface it guarded.
+
 #[test]
-fn legacy_untyped_declarative_before_handler_still_compiles() {
-    // The Legacy class keeps the byte-unchanged legacy weave until S6 —
-    // the fork twin.
-    compile_ok("annotation once() { before(args, ctx) { args } }");
+fn lifecycle_zero_param_definition_compiles_and_registers_handlers() {
+    let program = parse(
+        "annotation traced() {\n\
+         \x20 targets: [function]\n\
+         \x20 on_define(target) { 1 }\n\
+         \x20 metadata(target) { { version: 1 } }\n\
+         }",
+    );
+    let bytecode = BytecodeCompiler::new()
+        .compile(&program)
+        .expect("zero-param lifecycle definition compiles");
+    let compiled = bytecode
+        .compiled_annotations
+        .get("traced")
+        .expect("compiled annotation registered");
+    assert!(compiled.on_define_handler.is_some());
+    assert!(compiled.metadata_handler.is_some());
+}
+
+#[test]
+fn lifecycle_typed_config_definition_now_compiles_with_typed_params() {
+    // The Risk-1 flip pin (former `r3_family_lifecycle_hooks_reject_citing_
+    // the_e4_s6_fence` / `s5b_r3_family_mixed_def_rejects_in_both_handler_
+    // orders`): typed config params + lifecycle handlers COMPILE on the
+    // collapsed surface, in both handler orders and mixed with hooks.
+    let program = parse(
+        "annotation typedcfg(times: int) {\n\
+         \x20 targets: [function]\n\
+         \x20 on_define(target) { 1 }\n\
+         }",
+    );
+    let bytecode = BytecodeCompiler::new()
+        .compile(&program)
+        .expect("typed-config lifecycle definition compiles");
+    assert!(
+        bytecode
+            .compiled_annotations
+            .get("typedcfg")
+            .expect("compiled annotation registered")
+            .on_define_handler
+            .is_some()
+    );
+    compile_ok(
+        "annotation typedcfg2(times: int) { metadata(target) { { version: times } } }",
+    );
+    // Mixed hook + lifecycle, both handler orders.
+    compile_ok(
+        "annotation typedcfg3(times: int) {\n\
+         \x20 targets: [function]\n\
+         \x20 before(args) { return args }\n\
+         \x20 on_define(target) { 1 }\n\
+         }",
+    );
+    compile_ok(
+        "annotation typedcfg4(times: int) {\n\
+         \x20 targets: [function]\n\
+         \x20 on_define(target) { 1 }\n\
+         \x20 before(args) { return args }\n\
+         }",
+    );
 }
 
 // ── S5b: the DECLARATION-tier non-function-target rejection (S4 residual 7)
-// A TypedConfig-with-hooks definition whose EXPLICIT targets exclude
-// `function` can never fire its hooks (the non-function consumer seams run
-// only comptime pre/post handlers — measured silent no-op, probe P-NFT) —
-// rejected at the declaration, ZERO applications needed. The application
-// tier (mixed targets) is pinned in sugar_matrix_tests.
+// A hooks-bearing definition whose EXPLICIT targets exclude `function` can
+// never fire its hooks (the non-function consumer seams run only comptime
+// pre/post handlers — measured silent no-op, probe P-NFT) — rejected at the
+// declaration, ZERO applications needed. The application tier (mixed
+// targets) is pinned in sugar_matrix_tests. Post-collapse the producer also
+// fires for ZERO-PARAM hook definitions (they carry sugar now).
 
 #[test]
 fn s5b_nonfn_type_only_targets_with_hooks_reject_at_declaration() {
@@ -298,6 +354,26 @@ fn s5b_nonfn_type_only_targets_with_hooks_reject_at_declaration() {
              seam and can never fire — add function to targets or remove the hooks"
         ),
         "the declaration-tier sentence must fire verbatim, got: {message}"
+    );
+}
+
+#[test]
+fn s5b_nonfn_zero_param_hook_definition_rejects_at_declaration_too() {
+    // The collapse's reachability extension: pre-collapse this zero-param
+    // fixture classified Legacy (no sugar, no check) and ran the legacy
+    // weave; now it carries sugar and the SAME producer fires.
+    let message = compile_err(
+        "annotation deco0() {\n\
+         \x20 targets: [expression]\n\
+         \x20 before(args) { return args }\n\
+         }",
+    );
+    assert!(
+        message.contains(
+            "annotation `deco0` declares declarative before/after hooks, but its targets \
+             ([expression]) do not include function"
+        ),
+        "the zero-param declaration-tier rejection must fire, got: {message}"
     );
 }
 
@@ -326,7 +402,7 @@ fn s5b_nonfn_declaration_twins_compile() {
          \x20 before(args) { return args }\n\
          }",
     );
-    // Twin 2: a HOOK-FREE TypedConfig def with non-function targets stays
+    // Twin 2: a HOOK-FREE typed-config def with non-function targets stays
     // legal — comptime handlers run on type targets; only declarative
     // hooks demand a function seam.
     compile_ok(
@@ -335,49 +411,12 @@ fn s5b_nonfn_declaration_twins_compile() {
          \x20 comptime post(target, ctx) { 1 }\n\
          }",
     );
-    // Twin 3: a LEGACY (untyped) def with non-function targets is outside
-    // the sugar surface entirely — untouched.
+    // Twin 3: a zero-param comptime-only def with non-function targets is
+    // hook-free — no sugar, no rejection.
     compile_ok(
-        "annotation legacy_deco() {\n\
+        "annotation zero_deco() {\n\
          \x20 targets: [type]\n\
          \x20 comptime post(target, ctx) { 1 }\n\
          }",
     );
 }
-
-// ── S5b lifecycle angle (charter item 4-i): a MIXED TypedConfig definition
-// (typed config + declarative hook + lifecycle handler) rejects with the
-// R3-family sentence REGARDLESS of handler order — the lowering loop
-// rejects OnDefine/Metadata before its empty-hooks early return, so the
-// R3-family declaration rejection is TOTAL: TypedConfig lifecycle handlers
-// can NEVER receive typed config params.
-
-#[test]
-fn s5b_r3_family_mixed_def_rejects_in_both_handler_orders() {
-    for source in [
-        // lifecycle handler AFTER the declarative hook
-        "annotation typedcfg(times: int) {\n\
-         \x20 targets: [function]\n\
-         \x20 before(args) { return args }\n\
-         \x20 on_define(target) { 1 }\n\
-         }",
-        // lifecycle handler BEFORE the declarative hook
-        "annotation typedcfg(times: int) {\n\
-         \x20 targets: [function]\n\
-         \x20 on_define(target) { 1 }\n\
-         \x20 before(args) { return args }\n\
-         }",
-    ] {
-        let message = compile_err(source);
-        assert!(
-            message.contains("is a runtime-lifecycle hook with no typed-surface form yet"),
-            "the R3-family rejection must fire regardless of handler order, got: {message}"
-        );
-        assert!(
-            message.contains("the runtime-hook context family is E4's charter")
-                && message.contains("deleted at C3-S6"),
-            "the E4/S6 fence must be cited, got: {message}"
-        );
-    }
-}
-

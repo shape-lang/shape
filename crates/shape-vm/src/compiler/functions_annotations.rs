@@ -6299,64 +6299,11 @@ fn main() -> int { generated_flag() }
         }
     }
 
-    /// The specialized annotation-handler WRAPPER function (the compiled
-    /// `before`/`after` handler body) anchors at the handler definition —
-    /// the generator's real span — for both its name span and its
-    /// synthesized `Return` statement.
-    #[test]
-    fn annotation_handler_wrapper_anchors_at_the_handler_definition() {
-        let source = r#"
-annotation logged() {
-  before(args, ctx) {
-    args
-  }
-}
-
-@logged()
-fn work(x: int) -> int { x + 1 }
-
-let out = work(2)
-"#;
-        let compiler = compiled_with_source(source);
-        let handler_line = line_of(source, "before(args, ctx)");
-        // ADR-009 E3 (S2, U10): the specialized handler is registered under a
-        // HYGIENIC (unspellable, SOH-prefixed) name — role bound by identity,
-        // not spelling. Find it by that hygienic marker + its handler-line
-        // anchor, never by a `*_wrapper` substring (which no longer exists).
-        let (name, wrapper) = compiler
-            .function_defs
-            .iter()
-            .find(|(name, wrapper)| {
-                name.starts_with('\u{1}')
-                    && resolved_line(&compiler, wrapper.name_span) == handler_line
-            })
-            .expect("before-handler wrapper is registered under a hygienic name");
-        assert!(
-            !compiler
-                .function_defs
-                .keys()
-                .any(|name| name.contains("_wrapper")),
-            "rejection row 2: no `*_wrapper` synthetic spelling may enter the function table"
-        );
-        assert_eq!(
-            resolved_line(&compiler, wrapper.name_span),
-            handler_line,
-            "wrapper `{name}` name span must resolve to the handler definition line"
-        );
-        let return_span = wrapper
-            .body
-            .iter()
-            .find_map(|statement| match statement {
-                shape_ast::ast::Statement::Return(_, span) => Some(*span),
-                _ => None,
-            })
-            .expect("wrapper body is a synthesized Return");
-        assert_eq!(
-            resolved_line(&compiler, return_span),
-            handler_line,
-            "wrapper Return statement must anchor at the handler body"
-        );
-    }
+    // ADR-009 C3-S6 completion: `annotation_handler_wrapper_anchors_at_the_
+    // handler_definition` DELETED — it anchored the LEGACY specialized
+    // before-handler (a zero-param `logged()` + `before(args, ctx)` fixture
+    // that no longer compiles post-collapse). The typed weave carries its own
+    // span-anchoring pins (template_specialization/weave.rs).
 }
 
 // ADR-009 ticket D1 (slice S4) — the shared compiler query surface for

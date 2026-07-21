@@ -233,6 +233,7 @@ impl BytecodeCompiler {
             generated_symbols:
                 crate::compiler::comptime_builtins::expansion_provenance::GeneratedSymbolTable::new(
                 ),
+            template_weave_shadow_names: std::collections::HashSet::new(),
             retain_generated_reservations_for_query_session: false,
             install_journal: None,
             hook_install_registry: Vec::new(),

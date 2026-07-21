@@ -1935,6 +1935,19 @@ pub struct BytecodeCompiler {
     /// membership is the table's derived `contains_name` view.
     pub(crate) generated_symbols: comptime_builtins::expansion_provenance::GeneratedSymbolTable,
 
+    /// ADR-009 C3 #14 (S6 completion) — the hygienic names of hook-template
+    /// weave IMPL SHADOWS (`template_weave_impl_name`). A shadow is a
+    /// GENERATED declaration by reservation (journaled, D1-navigable) whose
+    /// BODY is the user's own source carried verbatim, so its interior
+    /// closures are legitimately UNSTAMPED (they keep ordinary capture
+    /// inference — the gate-totality G4 negative-control contract). The
+    /// capture-surface debug crosscheck ("a generated declaration's closures
+    /// are stamped", capture_plan/surface.rs) consults this set to exclude
+    /// the class where its name-view heuristic is unsound. Advisory only —
+    /// node-borne provenance stays the authority; stale entries after a
+    /// rollback are harmless (the crosscheck is debug-tier).
+    pub(in crate::compiler) template_weave_shadow_names: HashSet<String>,
+
     /// ADR-009 C2 #13 (slice 1) — when set, a rolled-back generated-body
     /// install (see [`checked_body`]) retains the generated-query reservation
     /// tables (`generated_symbols`, `closure_capture_packs`) after a recoverable

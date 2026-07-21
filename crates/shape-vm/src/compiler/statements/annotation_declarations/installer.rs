@@ -9,7 +9,7 @@ use shape_ast::error::{Result, ShapeError};
 use crate::bytecode::CompiledAnnotation;
 use crate::compiler::BytecodeCompiler;
 
-use super::planner::{handler_callable_name, AnnotationSurfaceClass, PlannedAnnotation};
+use super::planner::{handler_callable_name, PlannedAnnotation};
 
 pub(super) fn install(
     compiler: &mut BytecodeCompiler,
@@ -54,35 +54,17 @@ pub(super) fn install(
                 compiled.comptime_post_handler = Some(handler.clone());
             }
             AnnotationHandlerType::Before | AnnotationHandlerType::After => {
-                // ADR-009 C3 #14 (slice 4, S4c): the classification fork. A
-                // TypedConfig definition's declarative before/after handlers
-                // NEVER register on the legacy weave slots (`before_handler`
-                // / `before_handler_template` — silent legacy engagement of
-                // typed params is forbidden). They are LOWERED onto the
-                // public comptime API instead: the planner validated (R3)
-                // and built the artifacts (`plan.sugar` — minted body fns +
+                // ADR-009 C3 #14 (S6 completion): declarative before/after
+                // handlers NEVER register handler slots — they were LOWERED
+                // onto the public comptime API at planning (the planner
+                // validated (R3) and built `plan.sugar` — minted body fns +
                 // the synthesized public-API `comptime post` handler), which
-                // are attached to the carrier below and installed per-target
-                // through `specialize_template` + the open
-                // InstallTransaction, exactly like a hand-written handler
-                // (C3-G2/G3/G4).
-                if matches!(plan.surface_class, AnnotationSurfaceClass::TypedConfig(_)) {
-                    continue;
-                }
-                let name = handler_callable_name(&definition.name, &handler.handler_type);
-                let function = placeholder_function(name, handler.return_type.clone());
-                let function_id = register_exact_function(compiler, &function)?;
-                match &handler.handler_type {
-                    AnnotationHandlerType::Before => {
-                        compiled.before_handler = Some(function_id);
-                        compiled.before_handler_template = Some(handler.clone());
-                    }
-                    AnnotationHandlerType::After => {
-                        compiled.after_handler = Some(function_id);
-                        compiled.after_handler_template = Some(handler.clone());
-                    }
-                    _ => unreachable!(),
-                }
+                // is attached to the carrier above and installed per-target
+                // through `specialize_template` + the open InstallTransaction,
+                // exactly like a hand-written handler (C3-G2/G3/G4). The
+                // legacy weave slots (`before_handler` / `after_handler` /
+                // `*_handler_template`) stay `None` for every definition; the
+                // S6 capstone deletes them.
             }
             AnnotationHandlerType::OnDefine | AnnotationHandlerType::Metadata => {
                 let name = handler_callable_name(&definition.name, &handler.handler_type);
@@ -165,23 +147,6 @@ fn verify_compiled_handler(
         return Err(handler_identity_error(name));
     }
     Ok(())
-}
-
-fn placeholder_function(name: String, return_type: Option<TypeAnnotation>) -> FunctionDef {
-    FunctionDef {
-        name,
-        name_span: Span::DUMMY,
-        declaring_module_path: None,
-        doc_comment: None,
-        params: Vec::new(),
-        return_type,
-        body: Vec::new(),
-        type_params: Some(Vec::new()),
-        annotations: Vec::new(),
-        is_async: false,
-        is_comptime: false,
-        where_clause: None,
-    }
 }
 
 fn lifecycle_function(

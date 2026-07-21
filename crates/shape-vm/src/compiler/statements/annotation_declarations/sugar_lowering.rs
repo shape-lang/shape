@@ -1,6 +1,8 @@
-//! ADR-009 C3 #14 (slice 4, S4c) — THE SUGAR LOWERING onto the public API.
+//! ADR-009 C3 #14 (slice 4, S4c; S6 completion) — THE SUGAR LOWERING onto
+//! the public API.
 //!
-//! A TypedConfig annotation's declarative `before`/`after` block lowers
+//! EVERY annotation's declarative `before`/`after` block (zero-param
+//! definitions included — the S4 TypedConfig/Legacy fork is deleted) lowers
 //! COMPILER-SIDE onto exactly what the public comptime hook-template API
 //! expresses (C3-G2, ZERO private side-channels BY CONSTRUCTION):
 //!
@@ -30,12 +32,15 @@
 //!      matrix is the completeness proof, and the synthesized handler runs
 //!      through the SAME executor path as a hand-written handler.
 //!
-//! Handler shapes outside the four typed-surface forms are the R3
-//! declaration-site rejection (fired by the planner through this module's
-//! single producer); `on_define`/`metadata` in a TypedConfig definition are
-//! the R3-family rejection citing the E4/S6 fence. There is NO `ctx` on the
-//! typed surface (S2 fix-round F3; E4 owns the runtime-hook ctx family) — a
-//! body referencing `ctx` fails as an ordinary unresolved identifier, loud.
+//! Handler shapes outside the four hook forms are the R3 declaration-site
+//! rejection (fired by the planner through this module's single producer);
+//! `on_define`/`metadata` lifecycle handlers are CLASSIFICATION-INDEPENDENT
+//! like the comptime handlers — they register through the installer's
+//! lifecycle arm and this lowering skips them (S6-completion Risk-1
+//! disposition; the former R3-family rejection guarded the deleted legacy
+//! surface). There is NO `ctx` on the hook surface (S2 fix-round F3; E4
+//! owns the runtime-hook ctx family — issue #68) — a body referencing
+//! `ctx` fails as an ordinary unresolved identifier, loud.
 //!
 //! DESIGN NOTE (recorded per the stage charter): declarative handlers lower
 //! to the polymorphic/observer forms ONLY this slice; CONCRETE hook bodies
@@ -86,8 +91,9 @@ pub(in crate::compiler) struct SugarLoweringRejection {
 
 /// THE lowering producer (single producer; planner + LocalAst handler
 /// resolution both call it, the installer stores its output). Returns
-/// `Ok(None)` for a TypedConfig definition with NO declarative hooks (the
-/// hand-written-API spelling — nothing to lower).
+/// `Ok(None)` for a definition with NO declarative hooks (the hand-written
+/// API spelling, comptime-only, or lifecycle-only — nothing to lower).
+/// The name keeps its S4 spelling until the S6 capstone's naming sweep.
 pub(in crate::compiler) fn lower_typed_config_declarative_hooks(
     compiler: &BytecodeCompiler,
     definition: &AnnotationDef,
@@ -99,27 +105,18 @@ pub(in crate::compiler) fn lower_typed_config_declarative_hooks(
 
     for (index, handler) in definition.handlers.iter().enumerate() {
         match &handler.handler_type {
-            // Comptime handlers are classification-independent (they run
-            // through the mini-VM on both surface classes) and may COEXIST
+            // Comptime handlers run through the mini-VM and may COEXIST
             // with declarative hooks — the synthesized handler is appended
             // AFTER them by the resolution seams.
             AnnotationHandlerType::ComptimePre | AnnotationHandlerType::ComptimePost => continue,
-            // R3-family: lifecycle hooks have no typed-surface form yet.
-            AnnotationHandlerType::OnDefine | AnnotationHandlerType::Metadata => {
-                return Err(SugarLoweringRejection {
-                    message: format!(
-                        "annotation `{}` declares typed config parameters, which selects the \
-                         typed hook surface, but its `{}` handler is a runtime-lifecycle hook \
-                         with no typed-surface form yet (the runtime-hook context family is \
-                         E4's charter; the legacy lifecycle surface is deleted at C3-S6) — \
-                         remove the parameter types to stay on the legacy surface until it is \
-                         deleted (C3-G7/S6)",
-                        definition.name,
-                        hook_kind_word(&handler.handler_type),
-                    ),
-                    span: handler.span,
-                });
-            }
+            // Lifecycle handlers register through the installer's lifecycle
+            // arm (compile-time-fired definition hooks, not part of the
+            // deleted runtime before/after weave) — nothing to lower here.
+            // S6-completion Risk-1 disposition: the former R3-family
+            // rejection existed to keep typed config params off the legacy
+            // surface, which no longer exists; lifecycle handlers now accept
+            // typed config params like every other handler kind.
+            AnnotationHandlerType::OnDefine | AnnotationHandlerType::Metadata => continue,
             AnnotationHandlerType::Before | AnnotationHandlerType::After => {
                 validate_typed_surface_hook_params(definition, handler)?;
                 let minted = mint_hook_body_fn(compiler, definition, handler, index, &config_params);
@@ -162,21 +159,16 @@ pub(in crate::compiler) fn lower_typed_config_declarative_hooks(
 }
 
 /// Convenience for the resolution seams: `None` when the definition has no
-/// lowering (legacy class, mixed params, no declarative hooks) OR when the
-/// lowering rejects — R2/R3 sentences fire ONLY at the declaration through
-/// the planner, so the pre-pass ingest never races the attribution.
+/// lowering (no declarative hooks) OR when the lowering rejects — the
+/// declaration-site sentences fire ONLY through the planner, so the
+/// pre-pass ingest never races the attribution.
 pub(in crate::compiler) fn sugar_lowering_for_def(
     compiler: &BytecodeCompiler,
     definition: &AnnotationDef,
 ) -> Option<SugarLowering> {
-    match super::planner::classify_annotation_surface(definition) {
-        Ok(super::planner::AnnotationSurfaceClass::TypedConfig(_)) => {
-            lower_typed_config_declarative_hooks(compiler, definition)
-                .ok()
-                .flatten()
-        }
-        _ => None,
-    }
+    lower_typed_config_declarative_hooks(compiler, definition)
+        .ok()
+        .flatten()
 }
 
 /// ADR-009 C3 #14 (slice 5, S5b) — the DECLARATION-tier non-function-target
@@ -229,7 +221,10 @@ pub(in crate::compiler) fn non_function_target_application_rejection(
     )
 }
 
-/// R3: the typed-surface hook-shape rejection (exact charter sentence).
+/// R3: the hook-shape rejection (exact charter sentence, S6-collapsed: the
+/// former "typed config parameters select the typed hook surface" head and
+/// the "stay on the legacy surface" escape are deleted with the fork — the
+/// hook surface is the only surface).
 fn validate_typed_surface_hook_params(
     definition: &AnnotationDef,
     handler: &AnnotationHandler,
@@ -239,11 +234,8 @@ fn validate_typed_surface_hook_params(
     if handler.params.len() > 1 || magic_single || handler.params.iter().any(|p| p.is_variadic) {
         return Err(SugarLoweringRejection {
             message: format!(
-                "annotation `{}` declares typed config parameters, which selects the typed \
-                 hook surface, but its `{}` handler declares ({}); typed-surface hooks are \
-                 before(args) / after(result) / zero-param observers before() / after() — or \
-                 remove the parameter types to stay on the legacy surface until it is deleted \
-                 (C3-G7/S6)",
+                "annotation `{}`'s `{}` handler declares ({}); declarative hooks are \
+                 before(args) / after(result) / zero-param observers before() / after()",
                 definition.name,
                 hook_kind_word(&handler.handler_type),
                 render_handler_params(&handler.params),

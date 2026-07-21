@@ -152,9 +152,9 @@ print(compute())
 #[test]
 fn annotation_hook_impl_body_keeps_implicit_capture() {
     let source = r#"
-annotation traced(tag) {
-  before(args, ctx) {
-    args
+annotation traced(tag: string) {
+  before() {
+    print(f"[{tag}]")
   }
 }
 

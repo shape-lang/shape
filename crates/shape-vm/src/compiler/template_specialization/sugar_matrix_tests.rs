@@ -84,7 +84,7 @@ fn tmpl<Args>(args: Args, factor: int) -> Args {
     return args
 }
 
-annotation scaled(factor) {
+annotation scaled(factor: int) {
   targets: [function]
   comptime post(target, ctx) {
     install(before_hook(tmpl, [capture("factor", factor)]))
@@ -300,7 +300,7 @@ fn r6_config_conditional_install_is_ordinary_control_flow() {
     let src = r#"
 fn add_one(x: int) -> int { return x + 1 }
 
-annotation maybe_hook(enabled) {
+annotation maybe_hook(enabled: bool) {
   targets: [function]
   comptime post(target, ctx) {
     if enabled {
@@ -996,10 +996,12 @@ outer()
     let message = result
         .expect_err("a hook-template annotation on a nested fn must reject loudly (C3-G12)")
         .to_string();
+    // ADR-009 C3-S6: the class-conditional "hook-template " qualifier died
+    // with the classification collapse — one surface, one G12 sentence.
     assert!(
         message.contains(
             "annotation `@retry_n` on fn-local nested function `inner` is not applied — \
-             hook-template annotations on nested functions are not supported yet (#62); \
+             annotations on nested functions are not supported yet (#62); \
              apply @retry_n to a module-scope function"
         ),
         "the G12 sentence must fire verbatim, got: {message}"
@@ -1027,22 +1029,21 @@ scaled(4)
     assert_eq!(value, 12, "the module-scope twin weaves (skip ⇒ 4)");
 }
 
-// C3-G12 LEGACY EXTENSION (S5b — the PRE-DECLARED pin flip of the S4c
-// silent-drop control): a LEGACY-classified annotation on a nested fn now
-// rejects LOUDLY with the class-conditional sentence (same producer as the
-// TypedConfig arm, "hook-template " dropped). Pre-flip this fixture ran
-// silently to 4 (the S0 a4/a4c drop hazard: an APPLIED legacy before would
-// give 99).
+// C3-G12 ZERO-PARAM ARM (S5b Legacy extension, S6-collapsed): a zero-param
+// annotation on a nested fn rejects with the SAME single-producer sentence
+// as every other annotation (the class-conditional phrase fork died with
+// the classification collapse). Pre-S5b this class ran silently (the S0
+// a4/a4c drop hazard).
 #[test]
-fn s5b_g12_legacy_annotation_on_nested_fn_rejects_loudly() {
+fn s6_g12_zero_param_annotation_on_nested_fn_rejects_loudly() {
     let src = r#"
-annotation legacy_n() {
+annotation plain_n() {
   targets: [function]
-  before(args, ctx) { [99] }
+  before(args) { return args }
 }
 
 fn outer() -> int {
-  @legacy_n()
+  @plain_n()
   fn inner(x: int) -> int { return x }
   return inner(4)
 }
@@ -1051,15 +1052,15 @@ outer()
 "#;
     let (result, compiler) = compile_source(src);
     let message = result
-        .expect_err("a legacy annotation on a nested fn must reject loudly (C3-G12/S5b)")
+        .expect_err("a zero-param annotation on a nested fn must reject loudly (C3-G12)")
         .to_string();
     assert!(
         message.contains(
-            "annotation `@legacy_n` on fn-local nested function `inner` is not applied — \
+            "annotation `@plain_n` on fn-local nested function `inner` is not applied — \
              annotations on nested functions are not supported yet (#62); \
-             apply @legacy_n to a module-scope function"
+             apply @plain_n to a module-scope function"
         ),
-        "the G12 Legacy sentence must fire verbatim, got: {message}"
+        "the G12 sentence must fire verbatim, got: {message}"
     );
     assert!(compiler.hook_install_registry.is_empty());
 }
@@ -1201,16 +1202,14 @@ x
     assert!(compiler.hook_install_registry.is_empty());
 }
 
-// ═══ S5b lifecycle angle (charter item 4): the LEGACY lifecycle twin ═══
-// A ZERO-PARAM (Legacy) definition with on_define + metadata handlers
-// applied to a function stays byte-unchanged green THROUGH EXECUTION
-// (P-LC-legacy / P-LC-legacy-od measured 7) — only TYPED-CONFIG lifecycle
-// declarations are the R3-family rejection (which is TOTAL: the planner
-// runs the lowering for every TypedConfig def, and the lowering rejects
-// OnDefine/Metadata before its empty-hooks early return — see
-// surface_class.rs for the order pins).
+// ═══ Lifecycle on the collapsed surface (S6 completion, Risk-1) ═══
+// A ZERO-PARAM definition with on_define + metadata handlers applied to a
+// function executes green through the installer's lifecycle arm — the
+// lifecycle pair survives the collapse (it is compile-time definition
+// machinery, not the deleted runtime before/after weave) and now also
+// accepts typed config params (surface_class.rs pins the typed twin).
 #[test]
-fn s5b_legacy_lifecycle_twin_zero_param_def_executes_green() {
+fn s6_lifecycle_zero_param_def_executes_green() {
     let src = r#"
 annotation traced() {
   targets: [function]
@@ -1228,7 +1227,7 @@ fn tagged(x: int) -> int { return x }
 tagged(7)
 "#;
     let (value, compiler) = top_level_i64(src);
-    assert_eq!(value, 7, "the Legacy lifecycle surface stays green until S6");
+    assert_eq!(value, 7, "the lifecycle surface survives the collapse");
     assert!(compiler.hook_install_registry.is_empty());
 }
 
