@@ -8220,10 +8220,9 @@ mod tests {
             2,
             "One minted body fn per declarative hook"
         );
-        assert!(
-            compiled.before_handler.is_none() && compiled.after_handler.is_none(),
-            "The legacy weave slots must NEVER be populated (C3-G7/S6)"
-        );
+        // (The C3-G7/S6 "legacy weave slots never populated" assert retired
+        // with the fields themselves — deleted from `CompiledAnnotation` at
+        // the S6 capstone; the absence sentinel guards re-introduction.)
     }
 
     #[test]
@@ -8276,11 +8275,7 @@ mod tests {
             .compile(&program)
             .expect("Failed to compile");
 
-        let compiled = bytecode.compiled_annotations.get("my_ann").unwrap();
-        assert!(
-            compiled.before_handler.is_none(),
-            "No legacy handler slot may be populated"
-        );
+        let _compiled = bytecode.compiled_annotations.get("my_ann").unwrap();
         assert!(
             !bytecode
                 .functions

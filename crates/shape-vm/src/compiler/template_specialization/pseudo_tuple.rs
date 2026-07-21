@@ -90,8 +90,8 @@
 //! prefix (`__c3_p{i}` parameters, `__c3_arg_{i}` mutable locals). The walker
 //! rejects ANY identifier carrying that prefix in a template body so a minted
 //! name can never collide with (or capture) user spelling — the same
-//! internal-name discipline as the legacy wrapper's `__args`/`__result`/`__ctx`
-//! locals (`compile_annotation_wrapper`, `functions_annotations.rs:4232-4234`),
+//! internal-name discipline the deleted legacy wrapper applied to its
+//! `__args`/`__result`/`__ctx` locals (S6-capstone deletion territory),
 //! but enforced at construction instead of relied on by convention. Minted
 //! nodes are inserted AFTER the walk (prologue/params) or as terminal
 //! replacements the traversal never revisits, so the reserved-prefix check

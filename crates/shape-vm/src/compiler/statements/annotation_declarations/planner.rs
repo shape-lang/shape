@@ -60,9 +60,9 @@ pub(super) struct PlannedAnnotation {
 //     config params (the former R3-family rejection existed to keep typed
 //     params off the legacy surface, which no longer exists).
 //
-// The legacy weave slots (`before_handler` / `after_handler` /
-// `*_handler_template`) are NEVER populated — nothing routes the legacy
-// weave; the S6 capstone deletes the dead machinery and the carrier fields.
+// The legacy weave slots and their machinery are GONE (deleted from
+// `CompiledAnnotation` and the compiler at the S6 capstone) — declarative
+// hooks travel exclusively on the sugar carrier above.
 
 impl AnnotationInstallationPlan {
     pub(super) fn is_empty(&self) -> bool {

@@ -1,10 +1,9 @@
 //! Foreign function (extern C) compilation
 
 use crate::bytecode::{Constant, Instruction, OpCode, Operand};
-use shape_ast::ast::FunctionDef;
 use shape_ast::error::{Result, ShapeError};
 
-use super::{BytecodeCompiler, HygienicRole};
+use super::BytecodeCompiler;
 
 /// Display a type annotation using C-ABI convention (Vec instead of Array).
 fn cabi_type_display(ann: &shape_ast::ast::TypeAnnotation) -> String {
@@ -331,105 +330,6 @@ impl BytecodeCompiler {
             OpCode::StoreModuleBinding,
             Some(Operand::ModuleBinding(binding_idx)),
         ));
-
-        // Check for annotation-based wrapping on foreign functions (e.g. @remote).
-        // This mirrors the annotation wrapping in compile_function for regular fns.
-        let foreign_annotations: Vec<_> = def
-            .annotations
-            .iter()
-            .filter_map(|ann| {
-                self.lookup_compiled_annotation(ann)
-                    .map(|(_, compiled)| compiled)
-                    .filter(|c| c.before_handler.is_some() || c.after_handler.is_some())
-            })
-            .collect();
-
-        if let Some(compiled_ann) = foreign_annotations.into_iter().next() {
-            let ann_arg_exprs =
-                self.annotation_args_for_compiled_name(&def.annotations, &compiled_ann.name);
-
-            // The foreign stub at func_idx is the impl
-            let impl_idx = func_idx as u16;
-
-            // Create a new function slot for the annotation wrapper
-            let wrapper_func_idx = self.program.functions.len();
-            let wrapper_param_names: Vec<String> = def
-                .params
-                .iter()
-                .enumerate()
-                .filter(|(i, _)| !out_param_indices.contains(i))
-                .flat_map(|(_, p)| p.get_identifiers())
-                .collect();
-            // ADR-009 E3 (S2, U10): HYGIENIC generated wrapper slot label —
-            // role bound by the compiler-issued token, never the former
-            // `{name}___ann_wrapper` spelling. The slot is referenced by INDEX
-            // (`wrapper_func_idx`); the name is cosmetic, but an unspellable
-            // rendering keeps a user function of the former spelling from
-            // colliding with the generated slot in the function table.
-            let wrapper_name = self.mint_hygienic_fn_name(HygienicRole::ForeignAnnotationWrapper);
-            self.program.functions.push(crate::bytecode::Function {
-                name: wrapper_name,
-                arity: caller_visible_arity,
-                param_names: wrapper_param_names,
-                locals_count: 0,
-                entry_point: 0,
-                body_length: 0,
-                is_closure: false,
-                captures_count: 0,
-                is_async: def.is_async,
-                ref_params: Vec::new(),
-                ref_mutates: Vec::new(),
-                mutable_captures: Vec::new(),
-                frame_descriptor: None,
-                osr_entry_points: Vec::new(),
-                mir_data: None,
-            });
-
-            // Build a synthetic FunctionDef for the annotation wrapper machinery.
-            // Only params visible to the caller (non-out) are included.
-            let wrapper_params: Vec<_> = def
-                .params
-                .iter()
-                .enumerate()
-                .filter(|(i, _)| !out_param_indices.contains(i))
-                .map(|(_, p)| p.clone())
-                .collect();
-            let synthetic_def = FunctionDef {
-                name: def.name.clone(),
-                name_span: def.name_span,
-                declaring_module_path: None,
-                doc_comment: None,
-                params: wrapper_params,
-                return_type: def.return_type.clone(),
-                body: vec![],
-                type_params: def.type_params.clone(),
-                annotations: def.annotations.clone(),
-                where_clause: None,
-                is_async: def.is_async,
-                is_comptime: false,
-            };
-
-            self.compile_annotation_wrapper(
-                &synthetic_def,
-                wrapper_func_idx,
-                impl_idx,
-                &compiled_ann,
-                &ann_arg_exprs,
-            )?;
-
-            // Update module binding to point to the wrapper
-            let wrapper_const = self
-                .program
-                .add_constant(Constant::Function(wrapper_func_idx as u16));
-            self.emit(Instruction::new(
-                OpCode::PushConst,
-                Some(Operand::Const(wrapper_const)),
-            ));
-            self.emit(Instruction::new(
-                OpCode::StoreModuleBinding,
-                Some(Operand::ModuleBinding(binding_idx)),
-            ));
-        }
 
         Ok(())
     }

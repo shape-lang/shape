@@ -7,17 +7,13 @@
 //! The wrapper is an ordinary typed AST `FunctionDef` compiled through the
 //! ORDINARY pipeline, so bytecode AND MIR derive from the same wrapped
 //! definition — full native, no `mir_data` suppression. Un-suppressing
-//! `mir_data` on the LEGACY raw-bytecode weave is MEASURED-FORBIDDEN
-//! (slice-0 §2.3: silent VM≠JIT divergence, hooks silently skipped); the
-//! legacy weave (`compile_wrapped_function` / `compile_chained_annotations` /
-//! the `functions.rs:993-1006` suppression) stays BYTE-UNCHANGED beside this
-//! module. A new-path target can never reach the legacy classification: the
-//! apply seam's mixed-legacy rejection guarantees no annotation on the
-//! target carries a legacy `before`/`after` handler, so
-//! `find_compiled_annotations` returns empty and the wrapper compiles as an
-//! ordinary fn with the `functions.rs:1132` mir-attach tail. This module
-//! asserts that invariant defensively rather than routing around the legacy
-//! classifier.
+//! `mir_data` on the deleted LEGACY raw-bytecode weave was
+//! MEASURED-FORBIDDEN (slice-0 §2.3: silent VM≠JIT divergence, hooks
+//! silently skipped); the S6 capstone deleted that weave, its selector and
+//! its mir_data suppression whole (deletion-fate: the C3-G7 charter), so
+//! this typed weave is THE ONLY weave and every woven wrapper compiles as
+//! an ordinary fn with the ordinary mir-attach tail in
+//! `compile_function_inner`.
 //!
 //! # The weave shape
 //!
@@ -26,7 +22,7 @@
 //!
 //! 1. The final target body moves under an unspellable hygienic shadow name
 //!    ([`HygienicRole::TemplateWeaveImplBody`], the C3 successor of the
-//!    legacy `AnnotationHookImplBody` role), reserved through
+//!    deleted legacy hook-impl shadow role), reserved through
 //!    `reserve_generated_decl_journaled` (the `CheckedReplaceBody`
 //!    shadow-construction precedent) so a failing later compile rolls the
 //!    reservation back with the rest of the open C2 `InstallTransaction` —
@@ -72,9 +68,8 @@
 //!   bind the parameter to a name.
 //! - Internal invariants (a non-observer Before install without a carrier, a
 //!   result-threading After install on a void target, a generic def reaching
-//!   the weave, a legacy classification on a new-path target) are
-//!   internal-error-shaped — the apply seam's rejections make them
-//!   unreachable from user code.
+//!   the weave) are internal-error-shaped — the apply seam's rejections make
+//!   them unreachable from user code.
 
 use std::collections::HashSet;
 
@@ -101,8 +96,7 @@ impl BytecodeCompiler {
     /// impl shadow for `func_name` (the target's FINAL body). The nonce is a
     /// stable digest of the function name, so re-registration is idempotent
     /// (one weave shadow per woven function; `register_function` dedups by
-    /// name) — the `original_body_shadow_name` /
-    /// `annotation_hook_impl_name` precedent.
+    /// name) — the `original_body_shadow_name` precedent.
     ///
     /// `pub(in crate::compiler)` (C3-S5c): tests locate the impl shadow BY
     /// ROLE through this ONE producer — never by spelling an SOH string —
@@ -133,8 +127,8 @@ impl BytecodeCompiler {
             .expect("caller gates on a non-empty staged-install accumulator");
         let application_span = first.application_span;
 
-        // Defensive invariants (module docs): unreachable from user code —
-        // the apply seam's G8 / mixed-legacy rejections fire first.
+        // Defensive invariant (module docs): unreachable from user code —
+        // the apply seam's G8 rejection fires first.
         if func_def
             .type_params
             .as_ref()
@@ -146,17 +140,6 @@ impl BytecodeCompiler {
                 func_def.name
             )));
         }
-        if !self.find_compiled_annotations(func_def).is_empty() {
-            return Err(internal(format!(
-                "internal error: hook-template weave target `{}` classifies as a LEGACY \
-                 runtime-hook wrapper (`find_compiled_annotations` non-empty) — the woven \
-                 wrapper's mir_data would be suppressed (functions.rs:1046) and the JIT would \
-                 silently skip the hooks; the apply seam's mixed-legacy rejection fires \
-                 before any install stages",
-                func_def.name
-            )));
-        }
-
         // The wrapper forwards parameters by name — a destructuring
         // parameter has no forwardable spelling (module docs).
         let mut param_names: Vec<String> = Vec::with_capacity(func_def.params.len());
@@ -523,9 +506,9 @@ annotation hookann() {{
         assert_eq!(value, 50, "the before mutation must be observed (skip ⇒ 40)");
 
         // The C3-G6 SMALL observables: the woven wrapper compiles as an
-        // ORDINARY fn — mir_data attached (the legacy weave's suppression
-        // would leave it None) — and the hygienic shadow is registered with
-        // its OWN mir_data (the slice-0 "(ii)" plumbing).
+        // ORDINARY fn — mir_data attached (the deleted legacy weave's
+        // suppression would have left it None) — and the hygienic shadow is
+        // registered with its OWN mir_data (the slice-0 "(ii)" plumbing).
         let wrapper = function_entry(&compiler, "victim");
         assert!(
             wrapper.mir_data.is_some(),
@@ -1864,11 +1847,11 @@ victim_a(10) * 1000 + victim_b(10)
 
     // ── S3c: the W39/LoadModuleBinding named check (charter (e)) ───────────
     //
-    // The S0 §4 a4d/a4e-noted JIT poison: the LEGACY config path reads its
-    // config from a module binding at every invocation, planting
+    // The S0 §4 a4d/a4e-noted JIT poison: the deleted LEGACY config path
+    // read its config from a module binding at every invocation, planting
     // `LoadModuleBinding` (0x52) in the generated wrapper ("generated
     // wrapper contains `LoadModuleBinding` → W39 whole-program deopt"; the
-    // legacy machinery stays byte-unchanged beside the new path until S6).
+    // S6 capstone deleted that machinery).
     // The NEW path bakes capture values as CONSTANTS at specialization, so
     // config access must emit ZERO module-binding loads in the specialized
     // handler AND the generated wrapper. This is a BYTECODE-level pin — it
@@ -2610,9 +2593,8 @@ victim(4)
         // emission (the Validate/Rewrite faces never scan interiors; module
         // bindings resolve before fn tables). Rejects with the named
         // F5-boundary sentence, byte-exact. The annotation carries a TYPED
-        // config param — the S4 classification selector for the typed
-        // surface (a zero-param annotation is legacy-class and out of the
-        // gate's territory until the S6 deletion).
+        // config param (fixture written under the deleted S4 classification
+        // selector; post-collapse every def routes this surface).
         #[test]
         fn f1_fstring_interior_template_name_rejects_with_the_exact_sentence() {
             let src = r#"

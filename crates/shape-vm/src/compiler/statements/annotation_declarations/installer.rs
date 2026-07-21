@@ -24,14 +24,10 @@ pub(super) fn install(
             .flat_map(|parameter| parameter.get_identifiers())
             .collect(),
         param_defs: definition.params.clone(),
-        before_handler: None,
-        after_handler: None,
         on_define_handler: None,
         metadata_handler: None,
         comptime_pre_handler: None,
         comptime_post_handler: None,
-        before_handler_template: None,
-        after_handler_template: None,
         // ADR-009 C3 #14 (slice 4, S4c): the sugar lowering's artifacts
         // (planner-built) ride the carrier so BOTH the pass-2 handler driver
         // and the Compiled handler-resolution provenance run the synthesized
@@ -62,9 +58,8 @@ pub(super) fn install(
                 // is attached to the carrier above and installed per-target
                 // through `specialize_template` + the open InstallTransaction,
                 // exactly like a hand-written handler (C3-G2/G3/G4). The
-                // legacy weave slots (`before_handler` / `after_handler` /
-                // `*_handler_template`) stay `None` for every definition; the
-                // S6 capstone deletes them.
+                // legacy per-annotation weave slots this arm once populated
+                // were deleted from `CompiledAnnotation` at the S6 capstone.
             }
             AnnotationHandlerType::OnDefine | AnnotationHandlerType::Metadata => {
                 let name = handler_callable_name(&definition.name, &handler.handler_type);

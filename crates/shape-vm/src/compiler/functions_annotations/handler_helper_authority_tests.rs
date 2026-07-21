@@ -23,8 +23,6 @@ fn compiled_annotation(exact_name: &str, def: &AnnotationDef) -> CompiledAnnotat
         name: exact_name.to_string(),
         param_names: Vec::new(),
         param_defs: Vec::new(),
-        before_handler: None,
-        after_handler: None,
         on_define_handler: None,
         metadata_handler: None,
         comptime_pre_handler: def
@@ -37,8 +35,6 @@ fn compiled_annotation(exact_name: &str, def: &AnnotationDef) -> CompiledAnnotat
             .iter()
             .find(|handler| handler.handler_type == AnnotationHandlerType::ComptimePost)
             .cloned(),
-        before_handler_template: None,
-        after_handler_template: None,
         sugar_post_handler: None,
         sugar_body_fns: Vec::new(),
         allowed_targets: def.allowed_targets.clone().unwrap_or_default(),

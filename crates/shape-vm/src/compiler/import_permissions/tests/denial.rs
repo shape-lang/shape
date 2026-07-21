@@ -33,8 +33,6 @@ fn install_compiled_annotation(
                 .flat_map(|parameter| parameter.get_identifiers())
                 .collect(),
             param_defs: definition.params.clone(),
-            before_handler: None,
-            after_handler: None,
             on_define_handler: None,
             metadata_handler: None,
             comptime_pre_handler: definition
@@ -47,8 +45,6 @@ fn install_compiled_annotation(
                 .iter()
                 .find(|handler| handler.handler_type == AnnotationHandlerType::ComptimePost)
                 .cloned(),
-            before_handler_template: None,
-            after_handler_template: None,
         sugar_post_handler: None,
         sugar_body_fns: Vec::new(),
             allowed_targets: definition.allowed_targets.clone().unwrap_or_default(),

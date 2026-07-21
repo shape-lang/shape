@@ -19,9 +19,8 @@
 //! store resolving the stale index to the NESTED run's template and silently
 //! installing the WRONG one). The snapshot extends `take_comptime_directives`'
 //! value-snapshot discipline to the handles the directives carry. Per install,
-//! IN ORDER: the C3-G8 generic-target named rejection → the mixed-legacy
-//! rejection (one weave owner per target until S6 deletes the legacy
-//! machinery) → [`super::SpecializationTarget`] glue → `specialize_template`
+//! IN ORDER: the C3-G8 generic-target named rejection →
+//! [`super::SpecializationTarget`] glue → `specialize_template`
 //! (S3b: the capture VALUES flow in — rule-6 identity + the const_lift BAKE;
 //! no separate delivery-plan step exists) → stage the install on the
 //! caller's per-target accumulator + write one journaled registry row.
@@ -224,45 +223,19 @@ impl BytecodeCompiler {
             });
         }
 
-        // 3. Mixed-legacy rejection: ONE weave owner per target until the S6
-        //    capstone deletes the legacy machinery (C3-G7). Any annotation on
-        //    this target carrying a legacy runtime `before`/`after` handler
-        //    (compiled id or per-target template) would weave the same target
-        //    through `compile_wrapped_function`/`compile_chained_annotations`.
-        for ann in &func_def.annotations {
-            let Some((_, compiled)) = self.lookup_compiled_annotation(ann) else {
-                continue;
-            };
-            let engages_legacy_weave = compiled.before_handler.is_some()
-                || compiled.after_handler.is_some()
-                || compiled.before_handler_template.is_some()
-                || compiled.after_handler_template.is_some();
-            if engages_legacy_weave {
-                return Err(ShapeError::SemanticError {
-                    message: format!(
-                        "cannot install hook template `{}` (via @{annotation_name}) on `{}`: \
-                         annotation `@{}` on the same target engages the legacy before/after \
-                         runtime-hook weave, and a target has exactly one weave owner until \
-                         the legacy machinery is deleted (C3-G7 / S6); move all of `{}`'s \
-                         hooks onto the typed hook-template surface",
-                        bound.template.body_fn(),
-                        func_def.name,
-                        ann.name,
-                        func_def.name,
-                    ),
-                    location: Some(self.span_to_source_location(application_span)),
-                });
-            }
-        }
+        // (The former step 3 — the C3-G7 transitional mixed-legacy rejection,
+        // one weave owner per target — was deleted WITH the legacy machinery
+        // at the S6 capstone: the state it rejected is unconstructible now
+        // that the typed weave is the only weave.)
 
-        // 4./5. Target glue + specialization through the ONE open transaction
+        // 3./4. Target glue + specialization through the ONE open transaction
         //    (module docs: the journal is open by construction — E1-D6b). The
         //    descriptor slot is `None`: the structural comparison path is
         //    complete; the frozen-identity fast path stays available to
         //    callers that already hold a `CallableDescriptor` (identity-only,
         //    slice-0 §7.4).
         let target = self.specialization_target_from_def(func_def, None, application_span)?;
-        // 5./6. Specialization + capture delivery are ONE step at S3b: the
+        // 4./5. Specialization + capture delivery are ONE step at S3b: the
         //    capture values flow into the specialization plan (rule-6
         //    identity + the bake) — the S2 bind-a-call-site-plan step is
         //    deleted with `CaptureBindingPlan`.
@@ -995,9 +968,9 @@ type Widget {{
     // install` RETIRED — the mixed-legacy state is UNCONSTRUCTIBLE after the
     // classification collapse (its `legacy_hook()` + `before(args, ctx)`
     // fixture now rejects at the declaration, and no definition can populate
-    // the legacy weave slots the product rejection reads). The dead
-    // one-weave-owner rejection block itself is the S6 capstone's deletion
-    // territory.
+    // handler slots that no longer exist). The dead one-weave-owner rejection
+    // block was deleted with the rest of the legacy machinery at the S6
+    // capstone.
 
     // The install builtin's own misuse rejection: a non-handle argument is
     // named with the producer twin.

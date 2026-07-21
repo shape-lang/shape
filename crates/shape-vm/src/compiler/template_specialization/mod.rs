@@ -62,17 +62,16 @@
 //! its own — specialization output composes with the one open install exactly
 //! as the `CheckedReplaceBody` shadow_export journaling precedent does.
 //!
-//! # Not a foundation: the legacy weave
+//! # The deleted legacy weave (C3-G7 — history, not a foundation)
 //!
-//! The legacy hook machinery (`compile_specialized_annotation_handler`,
-//! `specialize_annotation_runtime_handlers`, `compile_annotation_wrapper`, the
-//! homogeneous args array) is a C3-G7 DELETION target. Nothing in this module
-//! may call into it, extend it, or depend on its carriers; the new path is
-//! built BESIDE it and the S6 capstone deletes it whole. Error attribution
-//! here deliberately inverts the legacy failure mode (the S0 g3 finding):
-//! every rejection anchors at the `@application` site and names the
-//! USER-SPELLED target and template signatures — never `handler.span`, never
-//! a mangled mono-key name.
+//! The legacy hook machinery (the specialized-handler compiler, the
+//! per-target runtime-handler specializer, the raw-bytecode wrapper
+//! emitter, the homogeneous args array) was a C3-G7 DELETION target and the
+//! S6 capstone deleted it whole; this module is THE hook implementation.
+//! Error attribution here deliberately inverts the deleted machinery's
+//! failure mode (the S0 g3 finding): every rejection anchors at the
+//! `@application` site and names the USER-SPELLED target and template
+//! signatures — never `handler.span`, never a mangled mono-key name.
 
 pub(in crate::compiler) mod const_lift;
 pub(in crate::compiler) mod install_registry;
