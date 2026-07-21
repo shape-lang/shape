@@ -6,20 +6,24 @@
 // capture / install); the S2c weave generates the wrapper + hygienic impl
 // shadow.
 //
-// MEASURED S2d STATUS — NAMED-EXPECTED-FALLBACK (the C3-G6 Deep-contingency
-// pin shape, loud-flip semantics; see the CLI cell): the heterogeneous 2-ary
-// target forces the G9 compiler-internal MUTATION AGGREGATE, whose
-// inline-Object annotation chain is not yet JIT-provable — two named gaps,
-// surfaced verbatim in the S2d slice report: (1) `classify_type_annotation_
-// metadata` has no `TypeAnnotation::Object` arm, so the specialized handler
-// carries no proven FrameDescriptor.return_kind (the W36 surface-and-stop
-// fires at the wrapper's call site); (2) behind it (probe-measured), MirToIR
-// has no statically proven field layout for reads off an inline-Object-
-// annotated local (`unresolved direct field read .a0`). VM and JIT agree on
-// stdout (whole-program interpreter fallback, LOUD, never silent); the
-// SINGLE-carrier sibling (`c3-api-installed-hooks-single.shape`) is
-// zero-fallback native, attributing the gap to the aggregate carrier
-// exactly. S7 owns the proof chain; the CLI cell fails loudly the moment
+// MEASURED STATUS (S2d, RE-MEASURED S7) — NAMED-EXPECTED-FALLBACK (the
+// C3-G6 Deep-contingency pin shape, loud-flip semantics; see the CLI cell):
+// the heterogeneous 2-ary target forces the G9 compiler-internal MUTATION
+// AGGREGATE. Of the two S2d-measured gaps in its inline-Object annotation
+// chain, S7 CLOSED gap (a) — `classify_type_annotation_metadata` gained
+// its `TypeAnnotation::Object` return-kind arm, so the specialized handler
+// now carries a proven FrameDescriptor.return_kind and the original W36
+// stop no longer fires (the cell's loud-flip caught the identity change).
+// Gap (b) remains OPEN and is the re-pinned identity — MirToIR has no
+// statically proven field layout for `Place::Field` reads off an
+// inline-Object-annotated local (`unresolved direct field read .a0`);
+// issue #70 carries both measurements verbatim + the close condition.
+// VM and JIT agree on stdout (whole-program interpreter fallback, LOUD,
+// never silent); the SINGLE-carrier sibling
+// (`c3-api-installed-hooks-single.shape`) is zero-fallback native, and the
+// USER-DECLARED `type` spelling of the same aggregate is zero-fallback
+// native (the S1a cells), attributing the residual gap to the
+// inline-schema spelling exactly. The CLI cell fails loudly the moment
 // the fallback disappears, forcing the flip to the zero-fallback form.
 //
 // Heterogeneous 2-ary (int, number) target; hot loop of 200 calls crosses

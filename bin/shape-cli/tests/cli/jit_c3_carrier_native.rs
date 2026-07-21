@@ -34,15 +34,18 @@
 //!    generated weave itself (wrapper + shadow + polymorphic specialized
 //!    handler + capture delivery) is native, discharging the cells-1..3
 //!    proxy caveat for the 1-ary installed-hook shape.
-//! 5. `c3-api-installed-hooks` (S2d) — the COMPILER-GENERATED path,
-//!    heterogeneous 2-ary AGGREGATE carrier: NAMED-EXPECTED-FALLBACK (the
-//!    C3-G6 Deep-contingency pin, loud-flip semantics). The G9 aggregate's
-//!    inline-Object annotation chain is not yet JIT-provable (measured, two
-//!    named gaps — fixture header + the S2d slice report carry them
-//!    verbatim); the deopt is LOUD and whole-program (VM==JIT stdout), and
-//!    this cell pins the exact fallback identity so it FAILS the moment S7
-//!    proves the chain — forcing the flip to the zero-fallback form. Never
-//!    vacuous in either direction.
+//! 5. `c3-api-installed-hooks` (S2d, re-pinned S7) — the COMPILER-GENERATED
+//!    path, heterogeneous 2-ary AGGREGATE carrier: NAMED-EXPECTED-FALLBACK
+//!    (the C3-G6 Deep-contingency pin, loud-flip semantics). Of the two
+//!    S2d-measured gaps in the G9 aggregate's inline-Object annotation
+//!    chain, S7 CLOSED gap (a) (the `classify_type_annotation_metadata`
+//!    `TypeAnnotation::Object` return-kind arm — the W36 identity this cell
+//!    originally pinned no longer fires; the loud-flip mechanism worked)
+//!    and the pin is RE-ANCHORED on gap (b), the MirToIR inline-Object
+//!    field-layout proof (issue #70 carries both measurements verbatim).
+//!    The deopt stays LOUD and whole-program (VM==JIT stdout); the cell
+//!    FAILS the moment #70 proves the chain — forcing the flip to the
+//!    zero-fallback form. Never vacuous in either direction.
 //! 6. `c3-composite-config-single` (S3c) — COMPOSITE (`Array<int>`) config
 //!    baked into the specialized handler's prologue (S3b ConstLift), 1-ary
 //!    SINGLE carrier: ZERO-FALLBACK (measured — the NewTypedArray*-lowering
@@ -184,25 +187,42 @@ fn c3_api_installed_hooks_single_runs_natively_both_tiers() {
     assert_c3_fixture_reaches_native_jit("c3-api-installed-hooks-single.shape", "402600\n");
 }
 
-/// Cell 5 (S2d) — the API-INSTALLED weave smoke, heterogeneous 2-ary
-/// AGGREGATE carrier: an EXPLICIT NAMED-EXPECTED-FALLBACK pin with
-/// loud-flip semantics (the C3-G6 Deep-contingency mechanism, ruled in
-/// c3-decisions.md — "the wrapper cell pinned as an EXPLICIT named-fallback
-/// with loud-flip semantics"; NOT a zero-fallback claim). Measured at S2d:
-/// the G9 compiler-internal mutation aggregate's inline-Object annotation
-/// chain is not yet JIT-provable — the first named gap
-/// (`classify_type_annotation_metadata` has no `TypeAnnotation::Object`
-/// arm → no proven `FrameDescriptor.return_kind` on the specialized
-/// handler) fires the W36 surface-and-stop at the wrapper's call site, and
-/// a second (MirToIR inline-Object field-layout proof) sits behind it
-/// (probe-measured; fixture header + slice report carry both verbatim).
+/// Cell 5 (S2d, RE-PINNED S7) — the API-INSTALLED weave smoke,
+/// heterogeneous 2-ary AGGREGATE carrier: an EXPLICIT
+/// NAMED-EXPECTED-FALLBACK pin with loud-flip semantics (the C3-G6
+/// Deep-contingency mechanism, ruled in c3-decisions.md — "the wrapper
+/// cell pinned as an EXPLICIT named-fallback with loud-flip semantics";
+/// NOT a zero-fallback claim).
+///
+/// S2d measured TWO gaps in the G9 mutation aggregate's inline-Object
+/// annotation chain. S7 CLOSED gap (a): `classify_type_annotation_metadata`
+/// gained its `TypeAnnotation::Object` return-kind arm (unit pin
+/// `inline_object_return_stamps_typed_object_abi_and_plain_wrapper`), the
+/// specialized handler now carries a proven `FrameDescriptor.return_kind`,
+/// and the originally-pinned W36 identity no longer fires — this cell's
+/// loud-flip mechanism caught the change exactly as designed. The pin is
+/// RE-ANCHORED on gap (b): MirToIR has no statically proven field layout
+/// for `Place::Field` reads off an inline-Object-annotated local. Measured
+/// verbatim at S7 post-(a) (issue #70 carries both measurements + the
+/// close condition):
+///
+/// `[jit-fallback] function main failed JIT compile: Runtime error: JIT
+/// compilation failed: MirToIR: unresolved direct field read `.a0` (field
+/// idx 0) lacks a statically proven typed-object byte offset and/or
+/// projected NativeKind. … Surface-and-stop: deopt to the bytecode
+/// interpreter until the field layout and field kind are proven at compile
+/// time.; running under interpreter`
+///
 /// The deopt is LOUD and whole-program: VM==JIT==400600 (correctness
 /// preserved under the interpreter), VM mode emits zero fallback lines,
 /// and JIT mode emits EXACTLY ONE `[jit-fallback]` line whose identity this
-/// cell pins. The moment S7 proves the chain the count drops to zero, this
+/// cell pins. The moment #70 proves the chain the count drops to zero, this
 /// cell FAILS, and it must be flipped to
 /// `assert_c3_fixture_reaches_native_jit` — never a silent deopt under a
-/// green smoke, never a vacuous green in either direction.
+/// green smoke, never a vacuous green in either direction. (The
+/// attribution boundary stands: the USER-DECLARED `type` spelling of the
+/// same aggregate is zero-fallback native — cells 2/3 — so the gap is the
+/// inline-schema spelling exactly.)
 #[test]
 fn c3_api_installed_hooks_aggregate_is_a_named_expected_fallback() {
     let fixture = "c3-api-installed-hooks.shape";
@@ -244,11 +264,12 @@ fn c3_api_installed_hooks_aggregate_is_a_named_expected_fallback() {
         .find(|line| line.starts_with("[jit-fallback]"))
         .expect("count asserted above");
     assert!(
-        fallback_line.contains("no compile-time-proven FrameDescriptor.return_kind")
-            && fallback_line.contains("c3_before_hook"),
-        "{fixture}: the fallback must be EXACTLY the named W36 return-kind gap on the \
-         specialized before-handler (a different fallback identity is a new regression, \
-         not the pinned expectation): {fallback_line}"
+        fallback_line.contains("MirToIR: unresolved direct field read `.a0`")
+            && fallback_line.contains("typed-object byte offset"),
+        "{fixture}: the fallback must be EXACTLY the named gap-(b) MirToIR inline-Object \
+         field-layout stop (issue #70). The original W36 return-kind identity was closed \
+         by the S7 gap-(a) arm; a different fallback identity is a new regression, not \
+         the pinned expectation: {fallback_line}"
     );
 }
 

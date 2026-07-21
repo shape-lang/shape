@@ -1379,6 +1379,30 @@ fn classify_type_annotation_metadata(
         return future_return_metadata();
     }
 
+    // ADR-009 C3 S7 — the S2d gap-(a) kind-tracker completion: an INLINE
+    // object type annotation `{ field: T, ... }` in return position. The
+    // runtime carrier for every object value is `HeapKind::TypedObject`
+    // (`NewTypedObject` with fully-typed fields — the same carrier the
+    // Option/Result head-only arm below stamps), so the declared annotation
+    // is sufficient proof for the ABI return kind per ADR-006 §2.7.5. This
+    // is a TOP-LEVEL-Object arm only: `Option<{...}>` / `Result<{...}>`
+    // spellings keep riding the head-only wrapper arm below. No anonymous-
+    // object `ConcreteType` exists (Record reconstruction is B4/B5
+    // territory), which is why this classification completes at the
+    // metadata tier rather than in `declared_annotation_concrete_type`.
+    // Consumer proof: the W36 named-function callgraph check reads exactly
+    // this stamp at hook-wrapper call sites (the S2d measurement); the
+    // MirToIR inline-Object field-layout proof behind it is tracked
+    // separately (gap (b), the S7 follow-up issue).
+    if matches!(return_type, shape_ast::ast::TypeAnnotation::Object(_)) {
+        return FrameReturnMetadata {
+            return_kind: Some(shape_value::NativeKind::Ptr(
+                shape_value::HeapKind::TypedObject,
+            )),
+            wrapper: FrameReturnWrapper::Plain,
+        };
+    }
+
     if let Some(concrete) =
         crate::compiler::monomorphization::type_resolution::declared_annotation_concrete_type(
             compiler,
@@ -8429,6 +8453,31 @@ mod frame_return_metadata_tests {
         let frame = frame_for(&program, "scalar_value");
 
         assert_eq!(frame.return_kind, Some(NativeKind::Int64));
+        assert_eq!(frame.return_wrapper, FrameReturnWrapper::Plain);
+        assert_eq!(frame.effective_return_wrapper(), FrameReturnWrapper::Plain);
+    }
+
+    // ADR-009 C3 S7 — the S2d gap-(a) completion: an INLINE object return
+    // annotation stamps the TypedObject ABI carrier with a Plain wrapper
+    // (before the arm landed, `-> { ... }` classified to
+    // `FrameReturnMetadata::unknown()` and the specialized aggregate-
+    // returning hook handler carried no return_kind — the W36 stop the S2d
+    // cell measured at the wrapper call site).
+    #[test]
+    fn inline_object_return_stamps_typed_object_abi_and_plain_wrapper() {
+        let program = compile(
+            r#"
+            fn aggregate_value() -> { a0: int, a1: number } {
+                return { a0: 1, a1: 2.5 }
+            }
+            "#,
+        );
+        let frame = frame_for(&program, "aggregate_value");
+
+        assert_eq!(
+            frame.return_kind,
+            Some(NativeKind::Ptr(HeapKind::TypedObject))
+        );
         assert_eq!(frame.return_wrapper, FrameReturnWrapper::Plain);
         assert_eq!(frame.effective_return_wrapper(), FrameReturnWrapper::Plain);
     }
