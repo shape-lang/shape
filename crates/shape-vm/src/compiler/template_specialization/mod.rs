@@ -371,7 +371,19 @@ impl BytecodeCompiler {
                 (origin, module, def)
             }
         };
-        let ctx = pseudo_tuple::AmbientScopeCtx::new(self, origin, template_module);
+        // Fix round 1, F1: PolymorphicArgs templates hand the ambient face
+        // their REAL pseudo-tuple spellings for the f-string-interior arm
+        // (`AmbientScopeCtx::check_fstring_template_name`) — the face itself
+        // still runs under the unspellable sentinels.
+        let pseudo_tuple_params = match template.sig() {
+            TemplateSig::PolymorphicArgs {
+                type_param,
+                args_param,
+            } => Some((args_param.clone(), type_param.clone())),
+            TemplateSig::PolymorphicResult { .. } | TemplateSig::Concrete(_) => None,
+        };
+        let ctx =
+            pseudo_tuple::AmbientScopeCtx::new(self, origin, template_module, pseudo_tuple_params);
         pseudo_tuple::scan_template_body_ambient_scope(&mut def, &ctx).map_err(|error| {
             let detail = match error {
                 ShapeError::SemanticError { message, .. } => message,
@@ -2718,5 +2730,131 @@ mod tests {
         let target = target_for(&fx, "target_fn", None);
         specialize(&mut fx.compiler, &template, &target)
             .expect("an ambient-free body specializes with the binding registered");
+    }
+
+    // ── Fix round 1, F1: the F5-boundary arm — the template's own
+    // pseudo-tuple spellings inside f-string interpolation interiors ──────
+
+    // The pseudo-tuple param inside an interior rejects UNCONDITIONALLY (no
+    // shadow binding registered): the Rewrite face never resolves
+    // interiors, so the reference would survive as raw text and resolve
+    // ambiently at emission (module bindings before fn tables).
+    #[test]
+    fn f1_fstring_interior_pseudo_tuple_name_rejects_for_polymorphic_before() {
+        let src = "fn tmpl<Args>(args: Args) -> Args {\n\
+                   \x20   let s = f\"{args[0]}\"\n\
+                   \x20   args[0] = args[0] + 1\n\
+                   \x20   return args\n\
+                   }\n\
+                   fn target_fn(a: int) -> int { return a }\n";
+        let mut fx = fixture(src);
+        let template = template(&fx, TemplateHookKind::Before, "tmpl");
+        let target = target_for(&fx, "target_fn", None);
+        let err = specialize(&mut fx.compiler, &template, &target)
+            .expect_err("a template name inside an f-string interior must reject");
+        let text = err.to_string();
+        assert!(
+            text.contains("references the template name `args` inside an f-string interpolation"),
+            "the F5-boundary sentence names the spelling: {text}"
+        );
+        assert!(
+            text.contains("hoist the value to a local outside the f-string"),
+            "the hoist-to-a-local positive twin is present: {text}"
+        );
+        assert!(
+            !text.contains("[C0926]"),
+            "the F5-boundary arm is its own named sentence, not a [C0926] resolution claim: {text}"
+        );
+    }
+
+    // The template TYPE param inside an interior rejects the same way.
+    #[test]
+    fn f1_fstring_interior_type_param_name_rejects() {
+        let src = "fn tmpl<Args>(args: Args) -> Args {\n\
+                   \x20   let s = f\"{Args}\"\n\
+                   \x20   args[0] = args[0] + 1\n\
+                   \x20   return args\n\
+                   }\n\
+                   fn target_fn(a: int) -> int { return a }\n";
+        let mut fx = fixture(src);
+        let template = template(&fx, TemplateHookKind::Before, "tmpl");
+        let target = target_for(&fx, "target_fn", None);
+        let err = specialize(&mut fx.compiler, &template, &target)
+            .expect_err("the type-param spelling inside an f-string interior must reject");
+        assert!(
+            err.to_string()
+                .contains("references the template name `Args` inside an f-string interpolation"),
+            "the F5-boundary sentence names the type-param spelling: {err}"
+        );
+    }
+
+    // POSITIVE TWIN, EXECUTED: hoist the value to a local outside the
+    // f-string — specializes and runs. The carrier write stays on the
+    // provable surface (`args[0] + <literal>`); the hoisted local feeds
+    // ONLY the f-string.
+    #[test]
+    fn f1_hoisted_local_control_specializes_and_executes() {
+        let src = "fn tmpl<Args>(args: Args) -> Args {\n\
+                   \x20   let v = args[0]\n\
+                   \x20   let s = f\"{v}\"\n\
+                   \x20   args[0] = args[0] + 2\n\
+                   \x20   return args\n\
+                   }\n\
+                   fn target_fn(a: int) -> int { return a }\n";
+        let mut fx = fixture(src);
+        let template = template(&fx, TemplateHookKind::Before, "tmpl");
+        let target = target_for(&fx, "target_fn", None);
+        let handler = specialize(&mut fx.compiler, &template, &target)
+            .expect("the hoisted-local twin specializes");
+        let result =
+            execute_specialized(&fx.compiler, handler.function_index(), vec![int_arg(10)]);
+        assert_eq!(result.as_i64(), Some(12), "10 + 2 through the hoisted local");
+    }
+
+    // ── Fix round 1, F2: capture-clause entries classify against the OUTER
+    // environment before binding into the closure frame ───────────────────
+
+    // `share amb` on a template-body closure where `amb` is a module
+    // binding: [C0926] — the clause is a reference into the outer
+    // environment; share-mode would lower to the shared capture kind
+    // silently (only move-mode is C0906-gated downstream).
+    #[test]
+    fn f2_capture_clause_naming_module_binding_rejects_c0926() {
+        let src = "fn tmpl(x: int) -> int {\n\
+                   \x20   let f = |y: int; share amb| y + 1\n\
+                   \x20   return f(x)\n\
+                   }\n\
+                   fn target_fn(a: int) -> int { return a }\n";
+        let mut fx = fixture(src);
+        with_ambient_binding(&mut fx);
+        let template = template(&fx, TemplateHookKind::Before, "tmpl");
+        let target = target_for(&fx, "target_fn", None);
+        expect_c0926(
+            specialize(&mut fx.compiler, &template, &target)
+                .expect_err("a capture-clause entry naming a module binding must reject"),
+        );
+    }
+
+    // SELECTIVITY CONTROL: an entry naming a template LOCAL passes the
+    // ambient gate — whatever downstream capture-plan gates decide, the
+    // ambient face does not blanket-reject clauses.
+    #[test]
+    fn f2_capture_clause_naming_local_passes_the_ambient_gate() {
+        let src = "fn tmpl(x: int) -> int {\n\
+                   \x20   let v = 3\n\
+                   \x20   let f = |y: int; share v| y + v\n\
+                   \x20   return f(x)\n\
+                   }\n\
+                   fn target_fn(a: int) -> int { return a }\n";
+        let mut fx = fixture(src);
+        with_ambient_binding(&mut fx);
+        let template = template(&fx, TemplateHookKind::Before, "tmpl");
+        let target = target_for(&fx, "target_fn", None);
+        if let Err(err) = specialize(&mut fx.compiler, &template, &target) {
+            assert!(
+                !err.to_string().contains("[C0926]"),
+                "a local-named capture entry is not ambient — downstream gates own it: {err}"
+            );
+        }
     }
 }

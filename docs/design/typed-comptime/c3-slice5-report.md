@@ -836,3 +836,100 @@ split, semicolon one-liners) ran green with exact expected output.
   `compile_annotation_wrapper`.
 - C09xx discipline: S5c mints NOTHING (the slice's minted set stays
   exactly [C0926] + [C0931], one producer each).
+
+---
+
+## Fix round 1 (verify findings F1 + F2)
+
+The round-1 verify (worktree @ 5f534bc8) returned FAIL on F1 with F2 as a
+LOW sibling; both are closed here. The §S5a "MUST-SCAN covered: f-string
+interiors" claim above held only for ORDINARY ambient names — the
+template-name+shadow corner (F1) and the capture-clause waver (F2) are
+amended below.
+
+### F1 — the a6 class inside an f-string interior (MEDIUM), CLOSED
+
+**Escape**: the Validate/Rewrite faces never scan f-string interiors (the
+F5 boundary), while the ambient face bound ALL declared params — including
+the pseudo-tuple param — into frame 0. A polymorphic body's
+`f"{args[0]}"` therefore passed the gate as in-scope, the rewrite resolved
+the param away to `__c3_p{i}`, and the raw-text interior `args` resolved
+at emission with module-bindings-before-fn-tables precedence: the a6
+silent capture, one interpolation deep. The pseudo_tuple.rs module-doc
+claim "caught downstream … never silently honored" was FALSE for exactly
+this input (doc corrected in the same commit).
+
+**Fix (one arm, no new walker, no new C09xx mint)**:
+`AmbientScopeCtx` now carries the REAL `args`/`Args` spellings
+(`template_args_param` / `template_type_param`, threaded from
+`template.sig()` at the gate — `None` for non-PolymorphicArgs kinds;
+the face itself still runs under the unspellable sentinels) plus an
+`fstring_interior_depth` cell incremented around each interior walk in
+`ambient_scan_fstring`. `check_fstring_template_name` fires at the head
+of `ambient_check_value_name` / `ambient_check_call_name` — BEFORE the
+in_scope check, because frame-0 in-scope-ness is a lie inside interiors —
+and rejects the template's own spellings UNCONDITIONALLY (totality does
+not depend on a shadow binding being registered) with the named
+F5-boundary sentence, positive twin: hoist the value to a local outside
+the f-string. Uncoded sentence; the slice's minted set stays exactly
+[C0926] + [C0931], one producer each.
+
+**Route census (empirical, probe-verified then deleted)**: a ZERO-param
+annotation with declarative hooks lowers on the LEGACY route (the S4
+classification selector is a TYPED config param), where `args` is the
+wrapper's real runtime parameter and `f"{args[0]}"` legitimately
+resolves — legacy stays byte-unchanged per charter (S6 deletion
+territory). The typed surface (typed-config sugar + API path) rejects.
+
+**Pins** (5 new): unit — polymorphic-before interior `args` rejects
+(sentence + twin, no shadow registered); interior `Args` rejects;
+hoisted-local control specializes AND executes (12 = 10+2). Weave —
+typed-config sugar headline with `let args = [7, 8]` shadow rejects
+byte-exact (mirror helper `fstring_template_name_sentence`);
+hoisted-local twin weaves, runs (7), and passes the module-binding-free
+ambient belt with the shadow present.
+
+### F2 — capture-clause entries waved into scope (LOW), CLOSED
+
+**Escape**: `Expr::FunctionExpr` capture-clause entries registered as
+closure binders with no outer classification — `captures(share x)`
+naming a module binding waved `x` into scope for the closure interior;
+only move-mode is [C0906]-gated downstream, so share-mode would lower to
+the shared capture kind silently.
+
+**Fix**: entries are syntactic references into the OUTER environment
+(captures.rs), so the ambient face now classifies each entry name via
+`ambient_check_value_name` BEFORE the closure's own binders register
+(inside the pushed frame while it is still empty) — a module-scope value
+binding named by an entry is [C0926] in EVERY mode, through the ONE
+existing producer. Binding/registration behavior for the other faces is
+byte-unchanged.
+
+**Pins** (3 new): unit — `|y: int; share amb|` with `amb` a module
+binding rejects [C0926]; selectivity control — an entry naming a template
+LOCAL passes the ambient gate (downstream capture-plan gates own the
+rest). Weave — typed-config sugar body with `share bump` rejects with
+the byte-exact [C0926] sentence naming `bump`.
+
+### Fix-round regression evidence
+
+- New pins: 8/8 green (5 unit in mod.rs + 3 weave in weave.rs; the
+  f1_/f2_ filter run also matches 2 unrelated pre-existing
+  `loops::stage_f1_*` tests, both green).
+- `template_specialization` module: 230/230. `capture`+`annotation`+
+  `template_specialization` neighborhoods: 602 passed / 0 failed
+  (after rewording two pin comments that tripped the K1
+  one-producer-file sentinel grep with a literal `CaptureKind::` token
+  in prose — comments only, zero code change).
+- Full `shape-vm --lib` blast-radius name-diff (baseline 5f534bc8 via
+  stash vs with-fix): baseline 3463 passed / 6 failed; with-fix 3470
+  passed / 7 failed; the +7/+1 delta is the 8 new pins minus the one
+  extra FAILED name `route_tests::nested_exact_calls_…`, which is
+  PRE-EXISTING run-mix contention, not diff-caused: it FAILS at baseline
+  in the isolated 7-name subset run and PASSES with the fix applied
+  under `--exact`; the route_tests trio
+  (`unavailable_and_missing…`/`inlined_closure…`/`nested_exact_calls…`)
+  reproduces at baseline. The remaining 6 baseline failures are
+  byte-identical names in both runs.
+- Refused-regex grep over the working diff: zero hits. No
+  `functions_annotations.rs` change; legacy weave fns untouched.

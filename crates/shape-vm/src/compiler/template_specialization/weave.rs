@@ -2182,6 +2182,135 @@ victim(4)
             );
         }
 
+        /// The exact F5-boundary sentence for one (origin, ident,
+        /// args-spelling) triple — the pin-side mirror of the ONE producer
+        /// (`pseudo_tuple::AmbientScopeCtx::fstring_template_name_rejection`,
+        /// fix round 1, F1).
+        fn fstring_template_name_sentence(origin: &str, ident: &str, args: &str) -> String {
+            format!(
+                "hook template body {origin} references the template name `{ident}` inside an \
+                 f-string interpolation; interpolation interiors are raw text to the \
+                 pseudo-tuple specialization (the named non-scanned boundary), so `{ident}` is \
+                 never resolved there and would instead resolve ambiently in the application \
+                 module — hoist the value to a local outside the f-string (for example \
+                 `let v = {args}[0]`) and interpolate the local (`f\"{{v}}\"`)"
+            )
+        }
+
+        // F1 (fix round 1) — the a6 class INSIDE an f-string interior: the
+        // template's own pseudo-tuple spelling in an interpolation, with a
+        // same-spelled application-module binding poised to win silently at
+        // emission (the Validate/Rewrite faces never scan interiors; module
+        // bindings resolve before fn tables). Rejects with the named
+        // F5-boundary sentence, byte-exact. The annotation carries a TYPED
+        // config param — the S4 classification selector for the typed
+        // surface (a zero-param annotation is legacy-class and out of the
+        // gate's territory until the S6 deletion).
+        #[test]
+        fn f1_fstring_interior_template_name_rejects_with_the_exact_sentence() {
+            let src = r#"
+let args = [7, 8]
+
+annotation hookann(times: int) {
+  targets: [function]
+  before(args) {
+    let s = f"{args[0]}"
+    args[0] = args[0] + times
+    return args
+  }
+}
+
+@hookann(1)
+fn victim(a: int) -> int { return a * 10 }
+
+victim(4)
+"#;
+            let (message, _) = expect_semantic_error(src);
+            assert!(
+                message.contains(&fstring_template_name_sentence(
+                    "the `before` hook of annotation `hookann`",
+                    "args",
+                    "args"
+                )),
+                "the full F5-boundary sentence must appear byte-exact: {message}"
+            );
+        }
+
+        // F1 POSITIVE TWIN, EXECUTED: hoist the value to a local outside
+        // the f-string — the woven program runs correctly even with the
+        // same-spelled application-module binding present, and the
+        // specialized handler stays module-binding-free (the ambient belt).
+        #[test]
+        fn f1_hoisted_local_twin_weaves_runs_and_stays_module_binding_free() {
+            let src = r#"
+let args = [7, 8]
+
+annotation tagged(times: int) {
+  targets: [function]
+  before(args) {
+    let v = args[0]
+    let s = f"{v}"
+    args[0] = args[0] + times
+    return args
+  }
+}
+
+@tagged(2)
+fn victim(a: int) -> int { return a + 1 }
+
+victim(4)
+"#;
+            let (value, compiler) = top_level_i64(src);
+            assert_eq!(value, 7, "4+2 = 6 → impl(6) = 7 (skip ⇒ 5; ambient [7,8] shifts)");
+            assert_eq!(compiler.hook_install_registry.len(), 1);
+            for row in &compiler.hook_install_registry {
+                let handler = &compiler.program.functions[usize::from(row.function_index)];
+                assert_eq!(
+                    module_binding_loads(&compiler, handler),
+                    0,
+                    "ambient belt: the specialized handler is module-binding-free"
+                );
+            }
+        }
+
+        // F2 (fix round 1) — a capture CLAUSE naming a module binding: the
+        // entries are references into the OUTER environment, so `share bump`
+        // on a template-body closure is the a6 hazard through the clause
+        // (move-mode is C0906-gated downstream, but share-mode would lower
+        // to the shared capture kind silently). The ambient face classifies
+        // entry names BEFORE binding them into the closure frame.
+        #[test]
+        fn f2_capture_clause_module_binding_rejects_c0926() {
+            let src = r#"
+let bump = 5
+
+mod defs {
+    annotation hookann(times: int) {
+      targets: [function]
+      before(args) {
+        let f = |y: int; share bump| y + 1
+        args[0] = f(args[0])
+        return args
+      }
+    }
+}
+
+@defs::hookann(1)
+fn victim(a: int) -> int { return a * 10 }
+
+victim(4)
+"#;
+            let (message, _) = expect_semantic_error(src);
+            assert!(
+                message.contains(&c0926_sentence(
+                    "the `before` hook of annotation `hookann`",
+                    "bump",
+                    "bump"
+                )),
+                "f2: a capture-clause entry naming a module binding rejects [C0926]: {message}"
+            );
+        }
+
         // MUST-SCAN: assignment TARGETS (a store into a module binding is
         // as ambient as a read — StoreModuleBinding).
         #[test]

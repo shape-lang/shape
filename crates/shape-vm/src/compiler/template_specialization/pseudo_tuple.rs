@@ -56,13 +56,18 @@
 //!   attribution.
 //! - **Interpolated f-string contents are not scanned by the pseudo-tuple
 //!   faces.** A `Literal::FormattedString` carries its interpolation as raw
-//!   text until emission; a pseudo-tuple reference inside one (`f"{args}"`)
-//!   is caught downstream by ordinary identifier resolution after the
-//!   pseudo-tuple has resolved away (the name no longer exists), never
-//!   silently honored. The S5 [`Face::AmbientScope`] face DOES scan
-//!   interpolation interiors: an ambient module-binding name there resolves
-//!   and is SILENTLY honored at emission (unlike `args`, it does not resolve
-//!   away), so the F5 non-scanned boundary does not apply to that face.
+//!   text until emission, so a pseudo-tuple reference inside one
+//!   (`f"{args[0]}"`) is NEVER rewritten — after specialization the name no
+//!   longer exists, and emission resolves module bindings BEFORE fn tables,
+//!   so an unrelated application-module binding spelled `args` would be
+//!   silently honored (the a6 shape, inside an interpolation). The S5
+//!   [`Face::AmbientScope`] face therefore DOES scan interpolation
+//!   interiors: an ambient module-binding name there is a [C0926]
+//!   rejection, and the template's own `args`/`Args` spellings there are
+//!   rejected with the named F5-boundary sentence
+//!   ([`AmbientScopeCtx::check_fstring_template_name`], positive twin:
+//!   hoist the value to a local outside the f-string) — neither is ever
+//!   silently honored.
 //!
 //! # The `__c3_` reserved prefix
 //!
@@ -158,6 +163,20 @@ pub(in crate::compiler) struct AmbientScopeCtx<'a> {
     /// binders register in traversal order (sequential visibility: a use
     /// BEFORE a same-spelled local `let` resolves ambiently and rejects).
     scopes: std::cell::RefCell<Vec<Vec<String>>>,
+    /// The REAL pseudo-tuple spellings (`args` / `Args`) for PolymorphicArgs
+    /// templates — `None` for every other template kind. The ambient face
+    /// runs under unspellable sentinels so the pseudo-tuple surface stays
+    /// structurally disengaged; these carry the real spellings ONLY for the
+    /// f-string-interior arm ([`Self::check_fstring_template_name`]): the
+    /// Rewrite face never enters interpolation interiors, so a template
+    /// name there survives specialization as raw text and would resolve
+    /// ambiently in the application module (fix round 1, F1).
+    template_args_param: Option<String>,
+    template_type_param: Option<String>,
+    /// > 0 while the ambient face is scanning inside an f-string
+    /// interpolation interior (incremented around each interior walk in
+    /// `Scan::ambient_scan_fstring`).
+    fstring_interior_depth: std::cell::Cell<usize>,
 }
 
 impl<'a> AmbientScopeCtx<'a> {
@@ -165,12 +184,20 @@ impl<'a> AmbientScopeCtx<'a> {
         compiler: &'a crate::compiler::BytecodeCompiler,
         origin: String,
         template_module: Option<String>,
+        pseudo_tuple_params: Option<(String, String)>,
     ) -> Self {
+        let (template_args_param, template_type_param) = match pseudo_tuple_params {
+            Some((args_param, type_param)) => (Some(args_param), Some(type_param)),
+            None => (None, None),
+        };
         Self {
             compiler,
             origin,
             template_module,
             scopes: std::cell::RefCell::new(Vec::new()),
+            template_args_param,
+            template_type_param,
+            fstring_interior_depth: std::cell::Cell::new(0),
         }
     }
 
@@ -236,6 +263,44 @@ impl<'a> AmbientScopeCtx<'a> {
             }
         }
         false
+    }
+
+    /// The F5-boundary arm (fix round 1, F1): inside an f-string
+    /// interpolation interior, the template's own pseudo-tuple spellings
+    /// (`args` / `Args`) reject. The Validate/Rewrite faces never enter
+    /// interpolation interiors (the module-docs named boundary), so a
+    /// template name there is NEVER specialized away — it would survive
+    /// into the woven module as raw text and resolve with
+    /// module-bindings-before-fn-tables precedence: the a6 silent-capture
+    /// shape, one interpolation deep. Fires unconditionally on the spelling
+    /// (totality does not depend on whether a shadow binding happens to be
+    /// registered yet). Uncoded named sentence — no new C09xx mint.
+    fn check_fstring_template_name(&self, name: &str) -> Result<()> {
+        if self.fstring_interior_depth.get() == 0 {
+            return Ok(());
+        }
+        if self.template_args_param.as_deref() == Some(name)
+            || self.template_type_param.as_deref() == Some(name)
+        {
+            return Err(self.fstring_template_name_rejection(name));
+        }
+        Ok(())
+    }
+
+    /// The named F5-boundary sentence (hoist-to-a-local positive twin) for
+    /// [`Self::check_fstring_template_name`]. `{origin}` never renders an
+    /// SOH hygienic name.
+    fn fstring_template_name_rejection(&self, ident: &str) -> ShapeError {
+        let args = self.template_args_param.as_deref().unwrap_or("args");
+        reject(format!(
+            "hook template body {origin} references the template name `{ident}` inside an \
+             f-string interpolation; interpolation interiors are raw text to the pseudo-tuple \
+             specialization (the named non-scanned boundary), so `{ident}` is never resolved \
+             there and would instead resolve ambiently in the application module — hoist the \
+             value to a local outside the f-string (for example `let v = {args}[0]`) and \
+             interpolate the local (`f\"{{v}}\"`)",
+            origin = self.origin
+        ))
     }
 
     /// THE ONE [C0926] sentence producer (S5a; exact sentence, pinned
@@ -1111,6 +1176,11 @@ impl<'a> Scan<'a> {
         let Some(ctx) = self.ambient() else {
             return Ok(());
         };
+        // The F5-boundary arm runs BEFORE the in_scope check: the template's
+        // own `args`/`Args` ARE frame-0 in-scope params for this face, but
+        // inside an f-string interior that in-scope-ness is a lie — the
+        // Rewrite face never resolves interiors (fix round 1, F1).
+        ctx.check_fstring_template_name(name)?;
         if ctx.in_scope(name) {
             return Ok(());
         }
@@ -1128,6 +1198,10 @@ impl<'a> Scan<'a> {
         let Some(ctx) = self.ambient() else {
             return Ok(());
         };
+        // Same F5-boundary arm as the value position (fix round 1, F1): a
+        // call spelled with the template name inside an f-string interior
+        // can never be specialized either.
+        ctx.check_fstring_template_name(name)?;
         if ctx.in_scope(name) || ctx.is_module_fn(name) {
             return Ok(());
         }
@@ -1154,9 +1228,9 @@ impl<'a> Scan<'a> {
         interp_mode: shape_ast::ast::InterpolationMode,
         mode: ScanMode,
     ) -> Result<()> {
-        if self.ambient().is_none() {
+        let Some(ctx) = self.ambient() else {
             return Ok(());
-        }
+        };
         let Ok(parts) = shape_ast::interpolation::parse_interpolation_with_mode(value, interp_mode)
         else {
             return Ok(());
@@ -1166,7 +1240,17 @@ impl<'a> Scan<'a> {
                 let Ok(mut parsed) = shape_ast::parser::parse_expression_str(&expr) else {
                     continue;
                 };
-                self.expr(&mut parsed, mode)?;
+                // Interior-depth tracking for the F5-boundary arm
+                // (`AmbientScopeCtx::check_fstring_template_name`, fix
+                // round 1, F1): the template's own `args`/`Args` spellings
+                // reject inside interiors — the Rewrite face never resolves
+                // them here.
+                ctx.fstring_interior_depth
+                    .set(ctx.fstring_interior_depth.get() + 1);
+                let result = self.expr(&mut parsed, mode);
+                ctx.fstring_interior_depth
+                    .set(ctx.fstring_interior_depth.get() - 1);
+                result?;
             }
         }
         Ok(())
@@ -1916,6 +2000,20 @@ impl<'a> Scan<'a> {
                 annotations: _,
                 span: _,
             } => self.ambient_frame(|| {
+                // Capture-clause entries are syntactic references into the
+                // OUTER environment (captures.rs: resolved at the capture
+                // gate against the construction scope), so the ambient face
+                // classifies them BEFORE the closure's own binders register
+                // (fix round 1, F2): an entry naming a module-scope value
+                // binding is [C0926] in EVERY mode — `move` is C0906-gated
+                // and the borrow spellings are C0902-gated downstream, but
+                // `share` would silently wave the module value into a
+                // template closure, the a6 hazard through a capture clause.
+                if let Some(clause) = captures {
+                    for entry in &clause.entries {
+                        self.ambient_check_value_name(&entry.name)?;
+                    }
+                }
                 for param in params.iter_mut() {
                     self.function_parameter(param, ScanMode::ClosureInterior)?;
                 }
