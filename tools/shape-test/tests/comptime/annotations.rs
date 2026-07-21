@@ -159,30 +159,11 @@ print(subtract(10, 3))
         .expect_output_contains("7");
 }
 
-#[test]
-fn ct_30_annotation_ctx() {
-    let code = r#"
-annotation inspect_ctx(label) {
-  before(args, ctx) {
-    print(f"[{label}] ctx = {ctx}")
-    args
-  }
-  after(args, result, ctx) {
-    result
-  }
-}
-
-@inspect_ctx("test")
-fn double(x: int) -> int {
-  x * 2
-}
-
-print(double(21))
-"#;
-    ShapeTest::new(code)
-        .expect_run_ok()
-        .expect_output_contains("42");
-}
+// DARK WINDOW (ADR-009 C3-G14 A′ / S2-F3 class, retired at the S6
+// completion): `ct_30_annotation_ctx` printed the legacy runtime-hook `ctx`
+// value from a `before(args, ctx)` body. The runtime-hook context family is
+// E4's charter; the typed hook surface has no `ctx` parameter by design. The
+// capability returns with E4's typed HookDecision protocol — see issue #68.
 
 #[test]
 fn ct_31_annotation_only_before() {

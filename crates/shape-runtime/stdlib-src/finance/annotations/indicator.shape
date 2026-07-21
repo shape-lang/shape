@@ -18,45 +18,21 @@
 ///     let rs = avg_gain / avg_loss
 ///     return 100 - (100 / (1 + rs))
 /// }
+// DARK WINDOW (ADR-009 C3-S6 / same class as C3-G14): the former `before`/
+// `after` cache hooks rode the deleted legacy runtime-hook surface (`ctx`
+// registry access + the cached-result before-short-circuit — the HookDecision
+// protocol, E4's charter) and were REMOVED with the C3-S6 classification
+// collapse. The memoization capability returns when E4 lands the typed
+// HookDecision protocol — see GitHub issue #68. The `on_define` registry
+// registration (`ctx`/`self` runtime-context family) is the same class and
+// went dark with them. The lifecycle `metadata()` handler survives on the
+// collapsed surface.
 pub annotation indicator() {
-    // Called when a function with @indicator is defined
-    // self = the annotated function
-    on_define(ctx) {
-        // Register in the indicators registry
-        ctx.get("registry").set(self.name, self)
-    }
-
-    // Called before each invocation - check cache
-    // self = the annotated function
-    before(args, ctx) {
-        // Generate cache key from function name and arguments
-        let key = self.name + ":" + args.toString()
-
-        // Check if we have a cached result
-        let cached = ctx.get("cache").get(key)
-        if cached != None {
-            // Return cached value — wrapper will use self instead of calling impl
-            return cached
-        }
-        // Return None to continue with normal execution
-        None
-    }
-
-    // Called after each invocation - cache result
-    // self = the annotated function
-    after(args, result, ctx) {
-        // Generate cache key
-        let key = self.name + ":" + args.toString()
-
-        // Return state with cache update
-        result
-    }
-
     // Return static metadata
     metadata() {
         return {
             is_indicator: true,
-            cacheable: true,
+            cacheable: false,
             pure: true
         }
     }

@@ -243,31 +243,12 @@ print(mul(4, 5))
     .expect_output_contains("20");
 }
 
-#[test]
-fn ctx_target_calls_original_impl_from_after_hook() {
-    // §4.1.5: `ctx.target` is a typed function value statically bound to the
-    // annotated function's ORIGINAL implementation. A runtime hook can call it
-    // (or pass it on) — it invokes the original body without re-triggering the
-    // hook. This is the surface WF-2C's `@remote` hard-depends on.
-    ShapeTest::new(
-        r#"
-annotation traced() {
-  after(args, result, ctx) {
-    let again = ctx.target(3)
-    print(f"again={again}")
-    result
-  }
-}
-
-@traced()
-fn square(x: int) -> int {
-  x * x
-}
-
-let r = square(5)
-print(r)
-"#,
-    )
-    .expect_run_ok()
-    .expect_output("again=9\n25");
-}
+// DARK WINDOW (ADR-009 C3-G14 A′ / S2-F3, retired at the S6 completion):
+// `ctx_target_calls_original_impl_from_after_hook` pinned §4.1.5 `ctx.target`
+// (the original-impl function value delivered to a legacy runtime hook body —
+// the surface the legacy `@remote` hard-depended on). The runtime-hook context
+// family is E4's charter; the legacy surface carrying it is deleted, and
+// `@remote` itself is dark until E4 re-implements it on the typed HookDecision
+// protocol — see issue #68. The legacy fixture (`after(args, result, ctx)` +
+// `ctx.target(3)`) can no longer compile, so the pin is retired rather than
+// #[ignore]'d; E4's acceptance suite re-pins the capability on its typed form.

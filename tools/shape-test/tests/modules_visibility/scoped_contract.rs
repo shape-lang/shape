@@ -71,6 +71,7 @@ fn scoped_contract_namespace_function_calls_use_double_colon() {
 // (compiler_impl_reference_model.rs), all three forms resolve and the
 // `@remote` `before` handler runs successfully.
 #[test]
+#[ignore = "dark window: E4 re-implements @remote on typed HookDecision — see issue #68"]
 fn scoped_contract_namespace_annotation_refs_use_double_colon() {
     ShapeTest::new(
         r#"
@@ -87,6 +88,7 @@ fn scoped_contract_namespace_annotation_refs_use_double_colon() {
 }
 
 #[test]
+#[ignore = "dark window: E4 re-implements @remote on typed HookDecision — see issue #68"]
 fn scoped_contract_named_annotation_import_enables_bare_annotation() {
     ShapeTest::new(
         r#"
@@ -121,6 +123,7 @@ fn scoped_contract_namespace_import_does_not_bind_bare_regular_names() {
 // disposition path (i): the namespace-import path now registers
 // annotation defs from the imported module so bare `@remote` resolves.
 #[test]
+#[ignore = "dark window: E4 re-implements @remote on typed HookDecision — see issue #68"]
 fn scoped_contract_namespace_import_binds_bare_annotations() {
     ShapeTest::new(
         r#"

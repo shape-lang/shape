@@ -362,29 +362,14 @@ print(process(50))
     .expect_output_contains("50");
 }
 
-#[test]
-fn before_hook_passes_ctx_info() {
-    ShapeTest::new(
-        r#"
-annotation show_ctx(label) {
-  before(args, ctx) {
-    print(f"[{label}] ctx = {ctx}")
-    args
-  }
-}
-
-@show_ctx("test")
-fn noop() {
-  print("noop")
-}
-
-noop()
-"#,
-    )
-    .expect_run_ok()
-    .expect_output_contains("[test] ctx =")
-    .expect_output_contains("noop");
-}
+// DARK WINDOW (ADR-009 C3-G14 A′ / S2-F3, retired at the S6 completion):
+// `before_hook_passes_ctx_info` pinned the legacy runtime-hook `ctx` value
+// reaching a `before(args, ctx)` body — the runtime-hook context family is
+// E4's charter, and the legacy surface carrying it is deleted. The typed hook
+// surface has no `ctx` parameter by design (S2-F3); the capability returns
+// with E4's typed HookDecision protocol — see issue #68. The legacy fixture
+// (`annotation show_ctx(label)` + `before(args, ctx)`) can no longer compile,
+// so the pin is retired rather than #[ignore]'d.
 
 // C3-S6 A-phase typed rewrite: STACKED mutating befores (proven by the s4c
 // stacked-sugar pin). ORDER DISCLOSURE: the typed before-chain runs in

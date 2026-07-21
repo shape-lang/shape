@@ -2397,6 +2397,7 @@ print(r)
     /// not a client-side fallback. This is the exact `blobs>=2` /
     /// foreign-functions-non-empty regression path the audit found untested.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[ignore = "dark window: E4 re-implements @remote on typed HookDecision — see issue #68"]
     async fn test_remote_foreign_extern_c_transfer_over_tcp() {
         // `none` on loopback grants `Ffi`; `extern C` is not gated by the
         // (empty) `ffi_languages` allow-list, so the foreign call is admitted.
@@ -2746,6 +2747,7 @@ match r {{
     /// node (python NOT opted in) refuses the identical program server-side — it
     /// never yields `105`. Skips cleanly when `libshape_ext_python.so` is absent.
     #[test]
+    #[ignore = "dark window: E4 re-implements @remote on typed HookDecision — see issue #68"]
     fn test_remote_foreign_python_transfer_over_tcp() {
         let _guard = polyglot_process_lock()
             .lock()
@@ -2861,6 +2863,7 @@ print(remote_py(100))
     /// strict-node server-side refusal. Skips cleanly when
     /// `libshape_ext_typescript.so` is absent.
     #[test]
+    #[ignore = "dark window: E4 re-implements @remote on typed HookDecision — see issue #68"]
     fn test_remote_foreign_typescript_transfer_over_tcp() {
         let _guard = polyglot_process_lock()
             .lock()

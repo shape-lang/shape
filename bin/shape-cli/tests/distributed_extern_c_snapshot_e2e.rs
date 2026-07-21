@@ -5,6 +5,7 @@ use std::time::Duration;
 use support::*;
 
 #[test]
+#[ignore = "dark window: E4 re-implements @remote on typed HookDecision — see issue #68"]
 fn remote_extern_c_snapshot_hash_can_be_resumed_from_receiver_store() {
     let _guard = lock_process();
     let env = IsolatedEnv::new("shape-remote-c-snapshot-resume-e2e-");
