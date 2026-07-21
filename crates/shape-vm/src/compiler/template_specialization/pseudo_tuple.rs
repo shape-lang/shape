@@ -508,7 +508,12 @@ pub(in crate::compiler) fn validate_pseudo_tuple_uses(
 ///    target's arity + signature); `args.length` → the constant `N`;
 ///    `return args` / the final bare-`args` tail → the carrier expression.
 ///    Any residual `args`/`type_param` use named-rejects via the SAME shared
-///    core the construction face runs.
+///    core the construction face runs. After the walk, TWO specialization
+///    guards run over the collected events: the S2c aggregate-kind guard
+///    ([`guard_carrier_write_kinds`] — every per-slot write proves its
+///    declared parameter type) and the S6-round-3 F3 before-side exit gate
+///    ([`guard_before_template_exit_kinds`] — every value-producing exit
+///    proves the bound carrier type; value-less completion rejects).
 /// 2. Replace the single `args` parameter with N parameters `__c3_p{i}`
 ///    typed with the target's AST-side annotations.
 /// 3. Prepend the prologue `let mut __c3_arg_{i} = __c3_p{i}` per parameter
@@ -596,11 +601,15 @@ pub(in crate::compiler) fn resolve_pseudo_tuple(
 
     // (1) The rewrite walk — same core, second face. The walk COLLECTS every
     // per-slot mutation's rewritten RHS for the aggregate-kind guard below,
-    // plus the S6 provable-locals events (binding-position names with their
-    // post-rewrite initializers, and every whole-name assignment target).
+    // the S6 provable-locals events (binding-position names with their
+    // post-rewrite initializers, and every whole-name assignment target),
+    // and — S6 round 3, F3 — every body-level non-conforming return value
+    // for the before-side exit gate (the conforming `return args` spellings
+    // are intercepted and rewritten before collection).
     let carrier_writes = std::cell::RefCell::new(Vec::new());
     let local_bindings = std::cell::RefCell::new(Vec::new());
     let assigned_locals = std::cell::RefCell::new(std::collections::HashSet::new());
+    let body_returns = std::cell::RefCell::new(Vec::new());
     let scan = Scan {
         args_param: &pt.args_param,
         type_param: &pt.type_param,
@@ -610,9 +619,14 @@ pub(in crate::compiler) fn resolve_pseudo_tuple(
             carrier_writes: &carrier_writes,
             local_bindings: &local_bindings,
             assigned_locals: &assigned_locals,
+            returns: &body_returns,
         },
     };
     walk_template_body(&scan, &mut def.body)?;
+    let carrier_writes = carrier_writes.into_inner();
+    let local_bindings = local_bindings.into_inner();
+    let assigned_locals = assigned_locals.into_inner();
+    let body_returns = body_returns.into_inner();
 
     // (1b) ADR-009 C3 #14 (slice 2, S2c) — the aggregate-kind guard, closing
     // the S1 pending observation (c3-slice1-report.md §Observations: a
@@ -634,9 +648,29 @@ pub(in crate::compiler) fn resolve_pseudo_tuple(
         compiler,
         pt,
         &capture_tail,
-        &carrier_writes.into_inner(),
-        &local_bindings.into_inner(),
-        &assigned_locals.into_inner(),
+        &carrier_writes,
+        &local_bindings,
+        &assigned_locals,
+    )?;
+
+    // (1c) ADR-009 C3 #14 (S6 fixlet round 3, F3) — the BEFORE-side exit
+    // gate: every value-producing exit of the (post-rewrite) body must PROVE
+    // the bound before-protocol type — the carrier type the weave's typed
+    // read consumes (see the gate's docs for the weave-consumption quote).
+    // Runs AFTER the write guard so the established per-slot write
+    // rejections keep sentence precedence, and BEFORE the parameter/prologue
+    // minting so the gated body is exactly the walked one. The
+    // monomorphization ride classifies a rejection Hard and the seam wraps
+    // it through `template_application_error` at the `@application` site,
+    // exactly like the write guard.
+    guard_before_template_exit_kinds(
+        compiler,
+        pt,
+        &capture_tail,
+        &def.body,
+        &body_returns,
+        &local_bindings,
+        &assigned_locals,
     )?;
 
     // (2) Per-slot minted parameters, typed from the target's AST side; the
@@ -687,38 +721,32 @@ pub(in crate::compiler) fn resolve_pseudo_tuple(
     Ok(())
 }
 
-/// ADR-009 C3 #14 (slice 2, S2c) — the aggregate-kind guard (see the call
-/// site in [`resolve_pseudo_tuple`] for the full rationale). Every collected
-/// per-slot write must PROVE the declared parameter type via
-/// [`carrier_write_concrete_type`]; a proven-divergent write and an
-/// unprovable write are both NAMED rejections with positive twins
-/// (surface-and-stop — never a silently kind-divergent typed read in the
-/// weave). Comparison is `ConcreteType` equality (never spelling equality —
-/// the S1 same-Sig cache-hit carrier-spelling observation), so alias
-/// spellings of one concrete type (`Array<int>` / `Vec<int>`) agree.
-fn guard_carrier_write_kinds(
+/// The shared proof environment of the two specialization guards (the S2c
+/// write guard and the S6-round-3 F3 exit gate): the declared per-slot
+/// `ConcreteType`s in target-parameter order, plus the declared trailing
+/// captures (name → concrete; an unresolvable capture annotation simply
+/// stays out of the env — the affected expression then proves `None` and
+/// the consuming guard's named rejection stands, never a guess).
+///
+/// The specialization seam (`specialize_polymorphic_before`) already proved
+/// every target parameter resolves concretely before building the plan, so
+/// a slot miss here is internal-error-shaped, never a user rejection.
+fn resolve_carrier_proof_env(
     compiler: &crate::compiler::BytecodeCompiler,
     plan: &PseudoTuplePlan,
     capture_tail: &[FunctionParameter],
-    writes: &[(usize, Expr)],
-    local_bindings: &[(String, Option<Expr>)],
-    assigned_locals: &std::collections::HashSet<String>,
-) -> Result<()> {
+) -> Result<(
+    Vec<shape_value::v2::ConcreteType>,
+    Vec<(String, shape_value::v2::ConcreteType)>,
+)> {
     use crate::compiler::monomorphization::type_resolution::declared_annotation_concrete_type;
     use shape_value::v2::ConcreteType;
 
-    if writes.is_empty() {
-        return Ok(());
-    }
-    // Declared per-slot ConcreteTypes. The specialization seam
-    // (`specialize_polymorphic_before`) already proved every target
-    // parameter resolves concretely before building the plan, so a miss
-    // here is internal-error-shaped, never a user rejection.
     let mut declared_slots: Vec<ConcreteType> = Vec::with_capacity(plan.target_params.len());
     for (param_name, annotation) in &plan.target_params {
         let Some(concrete) = declared_annotation_concrete_type(compiler, annotation) else {
             return Err(reject(format!(
-                "internal error: the aggregate-kind guard could not resolve the declared type \
+                "internal error: the specialization guards could not resolve the declared type \
                  `{}` of target parameter `{param_name}`; the specialization seam proves every \
                  parameter resolves concretely before building the plan",
                 annotation.to_type_string()
@@ -737,6 +765,30 @@ fn guard_carrier_write_kinds(
             Some((name, concrete))
         })
         .collect();
+    Ok((declared_slots, captures))
+}
+
+/// ADR-009 C3 #14 (slice 2, S2c) — the aggregate-kind guard (see the call
+/// site in [`resolve_pseudo_tuple`] for the full rationale). Every collected
+/// per-slot write must PROVE the declared parameter type via
+/// [`carrier_write_concrete_type`]; a proven-divergent write and an
+/// unprovable write are both NAMED rejections with positive twins
+/// (surface-and-stop — never a silently kind-divergent typed read in the
+/// weave). Comparison is `ConcreteType` equality (never spelling equality —
+/// the S1 same-Sig cache-hit carrier-spelling observation), so alias
+/// spellings of one concrete type (`Array<int>` / `Vec<int>`) agree.
+fn guard_carrier_write_kinds(
+    compiler: &crate::compiler::BytecodeCompiler,
+    plan: &PseudoTuplePlan,
+    capture_tail: &[FunctionParameter],
+    writes: &[(usize, Expr)],
+    local_bindings: &[(String, Option<Expr>)],
+    assigned_locals: &std::collections::HashSet<String>,
+) -> Result<()> {
+    if writes.is_empty() {
+        return Ok(());
+    }
+    let (declared_slots, captures) = resolve_carrier_proof_env(compiler, plan, capture_tail)?;
 
     // S6 (supervisor-ordered guard growth): resolve the provable-initializer
     // locals BEFORE the write loop, so a hoisted local (`let t = args[0]`)
@@ -1065,6 +1117,212 @@ pub(in crate::compiler) fn guard_after_template_return_kind(
     Ok(())
 }
 
+/// ADR-009 C3 #14 (S6 fixlet round 3, F3 — supervisor-ordered) — the
+/// BEFORE-side exit gate: the analog of the after-side return-kind gate for
+/// polymorphic `before` templates, at the same specialization seam
+/// (`resolve_pseudo_tuple`, both the sugar and API routes — every
+/// PolymorphicArgs specialization passes here).
+///
+/// THE BOUND BEFORE-PROTOCOL TYPE (determined from the weave's actual
+/// carrier consumption — `weave.rs`, the before chain): the weave binds a
+/// non-observer `before` handler's call result to a local ANNOTATED with the
+/// carrier type and reads it back TYPED —
+/// [`MutationCarrier::Single`]: `let __c3_w{n}: <the target's one parameter
+/// type> = handler(args...)`, rebound as the next call's one argument;
+/// [`MutationCarrier::Aggregate`]: `let __c3_w{n}: { a0: T0, ..., aN-1:
+/// TN-1 } = handler(args...)` (the CURRENT target's AST-side parameter
+/// spellings), then per-field `m.a0 .. m.aN-1` typed reads feed the next
+/// call. The bound type at EVERY value-producing exit is therefore exactly
+/// the carrier's return annotation
+/// ([`PseudoTuplePlan::carrier_return_annotation`]): the one declared
+/// parameter type for `Single`; the compiler-internal per-target aggregate
+/// for `Aggregate` (C3-G4's typed args-mutation contract, G9-resolved).
+/// Before this gate NOTHING checked the body's actual exits against that
+/// bound — the S2c guard covers per-slot `args[i] = expr` writes only, the
+/// sugar carries bodies verbatim with no auto-appended return, and a stray
+/// value / value-less completion reached the woven local's typed read
+/// unchecked (the round-1-lens F3 finding; the same reinterpretation class
+/// as the measured after-side leak).
+///
+/// WHAT PROVES: the conforming mutation-return spellings (`return args`, the
+/// final bare-`args` tail) are rewritten to the carrier expression before
+/// collection and are conforming BY CONSTRUCTION (minted slot locals typed
+/// by the prologue + the S2c write guard) — a body whose every exit is a
+/// mutation-return yields zero leaves here. Every OTHER value-producing exit
+/// (a stray value tail, a non-`args` `return`) must PROVE the carrier type
+/// under the same bounded evaluator the S2c guard runs
+/// ([`carrier_write_concrete_type`]: minted slot locals, declared captures,
+/// provable-initializer locals, literals, arithmetic, typed calls) — for
+/// `Single`, `ConcreteType` equality with the one declared parameter type;
+/// for `Aggregate` (which has NO `ConcreteType` — inline object annotations
+/// are deliberately outside `declared_annotation_concrete_type`), a
+/// positionally exact `{ a0: ..., aN-1: ... }` object literal proving every
+/// field's declared parameter type, minted or user-spelled alike. Proven-
+/// divergent, unprovable, and pack-less (value-less completion / bare
+/// `return`) exits are all NAMED rejections (surface-and-stop — CLAUDE.md
+/// "if the type can't be proven, it is a compile error"); the ride
+/// classifies them Hard and the seam wraps them through
+/// `template_application_error` with both signatures at the `@application`
+/// site. The `?`-exit is rejected during the walk itself (the round-2 F1
+/// arm on `Face::Rewrite` — [`Scan::reject_try_operator_exit`]).
+///
+/// POSITIVE TWINS (gated to exactly what the weave accepts): the canonical
+/// mutation-return spellings; any exit proving the carrier type (e.g.
+/// `return args[0] * 2` on a 1-ary int target — type-sound and previously
+/// working, the gate proves types, never polices spellings); and for
+/// pure-read observation WITHOUT delivering the pack, the zero-parameter
+/// void OBSERVER form (`before()` sugar / a zero-param void body fn) — the
+/// observer route carries no pseudo-tuple plan and no carrier, the weave
+/// calls it with zero arguments and threads the target's arguments
+/// untouched, so it never enters this gate.
+///
+/// KNOWN BOUNDARY (named, deliberate — same as the after gate): the gate
+/// proves the type of every visible value-producing exit; exhaustive
+/// control-flow reachability (e.g. `loop`-break value paths — a loop in
+/// tail position rejects conservatively as a value-less completion) stays
+/// with the downstream compile battery.
+fn guard_before_template_exit_kinds(
+    compiler: &crate::compiler::BytecodeCompiler,
+    plan: &PseudoTuplePlan,
+    capture_tail: &[FunctionParameter],
+    body: &[Statement],
+    body_returns: &[Option<Expr>],
+    local_bindings: &[(String, Option<Expr>)],
+    assigned_locals: &std::collections::HashSet<String>,
+) -> Result<()> {
+    use shape_value::v2::ConcreteType;
+
+    let (declared_slots, captures) = resolve_carrier_proof_env(compiler, plan, capture_tail)?;
+    let locals = resolve_provable_locals(
+        compiler,
+        &declared_slots,
+        &captures,
+        local_bindings,
+        assigned_locals,
+    );
+
+    let mut leaves = Vec::new();
+    collect_tail_leaves_of_statements(body, &mut leaves);
+    for return_value in body_returns {
+        match return_value {
+            Some(expr) => collect_result_value_leaves(expr, &mut leaves),
+            None => leaves.push(ResultLeaf::NoValue),
+        }
+    }
+
+    let args = &plan.args_param;
+    let carrier_desc = match &plan.carrier {
+        MutationCarrier::Single { annotation } => format!(
+            "`{}` (the target's one parameter type — the typed args-mutation carrier)",
+            annotation.to_type_string()
+        ),
+        MutationCarrier::Aggregate { .. } => format!(
+            "the compiler-internal argument aggregate over ({}) (the typed args-mutation \
+             carrier the weave reads back per-field at its typed read)",
+            plan.render_target_params()
+        ),
+    };
+    let value_less = || {
+        reject(format!(
+            "the template body can complete without delivering the mutated argument pack, \
+             but the required specialization returns {carrier_desc} — a `before` template \
+             delivers the typed `{args}` pack to the woven call on every exit; end the body \
+             with `{args}` (or `return {args}`) on every path, or declare the template as a \
+             zero-parameter void observer (`fn t() {{ ... }}`) to observe the call without \
+             touching its arguments"
+        ))
+    };
+    let divergent = |proven: &ConcreteType| {
+        reject(format!(
+            "the template body delivers `{proven}` at an exit but the required \
+             specialization returns {carrier_desc} — a kind-divergent exit would make the \
+             woven wrapper reinterpret the hook's raw return bits at its typed read; return \
+             the whole mutated pack with `return {args}` (or a final bare `{args}`)"
+        ))
+    };
+    let unprovable = || {
+        reject(format!(
+            "cannot prove the type of a value the template body delivers at an exit: the \
+             typed args-mutation carrier requires every value-producing exit to prove \
+             {carrier_desc} — return the whole mutated pack with `return {args}` (or a \
+             final bare `{args}`), or deliver an expression whose type is provable at \
+             specialization (a literal, an `{args}[i]` slot, a declared capture, a local \
+             bound to a provable initializer, a typed fn's result, or arithmetic over those)"
+        ))
+    };
+
+    for leaf in leaves {
+        let expr = match leaf {
+            ResultLeaf::NoValue => return Err(value_less()),
+            ResultLeaf::Value(expr) => expr,
+        };
+        // The Aggregate carrier's conforming shape: a positionally exact
+        // `{ a0: ..., aN-1: ... }` object literal (the minted carrier
+        // expression, or an equivalent user spelling), every field proving
+        // its declared parameter type.
+        if let (MutationCarrier::Aggregate { fields }, Expr::Object(entries, _)) =
+            (&plan.carrier, &expr)
+        {
+            let positionally_exact = entries.len() == fields.len()
+                && entries.iter().zip(fields.iter()).all(|(entry, (name, _))| {
+                    matches!(entry, ObjectEntry::Field { key, .. } if key == name)
+                });
+            if positionally_exact {
+                for (index, entry) in entries.iter().enumerate() {
+                    let ObjectEntry::Field { value, .. } = entry else {
+                        unreachable!("guarded by positionally_exact");
+                    };
+                    let (param_name, annotation) = &plan.target_params[index];
+                    let required = &declared_slots[index];
+                    match carrier_write_concrete_type(
+                        compiler,
+                        &declared_slots,
+                        &captures,
+                        &locals,
+                        value,
+                    ) {
+                        Some(proven) if &proven == required => {}
+                        Some(proven) => {
+                            return Err(reject(format!(
+                                "the pack value delivered for field a{index} proves type \
+                                 `{proven}` but the target's parameter `{param_name}` \
+                                 declares `{ann}` — a kind-divergent field would make the \
+                                 weave's typed a{index} read lie about its runtime kind; \
+                                 deliver a `{ann}` value (or return the whole mutated pack \
+                                 with `return {args}`)",
+                                ann = annotation.to_type_string(),
+                            )));
+                        }
+                        None => {
+                            return Err(reject(format!(
+                                "cannot prove the type of the pack value delivered for \
+                                 field a{index}: the typed args-mutation carrier requires \
+                                 it to prove the declared parameter type `{ann}` \
+                                 (parameter `{param_name}`) — deliver a provable `{ann}` \
+                                 value, or return the whole mutated pack with \
+                                 `return {args}`",
+                                ann = annotation.to_type_string(),
+                            )));
+                        }
+                    }
+                }
+                continue;
+            }
+        }
+        let required_single = match &plan.carrier {
+            MutationCarrier::Single { .. } => Some(&declared_slots[0]),
+            MutationCarrier::Aggregate { .. } => None,
+        };
+        match carrier_write_concrete_type(compiler, &declared_slots, &captures, &locals, &expr) {
+            Some(proven) if required_single == Some(&proven) => {}
+            Some(ConcreteType::Void) => return Err(value_less()),
+            Some(proven) => return Err(divergent(&proven)),
+            None => return Err(unprovable()),
+        }
+    }
+    Ok(())
+}
+
 /// The guard's bounded, template-owned type evaluator: resolve the
 /// `ConcreteType` an expression PROVES inside a rewritten specialized
 /// template body. Knows exactly the template's own vocabulary — the minted
@@ -1279,6 +1537,16 @@ enum Face<'a> {
         carrier_writes: &'a std::cell::RefCell<Vec<(usize, Expr)>>,
         local_bindings: &'a std::cell::RefCell<Vec<(String, Option<Expr>)>>,
         assigned_locals: &'a std::cell::RefCell<std::collections::HashSet<String>>,
+        /// ADR-009 C3 #14 (S6 fixlet round 3, F3): every BODY-LEVEL
+        /// `return`-position value expression, POST-rewrite (`None` = a bare
+        /// `return` — a pack-less exit the BEFORE-side exit gate rejects).
+        /// The conforming mutation-return spellings (`return args`, and the
+        /// final bare-`args` tail) are intercepted BEFORE collection and
+        /// never enter this list — they are conforming by construction
+        /// (rewritten to the carrier expression). Closure-interior and
+        /// comptime-block returns are filtered exactly as on the after face
+        /// (the F2 body-level-only rule at [`Scan::note_return_value`]).
+        returns: &'a std::cell::RefCell<Vec<Option<Expr>>>,
     },
     /// ADR-009 C3 #14 (slice 5, S5a) — the [C0926] ambient-totality face:
     /// classifies every FREE identifier against the lexical scope stack and
@@ -1720,7 +1988,15 @@ impl<'a> Scan<'a> {
     }
 
     /// ADR-009 C3 #14 (S6): record one `return`-position value expression
-    /// (`None` = a bare `return`) for the after-side return-kind guard.
+    /// (`None` = a bare `return`) for the exit gates — the after-side
+    /// return-kind guard ([`Face::AfterReturnScan`]) and the S6-round-3 F3
+    /// before-side exit gate ([`Face::Rewrite`], consumed by
+    /// [`guard_before_template_exit_kinds`]). Callers note AFTER walking the
+    /// value, so on the rewrite face the collected expression carries the
+    /// POST-rewrite spelling (pseudo-tuple reads already resolved to minted
+    /// slot locals — the same ordering rule as the `carrier_writes`
+    /// collection); the after face never mutates, so the ordering is
+    /// observation-equivalent there.
     ///
     /// S6 fixlet round 2, F2: BODY-LEVEL returns only. A closure's own
     /// `return` exits the CLOSURE frame, and a comptime block's `return`
@@ -1736,8 +2012,11 @@ impl<'a> Scan<'a> {
         if mode == ScanMode::ClosureInterior || self.comptime_depth.get() > 0 {
             return;
         }
-        if let Face::AfterReturnScan { returns, .. } = self.face {
-            returns.borrow_mut().push(value.cloned());
+        match self.face {
+            Face::AfterReturnScan { returns, .. } | Face::Rewrite { returns, .. } => {
+                returns.borrow_mut().push(value.cloned());
+            }
+            Face::Validate | Face::AmbientScope(_) => {}
         }
     }
 
@@ -1869,11 +2148,16 @@ impl<'a> Scan<'a> {
                         }
                     }
                 }
-                // S6 after-return face: every BODY-LEVEL return-position
+                // S6 exit-gate collection: every BODY-LEVEL return-position
                 // value (a bare `return` records `None` — a no-value exit;
-                // closure-interior/comptime returns are filtered — F2).
+                // closure-interior/comptime returns are filtered — F2). The
+                // value is walked FIRST so the rewrite face collects the
+                // POST-rewrite expression (round 3, F3 — the `carrier_writes`
+                // ordering rule; the after face never mutates, so the order
+                // is observation-equivalent there).
+                self.opt_expr(value.as_mut(), mode)?;
                 self.note_return_value(value.as_ref(), mode);
-                self.opt_expr(value.as_mut(), mode)
+                Ok(())
             }
             Statement::Break(_) | Statement::Continue(_) | Statement::RemoveTarget(_) => Ok(()),
             Statement::VariableDecl(decl, _) => self.variable_decl(decl, mode),
@@ -2636,11 +2920,13 @@ impl<'a> Scan<'a> {
                         }
                     }
                 }
-                // S6 after-return face: the expression-position `return`
+                // S6 exit-gate collection: the expression-position `return`
                 // twin records exactly like the statement form (body-level
-                // only — the F2 filter).
+                // only — the F2 filter; value walked first so the rewrite
+                // face collects the post-rewrite expression — round 3, F3).
+                self.opt_expr(value.as_deref_mut(), mode)?;
                 self.note_return_value(value.as_deref(), mode);
-                self.opt_expr(value.as_deref_mut(), mode)
+                Ok(())
             }
 
             Expr::MethodCall {
@@ -3508,6 +3794,179 @@ fn t<Args>(args: Args) -> Args {
 "#,
         )
         .expect("construction stays permissive; the specialization scans own the rejection");
+    }
+
+    // ── S6 fixlet round 3, F3: the BEFORE-side exit gate ──────────────────
+
+    // MUST-REJECT (value-less completion, branch decomposition): a tail `if`
+    // whose only exit is a branch-local `return args` falls through with NO
+    // pack on the missing-else path — the woven typed local would read
+    // garbage. Named rejection with the observer positive twin in the
+    // sentence.
+    #[test]
+    fn before_exit_gate_value_less_missing_else_is_rejected() {
+        expect_resolve_reject(
+            r#"
+fn t<Args>(args: Args) -> Args {
+    if args.length > 1 {
+        return args
+    }
+}
+"#,
+            &aggregate_plan(),
+            "can complete without delivering the mutated argument pack",
+        );
+    }
+
+    // MUST-REJECT (value-less completion, declaration tail): the pure-read
+    // body with no mutation-return at all — the exact sugar-verbatim shape
+    // the order traced (`before(args) { let v = args[0] }`).
+    #[test]
+    fn before_exit_gate_value_less_decl_tail_is_rejected() {
+        expect_resolve_reject(
+            r#"
+fn t<Args>(args: Args) -> Args {
+    let v = args[0]
+}
+"#,
+            &single_plan(),
+            "can complete without delivering the mutated argument pack",
+        );
+    }
+
+    // MUST-REJECT (pack-less bare `return`): a value-less `return` is an
+    // exit that delivers nothing — same rejection family.
+    #[test]
+    fn before_exit_gate_bare_return_is_rejected() {
+        expect_resolve_reject(
+            r#"
+fn t<Args>(args: Args) -> Args {
+    if args.length > 1 {
+        return
+    }
+    return args
+}
+"#,
+            &aggregate_plan(),
+            "can complete without delivering the mutated argument pack",
+        );
+    }
+
+    // MUST-REJECT (stray value tail on the AGGREGATE carrier): a provable
+    // non-pack tail (`args[0] + 1` → int) can never be the compiler-internal
+    // aggregate the weave reads back per-field.
+    #[test]
+    fn before_exit_gate_stray_value_tail_rejects_on_the_aggregate_carrier() {
+        let err = resolve(
+            r#"
+fn t<Args>(args: Args) -> Args {
+    args[0] = args[0] + 1
+    args[0] + 1
+}
+"#,
+            &aggregate_plan(),
+        )
+        .expect_err("a stray non-pack tail must be rejected by the exit gate");
+        let message = err.to_string();
+        assert!(
+            message.contains("delivers `int` at an exit"),
+            "names the proven kind: {message}"
+        );
+        assert!(
+            message.contains("compiler-internal argument aggregate over (a: int, b: number)"),
+            "names the bound carrier: {message}"
+        );
+    }
+
+    // MUST-REJECT (divergent `return` on the SINGLE carrier): a body-level
+    // `return "boom"` proves string against the bound int carrier.
+    #[test]
+    fn before_exit_gate_divergent_return_rejects_on_the_single_carrier() {
+        expect_resolve_reject(
+            r#"
+fn t<Args>(args: Args) -> Args {
+    if args.length > 0 {
+        return "boom"
+    }
+    return args
+}
+"#,
+            &single_plan(),
+            "delivers `string` at an exit",
+        );
+    }
+
+    // MUST-REJECT (unprovable exit): an exit whose type the bounded
+    // evaluator cannot prove is a LOUD rejection, never a guess.
+    #[test]
+    fn before_exit_gate_unprovable_exit_is_rejected() {
+        expect_resolve_reject(
+            r#"
+fn t<Args>(args: Args) -> Args {
+    return mystery()
+}
+"#,
+            &single_plan(),
+            "cannot prove the type of a value the template body delivers",
+        );
+    }
+
+    // POSITIVE TWIN (type-proof, not spelling police): a NON-canonical exit
+    // that PROVES the Single carrier type is legal — `return args[0] * 2`
+    // on a 1-ary int target delivered the doubled arg pre-gate (type-sound,
+    // previously working) and still resolves.
+    #[test]
+    fn before_exit_gate_conforming_value_exit_is_legal_on_the_single_carrier() {
+        let def = resolve(
+            r#"
+fn t<Args>(args: Args) -> Args {
+    return args[0] * 2
+}
+"#,
+            &single_plan(),
+        )
+        .expect("a carrier-proving value exit is legal");
+        assert_eq!(def.return_type, Some(int_ann()));
+    }
+
+    // MUST-REJECT (per-field proof on a user-spelled aggregate literal): an
+    // object literal positionally matching the carrier shape is proven
+    // FIELD BY FIELD — `a1` delivering an int slot where the target's `b`
+    // declares number is a kind-divergent field, named as such.
+    #[test]
+    fn before_exit_gate_user_spelled_aggregate_literal_proves_per_field() {
+        expect_resolve_reject(
+            r#"
+fn t<Args>(args: Args) -> Args {
+    return { a0: args[0], a1: args[0] }
+}
+"#,
+            &aggregate_plan(),
+            "the pack value delivered for field a1",
+        );
+    }
+
+    // POSITIVE TWIN (canonical spellings yield ZERO leaves): both
+    // mutation-return spellings stay green under the gate — pinned by the
+    // existing resolve-face battery (`aggregate_resolution_transforms_the_
+    // full_surface`, `single_resolution_rewrites_tail_to_the_minted_local`),
+    // whose minted carrier exits the gate proves by construction. This twin
+    // pins the branch-conditional shape beside the missing-else rejection
+    // above: the SAME body WITH the else-side pack delivery resolves.
+    #[test]
+    fn before_exit_gate_branchy_mutation_returns_stay_green() {
+        resolve(
+            r#"
+fn t<Args>(args: Args) -> Args {
+    if args.length > 1 {
+        return args
+    }
+    return args
+}
+"#,
+            &aggregate_plan(),
+        )
+        .expect("pack delivery on every path resolves");
     }
 
     // INTERNAL INVARIANT: a def that does not carry exactly the pseudo-tuple

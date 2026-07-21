@@ -15,7 +15,10 @@
 //! ratified S2-F3 disposition row (the typed surface has no `ctx` by
 //! design); stays as retained legacy coverage pending its ruling. Fixlet
 //! round 2 adds the before-side F1 `?`-exit MUST-REJECT pin (measured
-//! silent corruption of the woven call on the round-1 state).
+//! silent corruption of the woven call on the round-1 state). Fixlet
+//! round 3 (F3, the before-side exit gate) adds the sugar MUST-REJECT pins
+//! for the value-less and stray-value exits (previously reached the woven
+//! carrier boundary unchecked) plus the closure-helper green twin.
 
 use shape_test::shape_test::ShapeTest;
 
@@ -108,6 +111,87 @@ print(r + 1)
 "#,
     )
     .expect_run_err_contains("the `?` operator cannot be used in a `before` template body");
+}
+
+// C3-S6 fixlet round 3, F3 (the before-side exit gate) — MUST-REJECT: a
+// `before(args)` body that can complete WITHOUT delivering the mutated args
+// pack (the sugar carries bodies verbatim with no auto-appended return; the
+// minted body fn is never analyzer-visited, so no definition-time check
+// fires). Pre-gate this specialized and wove, and the woven typed local
+// read the handler's unit return as the argument aggregate — the same
+// reinterpretation class as the after-side leak. The positive twin for
+// pure-read observation is the zero-parameter observer form
+// (`before() { ... }` — `before_hook_with_empty_params` in
+// before_after.rs), which carries no pack contract and stays green.
+#[test]
+fn before_hook_value_less_body_must_reject() {
+    ShapeTest::new(
+        r#"
+annotation peek(tag: string) {
+  before(args) {
+    let v = args[0]
+  }
+}
+
+@peek("t")
+fn add(a: int, b: int) -> int { a + b }
+
+print(add(3, 4))
+"#,
+    )
+    .expect_run_err_contains("can complete without delivering the mutated argument pack");
+}
+
+// C3-S6 fixlet round 3, F3 — MUST-REJECT: a stray value exit (the body ends
+// in a plain int expression, not the pack) can never be the compiler-internal
+// argument aggregate the weave reads back per-field on a 2-ary target.
+#[test]
+fn before_hook_stray_value_exit_must_reject() {
+    ShapeTest::new(
+        r#"
+annotation strays(tag: string) {
+  before(args) {
+    args[0] = args[0] * 2
+    args[0] + 1
+  }
+}
+
+@strays("t")
+fn add(a: int, b: int) -> int { a + b }
+
+print(add(3, 4))
+"#,
+    )
+    .expect_run_err_contains("delivers `int` at an exit")
+    .expect_run_err_contains("compiler-internal argument aggregate");
+}
+
+// C3-S6 fixlet round 3, F3 — the F2 body-level-only filter applies to the
+// before-side collection too: a closure helper's own internal `return "s"`
+// is a CLOSURE-frame exit, not a template-body exit, so a type-correct
+// before body (args tail) with a string-returning helper specializes green.
+#[test]
+fn before_hook_closure_helper_internal_return_specializes_green() {
+    ShapeTest::new(
+        r#"
+annotation withhelper(tag: string) {
+  before(args) {
+    let helper = |x: int| { return "s" }
+    let s = helper(1)
+    print(f"[{tag}] {s}")
+    args
+  }
+}
+
+@withhelper("t")
+fn add(a: int, b: int) -> int { a + b }
+
+print(add(3, 4))
+"#,
+    )
+    .expect_run_ok()
+    .expect_output_contains("[t] s")
+    .expect_output_contains("7");
 }
 
 // C3-S6 soundness fixlet: the A-phase finding-1 rewrite, executed. The S2c

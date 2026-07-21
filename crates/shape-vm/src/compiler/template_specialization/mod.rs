@@ -411,6 +411,16 @@ impl BytecodeCompiler {
     /// fallback for templates, the C3-G10 hard-fail posture) wraps through
     /// [`Self::template_application_error`], preserving the inner detail
     /// text.
+    ///
+    /// ADR-009 C3 #14 (S6 fixlet round 3, F3): the ride's pseudo-tuple
+    /// resolution carries the BEFORE-side exit gate
+    /// (`pseudo_tuple::guard_before_template_exit_kinds`, beside the S2c
+    /// write guard) — every value-producing exit of the body must PROVE the
+    /// carrier type the weave's typed read consumes (`Single`: the one
+    /// declared parameter type; `Aggregate`: the compiler-internal
+    /// per-target aggregate), and value-less completion is a named
+    /// rejection. Its rejections classify Hard and wrap through the same
+    /// `template_application_error` seam below — no extra plumbing here.
     fn specialize_polymorphic_before(
         &mut self,
         template: &CheckedTemplate,

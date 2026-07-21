@@ -1226,6 +1226,112 @@ victim_a([1], 4) * 10000 + victim_b([2], 7)
         assert_eq!(compiler.hook_install_registry.len(), 1);
     }
 
+    // ── S6 fixlet round 3 (F3): the BEFORE-side exit gate, API-path twins ──
+
+    // MUST-REJECT (stray value exit): a polymorphic before body whose exit
+    // delivers a plain int on a 2-ary target can never be the
+    // compiler-internal argument aggregate the weave reads back per-field —
+    // pre-gate this specialized and wove, reaching the woven typed local's
+    // read unchecked (the round-1-lens F3 finding; the sugar twin is pinned
+    // in `tools/shape-test/tests/annotations_runtime/injection.rs`). The
+    // analyzer does NOT check a generic body's return against `Args` at
+    // definition (the measured after-side symmetry), so the gate is the live
+    // line on BOTH paths for this shape.
+    #[test]
+    fn before_template_stray_value_exit_is_a_named_rejection() {
+        let (result, compiler) = compile_source(&hook_source(
+            "fn tmpl<Args>(args: Args) -> Args {\n\
+             \x20   args[0] = args[0] + 1\n\
+             \x20   return 42\n\
+             }",
+            "install(before_hook(tmpl, []))",
+            "@hookann()\nfn victim(a: int, b: int) -> int { return a + b }\n\nvictim(3, 4)",
+        ));
+        let text = result
+            .expect_err("a stray-value before exit must reject at specialization")
+            .to_string();
+        assert!(
+            text.contains("delivers `int` at an exit")
+                && text.contains("compiler-internal argument aggregate over (a: int, b: int)"),
+            "names the proven kind and the bound carrier: {text}"
+        );
+        assert!(
+            text.contains("<Args>(args: Args) -> Args")
+                && text.contains("(int, int) -> (int, int)"),
+            "wrapped with both signatures at the application site: {text}"
+        );
+        assert!(
+            compiler.hook_install_registry.is_empty(),
+            "a rejected install leaves no registry row"
+        );
+    }
+
+    // MUST-REJECT (value-less body): covered UPSTREAM on the analyzer-visited
+    // API path (verified, pinned AS-IS — the round-1 layering convention): a
+    // `<Args>(args: Args) -> Args` body with no value-producing exit dies at
+    // DEFINITION — the inference unifies the value-less body with
+    // `Args := Void`, so the body's `args[0]` read violates the Void
+    // index-access constraint (MEASURED sentence; upstream's wording, not
+    // this gate's charter). The gate's own pack-less arm backstops the
+    // never-analyzer-visited sugar path (pinned in injection.rs) and the
+    // branch-fall-through shape (pinned on the rewrite face in
+    // pseudo_tuple.rs).
+    #[test]
+    fn before_template_value_less_body_is_a_named_rejection() {
+        let (result, _) = compile_source(&hook_source(
+            "fn tmpl<Args>(args: Args) -> Args { let x = args[0] }",
+            "install(before_hook(tmpl, []))",
+            "@hookann()\nfn victim(a: int, b: int) -> int { return a + b }\n\nvictim(3, 4)",
+        ));
+        let text = result
+            .expect_err("a value-less before body must reject before any weave")
+            .to_string();
+        assert!(
+            text.contains("Concrete(Void) does not support index access"),
+            "the definition-time constraint rejection fires on the API path: {text}"
+        );
+    }
+
+    // MUST-REJECT (value-less body, args untouched): the variant with no
+    // `args` read dies at DEFINITION with the same "must return a value"
+    // check as the after side (MEASURED — pinned as-is). Between this pin
+    // and the one above, BOTH value-less API spellings are upstream-covered;
+    // the gate's pack-less arm's live line is the never-analyzer-visited
+    // sugar path plus the branch-fall-through shapes the definition check
+    // cannot see (missing-else / bare-`return` — pinned on the rewrite face
+    // in pseudo_tuple.rs).
+    #[test]
+    fn before_template_value_less_args_untouched_body_rejects_at_definition() {
+        let (result, _) = compile_source(&hook_source(
+            "fn tmpl<Args>(args: Args) -> Args { let x = 1 }",
+            "install(before_hook(tmpl, []))",
+            "@hookann()\nfn victim(a: int, b: int) -> int { return a + b }\n\nvictim(3, 4)",
+        ));
+        let text = result
+            .expect_err("an args-untouched value-less before body must reject")
+            .to_string();
+        assert!(
+            text.contains("must return a value"),
+            "the definition-time value-less rejection fires: {text}"
+        );
+    }
+
+    // POSITIVE TWIN (type-proof, end-to-end): a NON-canonical exit proving
+    // the Single carrier type (`return args[0] * 2` on a 1-ary int target)
+    // specializes, weaves, and delivers the doubled argument — the gate
+    // proves types, never polices spellings (the shape was type-sound and
+    // working pre-gate; gated to exactly what the weave accepts).
+    #[test]
+    fn before_template_conforming_value_exit_specializes_and_runs() {
+        let (value, compiler) = top_level_i64(&hook_source(
+            "fn tmpl<Args>(args: Args) -> Args { return args[0] * 2 }",
+            "install(before_hook(tmpl, []))",
+            "@hookann()\nfn victim(a: int) -> int { return a * 10 }\n\nvictim(4)",
+        ));
+        assert_eq!(value, 80, "the carrier-proving exit delivers the doubled arg");
+        assert_eq!(compiler.hook_install_registry.len(), 1);
+    }
+
     // ── a void target hosts a before-only weave ────────────────────────────
 
     #[test]
