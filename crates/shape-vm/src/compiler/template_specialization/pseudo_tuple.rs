@@ -72,7 +72,17 @@
 //!   rejected with the named F5-boundary sentence
 //!   ([`AmbientScopeCtx::check_fstring_template_name`], positive twin:
 //!   hoist the value to a local outside the f-string) — neither is ever
-//!   silently honored.
+//!   silently honored. S6 fixlet round 4: the SPECIALIZATION faces
+//!   ([`Face::Rewrite`] / [`Face::AfterReturnScan`]) additionally parse the
+//!   interiors and reject the two EXIT constructs (`?` / `return`) found
+//!   inside ([`Scan::scan_fstring_interior_exits`]) — an interpolation part
+//!   is re-parsed and compiled IN THE ENCLOSING FRAME at emission
+//!   (`string_interpolation.rs`), so an exit construct there exits the
+//!   SPECIALIZED BODY, bypassing the round-2 F1 arm and both exit gates
+//!   (measured pointer-bits leak). That scan is SCAN-ONLY: the re-parsed
+//!   temp AST is never rewritten (a rewrite there would be silently
+//!   discarded — the raw text is what emission re-parses), so the
+//!   no-rewrite F5 boundary stands.
 //!
 //! # The `__c3_` reserved prefix
 //!
@@ -1144,11 +1154,14 @@ pub(in crate::compiler) fn guard_after_template_return_kind(
 /// unchecked (the round-1-lens F3 finding; the same reinterpretation class
 /// as the measured after-side leak).
 ///
-/// WHAT PROVES: the conforming mutation-return spellings (`return args`, the
-/// final bare-`args` tail) are rewritten to the carrier expression before
-/// collection and are conforming BY CONSTRUCTION (minted slot locals typed
-/// by the prologue + the S2c write guard) — a body whose every exit is a
-/// mutation-return yields zero leaves here. Every OTHER value-producing exit
+/// WHAT PROVES: both conforming mutation-return spellings (`return args`,
+/// the final bare-`args` tail) are rewritten to the carrier expression at
+/// the walk and are conforming BY CONSTRUCTION (minted slot locals typed
+/// by the prologue + the S2c write guard) — but only the `return args`
+/// spelling is intercepted BEFORE the return collection and yields zero
+/// leaves; the rewritten bare-`args` TAIL IS collected as an ordinary tail
+/// leaf and PROVES here (the minted carrier expression passes the
+/// per-field/`Single` arms below). Every OTHER value-producing exit
 /// (a stray value tail, a non-`args` `return`) must PROVE the carrier type
 /// under the same bounded evaluator the S2c guard runs
 /// ([`carrier_write_concrete_type`]: minted slot locals, declared captures,
@@ -1164,7 +1177,11 @@ pub(in crate::compiler) fn guard_after_template_return_kind(
 /// classifies them Hard and the seam wraps them through
 /// `template_application_error` with both signatures at the `@application`
 /// site. The `?`-exit is rejected during the walk itself (the round-2 F1
-/// arm on `Face::Rewrite` — [`Scan::reject_try_operator_exit`]).
+/// arm on `Face::Rewrite` — [`Scan::reject_try_operator_exit`]); exit
+/// constructs hidden inside f-string interpolation interiors — invisible to
+/// this gate's collections because the interior is raw text to the walker —
+/// are rejected by the round-4 interior scan
+/// ([`Scan::scan_fstring_interior_exits`]).
 ///
 /// POSITIVE TWINS (gated to exactly what the weave accepts): the canonical
 /// mutation-return spellings; any exit proving the carrier type (e.g.
@@ -1587,6 +1604,20 @@ enum Intercept {
     Replace(Expr),
 }
 
+/// ADR-009 C3 #14 (S6 fixlet round 4): which EXIT construct the
+/// interpolation-interior scan found (see
+/// [`Scan::scan_fstring_interior_exits`] /
+/// [`Scan::reject_fstring_interior_exit`]).
+#[derive(Clone, Copy)]
+enum FstringInteriorExit {
+    /// `?` — an unconditional early return of the propagated failure
+    /// carrier (the round-2 F1 mechanism, hidden inside the interior).
+    TryOperator,
+    /// `return` (expression or statement form) — exits the specialized body
+    /// from inside the string build.
+    Return,
+}
+
 struct Scan<'a> {
     args_param: &'a str,
     type_param: &'a str,
@@ -1766,6 +1797,56 @@ impl<'a> Scan<'a> {
         }
     }
 
+    /// ADR-009 C3 #14 (S6 fixlet round 4) — an EXIT construct (`?` /
+    /// `return`) inside an f-string INTERPOLATION INTERIOR. An interpolation
+    /// part is re-parsed and compiled IN THE ENCLOSING FRAME at emission
+    /// (`string_interpolation.rs:277-295`), so the construct exits the
+    /// SPECIALIZED BODY — but the interior is raw text to the walker (the
+    /// module-docs F5 boundary), so the round-2 F1 arm and both exit gates'
+    /// collections never saw it. MEASURED on the round-3 state (2026-07-21
+    /// round-4 probe): an `after` body `let x = f"{fallible(0)?}"` then
+    /// `result` on `fn add(a: int, b: int) -> int` RAN and `add(3, 4) + 1`
+    /// printed the Err carrier's pointer bits `95158939846801` (the
+    /// heap-pointer-reinterpretation class). NAMED surface-and-stop
+    /// rejection (CLAUDE.md: "if the type can't be proven, it is a compile
+    /// error") with the move-it-out positive twin, per the F1 sentence
+    /// conventions.
+    fn reject_fstring_interior_exit(&self, construct: FstringInteriorExit) -> ShapeError {
+        let (construct_head, construct_mechanism, construct_twin) = match construct {
+            FstringInteriorExit::TryOperator => (
+                "the `?` operator cannot be used",
+                "its failure path propagates the `Err` value as the specialized body's \
+                 early return from inside the string build",
+                "hoist the fallible call out of the f-string, handle the `Result` \
+                 explicitly (`match f() { Ok(v) => ..., Err(e) => ... }`), and \
+                 interpolate the handled local (`f\"{v}\"`)",
+            ),
+            FstringInteriorExit::Return => (
+                "a `return` cannot be used",
+                "it exits the specialized body from inside the string build",
+                "move the `return` out of the f-string and interpolate a plain local \
+                 computed before it",
+            ),
+        };
+        match self.face {
+            Face::AfterReturnScan { .. } => reject(format!(
+                "{construct_head} inside an f-string interpolation in an `after` template \
+                 body: the interpolation expression compiles in the specialized body's own \
+                 frame, so {construct_mechanism}, bypassing the typed exit contract (an \
+                 `after` template returns the typed result on every path) — \
+                 {construct_twin}"
+            )),
+            _ => reject(format!(
+                "{construct_head} inside an f-string interpolation in a `before` template \
+                 body: the interpolation expression compiles in the specialized body's own \
+                 frame, so {construct_mechanism}, bypassing the typed exit contract (a \
+                 `before` template's exits deliver the typed `{args}` pack) — \
+                 {construct_twin}",
+                args = self.args_param
+            )),
+        }
+    }
+
     /// S5a Dec-65 walker arm (uncoded, G13 string-tag with the #60 routing
     /// note): a template pseudo-tuple / type-param name read inside an
     /// `Expr::Comptime` block. Comptime code evaluates at compile time,
@@ -1924,6 +2005,130 @@ impl<'a> Scan<'a> {
             }
         }
         Ok(())
+    }
+
+    /// ADR-009 C3 #14 (S6 fixlet round 4) — the specialization faces'
+    /// interpolation-interior EXIT scan: parse this f-string's interpolation
+    /// parts (the same parse [`Self::ambient_scan_fstring`] runs — parse
+    /// failures are left to the emitter's own error) and reject the two
+    /// exit constructs found inside (`Expr::TryOperator` and
+    /// `Expr::Return` / `Statement::Return` — see
+    /// [`Self::reject_fstring_interior_exit`] for the measured leak and the
+    /// sentence). Called at the `Literal::FormattedString` leaf on
+    /// [`Face::Rewrite`] and [`Face::AfterReturnScan`] in
+    /// [`ScanMode::TemplateBody`] with the surface live; an f-string inside
+    /// a closure interior compiles its interiors in the CLOSURE frame, so
+    /// the mode gate skips it there (the F1 closure-transparency boundary).
+    ///
+    /// SCAN-ONLY BY DESIGN: the re-parsed temp AST is searched, never
+    /// walked by the faces — on the rewrite face an intercept-Replace
+    /// mutation into the temp AST would be SILENTLY DISCARDED (the raw text
+    /// is what emission re-parses), which is exactly the class of quiet
+    /// wrongness this module refuses.
+    fn scan_fstring_interior_exits(
+        &self,
+        value: &str,
+        interp_mode: shape_ast::ast::InterpolationMode,
+    ) -> Result<()> {
+        let Ok(parts) = shape_ast::interpolation::parse_interpolation_with_mode(value, interp_mode)
+        else {
+            return Ok(());
+        };
+        for part in parts {
+            if let shape_ast::interpolation::InterpolationPart::Expression { expr, .. } = part {
+                let Ok(parsed) = shape_ast::parser::parse_expression_str(&expr) else {
+                    continue;
+                };
+                self.scan_parsed_interior_for_exits(&parsed)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// The scan-only pass over ONE re-parsed interpolation-interior
+    /// expression (see [`Self::scan_fstring_interior_exits`]). Boundaries
+    /// mirror the walker's own (F1/F2): closure interiors are pruned (`?` /
+    /// `return` there exit the CLOSURE frame, never the specialized body)
+    /// and comptime blocks are pruned (compile-time mini-VM evaluation,
+    /// Dec 65). A NESTED f-string literal inside the interior compiles its
+    /// own interiors in the same enclosing frame, so the scan recurses into
+    /// it.
+    fn scan_parsed_interior_for_exits(&self, parsed: &Expr) -> Result<()> {
+        use shape_runtime::visitor::{Visitor, walk_expr};
+
+        struct ExitScan<'s, 'a> {
+            scan: &'s Scan<'a>,
+            found: Option<ShapeError>,
+        }
+
+        impl ExitScan<'_, '_> {
+            fn record(&mut self, err: ShapeError) {
+                if self.found.is_none() {
+                    self.found = Some(err);
+                }
+            }
+        }
+
+        impl Visitor for ExitScan<'_, '_> {
+            fn visit_expr_try_operator(&mut self, _expr: &Expr, _span: Span) -> bool {
+                let err = self
+                    .scan
+                    .reject_fstring_interior_exit(FstringInteriorExit::TryOperator);
+                self.record(err);
+                false
+            }
+            fn visit_expr_return(&mut self, _expr: &Expr, _span: Span) -> bool {
+                let err = self
+                    .scan
+                    .reject_fstring_interior_exit(FstringInteriorExit::Return);
+                self.record(err);
+                false
+            }
+            // Statement-form `return` (block-bearing interiors).
+            fn visit_stmt(&mut self, stmt: &Statement) -> bool {
+                if matches!(stmt, Statement::Return(_, _)) {
+                    let err = self
+                        .scan
+                        .reject_fstring_interior_exit(FstringInteriorExit::Return);
+                    self.record(err);
+                    return false;
+                }
+                true
+            }
+            // Closure interiors: exits there leave the CLOSURE frame.
+            fn visit_expr_function_expr(&mut self, _expr: &Expr, _span: Span) -> bool {
+                false
+            }
+            // Comptime blocks: compile-time mini-VM evaluation (Dec 65).
+            fn visit_expr_comptime(&mut self, _expr: &Expr, _span: Span) -> bool {
+                false
+            }
+            fn visit_expr_comptime_for(&mut self, _expr: &Expr, _span: Span) -> bool {
+                false
+            }
+            // Nested f-string: its interiors compile in the same enclosing
+            // frame — recurse.
+            fn visit_expr_literal(&mut self, expr: &Expr, _span: Span) -> bool {
+                if let Expr::Literal(Literal::FormattedString { value, mode }, _) = expr {
+                    if self.found.is_none() {
+                        if let Err(err) = self.scan.scan_fstring_interior_exits(value, *mode) {
+                            self.record(err);
+                        }
+                    }
+                }
+                true
+            }
+        }
+
+        let mut visitor = ExitScan {
+            scan: self,
+            found: None,
+        };
+        walk_expr(&mut visitor, parsed);
+        match visitor.found {
+            Some(err) => Err(err),
+            None => Ok(()),
+        }
     }
 
     // ---------------------------------------------------------------------
@@ -2546,12 +2751,26 @@ impl<'a> Scan<'a> {
             }
         }
         match expr {
-            // Leaves. FormattedString interpolation is not scanned by the
+            // Leaves. FormattedString interpolation is not REWRITTEN by the
             // pseudo-tuple faces; the AMBIENT face scans it (the module
-            // docs' named boundary + its S5 exception).
+            // docs' named boundary + its S5 exception), and — S6 fixlet
+            // round 4 — the SPECIALIZATION faces run the scan-only
+            // interior-EXIT rejection (`?` / `return` inside an
+            // interpolation interior compile in the specialized body's own
+            // frame and would bypass the F1 arm and both exit gates; see
+            // `scan_fstring_interior_exits` for the measured leak).
             Expr::Literal(lit, _) => {
                 if let Literal::FormattedString { value, mode: interp_mode } = &*lit {
                     self.ambient_scan_fstring(value, *interp_mode, mode)?;
+                    if mode == ScanMode::TemplateBody
+                        && self.pseudo_tuple_surface_live()
+                        && matches!(
+                            self.face,
+                            Face::Rewrite { .. } | Face::AfterReturnScan { .. }
+                        )
+                    {
+                        self.scan_fstring_interior_exits(value, *interp_mode)?;
+                    }
                 }
                 Ok(())
             }
@@ -3794,6 +4013,64 @@ fn t<Args>(args: Args) -> Args {
 "#,
         )
         .expect("construction stays permissive; the specialization scans own the rejection");
+    }
+
+    // ── S6 fixlet round 4: interpolation-interior exit rejection ──────────
+
+    // MUST-REJECT: a `?` hidden inside an f-string interpolation interior.
+    // The interior compiles in the specialized body's own frame
+    // (string_interpolation.rs), so the `?` early-returns the Err carrier
+    // past the F1 arm and the before-side exit gate — the interior is raw
+    // text to the walker (the F5 boundary the round-2 lens traced as the
+    // one remaining bypass). Named rejection during the walk.
+    #[test]
+    fn rewrite_face_rejects_try_operator_inside_fstring_interior() {
+        expect_resolve_reject(
+            r#"
+fn t<Args>(args: Args) -> Args {
+    let x = f"{helper()?}"
+    return args
+}
+"#,
+            &aggregate_plan(),
+            "the `?` operator cannot be used inside an f-string interpolation in a `before` \
+             template body",
+        );
+    }
+
+    // MUST-REJECT: a `return` hidden inside an interpolation interior exits
+    // the specialized body from inside the string build — same bypass,
+    // second exit construct.
+    #[test]
+    fn rewrite_face_rejects_return_inside_fstring_interior() {
+        expect_resolve_reject(
+            r#"
+fn t<Args>(args: Args) -> Args {
+    let x = f"{return 1}"
+    return args
+}
+"#,
+            &aggregate_plan(),
+            "a `return` cannot be used inside an f-string interpolation in a `before` \
+             template body",
+        );
+    }
+
+    // POSITIVE twin of the scan's closure boundary: a `?` inside a CLOSURE
+    // inside the interior exits the closure frame, not the specialized body
+    // — the scan prunes closure interiors exactly like the F1 arm.
+    #[test]
+    fn try_operator_in_closure_inside_fstring_interior_is_transparent() {
+        resolve(
+            r#"
+fn t<Args>(args: Args) -> Args {
+    let x = f"{run(|y: int| { helper(y)? })}"
+    return args
+}
+"#,
+            &aggregate_plan(),
+        )
+        .expect("a closure-interior `?` inside an interpolation is not a template-body exit");
     }
 
     // ── S6 fixlet round 3, F3: the BEFORE-side exit gate ──────────────────

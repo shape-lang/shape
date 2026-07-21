@@ -18,7 +18,10 @@
 //! silent corruption of the woven call on the round-1 state). Fixlet
 //! round 3 (F3, the before-side exit gate) adds the sugar MUST-REJECT pins
 //! for the value-less and stray-value exits (previously reached the woven
-//! carrier boundary unchecked) plus the closure-helper green twin.
+//! carrier boundary unchecked) plus the closure-helper green twin. Fixlet
+//! round 4 adds the before-side interpolation-interior `?`-exit
+//! MUST-REJECT pins (let-initializer and per-slot-write-RHS spellings of
+//! the traced bypass).
 
 use shape_test::shape_test::ShapeTest;
 
@@ -111,6 +114,74 @@ print(r + 1)
 "#,
     )
     .expect_run_err_contains("the `?` operator cannot be used in a `before` template body");
+}
+
+// C3-S6 fixlet round 4 — MUST-REJECT (traced shape (b)): the before-side
+// twin of the interpolation-interior bypass. The interior compiles in the
+// specialized body's own frame, so a `?` inside `f"{fallible(0)?}"`
+// early-returns the Err carrier past the F1 arm and the before-side exit
+// gate (the interior is raw text to the specialization scans — the
+// measured after-side leak's exact mechanism, before side). A green run
+// here means the interior exit scan is bypassed.
+#[test]
+fn before_hook_fstring_interior_try_exit_must_reject() {
+    ShapeTest::new(
+        r#"
+fn fallible(flag: int) -> Result<int, string> {
+  if flag == 1 { Ok(5) } else { Err("boom") }
+}
+
+annotation tryfstr(tag: string) {
+  before(args) {
+    let x = f"{fallible(0)?}"
+    args
+  }
+}
+
+@tryfstr("t")
+fn add(a: int, b: int) -> int { a + b }
+
+let r = add(3, 4)
+print(r + 1)
+"#,
+    )
+    .expect_run_err_contains(
+        "the `?` operator cannot be used inside an f-string interpolation in a `before` \
+         template body",
+    );
+}
+
+// C3-S6 fixlet round 4 — MUST-REJECT (traced shape (c)): the same bypass
+// spelled INSIDE a per-slot write's RHS (`args[0] = f"{fallible(0)?}"`).
+// The interior `?` fires during the rewrite walk itself — BEFORE the S2c
+// write guard's post-walk proof — so the named interior-exit sentence wins
+// (never the divergent-write one), and the Err carrier can never reach the
+// woven aggregate.
+#[test]
+fn before_hook_fstring_interior_try_in_slot_write_must_reject() {
+    ShapeTest::new(
+        r#"
+fn fallible(flag: int) -> Result<int, string> {
+  if flag == 1 { Ok(5) } else { Err("boom") }
+}
+
+annotation tryfstr(tag: string) {
+  before(args) {
+    args[0] = f"{fallible(0)?}"
+    args
+  }
+}
+
+@tryfstr("t")
+fn greet(name: string) -> string { f"hi {name}" }
+
+print(greet("Bob"))
+"#,
+    )
+    .expect_run_err_contains(
+        "the `?` operator cannot be used inside an f-string interpolation in a `before` \
+         template body",
+    );
 }
 
 // C3-S6 fixlet round 3, F3 (the before-side exit gate) — MUST-REJECT: a
