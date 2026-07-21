@@ -42,8 +42,7 @@
 //!    verbatim); the deopt is LOUD and whole-program (VM==JIT stdout), and
 //!    this cell pins the exact fallback identity so it FAILS the moment S7
 //!    proves the chain — forcing the flip to the zero-fallback form. Never
-//!    vacuous in either direction. (S7 also owns depth beyond these cells:
-//!    the wider matrix, async named-expected-fallback, ctx-consuming hooks.)
+//!    vacuous in either direction.
 //! 6. `c3-composite-config-single` (S3c) — COMPOSITE (`Array<int>`) config
 //!    baked into the specialized handler's prologue (S3b ConstLift), 1-ary
 //!    SINGLE carrier: ZERO-FALLBACK (measured — the NewTypedArray*-lowering
@@ -67,6 +66,18 @@
 //!    `comptime post` marker counts EXACTLY twice (== the application count;
 //!    the equal-config pair rule-6 SHARES one baked specialization) and
 //!    never scales with the hot loop, in BOTH modes.
+//! 11. `c3-async-hook-target` (S7) — the ASYNC-HOOK cell (the S0 JIT
+//!    soundness fence: async targets get the NAMED-EXPECTED-FALLBACK cell):
+//!    a sugar-declared typed-config annotation (declarative before + after)
+//!    on an `async fn` target, awaited from main. VM proves BOTH hooks
+//!    EXECUTE on the async target (600000, value-distinguishing per skipped
+//!    hook — fixture header derives each refuter); JIT falls through
+//!    whole-program on the pre-existing VM-only `Await` opcode in `main`
+//!    with EXACTLY ONE pinned loud line (loud-flip semantics). The
+//!    ctx-consuming-hook cells the S2d note once listed are MOOT
+//!    post-S6/C3-G14: the typed surface carries no ctx — HookDecision/ctx
+//!    is E4 #20/#68 territory, and cells for it would half-build E4's
+//!    charter here.
 
 use super::jit_test_support::{
     assert_fixture_has_no_top_level_comptime, count_fallback_lines, run_workspace_fixture,
@@ -379,5 +390,93 @@ fn c3_sugar_config_eval_once_warns_once_per_application() {
         "c3-sugar-config-eval-once.shape",
         "1194000\n",
         2,
+    );
+}
+
+/// Cell 11 (S7) — the ASYNC-HOOK-TARGET cell: a NAMED-EXPECTED-FALLBACK pin
+/// with loud-flip semantics (the S0 JIT soundness fence rule "async hooks =
+/// named-expected-fallback"; precedent:
+/// `c2_async_clean_generated_method_installs_and_runs_named_fallback`). A
+/// sugar-declared typed-config annotation (declarative `before` + `after`)
+/// applies to an `async fn` target; the S2c weave awaits the hygienic impl
+/// shadow on async targets, and this cell proves BOTH hooks EXECUTE there:
+/// VM exit 0 with exact stdout 600000 — value-distinguishing per skipped
+/// hook (before-skip 200000, after-skip 599000, both-skip 199000 measured as
+/// the no-hook control, config-misread 202000; fixture header derives each).
+///
+/// `main` awaits, so its bytecode carries the async `Await` opcode, which
+/// the JIT preflight marks VM-only — the deopt is LOUD and whole-program
+/// (VM==JIT stdout by fall-through, correctness preserved under the
+/// interpreter). Measured verbatim at 03f8b9a1:
+///
+/// `[jit-fallback] function main failed JIT compile: Runtime error: JIT
+/// compilation failed: Main code contains unsupported constructs:
+/// JitPreflightReport { vm_only_opcodes: [Await], unsupported_builtins:
+/// [] }; running under interpreter`
+///
+/// LOUD-FLIP SEMANTICS: zero fallback lines means async lowering got kinded
+/// (a pre-existing JIT gap closed) — this cell FAILS and must be flipped to
+/// `assert_c3_fixture_reaches_native_jit`; more than one line, or a
+/// different identity, is a new regression. Never vacuous in either
+/// direction; never a silent deopt under a green smoke.
+#[test]
+fn c3_async_hook_target_executes_both_hooks_named_fallback() {
+    let fixture = "c3-async-hook-target.shape";
+    assert_fixture_has_no_top_level_comptime(fixture);
+
+    let vm = run_workspace_fixture("vm", "smokes-jit-closure", fixture);
+    let jit = run_workspace_fixture("jit", "smokes-jit-closure", fixture);
+
+    assert_eq!(
+        vm.exit_code,
+        Some(0),
+        "{fixture}: VM must exit 0 (install-success + hook execution are real); stderr={}",
+        vm.stderr
+    );
+    assert_eq!(
+        vm.stdout, "600000\n",
+        "{fixture}: exact VM stdout — both hooks must execute on the async target \
+         (each skipped hook is value-distinguishing; see the fixture header)"
+    );
+    assert_eq!(
+        jit.exit_code,
+        Some(0),
+        "{fixture}: JIT mode must fall through to the interpreter cleanly; stderr={}",
+        jit.stderr
+    );
+    assert_eq!(
+        jit.stdout, vm.stdout,
+        "{fixture}: whole-program fallback must preserve VM==JIT value equality; stderr={}",
+        jit.stderr
+    );
+    assert_eq!(
+        count_fallback_lines(&vm.stderr),
+        0,
+        "{fixture}: VM mode must never emit JIT fallback diagnostics"
+    );
+    assert_eq!(
+        count_fallback_lines(&jit.stderr),
+        1,
+        "{fixture}: the NAMED-EXPECTED-FALLBACK pin — exactly one loud fallback line. \
+         Zero means async lowering got kinded: FLIP this cell to \
+         assert_c3_fixture_reaches_native_jit; more than one is a new regression. \
+         stderr={}",
+        jit.stderr
+    );
+    let fallback_line = jit
+        .stderr
+        .lines()
+        .find(|line| line.starts_with("[jit-fallback]"))
+        .expect("count asserted above");
+    assert!(
+        fallback_line.starts_with("[jit-fallback] function main failed JIT compile:")
+            && fallback_line.contains("running under interpreter"),
+        "{fixture}: fallback line must carry the canonical prefix + suffix; got: {fallback_line}"
+    );
+    assert!(
+        fallback_line.contains("Await"),
+        "{fixture}: the fallback must name the measured pre-existing reason — the VM-only \
+         `Await` opcode in main's preflight (a different fallback identity is a new \
+         regression, not the pinned expectation): {fallback_line}"
     );
 }

@@ -1,0 +1,72 @@
+// ADR-009 C3 #14 slice 7 (S7) — the ASYNC-HOOK-TARGET cell: a SUGAR-DECLARED
+// typed-config annotation (declarative `before` + `after`, S4c lowering onto
+// the public comptime API) applied to an `async fn` target. The S2c weave
+// awaits the hygienic impl shadow for async targets (weave.rs "awaited on
+// async targets"); this fixture proves BOTH hooks EXECUTE on the async
+// target at runtime (the C3-G6/S0-fence rule: cells execute hook paths,
+// never vacuous).
+//
+// MEASURED S7 STATUS — NAMED-EXPECTED-FALLBACK (the S0 fence rule: "async
+// hooks = named-expected-fallback"; precedent cell
+// `c2_async_clean_generated_method_installs_and_runs_named_fallback`):
+// `main` awaits, so its bytecode carries the async `Await` opcode, which the
+// JIT preflight marks VM-only — `--mode jit` falls through to the
+// interpreter with EXACTLY ONE loud line and runs the SAME woven body
+// (VM == JIT by fall-through). Measured verbatim at 03f8b9a1:
+//   [jit-fallback] function main failed JIT compile: Runtime error: JIT
+//   compilation failed: Main code contains unsupported constructs:
+//   JitPreflightReport { vm_only_opcodes: [Await], unsupported_builtins:
+//   [] }; running under interpreter
+// Install-success and hook execution are real in both modes; native `await`
+// codegen is a pre-existing JIT gap, not a C3 regression. The CLI cell pins
+// the count (exactly 1) with loud-flip semantics: zero lines means async
+// lowering got kinded — flip the cell to the zero-fallback form.
+//
+// LOOP SPELLING (measured, hook-INDEPENDENT): `for i in 0..200` INSIDE an
+// async fn stops with the pre-existing surface-and-stop
+//   "op_iter_done SURFACE: iter_kind=Ptr(Range) not supported as iterator
+//    in the kinded API (legacy Array/Range/Iterator HeapValue variants
+//    deleted) — phase-2c, see ADR-006 §2.7.4"
+// in VM mode WITH OR WITHOUT hooks (a no-hook control reproduces it), so the
+// driver uses the `while` spelling. Async lowering of range-iterators is a
+// pre-existing async-lowering surface, not a hook/weave gap.
+//
+// Value-distinguishing arithmetic (the S1a convention), per call i in 0..200
+// with config times = 3:
+//   before: a0 = 3i + 1
+//   impl:   * 10        → 30i + 10
+//   after:  + 5         → 30i + 15
+//   sum = 30 * 19900 + 15 * 200 = 600000
+// Expected stdout: 600000
+//   skipped before            → 10i + 5   = 200000
+//   skipped after             → 30i + 10  = 599000
+//   both skipped              → 10i       = 199000  (measured no-hook control)
+//   times misread as 1        → 10i + 15  = 202000
+// Each hook is value-distinguishing: a silently skipped hook can never
+// print 600000.
+annotation boosted(times: int) {
+  targets: [function]
+  before(args) {
+    args[0] = args[0] * times + 1
+    return args
+  }
+  after(result) {
+    return result + 5
+  }
+}
+
+@boosted(3)
+async fn calc(a: int) -> int { a * 10 }
+
+async fn drive() -> int {
+  let mut total = 0
+  let mut i = 0
+  while i < 200 {
+    total = total + await calc(i)
+    i = i + 1
+  }
+  return total
+}
+
+let result = await drive()
+print(result)
