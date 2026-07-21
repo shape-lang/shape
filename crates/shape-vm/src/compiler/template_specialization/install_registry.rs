@@ -61,7 +61,10 @@
 use shape_ast::ast::{FunctionDef, Span};
 use shape_ast::error::{Result, ShapeError};
 
-use super::{SpecializedHandler, render_template_declared_signature};
+use super::{
+    SpecializedHandler, TemplateBodyOrigin, render_required_specialization_signature,
+    render_template_declared_signature,
+};
 use crate::compiler::BytecodeCompiler;
 use crate::compiler::comptime_builtins::expansion_provenance::ExpansionSite;
 use crate::compiler::comptime_builtins::{
@@ -105,9 +108,20 @@ pub(in crate::compiler) struct HookInstallRecord {
     pub(in crate::compiler) target_name: String,
     /// Before or After.
     pub(in crate::compiler) hook_kind: TemplateHookKind,
+    /// The template body fn's registered name — IDENTITY, never display:
+    /// for sugar-minted bodies this is the `\u{1}`-prefixed hygienic mint.
+    /// The S8c projection derives display through the ONE origin producer
+    /// (`BytecodeCompiler::template_body_origin`).
+    pub(in crate::compiler) body_fn: String,
     /// The template's declared-Sig rendering
     /// (`render_template_declared_signature`, prefixed by the body fn name).
     pub(in crate::compiler) template_sig: String,
+    /// The APPLICATION-view specialization signature (the C3-G10
+    /// two-signature attribution renderer,
+    /// `render_required_specialization_signature` — user spellings, the
+    /// delimited types the r8 sugar-matrix row pins). Captured at apply
+    /// time like every other rendering.
+    pub(in crate::compiler) specialized_sig: String,
     /// The specialized handler's registered symbol (the definition-compiled
     /// body fn for concrete templates; the suffixed unspellable
     /// specialization symbol for polymorphic ones).
@@ -256,10 +270,15 @@ impl BytecodeCompiler {
             annotation_name: annotation_name.to_string(),
             target_name: func_def.name.clone(),
             hook_kind: bound.template.hook_kind(),
+            body_fn: bound.template.body_fn().to_string(),
             template_sig: format!(
                 "{} {}",
                 bound.template.body_fn(),
                 render_template_declared_signature(&bound.template)
+            ),
+            specialized_sig: render_required_specialization_signature(
+                bound.template.hook_kind(),
+                &target,
             ),
             specialized_symbol,
             function_index: handler.function_index(),
@@ -327,6 +346,149 @@ impl BytecodeCompiler {
         self.hook_install_registry
             .retain(|row| row.target_name != target_name);
     }
+}
+
+/// ADR-009 C3 #14 (S8c) — the PUBLIC, display-safe projection of one
+/// hook-install registry row: the shared query surface LSP hover reads (the
+/// C1 slice-4 `generated_symbol_query` precedent — tooling reads the
+/// compiler-owned registry through this projection, never a text scan and
+/// never a hand-written parallel table).
+///
+/// Every string field is DISPLAY-SAFE: the sugar mint's `\u{1}`-hygienic
+/// body-fn name and the specialization symbol's unspellable marks never
+/// appear (machine-pinned in this module's tests). Sugar-origin rows derive
+/// `origin` through the ONE producer
+/// (`BytecodeCompiler::template_body_origin`); API-body rows carry their
+/// real fn name in both `origin` and `body_fn`.
+#[derive(Debug, Clone)]
+pub struct HookInstallView {
+    /// The installing annotation's name.
+    pub annotation_name: String,
+    /// The target function's user-spelled name.
+    pub target_name: String,
+    /// `"before"` or `"after"`.
+    pub hook_word: &'static str,
+    /// The user-facing origin phrase — `` fn `tmpl` `` for API bodies,
+    /// `` the `before` hook of annotation `traced` `` for sugar-minted
+    /// bodies.
+    pub origin: String,
+    /// The DECLARATION view: the template's declared (generic) signature,
+    /// e.g. `<Args>(args: Args) -> Args` — no body-fn prefix.
+    pub declared_signature: String,
+    /// The APPLICATION view: the required specialization signature at this
+    /// `@application` in user spellings, e.g.
+    /// `(int, number) -> (int, number)` (the r8 delimited types).
+    pub specialized_signature: String,
+    /// Capture names + rendered `LiftedConst` values, in delivery order.
+    pub captures: Vec<(String, String)>,
+    /// The `@application` anchor.
+    pub application_span: Span,
+    /// The body fn's user-spelled name for API-authored template bodies —
+    /// the hover match identity for hover-on-the-body-fn. `None` for
+    /// sugar-minted bodies (their SOH mint never displays; their hover
+    /// surface is the application, matched via `annotation_name` +
+    /// `application_span`).
+    pub body_fn: Option<String>,
+}
+
+impl BytecodeCompiler {
+    /// ADR-009 C3 #14 (S8c): the compiler-owned hook-install QUERY surface —
+    /// one display-safe [`HookInstallView`] per applied `install(...)` row,
+    /// in application order. Query AFTER `compile_in_place` (the
+    /// `generated_symbol_query` discipline); a rolled-back compile leaves no
+    /// row, so no view either.
+    pub fn hook_install_query(&self) -> Vec<HookInstallView> {
+        self.hook_install_registry
+            .iter()
+            .map(|record| {
+                let TemplateBodyOrigin { origin, sugar, .. } =
+                    self.template_body_origin(&record.body_fn, record.hook_kind);
+                let declared_signature = match record
+                    .template_sig
+                    .strip_prefix(record.body_fn.as_str())
+                {
+                    Some(sig) => {
+                        display_safe_declared_signature(sig.trim_start().to_string(), record.hook_kind)
+                    }
+                    // Unreachable by construction (`template_sig` is
+                    // `"{body_fn} {sig}"`, written by the one apply seam);
+                    // fail SAFE for display — never risk a raw SOH prefix.
+                    None => {
+                        debug_assert!(false, "template_sig lost its body-fn prefix");
+                        String::new()
+                    }
+                };
+                let hook_word = match record.hook_kind {
+                    TemplateHookKind::Before => "before",
+                    TemplateHookKind::After => "after",
+                };
+                let body_fn = (!sugar && !record.body_fn.starts_with('\u{1}'))
+                    .then(|| record.body_fn.clone());
+                HookInstallView {
+                    annotation_name: record.annotation_name.clone(),
+                    target_name: record.target_name.clone(),
+                    hook_word,
+                    origin,
+                    declared_signature,
+                    specialized_signature: record.specialized_sig.clone(),
+                    captures: record.captures.clone(),
+                    application_span: record.application_span,
+                    body_fn,
+                }
+            })
+            .collect()
+    }
+}
+
+/// ADR-009 C3 #14 (S8c): render a declared-Sig string display-safe. A
+/// sugar-minted POLYMORPHIC template renders its HYGIENIC type param
+/// (`\u{1}hygienic:<hex>` — the sugar_lowering MINTING/HYGIENE note mints
+/// the type-param name alongside the body-fn name) inside the polymorphic
+/// `<{type_param}>({param}: {type_param}) -> {type_param}` rendering; the
+/// display projection substitutes the canonical sugar-surface spelling
+/// (`Args` for a `before` hook, `R` for an `after` — the sugar_lowering doc
+/// convention). Mint-free sigs (every API-authored body; concrete/observer
+/// sugar bodies, whose `BodySignature` excludes the capture tail) pass
+/// through untouched.
+fn display_safe_declared_signature(sig: String, hook_kind: TemplateHookKind) -> String {
+    if !sig.contains('\u{1}') {
+        return sig;
+    }
+    let display = match hook_kind {
+        TemplateHookKind::Before => "Args",
+        TemplateHookKind::After => "R",
+    };
+    // The polymorphic rendering opens with `<{type_param}>` — the minted
+    // token is exactly the angle-delimited head; replace every occurrence.
+    if let Some(rest) = sig.strip_prefix('<') {
+        if let Some((param, _)) = rest.split_once('>') {
+            if param.starts_with('\u{1}') {
+                let substituted = sig.replace(param, display);
+                if !substituted.contains('\u{1}') {
+                    return substituted;
+                }
+            }
+        }
+    }
+    // Defensive only (no known rendering reaches here): scrub any residual
+    // mint token so no SOH byte can ever display.
+    debug_assert!(false, "declared-Sig rendering carried a mint outside the type-param head");
+    let mut out = String::with_capacity(sig.len());
+    let mut rest = sig.as_str();
+    while let Some(position) = rest.find('\u{1}') {
+        out.push_str(&rest[..position]);
+        let tail = &rest[position..];
+        let token_end = tail
+            .char_indices()
+            .skip(1)
+            .find(|(_, ch)| !(ch.is_ascii_alphanumeric() || *ch == '_' || *ch == ':'))
+            .map(|(index, _)| index)
+            .unwrap_or(tail.len());
+        out.push_str(display);
+        rest = &tail[token_end..];
+    }
+    out.push_str(rest);
+    out
 }
 
 /// Render the capture bindings for the registry row: `(name, rendering)` in
@@ -1143,6 +1305,109 @@ victim(4)
                 "rename the local binding or the body fn",
             ],
         );
+    }
+
+    // ═══ ADR-009 C3 #14 (S8c) — the hover QUERY projection ═══
+    //
+    // `hook_install_query()` is the shared query surface the LSP hover
+    // reads (the C1 slice-4 `generated_symbol_query` precedent). The first
+    // pin is the compiler-tier display-safety MACHINE PIN (charter: no
+    // display field of any projected row contains '\u{1}') with its
+    // built-in planted needle — the sugar row's RAW registry identity IS
+    // the SOH mint, so the projection is provably what strips it. The
+    // second is the API-row identity twin (body-fn identity + the r8
+    // delimited application view).
+
+    #[test]
+    fn s8c_sugar_row_projection_is_display_safe_and_carries_both_views() {
+        let compiler = compiled_ok(
+            r#"
+annotation traced(factor: int) {
+  targets: [function]
+  before(args) {
+    args[0] = args[0] * factor
+    return args
+  }
+}
+
+@traced(3)
+fn victim(a: int) -> int { return a }
+
+victim(1)
+"#,
+        );
+        // The planted needle (vacuity guard): the RAW row's identity fields
+        // DO carry the SOH hygienic mint...
+        assert_eq!(compiler.hook_install_registry.len(), 1);
+        let record = &compiler.hook_install_registry[0];
+        assert!(
+            record.body_fn.starts_with('\u{1}'),
+            "control: the sugar row's raw body-fn identity is the SOH mint"
+        );
+        assert!(
+            record.template_sig.contains('\u{1}'),
+            "control: the raw declared-Sig rendering carries the mint prefix"
+        );
+
+        // ...and the projection strips every one of them.
+        let views = compiler.hook_install_query();
+        assert_eq!(views.len(), 1);
+        let view = &views[0];
+        assert_eq!(view.annotation_name, "traced");
+        assert_eq!(view.target_name, "victim");
+        assert_eq!(view.hook_word, "before");
+        assert_eq!(
+            view.origin, "the `before` hook of annotation `traced`",
+            "sugar origin renders through the ONE producer, never the SOH name"
+        );
+        assert_eq!(view.declared_signature, "<Args>(args: Args) -> Args");
+        assert_eq!(view.specialized_signature, "(int) -> int");
+        assert_eq!(view.captures, vec![("factor".to_string(), "3".to_string())]);
+        assert_eq!(view.body_fn, None, "a sugar mint is never a display identity");
+        assert_ne!(view.application_span, Span::default());
+        for field in [
+            view.annotation_name.as_str(),
+            view.target_name.as_str(),
+            view.hook_word,
+            view.origin.as_str(),
+            view.declared_signature.as_str(),
+            view.specialized_signature.as_str(),
+        ] {
+            assert!(
+                !field.contains('\u{1}'),
+                "SOH leaked into a display field: {field:?}"
+            );
+        }
+        for (name, value) in &view.captures {
+            assert!(!name.contains('\u{1}') && !value.contains('\u{1}'));
+        }
+    }
+
+    #[test]
+    fn s8c_api_row_projection_carries_the_body_fn_identity_and_application_view() {
+        let compiler = compiled_ok(&hook_source(
+            "fn tmpl<Args>(args: Args, factor: int) -> Args {\n\
+             \x20   args[0] = args[0] * factor\n\
+             \x20   return args\n\
+             }",
+            "install(before_hook(tmpl, [capture(\"factor\", 3)]))",
+            "@hookann()\nfn victim(a: int, b: number) -> int { return a }\n\nvictim(1, 2.0)",
+        ));
+        let views = compiler.hook_install_query();
+        assert_eq!(views.len(), 1);
+        let view = &views[0];
+        assert_eq!(
+            view.body_fn.as_deref(),
+            Some("tmpl"),
+            "an API body projects its real fn name as the hover match identity"
+        );
+        assert_eq!(view.origin, "fn `tmpl`");
+        assert_eq!(view.declared_signature, "<Args>(args: Args) -> Args");
+        assert_eq!(
+            view.specialized_signature, "(int, number) -> (int, number)",
+            "the application view renders the r8 delimited types"
+        );
+        assert_eq!(view.captures, vec![("factor".to_string(), "3".to_string())]);
     }
 
     // FIX-ROUND-1 (lens item 6): the MODULE-target consumer's install

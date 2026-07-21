@@ -142,6 +142,13 @@ fn get_hover_for_word(
         return Some(hover);
     }
 
+    // ADR-009 C3 #14 (S8c): a hook-template body fn — matched via the shared
+    // hook-install query's body-fn identity — renders the template view
+    // (generic declaration signature + installs).
+    if let Some(hover) = get_hook_template_body_hover(text, word, module_cache, current_file) {
+        return Some(hover);
+    }
+
     // Check if we're hovering on a join strategy keyword — show resolved return type
     if matches!(word, "all" | "race" | "any" | "settle") {
         if let Some(hover) = get_join_expression_hover(text, word, position) {
@@ -433,6 +440,146 @@ fn build_typed_match_pattern_hover(info: &TypedMatchPatternInfo) -> Hover {
     }
 }
 
+// ═══ ADR-009 C3 #14 (S8c): hook-install hover via the SHARED query surface ═══
+//
+// The compiler-owned `hook_install_query()` projection (the C1 slice-4
+// `generated_symbol_query` precedent) is the ONLY source: every string below
+// renders from query-row fields — no hand-written parallel LSP table, no
+// text scan. Session routing follows the `GeneratedQuerySession` precedent
+// (`generated_captures/session.rs`): `Unavailable`/`NotNeeded` degrade to
+// ordinary hover. Display safety (no `\u{1}` hygienic mint anywhere) is the
+// projection's contract, machine-pinned at both tiers (compiler:
+// `install_registry.rs`; LSP: `hover_tests.rs`).
+
+/// One query session's display-safe hook-install rows for this document, or
+/// `None` when the document cannot answer (no generation reachability, an
+/// unavailable session, or zero installs) — callers fall through to the
+/// ordinary hover providers.
+fn hook_install_views(
+    text: &str,
+    module_cache: Option<&ModuleCache>,
+    current_file: Option<&Path>,
+) -> Option<Vec<shape_vm::compiler::HookInstallView>> {
+    let parse_src = parser_source(text);
+    let program = parse_program(parse_src.as_ref()).ok()?;
+    let context = crate::generated_captures::CaptureQueryContext {
+        file_path: current_file,
+        module_cache,
+        workspace_root: None,
+    };
+    let session = crate::generated_captures::GeneratedQuerySession::new(&program, text, context);
+    let compiler = session.compiler()?;
+    let views = compiler.hook_install_query();
+    (!views.is_empty()).then_some(views)
+}
+
+/// The hook rows anchored at THIS `@application` (matched by annotation name
+/// + the row's own `application_span` containing the cursor — the query's
+/// anchor, never a text scan), rendered as a markdown section for the
+/// annotation hover.
+fn hook_install_section_for_application(
+    text: &str,
+    word: &str,
+    offset: usize,
+    module_cache: Option<&ModuleCache>,
+    current_file: Option<&Path>,
+) -> Option<String> {
+    let views = hook_install_views(text, module_cache, current_file)?;
+    let rows: Vec<_> = views
+        .iter()
+        .filter(|row| {
+            row.annotation_name == word
+                && (row.application_span.start..=row.application_span.end).contains(&offset)
+        })
+        .collect();
+    if rows.is_empty() {
+        return None;
+    }
+    let mut lines = vec!["**Installed hooks:**".to_string()];
+    for row in rows {
+        lines.push(format!("- `{}` — {}", row.hook_word, row.origin));
+        lines.push(format!("  - declared: `{}`", row.declared_signature));
+        lines.push(format!(
+            "  - specialized for `{}`: `{}`",
+            row.target_name, row.specialized_signature
+        ));
+        if !row.captures.is_empty() {
+            let captures = row
+                .captures
+                .iter()
+                .map(|(name, value)| format!("`{name} = {value}`"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            lines.push(format!("  - captures: {captures}"));
+        }
+    }
+    Some(lines.join("\n"))
+}
+
+/// ADR-009 C3 #14 (S8c): hovering an API hook-template BODY FN name renders
+/// the template's generic declaration view + its installs, aggregated from
+/// the shared query surface's rows — matched via the `body_fn` identity the
+/// projection exposes (sugar-minted bodies project `body_fn: None`, so
+/// their unspellable mints can never match a hovered word).
+fn get_hook_template_body_hover(
+    text: &str,
+    word: &str,
+    module_cache: Option<&ModuleCache>,
+    current_file: Option<&Path>,
+) -> Option<Hover> {
+    // Cheap AST pre-gate before paying for a query session: a template body
+    // fn is an ordinary module-scope fn (C3-G3), so the hovered word must
+    // name a top-level fn in this document.
+    let program = parse_with_fallback(text)?;
+    let is_top_level_fn = program
+        .items
+        .iter()
+        .any(|item| matches!(item, Item::Function(def, _) if def.name == word));
+    if !is_top_level_fn {
+        return None;
+    }
+    let views = hook_install_views(text, module_cache, current_file)?;
+    let rows: Vec<_> = views
+        .iter()
+        .filter(|row| row.body_fn.as_deref() == Some(word))
+        .collect();
+    if rows.is_empty() {
+        return None;
+    }
+    let mut lines = vec![
+        format!("**Hook template**: fn `{word}`"),
+        String::new(),
+        format!("```shape\nfn {word}{}\n```", rows[0].declared_signature),
+        String::new(),
+        "**Installs:**".to_string(),
+    ];
+    for row in &rows {
+        let captures = if row.captures.is_empty() {
+            String::new()
+        } else {
+            format!(
+                " — captures: {}",
+                row.captures
+                    .iter()
+                    .map(|(name, value)| format!("`{name} = {value}`"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        };
+        lines.push(format!(
+            "- `{}` hook on `{}` via `@{}`: `{}`{}",
+            row.hook_word, row.target_name, row.annotation_name, row.specialized_signature, captures
+        ));
+    }
+    Some(Hover {
+        contents: HoverContents::Markup(MarkupContent {
+            kind: MarkupKind::Markdown,
+            value: lines.join("\n"),
+        }),
+        range: None,
+    })
+}
+
 /// Get hover information for annotation names (`@name`) from local/imported definitions.
 fn get_annotation_hover(
     text: &str,
@@ -480,6 +627,19 @@ fn get_annotation_hover(
             sections.push(format!("**Defined in:** `{}`", source_file.display()));
         } else {
             sections.push("**Defined in:** current file".to_string());
+        }
+        // ADR-009 C3 #14 (S8c): hovering an APPLICATION additionally renders
+        // the hook rows installed from this exact `@application` — read from
+        // the shared compiler query surface (`hook_install_query`), matched
+        // by each row's own application anchor. Definition-name hovers and
+        // applications with zero installs render the definition docs
+        // unchanged.
+        if is_usage_name {
+            if let Some(section) =
+                hook_install_section_for_application(text, word, offset, module_cache, current_file)
+            {
+                sections.push(section);
+            }
         }
         let content = sections.join("\n\n");
 

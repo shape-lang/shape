@@ -77,6 +77,11 @@ pub use comptime_builtins::expansion_provenance::{
     HygienicSymbol, SourceAnchor, SymbolId,
 };
 pub use generation_reachability::program_may_generate;
+// ADR-009 C3 #14 (S8c): the hook-install hover/query surface — tooling
+// reads the compiler-owned install registry through this display-safe
+// projection (`BytecodeCompiler::hook_install_query`), never a text scan
+// and never a hand-written parallel table.
+pub use template_specialization::install_registry::HookInstallView;
 pub(crate) mod comptime_concrete;
 pub(crate) mod comptime_diagnostics;
 pub(crate) mod comptime_target;
@@ -1970,7 +1975,8 @@ pub struct BytecodeCompiler {
     /// name, hook kind, template-Sig rendering, specialized symbol/index,
     /// capture renderings, `@application` span). Compiler-owned query state
     /// (the C1 slice-4 `generated_symbol_query` precedent — the S8 hover
-    /// surface reads THIS, never a text scan). Rows are written at the pass-2
+    /// surface reads THIS, never a text scan; projected display-safe via
+    /// `BytecodeCompiler::hook_install_query`). Rows are written at the pass-2
     /// apply seam and journaled through the open [`checked_body`] install
     /// transaction (`journal_record_hook_install_row`), so a rolled-back
     /// compile leaves no row.

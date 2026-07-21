@@ -1016,6 +1016,108 @@ let pair = Pair { a: 5, b: 6 }
 let t = pair.total()
 "#;
 
+// =====================================================================
+// ADR-009 C3 #14 (S8c): hover for typed-comptime hook installs via the
+// SHARED query surface (`BytecodeCompiler::hook_install_query` — the C1
+// slice-4 generated_symbol_query precedent). Every rendered string comes
+// from query-row projections; a hand-written parallel LSP table is a
+// defect. The no-SOH machine pins live at the compiler-projection tier
+// (shape-vm install_registry.rs) and the LSP-hover tier (shape-lsp
+// hover_tests.rs).
+// =====================================================================
+
+/// Zero-based lines:
+///  0  annotation traced(factor: int) {   <- typed-config sugar definition
+///  2    before(args) { ... }
+///  8  @traced(3)                          <- application (cursor here)
+///  9  fn victim(a: int) -> int ...
+const S8C_SUGAR_HOOK_PROGRAM: &str = r#"annotation traced(factor: int) {
+  targets: [function]
+  before(args) {
+    args[0] = args[0] * factor
+    return args
+  }
+}
+
+@traced(3)
+fn victim(a: int) -> int { return a }
+
+victim(1)
+"#;
+
+/// p1: hover on the `@application` renders the template's declared
+/// (generic-view) signature and the capture rendering — both read from the
+/// query row (declared view + `capture name = rendered LiftedConst`).
+#[test]
+fn s8c_sugar_application_hover_shows_template_signature_and_captures() {
+    ShapeTest::new(S8C_SUGAR_HOOK_PROGRAM)
+        .at(pos(8, 2))
+        .expect_hover_contains("<Args>(args: Args) -> Args")
+        .expect_hover_contains("factor = 3");
+}
+
+/// p3: the sugar application hover names the origin through the ONE
+/// producer's phrase (`the `before` hook of annotation `traced``) — never
+/// the SOH-hygienic minted body-fn name.
+#[test]
+fn s8c_sugar_application_hover_names_the_hook_origin_phrase() {
+    ShapeTest::new(S8C_SUGAR_HOOK_PROGRAM)
+        .at(pos(8, 2))
+        .expect_hover_contains("hook of annotation")
+        .expect_hover_contains("`traced`");
+}
+
+/// p2: the hand-written API path — hover on the template BODY FN name shows
+/// the generic view at declaration, matched via the query rows' `body_fn`
+/// identity (never a text scan).
+#[test]
+fn s8c_api_body_fn_hover_shows_the_generic_declaration_view() {
+    let source = r#"fn tmpl<Args>(args: Args) -> Args {
+  args[0] = args[0] * 2
+  return args
+}
+
+annotation hookann() {
+  targets: [function]
+  comptime post(target, ctx) {
+    install(before_hook(tmpl, []))
+  }
+}
+
+@hookann()
+fn victim(a: int) -> int { return a }
+
+victim(1)
+"#;
+    ShapeTest::new(source)
+        .at(pos(0, 4))
+        .expect_hover_contains("Hook template")
+        .expect_hover_contains("<Args>(args: Args) -> Args")
+        .expect_hover_contains("victim");
+}
+
+/// p4 (negative control): an annotation with ZERO installs renders the
+/// pre-existing definition hover unchanged — no hook section appears.
+#[test]
+fn s8c_application_with_zero_installs_keeps_the_definition_hover_unchanged() {
+    let source = r#"annotation plain() {
+  targets: [function]
+  comptime post(target, ctx) {
+    let x = 1
+  }
+}
+
+@plain()
+fn victim(a: int) -> int { return a }
+
+victim(1)
+"#;
+    ShapeTest::new(source)
+        .at(pos(7, 2))
+        .expect_hover_contains("**Annotation**")
+        .expect_hover_not_contains("Installed hooks");
+}
+
 #[test]
 fn goto_definition_on_generated_extend_method_resolves_via_shared_query() {
     // The generated `Pair.total` method has no hand-written declaration; the

@@ -120,6 +120,25 @@ pub(in crate::compiler) struct SpecializationTarget {
     application_span: Span,
 }
 
+/// The resolved origin of a template body fn — produced ONLY by the one
+/// producer, [`BytecodeCompiler::template_body_origin`] (S5a sentence
+/// precedent; shared by the S8c hover-query projection). `origin` is
+/// DISPLAY-SAFE by construction: sugar-minted SOH-hygienic body-fn names
+/// render as the annotation-hook phrase, never raw.
+pub(in crate::compiler) struct TemplateBodyOrigin {
+    /// `` fn `name` `` for API bodies; `` the `before|after` hook of
+    /// annotation `X` `` for sugar-minted bodies; the defensive
+    /// "the hook template body" for a hygienic name outside every compiled
+    /// annotation.
+    pub(in crate::compiler) origin: String,
+    /// The template's defining module (the a2b resolution trial).
+    pub(in crate::compiler) template_module: Option<String>,
+    /// The registered AST def, when either store holds one.
+    pub(in crate::compiler) def: Option<FunctionDef>,
+    /// Whether the body fn is a sugar mint (its raw name must never display).
+    pub(in crate::compiler) sugar: bool,
+}
+
 /// How a specialized `before` handler returns its typed args mutation
 /// (C3-G9). `after` handlers flow the typed result directly and carry no
 /// mutation carrier.
@@ -302,28 +321,21 @@ impl BytecodeCompiler {
         }
     }
 
-    /// ADR-009 C3 #14 (slice 5, S5a) — the [C0926] ambient-totality gate
-    /// (see the call site in [`Self::specialize_template`] for the site
-    /// rationale, and `pseudo_tuple::AmbientScopeCtx` for the G4 boundary
-    /// rule, the a6 motivating disaster, and the invariant-7 asymmetry
-    /// rule). Resolves the template body fn's AST, renders the sentence's
-    /// `{origin}` (`` fn `name` `` for API bodies; `` the `before|after`
-    /// hook of annotation `X` `` for sugar-minted bodies — never the SOH
-    /// hygienic name), derives the template's defining module (the a2b
-    /// resolution trial), and runs the ambient face of the ONE pseudo-tuple
-    /// walker over a clone of the body.
-    ///
-    /// A body fn absent from `function_defs` is SKIPPED, not rejected:
-    /// every downstream route (`template_body_function_index`, the
-    /// monomorphization ride's own `function_defs` lookup) internal-errors
-    /// on exactly that state, so no woven program can exist for the gate to
-    /// miss.
-    fn reject_ambient_template_scope(
+    /// ADR-009 C3 #14 (S5a; shared by S8c) — the ONE template-body ORIGIN
+    /// producer: resolves a template body fn to its user-facing origin
+    /// phrase (`` fn `name` `` for API bodies; `` the `before|after` hook
+    /// of annotation `X` `` for sugar-minted bodies — NEVER the SOH
+    /// hygienic name), its defining module (the a2b resolution trial), and
+    /// its registered AST def when one exists. Consumers: the [C0926]
+    /// ambient gate's sentence ([`Self::reject_ambient_template_scope`])
+    /// and the S8c hover-query projection
+    /// ([`BytecodeCompiler::hook_install_query`]) — one producer, so the
+    /// origin wording never forks (the S5 sentence precedent).
+    pub(in crate::compiler) fn template_body_origin(
         &self,
-        template: &CheckedTemplate,
-        target: &SpecializationTarget,
-    ) -> Result<()> {
-        let body_fn = template.body_fn();
+        body_fn: &str,
+        hook_kind: TemplateHookKind,
+    ) -> TemplateBodyOrigin {
         // Sugar reverse-lookup: minted body fns carry SOH-hygienic names;
         // the compiled annotation holding the def supplies the user-facing
         // origin AND the annotation's defining module.
@@ -340,26 +352,25 @@ impl BytecodeCompiler {
                 }
             }
         }
-        let (origin, template_module, mut def) = match sugar {
+        match sugar {
             Some((ann_key, def)) => {
                 let (module, display) = match ann_key.rsplit_once("::") {
                     Some((module, display)) => (Some(module.to_string()), display.to_string()),
                     None => (None, ann_key.clone()),
                 };
-                let word = match template.hook_kind() {
+                let word = match hook_kind {
                     TemplateHookKind::Before => "before",
                     TemplateHookKind::After => "after",
                 };
-                (
-                    format!("the `{word}` hook of annotation `{display}`"),
-                    module,
-                    def,
-                )
+                TemplateBodyOrigin {
+                    origin: format!("the `{word}` hook of annotation `{display}`"),
+                    template_module: module,
+                    def: Some(def),
+                    sugar: true,
+                }
             }
             None => {
-                let Some(def) = self.function_defs.get(body_fn).cloned() else {
-                    return Ok(());
-                };
+                let def = self.function_defs.get(body_fn).cloned();
                 let module = body_fn.rsplit_once("::").map(|(module, _)| module.to_string());
                 let origin = if body_fn.starts_with('\u{1}') {
                     // Defensive only: a hygienic body fn outside every
@@ -368,8 +379,44 @@ impl BytecodeCompiler {
                 } else {
                     format!("fn `{body_fn}`")
                 };
-                (origin, module, def)
+                TemplateBodyOrigin {
+                    origin,
+                    template_module: module,
+                    def,
+                    sugar: false,
+                }
             }
+        }
+    }
+
+    /// ADR-009 C3 #14 (slice 5, S5a) — the [C0926] ambient-totality gate
+    /// (see the call site in [`Self::specialize_template`] for the site
+    /// rationale, and `pseudo_tuple::AmbientScopeCtx` for the G4 boundary
+    /// rule, the a6 motivating disaster, and the invariant-7 asymmetry
+    /// rule). Resolves the template body fn's AST + origin phrase through
+    /// the ONE producer ([`Self::template_body_origin`]) and runs the
+    /// ambient face of the ONE pseudo-tuple walker over a clone of the
+    /// body.
+    ///
+    /// A body fn absent from `function_defs` is SKIPPED, not rejected:
+    /// every downstream route (`template_body_function_index`, the
+    /// monomorphization ride's own `function_defs` lookup) internal-errors
+    /// on exactly that state, so no woven program can exist for the gate to
+    /// miss.
+    fn reject_ambient_template_scope(
+        &self,
+        template: &CheckedTemplate,
+        target: &SpecializationTarget,
+    ) -> Result<()> {
+        let body_fn = template.body_fn();
+        let TemplateBodyOrigin {
+            origin,
+            template_module,
+            def,
+            sugar: _,
+        } = self.template_body_origin(body_fn, template.hook_kind());
+        let Some(mut def) = def else {
+            return Ok(());
         };
         // Fix round 1, F1: PolymorphicArgs templates hand the ambient face
         // their REAL pseudo-tuple spellings for the f-string-interior arm
