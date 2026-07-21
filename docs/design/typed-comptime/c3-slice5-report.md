@@ -632,3 +632,207 @@ diff-inspected). No probe text ships.
 - C09xx discipline: S5b mints NO code (the minted set stays exactly
   S5a's [C0926] + [C0931]); the new S5b sentences are G13
   string-tag-uncoded with the #60 routing posture.
+
+## S5c — pin-rewrite wave 1 + the VMRED rewrite-by-role + the slice close
+
+### The Wave-1 ledger (25 rewritten / 13 S6-ONLY / 10 UNAFFECTED = 48)
+
+All 25 wave-1 rewrites are IN PLACE (same test names, same files), landed
+FIRST-TRY GREEN (24/24 + 24/24 on the first post-rewrite suite runs — the
+revert-rule was never exercised; ZERO reclassifications; the S6-ONLY set
+stays exactly the pre-declared 13). Every rewritten pin's ASSERTED OUTPUT
+is byte-identical to its legacy version (every `.expect_*` line
+unchanged; the diff touches only the fixture source strings + comments).
+
+**Rewritten (25) — per-pin typed spelling:**
+
+| # | pin | typed spelling |
+|---|-----|----------------|
+| 1 | before_after.rs `before_hook_fires_before_function_body` | `tag: string` + observer `before()` |
+| 2 | before_after.rs `after_hook_fires_after_function_body` | `tag: string` + `after(result)` log+passthrough |
+| 3 | before_after.rs `before_and_after_both_fire_in_order` | `label: string` + observer `before()` + `after(result)` |
+| 4 | before_after.rs `stacked_annotations_execute_outer_first` | two typed defs, observers + `after(result)` passthroughs (asserts contains-42 only, as before) |
+| 5 | before_after.rs `after_hook_receives_correct_result_value` | `expected: int` + `after(result)` compare |
+| 6 | before_after.rs `after_hook_can_transform_result` | `label: string` + `after(result) { …; result * -1 }` |
+| 7 | before_after.rs `before_hook_with_empty_params` | ZERO-param def (classifies Legacy on the declarative surface) ⇒ the r2/r9-proven PUBLIC-API spelling: `comptime post(target, ctx) { install(before_hook(note_in, [])) install(after_hook(note_out, [])) }` with module-scope observer fns |
+| 8 | before_after.rs `same_annotation_reused_on_multiple_functions` | `name: string` + observer; two differing-config applications = rule-6 split |
+| 9 | injection.rs `before_hook_inspects_args_without_modification` | `label: string` + polymorphic `before(args)`; `let n = args.length` hoist |
+| 10 | injection.rs `before_hook_logs_string_argument` | `tag: string` + `before(args)`; `let v = args[0]` hoist |
+| 11 | wrapping.rs `after_hook_doubles_numeric_result` | `label: string` + `after(result) { …; result * 2 }` |
+| 12 | wrapping.rs `after_hook_conditionally_transforms_result` | `max_val: int` + conditional `after(result)` |
+| 13 | wrapping.rs `after_hook_returns_original_on_passthrough` | `tag: string` + observer `before()` + `after(result)` passthrough (EXACT output preserved) |
+| 14 | wrapping.rs `annotation_wrapping_void_function` | `tag: string` + OBSERVER pair (the F1 ledger case; `after()` — no result param on a void target) |
+| 15 | wrapping.rs `annotation_with_string_result_transformation` | `prefix: string` + `after(result)` at R=string returning `f"{prefix}_{result}"` — string→string, `(R) -> R` holds |
+| 16 | wrapping.rs `annotation_memoize_pattern_basic` | `label: string` + `before(args)` hoisted read + `after(result)` log; hooks fire per call on the recursive target, contains-assertions hold |
+| 17 | function_target.rs `annotation_on_simple_function` | `tag: string` + observer |
+| 18 | function_target.rs `annotation_with_targets_function_on_function` | `targets: [function]` + `tag: string` + observer `before()` + `after(result)` |
+| 19 | function_target.rs `annotation_on_function_with_return_value` | `name: string` + `after(result)` |
+| 20 | function_target.rs `annotation_on_recursive_function` | `tag: string` + `before(args)` hoisted read |
+| 21 | function_target.rs `annotation_on_void_function` | `tag: string` + observer pair |
+| 22 | function_target.rs `annotation_on_async_function` | `tag: string` typed config on an ASYNC target — definition-only pin (target never called); the typed weave ACCEPTS the async target (measured green; the revert-rule was armed but not needed) |
+| 23 | function_target.rs `multiple_annotations_on_same_function` | two typed defs (`n: string`), observers + `after(result)` passthroughs |
+| 24 | other_targets.rs `targets_declaration_function_on_function_works` | `targets: [function]` + `tag: string` + observer (F1 ledger) |
+| 25 | other_targets.rs `annotation_on_module_item` | `label: string` + observer (F1 ledger; a fn-target pin despite the name) |
+
+**S6-ONLY retained legacy coverage (13 — untouched; the legacy path
+stays exercised until the S6 capstone):** injection.rs
+`before_hook_doubles_first_argument` / `before_hook_swaps_arguments` /
+`before_hook_clamps_argument_to_range` /
+`chained_before_hooks_modify_args_sequentially` (the args-MUTATION
+family — S6's A-phase typed args-mutation rewrite); injection.rs
+`before_hook_passes_ctx_info` + before_after.rs
+`ctx_target_calls_original_impl_from_after_hook` (E4-BLOCKED per S2-F3 —
+S6 carries them as E4-blocked items); wrapping.rs
+`after_hook_wraps_result_in_string` (F4 RULED withdrawal — int→string is
+inexpressible on the typed `(R) -> R` after surface; S6 dated
+disposition); wrapping.rs `stacked_after_hooks_transform_result_in_order`
+(legacy chain-order coverage; the F2 ledger: value 12 survives a future
+rewrite); function_target.rs `annotation_on_multi_param_function` (F5
+whole-args `{args}` boundary); other_targets.rs
+`annotation_on_expression_is_rejected` / `annotation_on_let_binding` /
+`annotation_on_block_statement` /
+`targets_function_applied_to_type_errors` (legacy-def target-validation
+pins — trivial S6 rewrites, kept as legacy coverage).
+
+**UNAFFECTED (10 — comptime pre/post pins, classification-independent;
+new-path-for-free at S6's Legacy-arm deletion):** other_targets.rs
+`targets_declaration_type_on_type_works` /
+`targets_type_applied_to_function_errors`; all 8 type_target.rs pins.
+
+25 + 13 + 10 = 48. Module-doc notes in all five rewritten files record
+the split for S6's inheritance.
+
+### The VMRED rewrite-by-role (the pre-declared 7-name → 6-name flip)
+
+`compiler::helpers::frame_return_metadata_tests::runtime_before_hook_impl_stamps_declared_typed_array_parameter_prefix`
+(helpers.rs) — the S0 SPIKE-VMRED disposition executed THIS commit:
+
+- **Root cause (S0):** the 761469cd hygienic rename killed the test's
+  literal `compute___impl` lookup; the product invariant (declared
+  typed-array param prefix survives hook-wrapping) was GREEN at HEAD.
+- **The successor fixture** is the TYPED path: zero-param def + the
+  r2-proven API spelling (`comptime post { install(before_hook(keep, [])) }`
+  with module-scope `fn keep(a: Array<int>) -> Array<int> { a }`) on
+  `fn compute(data: Array<int>) -> Array<int>`.
+- **By-role location, never by spelling:**
+  `weave.rs::template_weave_impl_name` widened `fn` →
+  `pub(in crate::compiler)` (doc-comment records the rationale); the test
+  calls it with `"compute"` — the ONE producer computes the
+  `HygienicRole::TemplateWeaveImplBody` name; the test never spells SOH
+  strings, so the hygienic-rename failure class cannot recur.
+- **Asserts:** (a) the impl shadow's `frame.slots ==
+  [NativeKind::Ptr(HeapKind::TypedArray)]`; (b) per the S0 sketch: the
+  specialized before handler's registry row binds
+  Sig (Array<int>) -> Array<int> (`template_sig` `keep ([int]) -> [int]`
+  — `[int]` is the established shared `type_annotation_to_string`
+  rendering; deviation 1) AND the handler's own frame carries the same
+  `[Ptr(TypedArray)]` prefix; row `hook_kind == Before`, `target_name ==
+  "compute"`, exactly one registry row.
+- **`frame_for`'s conflated panic SPLIT** (name-miss: "no compiled
+  function is registered under the name {name}" vs descriptor-miss:
+  "compiled function {name} carries no frame descriptor") so genuine
+  descriptor regressions in the module's other 4 tests are never masked.
+- **Module gate:** frame_return_metadata_tests 5/5 (was 4/5 + the
+  standing red).
+
+### The consolidated rejection-matrix table (the slice's close view)
+
+Trigger → firing site (pass + anchor) → code → sentence → positive twin.
+Byte-exact sentence texts and their pins are recorded in §S5a/§S5b (and
+the S4 report §5 for the R-family); this table is the matrix-wide index.
+
+| rejection | trigger | firing site (pass + span anchor) | code | sentence (producer; byte-exact text in §) | positive twin |
+|---|---|---|---|---|---|
+| Ambient-totality | any free identifier in a template body resolving to a module-scope VALUE binding (incl. consts, imported consts, target-module + template-module bindings — a1/a2b/a3/a6) | `specialize_template` (pass-2 install seam), unconditional pre-dispatch, all four kinds; anchored at the `@application` span via `template_application_error` | **[C0926]** | `pseudo_tuple.rs::AmbientScopeCtx::ambient_rejection` (§S5a) | declare the input: typed config param or `capture("{ident}", …)` (a5 + a2b capture twin, executed) |
+| Runtime-value config arg (Dec 65) | a RUNTIME module binding in the `@ann(<arg>)` config position | pre-check at ALL THREE mini-program seams (signature-directive pre-pass; pass-2 `execute_comptime_annotation_handler`; discovery pre-pass), Err BEFORE execution; anchored at `ann.span` | **[C0931]** | `functions_annotations.rs::reject_runtime_module_binding_config_args` (§S5a) | literal config arg (a5/r1 pins); const exemption never-misfires (deviation-1 posture) |
+| Comptime-interior hook-input read (Dec 65 walker arm) | pseudo-tuple/type-param name inside `Expr::Comptime` in a template body | the ONE walker's `comptime_depth` gate, template construction/specialization | uncoded (G13, #60 routing) | "a `comptime` block inside a template body cannot read `{name}`…" (§S5a) | comptime block reading no hook inputs |
+| Static G8 (generic target, any engagement) | `@application` of a TEMPLATE-ENGAGING annotation (sugar hooks, or `install` reachable in handlers/helpers, any spelling) on a target with `type_params` | TOP of the signature-directive pre-pass per-annotation loop — BEFORE any handler execution (calledness-independent); `@application` span | uncoded (G13) | the EXISTING ONE producer `install_registry.rs::generic_target_install_rejection_message`, byte-unchanged (§S5b) | uncalled-CONCRETE twin installs (row 1); construct-only handler on generic stays green |
+| Dynamic G8 (backstops) | an install directive/apply reaching a generic target at execution | pre-pass directive arm + the two `apply_install_hook_template` twins | uncoded | same ONE producer | concrete-target charter pins |
+| G12 TypedConfig nested-fn | TypedConfig annotation on a fn-local nested fn | closure-compile dispatch (`reject_typed_config_annotations_on_nested_fn`), annotation span | uncoded | "annotation `@{ann}` on fn-local nested function `{fn}` … hook-template annotations … (#62)…" (S4 §5) | module-scope target weaves |
+| G12 Legacy nested-fn (the S5b extension; RULED legacy-behavior change) | Legacy-classified annotation on a fn-local nested fn (was a SILENT DROP) | same producer, class-conditional phrase | uncoded | "… annotations on nested functions are not supported yet (#62) …" (§S5b) | module-scope target runs |
+| Non-fn-target hooks, declaration tier | TypedConfig def with declarative hooks + non-empty `targets` excluding `function` | planner.rs `plan_definition` (declaration compile) | uncoded | `sugar_lowering.rs::non_function_targets_declaration_rejection` (§S5b) | mixed `[function, type]` def declares; hook-free `[type]` def declares |
+| Non-fn-target hooks, application tier | a mixed-targets def with hooks APPLIED to a type/module/expression | the three consumer seams (type/module/expression handler sites), `ann.span` | uncoded | `sugar_lowering.rs::non_function_target_application_rejection` (§S5b) | the fn application of the same mixed def WEAVES (12, one row) |
+| R1 ConstLift domain | typed config param outside the ConstLift domain | declaration (planner.rs, ONE S3 domain producer) | uncoded | S4 §5 R1 | int/string/Array/tuple/Option params compile |
+| R2 mixed params | mixed typed/untyped config params | declaration (planner.rs) | uncoded | S4 §5 R2 | all-typed classifies TypedConfig |
+| R3 hook shape | TypedConfig def whose hook declares anything but `(args)` / `(result)` / `()` | declaration (sugar_lowering.rs via planner) | uncoded | S4 §5 R3 | `before(args)` / observers lower + execute |
+| R3-family lifecycle | `on_define`/`metadata` in a TypedConfig def (TOTAL — both handler orders) | declaration (lowering loop, before the empty-hooks return) | uncoded | S4 §5 R3-family | Legacy zero-param lifecycle twin executes green |
+| Capture bijection / duplicate | duplicate capture name | checked_body / planner ("exactly once", C0907-aligned §S5a) | [C0907] (reused; C0930 NOT reused — E1-D4 binds it to `resolve_param_id`) | §S5a | distinct captures compile |
+
+The a1–a6 disposition table, the Dec-65 constructible-shapes resolution +
+pinned-unconstructible note, the static-G8 layering, the
+non-function-target disposition, and the lifecycle verification are in
+§S5a/§S5b above. The G11 defections.md entry landed in commit
+**`724a3a81`** (S5b).
+
+### Probes this stage (none in-tree)
+
+S5c required NO throwaway in-tree probes: the typed-spelling forms were
+probed as `.shape` fixtures in the SCRATCHPAD (outside the worktree) run
+against the prebuilt `target/debug/shape` binary (built at S5a+ state —
+sufficient: the probes exercise S4 sugar + S5a gate surface only, no S5b
+territory). All 14 probe outputs matched the expected legacy outputs
+byte-for-byte before any test file was edited; the worktree tree was
+never touched for probing (`git status` clean of probe files
+throughout). The one measured surprise: none — every form (observer w/
+config, `after(result)` transform/passthrough/string, `before(args)`
+hoists, zero-param API spelling, async target, stacked order, rule-6
+split, semicolon one-liners) ran green with exact expected output.
+
+### Deviations / disclosures (S5c)
+
+1. **Sig-rendering in the VMRED sketch-(b) assert**: the registry row
+   renders `Array<int>` as `[int]` (the shared
+   `type_annotation_to_string` used by
+   `render_template_declared_signature`), so the pin asserts
+   `([int]) -> [int]` — the established rendering; the invariant
+   (Sig binds Array<int> → Array<int>) is unchanged. A code comment
+   records it.
+2. **`template_weave_impl_name` visibility widened** (private →
+   `pub(in crate::compiler)`) — the pre-declared rewrite-by-role
+   mechanism; doc-comment carries the rationale; no other product-code
+   change this stage.
+3. **First-try green everywhere**: the revert-rule (rewrite fails first
+   green run → revert to legacy spelling + reclass S6-ONLY) was armed
+   but never exercised; the async definition-only pin also weaved green.
+4. **Comment-only module-doc notes** added to the five rewritten test
+   files recording the wave-1/S6-ONLY/UNAFFECTED split (test-file
+   comments; no behavior).
+5. **No baseline movement beyond the pre-declared one**: shape-vm vmlib
+   FAILED set 7-name → 6-name via the VMRED rewrite; every other
+   baseline unchanged.
+
+### Gates at the S5c close (the full six-suite run, lane, `-j1` / `--test-threads=1`)
+
+- Full shape-vm `--lib --test-threads=1`: **FAILED set == EXACTLY the
+  pre-declared 6-name set** (the S0 7-name baseline MINUS
+  `frame_return_metadata_tests::runtime_before_hook_impl_stamps_declared_typed_array_parameter_prefix`,
+  retired by the rewrite-by-role; 3462 passed; 34 ignored) PLUS one red
+  of the DOCUMENTED nested_exact flap member — flap protocol run:
+  `--exact` twice on the same binary → FAILED then ok
+  (nondeterministic; the S0-named KNOWN FLAP, not a regression).
+  `frame_return_metadata_tests` module: 5/5.
+- shape-test: `annotations_runtime` **24/24** and `annotation_targets`
+  **24/24** at the final tree state (the 25 rewritten pins + the 13
+  S6-ONLY legacy pins + the 10 unaffected pins all green);
+  `annotations_comptime` FAILED == the 10-name S0 set (116 passed);
+  `comptime` FAILED == the 3-name S0 set (261 passed); `lsp` **502/502**.
+- shape-lsp `--lib`: **882/882**. shape-cli `cli_tests`
+  `--test-threads=1`: **57/57** (313.2s; S5 added no CLI cells, as
+  chartered).
+- Byte-identical asserted outputs verified MECHANICALLY: the
+  `tools/shape-test/tests/` slice diff contains ZERO changed `.expect_*`
+  lines.
+- `cargo check -p shape-vm --all-targets`: exit 0, zero errors (the one
+  PRE-EXISTING comptime_builtins.rs test-scope unused-import warning, on
+  record since S2).
+- `just check-clean` exit 0. `just check-no-dynamic` exit 0.
+- Refused-regex grep (the CLAUDE.md broader-family regex, `[ _-]`
+  widened) over the full `ae735292..` slice diff: zero hits.
+- Legacy weave byte-check: the S5c diff touches
+  `functions_annotations.rs` NOWHERE (zero-line diff); the slice-range
+  hunks contain ZERO occurrences of
+  `compile_specialized_annotation_handler` /
+  `specialize_annotation_runtime_handlers` /
+  `compile_annotation_wrapper`.
+- C09xx discipline: S5c mints NOTHING (the slice's minted set stays
+  exactly [C0926] + [C0931], one producer each).

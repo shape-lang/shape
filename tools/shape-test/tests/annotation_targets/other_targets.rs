@@ -2,6 +2,16 @@
 //!
 //! Covers: annotations on expressions, blocks, let bindings, modules.
 //! Most of these are TDD since not all target kinds are implemented.
+//!
+//! C3-S5c pin-rewrite wave 1: the two green fn-target pins
+//! (`targets_declaration_function_on_function_works`,
+//! `annotation_on_module_item`) are rewritten onto the typed surface.
+//! The legacy-def target-validation rejection pins
+//! (`annotation_on_expression_is_rejected`, `annotation_on_let_binding`,
+//! `annotation_on_block_statement`, `targets_function_applied_to_type_errors`)
+//! stay on the legacy spelling as retained legacy coverage — trivial S6
+//! rewrites. The comptime pre/post pins are surface-class-independent
+//! (unaffected; new-path-for-free at S6's Legacy-arm deletion).
 
 use shape_test::shape_test::ShapeTest;
 
@@ -74,11 +84,10 @@ annotation timed(label) {
 fn targets_declaration_function_on_function_works() {
     ShapeTest::new(
         r#"
-annotation fn_target(tag) {
+annotation fn_target(tag: string) {
   targets: [function]
-  before(args, ctx) {
+  before() {
     print(f"[{tag}] before")
-    args
   }
 }
 
@@ -161,15 +170,14 @@ print(wrong())
     .expect_run_err_contains("target");
 }
 
-// TDD: annotation on module-level scope not yet implemented
+// A fn-target pin despite the name (the F1 ledger classification).
 #[test]
 fn annotation_on_module_item() {
     ShapeTest::new(
         r#"
-annotation module_meta(label) {
-  before(args, ctx) {
+annotation module_meta(label: string) {
+  before() {
     print(f"[{label}] module loaded")
-    args
   }
 }
 

@@ -2,6 +2,14 @@
 //!
 //! Covers: after hook wrapping return values, caching patterns, retry patterns,
 //! conditional result transformation, and composition of wrapping annotations.
+//!
+//! C3-S5c pin-rewrite wave 1: six pins rewritten IN PLACE onto the typed
+//! surface (asserted outputs byte-identical). S6-ONLY remainder:
+//! `after_hook_wraps_result_in_string` (F4 RULED withdrawal — int->string is
+//! inexpressible on the typed `(R) -> R` after surface; S6 carries the dated
+//! disposition) and `stacked_after_hooks_transform_result_in_order` (legacy
+//! chain-order coverage; per the F2 ledger its value 12 survives a future
+//! rewrite).
 
 use shape_test::shape_test::ShapeTest;
 
@@ -9,8 +17,8 @@ use shape_test::shape_test::ShapeTest;
 fn after_hook_doubles_numeric_result() {
     ShapeTest::new(
         r#"
-annotation double_result(label) {
-  after(args, result, ctx) {
+annotation double_result(label: string) {
+  after(result) {
     print(f"[{label}] doubling {result}")
     result * 2
   }
@@ -84,8 +92,8 @@ print(r)
 fn after_hook_conditionally_transforms_result() {
     ShapeTest::new(
         r#"
-annotation cap_at(max_val) {
-  after(args, result, ctx) {
+annotation cap_at(max_val: int) {
+  after(result) {
     if result > max_val {
       print(f"capped {result} to {max_val}")
       max_val
@@ -111,12 +119,11 @@ print(square(20))
 fn after_hook_returns_original_on_passthrough() {
     ShapeTest::new(
         r#"
-annotation passthrough(tag) {
-  before(args, ctx) {
+annotation passthrough(tag: string) {
+  before() {
     print(f"[{tag}] before")
-    args
   }
-  after(args, result, ctx) {
+  after(result) {
     print(f"[{tag}] after, result unchanged")
     result
   }
@@ -137,14 +144,12 @@ print(r)
 fn annotation_wrapping_void_function() {
     ShapeTest::new(
         r#"
-annotation wrap_void(tag) {
-  before(args, ctx) {
+annotation wrap_void(tag: string) {
+  before() {
     print(f"[{tag}] before void")
-    args
   }
-  after(args, result, ctx) {
+  after() {
     print(f"[{tag}] after void")
-    result
   }
 }
 
@@ -166,8 +171,8 @@ log_message("test message")
 fn annotation_with_string_result_transformation() {
     ShapeTest::new(
         r#"
-annotation prefix_result(prefix) {
-  after(args, result, ctx) {
+annotation prefix_result(prefix: string) {
+  after(result) {
     f"{prefix}_{result}"
   }
 }
@@ -182,17 +187,20 @@ print(get_name())
     .expect_output_contains("v1_release");
 }
 
-// TDD: annotation-based memoization requires mutable state capture (closures in annotations)
+// TDD: annotation-based memoization requires mutable state capture (closures in annotations).
+// C3-S5c wave-1: hooks fire per call on the recursive target; the contains-
+// assertions hold; `args[0]` hoists to a local (the F5 f-string boundary).
 #[test]
 fn annotation_memoize_pattern_basic() {
     ShapeTest::new(
         r#"
-annotation memoize(label) {
-  before(args, ctx) {
-    print(f"[{label}] computing for {args[0]}")
+annotation memoize(label: string) {
+  before(args) {
+    let v = args[0]
+    print(f"[{label}] computing for {v}")
     args
   }
-  after(args, result, ctx) {
+  after(result) {
     print(f"[{label}] result = {result}")
     result
   }

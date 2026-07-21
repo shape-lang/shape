@@ -103,7 +103,12 @@ impl BytecodeCompiler {
     /// (one weave shadow per woven function; `register_function` dedups by
     /// name) — the `original_body_shadow_name` /
     /// `annotation_hook_impl_name` precedent.
-    fn template_weave_impl_name(&self, func_name: &str) -> String {
+    ///
+    /// `pub(in crate::compiler)` (C3-S5c): tests locate the impl shadow BY
+    /// ROLE through this ONE producer — never by spelling an SOH string —
+    /// so the hygienic rename class that killed the pre-rewrite
+    /// `compute___impl` lookup (761469cd) cannot recur.
+    pub(in crate::compiler) fn template_weave_impl_name(&self, func_name: &str) -> String {
         use std::hash::{Hash, Hasher};
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
         func_name.hash(&mut hasher);

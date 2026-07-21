@@ -3,6 +3,11 @@
 //! Covers: annotations on top-level function declarations, on functions with
 //! various signatures, on recursive functions, on void functions, and
 //! on functions with the `targets: [function]` declaration.
+//!
+//! C3-S5c pin-rewrite wave 1: every pin except
+//! `annotation_on_multi_param_function` (F5 whole-args `{args}` boundary —
+//! S6-ONLY retained legacy coverage) is rewritten IN PLACE onto the typed
+//! surface with byte-identical asserted outputs.
 
 use shape_test::shape_test::ShapeTest;
 
@@ -10,10 +15,9 @@ use shape_test::shape_test::ShapeTest;
 fn annotation_on_simple_function() {
     ShapeTest::new(
         r#"
-annotation log(tag) {
-  before(args, ctx) {
+annotation log(tag: string) {
+  before() {
     print(f"[{tag}] called")
-    args
   }
 }
 
@@ -33,13 +37,12 @@ greet()
 fn annotation_with_targets_function_on_function() {
     ShapeTest::new(
         r#"
-annotation fn_only(tag) {
+annotation fn_only(tag: string) {
   targets: [function]
-  before(args, ctx) {
+  before() {
     print(f"[{tag}] before")
-    args
   }
-  after(args, result, ctx) {
+  after(result) {
     print(f"[{tag}] after")
     result
   }
@@ -61,8 +64,8 @@ print(add(3, 4))
 fn annotation_on_function_with_return_value() {
     ShapeTest::new(
         r#"
-annotation track(name) {
-  after(args, result, ctx) {
+annotation track(name: string) {
+  after(result) {
     print(f"[{name}] returned {result}")
     result
   }
@@ -83,9 +86,10 @@ print(r)
 fn annotation_on_recursive_function() {
     ShapeTest::new(
         r#"
-annotation count_calls(tag) {
-  before(args, ctx) {
-    print(f"[{tag}] call with {args[0]}")
+annotation count_calls(tag: string) {
+  before(args) {
+    let v = args[0]
+    print(f"[{tag}] call with {v}")
     args
   }
 }
@@ -134,14 +138,12 @@ print(weighted_sum(10, 5, 60))
 fn annotation_on_void_function() {
     ShapeTest::new(
         r#"
-annotation wrap(tag) {
-  before(args, ctx) {
+annotation wrap(tag: string) {
+  before() {
     print(f"[{tag}] start")
-    args
   }
-  after(args, result, ctx) {
+  after() {
     print(f"[{tag}] end")
-    result
   }
 }
 
@@ -157,17 +159,18 @@ log_msg("test")
     .expect_output("[side] start\nLOG: test\n[side] end");
 }
 
-// TDD: annotations on async fn not yet supported
+// Definition-only pin: the typed-config weave accepts the async target
+// (the target is never called; async hook EXECUTION coverage is a JIT
+// named-expected-fallback per the S0 fence, S7 territory).
 #[test]
 fn annotation_on_async_function() {
     ShapeTest::new(
         r#"
-annotation async_log(tag) {
-  before(args, ctx) {
+annotation async_log(tag: string) {
+  before() {
     print(f"[{tag}] async before")
-    args
   }
-  after(args, result, ctx) {
+  after(result) {
     print(f"[{tag}] async after")
     result
   }
@@ -189,14 +192,14 @@ print("defined async fn")
 fn multiple_annotations_on_same_function() {
     ShapeTest::new(
         r#"
-annotation first(n) {
-  before(args, ctx) { print(f"first:{n}"); args }
-  after(args, result, ctx) { print(f"first:{n} done"); result }
+annotation first(n: string) {
+  before() { print(f"first:{n}") }
+  after(result) { print(f"first:{n} done"); result }
 }
 
-annotation second(n) {
-  before(args, ctx) { print(f"second:{n}"); args }
-  after(args, result, ctx) { print(f"second:{n} done"); result }
+annotation second(n: string) {
+  before() { print(f"second:{n}") }
+  after(result) { print(f"second:{n} done"); result }
 }
 
 @first("A")

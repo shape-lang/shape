@@ -8362,16 +8362,21 @@ mod frame_return_metadata_tests {
             .expect("compile frame metadata fixture")
     }
 
+    // C3-S5c: the panic is split name-miss vs descriptor-miss so a genuine
+    // descriptor regression in this module's other tests is never masked as
+    // (or by) a registry-name lookup miss.
     fn frame_for<'a>(
         program: &'a crate::bytecode::BytecodeProgram,
         name: &str,
     ) -> &'a crate::type_tracking::FrameDescriptor {
-        program
+        let func = program
             .functions
             .iter()
             .find(|func| func.name == name)
-            .and_then(|func| func.frame_descriptor.as_ref())
-            .unwrap_or_else(|| panic!("missing frame descriptor for {name}"))
+            .unwrap_or_else(|| panic!("no compiled function is registered under the name {name}"));
+        func.frame_descriptor
+            .as_ref()
+            .unwrap_or_else(|| panic!("compiled function {name} carries no frame descriptor"))
     }
 
     #[test]
@@ -8444,14 +8449,26 @@ mod frame_return_metadata_tests {
         assert_eq!(frame.return_wrapper, FrameReturnWrapper::Plain);
     }
 
+    // C3-S5c rewrite-by-role (the S0 SPIKE-VMRED disposition): the pre-rewrite
+    // fixture looked up the dead literal `compute___impl` (killed by the
+    // 761469cd hygienic rename) through the LEGACY weave. The typed-path
+    // successor installs a concrete before template via the r2-proven public
+    // API, locates the weave's impl shadow BY ROLE through the ONE
+    // `template_weave_impl_name` producer, and pins the stable product
+    // invariant: the declared typed-array parameter prefix survives
+    // hook-wrapping. Sketch (b): the registry row + the specialized handler's
+    // own frame bind Sig (Array<int>) -> Array<int>.
     #[test]
     fn runtime_before_hook_impl_stamps_declared_typed_array_parameter_prefix() {
-        let program = compile(
-            r#"
+        use crate::compiler::comptime_fragments::checked_template::TemplateHookKind;
+
+        let source = r#"
+            fn keep(a: Array<int>) -> Array<int> { a }
+
             annotation preserve_args() {
               targets: [function]
-              before(args, ctx) {
-                args
+              comptime post(target, ctx) {
+                install(before_hook(keep, []))
               }
             }
 
@@ -8459,11 +8476,41 @@ mod frame_return_metadata_tests {
             fn compute(data: Array<int>) -> Array<int> {
               data
             }
-            "#,
-        );
-        let frame = frame_for(&program, "compute___impl");
+            "#;
+        let program = shape_ast::parser::parse_program(source).expect("parse");
+        let mut compiler = BytecodeCompiler::new();
+        compiler
+            .compile_in_place(&program)
+            .expect("compile frame metadata fixture");
 
-        assert_eq!(frame.slots, vec![NativeKind::Ptr(HeapKind::TypedArray)],);
+        // (a) The impl shadow (the target's FINAL body under its hygienic
+        // identity) stamps the declared typed-array parameter prefix.
+        let impl_name = compiler.template_weave_impl_name("compute");
+        let impl_frame = frame_for(&compiler.program, &impl_name);
+        assert_eq!(
+            impl_frame.slots,
+            vec![NativeKind::Ptr(HeapKind::TypedArray)]
+        );
+
+        // (b) The specialized before handler's registry row binds
+        // Sig (Array<int>) -> Array<int>, and the handler's own frame carries
+        // the same typed-array prefix.
+        assert_eq!(compiler.hook_install_registry.len(), 1);
+        let row = &compiler.hook_install_registry[0];
+        assert_eq!(row.hook_kind, TemplateHookKind::Before);
+        assert_eq!(row.target_name, "compute");
+        // `[int]` is the established `type_annotation_to_string` rendering
+        // of `Array<int>` (render_template_declared_signature).
+        assert!(
+            row.template_sig.starts_with("keep ") && row.template_sig.contains("([int]) -> [int]"),
+            "the before specialization binds Sig (Array<int>) -> Array<int>: {}",
+            row.template_sig
+        );
+        let handler_frame = frame_for(&compiler.program, &row.specialized_symbol);
+        assert_eq!(
+            handler_frame.slots,
+            vec![NativeKind::Ptr(HeapKind::TypedArray)]
+        );
     }
 }
 

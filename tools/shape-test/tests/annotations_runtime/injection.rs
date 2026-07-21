@@ -2,6 +2,14 @@
 //!
 //! Covers: before hooks modifying argument arrays, injecting extra context,
 //! conditional argument transformation, and argument inspection.
+//!
+//! C3-S5c pin-rewrite wave 1: the two READ-ONLY pins are rewritten onto the
+//! typed surface. The args-MUTATION family (`before_hook_doubles_first_argument`,
+//! `before_hook_swaps_arguments`, `before_hook_clamps_argument_to_range`,
+//! `chained_before_hooks_modify_args_sequentially`) is S6-ONLY (reserved for
+//! S6's A-phase typed args-mutation rewrite), and `before_hook_passes_ctx_info`
+//! is E4-blocked (S2-F3) — those five stay on the legacy spelling as retained
+//! legacy coverage until S6.
 
 use shape_test::shape_test::ShapeTest;
 
@@ -31,13 +39,17 @@ print(add(5, 3))
     .expect_output_contains("13");
 }
 
+// C3-S5c wave-1 typed rewrite: polymorphic `before(args)`; pseudo-tuple
+// reads hoist to a local first (f-string interiors are a non-scanned
+// boundary for the pseudo-tuple face).
 #[test]
 fn before_hook_inspects_args_without_modification() {
     ShapeTest::new(
         r#"
-annotation inspect(label) {
-  before(args, ctx) {
-    print(f"[{label}] arg count = {args.length}")
+annotation inspect(label: string) {
+  before(args) {
+    let n = args.length
+    print(f"[{label}] arg count = {n}")
     args
   }
 }
@@ -80,13 +92,16 @@ print(sub(3, 10))
     .expect_output_contains("7");
 }
 
+// C3-S5c wave-1 typed rewrite: read-only `args[0]` hoisted to a local
+// before f-string interpolation (the pseudo-tuple face's F5 boundary).
 #[test]
 fn before_hook_logs_string_argument() {
     ShapeTest::new(
         r#"
-annotation log_input(tag) {
-  before(args, ctx) {
-    print(f"[{tag}] input = {args[0]}")
+annotation log_input(tag: string) {
+  before(args) {
+    let v = args[0]
+    print(f"[{tag}] input = {v}")
     args
   }
 }
