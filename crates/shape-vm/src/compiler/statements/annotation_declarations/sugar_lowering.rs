@@ -281,6 +281,28 @@ pub(in crate::compiler) fn foreign_target_application_rejection(
 /// `target_descriptor` renders the flavour, exactly as its #68 sibling does.
 /// C3-G13 string-tag message text (uncoded — no new C09xx minted without a
 /// census; revisit when #60's coded path lands).
+///
+/// REMEDY WORDING IS LOAD-BEARING — do not flatten it back (S2b, review
+/// finding MAJOR-1). The S2 remedy opened flat with "wrap the call in an
+/// ordinary Shape function and annotate that", which is FALSE for every
+/// annotation declared `on type`, and TWO SHIPPED stdlib annotations are
+/// exactly that: `@json_schema` (`stdlib-src/serde/derive.shape:33`) and
+/// `@to_json` (`stdlib-src/serde/serialize.shape:25`). MEASURED at `28fb8b34`
+/// (debug `shape run`): `@json_schema()` on `extern "C" fn labs` fires this
+/// rejection, and following its remedy literally —
+/// `@json_schema() fn myabs(x: int) -> int { return labs(x) }` — hard-errors
+/// with "Annotation 'json_schema' cannot be applied to a function. Allowed
+/// targets: type". The remedy therefore routes through the annotation's OWN
+/// `on` clause and glosses the wrapper advice as CONDITIONAL on it. Both arms
+/// are execution-verified at `28fb8b34`: `on function` (`@llm_tool` wrapper →
+/// green, emits `myabs_tool_def()`), `on type` (`@json_schema` /`@to_json` on
+/// a `type` → green, emit `AbsRequest_json_schema()` / `.to_json()`).
+///
+/// PRECEDENCE, NOT FIXED HERE (issue #76): `compile_foreign_function` runs
+/// this loop BEFORE `validate_annotation_target_usage`, so an `on type`
+/// annotation on a foreign fn reports THIS sentence rather than the sharper
+/// target-kind mismatch. Out of bounds for S2b by supervisor ruling; the
+/// wording above is true either way.
 pub(in crate::compiler) fn foreign_target_comptime_handler_rejection(
     annotation_name: &str,
     handler_type: &AnnotationHandlerType,
@@ -293,9 +315,11 @@ pub(in crate::compiler) fn foreign_target_comptime_handler_rejection(
          applied — its `{phase}` handler would never run, because foreign function \
          declarations never reach the compile-time annotation-handler pass (running \
          comptime handlers on foreign targets is planned, not refused — see issue #74; \
-         this rejection is interim and is deleted when that capability lands); wrap the \
-         call in an ordinary Shape function and annotate that, move the compile-time work \
-         into a `comptime {{ }}` block, or remove it"
+         this rejection is interim and is deleted when that capability lands); apply \
+         @{annotation_name} to an ordinary Shape declaration its own `on` clause allows \
+         (an `on function` annotation goes on a Shape fn wrapping the call; an `on type` \
+         annotation goes on a type), move the compile-time work into a `comptime {{ }}` \
+         block, or remove it"
     )
 }
 

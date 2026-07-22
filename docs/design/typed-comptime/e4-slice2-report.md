@@ -46,6 +46,10 @@ which is **byte-for-byte unchanged**.
 
 Rendered sentence (verbatim, CLI-confirmed):
 
+> **SUPERSEDED in S2b — the block below is what S2 shipped at `28fb8b34`, not
+> what ships now.** Its remedy was FALSE for `on type` annotations; see §S2b.1
+> for the corrected sentence and the executed proof.
+
 ```
 annotation `@marked` on extern "C" fn `labs` is not applied — its `comptime post` handler would never run, because foreign function declarations never reach the compile-time annotation-handler pass (running comptime handlers on foreign targets is planned, not refused — see issue #74; this rejection is interim and is deleted when that capability lands); wrap the call in an ordinary Shape function and annotate that, move the compile-time work into a `comptime { }` block, or remove it
 ```
@@ -135,15 +139,35 @@ contradicted the shipped code.
 
 `grep -rn "#74 INTERIM REJECTION"` returns the deletion set for when #74 lands.
 
-**Deviation from spec §5.H, disclosed:** the spec mandated *exactly three* sites
-(the producer doc-comment, the `compile_foreign_function` comment header, the
-test-module doc-comment). All three are present. The tag was additionally placed
-on the three new out-of-crate test cells (`ffi_syntax.rs`, `showcases.rs`,
+**Deviation from spec §5.H — disclosed by the implementer, RATIFIED by the
+supervisor (S2b).** The spec mandated *exactly three* sites (the producer
+doc-comment, the `compile_foreign_function` comment header, the test-module
+doc-comment). All three are present. The tag was additionally placed on the
+three new out-of-crate test cells (`ffi_syntax.rs`, `showcases.rs`,
 `foreign_lsp.rs`) and on the section header inside the test module. **Reason:**
 the tag's stated purpose is "returns the full deletion set"; those three cells
 ARE in the deletion set, so restricting the tag to three sites would have made
 the grep return an *incomplete* set and defeated the mechanism. Over-tagging is
-strictly better for the tag's own contract; under-tagging is not.
+strictly better for the tag's own contract; under-tagging is not. **Supervisor
+ruling (S2b): the deviation is ratified** — the tag's contract is "returns the
+full deletion set", and the three end-to-end cells plus the test-module header
+genuinely belong to it, so three would have returned an incomplete set. This is
+a ratified deviation, not an absorbed one.
+
+**The tag sits at SEVEN sites** (eight grep lines; the producer's doc-comment
+accounts for two of them — the tag itself plus the self-referential
+`grep -rn` instruction). Full enumeration by symbol, since the #74 issue comment
+originally listed only six:
+
+| # | File | Symbol / anchor |
+|---|------|-----------------|
+| 1 | `crates/shape-vm/src/compiler/statements/annotation_declarations/sugar_lowering.rs` | `foreign_target_comptime_handler_rejection` — producer doc-comment (2 grep lines, 1 site) |
+| 2 | `crates/shape-vm/src/compiler/functions_foreign.rs` | `BytecodeCompiler::compile_foreign_function` — call-site comment, arm (b) |
+| 3 | `crates/shape-vm/src/compiler/functions_foreign.rs` | `mod foreign_target_annotation_rejection_tests` — module `//!` doc-comment, paragraph (b) |
+| 4 | `crates/shape-vm/src/compiler/functions_foreign.rs` | `foreign_target_annotation_rejection_tests` — the `(b)` **section-divider comment**  ← *the one the #74 comment omitted* |
+| 5 | `tools/shape-test/tests/native_interop/ffi_syntax.rs` | `comptime_annotation_on_extern_c_fn_is_rejected_citing_74` |
+| 6 | `tools/shape-test/tests/annotations_comptime/showcases.rs` | `llm_tool_on_extern_c_fn_is_rejected_citing_74` |
+| 7 | `tools/shape-test/tests/lsp/foreign_lsp.rs` | `comptime_annotation_on_extern_c_fn_surfaces_lsp_diagnostic_at_the_application_line` |
 
 ## 3. Gate
 
@@ -177,9 +201,31 @@ member of its FAILED set is a regression.
 
 `just check-clean` (`cargo check --workspace --all-targets`): **exit 0**. It
 executes NO tests, so it is necessary and nowhere near sufficient — the eight
-runs above are the evidence. The only warning in the workspace check is a
-pre-existing `unused import: super::*` in `compiler/comptime_builtins.rs`,
-untouched by S2.
+runs above are the evidence.
+
+**Warning count — corrected in S2b (this sentence was false as first written).**
+The original text claimed "the only warning in the workspace check is a
+pre-existing `unused import: super::*`". That is wrong. The `check-clean` log
+records **22 warning emissions / 18 distinct printed warnings**, across three
+targets: **shape-vm (lib) 16**, **shape-vm (lib test) 5** (4 of them duplicates
+of lib warnings, so 1 new), **shape-test (test "iterators") 1**. Substance is
+unaffected — **zero of them land in an S2- or S2b-authored file**, verified by
+resolving every warning to its `-->` location:
+
+```
+crates/shape-vm/src/compiler/comptime_fragments/checked_body.rs      (6)
+crates/shape-vm/src/compiler/comptime_fragments/mod.rs               (5)
+crates/shape-vm/src/compiler/comptime_fragments/checked_template.rs  (2)
+crates/shape-vm/src/compiler/comptime_builtins.rs                    (1)
+crates/shape-vm/src/compiler/helpers.rs                              (1)
+crates/shape-vm/src/compiler/mod.rs                                  (1)
+crates/shape-vm/src/compiler/template_specialization/install_registry.rs (1)
+tools/shape-test/tests/iterators/stress_chaining.rs                  (1)
+```
+
+Neither `functions_foreign.rs` nor `sugar_lowering.rs` nor any of the three
+shape-test cells appears. **No later slice may adopt "one warning" as a
+cleanliness baseline** — the real pre-existing figure is the one above.
 
 `modules_visibility`, `shape-lsp --lib` and `cli_tests` were skipped per spec
 §6.1 — outside the blast radius, untouched by S2.
@@ -392,3 +438,333 @@ Carried forward, none introduced-and-hidden:
    (`nested_exact_calls_close_outer_arguments_before_inner_compilation`). Within
    the baseline's binding flap rule; recorded so the next slice does not read it
    as new.
+
+---
+
+## S2b. Review close-out — six lens findings closed
+
+A three-lens panel reviewed S2 (`28fb8b34` + `shape-web` `d60bbc0`) and returned
+PASS_WITH_FINDINGS, zero blockers, **two MAJOR** and four MINOR. All six are
+closed here. **Append-only**: `28fb8b34` and `d60bbc0` were examined by the
+panel and are NOT amended, rebased or rewritten — S2b is a new commit on top in
+each repo.
+
+### S2b.1 MAJOR-1 — the diagnostic's remedy was FALSE for `on type` annotations
+
+**The defect.** The S2 sentence's first and most prominent remedy read *"wrap
+the call in an ordinary Shape function and annotate that"*. Stated flat, it is
+false for every annotation declared `on type` — and **two SHIPPED stdlib
+annotations are exactly that**:
+
+- `@json_schema` — `crates/shape-runtime/stdlib-src/serde/derive.shape:33`
+  (`pub annotation json_schema() on type`)
+- `@to_json` — `crates/shape-runtime/stdlib-src/serde/serialize.shape:25`
+  (`pub annotation to_json() on type`)
+
+Both now fire the #74 rejection on a foreign fn (pre-S2 they were silently
+ignored — that is the whole point of S2). Reproduced against the **`28fb8b34`
+debug `shape`**, following the shipped remedy literally:
+
+```
+$ shape run f1_jsonschema_foreign.shape          # @json_schema() on extern "C" fn labs
+error[RUNTIME]: … annotation `@json_schema` on extern "C" fn `labs` is not applied — …
+… ); wrap the call in an ordinary Shape function and annotate that, …
+
+$ shape run f2_jsonschema_wrapper.shape          # DOING WHAT THE REMEDY SAYS
+error[RUNTIME]: Bytecode compilation failed: Semantic error:
+  Annotation 'json_schema' cannot be applied to a function. Allowed targets: type
+  --> <input>:5:1
+   5 | @json_schema()
+```
+
+`@to_json` behaves identically. Control, confirming the remedy was true for the
+`on function` case only: `@llm_tool` (`stdlib-src/llm/tools.shape:29`,
+`on function`) on a wrapper fn compiles and emits `myabs_tool_def()`.
+
+This is the *exact* disqualifying criterion the supervisor used in ruling Q1 to
+EXCLUDE `on_define` / `metadata` from S2's scope — "a rejection whose remedy
+reads 'apply it to an ordinary Shape function instead' would be false". The
+shipped sentence committed the very fault that ruling forbade.
+
+**The fix — remedy clause only. Zero compiler logic changed.** No new
+target-kind validation, no branching on `allowed_targets`; the producer
+`foreign_target_comptime_handler_rejection` still takes the same four arguments
+and the same call site selects it. The remedy now routes through the
+annotation's own `on` clause, and the wrapper advice is *visibly conditional* on
+that clause instead of stated flat. Head clause, reason clause, the three ruled-IN
+signals (**planned**, **not refused**, **interim**) and the `see issue #74`
+citation are all preserved verbatim; house style (one sentence, em-dash reason
+clause, semicolon before the remedy, no terminal period) is preserved; the #68
+sibling `foreign_target_application_rejection` is **byte-for-byte unchanged**.
+
+**The sentence that ships now** (CLI-rendered, `@marked` fixture):
+
+```
+annotation `@marked` on extern "C" fn `labs` is not applied — its `comptime post` handler would never run, because foreign function declarations never reach the compile-time annotation-handler pass (running comptime handlers on foreign targets is planned, not refused — see issue #74; this rejection is interim and is deleted when that capability lands); apply @marked to an ordinary Shape declaration its own `on` clause allows (an `on function` annotation goes on a Shape fn wrapping the call; an `on type` annotation goes on a type), move the compile-time work into a `comptime { }` block, or remove it
+```
+
+**MANDATORY VERIFICATION — the new remedy is EXECUTED, not merely read.** The
+original shipped unexecuted; that is how the fault got in. Against the S2b debug
+`shape` (`target/debug/shape`, rebuilt after the edit), for **both** `on`-clause
+arms, using the SHIPPED stdlib annotations rather than toy fixtures:
+
+| # | fixture | annotation (`on` clause) | step | result |
+|---|---|---|---|---|
+| 1 | `f3_llmtool_foreign.shape` | `@llm_tool` (**on function**) | rejection fires | `… apply @llm_tool to an ordinary Shape declaration its own `on` clause allows …` |
+| 2 | `f4_llmtool_wrapper.shape` | `@llm_tool` | **follow remedy**: Shape fn wrapping the call | **green** — prints `{"name": "myabs", "description": "absolute value", "parameters": {"type": "object", "properties": {"x": {"type": "integer"}}, "required": ["x"]}}` |
+| 3 | `f1_jsonschema_foreign.shape` | `@json_schema` (**on type**) | rejection fires | `… apply @json_schema to an ordinary Shape declaration its own `on` clause allows …` |
+| 4 | `f6_jsonschema_ontype.shape` | `@json_schema` | **follow remedy**: annotate a type | **green** — prints `{"type": "object", "title": "AbsRequest", "properties": {"x": {"type": "integer"}}, "required": ["x"]}` |
+| 5 | `f5_tojson_foreign.shape` | `@to_json` (**on type**) | rejection fires | `… apply @to_json to an ordinary Shape declaration its own `on` clause allows …` |
+| 6 | `f7_tojson_ontype.shape` | `@to_json` | **follow remedy**: annotate a type | **green** — prints `{ "x": 7 }` |
+
+Exact commands (all `shape run <fixture>`, debug binary at
+`/home/dev/dev/shape-lang/shape-adr009-a3/target/debug/shape`; fixtures in the
+S2b scratch dir). **The remedy is true for both arms.** Rows 2/4/6 are the
+literal execution of what the sentence tells the reader to do.
+
+**Pins updated — strengthened, not weakened.** The full-sentence assertion in
+`e4s2_comptime_post_annotation_on_extern_c_fn_rejects_citing_74` still asserts
+the **whole sentence verbatim** (it was deliberately not shortened to a laxer
+substring to reduce churn), and three assertions were **added** to it:
+
+- negative: the flat `"wrap the call in an ordinary Shape function and annotate
+  that"` must NOT come back — a direct regression tripwire on MAJOR-1;
+- positive: the remedy contains `"its own `on` clause allows"`;
+- positive: **both** arms are spelled out.
+
+Two new pins, same module:
+
+- `e4s2b_on_type_comptime_annotation_on_extern_c_fn_gets_a_true_remedy` — an
+  `on type` annotation on an `extern "C" fn` gets the type arm, not the flat
+  wrapper lie.
+- `e4s2b_on_type_comptime_annotation_remedy_compiles` — the **green twin**:
+  following that remedy compiles. This is the whole content of the fix, so it is
+  pinned in-repo rather than left to the CLI probes above.
+
+The producer's doc comment carries a `REMEDY WORDING IS LOAD-BEARING — do not
+flatten it back` block recording the measurement, so a later slice cannot
+"simplify" it back without reading why.
+
+**#76 is NOT touched.** The precedence question — `compile_foreign_function`
+runs the rejection loop *before* `validate_annotation_target_usage`, so the #74
+sentence wins over the sharper target-kind mismatch — is recorded in the
+producer's doc comment and in the #74 issue comment as #76's sharpest
+motivation. Widening S2b into #76 was explicitly out of bounds. The new wording
+is true either way, which is why the precedence bug does not block it.
+
+### S2b.2 MAJOR-2 — the book prose S2 added was FALSE, and regressed a true sentence
+
+**The defect.** Both S2-swept pages asserted a universal dichotomy that is false:
+
+- `advanced/annotations.mdx` — "Annotations that carry **handlers** are rejected
+  on **foreign functions**" + "Annotations with **no** handlers (pure markers)
+  are accepted".
+- `tooling/polyglot.mdx` — "Annotations carrying a **handler** are rejected on
+  foreign targets".
+
+`on_define` and `metadata` **are handlers** — in the compiler's own vocabulary
+(`CompiledAnnotation::on_define_handler` / `::metadata_handler`,
+`crates/shape-vm/src/bytecode/core_types.rs`) and in the book's own
+(`advanced/comptime.mdx`, `advanced/comptime-annotations-cookbook.mdx` both call
+them lifecycle hooks). They are **accepted and silently no-op** on foreign
+targets. Re-verified for S2b against the S2b debug `shape` under `-m vm`:
+
+```
+$ shape run -m vm g1_ondefine_foreign.shape     # @marked{on_define} on extern "C" fn
+compiled green                                   # ← on_define NEVER fired
+
+$ shape run -m vm g2_ondefine_ordinary.shape    # same annotation, ordinary fn
+on_define fired
+42
+
+$ shape run -m vm g3_metadata_foreign.shape     # @marked{metadata} on extern "C" fn
+compiled green
+```
+
+Pinned in-repo by the passing
+`e4s2_twin_metadata_only_annotation_on_extern_c_fn_compiles`.
+
+Two aggravating factors, both recorded rather than smoothed over:
+
+1. **S2 regressed a true sentence.** The pre-S2 text ("Hook annotations on
+   foreign functions … are rejected") was correctly scoped and TRUE. S2 replaced
+   it with a false universal — a net loss of truth on a page a reader trusts.
+2. **The book truth-gate structurally cannot catch this.** An over-broad prose
+   claim with no counterexample fence passes trivially: there is nothing to
+   execute. Only a reader gets hurt. The gate is not a prose oracle and must not
+   be treated as one.
+
+**The fix, in both pages** (`shape-web`, book prose only):
+
+1. **Scoped precisely** to what actually rejects: declarative `before` / `after`
+   hooks (#68) and `comptime pre` / `comptime post` (#74). The universal
+   "handlers" claim is gone from both pages; `annotations.mdx` now opens "Two
+   kinds of handler are rejected on foreign functions … Other handler kinds are
+   *not* rejected; see the gap noted below".
+2. **The gap is NAMED, not quietly narrowed.** `annotations.mdx` carries a
+   `:::caution[Known gap #75: on_define and metadata on foreign functions]`
+   aside stating plainly that such an annotation is *accepted on a foreign
+   function and then silently does nothing*, that the same declaration on an
+   ordinary Shape fn runs its `on_define` normally, why it was left out of #74's
+   rejection (the orthogonal JIT-drop half), and that **you get no diagnostic
+   either way**. `polyglot.mdx` carries the same statement in short form with the
+   #75 citation. Per the standing ruling that a silent no-op is the worst state:
+   we are shipping one behind a ratified fence, so the book at minimum makes it
+   **discoverable**. Hidden trap → documented knowledge.
+3. **Neighbouring sentences re-checked.** The `annotations.mdx` comptime
+   paragraph restated the same false remedy MAJOR-1 fixed in the compiler
+   ("wrap the call in an ordinary Shape function and annotate that") — corrected
+   in lockstep, and it now names `@json_schema` / `@to_json` as the concrete
+   `on type` counterexample. The "pure markers" sentence is kept but rewritten so
+   it no longer implies a dichotomy ("That is not a gap: a marker does nothing on
+   any target"). A book-wide grep for the same over-claim shape
+   (`handler` × `foreign|extern|polyglot`) returns only these two pages;
+   frontmatter `llm_summary` / key-facts on both pages carry no such claim.
+
+**Repo-hazard discipline observed.** `shape-web` carries 64 uncommitted files of
+another agent's work. Staged by **exact path only** — never `git add -A`, never
+`git add .`, never `git stash`, never `git checkout -- .`. Dirty-file count
+verified 64 → 66 → 64 across the commit.
+
+### S2b.3 MINOR-3 — the #74 issue comment under-enumerated the deletion set
+
+The `#74 INTERIM REJECTION` grep tag sits at **7** sites; the #74 issue comment
+described only **6**, omitting the `(b)` section-divider comment inside
+`foreign_target_annotation_rejection_tests`. Closed by a new **S2b correction
+comment** on #74 enumerating all seven by symbol (table reproduced in §2.6
+above), plus superseded-markers on the two stale blocks of the original comment
+so no reader copies them.
+
+**The 7-vs-3 deviation from spec §5.H is RATIFIED, not absorbed** (supervisor,
+S2b) — recorded as such in §2.6. The tag's contract is "returns the full
+deletion set"; the three end-to-end cells plus the test-module header genuinely
+belong to it, so the spec's "exactly 3" would have returned an *incomplete* set.
+
+### S2b.4 MINOR-4 — the slice report overstated workspace-check cleanliness
+
+§3.1 claimed "the only warning in the workspace check is a pre-existing
+`unused import: super::*`". False. Corrected in place: **22 warning emissions /
+18 distinct printed warnings** (shape-vm lib 16, shape-vm lib-test 5, shape-test
+"iterators" 1), with every warning resolved to its file so the real claim —
+**zero in an S2- or S2b-authored file** — is checkable rather than asserted. §3.1
+now states explicitly that no later slice may adopt "one warning" as a
+cleanliness baseline.
+
+### S2b.5 MINOR-5 — `#[serde(skip)]` undermines the LOUD guarantee → **#77**
+
+Filed as **#77**. `CompiledAnnotation`'s `comptime_pre_handler`,
+`comptime_post_handler` and `sugar_post_handler` are all `#[serde(skip, default)]`
+(`crates/shape-vm/src/bytecode/core_types.rs`), so a **deserialized**
+`CompiledAnnotation` presents `None` for all three, the gate in
+`BytecodeCompiler::compile_foreign_function` `continue`s, and **both** the #68
+and #74 rejections silently vanish — the exact silent-no-op class S2 exists to
+eliminate, restored by a serialization round-trip. (`allowed_targets` is
+serde-skipped too, so the `on`-clause check has the same exposure; that half
+overlaps #76.)
+
+**Not an S2 regression** — the pre-existing #68 arm has identical exposure — and
+**no reproducer exists**: the common in-process path populates the handlers
+correctly (verified with `@llm_tool` via `from std::llm::tools use { @llm_tool }`
+on an `extern "C" fn`, which rejects as designed). Filed anyway, honestly
+labelled latent, because a LOUD guarantee with a serialization-shaped hole is
+worth a named ticket. Anchored on the struct + the three field names + the gate
+symbol; names content-addressed bytecode, snapshot/resume and the wire protocol
+as the paths most likely to expose it; cross-referenced to **#71** (same
+`#[serde(skip)]` family, different consequence).
+
+### S2b.6 MINOR-6 — book-gate harness reproducibility caveat (recorded, not fixed)
+
+> **The 557/573 figure is NOT reproducible from committed state.** It was
+> measured against a book-gate harness that is **uncommitted**. Both
+> `book/book-site/scripts/run-book-truth-gate.mjs` (**+451 lines** vs committed
+> HEAD) and `book/book-site/scripts/extract-shape-snippets.mjs` (**+65 lines**)
+> are part of another agent's 64-file working set — 499 insertions across those
+> two files alone. The gate's **grading classes** AND the **snippet extractor
+> that sets the 573 denominator** are both modified relative to committed HEAD.
+> A future slice checking out `adr009-c3-annotations` at `d60bbc0` and running
+> the gate will NOT get 573 snippets and may not get 16 reds. **Do not treat
+> 557/573 as a committed baseline.** It is a measurement against a working tree
+> that no commit describes.
+
+Deliberately **not fixed and not committed** — that harness is not S2/S2b's work
+and staging it would violate the repo-hazard discipline. Recorded only.
+
+Mitigation already on record: both `expected-fail` fences on
+`advanced/annotations.mdx` (the #68 one and the new #74 one) were verified to
+grade correctly and **binary-independently** across debug/release × vm/jit, so
+the specific claim S2 shipped does not rest on the harness's modified grading
+classes.
+
+### S2b.7 Re-gate (targeted — MAJOR-1 changes a pinned string)
+
+Judged by **FAILED-NAME SET**, never counts. Baselines: `e4-slice0-report.md` §1
+plus the S2-established `native_interop` row (18/0/0 at base, 19/0 after S2).
+
+| # | suite | S2 result | S2b result | verdict |
+|---|---|---|---|---|
+| 1 | `cargo test -p shape-vm --lib foreign_target_annotation_rejection_tests` | 15 / 0 | **17 passed / 0 failed** | PASS — 15 + the 2 new `e4s2b_*` pins, all named in the run output |
+| 2 | `cargo test -p shape-vm --lib` | 3518 / 7 fail / 36 ign | **3520 passed / 7 failed / 36 ign** | PASS — FAILED set byte-identical to S2: the 6 stable names + the ONE permitted flap member `…nested_exact_calls_close_outer_arguments_before_inner_compilation`. No other name. +2 passed = the 2 new pins |
+| 3 | `cargo test -p shape-test --test native_interop -- --test-threads=1` | 19 / 0 | **19 passed / 0 failed** | PASS — FAILED set still empty |
+| 4 | `cargo test -p shape-test --test annotations_comptime -- --test-threads=1` | 117 / 10 fail | **117 passed / 10 failed** | PASS — same 10 names (`executed_extend_authority::*` ×8, `generated_method_runtime::*` ×2) |
+| 5 | `cargo test -p shape-test --test lsp -- --test-threads=1` | 507 / 0 | **507 passed / 0 failed** | PASS — FAILED set still empty |
+| 6 | `just check-clean` | exit 0 | **exit 0** | PASS (warning inventory corrected — §S2b.4) |
+| 7 | book truth-gate, re-run | 557 / 573, 16 red | **557 / 573, 16 red — SAME LIST** | PASS |
+
+The 6 stable vmlib FAILED names, for the record: `test_async_let_binding_is_immutable`,
+`test_match_arm_empty_array_unprovable_element_is_clean_compile_error`,
+`inlined_closure_keeps_outer_authored_type_ref_in_its_parameter_scope`,
+`unavailable_and_missing_callsite_evidence_execute_only_in_legacy_domain`,
+`ws6b_inferred_result_variable_arg`, `ws6_generic_id_ok_arg`.
+
+**Book gate — the LIST was verified, not just the count.** A swap holding the
+count at 16 would be invisible to a count check. Snippets re-extracted first
+(`node scripts/extract-shape-snippets.mjs` → `runnable=true: 573`), then
+`SHAPE_BIN=<S2b release binary> node scripts/run-book-truth-gate.mjs`, one
+whole-corpus run (3m20s on release — the per-slice split S2 needed was a
+debug-binary artefact). The 16 reds by page, identical to the S2 record:
+
+| page | reds |
+|---|---|
+| `advanced/comptime-annotations-cookbook.mdx` | 6 |
+| `advanced/comptime.mdx` | 1 |
+| `advanced/content-addressed-bytecode.mdx` | 2 |
+| `advanced/polyglot-distributed.mdx` | 2 |
+| `fundamentals/modules.mdx` | 2 |
+| `stdlib/core/remote.mdx` | 2 |
+| `tooling/execution-server.mdx` | 1 |
+| **total** | **16** |
+
+All 16 are `both-fail`; `vm-only-fail`, `jit-only-fail`, `output-divergence`,
+`expected-divergence`, `expected-fail-succeeded`, `expected-fail-missing` and
+`runtime-timeout` are all **0**. Positive checks: all **17**
+`advanced/annotations.mdx` snippets pass (including the #68 fence and the #74
+fence — the #74 fence's `expected-fail="see issue #74"` substring survives the
+MAJOR-1 rewording, which is exactly why the rewording preserved the citation
+verbatim), and all **4** `tooling/polyglot.mdx` snippets pass. The new `:::caution`
+aside adds no fence, so the denominator stays 573.
+
+**Suites deliberately SKIPPED, with reason.** S2 gate suites 5–7
+(`annotations_runtime` 36/0, `annotation_targets` 24/0, `comptime` 260/3) were
+not re-run. Reason: S2b changes exactly one string literal in
+`foreign_target_comptime_handler_rejection` plus test code and doc comments. That
+producer is reachable only from `compile_foreign_function`, which none of those
+three suites exercises (`annotations_runtime` and `annotation_targets` cover the
+#68 arm and ordinary-target validation; `comptime` covers comptime execution on
+ordinary fns). No assertion in any of them quotes the #74 sentence — verified by
+grep for `see issue #74` / `planned, not refused` across `tools/shape-test/`,
+which returns only the three end-to-end cells in suites 3, 4 and 5, all of which
+WERE re-run and all of which pin the `"see issue #74"` substring that the
+rewording preserves verbatim. Re-running them could not have discriminated.
+
+### S2b.8 Residuals
+
+- **#76 (precedence) is open and untouched by design.** An `on type` annotation
+  on a foreign fn still reports the #74 sentence rather than the sharper
+  target-kind mismatch. The wording now handles that case truthfully, which is
+  the mitigation, not the fix.
+- **#77 has no reproducer.** Filed latent. If a deserialized-annotation path is
+  ever opened, that ticket is the tripwire.
+- **The book gate remains prose-blind.** MAJOR-2 was invisible to it and a future
+  over-claim would be too. Nothing in S2b changes that; it is a standing limit of
+  the gate, recorded here so no one mistakes a green gate for a true book.
+- **The 557/573 baseline is working-tree-dependent** (§S2b.6).

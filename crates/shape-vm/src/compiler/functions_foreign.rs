@@ -1781,9 +1781,10 @@ print(labs(0 - 42))
                  declarations never reach the compile-time annotation-handler pass \
                  (running comptime handlers on foreign targets is planned, not refused \
                  — see issue #74; this rejection is interim and is deleted when that \
-                 capability lands); wrap the call in an ordinary Shape function and \
-                 annotate that, move the compile-time work into a `comptime { }` block, \
-                 or remove it"
+                 capability lands); apply @marked to an ordinary Shape declaration its \
+                 own `on` clause allows (an `on function` annotation goes on a Shape fn \
+                 wrapping the call; an `on type` annotation goes on a type), move the \
+                 compile-time work into a `comptime { }` block, or remove it"
             ),
             "the foreign-target comptime sentence must fire verbatim, got: {message}"
         );
@@ -1799,7 +1800,92 @@ print(labs(0 - 42))
             !message.contains("#68"),
             "the two reasons must not blur — #68 is the hook arm, got: {message}"
         );
+        // S2b / review finding MAJOR-1: the remedy must NOT open with a flat
+        // "wrap the call in an ordinary Shape function and annotate that". That
+        // wording is FALSE for every `on type` annotation, and two SHIPPED
+        // stdlib annotations are exactly that (`@json_schema`, `@to_json`) —
+        // following it hard-errors with "cannot be applied to a function.
+        // Allowed targets: type". The remedy routes through the annotation's
+        // own `on` clause instead, and the wrapper advice is CONDITIONAL on it.
+        assert!(
+            !message.contains("wrap the call in an ordinary Shape function and annotate that"),
+            "MAJOR-1 regression: the flat wrapper remedy is false for `on type` \
+             annotations (@json_schema / @to_json), got: {message}"
+        );
+        assert!(
+            message.contains("its own `on` clause allows"),
+            "the remedy must route through the annotation's own `on` clause so it is \
+             true whatever that clause says, got: {message}"
+        );
+        assert!(
+            message.contains("an `on function` annotation goes on a Shape fn wrapping the call")
+                && message.contains("an `on type` annotation goes on a type"),
+            "both `on`-clause arms must be spelled out; the wrapper advice is only \
+             true for the `on function` arm, got: {message}"
+        );
         assert_anchored_at(location, src, "@marked(");
+    }
+
+    /// S2b / review finding MAJOR-1, the EXECUTABLE half: the reworded remedy
+    /// must be true for an `on type` annotation, not just readable. `@marked`
+    /// here is declared `on type` and applied to an `extern "C" fn`, which
+    /// still fires the #74 sentence (the `on`-clause mismatch is issue #76 —
+    /// `compile_foreign_function` runs this loop before
+    /// `validate_annotation_target_usage`); the remedy the reader is handed
+    /// must then be one that WORKS. `..._remedy_compiles` is its green twin.
+    #[test]
+    fn e4s2b_on_type_comptime_annotation_on_extern_c_fn_gets_a_true_remedy() {
+        let src = r#"
+annotation marked() on type {
+  comptime post(target, ctx) {
+    1
+  }
+}
+
+@marked()
+extern "C" fn labs(x: int) -> int from "c"
+
+print(labs(0 - 42))
+"#;
+        let (message, _) = compile_err_with_location(src);
+        assert!(
+            message.contains("an `on type` annotation goes on a type"),
+            "an `on type` annotation must be handed the type remedy, got: {message}"
+        );
+        assert!(
+            !message.contains("wrap the call in an ordinary Shape function and annotate that"),
+            "the flat wrapper remedy would be a lie here — following it hard-errors \
+             on the target-kind check, got: {message}"
+        );
+    }
+
+    /// The green twin of `e4s2b_on_type_..._gets_a_true_remedy`: FOLLOWING the
+    /// remedy compiles. Same `on type` annotation, applied to a type instead of
+    /// the foreign fn — this is the whole content of the MAJOR-1 fix, so it is
+    /// pinned rather than left to the CLI probes in the S2b report.
+    #[test]
+    fn e4s2b_on_type_comptime_annotation_remedy_compiles() {
+        let compiler = compile_ok(
+            r#"
+annotation marked() on type {
+  comptime post(target, ctx) {
+    1
+  }
+}
+
+extern "C" fn labs(x: int) -> int from "c"
+
+@marked()
+type AbsRequest {
+  x: int
+}
+
+print(labs(0 - 42))
+"#,
+        );
+        // Touch the compiler so the binding is not merely dropped — the pin is
+        // that the remedy path compiles at all.
+        let _ = compiler.hook_install_registry.len();
     }
 
     // The phase word derives from the real `AnnotationHandlerType`, not from
