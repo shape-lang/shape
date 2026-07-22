@@ -816,6 +816,36 @@ fn test_hover_local_annotation_usage() {
 }
 
 #[test]
+fn test_hover_annotation_usage_renders_on_clause_contract() {
+    // ADR-009 E4-D4 (#73, S1c): a def with an explicit header `on`-clause
+    // renders the declared target set into the one-line hover signature —
+    // "the full contract in one line" (issue #73). Non-vacuity for DN5.
+    let code = "annotation guarded(level: int) on function, type {\n  before(args) { args }\n}\n\n@guarded(2)\nfn run() { 1 }\n";
+    let hover = get_hover(
+        code,
+        Position {
+            line: 4,
+            character: 2,
+        },
+        None,
+        None,
+        None,
+    )
+    .expect("annotation usage hover renders");
+    if let HoverContents::Markup(markup) = hover.contents {
+        assert!(
+            markup
+                .value
+                .contains("**Annotation**: `@guarded(level) on function, type`"),
+            "hover must render the declared on-clause contract, got: {}",
+            markup.value
+        );
+    } else {
+        panic!("markdown hover expected");
+    }
+}
+
+#[test]
 fn test_hover_locally_defined_annotation_usage_with_module_cache() {
     let code =
         "/// Mark a function for auditing.\nannotation my_ann() {}\n@my_ann\nfn run() { 1 }\n";

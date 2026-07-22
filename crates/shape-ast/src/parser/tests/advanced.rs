@@ -1899,8 +1899,14 @@ fn test_legacy_body_targets_field_is_rejected_with_named_migration_diagnostic() 
     // bare `is_err`) is load-bearing: a future grammar rework that silently
     // turned this into a *different* parse error would pass a bare `is_err`
     // vacuously. Twins the `@annotation`-rejection assertion pattern above.
+    //
+    // S1c fixup: the S1b commit shipped this fixture in the HEADER form by
+    // copy-paste, so it parsed cleanly and the `expect_err` panicked (the pin
+    // was RED, not vacuously green). Restored to the body `targets: [...]` form
+    // — the spelling this tombstone actually rejects.
     let content = r#"
-        annotation legacy_form() on function {
+        annotation legacy_form() {
+            targets: [function]
             comptime post(target, ctx) {
                 target.kind
             }

@@ -4,7 +4,7 @@
 
 use crate::doc_render::render_doc_comment;
 use crate::module_cache::ModuleCache;
-use shape_ast::ast::{AnnotationDef, DocComment, Item, Program, Span};
+use shape_ast::ast::{AnnotationDef, AnnotationTargetKind, DocComment, Item, Program, Span};
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
@@ -23,6 +23,12 @@ pub struct AnnotationDiscovery {
 pub struct AnnotationInfo {
     pub name: String,
     pub params: Vec<String>,
+    /// Declared target restrictions from the header `on`-clause
+    /// (`annotation name(...) on function, type`). `None` when the clause is
+    /// absent — target applicability is then inferred from handler kinds
+    /// (ADR-009 E4-D4 / DN1). Rendered into the hover/completion signature so
+    /// tooling shows the full contract in one line (issue #73).
+    pub targets: Option<Vec<AnnotationTargetKind>>,
     pub doc_comment: Option<DocComment>,
     pub location: Span,
     /// Source file where the annotation is defined (None for local annotations)
@@ -50,6 +56,7 @@ impl AnnotationDiscovery {
         let info = AnnotationInfo {
             name: ann_def.name.clone(),
             params: annotation_param_names(ann_def),
+            targets: ann_def.allowed_targets.clone(),
             doc_comment: ann_def.doc_comment.clone(),
             location: ann_def.name_span,
             source_file: None, // Local annotations are in the current file
@@ -118,6 +125,7 @@ impl AnnotationDiscovery {
                 let info = AnnotationInfo {
                     name: ann_def.name.clone(),
                     params: annotation_param_names(ann_def),
+                    targets: ann_def.allowed_targets.clone(),
                     doc_comment: ann_def.doc_comment.clone(),
                     location: ann_def.name_span,
                     source_file: Some(source_path.to_path_buf()),
@@ -176,6 +184,53 @@ fn annotation_param_names(ann_def: &AnnotationDef) -> Vec<String> {
         .collect()
 }
 
+/// Map one `AnnotationTargetKind` to the header-`on`-clause word a user would
+/// type (`function`, `type`, ...). The match is exhaustive over all seven kinds
+/// — the LSP-tier guard against the 4-of-7 undercount the issue-#73 correction
+/// called out (a new kind fails to compile here).
+fn target_kind_word(kind: AnnotationTargetKind) -> &'static str {
+    match kind {
+        AnnotationTargetKind::Function => "function",
+        AnnotationTargetKind::Type => "type",
+        AnnotationTargetKind::Module => "module",
+        AnnotationTargetKind::Expression => "expression",
+        AnnotationTargetKind::Block => "block",
+        AnnotationTargetKind::AwaitExpr => "await_expr",
+        AnnotationTargetKind::Binding => "binding",
+    }
+}
+
+/// Render a declared target set as its header `on`-clause spelling
+/// (`function, type`), matching the exact grammar words. Returns `None` when
+/// the target set is absent or empty (targets inferred from handler kinds per
+/// ADR-009 E4-D4 / DN1) so callers render no `on`-clause rather than an
+/// over-claimed one.
+pub fn render_on_clause(targets: Option<&[AnnotationTargetKind]>) -> Option<String> {
+    let targets = targets.filter(|t| !t.is_empty())?;
+    Some(
+        targets
+            .iter()
+            .map(|k| target_kind_word(*k))
+            .collect::<Vec<_>>()
+            .join(", "),
+    )
+}
+
+/// Build the one-line annotation signature shown in hover / completion:
+/// `@name(params)` plus ` on <kinds>` when the def declared an explicit target
+/// set. This is the "full contract in one line" issue #73 asks for.
+pub fn annotation_signature(info: &AnnotationInfo) -> String {
+    let base = if info.params.is_empty() {
+        format!("@{}", info.name)
+    } else {
+        format!("@{}({})", info.name, info.params.join(", "))
+    };
+    match render_on_clause(info.targets.as_deref()) {
+        Some(on_clause) => format!("{base} on {on_clause}"),
+        None => base,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -207,6 +262,59 @@ mod tests {
 
         let all = discovery.all_annotations();
         assert_eq!(all.len(), 0);
+    }
+
+    #[test]
+    fn signature_renders_declared_on_clause() {
+        // ADR-009 E4-D4 (#73, S1c): a def with an explicit header `on`-clause
+        // renders the target set into the one-line signature.
+        let program = shape_ast::parser::parse_program(
+            "annotation guarded(level: int) on function, type {\n  before(args) { args }\n}\n",
+        )
+        .expect("program");
+        let mut discovery = AnnotationDiscovery::new();
+        discovery.discover_from_program(&program);
+        let info = discovery.get("guarded").expect("annotation discovered");
+        assert_eq!(
+            info.targets.as_deref(),
+            Some([AnnotationTargetKind::Function, AnnotationTargetKind::Type].as_slice()),
+        );
+        assert_eq!(
+            annotation_signature(info),
+            "@guarded(level) on function, type",
+        );
+    }
+
+    #[test]
+    fn signature_omits_on_clause_when_targets_inferred() {
+        // DN1: absent on-clause => None => no fabricated `on`-clause.
+        let program = shape_ast::parser::parse_program(
+            "annotation traced() {\n  before(args) { args }\n}\n",
+        )
+        .expect("program");
+        let mut discovery = AnnotationDiscovery::new();
+        discovery.discover_from_program(&program);
+        let info = discovery.get("traced").expect("annotation discovered");
+        assert_eq!(info.targets, None);
+        assert_eq!(annotation_signature(info), "@traced");
+    }
+
+    #[test]
+    fn render_on_clause_covers_all_seven_target_kinds() {
+        // Anti-undercount pin (issue #73 correction): each of the seven kinds
+        // renders to its exact grammar word — guards the 4-of-7 undercount.
+        use AnnotationTargetKind::*;
+        let all = [
+            Function, Type, Module, Expression, Block, AwaitExpr, Binding,
+        ];
+        assert_eq!(
+            render_on_clause(Some(&all)),
+            Some(
+                "function, type, module, expression, block, await_expr, binding".to_string()
+            ),
+        );
+        assert_eq!(render_on_clause(None), None);
+        assert_eq!(render_on_clause(Some(&[])), None);
     }
 
     #[test]
