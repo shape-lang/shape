@@ -499,8 +499,7 @@ report](typed-comptime/e2-slice5-report.md).
 **CURRENT / VM+JIT - applied type annotation generation**
 
 ```shape
-annotation summarize() {
-    targets: [type]
+annotation summarize() on type {
     comptime post(target, ctx) {
         extend target {
             method summary() -> string { self.name }

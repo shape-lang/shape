@@ -2,6 +2,16 @@
 
 [Back to the typed comptime overview](../typed-comptime.md) | [Previous: Nominals And Members](nominals-and-members.md) | [Next: Expansion And Tooling](expansion-and-tooling.md)
 
+> **Reading note on `targets: [...]` below.** Every `targets: [...]` occurrence
+> on this page sits inside a **TARGET** example (proposed syntax), not a
+> **CURRENT** one — see the label table in
+> [typed-comptime.md](../typed-comptime.md) §Example Labels. The *shipped*
+> spelling for target restrictions is the header `on` clause
+> (`annotation audit() on type, module { … }`, ADR-009 E4 slice 1 / issue #73);
+> the body `targets: [...]` field is deleted and the parser answers it with a
+> named migration diagnostic. Decision 62 below goes further still and removes
+> the separate registry entirely in favour of the typed handler clause set.
+
 ## Decision 61: Typed Applied Annotations
 
 Accepted: every annotation application is a compiler-issued typed descriptor
