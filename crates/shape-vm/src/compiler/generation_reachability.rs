@@ -59,8 +59,7 @@ fn identity(value: int) -> int { value }
         let program = parse(
             r#"
 mod generated {
-    annotation mark() {
-        targets: [function]
+    annotation mark() on function {
         comptime post(target, ctx) { 0 }
     }
     @mark()
@@ -101,8 +100,7 @@ mod generated {}
     fn annotated_exported_supported_target_is_reachable() {
         let program = parse(
             r#"
-annotation mark() {
-    targets: [function]
+annotation mark() on function {
     comptime post(target, ctx) { 0 }
 }
 pub @mark() fn probe() -> int { 0 }
@@ -116,8 +114,7 @@ pub @mark() fn probe() -> int { 0 }
     fn annotated_impl_method_is_reachable() {
         let program = parse(
             r#"
-annotation mark() {
-    targets: [function]
+annotation mark() on function {
     comptime post(target, ctx) { 0 }
 }
 trait Runnable { fn run() -> int; }
@@ -136,8 +133,7 @@ impl Runnable for Job {
     fn annotation_in_otherwise_unannotated_function_body_is_reachable() {
         let program = parse(
             r#"
-annotation mark() {
-    targets: [expression]
+annotation mark() on expression {
     comptime post(target, ctx) { 0 }
 }
 fn probe() -> int { @mark() 1 }
@@ -154,8 +150,7 @@ fn probe() -> int { @mark() 1 }
     fn annotation_in_binding_initializer_is_reachable() {
         let program = parse(
             r#"
-annotation mark() {
-    targets: [expression]
+annotation mark() on expression {
     comptime post(target, ctx) { 0 }
 }
 let probe = @mark() 1
@@ -174,8 +169,7 @@ let probe = @mark() 1
     fn annotation_on_block_expression_is_reachable() {
         let program = parse(
             r#"
-annotation mark() {
-    targets: [block]
+annotation mark() on block {
     comptime post(target, ctx) { 0 }
 }
 fn probe() -> int { @mark() { 1 } }
@@ -192,8 +186,7 @@ fn probe() -> int { @mark() { 1 } }
     fn annotation_inside_await_expression_is_reachable() {
         let program = parse(
             r#"
-annotation mark() {
-    targets: [await_expr]
+annotation mark() on await_expr {
     comptime post(target, ctx) { 0 }
 }
 async function ready() { 1 }
@@ -227,8 +220,7 @@ async function probe() { await @mark() ready() }
     fn expression_annotation_in_trait_default_body_is_reachable() {
         let program = parse(
             r#"
-annotation mark() {
-    targets: [expression]
+annotation mark() on expression {
     comptime post(target, ctx) { 0 }
 }
 trait Runnable {
@@ -244,8 +236,7 @@ trait Runnable {
         let program = parse(
             r#"
 mod generated {
-    annotation add_number_method() {
-        targets: [function]
+    annotation add_number_method() on function {
         comptime post(target, ctx) {
             extend Number { method from_nested_function() { self } }
         }
@@ -267,8 +258,7 @@ mod generated {
         let program = parse(
             r#"
 mod generated {
-    annotation add_number_method() {
-        targets: [type]
+    annotation add_number_method() on type {
         comptime post(target, ctx) {
             extend Number { method from_nested_struct() { self } }
         }
@@ -290,14 +280,12 @@ mod generated {
         let program = parse(
             r#"
 mod generated {
-    annotation add_from_function() {
-        targets: [function]
+    annotation add_from_function() on function {
         comptime post(target, ctx) {
             extend Number { method from_exported_function() { self } }
         }
     }
-    annotation add_from_struct() {
-        targets: [type]
+    annotation add_from_struct() on type {
         comptime post(target, ctx) {
             extend Number { method from_exported_struct() { self } }
         }
@@ -320,8 +308,7 @@ mod generated {
     fn ordinary_impl_method_target_executes_in_the_fixed_point() {
         let program = parse(
             r#"
-annotation add_number_method() {
-    targets: [function]
+annotation add_number_method() on function {
     comptime post(target, ctx) {
         extend Number { method from_impl() { self } }
     }
@@ -346,8 +333,7 @@ impl Runnable for Job {
         let program = parse(
             r#"
 mod generated {
-    annotation add_number_method() {
-        targets: [function]
+    annotation add_number_method() on function {
         comptime post(target, ctx) {
             extend Number { method from_inherited_impl() { self } }
         }
@@ -393,8 +379,7 @@ fn use_generated_method() -> number { 2.0.from_inherited_impl() }
         let program = parse(
             r#"
 mod generated {
-    annotation add_number_method() {
-        targets: [function]
+    annotation add_number_method() on function {
         comptime post(target, ctx) {
             extend Number {
                 method tripled() { self * 3.0 }

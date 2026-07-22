@@ -1,6 +1,5 @@
 // ADR-009 C1 slice 4: generated `move` drives OwnedMutable storage.
-annotation add_answer() {
-  targets: [type]
+annotation add_answer() on type {
   comptime post(target, ctx) {
     extend target { method answer() -> int { let mut total = 40
       let worker = |; move total| { total = total + 2

@@ -15,8 +15,7 @@ fn generated_function_rejects_implicit_closure_capture() {
     // gate is container-agnostic (provenance stamp), so the method carries it.
     ShapeTest::new(
         r#"
-annotation generate_worker() {
-  targets: [type]
+annotation generate_worker() on type {
   comptime post(target, ctx) {
     extend target {
       method generated_worker() -> int { let value = 41; let worker = || value + 1; worker() }
@@ -42,8 +41,7 @@ fn generated_function_rejects_parameter_capture() {
     // gate is container-agnostic (provenance stamp), so the method carries it.
     ShapeTest::new(
         r#"
-annotation generate_worker() {
-  targets: [type]
+annotation generate_worker() on type {
   comptime post(target, ctx) {
     extend target {
       method generated_worker(base: int) -> int { let worker = || base + 1; worker() }
@@ -68,8 +66,7 @@ fn generated_capture_diagnostic_is_deterministically_sorted() {
     // Option C (5b-2): free-fn container retired with U03; the implicit-capture
     // gate (and its sorted name list) is container-agnostic, so the method carries it.
     let source = r#"
-annotation generate_worker() {
-  targets: [type]
+annotation generate_worker() on type {
   comptime post(target, ctx) {
     extend target {
       method generated_worker() -> int { let z = 40; let a = 2; let worker = || z + a; worker() }
@@ -95,8 +92,7 @@ print(job.generated_worker())
 fn generated_method_rejects_implicit_self_capture() {
     ShapeTest::new(
         r#"
-annotation add_reader() {
-  targets: [type]
+annotation add_reader() on type {
   comptime post(target, ctx) {
     extend target {
       method read() -> int { let worker = || self.id; worker() }
@@ -121,8 +117,7 @@ fn generated_closure_parameters_are_not_captures() {
     // Option C (5b-2): free-fn container retired with U03; closure params (not
     // captures) are container-agnostic, so the method carries the coverage.
     let source = r#"
-annotation generate_increment() {
-  targets: [type]
+annotation generate_increment() on type {
   comptime post(target, ctx) {
     extend target {
       method generated_increment() -> int { let increment = |value| value + 1; increment(41) }
@@ -142,8 +137,7 @@ job.generated_increment()
 #[test]
 fn generated_method_allows_capture_free_closure_in_both_tiers() {
     let source = r#"
-annotation add_answer() {
-  targets: [type]
+annotation add_answer() on type {
   comptime post(target, ctx) {
     extend target {
       method answer() -> int { let worker = || 42; worker() }

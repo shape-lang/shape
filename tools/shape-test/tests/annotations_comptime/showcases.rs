@@ -115,8 +115,7 @@ fn to_json_serializes_via_stdlib_import_jit() {
 fn extend_method_rejects_injection_field_splice() {
     ShapeTest::new(
         r#"
-annotation inject() {
-    targets: [type]
+annotation inject() on type {
     comptime post(target, ctx) {
         extend (extend_method(target.name, "evil", "string", ["{ ", " }"], ["a} + boom() + {b"]))
     }

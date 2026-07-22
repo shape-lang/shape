@@ -1949,11 +1949,11 @@ fn test_span_contains_offset() {
 
 #[test]
 fn s8c_sugar_application_hover_renders_hook_rows_with_no_soh_byte() {
-    let text = "annotation traced(factor: int) {\n  targets: [function]\n  before(args) {\n    args[0] = args[0] * factor\n    return args\n  }\n}\n\n@traced(3)\nfn victim(a: int) -> int { return a }\n\nvictim(1)\n";
+    let text = "annotation traced(factor: int) on function {\n  before(args) {\n    args[0] = args[0] * factor\n    return args\n  }\n}\n\n@traced(3)\nfn victim(a: int) -> int { return a }\n\nvictim(1)\n";
     let hover = get_hover(
         text,
         Position {
-            line: 8,
+            line: 7,
             character: 2,
         },
         None,
@@ -1981,7 +1981,7 @@ fn s8c_sugar_application_hover_renders_hook_rows_with_no_soh_byte() {
 
 #[test]
 fn s8c_api_body_fn_hover_renders_generic_view_with_no_soh_byte() {
-    let text = "fn tmpl<Args>(args: Args) -> Args {\n  args[0] = args[0] * 2\n  return args\n}\n\nannotation hookann() {\n  targets: [function]\n  comptime post(target, ctx) {\n    install(before_hook(tmpl, []))\n  }\n}\n\n@hookann()\nfn victim(a: int) -> int { return a }\n\nvictim(1)\n";
+    let text = "fn tmpl<Args>(args: Args) -> Args {\n  args[0] = args[0] * 2\n  return args\n}\n\nannotation hookann() on function {\n  comptime post(target, ctx) {\n    install(before_hook(tmpl, []))\n  }\n}\n\n@hookann()\nfn victim(a: int) -> int { return a }\n\nvictim(1)\n";
     let hover = get_hover(
         text,
         Position {

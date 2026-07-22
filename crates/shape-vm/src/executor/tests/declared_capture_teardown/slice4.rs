@@ -9,8 +9,7 @@ use shape_value::{HeapKind, NativeKind};
 use super::weak_of;
 
 const NESTED_SHARE_VAR: &str = r#"
-annotation add_reader() {
-  targets: [type]
+annotation add_reader() on type {
   comptime post(target, ctx) {
     extend target {
       method read() -> int { var total = 40

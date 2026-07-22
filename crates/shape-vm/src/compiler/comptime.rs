@@ -4011,8 +4011,7 @@ mod tests {
     fn annotation_handler_body_type_ref_is_rewritten_against_the_freeze() {
         let program = shape_ast::parse_program(
             r#"
-annotation reflect() {
-  targets: [type]
+annotation reflect() on type {
   comptime post(target, ctx) {
     let flag = match type_category(type_ref(User)) {
       FrozenTypeCategory::Nominal => 1

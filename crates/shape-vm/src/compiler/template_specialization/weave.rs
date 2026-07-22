@@ -423,8 +423,7 @@ mod tests {
             r#"
 {body_fns}
 
-annotation hookann() {{
-  targets: [function]
+annotation hookann() on function {{
   comptime post(target, ctx) {{
     {handler_stmts}
   }}
@@ -613,15 +612,13 @@ fn tmpl<Args>(args: Args, factor: int) -> Args {
     return args
 }
 
-annotation with3() {
-  targets: [function]
+annotation with3() on function {
   comptime post(target, ctx) {
     install(before_hook(tmpl, [capture("factor", 3)]))
   }
 }
 
-annotation with5() {
-  targets: [function]
+annotation with5() on function {
   comptime post(target, ctx) {
     install(before_hook(tmpl, [capture("factor", 5)]))
   }
@@ -678,15 +675,13 @@ fn tmpl<Args>(args: Args, factor: int) -> Args {
     return args
 }
 
-annotation first3() {
-  targets: [function]
+annotation first3() on function {
   comptime post(target, ctx) {
     install(before_hook(tmpl, [capture("factor", 3)]))
   }
 }
 
-annotation second3() {
-  targets: [function]
+annotation second3() on function {
   comptime post(target, ctx) {
     install(before_hook(tmpl, [capture("factor", 3)]))
   }
@@ -721,15 +716,13 @@ victim_a(10) * 1000 + victim_b(20)
 fn add_ten(x: int) -> int { return x + 10 }
 fn mul_two(x: int) -> int { return x * 2 }
 
-annotation first_hook() {
-  targets: [function]
+annotation first_hook() on function {
   comptime post(target, ctx) {
     install(before_hook(add_ten, []))
   }
 }
 
-annotation second_hook() {
-  targets: [function]
+annotation second_hook() on function {
   comptime post(target, ctx) {
     install(before_hook(mul_two, []))
   }
@@ -760,15 +753,13 @@ victim(1)
 fn add_ten(x: int) -> int { return x + 10 }
 fn mul_two(x: int) -> int { return x * 2 }
 
-annotation first_hook() {
-  targets: [function]
+annotation first_hook() on function {
   comptime post(target, ctx) {
     install(after_hook(add_ten, []))
   }
 }
 
-annotation second_hook() {
-  targets: [function]
+annotation second_hook() on function {
   comptime post(target, ctx) {
     install(after_hook(mul_two, []))
   }
@@ -799,8 +790,7 @@ victim(1)
         let src = r#"
 fn add_one(x: int) -> int { return x + 1 }
 
-annotation edit_and_hook() {
-  targets: [function]
+annotation edit_and_hook() on function {
   comptime post(target, ctx) {
     replace body { return ctx.original(a) + 7 }
     install(before_hook(add_one, []))
@@ -834,8 +824,7 @@ fn tmpl<Args>(args: Args) -> Args {
     return args
 }
 
-annotation hookann() {
-  targets: [function]
+annotation hookann() on function {
   comptime post(target, ctx) {
     install(before_hook(tmpl, []))
   }
@@ -1537,24 +1526,21 @@ fn tmpl<Args>(args: Args, cfg: Array<int>) -> Args {
     return args
 }
 
-annotation with_one_two() {
-  targets: [function]
+annotation with_one_two() on function {
   comptime post(target, ctx) {
     let cfg = [1, 2]
     install(before_hook(tmpl, [capture("cfg", cfg)]))
   }
 }
 
-annotation with_one_two_three() {
-  targets: [function]
+annotation with_one_two_three() on function {
   comptime post(target, ctx) {
     let cfg = [1, 2, 3]
     install(before_hook(tmpl, [capture("cfg", cfg)]))
   }
 }
 
-annotation with_two_one() {
-  targets: [function]
+annotation with_two_one() on function {
   comptime post(target, ctx) {
     let cfg = [2, 1]
     install(before_hook(tmpl, [capture("cfg", cfg)]))
@@ -1606,16 +1592,14 @@ fn tmpl<Args>(args: Args, cfg: Array<int>) -> Args {
     return args
 }
 
-annotation first_config() {
-  targets: [function]
+annotation first_config() on function {
   comptime post(target, ctx) {
     let cfg = [1, 2]
     install(before_hook(tmpl, [capture("cfg", cfg)]))
   }
 }
 
-annotation second_config() {
-  targets: [function]
+annotation second_config() on function {
   comptime post(target, ctx) {
     let cfg = [1, 2]
     install(before_hook(tmpl, [capture("cfg", cfg)]))
@@ -1665,16 +1649,14 @@ fn tmpl<Args>(args: Args, cfg: Array<string>) -> Args {
     return args
 }
 
-annotation with_ab_c() {
-  targets: [function]
+annotation with_ab_c() on function {
   comptime post(target, ctx) {
     let cfg = ["ab", "c"]
     install(before_hook(tmpl, [capture("cfg", cfg)]))
   }
 }
 
-annotation with_a_bc() {
-  targets: [function]
+annotation with_a_bc() on function {
   comptime post(target, ctx) {
     let cfg = ["a", "bc"]
     install(before_hook(tmpl, [capture("cfg", cfg)]))
@@ -1714,16 +1696,14 @@ fn tmpl<Args>(args: Args, cfg: Array<Array<int>>) -> Args {
     return args
 }
 
-annotation with_nested_a() {
-  targets: [function]
+annotation with_nested_a() on function {
   comptime post(target, ctx) {
     let cfg = [[1, 2], [3]]
     install(before_hook(tmpl, [capture("cfg", cfg)]))
   }
 }
 
-annotation with_nested_b() {
-  targets: [function]
+annotation with_nested_b() on function {
   comptime post(target, ctx) {
     let cfg = [[1], [2, 3]]
     install(before_hook(tmpl, [capture("cfg", cfg)]))
@@ -1766,16 +1746,14 @@ fn tmpl<Args>(args: Args, cfg: Option<int>) -> Args {
     return args
 }
 
-annotation with_some() {
-  targets: [function]
+annotation with_some() on function {
   comptime post(target, ctx) {
     let cfg: Option<int> = Some(5)
     install(before_hook(tmpl, [capture("cfg", cfg)]))
   }
 }
 
-annotation with_none() {
-  targets: [function]
+annotation with_none() on function {
   comptime post(target, ctx) {
     let cfg: Option<int> = None
     install(before_hook(tmpl, [capture("cfg", cfg)]))
@@ -1921,15 +1899,13 @@ fn tmpl_array<Args>(args: Args, cfg: Array<int>) -> Args {
     return args
 }
 
-annotation scalar_ann() {
-  targets: [function]
+annotation scalar_ann() on function {
   comptime post(target, ctx) {
     install(before_hook(tmpl_scalar, [capture("bump", 3)]))
   }
 }
 
-annotation array_ann() {
-  targets: [function]
+annotation array_ann() on function {
   comptime post(target, ctx) {
     let cfg = [5, 6]
     install(before_hook(tmpl_array, [capture("cfg", cfg)]))
@@ -2093,22 +2069,19 @@ fn tmpl<Args>(args: Args, bump: int, tag: string) -> Args {
     return args
 }
 
-annotation ab_one() {
-  targets: [function]
+annotation ab_one() on function {
   comptime post(target, ctx) {
     install(before_hook(tmpl, [capture("bump", 3), capture("tag", "ab")]))
   }
 }
 
-annotation ab_two() {
-  targets: [function]
+annotation ab_two() on function {
   comptime post(target, ctx) {
     install(before_hook(tmpl, [capture("bump", 3), capture("tag", "ab")]))
   }
 }
 
-annotation with_xyz() {
-  targets: [function]
+annotation with_xyz() on function {
   comptime post(target, ctx) {
     install(before_hook(tmpl, [capture("bump", 3), capture("tag", "xyz")]))
   }
@@ -2162,8 +2135,7 @@ fn bump<Args>(args: Args, times: int, tag: string) -> Args {
     return args
 }
 
-annotation retry(times: int, tag: string) {
-  targets: [function]
+annotation retry(times: int, tag: string) on function {
   comptime post(target, ctx) {
     install(before_hook(bump, [capture("times", times), capture("tag", tag)]))
   }
@@ -2221,8 +2193,7 @@ fn bump<Args>(args: Args, times: int, tag: string) -> Args {
     return args
 }
 
-annotation retry(times: int, tag: string) {
-  targets: [function]
+annotation retry(times: int, tag: string) on function {
   comptime post(target, ctx) {
     install(before_hook(bump, [capture("times", times), capture("tag", tag)]))
   }
@@ -2339,8 +2310,7 @@ let ambient = 7
 
 fn hook(x: int) -> int { return x + ambient }
 
-annotation hookann() {
-  targets: [function]
+annotation hookann() on function {
   comptime post(target, ctx) {
     install(before_hook(hook, []))
   }
@@ -2399,8 +2369,7 @@ victim(4)
 mod defs {
     pub const secret: int = 11
 
-    annotation hookann(times: int) {
-      targets: [function]
+    annotation hookann(times: int) on function {
       before(args) {
         args[0] = args[0] + secret + times
         return args
@@ -2433,8 +2402,7 @@ victim(4)
 let sees = 9
 
 mod defs {
-    annotation hookann(times: int) {
-      targets: [function]
+    annotation hookann(times: int) on function {
       before(args) {
         args[0] = args[0] + sees + times
         return args
@@ -2472,8 +2440,7 @@ victim(4)
 mod defs {
     pub const secret: int = 11
 
-    annotation hookann(times: int) {
-      targets: [function]
+    annotation hookann(times: int) on function {
       before(args) {
         args[0] = args[0] + secret + times
         return args
@@ -2508,8 +2475,7 @@ victim(4)
         #[test]
         fn a5_config_only_body_weaves_runs_and_stays_module_binding_free() {
             let src = r#"
-annotation tagged(times: int) {
-  targets: [function]
+annotation tagged(times: int) on function {
   before(args) {
     args[0] = args[0] * times
     return args
@@ -2553,8 +2519,7 @@ fn hook(x: int) -> int {
     return x + 1
 }
 
-annotation hookann() {
-  targets: [function]
+annotation hookann() on function {
   comptime post(target, ctx) {
     install(before_hook(hook, []))
   }
@@ -2600,8 +2565,7 @@ victim(4)
             let src = r#"
 let args = [7, 8]
 
-annotation hookann(times: int) {
-  targets: [function]
+annotation hookann(times: int) on function {
   before(args) {
     let s = f"{args[0]}"
     args[0] = args[0] + times
@@ -2634,8 +2598,7 @@ victim(4)
             let src = r#"
 let args = [7, 8]
 
-annotation tagged(times: int) {
-  targets: [function]
+annotation tagged(times: int) on function {
   before(args) {
     let v = args[0]
     let s = f"{v}"
@@ -2674,8 +2637,7 @@ victim(4)
 let bump = 5
 
 mod defs {
-    annotation hookann(times: int) {
-      targets: [function]
+    annotation hookann(times: int) on function {
       before(args) {
         let f = |y: int; share bump| y + 1
         args[0] = f(args[0])
@@ -2712,8 +2674,7 @@ fn hook(x: int) -> int {
     return x
 }
 
-annotation hookann() {
-  targets: [function]
+annotation hookann() on function {
   comptime post(target, ctx) {
     install(before_hook(hook, []))
   }
@@ -2742,8 +2703,7 @@ fn hook(x: int) -> int {
     return f(x)
 }
 
-annotation hookann() {
-  targets: [function]
+annotation hookann() on function {
   comptime post(target, ctx) {
     install(before_hook(hook, []))
   }
@@ -2769,8 +2729,7 @@ victim(4)
 mod defs {
     pub const secret: int = 11
 
-    annotation hookann(times: int) {
-      targets: [function]
+    annotation hookann(times: int) on function {
       before(args) {
         args[0] = args[0] + defs::secret + times
         return args
@@ -2803,8 +2762,7 @@ fn hook(x: int) -> int {
     return x + bump
 }
 
-annotation hookann() {
-  targets: [function]
+annotation hookann() on function {
   comptime post(target, ctx) {
     install(before_hook(hook, []))
   }
@@ -2832,8 +2790,7 @@ fn hook(x: int) -> int {
     return x + y + bump
 }
 
-annotation hookann() {
-  targets: [function]
+annotation hookann() on function {
   comptime post(target, ctx) {
     install(before_hook(hook, []))
   }
@@ -2866,8 +2823,7 @@ fn hook(x: int) -> int {
     return x + bump
 }
 
-annotation hookann() {
-  targets: [function]
+annotation hookann() on function {
   comptime post(target, ctx) {
     install(before_hook(hook, []))
   }
@@ -2895,8 +2851,7 @@ fn helper(v: int) -> int { return v + 1 }
 
 fn hook(x: int) -> int { return helper(x) }
 
-annotation hookann() {
-  targets: [function]
+annotation hookann() on function {
   comptime post(target, ctx) {
     install(before_hook(hook, []))
   }
@@ -2935,8 +2890,7 @@ victim(4)
             let src = r#"
 let chosen = 5
 
-annotation retry(times: int) {
-  targets: [function]
+annotation retry(times: int) on function {
   before(args) {
     args[0] = args[0] * times
     return args
@@ -2981,8 +2935,7 @@ victim(4)
             let src = r#"
 const n: int = 3
 
-annotation retry(times: int) {
-  targets: [function]
+annotation retry(times: int) on function {
   before(args) {
     args[0] = args[0] * times
     return args
@@ -3019,8 +2972,7 @@ fn hook<Args>(args: Args, x: int) -> Args {
     return args
 }
 
-annotation hookann() {
-  targets: [function]
+annotation hookann() on function {
   comptime post(target, ctx) {
     install(before_hook(hook, [capture("x", args)]))
   }
@@ -3053,8 +3005,7 @@ fn hook(x: int) -> int {
     return x + 1
 }
 
-annotation hookann() {
-  targets: [function]
+annotation hookann() on function {
   comptime post(target, ctx) {
     install(before_hook(hook, []))
   }
@@ -3086,8 +3037,7 @@ fn tmpl<Args>(args: Args) -> Args {
     return args
 }
 
-annotation hookann() {
-  targets: [function]
+annotation hookann() on function {
   comptime post(target, ctx) {
     install(before_hook(tmpl, []))
   }

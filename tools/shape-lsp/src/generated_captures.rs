@@ -134,8 +134,7 @@ mod tests {
     use crate::util::offset_to_line_col;
 
     const GENERATED_CAPTURE: &str = r#"
-annotation add_reader() {
-  targets: [type]
+annotation add_reader() on type {
   comptime post(target, ctx) {
     extend target {
       method read(x: int) -> int {
@@ -155,8 +154,7 @@ job.read(2)
 "#;
 
     const GENERATED_CALLABLE_CAPTURE: &str = r#"
-annotation add_runner() {
-  targets: [type]
+annotation add_runner() on type {
   comptime post(target, ctx) {
     extend target {
       method run(x: int) -> int {
@@ -176,8 +174,7 @@ job.run(2)
 "#;
 
     const SIBLING_GENERATED_CAPTURES: &str = r#"
-annotation add_reader() {
-  targets: [type]
+annotation add_reader() on type {
   comptime post(target, ctx) {
     extend target {
       method read(x: int) -> int {
@@ -207,8 +204,7 @@ job.read(2)
     // GENERIC/NESTED/INVALID fixtures below.
 
     const GENERIC_GENERATED_CAPTURE: &str = r#"
-annotation add_echo() {
-  targets: [type]
+annotation add_echo() on type {
   comptime post(target, ctx) {
     extend target {
       method echo<T>(value: T) -> T {
@@ -229,8 +225,7 @@ let text = job.echo("shape")
 "#;
 
     const NESTED_GENERATED_CAPTURE: &str = r#"
-annotation add_reader() {
-  targets: [type]
+annotation add_reader() on type {
   comptime post(target, ctx) {
     extend target {
       method read() -> int {
@@ -253,8 +248,7 @@ job.read()
 "#;
 
     const INVALID_IMPLICIT_GENERATED_CAPTURE: &str = r#"
-annotation add_reader() {
-  targets: [type]
+annotation add_reader() on type {
   comptime post(target, ctx) {
     extend target {
       method read(x: int) -> int {

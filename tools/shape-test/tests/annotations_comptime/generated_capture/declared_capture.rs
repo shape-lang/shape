@@ -63,8 +63,7 @@ answer()
 fn c0901_declared_but_unused_is_rejected_in_a_generated_extend_method() {
     ShapeTest::new(
         r#"
-annotation add_reader() {
-  targets: [type]
+annotation add_reader() on type {
   comptime post(target, ctx) {
     extend target {
       method read(x: int) -> int { let unused = 7
@@ -94,8 +93,7 @@ print(job.read(2))
 fn c0902_borrow_capture_is_rejected_in_a_generated_extend_method() {
     ShapeTest::new(
         r#"
-annotation add_reader() {
-  targets: [type]
+annotation add_reader() on type {
   comptime post(target, ctx) {
     extend target {
       method read(x: int) -> int { let base = 7
@@ -121,8 +119,7 @@ print(job.read(2))
 fn c0902_exclusive_borrow_is_rejected_in_a_nested_generated_closure() {
     ShapeTest::new(
         r#"
-annotation add_reader() {
-  targets: [type]
+annotation add_reader() on type {
   comptime post(target, ctx) {
     extend target {
       method read(x: int) -> int { let outer = |; | { let base = 7
@@ -149,8 +146,7 @@ print(job.read(2))
 fn c0904_move_cannot_unshare_a_var_in_a_generated_extend_method() {
     ShapeTest::new(
         r#"
-annotation add_reader() {
-  targets: [type]
+annotation add_reader() on type {
   comptime post(target, ctx) {
     extend target {
       method read(x: int) -> int { var total = 5
@@ -179,8 +175,7 @@ print(job.read(2))
 fn c0905_unresolvable_declared_capture_is_rejected() {
     ShapeTest::new(
         r#"
-annotation add_reader() {
-  targets: [type]
+annotation add_reader() on type {
   comptime post(target, ctx) {
     extend target {
       method read(x: int) -> int { let base = 7
@@ -211,8 +206,7 @@ print(job.read(2))
 fn c0908_share_on_a_plain_local_is_rejected_through_monomorphization() {
     ShapeTest::new(
         r#"
-annotation add_reader() {
-  targets: [type]
+annotation add_reader() on type {
   comptime post(target, ctx) {
     extend target {
       method read<T>(f: T) -> int { let base = 7
@@ -237,8 +231,7 @@ print(job.read(9))
 fn c0907_duplicate_capture_declaration_is_rejected() {
     ShapeTest::new(
         r#"
-annotation add_reader() {
-  targets: [type]
+annotation add_reader() on type {
   comptime post(target, ctx) {
     extend target {
       method read(x: int) -> int { let base = 7
@@ -268,8 +261,7 @@ print(job.read(2))
 fn used_but_undeclared_raises_the_wave46_message_verbatim() {
     ShapeTest::new(
         r#"
-annotation add_reader() {
-  targets: [type]
+annotation add_reader() on type {
   comptime post(target, ctx) {
     extend target {
       method read(x: int) -> int { let base = 7
@@ -298,8 +290,7 @@ print(job.read(2))
 fn b0005_is_not_widened_by_a_declared_move() {
     ShapeTest::new(
         r#"
-annotation add_reader() {
-  targets: [type]
+annotation add_reader() on type {
   comptime post(target, ctx) {
     extend target {
       method read(x: int) -> int { let base = 7
@@ -359,8 +350,7 @@ print(worker(2))
 fn no_ctx_capture_builtin_resolves() {
     ShapeTest::new(
         r#"
-annotation add_reader() {
-  targets: [type]
+annotation add_reader() on type {
   comptime post(target, ctx) {
     ctx.capture("base")
     extend target {
@@ -385,8 +375,7 @@ print(1)
 fn declared_move_over_a_read_only_let_mut_runs_in_both_tiers() {
     expect_vm_and_jit_number(
         r#"
-annotation add_scaler() {
-  targets: [type]
+annotation add_scaler() on type {
   comptime post(target, ctx) {
     extend target {
       method scale(f: int) -> int { let mut hits = 3
@@ -414,8 +403,7 @@ job.scale(14)
 fn declared_share_over_a_var_runs_on_the_interpreter() {
     ShapeTest::new(
         r#"
-annotation add_reader() {
-  targets: [type]
+annotation add_reader() on type {
   comptime post(target, ctx) {
     extend target {
       method read(x: int) -> int { var total = 40

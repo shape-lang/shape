@@ -9,8 +9,7 @@ use shape_test::shape_test::ShapeTest;
 fn comptime_post_extend_adds_method_to_type() {
     ShapeTest::new(
         r#"
-annotation add_greet() {
-  targets: [type]
+annotation add_greet() on type {
   comptime post(target, ctx) {
     extend target {
       method greet() { f"Hello from {self.name}" }
@@ -33,8 +32,7 @@ print(p.greet())
 fn comptime_post_extend_adds_computed_method() {
     ShapeTest::new(
         r#"
-annotation add_area() {
-  targets: [type]
+annotation add_area() on type {
   comptime post(target, ctx) {
     extend target {
       method area() { self.width * self.height }
@@ -57,8 +55,7 @@ print(r.area())
 fn comptime_post_remove_target_eliminates_type() {
     ShapeTest::new(
         r#"
-annotation remove_type() {
-  targets: [type]
+annotation remove_type() on type {
   comptime post(target, ctx) {
     remove target
   }
@@ -78,8 +75,7 @@ print("Ghost type was removed")
 fn comptime_post_replace_body_overrides_function() {
     ShapeTest::new(
         r#"
-annotation always_zero() {
-  targets: [function]
+annotation always_zero() on function {
   comptime post(target, ctx) {
     replace body {
       0
@@ -103,8 +99,7 @@ print(compute(999))
 fn comptime_post_extend_adds_multiple_methods() {
     ShapeTest::new(
         r#"
-annotation add_math() {
-  targets: [type]
+annotation add_math() on type {
   comptime post(target, ctx) {
     extend target {
       method sum() { self.x + self.y }
@@ -131,8 +126,7 @@ fn comptime_post_with_annotation_param_in_method() {
     // ordinary generated methods.
     ShapeTest::new(
         r#"
-annotation add_label(label_text: string) {
-  targets: [type]
+annotation add_label(label_text: string) on type {
   comptime post(target, ctx) {
     extend target {
       method label() { self.name }
@@ -156,8 +150,7 @@ fn comptime_post_set_param_default() {
     // The call omits `y`, proving the directive-installed default is used.
     ShapeTest::new(
         r#"
-annotation default_y(val: int) {
-  targets: [function]
+annotation default_y(val: int) on function {
   comptime post(target, ctx) {
     set param y = val
   }
@@ -179,8 +172,7 @@ print(add(5))
 fn targets_declaration_restricts_to_type() {
     ShapeTest::new(
         r#"
-annotation type_only() {
-  targets: [type]
+annotation type_only() on type {
   comptime post(target, ctx) {
     extend target {
       method tag() { "tagged" }

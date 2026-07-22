@@ -27,8 +27,7 @@ fn boost<Args>(args: Args, bump: int) -> Args {
 }
 fn settle(r: int) -> int { return r + 3 }
 
-annotation hooked() {
-  targets: [function]
+annotation hooked() on function {
   comptime post(target, ctx) {
     install(before_hook(boost, [capture("bump", 2)]))
     install(after_hook(settle, []))

@@ -32,8 +32,7 @@ fn tmpl<Args>(args: Args, cfg: Array<int>) -> Args {
   return args
 }
 
-annotation hooked() {
-  targets: [function]
+annotation hooked() on function {
   comptime post(target, ctx) {
     let cfg = [3, 4]
     install(before_hook(tmpl, [capture("cfg", cfg)]))

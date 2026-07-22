@@ -31,8 +31,7 @@ fn expect_vm_and_jit_number(source: &str, expected: f64) {
 #[test]
 fn annotation_handler_reflection_reaches_generated_fn_called_from_fn_body() {
     let source = r#"
-annotation reflect_category() {
-  targets: [type]
+annotation reflect_category() on type {
   comptime post(target, ctx) {
     let flag = match type_category(type_ref(User)) {
       FrozenTypeCategory::Nominal => 1
@@ -57,8 +56,7 @@ show()
 #[test]
 fn annotation_handler_reflection_reaches_generated_fn_called_top_level() {
     let source = r#"
-annotation reflect_category() {
-  targets: [type]
+annotation reflect_category() on type {
   comptime post(target, ctx) {
     let flag = match type_category(type_ref(User)) {
       FrozenTypeCategory::Nominal => 1
@@ -85,8 +83,7 @@ user_category_flag()
 #[test]
 fn function_target_annotation_handler_asserts_frozen_category() {
     let source = r#"
-annotation assert_user_is_nominal() {
-  targets: [function]
+annotation assert_user_is_nominal() on function {
   comptime post(target, ctx) {
     match type_category(type_ref(User)) {
       FrozenTypeCategory::Nominal => 1
@@ -114,8 +111,7 @@ compute()
 #[test]
 fn annotation_handler_composite_type_expression_reaches_generated_fn() {
     let source = r#"
-annotation reflect_tuple() {
-  targets: [type]
+annotation reflect_tuple() on type {
   comptime post(target, ctx) {
     let flag = match type_category(type_ref([int, string])) {
       FrozenTypeCategory::Tuple => 1
@@ -141,8 +137,7 @@ show()
 #[test]
 fn function_target_annotation_handler_error_branch_fires_on_wrong_category() {
     let source = r#"
-annotation assert_int_is_nominal() {
-  targets: [function]
+annotation assert_int_is_nominal() on function {
   comptime post(target, ctx) {
     match type_category(type_ref(int)) {
       FrozenTypeCategory::Nominal => 1
@@ -170,8 +165,7 @@ compute()
 #[test]
 fn annotation_handler_reflect_payload_reaches_generated_fn() {
     let source = r#"
-annotation reflect_width() {
-  targets: [type]
+annotation reflect_width() on type {
   comptime post(target, ctx) {
     let flag = match reflect(type_ref(int)) {
       FrozenType::Primitive(p) => match p {
@@ -204,8 +198,7 @@ show()
 #[test]
 fn annotation_handler_reflect_composite_payload_reaches_generated_fn() {
     let source = r#"
-annotation reflect_arity() {
-  targets: [type]
+annotation reflect_arity() on type {
   comptime post(target, ctx) {
     let n = match reflect(type_ref([int, string])) {
       FrozenType::Tuple(t) => t.elements.len()

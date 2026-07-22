@@ -883,8 +883,7 @@ print("ok")
 fn descriptor_cannot_lift_through_the_set_param_value_directive() {
     ShapeTest::new(
         r#"
-annotation inject_descriptor() {
-  targets: [function]
+annotation inject_descriptor() on function {
   comptime post(target, ctx) {
     set param b = reflect(type_ref(int))
   }

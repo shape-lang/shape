@@ -9,8 +9,7 @@ use shape_test::shape_test::ShapeTest;
 fn set_param_value_supplies_default_for_omitted_arg() {
     ShapeTest::new(
         r#"
-annotation default_y(val: int) {
-  targets: [function]
+annotation default_y(val: int) on function {
   comptime post(target, ctx) {
     set param y = val
   }
@@ -32,8 +31,7 @@ print(add(5))
 fn set_param_value_explicit_arg_still_overrides_generated_default() {
     ShapeTest::new(
         r#"
-annotation default_y(val: int) {
-  targets: [function]
+annotation default_y(val: int) on function {
   comptime post(target, ctx) {
     set param y = val
   }
@@ -56,8 +54,7 @@ print(add(5))
 fn set_param_value_unknown_param_is_compile_error() {
     ShapeTest::new(
         r#"
-annotation default_missing() {
-  targets: [function]
+annotation default_missing() on function {
   comptime post(target, ctx) {
     set param missing = 1
   }
@@ -81,8 +78,7 @@ print(add(5))
 fn set_param_value_string_default_is_supported() {
     ShapeTest::new(
         r#"
-annotation default_suffix(val: string) {
-  targets: [function]
+annotation default_suffix(val: string) on function {
   comptime post(target, ctx) {
     set param suffix = val
   }
@@ -104,8 +100,7 @@ print(shout("shape"))
 fn set_param_value_bool_default_is_supported() {
     ShapeTest::new(
         r#"
-annotation default_flag(val: bool) {
-  targets: [function]
+annotation default_flag(val: bool) on function {
   comptime post(target, ctx) {
     set param flag = val
   }
@@ -127,8 +122,7 @@ print(label())
 fn set_param_value_number_default_is_supported() {
     ShapeTest::new(
         r#"
-annotation default_limit(val: number) {
-  targets: [function]
+annotation default_limit(val: number) on function {
   comptime post(target, ctx) {
     set param limit = val
   }
@@ -162,8 +156,7 @@ print(over_limit(3.0))
 fn replace_module_typed_fragment_body_type_errors_are_reported() {
     ShapeTest::new(
         r#"
-annotation bad_module() {
-  targets: [module]
+annotation bad_module() on module {
   comptime post(target, ctx) {
     replace module (item_fn("answer", "int", "not an int"))
   }
@@ -196,8 +189,7 @@ print(demo::answer())
 fn extend_item_fragment_generates_free_function_without_source_string() {
     ShapeTest::new(
         r#"
-annotation typed_label() {
-  targets: [type]
+annotation typed_label() on type {
   comptime post(target, ctx) {
     extend (item_fn(f"{target.name}_label", type_info("string").type_ref, "typed fragment"))
   }
@@ -229,8 +221,7 @@ print(Widget_label())
 fn replace_module_source_string_is_rejected_with_named_alternative() {
     ShapeTest::new(
         r#"
-annotation synth_module() {
-  targets: [module]
+annotation synth_module() on module {
   comptime post(target, ctx) {
     replace module ("fn answer() -> int { 42 }")
   }
@@ -258,8 +249,7 @@ print(demo::answer())
 fn replace_module_typed_fragment_installs_and_runs() {
     ShapeTest::new(
         r#"
-annotation synth_module() {
-  targets: [module]
+annotation synth_module() on module {
   comptime post(target, ctx) {
     replace module (item_fn("answer", "int", 42))
   }
@@ -281,8 +271,7 @@ print(demo::answer())
 fn replace_module_typed_fragment_rejected_on_function_target() {
     ShapeTest::new(
         r#"
-annotation bad_typed_replace() {
-  targets: [function]
+annotation bad_typed_replace() on function {
   comptime post(target, ctx) {
     replace module (item_fn("answer", "int", 42))
   }
@@ -306,8 +295,7 @@ print(answer())
 fn set_param_type_literal_applies_via_typed_transport() {
     ShapeTest::new(
         r#"
-annotation typed_param() {
-  targets: [function]
+annotation typed_param() on function {
   comptime post(target, ctx) {
     set param x: int
   }
@@ -329,8 +317,7 @@ print(identity(7))
 fn set_return_type_literal_applies_via_typed_transport() {
     ShapeTest::new(
         r#"
-annotation typed_return() {
-  targets: [function]
+annotation typed_return() on function {
   comptime post(target, ctx) {
     set return int
   }
@@ -359,8 +346,7 @@ print(answer())
 fn direct_block_extend_adds_callable_method_via_typed_transport() {
     ShapeTest::new(
         r#"
-annotation add_label() {
-  targets: [type]
+annotation add_label() on type {
   comptime post(target, ctx) {
     extend target {
       method label() { "direct block" }
@@ -383,8 +369,7 @@ print(w.label())
 fn direct_block_extend_multiple_methods_via_typed_transport() {
     ShapeTest::new(
         r#"
-annotation add_ops() {
-  targets: [type]
+annotation add_ops() on type {
   comptime post(target, ctx) {
     extend target {
       method doubled() { self.n * 2 }

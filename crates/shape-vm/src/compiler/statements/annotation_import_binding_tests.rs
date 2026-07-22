@@ -116,7 +116,7 @@ from pkg::alpha use { @same }
 fn root_local_annotation_keeps_lexical_precedence_over_imports_and_prelude() {
     let standalone = parse(
         r#"
-annotation same() { targets: [type] }
+annotation same() on type { }
 from pkg::support use { @same }
 "#,
     );
@@ -147,7 +147,7 @@ from pkg::support use { @same }
                  suppression above is caused by the local declaration");
     assert_eq!(installed._module_path, "pkg::support");
 
-    let graph_program = parse("annotation same() { targets: [type] }");
+    let graph_program = parse("annotation same() on type { }");
     let graph = root_graph(
         &graph_program,
         vec![annotation_import("std::prelude", "same")],

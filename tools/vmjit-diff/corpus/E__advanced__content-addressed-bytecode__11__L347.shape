@@ -1,5 +1,4 @@
-annotation memoized(store) {
-    targets: [function]
+annotation memoized(store) on function {
     comptime post(target, ctx) {
         replace body {
             let key = state::hash([state::fn_hash(__original__), ...args])

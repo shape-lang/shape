@@ -96,8 +96,7 @@ fn discovered_extend_methods(items: &[shape_ast::ast::Item], type_name: &str) ->
 /// (the capture case is the C0911 quarantine fixture in the LSP suite). Mirrors
 /// the `tests/smokes-jit-closure/c2-replace-body-edit.shape` smoke shape.
 const FUNCTION_TARGET_REPLACE_BODY: &str = r#"
-annotation edit_answer() {
-    targets: [function]
+annotation edit_answer() on function {
     comptime post(target, ctx) {
         replace body {
             return 42
@@ -116,8 +115,7 @@ answer()
 /// Identical target shape to `FUNCTION_TARGET_REPLACE_BODY`; only the directive
 /// kind differs, which is what isolates the gap to directive WIRING.
 const FUNCTION_TARGET_EXTEND: &str = r#"
-annotation add_number_method() {
-    targets: [function]
+annotation add_number_method() on function {
     comptime post(target, ctx) {
         extend Number {
             method doubled() { self * 2.0 }

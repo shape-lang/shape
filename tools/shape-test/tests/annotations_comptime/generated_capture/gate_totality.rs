@@ -10,8 +10,7 @@ use super::expect_vm_and_jit_number;
 #[test]
 fn generated_function_allows_capture_free_closure() {
     let source = r#"
-annotation generate_constant() {
-  targets: [type]
+annotation generate_constant() on type {
   comptime post(target, ctx) {
     extend target {
       method generated_constant() -> int { let worker = || 42; worker() }
@@ -59,8 +58,7 @@ fn generated_nested_closure_rejects_implicit_capture() {
     // container carries the nested-generated-closure gate coverage identically.
     ShapeTest::new(
         r#"
-annotation generate_worker() {
-  targets: [type]
+annotation generate_worker() on type {
   comptime post(target, ctx) {
     extend target {
       method generated_nested() -> int { let outer = || { let v = 41; let inner = || v + 1; inner() }; outer() }
@@ -93,8 +91,7 @@ fn generated_generic_body_rejects_implicit_capture_through_monomorphization() {
     // type_params?, verified against existing `method describe<N>` extends).
     ShapeTest::new(
         r#"
-annotation generate_worker() {
-  targets: [type]
+annotation generate_worker() on type {
   comptime post(target, ctx) {
     extend target {
       method generated_generic<T>(x: T) -> T { let value = x; let worker = || value; worker() }
@@ -122,8 +119,7 @@ print(job.generated_generic(41))
 fn replace_body_expansion_rejects_implicit_capture() {
     ShapeTest::new(
         r#"
-annotation stub_worker() {
-  targets: [function]
+annotation stub_worker() on function {
   comptime post(target, ctx) {
     replace body {
       let value = 41
@@ -178,8 +174,7 @@ compute()
 #[test]
 fn ctx_original_shadow_body_keeps_implicit_capture() {
     let source = r#"
-annotation wrap() {
-  targets: [function]
+annotation wrap() on function {
   comptime post(target, ctx) {
     replace body {
       return ctx.original() + 1

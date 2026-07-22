@@ -4377,8 +4377,7 @@ mod s3_freeze_gate_tests {
     fn extends_prepass_without_freeze_handle_is_the_named_row3_compile_error() {
         let program = parse(
             r#"
-annotation touch() {
-  targets: [type]
+annotation touch() on type {
   comptime post(target, ctx) {
     1
   }
@@ -4404,8 +4403,7 @@ type Probe { id: int }
     fn signature_directive_prepass_without_freeze_handle_is_the_named_row3_compile_error() {
         let mut program = parse(
             r#"
-annotation touch() {
-  targets: [function]
+annotation touch() on function {
   comptime post(target, ctx) {
     1
   }
@@ -4460,8 +4458,7 @@ fn probe() -> int { 2 }
 
         let program = parse(
             r#"
-annotation marker() {
-  targets: [type]
+annotation marker() on type {
   comptime post(target, ctx) {
     warning("SIDE_EFFECT")
     error("HANDLER_RAN")
@@ -4617,8 +4614,7 @@ mod s2_expansion_provenance_tests {
     fn prepass_and_pass2_agree_on_one_expansion_identity_for_generated_extend_method() {
         let program = parse(
             r#"
-annotation gen() {
-  targets: [type]
+annotation gen() on type {
   comptime post(target, ctx) {
     extend (extend_method_literal(target.name, "answer", "int", 42))
   }
@@ -4678,8 +4674,7 @@ type Point { id: int }
     fn prepass_and_pass2_agree_on_one_expansion_identity_for_generated_free_function() {
         let program = parse(
             r#"
-annotation gen2() {
-  targets: [type]
+annotation gen2() on type {
   comptime post(target, ctx) {
     extend (item_fn("generated_flag", "int", 7))
   }
@@ -4714,8 +4709,7 @@ fn main() -> int { generated_flag() }
     fn conflicting_generated_name_across_applications_is_the_named_row2_compile_error() {
         let program = parse(
             r#"
-annotation dup() {
-  targets: [type]
+annotation dup() on type {
   comptime post(target, ctx) {
     extend (item_fn("clash", "int", 1))
   }
@@ -4960,8 +4954,7 @@ mod s3_source_anchor_tests {
     #[test]
     fn generated_extend_target_method_name_span_anchors_at_the_application_site() {
         let source = r#"
-annotation gen() {
-  targets: [type]
+annotation gen() on type {
   comptime post(target, ctx) {
     extend target {
       method answer() -> int { 42 }
@@ -4994,8 +4987,7 @@ type Point { id: int }
     #[test]
     fn generated_producer_extend_method_name_span_anchors_at_the_application_site() {
         let source = r#"
-annotation gen() {
-  targets: [type]
+annotation gen() on type {
   comptime post(target, ctx) {
     extend (extend_method_literal(target.name, "answer", "int", 42))
   }
@@ -5027,8 +5019,7 @@ type Point { id: int }
     #[test]
     fn generated_producer_free_function_anchors_at_the_application_site() {
         let source = r#"
-annotation gen2() {
-  targets: [type]
+annotation gen2() on type {
   comptime post(target, ctx) {
     extend (item_fn("generated_flag", "int", 7))
   }
@@ -5168,8 +5159,7 @@ mod s4_query_surface_and_diagnostics_tests {
     }
 
     const GENERATED_METHOD_FIXTURE: &str = r#"
-annotation gen() {
-  targets: [type]
+annotation gen() on type {
   comptime post(target, ctx) {
     extend target {
       method answer() -> int { 42 }
@@ -5402,8 +5392,7 @@ type Point { id: int }
     #[test]
     fn end_to_end_generated_body_failure_carries_provenance() {
         let source = r#"
-annotation bad_gen() {
-  targets: [type]
+annotation bad_gen() on type {
   comptime post(target, ctx) {
     extend target {
       method broken() -> int { missing_helper() }
@@ -5502,8 +5491,7 @@ mod e3_function_target_discovery_tests {
     fn function_target_extend_explicit_type_enters_discovery() {
         let program = parse(
             r#"
-annotation add_number_method() {
-    targets: [function]
+annotation add_number_method() on function {
     comptime post(target, ctx) {
         extend Number {
             method doubled() { self * 2.0 }
@@ -5528,8 +5516,7 @@ fn marker() { 0 }
         let program = parse(
             r#"
 type Widget { id: int }
-annotation add_label() {
-    targets: [function]
+annotation add_label() on function {
     comptime post(target, ctx) {
         extend Widget {
             method label() -> string { f"widget-{self.id}" }
@@ -5554,8 +5541,7 @@ fn register() -> int { 0 }
     fn unapplied_function_target_annotation_generates_nothing() {
         let program = parse(
             r#"
-annotation add_number_method() {
-    targets: [function]
+annotation add_number_method() on function {
     comptime post(target, ctx) {
         extend Number {
             method doubled() { self * 2.0 }

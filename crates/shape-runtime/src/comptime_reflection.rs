@@ -797,7 +797,7 @@ pub const REFLECT_REPR_BUILTIN_ROW: BuiltinMetadata = BuiltinMetadata {
     ],
     return_type: "FrozenType<T>",
     example: Some(
-        "annotation derive() { targets: [type] comptime post(target, ctx, access) { reflect_repr(type_ref(User), access) } }",
+        "annotation derive() on type { comptime post(target, ctx, access) { reflect_repr(type_ref(User), access) } }",
     ),
 };
 

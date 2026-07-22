@@ -1532,8 +1532,7 @@ mod foreign_target_hook_annotation_tests {
     }
 
     const TRACED_DECL: &str = r#"
-annotation traced(tag: string) {
-  targets: [function]
+annotation traced(tag: string) on function {
   before(args) {
     print(f"before fired: {tag}")
     return args
@@ -1572,8 +1571,7 @@ print(labs(0 - 42))
     #[test]
     fn s8a_hook_annotation_on_dynamic_language_foreign_fn_rejects_naming_the_language() {
         let src = r#"
-annotation traced2(tag: string) {
-  targets: [function]
+annotation traced2(tag: string) on function {
   after(result) {
     print(f"after fired: {tag}")
     return result
@@ -1607,8 +1605,7 @@ print("unreachable")
     fn s8a_stacked_hook_annotations_on_extern_c_fn_reject_on_the_first() {
         let src = &format!(
             r#"{TRACED_DECL}
-annotation logged(tag: string) {{
-  targets: [function]
+annotation logged(tag: string) on function {{
   after(result) {{
     print(f"after fired: {{tag}}")
     return result
@@ -1682,8 +1679,7 @@ print(double(21))
     fn s8a_scope_fence_comptime_only_annotation_on_extern_c_fn_stays_unrejected() {
         compile_ok(
             r#"
-annotation marked() {
-  targets: [function]
+annotation marked() on function {
   comptime post(target, ctx) {
     1
   }

@@ -1,6 +1,5 @@
 // Probe: runtime before/after using f-strings (avoid the unknown+string concat issue)
-annotation traced(tag) {
-  targets: [function]
+annotation traced(tag) on function {
 
   before(args, ctx) {
     print(f"[{tag}] before")

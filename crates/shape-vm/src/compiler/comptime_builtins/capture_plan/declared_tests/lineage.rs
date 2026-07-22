@@ -4,8 +4,7 @@ use super::*;
 fn nested_move_preserves_original_lineage_and_semantic_type_by_ordinal() {
     let compiler = compile(
         r#"
-annotation add_reader() {
-  targets: [type]
+annotation add_reader() on type {
   comptime post(target, ctx) {
     extend target {
       method read() -> int { let total = 40

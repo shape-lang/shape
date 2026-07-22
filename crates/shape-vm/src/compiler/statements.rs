@@ -8455,8 +8455,7 @@ mod tests {
         // rejects at the declaration (S5b), so the override subject rides a
         // comptime handler instead.
         let code = r#"
-            annotation traced() {
-                targets: [type]
+            annotation traced() on type {
                 comptime post(target, ctx) {
                     1
                 }
@@ -8504,8 +8503,7 @@ mod tests {
     #[test]
     fn test_definition_lifecycle_targets_reject_expression_target() {
         let code = r#"
-            annotation info() {
-                targets: [expression]
+            annotation info() on expression {
                 metadata(target, ctx) {
                     target.name
                 }

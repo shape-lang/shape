@@ -39,8 +39,7 @@ use shape_test::shape_test::ShapeTest;
 // ============================================================================
 
 const F1_PROGRAM: &str = r#"
-annotation schema_of() {
-    targets: [type]
+annotation schema_of() on type {
     comptime post(target, ctx) {
         extend (item_fn(f"{target.name}_label", "string", "User schema"))
     }
@@ -127,8 +126,7 @@ fn wf3d_f3_comptime_error_lsds_jit() {
 // ============================================================================
 
 const F4_PROGRAM: &str = r#"
-annotation add_label() {
-    targets: [type]
+annotation add_label() on type {
     comptime post(target, ctx) {
         extend (extend_method_literal(target.name, "label", "string", "lbl-emitted"))
     }

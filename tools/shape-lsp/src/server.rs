@@ -3230,8 +3230,7 @@ print("hello")
     /// mirrors `expansion_views.rs::METHOD_PROGRAM` so the wiring test
     /// exercises a real generated-symbol call site.
     const EXPANSION_METHOD_PROGRAM: &str = r#"
-annotation gen() {
-  targets: [type]
+annotation gen() on type {
   comptime post(target, ctx) {
     extend target {
       method answer() -> int { 42 }

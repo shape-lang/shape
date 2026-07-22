@@ -45,8 +45,7 @@ impl Drop for Conn {{
 }}
 async fn tick() -> int {{ 0 }}
 
-annotation edit() {{
-  targets: [function]
+annotation edit() on function {{
   comptime post(target, ctx) {{
     replace body {{ {replacement_body} }}
   }}
@@ -174,8 +173,7 @@ fn replace_body_edit_suspension_without_drop_in_replacement_installs() {
 fn plain_edit_program(replacement_body: &str) -> String {
     format!(
         r#"
-annotation edit() {{
-  targets: [function]
+annotation edit() on function {{
   comptime post(target, ctx) {{
     replace body {{ {replacement_body} }}
   }}

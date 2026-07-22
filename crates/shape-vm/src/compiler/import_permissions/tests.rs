@@ -75,7 +75,7 @@ fn annotation_only_dependency_carrier_is_hashed_linked_and_refused_at_load() {
     let file_id = ModuleId(1);
     let dependency_id = ModuleId(2);
     let root = parse("0");
-    let dependency = parse("pub annotation marker() { targets: [type] }");
+    let dependency = parse("pub annotation marker() on type { }");
     let graph = graph(
         vec![
             node(

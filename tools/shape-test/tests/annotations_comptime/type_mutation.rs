@@ -10,8 +10,7 @@ use shape_test::shape_test::ShapeTest;
 fn extend_target_adds_derived_method() {
     ShapeTest::new(
         r#"
-annotation with_double() {
-  targets: [type]
+annotation with_double() on type {
   comptime post(target, ctx) {
     extend target {
       method doubled() { self.value * 2 }
@@ -34,8 +33,7 @@ print(w.doubled())
 fn extend_target_adds_method_using_multiple_fields() {
     ShapeTest::new(
         r#"
-annotation with_magnitude() {
-  targets: [type]
+annotation with_magnitude() on type {
   comptime post(target, ctx) {
     extend target {
       method magnitude() { self.x + self.y + self.z }
@@ -58,8 +56,7 @@ print(v.magnitude())
 fn extend_target_method_with_parameters() {
     ShapeTest::new(
         r#"
-annotation with_scale() {
-  targets: [type]
+annotation with_scale() on type {
   comptime post(target, ctx) {
     extend target {
       method scale(factor) { self.value * factor }
@@ -83,8 +80,7 @@ print(s.scale(10))
 fn annotation_removes_and_replaces_type() {
     ShapeTest::new(
         r#"
-annotation deprecated() {
-  targets: [type]
+annotation deprecated() on type {
   comptime post(target, ctx) {
     remove target
   }
@@ -104,8 +100,7 @@ print("OldConfig removed successfully")
 fn annotation_extends_type_with_boolean_method() {
     ShapeTest::new(
         r#"
-annotation with_empty_check() {
-  targets: [type]
+annotation with_empty_check() on type {
   comptime post(target, ctx) {
     extend target {
       method is_empty() { self.count == 0 }
@@ -130,8 +125,7 @@ print(full.is_empty())
 fn annotation_extends_type_with_string_method() {
     ShapeTest::new(
         r#"
-annotation with_info() {
-  targets: [type]
+annotation with_info() on type {
   comptime post(target, ctx) {
     extend target {
       method info() { f"{self.name} (age {self.age})" }
@@ -156,8 +150,7 @@ print(p.info())
 fn annotation_with_param_used_in_generated_method() {
     ShapeTest::new(
         r#"
-annotation with_default(default_val: int) {
-  targets: [type]
+annotation with_default(default_val: int) on type {
   comptime post(target, ctx) {
     extend target {
       method get_or_default() {
@@ -187,8 +180,7 @@ print(nonzero.get_or_default())
 fn replace_body_on_function_target() {
     ShapeTest::new(
         r#"
-annotation mock() {
-  targets: [function]
+annotation mock() on function {
   comptime post(target, ctx) {
     replace body {
       "mocked"
@@ -216,8 +208,7 @@ fn set_return_incompatible_with_body_is_compile_error() {
     // string pointer and segfaulted; now it is an ordinary compile error.
     ShapeTest::new(
         r#"
-annotation force_string_return() {
-  targets: [function]
+annotation force_string_return() on function {
   comptime post(target, ctx) {
     set return string
   }
@@ -240,8 +231,7 @@ fn set_return_compatible_with_body_still_compiles() {
     // `set return int` on an int-bodied function still compiles and runs.
     ShapeTest::new(
         r#"
-annotation force_int_return() {
-  targets: [function]
+annotation force_int_return() on function {
   comptime post(target, ctx) {
     set return int
   }
@@ -263,8 +253,7 @@ print(answer())
 fn target_params_and_return_expose_type_refs() {
     ShapeTest::new(
         r#"
-annotation assert_signature_refs() {
-  targets: [function]
+annotation assert_signature_refs() on function {
   comptime post(target, ctx) {
     if target.params[0].type_ref.kind != "String" {
       error(f"expected string param TypeRef, got {target.params[0].type_ref.kind}")
@@ -291,8 +280,7 @@ print(echo("ok"))
 fn set_return_accepts_type_ref_expression() {
     ShapeTest::new(
         r#"
-annotation return_like_first_param() {
-  targets: [function]
+annotation return_like_first_param() on function {
   comptime post(target, ctx) {
     set return (target.params[0].type_ref)
   }
@@ -314,8 +302,7 @@ print(echo("typed"))
 fn set_param_type_accepts_type_ref_expression() {
     ShapeTest::new(
         r#"
-annotation first_param_like_second() {
-  targets: [function]
+annotation first_param_like_second() on function {
   comptime post(target, ctx) {
     if target.params[1].type != "string" {
       error(f"legacy param type string changed: {target.params[1].type}")
@@ -357,8 +344,7 @@ print(join("type", "ref"))
 fn set_return_accepts_composite_type_ref_expression() {
     ShapeTest::new(
         r#"
-annotation return_like_first_param() {
-  targets: [function]
+annotation return_like_first_param() on function {
   comptime post(target, ctx) {
     set return (target.params[0].type_ref)
   }
@@ -387,8 +373,7 @@ print(pair[1])
 fn set_param_type_accepts_composite_type_ref_expression() {
     ShapeTest::new(
         r#"
-annotation first_param_like_second() {
-  targets: [function]
+annotation first_param_like_second() on function {
   comptime post(target, ctx) {
     set param left: (target.params[1].type_ref)
   }
@@ -414,8 +399,7 @@ fn duplicate_annotation_application_is_compile_error() {
     // compile error naming both application sites.
     ShapeTest::new(
         r#"
-annotation tag() {
-  targets: [function]
+annotation tag() on function {
   comptime post(target, ctx) {
     set return int
   }

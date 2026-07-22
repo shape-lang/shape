@@ -37,8 +37,7 @@ const EDIT_TARGET_NAME: &str = "answer";
 fn replace_body_program(replacement_body: &str) -> String {
     format!(
         r#"
-annotation edit_answer() {{
-  targets: [function]
+annotation edit_answer() on function {{
   comptime post(target, ctx) {{
     replace body {{ {replacement_body} }}
   }}
@@ -58,8 +57,7 @@ answer()
 fn named_replace_body_program(ann: &str, func: &str, replacement_body: &str) -> String {
     format!(
         r#"
-annotation {ann}() {{
-  targets: [function]
+annotation {ann}() on function {{
   comptime post(target, ctx) {{
     replace body {{ {replacement_body} }}
   }}
@@ -184,8 +182,7 @@ fn closure_free_replace_body_stays_pass2_and_reserves_no_shadow() {
 fn const_template_replace_body_is_not_pre_analysis_materialized() {
     let program = shape_ast::parse_program(&format!(
         r#"
-annotation edit_const() {{
-  targets: [function]
+annotation edit_const() on function {{
   comptime post(target, ctx) {{
     replace body {{ {CLOSURE_BEARING_REPLACEMENT} }}
   }}

@@ -6,8 +6,7 @@ use shape_test::shape_test::{ShapeTest, pos};
 use tower_lsp_server::ls_types::Position;
 
 const SIBLING_CAPTURES: &str = r#"
-annotation add_reader() {
-  targets: [type]
+annotation add_reader() on type {
   comptime post(target, ctx) {
     extend target {
       method read(x: int) -> int {
@@ -28,8 +27,7 @@ job.read(2)
 "#;
 
 const COLLIDING_SCOPES: &str = r#"
-annotation add_readers() {
-  targets: [type]
+annotation add_readers() on type {
   comptime post(target, ctx) {
     extend target {
       method first(x: int) -> int {
@@ -64,8 +62,7 @@ worker(2)
 // is deleted this slice.
 
 const INVALID_IMPLICIT_GENERATED_CAPTURE: &str = r#"
-annotation add_reader() {
-  targets: [type]
+annotation add_reader() on type {
   comptime post(target, ctx) {
     extend target {
       method read(x: int) -> int {
@@ -82,8 +79,7 @@ type Job { id: int }
 "#;
 
 const GENERIC_CAPTURE_SPECIALIZATIONS: &str = r#"
-annotation add_echo() {
-  targets: [type]
+annotation add_echo() on type {
   comptime post(target, ctx) {
     extend target {
       method echo<T>(value: T) -> T {
@@ -104,8 +100,7 @@ let text = job.echo("shape")
 "#;
 
 const INVALID_UNUSED_GENERATED_CAPTURE: &str = r#"
-annotation add_reader() {
-  targets: [type]
+annotation add_reader() on type {
   comptime post(target, ctx) {
     extend target {
       method read(x: int) -> int {

@@ -230,8 +230,9 @@ pub struct AnnotationDef {
     pub doc_comment: Option<DocComment>,
     /// Annotation parameters (e.g., `period` in `@warmup(period)`)
     pub params: Vec<FunctionParameter>,
-    /// Optional explicit target restrictions from `targets: [...]`.
-    /// If None, target applicability is inferred from handler kinds.
+    /// Optional explicit target restrictions from the header `on`-clause
+    /// (`annotation name(...) on function, type`). If None, target
+    /// applicability is inferred from handler kinds.
     pub allowed_targets: Option<Vec<AnnotationTargetKind>>,
     /// Lifecycle handlers (on_define, before, after, metadata)
     pub handlers: Vec<AnnotationHandler>,

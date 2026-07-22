@@ -5,8 +5,7 @@
 // runs. The runtime program is a plain int function + its dead shadow + a call;
 // no async, trait/impl, closure, or top-level comptime, so JIT == VM natively
 // (zero [jit-fallback]).
-annotation edit_answer() {
-  targets: [function]
+annotation edit_answer() on function {
   comptime post(target, ctx) {
     replace body { return 42 }
   }

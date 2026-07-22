@@ -111,8 +111,7 @@ type Probe { id: int }
     );
     let definition = annotation_definition(
         r#"
-annotation read_text() {
-  targets: [type]
+annotation read_text() on type {
   comptime post(target, ctx) {
     extend (item_fn("forbidden_generated", "int", 1))
   }

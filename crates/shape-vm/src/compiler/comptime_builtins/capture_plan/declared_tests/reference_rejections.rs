@@ -58,8 +58,7 @@ fn assert_no_closure_artifacts(compiler: &BytecodeCompiler) {
 fn generated_direct_reference_is_rejected() {
     let (_, outcome) = compile_outcome(
         r#"
-annotation add_reader() {
-  targets: [type]
+annotation add_reader() on type {
   comptime post(target, ctx) {
     extend target {
       method read(x: int) -> int { let value = 7
@@ -82,8 +81,7 @@ job.read(2)
 fn generated_straight_line_reference_alias_is_rejected() {
     let (_, outcome) = compile_outcome(
         r#"
-annotation add_reader() {
-  targets: [type]
+annotation add_reader() on type {
   comptime post(target, ctx) {
     extend target {
       method read(x: int) -> int { let value = 7
@@ -107,8 +105,7 @@ job.read(2)
 fn generated_owned_binding_is_not_falsely_rejected() {
     let (_, outcome) = compile_outcome(
         r#"
-annotation add_reader() {
-  targets: [type]
+annotation add_reader() on type {
   comptime post(target, ctx) {
     extend target {
       method read(x: int) -> int { let owned = 7
@@ -143,8 +140,7 @@ fn generated_free_function_module_reference_rejects_before_closure_publication()
 let module_value = 7
 let module_ref = &module_value
 
-annotation add_reader() {
-  targets: [type]
+annotation add_reader() on type {
   comptime post(target, ctx) {
     extend target {
       method generated_read(x: int) -> int {
@@ -179,8 +175,7 @@ fn generated_free_function_module_value_move_rejects_with_c0906() {
         r#"
 let count = 41
 
-annotation add_reader() {
-  targets: [type]
+annotation add_reader() on type {
   comptime post(target, ctx) {
     extend target {
       method generated_read(x: int) -> int {
@@ -222,8 +217,7 @@ fn generated_free_function_module_value_share_does_not_reuse_the_move_refusal() 
         r#"
 let count = 41
 
-annotation add_reader() {
-  targets: [type]
+annotation add_reader() on type {
   comptime post(target, ctx) {
     extend target {
       method generated_read(x: int) -> int {

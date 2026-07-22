@@ -46,8 +46,7 @@
 // ---------------------------------------------------------------------------
 // S1: @traced runtime before/after wrapper (identity contract)
 // ---------------------------------------------------------------------------
-annotation traced(tag) {
-  targets: [function]
+annotation traced(tag) on function {
 
   before(args, ctx) {
     // identity tail: returning original args -> contract case 3 (unchanged)
@@ -68,8 +67,7 @@ fn traced_add(a: int, b: int) -> int {
 // ---------------------------------------------------------------------------
 // S2: @validate -- before short-circuit object form { result: ... }
 // ---------------------------------------------------------------------------
-annotation validate() {
-  targets: [function]
+annotation validate() on function {
 
   before(args, ctx) {
     // book before-contract case 2: object with non-null result short-circuits
@@ -97,8 +95,7 @@ fn safe_sqrt_floor(n: int) -> int {
 // ---------------------------------------------------------------------------
 // S3: @memoize -- ctx.state persistence + state-rebuild contract
 // ---------------------------------------------------------------------------
-annotation memoize() {
-  targets: [function]
+annotation memoize() on function {
 
   before(args, ctx) {
     // consult ctx.state cache map keyed by arg; if hit, short-circuit.
@@ -144,8 +141,7 @@ fn fib(n: int) -> int {
 // ---------------------------------------------------------------------------
 // S4: @serializable comptime derive (cookbook Recipe 2, runnable=true)
 // ---------------------------------------------------------------------------
-annotation serializable() {
-  targets: [type]
+annotation serializable() on type {
 
   comptime pre(target, ctx) {
     comptime for field in target.fields {
@@ -179,8 +175,7 @@ type Prompt {
   temperature: number
 }
 
-annotation json_schema() {
-  targets: [type]
+annotation json_schema() on type {
 
   comptime post(target, ctx) {
     extend target {
@@ -208,8 +203,7 @@ comptime fn require_const_host(target) {
   }
 }
 
-annotation host_typed() {
-  targets: [function]
+annotation host_typed() on function {
 
   comptime pre(target, ctx) {
     require_const_host(target)

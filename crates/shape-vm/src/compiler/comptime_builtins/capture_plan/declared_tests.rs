@@ -21,8 +21,7 @@
     /// A generated `extend Job { method scale }` — THE FLAGSHIP surface — whose
     /// closure declares `move hits` over a `let mut` it only READS.
     const FLAGSHIP_DECLARED: &str = r#"
-annotation add_scaler() {
-  targets: [type]
+annotation add_scaler() on type {
   comptime post(target, ctx) {
     extend target {
       method scale(f: int) -> int { let mut hits = 3
@@ -198,8 +197,7 @@ scale(2)
     fn declared_share_over_local_var_emits_shared() {
         let c = compile(
             r#"
-annotation add_reader() {
-  targets: [type]
+annotation add_reader() on type {
   comptime post(target, ctx) {
     extend target {
       method read(x: int) -> int { var total = 5
@@ -252,8 +250,7 @@ job.read(2)
     fn nested_declared_share_preserves_the_outer_cell_descriptor() {
         let c = compile(
             r#"
-annotation add_reader() {
-  targets: [type]
+annotation add_reader() on type {
   comptime post(target, ctx) {
     extend target {
       method read() -> int { var total = 40
@@ -345,8 +342,7 @@ job.read()
     fn declared_move_over_let_string_emits_immutable_with_heap_mask() {
         let c = compile(
             r#"
-annotation add_reader() {
-  targets: [type]
+annotation add_reader() on type {
   comptime post(target, ctx) {
     extend target {
       method read() -> string { let tag = "hi"
@@ -387,8 +383,7 @@ job.read()
     fn declared_mode_survives_monomorphization() {
         let c = compile(
             r#"
-annotation add_scaler() {
-  targets: [type]
+annotation add_scaler() on type {
   comptime post(target, ctx) {
     extend target {
       method scale<T>(f: T) -> int { let mut hits = 3

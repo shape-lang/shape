@@ -9,8 +9,7 @@ use shape_test::shape_test::ShapeTest;
 fn annotation_generates_display_method() {
     ShapeTest::new(
         r#"
-annotation displayable() {
-  targets: [type]
+annotation displayable() on type {
   comptime post(target, ctx) {
     extend target {
       method display() { f"({self.x}, {self.y})" }
@@ -33,8 +32,7 @@ print(p.display())
 fn annotation_generates_getter_method() {
     ShapeTest::new(
         r#"
-annotation with_getter() {
-  targets: [type]
+annotation with_getter() on type {
   comptime post(target, ctx) {
     extend target {
       method get_value() { self.value }
@@ -59,8 +57,7 @@ fn annotation_replace_body_generates_constant_function() {
     // replacement body.
     ShapeTest::new(
         r#"
-annotation stub_return(val: string) {
-  targets: [function]
+annotation stub_return(val: string) on function {
   comptime post(target, ctx) {
     replace body {
       "stubbed"
@@ -102,8 +99,7 @@ print(fetch_data())
 #[test]
 fn closure_bearing_replace_body_edit_runs_in_vm() {
     let program = r#"
-annotation edit_answer() {
-  targets: [function]
+annotation edit_answer() on function {
   comptime post(target, ctx) {
     replace body {
       let base = 40
@@ -130,8 +126,7 @@ print(answer())
 fn replace_body_expr_form_is_rejected_c0928() {
     ShapeTest::new(
         r#"
-annotation edit_expr() {
-  targets: [function]
+annotation edit_expr() on function {
   comptime post(target, ctx) {
     replace body (target)
   }
@@ -150,8 +145,7 @@ print(answer())
 fn annotation_extends_type_with_equality_check() {
     ShapeTest::new(
         r#"
-annotation with_eq() {
-  targets: [type]
+annotation with_eq() on type {
   comptime post(target, ctx) {
     extend target {
       method eq(other) { self.id == other.id }
@@ -178,8 +172,7 @@ print(a.eq(c))
 fn stacked_annotations_both_extend_type() {
     ShapeTest::new(
         r#"
-annotation with_sum() {
-  targets: [type]
+annotation with_sum() on type {
   comptime post(target, ctx) {
     extend target {
       method sum() { self.a + self.b }
@@ -187,8 +180,7 @@ annotation with_sum() {
   }
 }
 
-annotation with_diff() {
-  targets: [type]
+annotation with_diff() on type {
   comptime post(target, ctx) {
     extend target {
       method diff() { self.a - self.b }
@@ -214,8 +206,7 @@ print(n.diff())
 fn annotation_generates_to_string_method() {
     ShapeTest::new(
         r#"
-annotation stringable() {
-  targets: [type]
+annotation stringable() on type {
   comptime post(target, ctx) {
     extend target {
       method to_str() { f"{self.name}:{self.value}" }
@@ -238,8 +229,7 @@ print(c.to_str())
 fn annotation_generated_extend_method_runs_under_jit() {
     ShapeTest::new(
         r#"
-annotation summary() {
-  targets: [type]
+annotation summary() on type {
   comptime post(target, ctx) {
     extend target {
       method summary() -> string { f"{self.name}:{self.id}" }
@@ -262,8 +252,7 @@ u.summary()
 fn annotation_generates_predicate_method() {
     ShapeTest::new(
         r#"
-annotation checkable() {
-  targets: [type]
+annotation checkable() on type {
   comptime post(target, ctx) {
     extend target {
       method is_positive() { self.value > 0 }

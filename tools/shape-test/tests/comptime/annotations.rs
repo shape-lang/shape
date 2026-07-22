@@ -240,8 +240,7 @@ print(identity(99))
 #[test]
 fn ct_41_extend_target() {
     let code = r#"
-annotation add_sum() {
-  targets: [type]
+annotation add_sum() on type {
   comptime post(target, ctx) {
     extend target {
       method sum() { self.x + self.y }
@@ -261,8 +260,7 @@ print(p.sum())
 #[test]
 fn ct_42_remove_target() {
     let code = r#"
-annotation drop_it() {
-  targets: [type]
+annotation drop_it() on type {
   comptime post(target, ctx) {
     remove target
   }
@@ -282,8 +280,7 @@ print("after phantom definition")
 #[test]
 fn ct_43_annotation_targets_decl() {
     let code = r#"
-annotation fn_only(tag: string) {
-  targets: [function]
+annotation fn_only(tag: string) on function {
   before() {
     print(f"[{tag}] fn called")
   }
@@ -307,8 +304,7 @@ hello()
 #[test]
 fn ct_43b_annotation_targets_returning() {
     let code = r#"
-annotation fn_only(tag: string) {
-  targets: [function]
+annotation fn_only(tag: string) on function {
   before() {
     print(f"[{tag}] fn called")
   }
@@ -336,8 +332,7 @@ print(add(3, 4))
 #[test]
 fn ct_44_comptime_post_fn() {
     let code = r#"
-annotation instrument() {
-  targets: [function]
+annotation instrument() on function {
   comptime post(target, ctx) {
     extend target {
       method wrapper() { print("instrumented") }
@@ -361,8 +356,7 @@ print(greet("World"))
 #[test]
 fn ct_46_annotation_replace_body() {
     let code = r#"
-annotation always_42() {
-  targets: [function]
+annotation always_42() on function {
   comptime post(target, ctx) {
     replace body {
       42
@@ -594,8 +588,7 @@ print(c.add(5))
 #[test]
 fn ct_45_annotation_set_param() {
     let code = r#"
-annotation default_b(val: int) {
-  targets: [function]
+annotation default_b(val: int) on function {
   comptime post(target, ctx) {
     set param b = val
   }
@@ -616,8 +609,7 @@ print(add(5))
 #[test]
 fn ct_45b_set_param_noarg() {
     let code = r#"
-annotation default_b() {
-  targets: [function]
+annotation default_b() on function {
   comptime post(target, ctx) {
     set param b = 100
   }
@@ -641,8 +633,7 @@ print(add(5))
 
 fn ct_45c_set_param_typed() {
     let code = r#"
-annotation add_param() {
-  targets: [function]
+annotation add_param() on function {
   comptime post(target, ctx) {
     set param extra: int
   }
@@ -679,8 +670,7 @@ print(greet("World"))
 #[test]
 fn b6_annotation_reads_callable_param_modes_on_vm_and_jit() {
     let code = r#"
-annotation gate_by_signature() {
-  targets: [type]
+annotation gate_by_signature() on type {
   comptime post(target, ctx) {
     let shape = match reflect(type_ref((int, &mut string) -> bool)) {
       FrozenType::Callable(c) => {
@@ -722,8 +712,7 @@ print(w.signature_tag())
 #[test]
 fn b6_annotation_iterates_callable_parameters_on_vm_and_jit() {
     let code = r#"
-annotation gate_by_arity() {
-  targets: [type]
+annotation gate_by_arity() on type {
   comptime post(target, ctx) {
     let mut count = 0
     match reflect(type_ref((int, &string, bool) -> int)) {

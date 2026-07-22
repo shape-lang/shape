@@ -59,8 +59,7 @@ fn test_expand_comptime_summary_lists_generated_methods() {
     let script = dir.path().join("expand.shape");
     {
         let mut f = std::fs::File::create(&script).unwrap();
-        writeln!(f, "annotation add_sum() {{").unwrap();
-        writeln!(f, "  targets: [type]").unwrap();
+        writeln!(f, "annotation add_sum() on type {{").unwrap();
         writeln!(f, "  comptime post(target, ctx) {{").unwrap();
         writeln!(f, "    extend target {{").unwrap();
         writeln!(f, "      method sum() {{ self.x + self.y }}").unwrap();
@@ -88,8 +87,7 @@ fn test_expand_comptime_shorthand_flag_works() {
     let script = dir.path().join("expand_short.shape");
     {
         let mut f = std::fs::File::create(&script).unwrap();
-        writeln!(f, "annotation add_sum() {{").unwrap();
-        writeln!(f, "  targets: [type]").unwrap();
+        writeln!(f, "annotation add_sum() on type {{").unwrap();
         writeln!(f, "  comptime post(target, ctx) {{").unwrap();
         writeln!(f, "    extend target {{").unwrap();
         writeln!(f, "      method sum() {{ self.x + self.y }}").unwrap();
@@ -116,8 +114,7 @@ fn test_expand_comptime_function_filter() {
     let script = dir.path().join("expand_filter.shape");
     {
         let mut f = std::fs::File::create(&script).unwrap();
-        writeln!(f, "annotation add_methods() {{").unwrap();
-        writeln!(f, "  targets: [type]").unwrap();
+        writeln!(f, "annotation add_methods() on type {{").unwrap();
         writeln!(f, "  comptime post(target, ctx) {{").unwrap();
         writeln!(f, "    extend target {{").unwrap();
         writeln!(f, "      method sum() {{ self.x + self.y }}").unwrap();

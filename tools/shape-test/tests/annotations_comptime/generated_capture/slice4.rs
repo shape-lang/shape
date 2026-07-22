@@ -20,8 +20,7 @@ fn expect_error_in_both_tiers(source: &str, expected: &str) {
 }
 
 const MOVE_LET: &str = r#"
-annotation add_answer() {
-  targets: [type]
+annotation add_answer() on type {
   comptime post(target, ctx) {
     extend target {
       method answer() -> int { let base = 40
@@ -37,8 +36,7 @@ job.answer()
 "#;
 
 const MOVE_LET_MUT: &str = r#"
-annotation add_answer() {
-  targets: [type]
+annotation add_answer() on type {
   comptime post(target, ctx) {
     extend target {
       method answer() -> int { let mut total = 40
@@ -55,8 +53,7 @@ job.answer()
 "#;
 
 const MOVE_HEAP_LET: &str = r#"
-annotation add_label() {
-  targets: [type]
+annotation add_label() on type {
   comptime post(target, ctx) {
     extend target {
       method label() -> string { let label = "shape"
@@ -72,8 +69,7 @@ job.label()
 "#;
 
 const NESTED_SHARE: &str = r#"
-annotation add_answer() {
-  targets: [type]
+annotation add_answer() on type {
   comptime post(target, ctx) {
     extend target {
       method answer() -> int { var total = 40

@@ -3487,8 +3487,7 @@ mod hook_template_builtin_tests {
             r#"
 {body_fns}
 
-annotation hookann() {{
-  targets: [function]
+annotation hookann() on function {{
   comptime post(target, ctx) {{
     {handler_stmts}
   }}

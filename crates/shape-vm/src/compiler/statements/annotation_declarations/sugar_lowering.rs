@@ -205,8 +205,8 @@ pub(in crate::compiler) fn non_function_targets_declaration_rejection(
 /// `execute_module_comptime_handlers`; expression:
 /// `run_comptime_annotation_handlers_for_target`) when the compiled
 /// annotation carries sugar (`sugar_post_handler.is_some()`) — reachable
-/// only through a MIXED `targets: [function, …]` definition (a targets-set
-/// without `function` already rejected at the declaration).
+/// only through a MIXED `on function, …` definition (a target-set without
+/// `function` already rejected at the declaration).
 pub(in crate::compiler) fn non_function_target_application_rejection(
     annotation_name: &str,
     target_kind_word: &str,

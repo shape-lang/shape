@@ -6,7 +6,7 @@ fn unresolved_import_maps_to_unavailable_not_empty_capture_query() {
     let file_path = directory.path().join("main.shape");
     let source = r#"
 from missing use { helper }
-annotation derive() { targets: [type] }
+annotation derive() on type { }
 @derive()
 type Probe { id: int }
 "#;
@@ -56,7 +56,7 @@ fn poisoned_imported_annotation_maps_to_unavailable() {
 #[test]
 fn hard_compile_error_is_unavailable_and_capture_routing_does_not_fall_through() {
     let source = r#"
-annotation derive() { targets: [type] }
+annotation derive() on type { }
 @derive()
 type Probe { id: int }
 __intrinsic_std([1, 2, 3])

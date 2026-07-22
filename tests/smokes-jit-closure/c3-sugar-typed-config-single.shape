@@ -34,8 +34,7 @@
 //   skipped before               → sum 10i   = 199000
 //   tag misread (branch false)   → 30i       = 597000
 //   times misread as 1           → 10i + 20  = 203000
-annotation boosted(times: int, tag: string) {
-  targets: [function]
+annotation boosted(times: int, tag: string) on function {
   before(args) {
     if tag == "ab" {
       args[0] = args[0] * times + 2

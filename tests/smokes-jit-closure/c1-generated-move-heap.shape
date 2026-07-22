@@ -1,6 +1,5 @@
 // ADR-009 C1 slice 4: generated `move` transfers one heap-local share.
-annotation add_label() {
-  targets: [type]
+annotation add_label() on type {
   comptime post(target, ctx) {
     extend target { method label() -> string { let label = "shape"
       let worker = |; move label| label

@@ -8514,8 +8514,7 @@ mod frame_return_metadata_tests {
         let source = r#"
             fn keep(a: Array<int>) -> Array<int> { a }
 
-            annotation preserve_args() {
-              targets: [function]
+            annotation preserve_args() on function {
               comptime post(target, ctx) {
                 install(before_hook(keep, []))
               }

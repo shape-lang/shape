@@ -108,8 +108,7 @@ fn completion_inside_comptime_block_offers_implements() {
 #[test]
 fn completion_for_generated_method_from_comptime_extend_target() {
     let code = r#"
-annotation add_sum() {
-    targets: [type]
+annotation add_sum() on type {
     comptime post(target, ctx) {
         extend target {
             method sum() { self.x + self.y }

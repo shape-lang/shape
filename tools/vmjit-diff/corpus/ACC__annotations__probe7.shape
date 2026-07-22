@@ -1,6 +1,5 @@
 // Probe: comptime pre that reads scalar target fields only (target.name)
-annotation note_name() {
-  targets: [function]
+annotation note_name() on function {
 
   comptime pre(target, ctx) {
     print(f"defining: {target.name}")

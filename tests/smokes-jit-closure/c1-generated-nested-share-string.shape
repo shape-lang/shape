@@ -1,6 +1,5 @@
 // ADR-009 C1 / #53: generated nested `share` preserves one refcounted cell.
-annotation add_label() {
-  targets: [type]
+annotation add_label() on type {
   comptime post(target, ctx) {
     extend target { method label() -> string { var text = "a"
       let outer = |; share text| {

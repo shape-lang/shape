@@ -21,8 +21,7 @@
 //     before -> [20, 40]; impl -> 60; after -> 61.
 //   So add(10, 20) must yield 61.
 
-annotation doubling() {
-  targets: [function]
+annotation doubling() on function {
 
   before(args, ctx) {
     // array form: rewrite args to doubled values (book contract case 1)

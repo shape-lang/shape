@@ -271,8 +271,7 @@ fn expect_vm_and_jit_number(source: &str, expected: f64) {
 #[test]
 fn reflect_repr_with_authority_exposes_complete_shape_on_vm_and_jit() {
     let source = r#"
-annotation derive_field_count() {
-  targets: [type]
+annotation derive_field_count() on type {
   comptime post(target, ctx, access) {
     let count = match reflect_repr(type_ref(User), access) {
       FrozenType::Nominal(n) => match n.shape() {
@@ -343,8 +342,7 @@ let reflected = comptime { reflect_repr(type_ref(User)) }
 #[test]
 fn ordinary_reflect_is_not_a_filtered_representation_on_vm_and_jit() {
     let source = r#"
-annotation check_agreement() {
-  targets: [type]
+annotation check_agreement() on type {
   comptime post(target, ctx, access) {
     let public_count = match reflect(type_ref(Account)) {
       FrozenType::Nominal(n) => match n.shape() {

@@ -81,8 +81,7 @@ fn expression_annotation_before_after_hooks_reject_at_the_declaration() {
     // non-function-target rejection fires first — hooks on an
     // expression-only targets set can never reach a function call seam.
     let code = r#"
-annotation trace_expr() {
-  targets: [expression]
+annotation trace_expr() on expression {
   before(args) {
     print("before")
     args

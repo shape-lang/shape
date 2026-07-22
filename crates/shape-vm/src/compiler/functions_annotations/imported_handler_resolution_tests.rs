@@ -71,8 +71,7 @@ fn applied(name: &str) -> Annotation {
 fn error_handler(marker: &str, target: &str) -> AnnotationDef {
     annotation_def(&format!(
         r#"
-annotation mark() {{
-  targets: [{target}]
+annotation mark() on {target} {{
   comptime post(target, ctx) {{ error("{marker}") }}
 }}
 "#
@@ -100,8 +99,7 @@ mod outer {
     );
     let imported = annotation_def(
         r#"
-annotation mark(policy: string) {
-  targets: [function]
+annotation mark(policy: string) on function {
   comptime post(target, ctx) { error("IMPORTED") }
 }
 "#,
@@ -280,8 +278,7 @@ fn inline_module_signature_traversal_uses_and_restores_lexical_scope() {
     let mut program = parse(
         r#"
 mod nested {
-  annotation mark() {
-    targets: [function]
+  annotation mark() on function {
     comptime post(target, ctx) { error("INLINE_LOCAL") }
   }
   @mark()

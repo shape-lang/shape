@@ -8,8 +8,7 @@ use super::{
 use crate::util::{offset_to_line_col, position_to_offset};
 
 const DIRECT_CAPTURE: &str = r#"
-annotation add_reader() {
-  targets: [type]
+annotation add_reader() on type {
   comptime post(target, ctx) {
     extend target {
       method read() -> int {
@@ -28,8 +27,7 @@ job.read()
 "#;
 
 const COLLIDING_BINDING_NAMES: &str = r#"
-annotation add_readers() {
-  targets: [type]
+annotation add_readers() on type {
   comptime post(target, ctx) {
     extend target {
       method left() -> int {

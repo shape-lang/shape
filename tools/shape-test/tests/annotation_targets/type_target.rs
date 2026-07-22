@@ -10,8 +10,7 @@ use shape_test::shape_test::ShapeTest;
 fn annotation_on_type_with_extend() {
     ShapeTest::new(
         r#"
-annotation with_describe() {
-  targets: [type]
+annotation with_describe() on type {
   comptime post(target, ctx) {
     extend target {
       method describe() { f"Point({self.x}, {self.y})" }
@@ -34,8 +33,7 @@ print(p.describe())
 fn annotation_on_type_with_remove() {
     ShapeTest::new(
         r#"
-annotation strip() {
-  targets: [type]
+annotation strip() on type {
   comptime post(target, ctx) {
     remove target
   }
@@ -55,8 +53,7 @@ print("type removed at compile time")
 fn annotation_on_type_adds_computed_method() {
     ShapeTest::new(
         r#"
-annotation measurable() {
-  targets: [type]
+annotation measurable() on type {
   comptime post(target, ctx) {
     extend target {
       method perimeter() { (self.w + self.h) * 2 }
@@ -79,8 +76,7 @@ print(r.perimeter())
 fn two_annotations_on_same_type() {
     ShapeTest::new(
         r#"
-annotation with_sum() {
-  targets: [type]
+annotation with_sum() on type {
   comptime post(target, ctx) {
     extend target {
       method sum() { self.a + self.b }
@@ -88,8 +84,7 @@ annotation with_sum() {
   }
 }
 
-annotation with_product() {
-  targets: [type]
+annotation with_product() on type {
   comptime post(target, ctx) {
     extend target {
       method product() { self.a * self.b }
@@ -114,8 +109,7 @@ print(p.product())
 fn annotation_on_type_adds_boolean_method() {
     ShapeTest::new(
         r#"
-annotation with_valid_check() {
-  targets: [type]
+annotation with_valid_check() on type {
   comptime post(target, ctx) {
     extend target {
       method is_valid() { self.status == 1 }
@@ -143,8 +137,7 @@ fn annotation_on_type_with_before_after_hooks() {
     // type annotation with comptime post works correctly.
     ShapeTest::new(
         r#"
-annotation enriched() {
-  targets: [type]
+annotation enriched() on type {
   comptime post(target, ctx) {
     extend target {
       method full_name() { f"{self.first} {self.last}" }
@@ -168,8 +161,7 @@ print(n.full_name())
 fn annotation_on_enum_type() {
     ShapeTest::new(
         r#"
-annotation with_label() {
-  targets: [type]
+annotation with_label() on type {
   comptime post(target, ctx) {
     extend target {
       method label() { "enum_value" }
@@ -200,8 +192,7 @@ print("enum annotation defined")
 fn annotation_on_trait_definition() {
     ShapeTest::new(
         r#"
-annotation documented(desc: string) {
-  targets: [type]
+annotation documented(desc: string) on type {
   comptime post(target, ctx) {
     // no-op, just metadata registration
   }

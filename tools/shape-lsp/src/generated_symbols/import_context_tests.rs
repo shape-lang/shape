@@ -47,7 +47,7 @@ type Probe { id: int }
 #[test]
 fn ordinary_hard_compile_error_is_unavailable_even_without_annotation_poison() {
     let source = r#"
-annotation derive() { targets: [type] }
+annotation derive() on type { }
 @derive()
 type Probe { id: int }
 __intrinsic_std([1, 2, 3])

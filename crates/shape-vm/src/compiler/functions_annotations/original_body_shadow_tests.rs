@@ -297,8 +297,7 @@ fn invalid_or_non_callable_identity_refuses_before_payload_and_publication() {
 #[test]
 fn remove_target_discards_a_staged_original_body_shadow() {
     let source = r#"
-annotation replace_then_remove() {
-  targets: [function]
+annotation replace_then_remove() on function {
   comptime post(target, ctx) {
     replace body { return ctx.original(value) }
     remove target
@@ -323,8 +322,7 @@ fn probe(value: int) -> int { value + 1 }
 #[test]
 fn repeated_replace_body_is_rejected_before_shadow_publication() {
     let source = r#"
-annotation replace_twice() {
-  targets: [function]
+annotation replace_twice() on function {
   comptime post(target, ctx) {
     replace body { return ctx.original(value) }
     replace body { return value }
@@ -352,8 +350,7 @@ fn probe(value: int) -> int { value + 1 }
 #[test]
 fn replacement_mir_uses_only_its_own_distinct_closure_identity() {
     let source = r#"
-annotation replace_with_closure() {
-  targets: [function]
+annotation replace_with_closure() on function {
   comptime post(target, ctx) {
     replace body {
       let replacement = |left: int, right: int; | left + right

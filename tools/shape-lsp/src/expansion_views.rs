@@ -268,8 +268,7 @@ mod tests {
 
     /// A generating document whose annotation emits a generated METHOD.
     const METHOD_PROGRAM: &str = r#"
-annotation gen() {
-  targets: [type]
+annotation gen() on type {
   comptime post(target, ctx) {
     extend target {
       method answer() -> int { 42 }

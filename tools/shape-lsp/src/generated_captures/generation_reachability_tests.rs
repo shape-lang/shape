@@ -15,8 +15,7 @@ use tower_lsp_server::ls_types::Position;
 const NESTED_GENERATED_CAPTURE: &str = r#"
 mod generated {
   mod decoy {
-    pub annotation add_reader() {
-      targets: [function]
+    pub annotation add_reader() on function {
       comptime post(target, ctx) {
         extend Number {
           method read(x: int) -> int {
@@ -29,8 +28,7 @@ mod generated {
     }
   }
 
-  pub annotation add_reader() {
-    targets: [function]
+  pub annotation add_reader() on function {
     comptime post(target, ctx) {
       extend Number {
         method read(x: int) -> int {
@@ -53,8 +51,7 @@ let force = 2.0.read(0)
 
 const NESTED_POISONED_GENERATION: &str = r#"
 mod nested {
-  annotation poison() {
-    targets: [function]
+  annotation poison() on function {
     comptime post(target, ctx) { error("NESTED_POISON") }
   }
 
@@ -65,8 +62,7 @@ mod nested {
 "#;
 
 const EXPRESSION_GENERATED_CAPTURE: &str = r#"
-annotation add_reader() {
-  targets: [expression]
+annotation add_reader() on expression {
   comptime post(target, ctx) {
     extend Job {
       method expression_read(x: int) -> int {
@@ -191,7 +187,7 @@ fn expression_annotation_missing_inference_is_terminally_quarantined() {
     assert_eq!(issue.code(), "C0911");
     assert_eq!(
         issue.message(),
-        "[C0911] generated capture 'total' cannot establish a structural specialization identity: capture descriptor 0 semantic evidence is unavailable (MissingInferenceFact): capture 'total' has no structural inference fact at ordinal 0: occurrence:0ba24839b354aaf7857a2f7dfedaf0f6:node:extend:Job/method:expression_read/closure:0:descriptor:0",
+        "[C0911] generated capture 'total' cannot establish a structural specialization identity: capture descriptor 0 semantic evidence is unavailable (MissingInferenceFact): capture 'total' has no structural inference fact at ordinal 0: occurrence:995e4bf63c356078bdbde4285ed74c2a:node:extend:Job/method:expression_read/closure:0:descriptor:0",
     );
 
     let declaration = EXPRESSION_GENERATED_CAPTURE.find("share total").unwrap() + "share ".len();

@@ -87,8 +87,7 @@ unsafe fn array_rc(arr: *mut TypedArray<f64>) -> u32 {
 
 /// `move` × a `let string` — Immutable + Ptr.
 const MOVE_LET_STRING: &str = r#"
-annotation add_reader() {
-  targets: [type]
+annotation add_reader() on type {
   comptime post(target, ctx) {
     extend target {
       method read() -> string { let tag = "hi"
@@ -106,8 +105,7 @@ job.read()
 /// `move` × a `let int` — Immutable + SCALAR. The heap mask must stay CLEAR:
 /// the mask derives from the TYPE, not the mode.
 const MOVE_LET_INT: &str = r#"
-annotation add_reader() {
-  targets: [type]
+annotation add_reader() on type {
   comptime post(target, ctx) {
     extend target {
       method read() -> int { let tag = 7
@@ -124,8 +122,7 @@ job.read()
 
 /// `move` × a `let mut Array<number>` — OwnedMutable, interior Ptr.
 const MOVE_LET_MUT_ARRAY: &str = r#"
-annotation add_reader() {
-  targets: [type]
+annotation add_reader() on type {
   comptime post(target, ctx) {
     extend target {
       method read() -> int { let mut xs = [1.0, 2.0]
@@ -142,8 +139,7 @@ job.read()
 
 /// `share` × a `var` — Shared.
 const SHARE_VAR: &str = r#"
-annotation add_reader() {
-  targets: [type]
+annotation add_reader() on type {
   comptime post(target, ctx) {
     extend target {
       method read(x: int) -> int { var total = 5
@@ -163,8 +159,7 @@ job.read(2)
 /// the specialization is rebuilt from was UNSTAMPED, so the gate went blind on
 /// exactly this shape.
 const MOVE_LET_MUT_ARRAY_MONO: &str = r#"
-annotation add_reader() {
-  targets: [type]
+annotation add_reader() on type {
   comptime post(target, ctx) {
     extend target {
       method read<T>(f: T) -> int { let mut xs = [1.0, 2.0]
@@ -180,8 +175,7 @@ job.read(9)
 "#;
 
 const SHARE_VAR_MONO: &str = r#"
-annotation add_reader() {
-  targets: [type]
+annotation add_reader() on type {
   comptime post(target, ctx) {
     extend target {
       method read<T>(f: T) -> int { var total = 5
@@ -197,8 +191,7 @@ job.read(9)
 "#;
 
 const MOVE_LET_STRING_MONO: &str = r#"
-annotation add_reader() {
-  targets: [type]
+annotation add_reader() on type {
   comptime post(target, ctx) {
     extend target {
       method read<T>(f: T) -> string { let tag = "hi"
@@ -363,8 +356,7 @@ fn declared_move_of_a_scalar_let_mut_reclaims_its_box_cell() {
     // The flagship program: `let mut hits = 3`, READ-ONLY in the body.
     let layout = emitted_layout_for(
         r#"
-annotation add_scaler() {
-  targets: [type]
+annotation add_scaler() on type {
   comptime post(target, ctx) {
     extend target {
       method scale(f: int) -> int { let mut hits = 3

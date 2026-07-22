@@ -31,8 +31,7 @@ use shape_test::shape_test::{ShapeTest, pos};
 /// 17  let a = p.answer()                      <- call site (cursor here)
 /// 18  let b = p.answer()                      <- second call site
 const SOURCE_BINDER_PROGRAM: &str = r#"
-annotation gen() {
-  targets: [type]
+annotation gen() on type {
   comptime post(target, ctx) {
     extend target {
       method answer() -> int { 42 }
@@ -60,10 +59,10 @@ let b = p.answer()
 #[test]
 fn rename_on_generated_method_edits_source_binder_and_call_sites_only() {
     ShapeTest::new(SOURCE_BINDER_PROGRAM)
-        .at(pos(17, 11))
-        .expect_rename_edits_include_lines("solution", &[5, 17, 18])
-        .expect_rename_edits_exclude_line("solution", 10)
-        .expect_rename_edits_exclude_line("solution", 11);
+        .at(pos(16, 11))
+        .expect_rename_edits_include_lines("solution", &[4, 16, 17])
+        .expect_rename_edits_exclude_line("solution", 9)
+        .expect_rename_edits_exclude_line("solution", 10);
 }
 
 /// Rejection row 5 (generated-range half): ZERO rename edits land inside
@@ -72,7 +71,7 @@ fn rename_on_generated_method_edits_source_binder_and_call_sites_only() {
 #[test]
 fn rename_on_generated_method_never_edits_generated_ranges() {
     ShapeTest::new(SOURCE_BINDER_PROGRAM)
-        .at(pos(17, 11))
+        .at(pos(16, 11))
         .expect_rename_edits_outside_generated_ranges("solution");
 }
 
@@ -83,8 +82,8 @@ fn rename_on_generated_method_never_edits_generated_ranges() {
 #[test]
 fn rename_on_extend_target_name_edits_source_only_and_recomputes() {
     ShapeTest::new(SOURCE_BINDER_PROGRAM)
-        .at(pos(14, 6))
-        .expect_rename_edits_include_lines("Spot", &[14, 16])
+        .at(pos(13, 6))
+        .expect_rename_edits_include_lines("Spot", &[13, 15])
         .expect_rename_edits_outside_generated_ranges("Spot");
 }
 
@@ -100,8 +99,7 @@ fn rename_on_extend_target_name_edits_source_only_and_recomputes() {
 /// never appears inside the generator definition — the name is WHOLLY
 /// GENERATOR-CONTROLLED (concatenated at expansion time).
 const GENERATOR_CONTROLLED_PROGRAM: &str = r#"
-annotation gen() {
-  targets: [type]
+annotation gen() on type {
   comptime post(target, ctx) {
     let suffix = "swer"
     extend (extend_method_literal(target.name, f"an{suffix}", "int", 42))
@@ -130,7 +128,7 @@ fn prepare_rename_declines_on_generator_controlled_name() {
         "test precondition: the generated name must not appear in the generator"
     );
     ShapeTest::new(GENERATOR_CONTROLLED_PROGRAM)
-        .at(pos(13, 11))
+        .at(pos(12, 11))
         .expect_prepare_rename_none();
 }
 
@@ -141,12 +139,12 @@ fn prepare_rename_declines_on_generator_controlled_name() {
 #[test]
 fn rename_on_generator_controlled_name_is_a_report_not_a_text_edit() {
     ShapeTest::new(GENERATOR_CONTROLLED_PROGRAM)
-        .at(pos(13, 11))
+        .at(pos(12, 11))
         .expect_rename_none("solution")
         .expect_rename_generator_controlled(
             "solution",
             shape_lsp::rename::GENERATOR_CONTROLLED_NAME_RENAME_REPORT,
-            3,
+            2,
         );
 }
 
@@ -154,8 +152,7 @@ fn rename_on_generator_controlled_name_is_a_report_not_a_text_edit() {
 /// 10  fn helper() -> int { 7 }                <- ordinary fn definition
 /// 17  let h = helper()                        <- ordinary call site (cursor)
 const MIXED_PROGRAM: &str = r#"
-annotation gen() {
-  targets: [type]
+annotation gen() on type {
   comptime post(target, ctx) {
     extend target {
       method answer() -> int { 42 }
@@ -179,8 +176,8 @@ let h = helper()
 #[test]
 fn ordinary_function_rename_is_unchanged_in_a_generating_document() {
     ShapeTest::new(MIXED_PROGRAM)
-        .at(pos(17, 9))
-        .expect_rename_edits_include_lines("assistant", &[10, 17]);
+        .at(pos(16, 9))
+        .expect_rename_edits_include_lines("assistant", &[9, 16]);
 }
 
 /// Round-1 review finding: ordinary symbols COLLIDE with the generated
@@ -192,8 +189,7 @@ fn ordinary_function_rename_is_unchanged_in_a_generating_document() {
 /// 19    fn answer() -> int { 8 }              <- ordinary module fn
 /// 21  let qualified = m::answer()             <- ordinary qualified call site
 const COLLIDING_PROGRAM: &str = r#"
-annotation gen() {
-  targets: [type]
+annotation gen() on type {
   comptime post(target, ctx) {
     extend target {
       method answer() -> int { 42 }
@@ -227,8 +223,8 @@ let qualified = m::answer()
 #[test]
 fn rename_on_colliding_ordinary_call_edits_the_ordinary_declaration() {
     ShapeTest::new(COLLIDING_PROGRAM)
-        .at(pos(17, 13))
-        .expect_rename_edits_include_lines("solution", &[10, 17]);
+        .at(pos(16, 13))
+        .expect_rename_edits_include_lines("solution", &[9, 16]);
 }
 
 /// Round-2 review finding 1: the method name is bound at the APPLICATION
@@ -244,8 +240,7 @@ fn rename_on_colliding_ordinary_call_edits_the_ordinary_declaration() {
 /// generated symbol kept its old name while every call site used the new
 /// one (a corrupting partial rename).
 const APPLICATION_BINDER_PROGRAM: &str = r#"
-annotation gen(mname: string) {
-  targets: [type]
+annotation gen(mname: string) on type {
   comptime post(target, ctx) {
     extend (extend_method_literal(target.name, mname, "int", 1))
   }
@@ -265,8 +260,8 @@ let a = p.answer()
 #[test]
 fn rename_on_application_bound_name_edits_the_application_binder_and_call_site() {
     ShapeTest::new(APPLICATION_BINDER_PROGRAM)
-        .at(pos(12, 11))
-        .expect_rename_edits_include_lines("solution", &[8, 12]);
+        .at(pos(11, 11))
+        .expect_rename_edits_include_lines("solution", &[7, 11]);
 }
 
 /// Round-2 review finding 2: the generated name is COMPUTED (`an{suffix}`)
@@ -283,8 +278,7 @@ fn rename_on_application_bound_name_edits_the_application_binder_and_call_site()
 /// the old name, silently violating the row-4 "never a text edit"
 /// guarantee.
 const COMMENT_DECOY_GENERATOR_CONTROLLED_PROGRAM: &str = r#"
-annotation gen() {
-  targets: [type]
+annotation gen() on type {
   comptime post(target, ctx) {
     // decoy: the computed method is called answer
     let suffix = "swer"
@@ -307,13 +301,13 @@ let x = p.answer()
 #[test]
 fn comment_decoy_inside_generator_keeps_the_name_generator_controlled() {
     ShapeTest::new(COMMENT_DECOY_GENERATOR_CONTROLLED_PROGRAM)
-        .at(pos(14, 11))
+        .at(pos(13, 11))
         .expect_prepare_rename_none()
         .expect_rename_none("solution")
         .expect_rename_generator_controlled(
             "solution",
             shape_lsp::rename::GENERATOR_CONTROLLED_NAME_RENAME_REPORT,
-            3,
+            2,
         );
 }
 
@@ -324,9 +318,9 @@ fn comment_decoy_inside_generator_keeps_the_name_generator_controlled() {
 #[test]
 fn rename_on_generated_method_excludes_colliding_ordinary_call_sites() {
     ShapeTest::new(COLLIDING_PROGRAM)
-        .at(pos(16, 11))
-        .expect_rename_edits_include_lines("solution", &[5, 16])
-        .expect_rename_edits_exclude_line("solution", 10)
-        .expect_rename_edits_exclude_line("solution", 17)
-        .expect_rename_edits_exclude_line("solution", 21);
+        .at(pos(15, 11))
+        .expect_rename_edits_include_lines("solution", &[4, 15])
+        .expect_rename_edits_exclude_line("solution", 9)
+        .expect_rename_edits_exclude_line("solution", 16)
+        .expect_rename_edits_exclude_line("solution", 20);
 }

@@ -428,8 +428,7 @@ int_category_code()
         // and must obtain the pre-Phase-1 unit freeze — its body uses frozen
         // reflection to prove the handle is populated.
         let numbers = r#"
-annotation reflected() {
-  targets: [type]
+annotation reflected() on type {
   comptime post(target, ctx) {
     let flag = match type_category(type_ref(int)) {
       FrozenTypeCategory::Primitive => 1

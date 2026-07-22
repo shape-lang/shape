@@ -1,5 +1,4 @@
-annotation synced(peers) {
-    targets: [function]
+annotation synced(peers) on function {
     comptime post(target, ctx) {
         replace body {
             let before = state::capture_module()

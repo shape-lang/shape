@@ -1586,8 +1586,7 @@ fn test_function_param_const_flag_parses() {
 #[test]
 fn test_annotation_def_with_explicit_targets_and_handler() {
     let content = r#"
-        annotation only_types() {
-            targets: [type, expression]
+        annotation only_types() on type, expression {
             comptime post(target, ctx) {
                 target.kind
             }
@@ -1627,8 +1626,7 @@ fn test_annotation_def_with_explicit_targets_and_handler() {
 #[test]
 fn test_annotation_comptime_directives_parse_in_block() {
     let content = r#"
-        annotation transform() {
-            targets: [expression]
+        annotation transform() on expression {
             comptime post(target, ctx) {
                 remove target
             }
@@ -1656,8 +1654,7 @@ fn test_annotation_comptime_directives_parse_in_block() {
 #[test]
 fn test_annotation_typed_comptime_directives_parse() {
     let content = r#"
-        annotation schema() {
-            targets: [function]
+        annotation schema() on function {
             comptime post(target, ctx) {
                 set param uri: string
                 set return DbConnection
@@ -1695,8 +1692,7 @@ fn test_annotation_typed_comptime_directives_parse() {
 #[test]
 fn test_annotation_set_param_type_expr_directive_parse() {
     let content = r#"
-        annotation schema() {
-            targets: [function]
+        annotation schema() on function {
             comptime post(target, ctx) {
                 set param uri: (string)
                 set param value: (target.params[0].type_ref)
@@ -1727,8 +1723,7 @@ fn test_annotation_set_param_type_expr_directive_parse() {
 #[test]
 fn test_annotation_replace_body_expr_directive_parse() {
     let content = r#"
-        annotation schema() {
-            targets: [function]
+        annotation schema() on function {
             comptime post(target, ctx) {
                 replace body (gen_body(target))
             }
@@ -1754,8 +1749,7 @@ fn test_annotation_replace_body_expr_directive_parse() {
 #[test]
 fn test_annotation_replace_module_expr_directive_parse() {
     let content = r#"
-        annotation schema() {
-            targets: [module]
+        annotation schema() on module {
             comptime post(target, ctx) {
                 replace module (gen_module(target))
             }
@@ -1788,10 +1782,11 @@ fn test_annotation_replace_module_expr_directive_parse() {
 // ===== ADR-009 E4-D4 (slice 1, issue #73): header `on`-clause targets =====
 //
 // The header spelling `annotation NAME(config)? on <kind>, ... { ... }`
-// populates `allowed_targets` FROM THE HEADER. During the S1a dual-parse
-// window the legacy body `targets: [...]` field still parses (covered by the
-// tests above); these pins exercise the new header spelling only. No existing
-// fixture is altered by this stage.
+// populates `allowed_targets` FROM THE HEADER, and after S1b it is the ONE
+// accepted spelling: the legacy body `targets: [...]` field is a tombstone that
+// yields a NAMED migration rejection (see
+// `test_legacy_body_targets_field_is_rejected_with_named_migration_diagnostic`
+// below). These pins exercise the header spelling.
 
 /// Pull the single `AnnotationDef` out of a parsed program.
 fn annotation_def_of(items: &[crate::ast::Item]) -> &crate::ast::AnnotationDef {
@@ -1893,6 +1888,55 @@ fn test_annotation_absent_on_clause_leaves_targets_none() {
     assert_eq!(
         ann.allowed_targets, None,
         "absent on-clause must leave allowed_targets as None (inference default)"
+    );
+}
+
+#[test]
+fn test_legacy_body_targets_field_is_rejected_with_named_migration_diagnostic() {
+    // S1b tombstone (DN2): the removed body `targets: [...]` field must produce
+    // a NAMED migration diagnostic pointing at the header `on`-clause — never an
+    // opaque pest error and never a valid AST. Asserting the message text (not a
+    // bare `is_err`) is load-bearing: a future grammar rework that silently
+    // turned this into a *different* parse error would pass a bare `is_err`
+    // vacuously. Twins the `@annotation`-rejection assertion pattern above.
+    let content = r#"
+        annotation legacy_form() on function {
+            comptime post(target, ctx) {
+                target.kind
+            }
+        }
+    "#;
+    let err = parse_program_helper(content).expect_err(
+        "body `targets: [...]` field must be rejected after S1b — one accepted spelling",
+    );
+    let msg = err.to_string();
+    assert!(
+        msg.contains("annotation targets moved to the header `on` clause"),
+        "rejection must name the migration to the header on-clause, got: {msg}"
+    );
+    assert!(
+        msg.contains("issue #73"),
+        "rejection should cite issue #73 for the migration, got: {msg}"
+    );
+}
+
+#[test]
+fn test_legacy_body_targets_positive_twin_header_form_parses() {
+    // Positive twin of the tombstone: the SAME target set written in the header
+    // form parses cleanly and populates `allowed_targets == Some([Function])`.
+    let content = r#"
+        annotation legacy_form() on function {
+            comptime post(target, ctx) {
+                target.kind
+            }
+        }
+    "#;
+    let items = parse_program_helper(content).expect("header form must parse");
+    let ann = annotation_def_of(&items);
+    assert_eq!(
+        ann.allowed_targets,
+        Some(vec![crate::ast::AnnotationTargetKind::Function]),
+        "header on-clause must populate allowed_targets == Some([Function])"
     );
 }
 
