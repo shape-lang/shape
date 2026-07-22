@@ -99,3 +99,31 @@ fn cmut_pointer_type_parses() {
     )
     .expect_parse_ok();
 }
+
+// =========================================================================
+// Annotations on extern "C" fns
+// =========================================================================
+
+/// `#74 INTERIM REJECTION` (ADR-009 E4-D5, slice S2) — a comptime-only
+/// annotation on an `extern "C" fn` is a LOUD named rejection end-to-end
+/// through the shipped pipeline. MEASURED at `75eca793` before the fix: this
+/// exact program compiled, ran, printed, and exited 0 with the `comptime post`
+/// handler a silent no-op on every channel. Deleted when #74 lands.
+#[test]
+fn comptime_annotation_on_extern_c_fn_is_rejected_citing_74() {
+    ShapeTest::new(
+        r#"
+annotation marked() on function {
+  comptime post(target, ctx) {
+    1
+  }
+}
+
+@marked()
+extern "C" fn labs(x: int) -> int from "c"
+
+print("unreachable")
+"#,
+    )
+    .expect_run_err_contains("see issue #74");
+}

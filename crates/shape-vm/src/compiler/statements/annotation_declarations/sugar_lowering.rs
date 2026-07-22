@@ -247,6 +247,58 @@ pub(in crate::compiler) fn foreign_target_application_rejection(
     )
 }
 
+/// `#74 INTERIM REJECTION` — ADR-009 E4-D5 (slice S2): the FOREIGN-target
+/// COMPTIME-HANDLER rejection, fired at the head of `compile_foreign_function`
+/// when a compiled annotation carrying a `comptime pre` / `comptime post`
+/// handler and NO declarative hooks is applied to an `extern "C"` /
+/// dynamic-language foreign fn.
+///
+/// MEASURED FACT this replaces (binary of record: the `75eca793` debug
+/// `shape`; all three foreign flavours — `extern "C"`, `fn python`,
+/// `fn typescript`): the comptime handler compiled as a SILENT NO-OP. Exit 0,
+/// nothing on ANY observation channel — no `error()`, no `warning()`, no
+/// `print()`, no code emission. The shipped `@llm_tool` / `@json_schema`
+/// schema generators are live instances: `@llm_tool` on an `extern "C" fn`
+/// runs green and generates no `<fn>_tool_def()` at all.
+///
+/// ROOT CAUSE — exactly one missing call-graph edge:
+/// `execute_comptime_handlers` (`compiler/functions_annotations.rs`) takes a
+/// `&mut FunctionDef`, and its sole non-test caller is `compile_function`
+/// (`compiler/functions.rs`). A `ForeignFunctionDef` never arrives there, and
+/// no `ForeignFunctionDef → FunctionDef` conversion exists anywhere in the
+/// workspace.
+///
+/// INTERIM. Issue #74 rules running comptime handlers on foreign targets
+/// **IN** — planned, not refused. This sentence is deleted when that
+/// capability lands; `grep -rn "#74 INTERIM REJECTION"` returns the full
+/// deletion set.
+///
+/// Sibling to `foreign_target_application_rejection` (#68), deliberately
+/// SEPARATE: different reason, different issue, **different deletion date**
+/// (the #68 producer dies when E4 closes #68; this one outlives it, because
+/// the #74 run capability is explicitly not an E4 deliverable). ONE producer
+/// for all three foreign flavours — the measured behaviour is identical and
+/// `target_descriptor` renders the flavour, exactly as its #68 sibling does.
+/// C3-G13 string-tag message text (uncoded — no new C09xx minted without a
+/// census; revisit when #60's coded path lands).
+pub(in crate::compiler) fn foreign_target_comptime_handler_rejection(
+    annotation_name: &str,
+    handler_type: &AnnotationHandlerType,
+    target_descriptor: &str,
+    fn_name: &str,
+) -> String {
+    let phase = hook_kind_word(handler_type);
+    format!(
+        "annotation `@{annotation_name}` on {target_descriptor} fn `{fn_name}` is not \
+         applied — its `{phase}` handler would never run, because foreign function \
+         declarations never reach the compile-time annotation-handler pass (running \
+         comptime handlers on foreign targets is planned, not refused — see issue #74; \
+         this rejection is interim and is deleted when that capability lands); wrap the \
+         call in an ordinary Shape function and annotate that, move the compile-time work \
+         into a `comptime {{ }}` block, or remove it"
+    )
+}
+
 /// R3: the hook-shape rejection (exact charter sentence, S6-collapsed: the
 /// former "typed config parameters select the typed hook surface" head and
 /// the "stay on the legacy surface" escape are deleted with the fork — the

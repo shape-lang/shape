@@ -20,45 +20,93 @@ impl BytecodeCompiler {
         &mut self,
         def: &shape_ast::ast::ForeignFunctionDef,
     ) -> Result<()> {
-        // ADR-009 C3 #14 (slice 8, S8a): a declarative-hook annotation on a
-        // FOREIGN target was a MEASURED silent no-op (S6 report §6.4: foreign
-        // fns never reach `execute_comptime_handlers`, and the typed weave
-        // targets ordinary `FunctionDef`s only) — a LOUD named
-        // surface-and-stop rejection anchored at the `@application` site
-        // replaces it. First hook-bearing annotation in application order
-        // fires; the ONE producer is
-        // `sugar_lowering::foreign_target_application_rejection` (C3-G13
-        // string-tag text with the #60 routing note; hooks on foreign
-        // targets are E4/#68 re-implementation territory). SCOPE FENCE
-        // (ordered, not silently widened): annotations WITHOUT declarative
-        // hooks (comptime-only, `@json_schema`-class) stay outside this
-        // rejection — their comptime handlers are ALSO measured silent
-        // no-ops on foreign targets (S8a probe), surfaced for disposition
-        // in the slice-7/8 report rather than rejected here. An
-        // unresolvable annotation name keeps the compiler's existing
-        // behavior (the G12 nested-fn precedent).
+        // `#74 INTERIM REJECTION` — annotations on FOREIGN targets are LOUD
+        // named surface-and-stop rejections, anchored at the `@application`
+        // site. TWO reasons, two issues, two deletion dates; ONE loop, first
+        // rejection-bearing annotation in application order fires.
+        //
+        //   (a) declarative before/after hooks (`sugar_post_handler`) —
+        //       ADR-009 C3 #14 (slice 8, S8a). MEASURED silent no-op (S6
+        //       report §6.4: the typed weave targets ordinary `FunctionDef`s
+        //       only). Producer:
+        //       `sugar_lowering::foreign_target_application_rejection`; cites
+        //       #68, which E4 itself closes.
+        //   (b) `comptime pre` / `comptime post` handlers, no declarative
+        //       hooks — ADR-009 E4-D5 (slice S2). MEASURED silent no-op at
+        //       `75eca793` on all three foreign flavours, on every observation
+        //       channel (`error()` / `warning()` / `print()` / code emission);
+        //       the shipped `@llm_tool` and `@json_schema` generators are live
+        //       instances. Root cause: `execute_comptime_handlers` takes a
+        //       `&mut FunctionDef` and its sole non-test caller is
+        //       `compile_function`, so a `ForeignFunctionDef` never arrives.
+        //       Producer:
+        //       `sugar_lowering::foreign_target_comptime_handler_rejection`;
+        //       cites #74, which rules the capability IN (planned, not
+        //       refused) and OUTLIVES the #68 arm.
+        //
+        // Precedence, inside ONE annotation: (a) wins. E4-D5 authorizes
+        // rejecting *comptime-only* annotations; an annotation carrying
+        // declarative hooks is not comptime-only and stays on #68. This is
+        // self-healing — when #68 closes and arm (a) is deleted, arm (b)
+        // takes over and is still correct.
+        //
+        // SCOPE FENCE (ordered, not silently widened): `on_define` /
+        // `metadata` handlers and pure markers (zero handlers) stay OUTSIDE.
+        // Markers are not a divergence at all (identical on ordinary and
+        // foreign targets) and rejecting them would break the shipped
+        // `@warmup`. `on_define` / `metadata` on foreign targets ARE genuine
+        // divergences — measured firing on an ordinary fn under `-m vm` and
+        // silent on every foreign flavour — but E4-D5's ratified word is
+        // "comptime-only", and the family carries an orthogonal, independently
+        // broken axis: the definition-time lifecycle call is silently DROPPED
+        // under `-m jit` (the CLI default) on ordinary fns too, so a rejection
+        // whose remedy read "apply it to an ordinary Shape function instead"
+        // would be false. Both halves are ticketed together. An unresolvable
+        // annotation name keeps the compiler's existing behavior (the G12
+        // nested-fn precedent) — the `else { continue }` below is what keeps
+        // it out, and flattening it into a rejection is a scope change.
         for ann in &def.annotations {
-            if let Some((_, compiled)) = self.lookup_compiled_annotation(ann)
-                && compiled.sugar_post_handler.is_some()
+            let Some((_, compiled)) = self.lookup_compiled_annotation(ann) else {
+                continue;
+            };
+            if compiled.sugar_post_handler.is_none()
+                && compiled.comptime_pre_handler.is_none()
+                && compiled.comptime_post_handler.is_none()
             {
-                let target_descriptor = match &def.native_abi {
-                    Some(native) => format!("extern \"{}\"", native.abi),
-                    None => format!("foreign {}", def.language),
-                };
-                let span = if ann.span == shape_ast::ast::Span::DUMMY {
-                    def.name_span
-                } else {
-                    ann.span
-                };
-                return Err(ShapeError::SemanticError {
-                    message: crate::compiler::statements::annotation_declarations::sugar_lowering::foreign_target_application_rejection(
-                        &ann.name,
-                        &target_descriptor,
-                        &def.name,
-                    ),
-                    location: Some(self.span_to_source_location(span)),
-                });
+                continue;
             }
+            let target_descriptor = match &def.native_abi {
+                Some(native) => format!("extern \"{}\"", native.abi),
+                None => format!("foreign {}", def.language),
+            };
+            let span = if ann.span == shape_ast::ast::Span::DUMMY {
+                def.name_span
+            } else {
+                ann.span
+            };
+            let message = if compiled.sugar_post_handler.is_some() {
+                crate::compiler::statements::annotation_declarations::sugar_lowering::foreign_target_application_rejection(
+                    &ann.name,
+                    &target_descriptor,
+                    &def.name,
+                )
+            } else {
+                let handler = compiled
+                    .comptime_pre_handler
+                    .as_ref()
+                    .or(compiled.comptime_post_handler.as_ref())
+                    .expect("gate proved a comptime handler is present");
+                crate::compiler::statements::annotation_declarations::sugar_lowering::foreign_target_comptime_handler_rejection(
+                    &ann.name,
+                    &handler.handler_type,
+                    &target_descriptor,
+                    &def.name,
+                )
+            };
+            return Err(ShapeError::SemanticError {
+                message,
+                location: Some(self.span_to_source_location(span)),
+            });
         }
 
         // Validate `out` params: only allowed on extern C, must be ptr, no const/&/default.
@@ -1471,21 +1519,54 @@ mod ctype_spelling_tests {
 }
 
 #[cfg(test)]
-mod foreign_target_hook_annotation_tests {
-    //! ADR-009 C3 #14 (slice 8, S8a) — the foreign-target hook-annotation
-    //! rejection (the ordered S6 report §6.4 close-out).
+mod foreign_target_annotation_rejection_tests {
+    //! Foreign-target annotation rejections — TWO reasons, two issues, two
+    //! deletion dates, one loop in `compile_foreign_function`.
     //!
-    //! MEASURED at `26780771` before the fix (CLI probes, both flavors):
-    //! a typed declarative-hook annotation on `extern "C" fn` / `fn python`
-    //! compiled and ran with the hook a SILENT NO-OP (extern probe printed
-    //! `42` only — "before fired" never appeared). These pins convert the
-    //! silence into the LOUD named surface-and-stop rejection, anchored at
-    //! the `@application` line, with the compile-green positive twins.
-    //! SCOPE-FENCE CONTROL: a comptime-only annotation (no declarative
-    //! hooks) stays OUTSIDE the rejection — its handler is ALSO a measured
-    //! silent no-op on foreign targets (probe: `error()` in `comptime post`
-    //! never fired on an extern target), surfaced for disposition in the
-    //! slice-7/8 report, deliberately NOT widened into this rejection.
+    //! **(a) declarative before/after hooks — ADR-009 C3 #14 (slice 8, S8a),
+    //! issue #68.** MEASURED at `26780771` before the fix (CLI probes, both
+    //! flavors): a typed declarative-hook annotation on `extern "C" fn` /
+    //! `fn python` compiled and ran with the hook a SILENT NO-OP (the extern
+    //! probe printed `42` only — "before fired" never appeared).
+    //!
+    //! **(b) `comptime pre` / `comptime post` handlers — ADR-009 E4-D5
+    //! (slice S2), issue #74.** `#74 INTERIM REJECTION`. MEASURED at
+    //! `75eca793` on ALL THREE foreign flavours (`extern "C"`, `fn python`,
+    //! `fn typescript`): exit 0 with the handler a SILENT NO-OP on every
+    //! observation channel — `error()`, `warning()`, `print()`, and code
+    //! emission all produced nothing. The shipped `@llm_tool` /
+    //! `@json_schema` generators are live instances (`@llm_tool` on an
+    //! `extern "C" fn` runs green and generates no `<fn>_tool_def()`). Root
+    //! cause, one missing call-graph edge: `execute_comptime_handlers` takes
+    //! a `&mut FunctionDef` and its sole non-test caller is
+    //! `compile_function`, so a `ForeignFunctionDef` never arrives. Issue #74
+    //! rules the capability **IN** — planned, not refused; this rejection is
+    //! INTERIM and is deleted when #74 lands.
+    //!
+    //! These pins convert both silences into LOUD named surface-and-stop
+    //! rejections anchored at the `@application` line, with the compile-green
+    //! positive twins. Precedence inside ONE annotation: (a) wins, because
+    //! E4-D5 authorizes rejecting *comptime-only* annotations and an
+    //! annotation carrying declarative hooks is not comptime-only. Across
+    //! STACKED annotations the first *rejection-bearing* one in application
+    //! order fires (a deliberate S2 generalization of the former "first
+    //! hook-bearing").
+    //!
+    //! ORDERED SCOPE FENCE — still OUTSIDE both rejections: `on_define` /
+    //! `metadata` handlers, pure markers (zero handlers), and unresolvable
+    //! annotation names. Markers are not a divergence at all and rejecting
+    //! them would break the shipped `@warmup`. `on_define` / `metadata` on
+    //! foreign targets ARE genuine foreign divergences — measured firing on an
+    //! ordinary fn under `-m vm`, silent on every foreign flavour — and are
+    //! excluded for two reasons, neither of which is "they don't fire on
+    //! ordinary fns": E4-D5's ratified word is "comptime-only", and the family
+    //! carries an orthogonal, independently broken axis (the definition-time
+    //! lifecycle call is silently DROPPED under `-m jit`, the CLI default, on
+    //! ordinary fns too), so a rejection whose remedy read "apply it to an
+    //! ordinary Shape function instead" would be false. Both halves are
+    //! ticketed together; the fence is a TEST here, not a comment. An
+    //! unresolvable name keeps the compiler's existing behavior (the G12
+    //! nested-fn precedent).
     use crate::compiler::BytecodeCompiler;
     use shape_ast::error::ShapeError;
 
@@ -1668,17 +1749,19 @@ print(double(21))
         );
     }
 
-    // Scope-fence control: a comptime-only annotation (NO declarative
-    // hooks) on a foreign target stays OUTSIDE the ordered rejection —
-    // compile-green today. Its handler is a MEASURED silent no-op on
-    // foreign targets (S8a probe: `error()` in `comptime post` never fired
-    // on an extern "C" target); that finding is surfaced for supervisor
-    // disposition in the slice-7/8 report, NOT silently widened into this
-    // rejection (the ordered scope covers declarative before/after only).
+    // =====================================================================
+    // (b) `#74 INTERIM REJECTION` — comptime-only annotations on foreign
+    //     targets. ADR-009 E4-D5, slice S2.
+    // =====================================================================
+
+    /// The INVERTED C3-S8a scope-fence control. Fixture is that pin's source
+    /// verbatim; only the expectation flips, from `compile_ok` to the LOUD
+    /// named rejection E4-D5 ratified. **This is one of the two tests #74's
+    /// implementer must flip when the run capability lands** (the other is
+    /// `e4s2_hook_and_comptime_annotation_on_extern_c_fn_reports_the_68_hook_reason`).
     #[test]
-    fn s8a_scope_fence_comptime_only_annotation_on_extern_c_fn_stays_unrejected() {
-        compile_ok(
-            r#"
+    fn e4s2_comptime_post_annotation_on_extern_c_fn_rejects_citing_74() {
+        let src = r#"
 annotation marked() on function {
   comptime post(target, ctx) {
     1
@@ -1686,6 +1769,304 @@ annotation marked() on function {
 }
 
 @marked()
+extern "C" fn labs(x: int) -> int from "c"
+
+print(labs(0 - 42))
+"#;
+        let (message, location) = compile_err_with_location(src);
+        assert!(
+            message.contains(
+                "annotation `@marked` on extern \"C\" fn `labs` is not applied — its \
+                 `comptime post` handler would never run, because foreign function \
+                 declarations never reach the compile-time annotation-handler pass \
+                 (running comptime handlers on foreign targets is planned, not refused \
+                 — see issue #74; this rejection is interim and is deleted when that \
+                 capability lands); wrap the call in an ordinary Shape function and \
+                 annotate that, move the compile-time work into a `comptime { }` block, \
+                 or remove it"
+            ),
+            "the foreign-target comptime sentence must fire verbatim, got: {message}"
+        );
+        assert!(
+            message.contains("see issue #74"),
+            "the interim rejection must route the reader to #74, got: {message}"
+        );
+        assert!(
+            message.contains("planned, not refused"),
+            "#74 is RULED IN; this must not read as a principled refusal, got: {message}"
+        );
+        assert!(
+            !message.contains("#68"),
+            "the two reasons must not blur — #68 is the hook arm, got: {message}"
+        );
+        assert_anchored_at(location, src, "@marked(");
+    }
+
+    // The phase word derives from the real `AnnotationHandlerType`, not from
+    // a hard-coded string: the same fixture with `comptime pre` must name
+    // `comptime pre`.
+    #[test]
+    fn e4s2_comptime_pre_annotation_on_extern_c_fn_names_the_pre_handler() {
+        let src = r#"
+annotation marked() on function {
+  comptime pre(target, ctx) {
+    1
+  }
+}
+
+@marked()
+extern "C" fn labs(x: int) -> int from "c"
+
+print(labs(0 - 42))
+"#;
+        let (message, location) = compile_err_with_location(src);
+        assert!(
+            message.contains(
+                "annotation `@marked` on extern \"C\" fn `labs` is not applied — its \
+                 `comptime pre` handler would never run"
+            ),
+            "the phase word must come from the handler type, got: {message}"
+        );
+        assert!(
+            message.contains("see issue #74"),
+            "the interim rejection must route the reader to #74, got: {message}"
+        );
+        assert_anchored_at(location, src, "@marked(");
+    }
+
+    // Both phases on ONE annotation: one rejection, naming `comptime pre`
+    // (pre-before-post mirrors the measured ordinary-fn firing order).
+    #[test]
+    fn e4s2_both_comptime_phases_on_extern_c_fn_names_the_pre_handler() {
+        let src = r#"
+annotation marked() on function {
+  comptime pre(target, ctx) {
+    1
+  }
+  comptime post(target, ctx) {
+    2
+  }
+}
+
+@marked()
+extern "C" fn labs(x: int) -> int from "c"
+
+print(labs(0 - 42))
+"#;
+        let (message, location) = compile_err_with_location(src);
+        assert!(
+            message.contains("its `comptime pre` handler would never run"),
+            "pre is selected before post, got: {message}"
+        );
+        assert!(
+            !message.contains("comptime post"),
+            "one rejection, one phase named, got: {message}"
+        );
+        assert!(
+            message.contains("see issue #74"),
+            "the interim rejection must route the reader to #74, got: {message}"
+        );
+        assert_anchored_at(location, src, "@marked(");
+    }
+
+    // ONE producer covers all three foreign flavours — `target_descriptor`
+    // renders the dynamic language, exactly as the #68 sibling does.
+    #[test]
+    fn e4s2_comptime_annotation_on_dynamic_language_foreign_fn_names_the_language() {
+        let src = r#"
+annotation marked() on function {
+  comptime post(target, ctx) {
+    1
+  }
+}
+
+@marked()
+fn python padd(a: int, b: int) -> Result<int> {
+    return a + b
+}
+
+print("unreachable")
+"#;
+        let (message, location) = compile_err_with_location(src);
+        assert!(
+            message.contains(
+                "annotation `@marked` on foreign python fn `padd` is not applied — its \
+                 `comptime post` handler would never run"
+            ),
+            "the comptime sentence must render the dynamic language, got: {message}"
+        );
+        assert!(
+            message.contains("see issue #74"),
+            "the interim rejection must route the reader to #74, got: {message}"
+        );
+        assert_anchored_at(location, src, "@marked(");
+    }
+
+    /// THE PRECEDENCE PIN. One annotation carrying BOTH a declarative
+    /// `before(args)` hook and a `comptime post` handler is NOT
+    /// "comptime-only", so E4-D5 does not reach it — it stays on the #68 arm.
+    /// Freezes the measured status quo and makes the D5-derived rule a test.
+    /// **Tripwire:** when E4 closes #68 and the sugar arm is deleted, this
+    /// goes red and forces the implementer to re-decide. It is also the
+    /// second of the two tests #74's implementer must flip.
+    #[test]
+    fn e4s2_hook_and_comptime_annotation_on_extern_c_fn_reports_the_68_hook_reason() {
+        let src = r#"
+annotation both(tag: string) on function {
+  before(args) {
+    print(f"before fired: {tag}")
+    return args
+  }
+  comptime post(target, ctx) {
+    1
+  }
+}
+
+@both("t")
+extern "C" fn labs(x: int) -> int from "c"
+
+print(labs(0 - 42))
+"#;
+        let (message, location) = compile_err_with_location(src);
+        assert!(
+            message.contains(
+                "annotation `@both` on extern \"C\" fn `labs` is not applied — runtime \
+                 hook templates weave ordinary Shape function bodies"
+            ),
+            "a hook-bearing annotation stays on the #68 arm, got: {message}"
+        );
+        assert!(
+            message.contains("see issue #68"),
+            "the hook reason routes to #68, got: {message}"
+        );
+        assert!(
+            !message.contains("#74"),
+            "the two reasons must not blur, got: {message}"
+        );
+        assert_anchored_at(location, src, "@both(");
+    }
+
+    /// PINS THE S2 BEHAVIOUR CHANGE across STACKED annotations. The loop
+    /// generalizes from "first *hook-bearing* annotation" to "first
+    /// *rejection-bearing* annotation". BEFORE S2 this fixture named
+    /// `@traced` at the later line (the loop skipped the sugar-less
+    /// `@marked`) — a priority inversion, the squiggle jumping past an
+    /// equally-broken earlier annotation. AFTER S2 it must name `@marked`.
+    #[test]
+    fn e4s2_stacked_comptime_then_hook_rejects_on_the_first_in_application_order() {
+        let src = &format!(
+            r#"{TRACED_DECL}
+annotation marked() on function {{
+  comptime post(target, ctx) {{
+    1
+  }}
+}}
+
+@marked()
+@traced("second")
+extern "C" fn labs(x: int) -> int from "c"
+
+print(labs(0 - 42))
+"#
+        );
+        let (message, location) = compile_err_with_location(src);
+        assert!(
+            message.contains("annotation `@marked` on extern \"C\" fn `labs` is not applied"),
+            "the FIRST rejection-bearing annotation must be the one named, got: {message}"
+        );
+        assert!(
+            message.contains("see issue #74"),
+            "the first annotation is comptime-only, so #74 is the reason, got: {message}"
+        );
+        assert!(
+            !message.contains("@traced"),
+            "surface-and-stop: only the first annotation fires, got: {message}"
+        );
+        assert_anchored_at(location, src, "@marked(");
+    }
+
+    // The critical positive twin: the SAME comptime annotation on an ORDINARY
+    // Shape fn must still RUN its handler — not merely compile. The fixture's
+    // handler calls `error()`, so a green compile here would mean the handler
+    // silently did not fire and the twin proved nothing.
+    #[test]
+    fn e4s2_twin_same_comptime_annotation_on_ordinary_fn_still_runs_its_handler() {
+        let src = r#"
+annotation marked() on function {
+  comptime post(target, ctx) {
+    error("COMPTIME POST FIRED")
+  }
+}
+
+@marked()
+fn ordinary(x: int) -> int {
+    return x * 2
+}
+
+print(ordinary(21))
+"#;
+        let (message, _location) = compile_err_with_location(src);
+        assert!(
+            message.contains("COMPTIME POST FIRED"),
+            "the ordinary-fn twin must actually RUN the comptime handler, got: {message}"
+        );
+        assert!(
+            !message.contains("see issue #74"),
+            "the foreign rejection must not reach ordinary fns, got: {message}"
+        );
+    }
+
+    // FENCE PIN — pure markers (zero handlers) are NOT a divergence: a marker
+    // does nothing on ordinary targets either. Rejecting them would break the
+    // shipped `std::finance::annotations` `@warmup`.
+    #[test]
+    fn e4s2_twin_marker_annotation_without_handlers_on_extern_c_fn_compiles() {
+        compile_ok(
+            r#"
+annotation marked() on function {
+}
+
+@marked()
+extern "C" fn labs(x: int) -> int from "c"
+
+print(labs(0 - 42))
+"#,
+        );
+    }
+
+    // FENCE PIN for the `on_define` / `metadata` exclusion. These ARE genuine
+    // foreign divergences, but E4-D5's ratified word is "comptime-only" and
+    // the lifecycle family carries an orthogonal `-m jit` drop that must be
+    // fixed first. Ticketed, not rejected here. Flips to a must-reject if the
+    // scope is ever widened.
+    #[test]
+    fn e4s2_twin_metadata_only_annotation_on_extern_c_fn_compiles() {
+        compile_ok(
+            r#"
+annotation marked() on function {
+  metadata() {
+    return { k: 1 }
+  }
+}
+
+@marked()
+extern "C" fn labs(x: int) -> int from "c"
+
+print(labs(0 - 42))
+"#,
+        );
+    }
+
+    // Pins that the `let Some(..) else { continue }` shape survives the S2
+    // widening: an unresolvable annotation name still keeps the compiler's
+    // existing behavior (the G12 nested-fn precedent, and what keeps the dark
+    // `@remote` out of this rejection). Flattening that `else` into a
+    // rejection would turn this green pin red.
+    #[test]
+    fn e4s2_twin_unknown_annotation_name_on_extern_c_fn_keeps_existing_behavior() {
+        compile_ok(
+            r#"
+@totally_unknown()
 extern "C" fn labs(x: int) -> int from "c"
 
 print(labs(0 - 42))

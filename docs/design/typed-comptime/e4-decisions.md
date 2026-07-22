@@ -63,6 +63,21 @@ preserved + the exit-soundness substrate).
   scope-fence pin flips to a LOUD named rejection of comptime-only
   annotations on foreign targets, citing #74. The run-capability exploration
   remains #74's, NOT an E4 deliverable.
+  - **S2 shipped** (`e4-slice2-report.md`). TWO producers now live in
+    `sugar_lowering.rs`, deliberately separate because they have different
+    deletion dates: `foreign_target_application_rejection` (#68, dies when E4
+    closes #68) and the new `foreign_target_comptime_handler_rejection` (#74,
+    outlives it). ONE loop in `compile_foreign_function` selects between them;
+    inside one annotation the #68 hook reason wins, because D5's word is
+    "comptime-only". Eight supervisor rulings ratified 2026-07-22 and recorded
+    in the report §1: Q1 EXCLUDE `on_define`/`metadata` (→ #75), Q2 no marker
+    rejection, Q3 ONE producer for all three foreign flavours, Q4 message text
+    verbatim, Q5 accept the stacked "first *rejection-bearing* annotation"
+    behaviour change, Q6 rename the test module, Q7 file the adjacent-holes
+    ticket (→ #76), Q8 no `sugar_lowering.rs` rename. 13 pins added, 0 deleted,
+    the 5 #68 must-keeps byte-for-byte unchanged. Grep tag:
+    `#74 INTERIM REJECTION`. Book swept in-slice (`shape-web` `d60bbc0`);
+    book truth-gate 557/573, same 16 pre-existing reds.
 - **E4-D6 (failure/retry vocabulary).** DESIGN the full four-transform
   vocabulary (recover / retry / re-place / propagate-typed-failure) in the
   protocol spec; IMPLEMENT only propagate in E4. The unimplemented three are

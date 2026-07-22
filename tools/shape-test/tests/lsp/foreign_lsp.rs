@@ -83,3 +83,27 @@ let b = ts_render(\"<span>\");
         .at(pos(0, 4))
         .expect_rename_edits("ts_display", 3);
 }
+
+// == Foreign-target annotation rejections surface in the editor ================
+
+/// `#74 INTERIM REJECTION` (ADR-009 E4-D5, slice S2) — the foreign-target
+/// comptime rejection must reach the EDITOR, not just `shape run`. The
+/// compiler's `SemanticError` flows through `shape-lsp`'s `analysis.rs`
+/// (`compile_in_place` under `RecoverAll` → `error_to_diagnostic_with_uri`),
+/// so the squiggle lands on the `@application` line — line 6, 0-based.
+#[test]
+fn comptime_annotation_on_extern_c_fn_surfaces_lsp_diagnostic_at_the_application_line() {
+    let code = "\
+annotation marked() on function {
+  comptime post(target, ctx) {
+    1
+  }
+}
+
+@marked()
+extern \"C\" fn labs(x: int) -> int from \"c\"
+
+print(\"unreachable\")
+";
+    ShapeTest::new(code).expect_semantic_diagnostic_at_line_contains(6, "see issue #74");
+}
