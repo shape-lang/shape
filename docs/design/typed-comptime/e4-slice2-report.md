@@ -162,10 +162,14 @@ full deletion set", and the three end-to-end cells plus the test-module header
 genuinely belong to it, so three would have returned an incomplete set. This is
 a ratified deviation, not an absorbed one.
 
-**The tag sits at SEVEN sites** (eight grep lines; the producer's doc-comment
-accounts for two of them — the tag itself plus the self-referential
-`grep -rn` instruction). Full enumeration by symbol, since the #74 issue comment
-originally listed only six:
+**The tag sits at SEVEN CODE sites** (eight grep lines in `.rs` files; the
+producer's doc-comment accounts for two of them — the tag itself plus the
+self-referential `grep -rn` instruction). **Restrict the grep to code**, e.g.
+`git grep -n "#74 INTERIM REJECTION" -- '*.rs'`: an unrestricted repo-wide
+`git grep` returns 13 lines, because this section and `e4-decisions.md` cite the
+tag in prose and so pollute their own grep. A future deleter running the
+unrestricted form gets five non-site prose hits. Full enumeration by symbol,
+since the #74 issue comment originally listed only six:
 
 | # | File | Symbol / anchor |
 |---|------|-----------------|
