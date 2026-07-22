@@ -18,6 +18,14 @@ slice-0 table had none.
 - Book repo `shape-web`, branch `adr009-c3-annotations`, base `43173a8`,
   commit `d60bbc0` (two files only; the ~64 uncommitted files belonging to
   another agent were left untouched and unstaged — verified before and after).
+- **S2b** — review close-out (§S2b), append-only on top of the panel-examined
+  pair. `28fb8b34` and `d60bbc0` are NOT amended, rebased or rewritten.
+  - `shape` `adr009/e4` :: **`9d50714f`** — the MAJOR-1 remedy rewording, the
+    strengthened + 2 new pins, and the §2.1 / §2.6 / §3.1 report corrections.
+  - `shape-web` `adr009-c3-annotations` :: **`fef948e`** — the MAJOR-2 book
+    prose fix, two files only, dirty count verified 64 → 66 → 64.
+  - This §0 line is itself appended by a follow-up commit, since a commit
+    cannot contain its own hash.
 
 ## 1. Supervisor rulings on the spec's §7 open questions (ratified 2026-07-22)
 
