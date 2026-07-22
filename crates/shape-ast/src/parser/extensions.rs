@@ -11,13 +11,39 @@ use crate::parser::pair_span;
 use crate::parser::types::parse_type_annotation;
 use pest::iterators::Pair;
 
+/// Map an `annotation_target_kind` token to its AST variant.
+///
+/// ADR-009 E4-D4 (slice 1, issue #73): shared by BOTH the header
+/// `on`-clause and the legacy body `targets: [...]` field so the two
+/// spellings can never drift in which of the seven kinds they accept. The
+/// pest grammar already constrains the token to the seven-kind alternation,
+/// so the `other` arm is defensive.
+fn parse_target_kind(s: &str) -> Result<crate::ast::AnnotationTargetKind> {
+    Ok(match s {
+        "function" => crate::ast::AnnotationTargetKind::Function,
+        "type" => crate::ast::AnnotationTargetKind::Type,
+        "module" => crate::ast::AnnotationTargetKind::Module,
+        "expression" => crate::ast::AnnotationTargetKind::Expression,
+        "block" => crate::ast::AnnotationTargetKind::Block,
+        "await_expr" => crate::ast::AnnotationTargetKind::AwaitExpr,
+        "binding" => crate::ast::AnnotationTargetKind::Binding,
+        other => {
+            return Err(ShapeError::ParseError {
+                message: format!("unknown annotation target kind '{}'", other),
+                location: None,
+            });
+        }
+    })
+}
+
 /// Parse an annotation definition with lifecycle handlers
 ///
 /// Grammar:
 /// ```pest
 /// annotation_def = {
-///     "annotation" ~ ident ~ "(" ~ annotation_def_params? ~ ")" ~ "{" ~ annotation_body ~ "}"
+///     "annotation" ~ ident ~ ("(" ~ annotation_def_params? ~ ")")? ~ annotation_on_clause? ~ "{" ~ annotation_body ~ "}"
 /// }
+/// annotation_on_clause = { "on" ~ annotation_target_kind ~ ("," ~ annotation_target_kind)* }
 /// annotation_body = { annotation_handler* }
 /// annotation_handler = {
 ///     annotation_handler_name ~ "(" ~ annotation_handler_params? ~ ")" ~ return_type? ~ block_expr
@@ -37,9 +63,35 @@ pub fn parse_annotation_def(pair: Pair<Rule>) -> Result<AnnotationDef> {
     let mut params: Vec<FunctionParameter> = Vec::new();
     let mut handlers = Vec::new();
     let mut allowed_targets: Option<Vec<crate::ast::AnnotationTargetKind>> = None;
+    // ADR-009 E4-D4 (slice 1, S1a): tracks whether the header `on`-clause
+    // already populated `allowed_targets`. The grammar orders the on-clause
+    // before the body, so this is set before the body `targets:` arm runs
+    // during the S1 dual-parse window; the body arm rejects a def that
+    // carries BOTH spellings (no fixture does) to prevent silent
+    // double-population.
+    let mut header_targets_set = false;
 
     for part in inner {
         match part.as_rule() {
+            Rule::annotation_on_clause => {
+                // ADR-009 E4-D4 (slice 1, issue #73): populate
+                // `allowed_targets` from the header on-clause. Reuses the
+                // SAME `annotation_target_kind` vocabulary as the body field
+                // via `parse_target_kind`, so the two spellings cannot drift.
+                // All seven kinds are header-eligible (no scoping cut, per
+                // DN4) — `annotation_target_kind` enumerates all seven, so the
+                // clause inherits them for free. No new AST field, no new
+                // variant, hence no exhaustive-match cascade.
+                let mut targets = Vec::new();
+                for kind_pair in part.into_inner() {
+                    if kind_pair.as_rule() != Rule::annotation_target_kind {
+                        continue;
+                    }
+                    targets.push(parse_target_kind(kind_pair.as_str())?);
+                }
+                allowed_targets = Some(targets);
+                header_targets_set = true;
+            }
             Rule::annotation_def_params => {
                 // ADR-009 C3 #14 (slice 4): each config parameter is an
                 // `annotation_def_param` pair — `ident ~ (":" ~
@@ -96,30 +148,29 @@ pub fn parse_annotation_def(pair: Pair<Rule>) -> Result<AnnotationDef> {
                             handlers.push(parse_annotation_handler(item)?);
                         }
                         Rule::annotation_targets_decl => {
+                            // ADR-009 E4-D4 (slice 1, S1a): the header
+                            // on-clause is the accepted spelling. A def that
+                            // carries BOTH the header clause and this body
+                            // field is rejected with a named diagnostic (no
+                            // fixture does this) so the transient dual-parse
+                            // window can never silently double-populate.
+                            if header_targets_set {
+                                return Err(ShapeError::ParseError {
+                                    message: format!(
+                                        "annotation '{}' declares targets in both the header \
+                                         `on`-clause and the body `targets:` field; use the \
+                                         header `on`-clause only",
+                                        name
+                                    ),
+                                    location: None,
+                                });
+                            }
                             let mut targets = Vec::new();
                             for target_pair in item.into_inner() {
                                 if target_pair.as_rule() != Rule::annotation_target_kind {
                                     continue;
                                 }
-                                let kind = match target_pair.as_str() {
-                                    "function" => crate::ast::AnnotationTargetKind::Function,
-                                    "type" => crate::ast::AnnotationTargetKind::Type,
-                                    "module" => crate::ast::AnnotationTargetKind::Module,
-                                    "expression" => crate::ast::AnnotationTargetKind::Expression,
-                                    "block" => crate::ast::AnnotationTargetKind::Block,
-                                    "await_expr" => crate::ast::AnnotationTargetKind::AwaitExpr,
-                                    "binding" => crate::ast::AnnotationTargetKind::Binding,
-                                    other => {
-                                        return Err(ShapeError::ParseError {
-                                            message: format!(
-                                                "unknown annotation target kind '{}'",
-                                                other
-                                            ),
-                                            location: None,
-                                        });
-                                    }
-                                };
-                                targets.push(kind);
+                                targets.push(parse_target_kind(target_pair.as_str())?);
                             }
                             allowed_targets = Some(targets);
                         }

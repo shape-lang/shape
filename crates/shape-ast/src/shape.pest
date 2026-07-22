@@ -377,7 +377,21 @@ annotation_args = {
 //     metadata() { return { warmup_period: period }; }
 // }
 annotation_def = {
-    "annotation" ~ ident ~ ("(" ~ annotation_def_params? ~ ")")? ~ "{" ~ annotation_body ~ "}"
+    "annotation" ~ ident ~ ("(" ~ annotation_def_params? ~ ")")? ~ annotation_on_clause? ~ "{" ~ annotation_body ~ "}"
+}
+
+// ADR-009 E4-D4 (slice 1, issue #73): the header `on <kind>, <kind>, ...`
+// clause is the accepted spelling for annotation target restrictions,
+// replacing the legacy body `targets: [...]` field. It REUSES
+// `annotation_target_kind` verbatim (all seven kinds), so the header and
+// the (still-live during the S1 dual-parse window) body field can never
+// fork their vocabulary. `on` is contextual — the grammar already spells
+// "on" in disjoint productions (on_clause, timeframe_expr,
+// join_query_clause) with no global reservation, and after the annotation
+// name/params group the only continuations are `on` or `{`, so there is no
+// collision.
+annotation_on_clause = {
+    "on" ~ annotation_target_kind ~ ("," ~ annotation_target_kind)*
 }
 
 // ADR-009 C3 #14 (slice 4): a config parameter may carry a type annotation

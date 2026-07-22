@@ -1785,6 +1785,117 @@ fn test_annotation_replace_module_expr_directive_parse() {
     )));
 }
 
+// ===== ADR-009 E4-D4 (slice 1, issue #73): header `on`-clause targets =====
+//
+// The header spelling `annotation NAME(config)? on <kind>, ... { ... }`
+// populates `allowed_targets` FROM THE HEADER. During the S1a dual-parse
+// window the legacy body `targets: [...]` field still parses (covered by the
+// tests above); these pins exercise the new header spelling only. No existing
+// fixture is altered by this stage.
+
+/// Pull the single `AnnotationDef` out of a parsed program.
+fn annotation_def_of(items: &[crate::ast::Item]) -> &crate::ast::AnnotationDef {
+    match &items[0] {
+        crate::ast::Item::AnnotationDef(ann_def, _) => ann_def,
+        other => panic!("expected AnnotationDef, got {:?}", other),
+    }
+}
+
+#[test]
+fn test_annotation_header_on_clause_single_kind() {
+    let content = r#"
+        annotation traced(f: int) on function {
+            before(args) { args }
+        }
+    "#;
+    let items = parse_program_helper(content).expect("header on-clause should parse");
+    let ann = annotation_def_of(&items);
+    assert_eq!(ann.name, "traced");
+    assert_eq!(
+        ann.allowed_targets,
+        Some(vec![crate::ast::AnnotationTargetKind::Function]),
+        "single-kind header should populate allowed_targets from the header"
+    );
+    // config param survives alongside the on-clause
+    assert_eq!(ann.params.len(), 1);
+}
+
+#[test]
+fn test_annotation_header_on_clause_multi_kind() {
+    let content = r#"
+        annotation only_defs() on function, type {
+            comptime post(target, ctx) {
+                target.kind
+            }
+        }
+    "#;
+    let items = parse_program_helper(content).expect("multi-kind header should parse");
+    let ann = annotation_def_of(&items);
+    assert_eq!(
+        ann.allowed_targets,
+        Some(vec![
+            crate::ast::AnnotationTargetKind::Function,
+            crate::ast::AnnotationTargetKind::Type,
+        ]),
+        "multi-kind header should populate both kinds in source order"
+    );
+}
+
+#[test]
+fn test_annotation_header_on_clause_all_seven_kinds() {
+    // Anti-undercount pin (2026-07-22 issue-#73 correction): every one of the
+    // SEVEN AnnotationTargetKind kinds is header-eligible and maps to its own
+    // variant. Each variant is asserted individually so a 4-of-7 (or any-of-7)
+    // regression fails loudly rather than passing on a length check.
+    let content = r#"
+        annotation everywhere() on function, type, module, expression, block, await_expr, binding {
+            metadata() { 1 }
+        }
+    "#;
+    let items = parse_program_helper(content).expect("all-seven-kind header should parse");
+    let ann = annotation_def_of(&items);
+    let targets = ann
+        .allowed_targets
+        .clone()
+        .expect("all-seven header should populate allowed_targets");
+    use crate::ast::AnnotationTargetKind::*;
+    assert_eq!(
+        targets,
+        vec![
+            Function, Type, Module, Expression, Block, AwaitExpr, Binding,
+        ],
+        "all seven kinds must be header-eligible, each mapping to its own variant"
+    );
+    // Individual variant pins — guard the exact undercount class the
+    // issue-#73 correction called out.
+    assert!(targets.contains(&Function));
+    assert!(targets.contains(&Type));
+    assert!(targets.contains(&Module));
+    assert!(targets.contains(&Expression));
+    assert!(targets.contains(&Block));
+    assert!(targets.contains(&AwaitExpr));
+    assert!(targets.contains(&Binding));
+}
+
+#[test]
+fn test_annotation_absent_on_clause_leaves_targets_none() {
+    // DN1: a missing on-clause yields None, so target applicability falls
+    // through to the existing handler-kind inference (planner). The header
+    // OVERRIDES inference when present and is a no-op when absent — it never
+    // hardcodes a default here.
+    let content = r#"
+        annotation traced() {
+            before(args) { args }
+        }
+    "#;
+    let items = parse_program_helper(content).expect("annotation without on-clause should parse");
+    let ann = annotation_def_of(&items);
+    assert_eq!(
+        ann.allowed_targets, None,
+        "absent on-clause must leave allowed_targets as None (inference default)"
+    );
+}
+
 // ===== Regression: temporal-nav identifier hijack =====
 //
 // The deleted `back_nav` / `forward_nav` grammar rules sat ahead of `ident` in the
