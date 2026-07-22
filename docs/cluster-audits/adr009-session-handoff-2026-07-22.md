@@ -86,6 +86,33 @@ capability waves A→F) → close.
    payload-bind deopt is pre-existing, universal to all Result code, tracked
    for v0.4 — NOT an E4 deliverable; scope-fenced).
 
+## Book truth-gate: the real number (measured 2026-07-22)
+
+The full book universe is **572 runnable fences**, gated by
+`shape-web/book/book-site/scripts/run-book-truth-gate.mjs`
+(`SHAPE_BIN=<binary> node scripts/run-book-truth-gate.mjs`; regenerate
+snippets with `extract-shape-snippets.mjs`). Measured against the E4 binary:
+**536 → 556 pass, 0 regressions**, after migrating 38 annotation declarations
+across 6 pages to the header `on` clause.
+
+**16 fences remain red — ALL pre-existing, none from #73:**
+- **7 × `@remote` dark window** (modules ×2, stdlib/core/remote ×2,
+  polyglot-distributed ×2, execution-server ×1) — these go green when E4's
+  S5/S6 lands `@remote` (**#68**). They are E4's own acceptance surface.
+- **9 × untyped annotation config parameter deleted (C3-G7/S6)** — cookbook
+  Recipes 5-9 + 12, comptime, content-addressed-bytecode. These are **C3
+  fallout that C3's close never caught**: the C3 gate ran the truth-gate on
+  the ONE new annotations page (16/16), not the 572-fence universe. Recipes
+  5-9/12 additionally use the deleted `before(args, ctx)` / `ctx.state`
+  surface on `await_expr` targets, so they cannot go green until #68 lands.
+  They were deliberately NOT flipped to `runnable=false` — that hides the gap
+  from the gate instead of fixing it.
+
+**RULE (learned twice now, C3 then S1): a language-surface change must sweep
+EVERY repo (shape + shape-web) and re-run the FULL book truth-gate as part of
+its own slice gate.** Scoping the gate to the page you touched, or to one
+repo, lets the surface drift silently.
+
 ## Operating rules (proven E1→C3→E4; do not relearn)
 
 - Supervisor-only build lane:
@@ -120,7 +147,10 @@ capability waves A→F) → close.
 - **#61** E1-D8 residual (E5's `.source` deletion blocked on B4/B5) · **#59**
   D6 monomorphization re-arm · **#60** C092x coded diagnostics · **#64/#65/#66/#67**
   (mono_key injectivity, array kind-leak, mini-VM gaps, fn-type rendering).
-- **shape-web branch `adr009-c3-annotations` @ `211fcc3`** (the C3 annotations
-  book page) still needs its merge to shape-web main.
+- **shape-web branch `adr009-c3-annotations`** (`211fcc3` C3 page + `43173a8`
+  the #73 on-clause migration) still needs its merge to shape-web main.
+  NOTE: that repo has ~64 files of ANOTHER agent's uncommitted work (mtimes
+  ~2026-07-10) — the #73 commit was staged hunk-by-hunk to avoid sweeping it
+  in; it is still present, unstaged, untouched. Do not `git add -A` there.
 - **G3 comptime-local template bodies**: narrowing ACCEPTED as a v1 boundary
   (loud named rejection; the lift rides E-track staging).
