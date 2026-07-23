@@ -1039,6 +1039,69 @@ fn decision_return_payload(expr: &Expr) -> Option<&Expr> {
     }
 }
 
+/// ADR-009 E4 S4 (S4-5, D6) — the three RESERVED failure-transform names E4
+/// authors but does NOT implement (only `propagate-typed-failure` ships — via
+/// `HookDecision::Return(<failure-valued R>)`, #20). These are recognized ONLY as
+/// LOUD, named surface-and-stop diagnostics (spec §4.3) — never a live
+/// `on_failure` / `FailureDecision` surface (a half-built failure surface is the
+/// E4 defection attractor), and never a silent "unknown identifier".
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum FailureTransform {
+    Recover,
+    Retry,
+    RePlace,
+}
+
+/// Classify a `namespace::name` as a reserved failure transform. Recognizes the
+/// names under BOTH `HookDecision::` (the surface a user reaches for beside
+/// `Proceed`/`Return`) and `FailureDecision::` (the eventual failure-handler
+/// enum), so a user who spells one gets the SPECIFIC designed-but-unimplemented
+/// sentence, not "unknown identifier". `re_place` is spelled `RePlace` /
+/// `Replace` (the constructor) or `re_place` (the transform word).
+fn reserved_failure_transform(namespace: &str, name: &str) -> Option<FailureTransform> {
+    if namespace != "HookDecision" && namespace != "FailureDecision" {
+        return None;
+    }
+    match name {
+        "Recover" | "recover" => Some(FailureTransform::Recover),
+        "Retry" | "retry" => Some(FailureTransform::Retry),
+        "RePlace" | "Replace" | "re_place" | "replace" => Some(FailureTransform::RePlace),
+        _ => None,
+    }
+}
+
+/// The verbatim surface-and-stop sentence for a reserved failure transform (spec
+/// §4.3). `propagate` shipped in E4 #20; the transform is designed, not refused —
+/// tracked in the D6 umbrella (#80).
+fn reject_reserved_failure_transform(transform: FailureTransform) -> ShapeError {
+    let message = match transform {
+        FailureTransform::Recover =>
+            "the `recover` failure transform is designed but not implemented in E4 — E4 #20 ships \
+             only propagate-typed-failure. `recover` would let a failure handler substitute a \
+             valid `R` result for the failure and continue the after-chain with it; it is \
+             planned, not rejected — see issue #80. In E4 a hook cannot convert a failure into a \
+             success value: return a valid `R` on the success path, or let the typed failure \
+             propagate outward with `return HookDecision::Return(<failure-valued result>)` when \
+             the target's return type has a failure channel.",
+        FailureTransform::Retry =>
+            "the `retry` failure transform is designed but not implemented in E4 — E4 #20 ships \
+             only propagate-typed-failure. `retry` would re-invoke the target with the same or a \
+             lens-transformed argument pack under the execution-certainty gate (RetryState / \
+             retry_not_executed), and its interaction with an awaited impl shadow and the \
+             after-chain is explicitly unmodeled; it is planned, not rejected — see issue #80. In \
+             E4 a hook cannot re-invoke the target: let the typed failure propagate outward and \
+             retry at the call site.",
+        FailureTransform::RePlace =>
+            "the `re-place` (choose-another-placement) failure transform is designed but not \
+             implemented in E4 — E4 #20 ships only propagate-typed-failure. `re-place` would \
+             re-dispatch the failed call to a different placement/route (the @remote \
+             retry-at-placement path, coupled to @remote issue #68); it is planned, not rejected \
+             — see issue #80. In E4 a hook cannot re-route a failed call: let the typed failure \
+             propagate outward.",
+    };
+    reject(message.to_string())
+}
+
 /// Validate every use of the pseudo-tuple parameter (`args_param`) and the
 /// template type parameter (`type_param`) in a polymorphic BEFORE template
 /// body.
@@ -1910,6 +1973,10 @@ fn guard_before_template_exit_kinds(
                 ) {
                     Some(proven) if &proven == required_r => continue,
                     Some(proven) => {
+                        // OQ-5: when the divergence is a propagate attempt — a
+                        // failure-valued Return on a non-failure `R` — the remedy
+                        // names `recover` (the designed-but-unimplemented alternative)
+                        // + the D6 umbrella (#80).
                         return Err(reject(format!(
                             "the hook short-circuits with `HookDecision::Return(...)` delivering \
                              `{proven}`, but the target's declared return type is `{r_spelling}` \
@@ -1917,7 +1984,12 @@ fn guard_before_template_exit_kinds(
                              reinterpret the hook's raw return bits as `{r_spelling}` at the \
                              short-circuit read; return a `{r_spelling}` value from \
                              `HookDecision::Return(...)` (or change the target's declared return \
-                             type)"
+                             type). To PROPAGATE a typed failure out of the hook, the target's \
+                             return type must have a failure channel (`Result<_, E>` / `Option`), \
+                             and `HookDecision::Return(<failure-valued {r_spelling}>)` threads it \
+                             through the after-chain (propagate — E4 #20). Converting a failure \
+                             into a valid `{r_spelling}` (recover) is designed but unimplemented \
+                             in E4 — see issue #80."
                         )));
                     }
                     None => {
@@ -2483,7 +2555,7 @@ impl<'a> Scan<'a> {
                  explicitly with `return HookDecision::Return(<failure-valued result>)` (available \
                  when the target's return type has a failure channel, e.g. `Result<_, E>`); the \
                  fallible-hook form `-> Result<HookDecision<{args}>, E>` that would make `?` \
-                 type-check is designed but deferred out of this cut — see issue #20",
+                 type-check is designed but deferred out of this cut — see issue #81",
                 args = self.type_param
             )),
             _ => reject(format!(
@@ -3106,6 +3178,22 @@ impl<'a> Scan<'a> {
         ))
     }
 
+    /// ADR-009 E4 S4 (S4-5, Gate 2 misplaced-decision / spec §2.2 / pin 5): a
+    /// `HookDecision::Proceed`/`::Return` constructor in an AFTER body. An
+    /// `after` transforms the target's typed `R -> R` and cannot DECIDE in E4;
+    /// re-place / recover on the result is D6 territory. LOUD named surface-and-
+    /// stop, never a silent accept.
+    fn reject_misplaced_decision_in_after(&self, variant: &str) -> ShapeError {
+        reject(format!(
+            "`HookDecision::{variant}(...)` cannot appear in an `after` hook body: an `after` \
+             transforms the target's typed result (`R -> R`) and does not make a \
+             Proceed/Return decision — only a `before` hook decides (E4 #20). Returning a \
+             different result from an after (re-place / recover on the result) is a designed \
+             failure transform, not implemented in E4 — see issue #80; return exactly the \
+             target's `R` from the after."
+        ))
+    }
+
     /// A `HookDecision::Proceed`/`::Return` with a non-single-tuple payload
     /// (the struct-payload State form, or a wrong arity) — OQ-3: only the
     /// no-State tuple form ships in the first cut. LOUD surface-and-stop.
@@ -3685,6 +3773,25 @@ impl<'a> Scan<'a> {
                 named_args,
                 span: _,
             } => {
+                // ADR-009 E4 S4 (S4-5, D6): a RESERVED failure transform
+                // (`recover`/`retry`/`re_place`, under `HookDecision::` or
+                // `FailureDecision::`) is designed but unimplemented — the SPECIFIC
+                // named surface-and-stop, never a silent "unknown function". Checked
+                // before the Proceed/Return arm and before check_call_name.
+                if mode == ScanMode::TemplateBody && self.pseudo_tuple_surface_live() {
+                    if let Some(transform) = reserved_failure_transform(namespace, function) {
+                        return Err(reject_reserved_failure_transform(transform));
+                    }
+                    // Gate 2 misplaced-decision (spec §2.2 / pin 5): a decision
+                    // constructor in an AFTER body — an after transforms `R -> R`
+                    // and cannot decide in E4.
+                    if matches!(self.face, Face::AfterReturnScan { .. })
+                        && namespace == "HookDecision"
+                        && matches!(function.as_str(), "Proceed" | "Return")
+                    {
+                        return Err(self.reject_misplaced_decision_in_after(function));
+                    }
+                }
                 // ADR-009 E4 S4 (S4-3): the tuple form `HookDecision::Proceed(x)`
                 // / `::Return(x)` parses as a qualified call. Reaching the GENERIC
                 // walk means a NON-exit position (exits are intercepted by the
@@ -3712,6 +3819,20 @@ impl<'a> Scan<'a> {
                 payload,
                 ..
             } => {
+                // ADR-009 E4 S4 (S4-5, D6): a RESERVED failure transform via the
+                // struct/unit-payload constructor surface — the SPECIFIC
+                // designed-but-unimplemented sentence, never "unknown identifier".
+                if mode == ScanMode::TemplateBody && self.pseudo_tuple_surface_live() {
+                    if let Some(transform) = reserved_failure_transform(enum_name, variant) {
+                        return Err(reject_reserved_failure_transform(transform));
+                    }
+                    if matches!(self.face, Face::AfterReturnScan { .. })
+                        && enum_name == "HookDecision"
+                        && matches!(variant.as_str(), "Proceed" | "Return")
+                    {
+                        return Err(self.reject_misplaced_decision_in_after(variant));
+                    }
+                }
                 // ADR-009 E4 S4 (S4-3): a `HookDecision::Proceed`/`::Return`
                 // constructor reaching the GENERIC EnumConstructor walk is at a
                 // NON-exit position (exits are intercepted by the return/tail

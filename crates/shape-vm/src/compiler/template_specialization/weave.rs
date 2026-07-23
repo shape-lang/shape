@@ -732,6 +732,94 @@ annotation hookann() on function {{
         );
     }
 
+    // ── ADR-009 E4 S4 (S4-5): failure vocabulary (D6) ─────────────────────
+
+    // The reserved failure transforms fire their SPECIFIC named sentence (never
+    // a silent "unknown identifier"), each citing the D6 umbrella (#80).
+    fn decision_failure_transform_reject(exit: &str) -> String {
+        let body = format!(
+            "fn decide<Args>(args: Args) -> HookDecision<Args> {{\n  \
+             if args[0] < 0 {{ return {exit} }}\n  return HookDecision::Proceed(args)\n}}"
+        );
+        let (result, _) = compile_source(&hook_source(
+            &body,
+            "install(before_hook(decide, []))",
+            "@hookann()\nfn compute(a: int) -> int { return a * 10 }\n\ncompute(5)",
+        ));
+        result.expect_err("a reserved failure transform is a named surface-and-stop").to_string()
+    }
+
+    #[test]
+    fn recover_transform_surfaces_and_stops() {
+        let err = decision_failure_transform_reject("HookDecision::Recover(0)");
+        assert!(err.contains("`recover` failure transform is designed but not implemented in E4"));
+        assert!(err.contains("#80"), "cites the D6 umbrella: {err}");
+    }
+
+    #[test]
+    fn retry_transform_surfaces_and_stops() {
+        let err = decision_failure_transform_reject("HookDecision::Retry(args)");
+        assert!(err.contains("`retry` failure transform is designed but not implemented in E4"));
+        assert!(err.contains("#80"), "cites the D6 umbrella: {err}");
+    }
+
+    #[test]
+    fn re_place_transform_surfaces_and_stops() {
+        let err = decision_failure_transform_reject("HookDecision::RePlace(0)");
+        assert!(err.contains("`re-place` (choose-another-placement) failure transform is designed"));
+        assert!(err.contains("#80"), "cites the D6 umbrella: {err}");
+        assert!(err.contains("#68"), "names the @remote coupling: {err}");
+    }
+
+    // Gate 2 misplaced-decision: a decision constructor in an AFTER body rejects.
+    #[test]
+    fn decision_in_after_body_surfaces_and_stops() {
+        let (result, _) = compile_source(&hook_source(
+            "fn af<R>(r: R) -> R { return HookDecision::Return(r) }",
+            "install(after_hook(af, []))",
+            "@hookann()\nfn compute(a: int) -> int { return a * 10 }\n\ncompute(5)",
+        ));
+        let err = result.expect_err("a decision constructor in an after body rejects").to_string();
+        assert!(err.contains("cannot appear in an `after` hook body"), "{err}");
+        assert!(err.contains("#80"), "cites the D6 umbrella: {err}");
+    }
+
+    // OQ-5: propagate on a non-failure `R` (a failure-valued Return on R=int)
+    // rejects and NAMES `recover` + the D6 issue.
+    #[test]
+    fn propagate_on_non_failure_r_names_recover() {
+        let body = "fn decide<Args>(args: Args) -> HookDecision<Args> {\n  \
+             if args[0] < 0 { return HookDecision::Return(Err(\"neg\")) }\n  \
+             return HookDecision::Proceed(args)\n}";
+        let (result, _) = compile_source(&hook_source(
+            body,
+            "install(before_hook(decide, []))",
+            "@hookann()\nfn compute(a: int) -> int { return a * 10 }\n\ncompute(5)",
+        ));
+        let err = result.expect_err("a failure Return on a non-failure R rejects").to_string();
+        assert!(err.contains("failure channel"), "names the missing failure channel: {err}");
+        assert!(err.contains("recover"), "names recover: {err}");
+        assert!(err.contains("#80"), "cites the D6 umbrella: {err}");
+    }
+
+    // Default propagate: the impl returns a failure-valued R, threaded through
+    // the after-chain as any success-valued R (afters run on the failure).
+    // R=Result matched by the caller — value-distinguishing (Err path prints -1).
+    #[test]
+    fn default_propagate_threads_failure_r_through_afters() {
+        let body = "fn decide<Args>(args: Args) -> HookDecision<Args> { return HookDecision::Proceed(args) }\n\
+                    fn pass_after(r: Result<int, string>) -> Result<int, string> { return r }";
+        let src = hook_source(
+            body,
+            "install(before_hook(decide, []))\n    install(after_hook(pass_after, []))",
+            "@hookann()\nfn compute(a: int) -> Result<int, string> {\n  \
+             if a < 0 { return Err(\"neg\") }\n  return Ok(a * 10)\n}\n\n\
+             match compute(-3) { Ok(v) => v, Err(e) => -1 }",
+        );
+        let (value, _) = top_level_i64(&src);
+        assert_eq!(value, -1, "the impl's failure-valued R threads through the after to the caller");
+    }
+
     // ── the heterogeneous AGGREGATE carrier (polymorphic before) ───────────
 
     // Arity-2 (int, number) target: the polymorphic before mutates slot 0

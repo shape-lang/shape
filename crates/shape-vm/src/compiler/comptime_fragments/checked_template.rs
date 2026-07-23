@@ -645,8 +645,9 @@ fn classify_template_sig(
             HookDecisionReturnForm::State => {
                 // OQ-3: ship ONLY the no-State tuple form in the first cut; a
                 // State-declaring decision hook is a NAMED surface-and-stop —
-                // never a silent no-op. #20 is the interim anchor; the D6
-                // umbrella follow-up substitutes in S4-5.
+                // never a silent no-op. State threading (OQ-3) is a DISTINCT
+                // deferral from the D6 failure vocab (#80) and the OQ-4 fallible
+                // hook (#81); it stays anchored at the E4 epic (#20).
                 return Err(reject(format!(
                     "template body fn `{}` returns `{}`, declaring a HookDecision State \
                      parameter; HookDecision State threading is designed but not yet \
