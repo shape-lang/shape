@@ -305,6 +305,27 @@ impl BytecodeCompiler {
                     captures,
                 )
             }
+            // ADR-009 E4 S4 (S4-2) — the decision-capable `before` form. The
+            // classifier derives the variant FROM the hook kind + the
+            // `HookDecision<Args>` return annotation, so this is Before-only by
+            // construction. Its short-circuit weave codegen lands in S4-4; until
+            // then the arm is a LOUD surface-and-stop (never a silent no-op — a
+            // decision hook that mis-woves is the worst state).
+            TemplateSig::PolymorphicDecision {
+                type_param,
+                args_param,
+            } => {
+                debug_assert_eq!(template.hook_kind(), TemplateHookKind::Before);
+                let type_param = type_param.clone();
+                let args_param = args_param.clone();
+                self.specialize_polymorphic_decision(
+                    template,
+                    target,
+                    &type_param,
+                    &args_param,
+                    captures,
+                )
+            }
             TemplateSig::PolymorphicResult { result_param, .. } => {
                 debug_assert_eq!(template.hook_kind(), TemplateHookKind::After);
                 let result_param = result_param.clone();
@@ -423,7 +444,14 @@ impl BytecodeCompiler {
         // (`AmbientScopeCtx::check_fstring_template_name`) — the face itself
         // still runs under the unspellable sentinels.
         let pseudo_tuple_params = match template.sig() {
+            // Both `before` polymorphic forms carry the C3-G9 pseudo-tuple
+            // surface, so both hand the ambient face their real spellings for
+            // the f-string-interior arm (S4-2 decision form included).
             TemplateSig::PolymorphicArgs {
+                type_param,
+                args_param,
+            }
+            | TemplateSig::PolymorphicDecision {
                 type_param,
                 args_param,
             } => Some((args_param.clone(), type_param.clone())),
@@ -527,6 +555,9 @@ impl BytecodeCompiler {
                 type_param: type_param.to_string(),
                 target_params: target.params.clone(),
                 carrier: carrier.clone(),
+                // Always-Proceed `PolymorphicArgs` form: no decision-exit surface
+                // (the before-exit gate's Return arm stays dormant — S4-1).
+                decision_return: None,
             }),
             captures,
         };
@@ -546,6 +577,38 @@ impl BytecodeCompiler {
             carrier: Some(carrier),
             observer: false,
         })
+    }
+
+    /// ADR-009 E4 S4 (S4-2) — the decision-capable polymorphic `before` case
+    /// (`fn t<Args>(args: Args) -> HookDecision<Args>`). The protocol's
+    /// classifier + construction-time pseudo-tuple validation are LIVE; its
+    /// before-exit gate extension (the `HookDecision::Return`/`Proceed` arms +
+    /// the [`pseudo_tuple::ShortCircuitProof`] token) lands in S4-3 and its
+    /// single-join short-circuit weave codegen in S4-4.
+    ///
+    /// Until the weave lands, this arm is a LOUD, DOOR-OPEN surface-and-stop
+    /// (D6 "named surface-and-stop, never a silent no-op"): a decision hook that
+    /// wove through the straight-line always-Proceed weave would silently DROP
+    /// its short-circuit — the worst state. The always-Proceed form
+    /// (`-> Args`) is available now.
+    #[allow(clippy::too_many_arguments)]
+    fn specialize_polymorphic_decision(
+        &mut self,
+        template: &CheckedTemplate,
+        target: &SpecializationTarget,
+        _type_param: &str,
+        _args_param: &str,
+        _captures: Vec<(String, LiftedConst)>,
+    ) -> Result<SpecializedHandler> {
+        Err(self.template_application_error(
+            template,
+            target,
+            "the HookDecision short-circuit protocol (`before` hooks returning \
+             `HookDecision<Args>` with `Proceed`/`Return`) is recognized but its decision weave \
+             codegen is not yet wired in this build (ADR-009 E4 S4-4); use the always-Proceed \
+             `before` form (`fn t<Args>(args: Args) -> Args`, returning the mutated `args` pack) \
+             until the decision form ships",
+        ))
     }
 
     /// The C3-G4 polymorphic `after` case. ZERO captures: the specialized
@@ -1186,6 +1249,10 @@ fn render_template_declared_signature(template: &CheckedTemplate) -> String {
             type_param,
             args_param,
         } => format!("<{type_param}>({args_param}: {type_param}) -> {type_param}"),
+        TemplateSig::PolymorphicDecision {
+            type_param,
+            args_param,
+        } => format!("<{type_param}>({args_param}: {type_param}) -> HookDecision<{type_param}>"),
         TemplateSig::PolymorphicResult {
             type_param,
             result_param,

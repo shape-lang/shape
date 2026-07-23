@@ -407,6 +407,19 @@ pub(in crate::compiler) struct PseudoTuplePlan {
     /// How the mutated pack flows back (C3-G9): `Single` for a 1-ary target,
     /// the compiler-internal `Aggregate` otherwise.
     pub(in crate::compiler) carrier: MutationCarrier,
+    /// ADR-009 E4 S4 (S4-1) — the target's declared RETURN type `R`, threaded
+    /// additively for the HookDecision short-circuit exit gate (spec §2.2).
+    ///
+    /// `Some(R annotation)` marks this a DECISION plan
+    /// (`TemplateSig::PolymorphicDecision`): the before-exit gate then admits
+    /// the two decision-exit spellings — `HookDecision::Proceed(<pack>)` (routed
+    /// through the existing carrier arms) and `HookDecision::Return(<result>)`
+    /// (proven `== R`, minting the [`ShortCircuitProof`] token). `None` is the
+    /// always-Proceed `PolymorphicArgs` form (byte-unchanged S1..S3 behavior —
+    /// this field is never read on that path). This is an ADDITIVE field, NOT an
+    /// `Any` widening (Hazard #2 clean): `R` is a concrete declared annotation,
+    /// exactly the value the after-return gate already resolves at `mod.rs:582`.
+    pub(in crate::compiler) decision_return: Option<TypeAnnotation>,
 }
 
 impl PseudoTuplePlan {
@@ -3411,6 +3424,7 @@ mod tests {
                 carrier: MutationCarrier::Aggregate {
                     fields: vec![("a0".into(), int_ann()), ("a1".into(), number_ann())],
                 },
+                decision_return: None,
             }),
             captures: Vec::new(),
         }
@@ -3426,6 +3440,7 @@ mod tests {
                 carrier: MutationCarrier::Single {
                     annotation: int_ann(),
                 },
+                decision_return: None,
             }),
             captures: Vec::new(),
         }
