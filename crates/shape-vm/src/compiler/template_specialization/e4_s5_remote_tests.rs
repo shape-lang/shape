@@ -112,3 +112,55 @@ t(7) * 100000 + (t(-5) + 100000)
     // t(7): Proceed → 1007. t(-5): Return(-5) → -5 (short-circuit).
     assert_eq!(top_level_i64(src), 1007 * 100000 + (-5 + 100000));
 }
+
+// ── CP2 — config captures on a decision hook ───────────────────────────────
+
+/// A declarative decision hook carrying a `capture(...)` config value resolves
+/// the config in the short-circuit. Pre-S5 (S4 first cut) this REJECTED loudly
+/// ("capturing values into a decision `before` hook … is not yet supported");
+/// CP2 lifts the bound by baking the config as a ConstLift prologue constant
+/// (`bake_captures_into_def`). This is the exact path @remote's `addr` rides.
+#[test]
+fn cp2_decision_hook_config_capture_resolves_in_short_circuit() {
+    let src = r#"
+annotation offset(delta: int) on function {
+  before(args) -> HookDecision<Args> {
+    return HookDecision::Return(args[0] + delta)
+  }
+}
+
+@offset(500)
+fn t(x: int) -> int { return x + 1000 }
+
+t(7)
+"#;
+    // The hook short-circuits with `args[0] + delta` = 7 + 500 = 507 (not 1007).
+    assert_eq!(
+        top_level_i64(src),
+        507,
+        "the config capture `delta` resolves in the decision short-circuit"
+    );
+}
+
+/// Two applications with DIFFERENT config values bake DISTINCT constants (the
+/// Dec-95 rule-6 specialization identity, preserved on the decision path).
+#[test]
+fn cp2_decision_hook_distinct_config_bakes_distinct_short_circuits() {
+    let src = r#"
+annotation offset(delta: int) on function {
+  before(args) -> HookDecision<Args> {
+    return HookDecision::Return(args[0] + delta)
+  }
+}
+
+@offset(3)
+fn a(x: int) -> int { return x + 1000 }
+
+@offset(5)
+fn b(x: int) -> int { return x + 1000 }
+
+a(10) * 100000 + b(10)
+"#;
+    // a: 10+3 = 13; b: 10+5 = 15.
+    assert_eq!(top_level_i64(src), 13 * 100000 + 15);
+}

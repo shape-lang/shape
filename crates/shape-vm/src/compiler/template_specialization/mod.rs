@@ -666,18 +666,6 @@ impl BytecodeCompiler {
                 ),
             ));
         }
-        // First cut: captures on a decision hook are deferred (the weave inlines
-        // the decision body rather than compiling+baking a standalone handler).
-        if !captures.is_empty() {
-            return Err(self.template_application_error(
-                template,
-                target,
-                "capturing values into a decision `before` hook (`capture(...)` on a hook \
-                 returning `HookDecision<Args>`) is not yet supported in this cut; use the \
-                 always-Proceed `before` form for captured config, or declare the decision hook \
-                 without captures",
-            ));
-        }
         let mut param_concretes = Vec::with_capacity(target.params.len());
         for (position, (param_name, annotation)) in target.params.iter().enumerate() {
             let Some(concrete) = declared_annotation_concrete_type(self, annotation) else {
@@ -727,6 +715,17 @@ impl BytecodeCompiler {
             ConcreteType::Tuple(param_concretes),
         )]);
         let mut prepared_def = substitution::substitute_function_def(&original_def, &subs);
+        // ADR-009 E4 S5 (CP2) — thread the config captures into the plan so the
+        // pseudo-tuple resolution preserves the trailing capture-parameter tail
+        // (and the before-exit gate + ambient-scope check resolve capture names
+        // as declared inputs, never ambient module bindings). The S4 first-cut
+        // "no captures on a decision hook" bound is LIFTED: the decision body is
+        // INLINED into the wrapper (fact #1) and so cannot ride a standalone
+        // handler's capture-param tail — the captures are ConstLift-baked as
+        // prologue constants immediately after resolution (below), reusing the
+        // SAME `bake_captures_into_def` producer the rebinding/after paths use.
+        // @remote's `addr` config reaches the short-circuit through exactly this
+        // path (nothing dynamic — captures ride the ConstLift identity path).
         let plan = TemplateSpecializationPlan {
             pseudo_tuple: Some(PseudoTuplePlan {
                 args_param: args_param.to_string(),
@@ -735,7 +734,7 @@ impl BytecodeCompiler {
                 carrier: carrier.clone(),
                 decision_return: Some(return_annotation.clone()),
             }),
-            captures: Vec::new(),
+            captures: captures.clone(),
         };
         let proof = pseudo_tuple::resolve_pseudo_tuple(&mut prepared_def, &plan, self)
             .map_err(|error| {
@@ -756,6 +755,25 @@ impl BytecodeCompiler {
                      every decision plan (OQ-7)",
                 )
             })?;
+        // Bake the config captures into the resolved helper: strip the trailing
+        // capture parameters and prepend one `let mut {name} = {value}` prologue
+        // per capture (the S3b HEAP-CONSTANT BAKE, `const_lift::bake_captures_into_def`).
+        if !captures.is_empty() {
+            let capture_params =
+                const_lift::declared_capture_params_from_tail(&prepared_def, &captures).map_err(
+                    |error| {
+                        self.template_application_error(
+                            template,
+                            target,
+                            &shape_error_message(error),
+                        )
+                    },
+                )?;
+            const_lift::bake_captures_into_def(&mut prepared_def, &captures, &capture_params)
+                .map_err(|error| {
+                    self.template_application_error(template, target, &shape_error_message(error))
+                })?;
+        }
         Ok(SpecializedHandler {
             function_index: DECISION_HANDLER_NO_FUNCTION_INDEX,
             carrier: Some(carrier.clone()),
@@ -1395,6 +1413,18 @@ fn template_param_annotation<'sig>(
 /// and Hard both surface — there is no generic fallback for templates.
 fn specialization_failure_detail(failure: SpecializationFailure) -> String {
     match failure.into_error() {
+        ShapeError::SemanticError { message, .. } => message,
+        ShapeError::TypeError(message) => message,
+        ShapeError::RuntimeError { message, .. } => message,
+        other => other.to_string(),
+    }
+}
+
+/// The user-facing message text of a `ShapeError`, for re-attribution through
+/// `template_application_error` at the `@application` site (ADR-009 E4 S5 CP2,
+/// the decision-hook capture-bake seam).
+fn shape_error_message(error: ShapeError) -> String {
+    match error {
         ShapeError::SemanticError { message, .. } => message,
         ShapeError::TypeError(message) => message,
         ShapeError::RuntimeError { message, .. } => message,
