@@ -82,6 +82,29 @@ preserved + the exit-soundness substrate).
   short-circuit = `HookDecision::Return(__call_raising(addr, <shadow>, args))`.
   HARD: no stringly `ctx["__impl"]`, no `?? args[0]` fallback — an
   unavailable binding fails LOUD.
+  - **S5 shipped** (`e4-slice5-report.md`; CP1 `286d8af1`, CP2 `1838c9e8`,
+    CP3+CP4 `4d2f235c`, CP5 `e9250bc6`, CP6a `30335639` + tripwire-flip
+    `97eb4916`; book `8b4d3695` on shape-web). `@remote` re-implemented in FINAL
+    syntax (`pub annotation remote(addr: string) on function` + a
+    `before(args) -> HookDecision<Args>` decision hook) — the HookDecision
+    protocol's FIRST real consumer; the #68 dark window is CLOSED. Callee
+    identity = the impl-shadow fn-ref via the compiler-recognized
+    `__remote_impl_ref()` weave marker (substituted at lowering to
+    `Identifier(<SOH shadow>)` → the shadow's UInt64 id); arg-pack via
+    `__remote_arg_pack()` → `[__c3_p0..__c3_pN-1]` (OUTER-TypedArray arm). Both
+    E4-D3-exact. NO-RECURSION proven by EXECUTION (a loopback `shape serve`
+    logged inbound Calls to the SOH-hygienic SHADOW, never the wrapper;
+    round-trip returned 3 / 42); FAIL-LOUD proven by EXECUTION (`@remote` to a
+    down server RAISES, Q26, no silent arg[0] misdispatch). R-typing: bare `R`
+    raises (no `Result` required), `Result`-R composes via propagate — the
+    documented `remote::call`-is-recoverable duality. First-cut bounds (each a
+    LOUD named-defer, #83): homogeneous-or-single param signatures, sync targets,
+    ≥1 param. Config captures compose (the S4 no-captures bound lifted). @remote'd
+    calls ride the `__call_raising` ModuleFn dispatch → one honest `[jit-fallback]`
+    (the ADR-006 §2.7.14 / v0.4 gap; interpreter-correct). Book 564→567.
+    **The 21 S6 acceptance tests stay `#[ignore]`'d (S6a-f capability waves);**
+    the 3 import-trio `scoped_contract` tests are reachable-and-would-pass but
+    stay ignored for S6f.
 - **E4-D4 (#73 sequencing).** The `on`-clause header syntax is E4's OPENING
   slice: `annotation name(config) on <kind>(, <kind>)*`; the body `targets:`
   field is DELETED in the same change; ALL SEVEN target kinds are
