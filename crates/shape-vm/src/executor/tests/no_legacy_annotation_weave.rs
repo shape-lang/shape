@@ -163,12 +163,16 @@ fn no_legacy_surface_classification() {
     );
 }
 
-/// C3-G14 (A′): `std::core/remote.shape` carries NO annotation declaration
-/// during the dark window — `@remote` returns only as E4's typed
-/// HookDecision consumer (#68). The keep-set (the `remote.execute` builtin
-/// export) must stay present, which also proves the right file was read.
+/// ADR-009 E4 S5 (closes the #68 dark window): `std::core/remote.shape` declares
+/// `@remote` AGAIN — but ONLY as E4's typed HookDecision re-implementation (the
+/// `on function` header + a `before(args) -> HookDecision<Args>` decision hook
+/// short-circuiting via `__call_raising`), NEVER the deleted LEGACY shape (the
+/// body `targets:` field + `ctx.target` + the `{result:}` before-short-circuit).
+/// This flips the C3-G14 A′ dark-window guard now that the re-implementation
+/// shipped. The keep-set (`remote.execute` builtin export) must stay present,
+/// which also proves the right file was read.
 #[test]
-fn remote_stdlib_module_carries_no_annotation_block() {
+fn remote_stdlib_module_carries_typed_hookdecision_remote_annotation() {
     let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
     let remote_shape = manifest
         .parent()
@@ -183,21 +187,30 @@ fn remote_stdlib_module_carries_no_annotation_block() {
     // Positive keep-set guard (non-vacuity): the live builtin surface.
     assert!(
         src.contains("pub builtin fn execute"),
-        "remote.shape keep-set regressed: the `remote.execute` builtin export \
-         must stay live through the dark window (C3-G14 A′)"
+        "remote.shape keep-set regressed: the `remote.execute` builtin export must stay live"
     );
 
-    // The dark window: no annotation declaration of any name, and no
-    // spelling of the deleted declaration head. Both needles assembled.
-    for (a, b) in [("pub ", "annotation "), ("annotation ", "remote(")] {
-        let needle = [a, b].concat();
+    // The typed re-implementation IS present, in final syntax: the `on function`
+    // header clause and the HookDecision decision hook riding `__call_raising`.
+    assert!(
+        src.contains("pub annotation remote(addr: string) on function"),
+        "remote.shape must declare `@remote` in the E4 final syntax (the `on function` header \
+         clause) — E4 S5 closed the #68 dark window on the typed HookDecision protocol"
+    );
+    assert!(
+        src.contains("-> HookDecision<Args>") && src.contains("__call_raising("),
+        "the `@remote` before-hook must ride the typed HookDecision protocol: a \
+         `before(args) -> HookDecision<Args>` decision hook short-circuiting via `__call_raising`"
+    );
+
+    // The deleted LEGACY declaration shape must NOT reappear: no body `targets:`
+    // field, no `ctx.target` callee lookup, no `{result:}` before-short-circuit.
+    for needle in ["targets:", "ctx.target", "{ result:", "{result:"] {
         assert!(
-            !src.contains(&needle),
-            "std::core/remote.shape declares an annotation again (needle \
-             assembled: {a}…{b}) — the C3-G14 A′ dark window says `@remote` \
-             comes back ONLY as E4's typed HookDecision re-implementation \
-             (GitHub issue #68), not by resurrecting the deleted legacy \
-             declaration in the stdlib module"
+            !src.contains(needle),
+            "std::core/remote.shape resurrects the deleted LEGACY `@remote` shape (needle \
+             `{needle}`) — E4 rides the typed HookDecision protocol (header `on` clause + \
+             `HookDecision::Return(__call_raising(...))`), never the legacy runtime-hook surface"
         );
     }
 }
