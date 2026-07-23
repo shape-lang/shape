@@ -63,7 +63,7 @@
 use shape_ast::ast::{
     AnnotationDef, AnnotationHandler, AnnotationHandlerParam, AnnotationHandlerType,
     AnnotationTargetKind, BlockExpr, BlockItem, DestructurePattern, Expr, FunctionDef,
-    FunctionParameter, Literal, Span, Spanned, Statement, TypeAnnotation, TypeParam,
+    FunctionParameter, Literal, Span, Spanned, Statement, TypeAnnotation, TypeParam, TypePath,
 };
 
 use crate::compiler::{BytecodeCompiler, HygienicRole};
@@ -419,6 +419,20 @@ fn mint_hook_body_fn(
             type_annotation: Some(TypeAnnotation::Basic(type_param_name.clone())),
             default_value: None,
         });
+        // ADR-009 E4 S5 (CP1) — a declarative `before` hook may declare a
+        // `HookDecision<Args>` return: the short-circuit-capable DECISION form
+        // (S4). The user spells the protocol name over their own args-type
+        // spelling; the minted body must carry the decision return over the
+        // HYGIENIC type parameter so the checked-template classifier
+        // (`checked_template.rs::hook_decision_return_form`) routes it to
+        // `TemplateSig::PolymorphicDecision`, never the always-Proceed bare-`Args`
+        // form. A non-HookDecision (or absent) return keeps the always-Proceed
+        // `-> Args` carrier (byte-identical to the pre-S5 behaviour).
+        let return_type = handler
+            .return_type
+            .as_ref()
+            .and_then(|declared| minted_hook_decision_return(declared, &type_param_name))
+            .unwrap_or_else(|| TypeAnnotation::Basic(type_param_name.clone()));
         (
             Some(vec![TypeParam::Type {
                 name: type_param_name.clone(),
@@ -427,7 +441,7 @@ fn mint_hook_body_fn(
                 default_type: None,
                 trait_bounds: Vec::new(),
             }]),
-            Some(TypeAnnotation::Basic(type_param_name)),
+            Some(return_type),
         )
     } else {
         // Observer form: `fn <minted>(<config>) { body }` — concrete, zero
@@ -462,6 +476,44 @@ fn mint_hook_body_fn(
         is_async: false,
         is_comptime: false,
     }
+}
+
+/// ADR-009 E4 S5 (CP1) — if a declarative hook's DECLARED return annotation
+/// names the `HookDecision` protocol (single-segment `HookDecision` only — a
+/// qualified `mod::HookDecision` is never the protocol name, matching the
+/// discipline in `checked_template.rs::hook_decision_return_form`), rebuild it
+/// as `HookDecision<hygienic type param>` so the minted body classifies as the
+/// decision-capable `before` form. The user's own args-type spelling inside
+/// `HookDecision<Args>` is DISCARDED (the value parameter is annotated with the
+/// hygienic type parameter, not the user spelling); every EXTRA surface type
+/// argument (the `HookDecision<Args, State>` State form) is PRESERVED after the
+/// hygienic head so the classifier's State surface-and-stop still fires LOUD.
+/// Returns `None` for a non-HookDecision return (the always-Proceed carrier).
+fn minted_hook_decision_return(
+    declared: &TypeAnnotation,
+    type_param_name: &str,
+) -> Option<TypeAnnotation> {
+    let extra_args: Vec<TypeAnnotation> = match declared {
+        TypeAnnotation::Basic(name) if name == "HookDecision" => Vec::new(),
+        TypeAnnotation::Reference(path) if !path.is_qualified() && path.name() == "HookDecision" => {
+            Vec::new()
+        }
+        TypeAnnotation::Generic { name, args }
+            if !name.is_qualified() && name.name() == "HookDecision" =>
+        {
+            // Drop the user's args-type spelling (argument 0); keep any State tail
+            // so the State form still reaches its named surface-and-stop.
+            args.iter().skip(1).cloned().collect()
+        }
+        _ => return None,
+    };
+    let mut minted_args = Vec::with_capacity(1 + extra_args.len());
+    minted_args.push(TypeAnnotation::Basic(type_param_name.to_string()));
+    minted_args.extend(extra_args);
+    Some(TypeAnnotation::Generic {
+        name: TypePath::simple("HookDecision"),
+        args: minted_args,
+    })
 }
 
 fn stable_hook_nonce(
