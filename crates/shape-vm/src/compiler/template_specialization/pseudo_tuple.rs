@@ -762,7 +762,7 @@ fn build_remote_arg_pack(carrier: &MutationCarrier, span: Span) -> Result<Expr> 
                      homogeneous `Array<T>` (the OUTER-TypedArray wire carrier), which a mix of \
                      parameter types cannot form. Use a single-parameter or homogeneous \
                      multi-parameter signature, or wrap the arguments in a struct — the \
-                     heterogeneous-signature carrier is a tracked follow-up (issue #20)."
+                     heterogeneous-signature carrier is a tracked follow-up (issue #83)."
                 )));
             }
             fields.len()
@@ -788,7 +788,7 @@ fn reject_async_remote_short_circuit(is_async: bool) -> Result<()> {
              executor thread on the wire round-trip. Apply `@remote` to a synchronous \
              function, or use the recoverable `remote::call_async` primitive directly — async \
              `@remote` (a `__call_async_raising` sibling + await-in-short-circuit lowering) is a \
-             tracked follow-up (issue #20)."
+             tracked follow-up (issue #83)."
                 .to_string(),
         ));
     }

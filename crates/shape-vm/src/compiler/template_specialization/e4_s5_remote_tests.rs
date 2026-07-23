@@ -355,7 +355,40 @@ fn mixed(a: int, b: string) -> int { return a }"#,
     );
     let message = compile_error(&src);
     assert!(
-        message.contains("heterogeneous multi-argument signature"),
-        "a heterogeneous @remote signature gets the clean named-defer; got: {message}"
+        message.contains("heterogeneous multi-argument signature") && message.contains("#83"),
+        "a heterogeneous @remote signature gets the clean named-defer + issue pointer; got: {message}"
+    );
+}
+
+// ── CP5 — async + 0-ary loud defers ────────────────────────────────────────
+
+/// async `@remote` is a LOUD named-defer: the sync `__call_raising`
+/// short-circuit cannot run on an async executor thread (no
+/// `__call_async_raising` sibling yet). Never a silent blocking call.
+#[test]
+fn cp5_async_remote_is_loud_named_defer() {
+    let src = remote_shaped_fixture(
+        r#"@myremote("127.0.0.1:9")
+async fn compute(x: int) -> int { return x * 2 }"#,
+    );
+    let message = compile_error(&src);
+    assert!(
+        message.contains("async fn") && message.contains("#83"),
+        "async @remote is a loud named-defer with an issue pointer; got: {message}"
+    );
+}
+
+/// 0-ary `@remote` is a LOUD reject (the decision-hook machinery has no arguments
+/// to short-circuit over a 0-parameter target). Never a silent no-op.
+#[test]
+fn cp5_zero_ary_remote_is_loud_reject() {
+    let src = remote_shaped_fixture(
+        r#"@myremote("127.0.0.1:9")
+fn snapshot_id() -> int { return 7 }"#,
+    );
+    let message = compile_error(&src);
+    assert!(
+        message.contains("no parameters") || message.contains("no arguments"),
+        "0-ary @remote is loudly rejected; got: {message}"
     );
 }
