@@ -1748,6 +1748,45 @@ impl BytecodeCompiler {
         args: &[Expr],
         span: Span,
     ) -> Result<()> {
+        use crate::compiler::template_specialization::pseudo_tuple::{
+            REMOTE_ARG_PACK_MARKER, REMOTE_CALL_RAISING_FN, REMOTE_IMPL_REF_MARKER,
+        };
+        // ADR-009 E4 S5 (CP3) — a stray `@remote` weave marker that reached
+        // bytecode compilation is a LOUD compile error. The decision-hook weave
+        // SUBSTITUTES `__remote_impl_ref()` / `__remote_arg_pack()` at lowering
+        // time (`pseudo_tuple::substitute_remote_markers`), so a marker surviving
+        // to here is a reference OUTSIDE a `@remote` before-hook weave (an
+        // internal error or a misuse) — never a silent misdispatch of arg[0] as
+        // the callee, and never a fabricated value (E4-D3 fail-loud).
+        if name == REMOTE_IMPL_REF_MARKER || name == REMOTE_ARG_PACK_MARKER {
+            return Err(ShapeError::SemanticError {
+                message: format!(
+                    "`{name}()` is a reserved `@remote` weave marker: it is substituted by the \
+                     decision-hook weave at lowering time and is never callable directly. A bare \
+                     `{name}()` reference outside the `@remote` before-hook is an internal error \
+                     or a misuse — remove it."
+                ),
+                location: Some(self.span_to_source_location(span)),
+            });
+        }
+        // ADR-009 E4 S5 (CP4, E4-D3) — the `@remote` synthesized short-circuit
+        // call the decision weave emits: `__call_raising(addr, <impl-shadow>,
+        // <arg-pack>)`, where the callee (arg[1]) is the hygienic impl shadow —
+        // an unspellable SOH-prefixed name in `template_weave_shadow_names`, so
+        // this interception is unreachable from user code. Elaborate it at the
+        // shadow's BARE R (the raising primitive delivers the callee's value at
+        // its declared return type and RAISES on failure; Q26) — NEVER the
+        // wrapper's return type (no self-recursion). If the impl-ref marker
+        // failed to substitute, arg[1] would still be `__remote_impl_ref()` and
+        // the stray-marker reject above fires — there is no `?? args[0]` fallback.
+        if name == REMOTE_CALL_RAISING_FN
+            && args.len() == 3
+            && let Expr::Identifier(shadow_name, _) = &args[1]
+            && self.template_weave_shadow_names.contains(shadow_name)
+        {
+            let shadow_name = shadow_name.clone();
+            return self.compile_remote_raising_short_circuit(&shadow_name, args, span);
+        }
         // Numeric-conversion §4 literal adoption (call-argument widening, THE
         // RULE user 2026-06-01): a bare int literal passed to a `number`(f64)
         // parameter IS the number literal (`f(5)` where `fn f(x: number)` ⇒
@@ -6472,6 +6511,75 @@ impl BytecodeCompiler {
             .last_expr_type_info
             .as_ref()
             .and_then(Self::value_schema_from_type_info);
+        Ok(())
+    }
+
+    /// ADR-009 E4 S5 (CP4, E4-D3) — elaborate the `@remote` decision weave's
+    /// synthesized short-circuit `__call_raising(addr, <impl-shadow>, <arg-pack>)`
+    /// at the shadow's BARE `R`.
+    ///
+    /// This is the raising-primitive analog of [`Self::compile_remote_call_elaboration`]
+    /// (which types the recoverable `remote::call` at `Result<R, RemoteError>`):
+    /// `__call_raising` delivers the callee's value at its DECLARED return type
+    /// and RAISES an ordinary runtime error on transport / protocol / remote
+    /// failure (Q26), so the short-circuit types at the bare `R`. The callee
+    /// (`shadow_name`) is the hygienic impl shadow the weave registered before it
+    /// lowered the decision helper; its declared return type IS `R` (the shadow
+    /// carries the target's own body), so the before-exit gate's `== R` proof
+    /// (`pseudo_tuple::is_call_raising_payload`) and this emitted type agree.
+    ///
+    /// The three arguments are already in final form (the markers were
+    /// substituted at weave time): `addr` (a baked config-capture string),
+    /// `Identifier(shadow_name)` — which lowers to the shadow's UInt64 function
+    /// id, the callee `build_remote_call_request_for_fn_ref` marshals against —
+    /// and the `[__c3_p0 .. __c3_pN-1]` positional pack (one `Array<T>`, the
+    /// OUTER-TypedArray `serialize_arg_pack` wire arm). No re-lowering to a
+    /// `_0.._n` TypedObject pack (that is the `remote::call` carrier).
+    fn compile_remote_raising_short_circuit(
+        &mut self,
+        shadow_name: &str,
+        args: &[Expr],
+        span: Span,
+    ) -> Result<()> {
+        // E4-D3: the callee IDENTITY is the impl shadow's fn-ref — NEVER the
+        // wrapper (infinite recursion). Read the shadow's declared return `R`.
+        let return_annotation = self
+            .function_defs
+            .get(shadow_name)
+            .ok_or_else(|| ShapeError::SemanticError {
+                message: format!(
+                    "internal error: the `@remote` short-circuit callee `{shadow_name}` is a \
+                     registered impl shadow with no recorded AST; the weave registers the shadow \
+                     before lowering the decision helper (E4-D3 — no fallback)"
+                ),
+                location: Some(self.span_to_source_location(span)),
+            })?
+            .return_type
+            .clone();
+
+        // Emit the RAISING sibling `remote::__call_raising` over the final args.
+        // `Identifier(shadow_name)` compiles to the shadow's UInt64 fn-ref; the
+        // pack is the `Array<T>` positional carrier; `addr` is the baked string.
+        self.compile_module_builtin_function_call(
+            &ModuleBuiltinFunction {
+                export_name: "__call_raising".to_string(),
+                source_module_path: "std::core::remote".to_string(),
+            },
+            args,
+            span,
+        )?;
+
+        // Type the call site at the shadow's BARE `R` (NOT the builtin's declared
+        // `_`, and NOT `Result<R, RemoteError>` — that is the recoverable
+        // `remote::call` sibling). An unannotated / unit shadow return is `Void`.
+        self.last_expr_type_info = return_annotation
+            .as_ref()
+            .and_then(|ann| self.type_info_from_annotation(ann));
+        self.last_expr_schema = self
+            .last_expr_type_info
+            .as_ref()
+            .and_then(Self::value_schema_from_type_info);
+        self.clear_last_expr_reference_result();
         Ok(())
     }
 

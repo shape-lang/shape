@@ -624,24 +624,175 @@ fn build_impl_shadow_call(
     }
 }
 
+/// ADR-009 E4 S5 (CP3) — the two `@remote` weave-substitution markers. They are
+/// namable only in the stdlib `remote.shape` `@remote` before-hook body; the
+/// decision lowerer substitutes them at WEAVE time (below), so they never reach
+/// bytecode compilation. A marker that DID reach compilation (a stray reference
+/// outside a decision weave) is a LOUD compile error
+/// (`reject_remote_weave_marker_out_of_weave`, function_calls.rs), never a
+/// silent misdispatch.
+pub(in crate::compiler) const REMOTE_IMPL_REF_MARKER: &str = "__remote_impl_ref";
+pub(in crate::compiler) const REMOTE_ARG_PACK_MARKER: &str = "__remote_arg_pack";
+
 /// Lower ONE decision exit value in place. A `HookDecision::Return(payload)` node
-/// becomes its proven-`R` payload (the short-circuit read — token consumed); any
-/// other exit value is a Proceed pack and becomes the impl-shadow call over it.
+/// becomes its proven-`R` payload (the short-circuit read — token consumed), with
+/// the `@remote` markers substituted first (§CP3); any other exit value is a
+/// Proceed pack and becomes the impl-shadow call over it.
 fn lower_decision_exit_value(
     value: &mut Expr,
     shadow_name: &str,
     is_async: bool,
     carrier: &MutationCarrier,
     proof: &ShortCircuitProof,
-) {
+) -> Result<()> {
     let span = value.span();
     if let Some(payload) = decision_return_payload(value) {
-        let payload = payload.clone();
+        let mut payload = payload.clone();
+        // ADR-009 E4 S5 (CP3, E4-D3) — substitute the two `@remote` markers in the
+        // Return payload BEFORE the short-circuit read is emitted:
+        //   `__remote_impl_ref()` → the impl-shadow's fn-ref (an ordinary
+        //     `Identifier(shadow_name)`, which lowers to the shadow's UInt64
+        //     function-id — NEVER the wrapper's, so `@remote` cannot self-recurse),
+        //   `__remote_arg_pack()` → the positional `[__c3_p0 .. __c3_pN-1]` pack
+        //     (one homogeneous `Array<T>`, the OUTER-TypedArray `serialize_arg_pack`
+        //     wire arm).
+        // No-op for a non-`@remote` decision body (no markers present).
+        substitute_remote_markers(&mut payload, shadow_name, is_async, carrier)?;
         *value = emit_short_circuit_result(proof, payload);
     } else {
         let pack = std::mem::replace(value, Expr::Unit(span));
         *value = build_impl_shadow_call(shadow_name, is_async, carrier, pack, span);
     }
+    Ok(())
+}
+
+/// ADR-009 E4 S5 (CP3, E4-D3) — substitute the two `@remote` weave markers in a
+/// `HookDecision::Return(...)` payload, in place. Recurses through the payload
+/// shapes the `@remote` before-hook produces (`__call_raising(addr,
+/// __remote_impl_ref(), __remote_arg_pack())` and simple wrappers over it). A
+/// marker that survives this pass is caught by the stray-marker compile reject
+/// (fail-loud). Hazards discharged here: #1 no-recursion (the impl-ref marker
+/// becomes the SHADOW's identifier, never the wrapper's) and #2 fail-loud (a
+/// heterogeneous n-ary signature can form no homogeneous `Array<T>` pack, so it
+/// is a CLEAN named-defer, never a cryptic array-type mismatch; async `@remote`
+/// is a LOUD defer — the sync `__call_raising` short-circuit cannot run on an
+/// async executor thread).
+fn substitute_remote_markers(
+    expr: &mut Expr,
+    shadow_name: &str,
+    is_async: bool,
+    carrier: &MutationCarrier,
+) -> Result<()> {
+    let span = expr.span();
+    match expr {
+        Expr::FunctionCall { name, args, .. } if name == REMOTE_IMPL_REF_MARKER => {
+            if !args.is_empty() {
+                return Err(reject(format!(
+                    "internal error: `{REMOTE_IMPL_REF_MARKER}()` takes no arguments (the \
+                     `@remote` weave marker for the impl-shadow fn-ref)"
+                )));
+            }
+            reject_async_remote_short_circuit(is_async)?;
+            *expr = Expr::Identifier(shadow_name.to_string(), span);
+            Ok(())
+        }
+        Expr::FunctionCall { name, args, .. } if name == REMOTE_ARG_PACK_MARKER => {
+            if !args.is_empty() {
+                return Err(reject(format!(
+                    "internal error: `{REMOTE_ARG_PACK_MARKER}()` takes no arguments (the \
+                     `@remote` weave marker for the positional argument pack)"
+                )));
+            }
+            reject_async_remote_short_circuit(is_async)?;
+            *expr = build_remote_arg_pack(carrier, span)?;
+            Ok(())
+        }
+        // Recurse through the payload shapes `@remote` produces plus simple
+        // wrappers. The stray-marker compile reject is the ultimate fail-loud
+        // backstop for any shape not walked here.
+        Expr::FunctionCall { args, .. } => {
+            for arg in args.iter_mut() {
+                substitute_remote_markers(arg, shadow_name, is_async, carrier)?;
+            }
+            Ok(())
+        }
+        Expr::QualifiedFunctionCall { args, .. } => {
+            for arg in args.iter_mut() {
+                substitute_remote_markers(arg, shadow_name, is_async, carrier)?;
+            }
+            Ok(())
+        }
+        Expr::MethodCall { receiver, args, .. } => {
+            substitute_remote_markers(receiver, shadow_name, is_async, carrier)?;
+            for arg in args.iter_mut() {
+                substitute_remote_markers(arg, shadow_name, is_async, carrier)?;
+            }
+            Ok(())
+        }
+        Expr::Await(inner, _) => substitute_remote_markers(inner, shadow_name, is_async, carrier),
+        Expr::Array(elements, _) => {
+            for element in elements.iter_mut() {
+                substitute_remote_markers(element, shadow_name, is_async, carrier)?;
+            }
+            Ok(())
+        }
+        _ => Ok(()),
+    }
+}
+
+/// ADR-009 E4 S5 (CP3) — build the `@remote` positional argument pack
+/// `[__c3_p0 .. __c3_pN-1]` (one homogeneous `Array<T>`). Applies the
+/// homogeneous-signature guard: a heterogeneous n-ary signature cannot form a
+/// single `Array<T>` positional pack, so it is a CLEAN named-defer (issue #20)
+/// rather than a cryptic downstream array-element-type mismatch.
+fn build_remote_arg_pack(carrier: &MutationCarrier, span: Span) -> Result<Expr> {
+    let arity = match carrier {
+        MutationCarrier::Single { .. } => 1,
+        MutationCarrier::Aggregate { fields } => {
+            let first = &fields[0].1;
+            if !fields.iter().all(|(_, annotation)| annotation == first) {
+                let rendered = fields
+                    .iter()
+                    .map(|(_, annotation)| annotation.to_type_string())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                return Err(reject(format!(
+                    "`@remote` does not yet support a heterogeneous multi-argument signature \
+                     (parameter types: {rendered}): its positional arguments are shipped as one \
+                     homogeneous `Array<T>` (the OUTER-TypedArray wire carrier), which a mix of \
+                     parameter types cannot form. Use a single-parameter or homogeneous \
+                     multi-parameter signature, or wrap the arguments in a struct — the \
+                     heterogeneous-signature carrier is a tracked follow-up (issue #20)."
+                )));
+            }
+            fields.len()
+        }
+    };
+    let elements = (0..arity)
+        .map(|index| Expr::Identifier(slot_param_name(index), span))
+        .collect();
+    Ok(Expr::Array(elements, span))
+}
+
+/// ADR-009 E4 S5 (CP5) — async `@remote` is a LOUD named-defer. The `@remote`
+/// short-circuit calls the SYNCHRONOUS `__call_raising` primitive; on an async
+/// target the woven helper would block the executor thread on the wire
+/// round-trip. Async `@remote` needs an `__call_async_raising` sibling +
+/// await-in-Return-arm lowering (issue #20) — deferred, never a silent blocking
+/// call.
+fn reject_async_remote_short_circuit(is_async: bool) -> Result<()> {
+    if is_async {
+        return Err(reject(
+            "`@remote` on an `async fn` is not yet supported: the short-circuit ships the call \
+             via the SYNCHRONOUS `__call_raising` primitive, which would block the async \
+             executor thread on the wire round-trip. Apply `@remote` to a synchronous \
+             function, or use the recoverable `remote::call_async` primitive directly — async \
+             `@remote` (a `__call_async_raising` sibling + await-in-short-circuit lowering) is a \
+             tracked follow-up (issue #20)."
+                .to_string(),
+        ));
+    }
+    Ok(())
 }
 
 /// ADR-009 E4 S4 (S4-4) — the weave-time recursive exit lowering. Walks the
@@ -685,8 +836,7 @@ fn lower_decision_stmt(
 ) -> Result<()> {
     match stmt {
         Statement::Return(Some(value), _) => {
-            lower_decision_exit_value(value, shadow_name, is_async, carrier, proof);
-            Ok(())
+            lower_decision_exit_value(value, shadow_name, is_async, carrier, proof)
         }
         Statement::Return(None, _) => Err(reject(
             "internal error: a value-less `return` reached the decision-weave lowering; the \
@@ -720,8 +870,7 @@ fn lower_decision_stmt(
             // (lowered by the recursion); a plain value expression at the TOP
             // tail is the bare-Proceed implicit return.
             if is_tail && !is_control_flow_expr(value) {
-                lower_decision_exit_value(value, shadow_name, is_async, carrier, proof);
-                Ok(())
+                lower_decision_exit_value(value, shadow_name, is_async, carrier, proof)
             } else {
                 lower_decision_expr(value, shadow_name, is_async, carrier, proof)
             }
@@ -760,8 +909,7 @@ fn lower_decision_expr(
 ) -> Result<()> {
     match expr {
         Expr::Return(Some(value), _) => {
-            lower_decision_exit_value(value, shadow_name, is_async, carrier, proof);
-            Ok(())
+            lower_decision_exit_value(value, shadow_name, is_async, carrier, proof)
         }
         Expr::Return(None, _) => Err(reject(
             "internal error: a value-less `return` reached the decision-weave lowering; the \
@@ -1036,6 +1184,23 @@ fn decision_return_payload(expr: &Expr) -> Option<&Expr> {
             Some(&items[0])
         }
         _ => None,
+    }
+}
+
+/// ADR-009 E4 S5 (CP4) — the internal name of the RAISING remote primitive the
+/// `@remote` short-circuit is built on. A `HookDecision::Return(...)` payload
+/// that is a direct `__call_raising(...)` call delivers BARE `R` (the impl
+/// shadow's declared return; Q26), so the before-exit gate proves it `== R`
+/// without type-resolving the still-unsubstituted `@remote` weave markers.
+pub(in crate::compiler) const REMOTE_CALL_RAISING_FN: &str = "__call_raising";
+
+/// Whether an expression is a direct `__call_raising(...)` call (bare or
+/// `remote::`-qualified) — the `@remote` synthesized short-circuit (CP4).
+fn is_call_raising_payload(expr: &Expr) -> bool {
+    match expr {
+        Expr::FunctionCall { name, .. } => name == REMOTE_CALL_RAISING_FN,
+        Expr::QualifiedFunctionCall { function, .. } => function == REMOTE_CALL_RAISING_FN,
+        _ => false,
     }
 }
 
@@ -1964,6 +2129,24 @@ fn guard_before_template_exit_kinds(
         // below (spec §2.2), so only Return constructors reach this arm.
         if let Some((required_r, r_spelling)) = &required_return {
             if let Some(payload) = decision_return_payload(&expr) {
+                // ADR-009 E4 S5 (CP4, E4-D3) — the `@remote` synthesized
+                // short-circuit `HookDecision::Return(__call_raising(addr,
+                // <impl-shadow>, <arg-pack>))`. `__call_raising` is the RAISING
+                // remote primitive (Q26): it delivers the callee's value at the
+                // callee's declared return type and RAISES an ordinary runtime
+                // error on transport/protocol/remote failure. The callee is the
+                // impl shadow, whose declared return type IS `R` by construction
+                // (the shadow is the target's own body), so the payload delivers
+                // BARE `R` — proven `== R` here. The direct `__call_raising` call
+                // is elaborated at that same bare `R` when the helper compiles
+                // (`compile_remote_raising_short_circuit`, function_calls.rs), so
+                // the gate proof and the emitted type agree. The markers inside
+                // are still un-substituted at this specialization stage (the weave
+                // substitutes them in `lower_decision_exit_value`); they are never
+                // type-resolved because this arm short-circuits before descending.
+                if is_call_raising_payload(payload) {
+                    continue;
+                }
                 match carrier_write_concrete_type(
                     compiler,
                     &declared_slots,
