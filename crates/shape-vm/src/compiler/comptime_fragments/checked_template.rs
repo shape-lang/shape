@@ -308,6 +308,7 @@ impl CheckedTemplateBuilder<Present, Present> {
         // those decision-exit constructors are recognized by the before-exit
         // gate at specialization (S4-3), not here (the validate face carries the
         // same construction-legality classification for the shared surface).
+        let is_decision_form = matches!(&sig, TemplateSig::PolymorphicDecision { .. });
         if let TemplateSig::PolymorphicArgs {
             type_param,
             args_param,
@@ -319,9 +320,10 @@ impl CheckedTemplateBuilder<Present, Present> {
         {
             // The walker's `&mut` is traversal-uniformity with its rewrite
             // face only; the validate face never mutates (pseudo_tuple.rs
-            // module docs).
+            // module docs). `is_decision_form` admits the decision-exit
+            // constructors at exit positions (S4-3).
             let mut body = def.body.clone();
-            validate_pseudo_tuple_uses(&mut body, args_param, type_param)?;
+            validate_pseudo_tuple_uses(&mut body, args_param, type_param, is_decision_form)?;
         }
 
         Ok(CheckedTemplate {

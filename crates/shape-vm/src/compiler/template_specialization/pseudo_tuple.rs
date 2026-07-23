@@ -355,6 +355,7 @@ pub(in crate::compiler) fn scan_template_body_ambient_scope(
         args_param: AMBIENT_SENTINEL_ARGS,
         type_param: AMBIENT_SENTINEL_TYPE,
         comptime_depth: std::cell::Cell::new(0),
+        decision: false,
         face: Face::AmbientScope(ctx),
     };
     let result = walk_template_body(&scan, &mut def.body);
@@ -480,6 +481,124 @@ impl PseudoTuplePlan {
     }
 }
 
+/// ADR-009 E4 S4 (S4-3, OQ-7) — the anti-walk-back proof token for a
+/// HookDecision short-circuit exit. This is the PRIMARY mechanical enforcement
+/// against the epic's most defection-prone move (Hazard #1: exit-gate bypass).
+///
+/// It is minted ONLY by [`guard_before_template_exit_kinds`] AFTER that gate
+/// proved every `HookDecision::Return(result)` exit of a decision body delivers
+/// the target's declared return type `R` (the same "prove, then attest"
+/// discipline `prove_native_kind() -> Result<NativeKind, ProofGap>` uses). The
+/// weave's short-circuit branch (S4-4) will CONSUME a `&ShortCircuitProof` to
+/// emit its `if __c3_tag == RETURN { __c3_result = ... }` read: a future "fast
+/// path" that emits the short-circuit read WITHOUT routing through the gate
+/// cannot construct the token — the field is private to this module and no
+/// `pub` constructor exists — so the walk-back becomes a compiler BUILD
+/// failure, not a silently-green test.
+#[derive(Debug, Clone)]
+pub(in crate::compiler) struct ShortCircuitProof {
+    /// The proven target return type `R`: every `HookDecision::Return(result)`
+    /// exit was proved to deliver exactly this. The weave reads it to type the
+    /// shared `__c3_result: R` join local (S4-4).
+    proven_return: shape_value::v2::ConcreteType,
+}
+
+impl ShortCircuitProof {
+    /// The proven target return type `R`.
+    pub(in crate::compiler) fn proven_return(&self) -> &shape_value::v2::ConcreteType {
+        &self.proven_return
+    }
+}
+
+/// The PRIVATE mint — the sole construction path for [`ShortCircuitProof`], only
+/// ever called by [`guard_before_template_exit_kinds`] once it has proved the
+/// decision body's Return exits against `R`. Keeping this module-private (no
+/// `pub`) is what makes an exit-gate bypass a compile error (OQ-7).
+fn mint_shortcircuit_proof(proven_return: shape_value::v2::ConcreteType) -> ShortCircuitProof {
+    ShortCircuitProof { proven_return }
+}
+
+/// ADR-009 E4 S4 (S4-3) — the two decision-exit constructor variants a
+/// `HookDecision`-returning `before` body spells at its exits (spec §1.1).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DecisionVariant {
+    /// `HookDecision::Proceed(<pack>)` — continue to the target/next-before with
+    /// the (possibly-rebound) argument pack. UNWRAPPED to its pack payload at
+    /// the walk and routed through the EXISTING carrier arms (spec §2.2).
+    Proceed,
+    /// `HookDecision::Return(<result>)` — short-circuit with a result. KEPT
+    /// intact through the walk; the before-exit gate proves the payload `== R`
+    /// (the substantive new arm) and mints the [`ShortCircuitProof`] token.
+    Return,
+}
+
+/// Classify one expression as a `HookDecision::Proceed`/`::Return` constructor
+/// by VARIANT NAME (OQ-1 Path 1 — never routed through the generic resolver).
+///
+/// Recognizes BOTH parser surface forms of the single-segment `HookDecision`
+/// name. The tuple form `HookDecision::Proceed(x)` parses as a
+/// [`Expr::QualifiedFunctionCall`] (`Ns::fn(args)` — the parser cannot know
+/// `HookDecision` is the compiler-recognized decision enum: it is NEVER a
+/// resolved user enum, fact #2); a struct/unit payload parses as
+/// [`Expr::EnumConstructor`] (rejected downstream as malformed — the first cut
+/// ships only the tuple form).
+fn decision_variant(expr: &Expr) -> Option<DecisionVariant> {
+    let (namespace, name) = match expr {
+        Expr::QualifiedFunctionCall {
+            namespace,
+            function,
+            ..
+        } => (namespace.as_str(), function.as_str()),
+        Expr::EnumConstructor {
+            enum_name, variant, ..
+        } => (enum_name.as_str(), variant.as_str()),
+        _ => return None,
+    };
+    if namespace != "HookDecision" {
+        return None;
+    }
+    match name {
+        "Proceed" => Some(DecisionVariant::Proceed),
+        "Return" => Some(DecisionVariant::Return),
+        _ => None,
+    }
+}
+
+/// The single payload of a well-formed `HookDecision::Return(result)` leaf (the
+/// short-circuit result the before-exit gate proves `== R`). `None` for any
+/// other leaf — the walk (`Scan::handle_decision_exit`) already rejected a
+/// malformed decision constructor and UNWRAPPED every `Proceed` to its pack
+/// payload, so a decision constructor surviving to the gate as a leaf is always
+/// a well-formed single-value `Return`.
+fn decision_return_payload(expr: &Expr) -> Option<&Expr> {
+    match expr {
+        Expr::QualifiedFunctionCall {
+            namespace,
+            function,
+            const_args,
+            args,
+            named_args,
+            ..
+        } if namespace == "HookDecision"
+            && function == "Return"
+            && const_args.is_empty()
+            && named_args.is_empty()
+            && args.len() == 1 =>
+        {
+            Some(&args[0])
+        }
+        Expr::EnumConstructor {
+            enum_name,
+            variant,
+            payload: EnumConstructorPayload::Tuple(items),
+            ..
+        } if enum_name == "HookDecision" && variant == "Return" && items.len() == 1 => {
+            Some(&items[0])
+        }
+        _ => None,
+    }
+}
+
 /// Validate every use of the pseudo-tuple parameter (`args_param`) and the
 /// template type parameter (`type_param`) in a polymorphic BEFORE template
 /// body.
@@ -507,15 +626,25 @@ impl PseudoTuplePlan {
 /// AFTER bodies (`result`) carry ordinary values with no pseudo-tuple
 /// surface. The `&mut` is traversal-uniformity with the rewrite face only;
 /// the validate face never mutates.
+///
+/// ADR-009 E4 S4 (S4-3): `decision` = the body is a `TemplateSig::
+/// PolymorphicDecision` form (returns `HookDecision<Args>`). When set, the
+/// construction face additionally accepts the `HookDecision::Proceed(...)` /
+/// `::Return(...)` decision-exit constructors at exit positions (rejecting them
+/// anywhere else — a HookDecision is not a first-class value, fact #1). The
+/// full R-proof of a Return payload is the SPECIALIZATION gate's
+/// ([`guard_before_template_exit_kinds`]), not this construction validator's.
 pub(in crate::compiler) fn validate_pseudo_tuple_uses(
     body: &mut [Statement],
     args_param: &str,
     type_param: &str,
+    decision: bool,
 ) -> Result<()> {
     let scan = Scan {
         args_param,
         type_param,
         comptime_depth: std::cell::Cell::new(0),
+        decision,
         face: Face::Validate,
     };
     walk_template_body(&scan, body)
@@ -547,11 +676,17 @@ pub(in crate::compiler) fn validate_pseudo_tuple_uses(
 ///
 /// The walk runs BEFORE the prologue/parameter minting so the reserved-prefix
 /// check never sees the rewriter's own output.
+///
+/// ADR-009 E4 S4 (S4-3): returns the [`ShortCircuitProof`] token — `Some` for a
+/// DECISION plan (`pt.decision_return.is_some()`) whose before-exit gate proved
+/// every `HookDecision::Return(result)` exit `== R`; `None` for the
+/// always-Proceed form. The weave consumes the token to emit the short-circuit
+/// read (S4-4) — an exit-gate bypass cannot construct one (OQ-7).
 pub(in crate::compiler) fn resolve_pseudo_tuple(
     def: &mut FunctionDef,
     plan: &TemplateSpecializationPlan,
     compiler: &crate::compiler::BytecodeCompiler,
-) -> Result<()> {
+) -> Result<Option<ShortCircuitProof>> {
     let internal = |message: String| ShapeError::RuntimeError {
         message,
         location: None,
@@ -637,6 +772,9 @@ pub(in crate::compiler) fn resolve_pseudo_tuple(
         args_param: &pt.args_param,
         type_param: &pt.type_param,
         comptime_depth: std::cell::Cell::new(0),
+        // ADR-009 E4 S4 (S4-3): a decision plan carries R; the rewrite face
+        // recognizes the `HookDecision::Proceed`/`::Return` exit constructors.
+        decision: pt.decision_return.is_some(),
         face: Face::Rewrite {
             plan: pt,
             carrier_writes: &carrier_writes,
@@ -686,7 +824,12 @@ pub(in crate::compiler) fn resolve_pseudo_tuple(
     // monomorphization ride classifies a rejection Hard and the seam wraps
     // it through `template_application_error` at the `@application` site,
     // exactly like the write guard.
-    guard_before_template_exit_kinds(
+    // ADR-009 E4 S4 (S4-3): the gate additionally proves every
+    // `HookDecision::Return(result)` exit `== R` on a decision plan and mints
+    // the ShortCircuitProof token, threaded out for the weave (OQ-7). The
+    // Proceed exits were UNWRAPPED to their pack payloads at the walk and prove
+    // through the SAME carrier arms as the always-Proceed form.
+    let shortcircuit_proof = guard_before_template_exit_kinds(
         compiler,
         pt,
         &capture_tail,
@@ -741,7 +884,7 @@ pub(in crate::compiler) fn resolve_pseudo_tuple(
     // either way (the polymorphism has resolved away).
     def.return_type = Some(pt.carrier_return_annotation());
     def.type_params = None;
-    Ok(())
+    Ok(shortcircuit_proof)
 }
 
 /// The shared proof environment of the two specialization guards (the S2c
@@ -1073,6 +1216,7 @@ pub(in crate::compiler) fn guard_after_template_return_kind(
         args_param: AMBIENT_SENTINEL_ARGS,
         type_param: AMBIENT_SENTINEL_TYPE,
         comptime_depth: std::cell::Cell::new(0),
+        decision: false,
         face: Face::AfterReturnScan {
             local_bindings: &local_bindings,
             assigned_locals: &assigned_locals,
@@ -1219,7 +1363,8 @@ fn guard_before_template_exit_kinds(
     body_returns: &[Option<Expr>],
     local_bindings: &[(String, Option<Expr>)],
     assigned_locals: &std::collections::HashSet<String>,
-) -> Result<()> {
+) -> Result<Option<ShortCircuitProof>> {
+    use crate::compiler::monomorphization::type_resolution::declared_annotation_concrete_type;
     use shape_value::v2::ConcreteType;
 
     let (declared_slots, captures) = resolve_carrier_proof_env(compiler, plan, capture_tail)?;
@@ -1230,6 +1375,27 @@ fn guard_before_template_exit_kinds(
         local_bindings,
         assigned_locals,
     );
+
+    // ADR-009 E4 S4 (S4-3, spec §2.2) — resolve the target's declared return
+    // type `R` for the decision form. `Some` marks a decision plan: the Return
+    // arm below proves `HookDecision::Return(result)` payloads `== R` and this
+    // gate mints the ShortCircuitProof token (OQ-7). `None` is the always-Proceed
+    // form — the Return arm never fires and no token is minted (byte-unchanged
+    // S6 behavior).
+    let required_return: Option<(ConcreteType, String)> = match &plan.decision_return {
+        Some(annotation) => {
+            let Some(concrete) = declared_annotation_concrete_type(compiler, annotation) else {
+                return Err(reject(format!(
+                    "internal error: the HookDecision before-exit gate could not resolve the \
+                     target's declared return type `{}`; the specialization seam proves R \
+                     resolves concretely before building a decision plan",
+                    annotation.to_type_string()
+                )));
+            };
+            Some((concrete, annotation.to_type_string()))
+        }
+        None => None,
+    };
 
     let mut leaves = Vec::new();
     collect_tail_leaves_of_statements(body, &mut leaves);
@@ -1286,6 +1452,47 @@ fn guard_before_template_exit_kinds(
             ResultLeaf::NoValue => return Err(value_less()),
             ResultLeaf::Value(expr) => expr,
         };
+        // ADR-009 E4 S4 (S4-3) — THE substantive decision Return arm (spec §2.2,
+        // Hazard #1). On a decision plan, a `HookDecision::Return(result)` exit
+        // short-circuits with the target's declared return `R`; its payload must
+        // PROVE `== R` — the exact soundness the four measured C3 leaks demand at
+        // the NEW short-circuit read (spec §2.3). Proceed exits were UNWRAPPED to
+        // their pack payloads at the walk and prove through the carrier arms
+        // below (spec §2.2), so only Return constructors reach this arm.
+        if let Some((required_r, r_spelling)) = &required_return {
+            if let Some(payload) = decision_return_payload(&expr) {
+                match carrier_write_concrete_type(
+                    compiler,
+                    &declared_slots,
+                    &captures,
+                    &locals,
+                    payload,
+                ) {
+                    Some(proven) if &proven == required_r => continue,
+                    Some(proven) => {
+                        return Err(reject(format!(
+                            "the hook short-circuits with `HookDecision::Return(...)` delivering \
+                             `{proven}`, but the target's declared return type is `{r_spelling}` \
+                             — a kind-divergent short-circuit would make the woven wrapper \
+                             reinterpret the hook's raw return bits as `{r_spelling}` at the \
+                             short-circuit read; return a `{r_spelling}` value from \
+                             `HookDecision::Return(...)` (or change the target's declared return \
+                             type)"
+                        )));
+                    }
+                    None => {
+                        return Err(reject(format!(
+                            "cannot prove the type of the value a `HookDecision::Return(...)` \
+                             short-circuit delivers: the decision-exit gate requires every Return \
+                             payload to prove the target's declared return type `{r_spelling}` at \
+                             the short-circuit read — deliver an expression whose type is \
+                             provable at specialization (a literal, an `{args}[i]` slot, a \
+                             declared capture, a typed fn's result, or arithmetic over those)"
+                        )));
+                    }
+                }
+            }
+        }
         // The Aggregate carrier's conforming shape: a positionally exact
         // `{ a0: ..., aN-1: ... }` object literal (the minted carrier
         // expression, or an equivalent user spelling), every field proving
@@ -1350,7 +1557,10 @@ fn guard_before_template_exit_kinds(
             None => return Err(unprovable()),
         }
     }
-    Ok(())
+    // OQ-7: every value-producing exit of a decision plan proved (Return arms
+    // proved `== R`; Proceed/shorthand exits proved the carrier) — mint the
+    // ShortCircuitProof token attesting `R`. A non-decision plan mints nothing.
+    Ok(required_return.map(|(concrete, _)| mint_shortcircuit_proof(concrete)))
 }
 
 /// The guard's bounded, template-owned type evaluator: resolve the
@@ -1527,6 +1737,18 @@ fn walk_template_body(scan: &Scan<'_>, body: &mut [Statement]) -> Result<()> {
                 }
                 continue;
             }
+            // ADR-009 E4 S4 (S4-3): a TOP-LEVEL tail decision constructor
+            // (`HookDecision::Proceed(args)` / `::Return(result)` as the
+            // implicit-return tail). Proceed unwraps to its pack; Return is kept
+            // for the gate. `collect_tail_leaves_of_statements` then classifies
+            // the (post-handle) tail leaf.
+            if scan.decision {
+                if let Statement::Expression(expr, _) = stmt {
+                    if scan.handle_decision_exit(expr, ScanMode::TemplateBody)? {
+                        continue;
+                    }
+                }
+            }
         }
         scan.statement(stmt, ScanMode::TemplateBody)?;
     }
@@ -1641,6 +1863,12 @@ struct Scan<'a> {
     /// being intercepted as legal reads (which would leak a minted
     /// `__c3_arg_{i}` name into the mini-VM's unresolved-identifier error).
     comptime_depth: std::cell::Cell<usize>,
+    /// ADR-009 E4 S4 (S4-3): the body is a decision-capable `before` form
+    /// (`TemplateSig::PolymorphicDecision`, return `HookDecision<Args>`). Gates
+    /// recognition of the `HookDecision::Proceed`/`::Return` decision-exit
+    /// constructors on the Validate + Rewrite faces (false for the ambient /
+    /// after-return faces — an `after` body has no decision surface).
+    decision: bool,
     face: Face<'a>,
 }
 
@@ -1798,6 +2026,26 @@ impl<'a> Scan<'a> {
                  return a result-typed value on every path"
                     .to_string(),
             ),
+            // ADR-009 E4 S4 (OQ-4, user ruling): `?` is governed by the ORDINARY
+            // Result/Option typing rule, NOT a special "hooks forbid `?`"
+            // prohibition. A DECISION `before` hook returns bare
+            // `HookDecision<Args>` (no failure channel) in this first cut, so `?`
+            // does not type-check by the ordinary rule — and its propagated `Err`
+            // could never prove the decision-exit contract at the short-circuit
+            // read. The message is TRUTHFUL + DOOR-OPEN: it names the missing
+            // failure channel, points at explicit propagate, and names the
+            // deferred fallible-hook path — never a permanent prohibition.
+            _ if self.decision => reject(format!(
+                "`?` does not type-check in this decision `before` hook: the hook returns \
+                 `HookDecision<{args}>`, which has no failure channel for `?` to propagate into, \
+                 and its propagated `Err` carrier could never prove the decision-exit contract \
+                 at the short-circuit read — to propagate a typed failure outward NOW, return it \
+                 explicitly with `return HookDecision::Return(<failure-valued result>)` (available \
+                 when the target's return type has a failure channel, e.g. `Result<_, E>`); the \
+                 fallible-hook form `-> Result<HookDecision<{args}>, E>` that would make `?` \
+                 type-check is designed but deferred out of this cut — see issue #20",
+                args = self.type_param
+            )),
             _ => reject(format!(
                 "the `?` operator cannot be used in a `before` template body: its failure \
                  path propagates the `Err` value as the specialized body's early return, and \
@@ -2326,6 +2574,114 @@ impl<'a> Scan<'a> {
         matches!(expr, Expr::Identifier(name, _) if name == self.args_param)
     }
 
+    /// ADR-009 E4 S4 (S4-3) — at an EXIT position of a DECISION body, recognize
+    /// and lower `HookDecision::Proceed(<pack>)` / `::Return(<result>)`
+    /// (spec §1.1). Returns `Ok(true)` when it handled a decision constructor
+    /// (the caller then notes the value and stops); `Ok(false)` when `value` is
+    /// not a decision constructor (the caller walks it normally — a bare pack
+    /// value / carrier-proving exit is an implicit Proceed).
+    ///
+    /// - `Proceed(pack)` is UNWRAPPED to its pack payload (spec §2.2): the bare
+    ///   `args` pack rewrites to the carrier expression (rewrite face); any other
+    ///   payload is walked and routed through the EXISTING carrier arms. No enum
+    ///   value survives — the `HookDecision::Proceed` node is replaced by the
+    ///   payload.
+    /// - `Return(result)` is KEPT intact (node unchanged); its payload is walked
+    ///   (inner `args[i]` reads rewritten), and the before-exit gate proves it
+    ///   `== R` and mints the [`ShortCircuitProof`] token.
+    ///
+    /// A malformed decision constructor (a non-single-tuple payload — the
+    /// struct-payload State form or a wrong arity) is a NAMED surface-and-stop
+    /// (OQ-3 / D6 — never a silent no-op).
+    fn handle_decision_exit(&self, value: &mut Expr, mode: ScanMode) -> Result<bool> {
+        if !self.decision || mode != ScanMode::TemplateBody || !self.pseudo_tuple_surface_live() {
+            return Ok(false);
+        }
+        let Some(variant) = decision_variant(value) else {
+            return Ok(false);
+        };
+        // Extract the SINGLE positional payload from either surface form; reject
+        // any other shape LOUDLY (multi-arg, named/const args, struct/unit — the
+        // State form is deferred, OQ-3).
+        let payload: Expr = match value {
+            Expr::QualifiedFunctionCall {
+                const_args,
+                args,
+                named_args,
+                ..
+            } if const_args.is_empty() && named_args.is_empty() && args.len() == 1 => {
+                args.remove(0)
+            }
+            Expr::EnumConstructor {
+                payload: EnumConstructorPayload::Tuple(items),
+                ..
+            } if items.len() == 1 => items.remove(0),
+            _ => return Err(self.reject_decision_malformed_payload(variant)),
+        };
+        match variant {
+            DecisionVariant::Proceed => {
+                // Unwrap to the pack payload. The bare `args` pack rewrites to the
+                // carrier; any other payload is walked (an implicit rebound pack
+                // proven by the existing carrier arms).
+                let mut payload = payload;
+                if self.is_args_identifier(&payload) {
+                    if let Face::Rewrite { plan, .. } = self.face {
+                        let span = payload.span();
+                        payload = plan.carrier_expr(span);
+                    }
+                } else {
+                    self.expr(&mut payload, mode)?;
+                }
+                *value = payload;
+            }
+            DecisionVariant::Return => {
+                // Keep the `HookDecision::Return(result)` node (either surface
+                // form); walk the result so the rewrite face resolves inner
+                // `args[i]` reads. The gate proves it `== R`.
+                let mut payload = payload;
+                self.expr(&mut payload, mode)?;
+                match value {
+                    Expr::QualifiedFunctionCall { args, .. } => *args = vec![payload],
+                    Expr::EnumConstructor { payload: slot, .. } => {
+                        *slot = EnumConstructorPayload::Tuple(vec![payload])
+                    }
+                    _ => unreachable!("decision_variant matched one of these two forms"),
+                }
+            }
+        }
+        Ok(true)
+    }
+
+    /// A `HookDecision::Proceed`/`::Return` constructor reaching a NON-exit
+    /// position (the return/tail callers intercept exits before the generic
+    /// EnumConstructor walk reaches here). Fact #1: a HookDecision is not a
+    /// first-class value; it may appear only at a hook body's exit.
+    fn reject_decision_not_first_class(&self, variant: &str) -> ShapeError {
+        reject(format!(
+            "`HookDecision::{variant}(...)` is not a first-class value: a HookDecision may appear \
+             ONLY at a `before` hook body's exit — write `return HookDecision::{variant}(...)`, \
+             or end the body with `HookDecision::Proceed({args})` / `return HookDecision::Return(...)`; \
+             it cannot be bound to a local, passed to a call, or nested inside another expression",
+            args = self.args_param
+        ))
+    }
+
+    /// A `HookDecision::Proceed`/`::Return` with a non-single-tuple payload
+    /// (the struct-payload State form, or a wrong arity) — OQ-3: only the
+    /// no-State tuple form ships in the first cut. LOUD surface-and-stop.
+    fn reject_decision_malformed_payload(&self, variant: DecisionVariant) -> ShapeError {
+        let (name, shape) = match variant {
+            DecisionVariant::Proceed => ("Proceed", "HookDecision::Proceed(args)"),
+            DecisionVariant::Return => ("Return", "HookDecision::Return(result)"),
+        };
+        reject(format!(
+            "`HookDecision::{name}` must carry exactly one value in the tuple form `{shape}`; the \
+             struct-payload (State-threading) form is designed but not yet implemented in this \
+             cut (OQ-3) — declare the hook without a State parameter and use `{shape}`; see issue \
+             #20"
+        ))
+    }
+
     /// The minted local for a range-checked constant index (rewrite face).
     fn checked_slot_local(
         &self,
@@ -2365,6 +2721,19 @@ impl<'a> Scan<'a> {
                             return Ok(());
                         }
                     }
+                }
+                // ADR-009 E4 S4 (S4-3): `return HookDecision::Proceed(...)` /
+                // `::Return(...)` at a decision-body exit — Proceed unwraps to
+                // its pack, Return is kept for the gate's R-proof. Intercepted
+                // BEFORE the generic walk (which would reject the constructor as
+                // a non-exit first-class value).
+                let handled_decision = match value.as_mut() {
+                    Some(inner) => self.handle_decision_exit(inner, mode)?,
+                    None => false,
+                };
+                if handled_decision {
+                    self.note_return_value(value.as_ref(), mode);
+                    return Ok(());
                 }
                 // S6 exit-gate collection: every BODY-LEVEL return-position
                 // value (a bare `return` records `None` — a no-value exit;
@@ -2876,6 +3245,19 @@ impl<'a> Scan<'a> {
                 named_args,
                 span: _,
             } => {
+                // ADR-009 E4 S4 (S4-3): the tuple form `HookDecision::Proceed(x)`
+                // / `::Return(x)` parses as a qualified call. Reaching the GENERIC
+                // walk means a NON-exit position (exits are intercepted by the
+                // return/tail callers first). Fact #1: a HookDecision is not a
+                // first-class value — LOUD reject, never a silent materialization.
+                if self.decision
+                    && mode == ScanMode::TemplateBody
+                    && self.pseudo_tuple_surface_live()
+                    && namespace == "HookDecision"
+                    && matches!(function.as_str(), "Proceed" | "Return")
+                {
+                    return Err(self.reject_decision_not_first_class(function));
+                }
                 self.check_call_name(namespace, mode)?;
                 self.check_call_name(function, mode)?;
                 self.ambient_check_call_name(&format!("{namespace}::{function}"))?;
@@ -2890,6 +3272,20 @@ impl<'a> Scan<'a> {
                 payload,
                 ..
             } => {
+                // ADR-009 E4 S4 (S4-3): a `HookDecision::Proceed`/`::Return`
+                // constructor reaching the GENERIC EnumConstructor walk is at a
+                // NON-exit position (exits are intercepted by the return/tail
+                // callers before recursion). Fact #1: a HookDecision is not a
+                // first-class value. LOUD named reject (never a silent
+                // materialization the weave would later fail to lower).
+                if self.decision
+                    && mode == ScanMode::TemplateBody
+                    && self.pseudo_tuple_surface_live()
+                    && enum_name == "HookDecision"
+                    && matches!(variant.as_str(), "Proceed" | "Return")
+                {
+                    return Err(self.reject_decision_not_first_class(variant));
+                }
                 // S5a ambient MUST-SCAN: a module-QUALIFIED value reference
                 // (`defs::secret`) parses as a Unit-payload enum constructor;
                 // when the joined path names a module-scope VALUE binding it
@@ -3152,6 +3548,16 @@ impl<'a> Scan<'a> {
                         }
                     }
                 }
+                // ADR-009 E4 S4 (S4-3): the expression-position `return` twin of
+                // the decision-exit interception (see the statement form).
+                let handled_decision = match value.as_deref_mut() {
+                    Some(inner) => self.handle_decision_exit(inner, mode)?,
+                    None => false,
+                };
+                if handled_decision {
+                    self.note_return_value(value.as_deref(), mode);
+                    return Ok(());
+                }
                 // S6 exit-gate collection: the expression-position `return`
                 // twin records exactly like the statement form (body-level
                 // only — the F2 filter; value walked first so the rewrite
@@ -3395,7 +3801,14 @@ mod tests {
 
     fn validate(src: &str) -> Result<()> {
         let mut body = body_of(src);
-        validate_pseudo_tuple_uses(&mut body, "args", "Args")
+        validate_pseudo_tuple_uses(&mut body, "args", "Args", false)
+    }
+
+    /// The S4-3 decision-form construction validator (admits the
+    /// `HookDecision::Proceed`/`::Return` exit constructors).
+    fn validate_decision(src: &str) -> Result<()> {
+        let mut body = body_of(src);
+        validate_pseudo_tuple_uses(&mut body, "args", "Args", true)
     }
 
     fn expect_reject(src: &str, needle: &str) {
@@ -3451,6 +3864,33 @@ mod tests {
         let compiler = crate::compiler::BytecodeCompiler::new();
         resolve_pseudo_tuple(&mut def, plan, &compiler)?;
         Ok(def)
+    }
+
+    /// A 1-ary `(int) -> int` DECISION plan (S4-3): `decision_return = Some(int)`.
+    fn decision_single_plan() -> TemplateSpecializationPlan {
+        TemplateSpecializationPlan {
+            pseudo_tuple: Some(PseudoTuplePlan {
+                args_param: "args".into(),
+                type_param: "Args".into(),
+                target_params: vec![("a".into(), int_ann())],
+                carrier: MutationCarrier::Single {
+                    annotation: int_ann(),
+                },
+                decision_return: Some(int_ann()),
+            }),
+            captures: Vec::new(),
+        }
+    }
+
+    /// Run the rewrite face + before-exit gate on a DECISION plan and return the
+    /// minted [`ShortCircuitProof`] (the token OQ-7 threads to the weave).
+    fn resolve_proof(
+        src: &str,
+        plan: &TemplateSpecializationPlan,
+    ) -> Result<Option<ShortCircuitProof>> {
+        let mut def = def_of(src);
+        let compiler = crate::compiler::BytecodeCompiler::new();
+        resolve_pseudo_tuple(&mut def, plan, &compiler)
     }
 
     fn expect_resolve_reject(src: &str, plan: &TemplateSpecializationPlan, needle: &str) {
@@ -4273,5 +4713,283 @@ fn t<Args>(args: Args) -> Args {
             err.to_string().contains("internal error"),
             "expected the named internal invariant error: {err}"
         );
+    }
+
+    // =====================================================================
+    // ADR-009 E4 S4 (S4-3) — the HookDecision decision-exit gate tripwire
+    // pins (spec §2.4). RED iff a Return-exit reaches the woven short-circuit
+    // read without a matching gate arm (reopens the measured leak class,
+    // spec §2.3). "extend, never bypass" — Hazard #1.
+    // =====================================================================
+
+    // POSITIVE: `return HookDecision::Return(<int>)` proves R and RESOLVES; the
+    // gate mints the ShortCircuitProof token carrying `R`.
+    #[test]
+    fn decision_return_int_on_int_target_proves_and_mints_proof() {
+        let proof = resolve_proof(
+            r#"
+fn t<Args>(args: Args) -> HookDecision<Args> {
+    return HookDecision::Return(0)
+}
+"#,
+            &decision_single_plan(),
+        )
+        .expect("a Return delivering R resolves")
+        .expect("a decision plan mints the ShortCircuitProof token");
+        assert_eq!(proof.proven_return(), &shape_value::v2::ConcreteType::I64);
+    }
+
+    // POSITIVE: `return HookDecision::Proceed(args)` proves through the EXISTING
+    // Single carrier arm (spec §2.2 — Proceed is unwrapped verbatim).
+    #[test]
+    fn decision_proceed_pack_resolves_through_the_carrier_arm() {
+        resolve(
+            r#"
+fn t<Args>(args: Args) -> HookDecision<Args> {
+    args[0] = args[0] + 1
+    return HookDecision::Proceed(args)
+}
+"#,
+            &decision_single_plan(),
+        )
+        .expect("Proceed(args) delivers the pack through the carrier arm");
+    }
+
+    // POSITIVE: a mixed decision body — short-circuit on one path, proceed on
+    // the other — resolves + mints the token.
+    #[test]
+    fn decision_mixed_return_and_proceed_resolves() {
+        let proof = resolve_proof(
+            r#"
+fn t<Args>(args: Args) -> HookDecision<Args> {
+    if args[0] > 5 {
+        return HookDecision::Return(42)
+    }
+    return HookDecision::Proceed(args)
+}
+"#,
+            &decision_single_plan(),
+        )
+        .expect("a mixed decision body resolves")
+        .expect("mints the token");
+        assert_eq!(proof.proven_return(), &shape_value::v2::ConcreteType::I64);
+    }
+
+    // PIN 1 (before-exit Return DIVERGENCE): `Return(<string>)` on an int target
+    // → reject naming R and the SHORT-CIRCUIT READ (reopens the before-exit /
+    // heap-pointer-reinterpretation leak class if bypassed).
+    #[test]
+    fn pin1_decision_return_divergent_kind_rejects_naming_r_and_short_circuit_read() {
+        let err = resolve(
+            r#"
+fn t<Args>(args: Args) -> HookDecision<Args> {
+    return HookDecision::Return("boom")
+}
+"#,
+            &decision_single_plan(),
+        )
+        .expect_err("a kind-divergent Return must be rejected");
+        let message = err.to_string();
+        assert!(message.contains("short-circuit read"), "names the read: {message}");
+        assert!(
+            message.contains("delivering `string`"),
+            "names the proven kind: {message}"
+        );
+    }
+
+    // PIN 2 (before-exit Return UNPROVABLE): a Return payload the bounded
+    // evaluator cannot prove → LOUD named reject, never a guess.
+    #[test]
+    fn pin2_decision_return_unprovable_payload_rejects() {
+        let err = resolve(
+            r#"
+fn t<Args>(args: Args) -> HookDecision<Args> {
+    return HookDecision::Return(mystery())
+}
+"#,
+            &decision_single_plan(),
+        )
+        .expect_err("an unprovable Return payload must be rejected");
+        assert!(
+            err.to_string()
+                .contains("cannot prove the type of the value a `HookDecision::Return(...)`"),
+            "names the unprovable Return: {err}"
+        );
+    }
+
+    // PIN 3 (before-exit VALUE-LESS): a decision body path completing without
+    // delivering an exit → value-less reject.
+    #[test]
+    fn pin3_decision_value_less_completion_rejects() {
+        let err = resolve(
+            r#"
+fn t<Args>(args: Args) -> HookDecision<Args> {
+    if args[0] > 0 {
+        return HookDecision::Return(1)
+    }
+}
+"#,
+            &decision_single_plan(),
+        )
+        .expect_err("a value-less decision completion must be rejected");
+        assert!(
+            err.to_string().contains("can complete without delivering"),
+            "names the value-less exit: {err}"
+        );
+    }
+
+    // PIN 4 (Proceed REGRESSION): the EXISTING carrier proof still fires for a
+    // divergent implicit Proceed payload (proves the Return arm did not weaken
+    // the Proceed arm — spec §2.4 pin 4).
+    #[test]
+    fn pin4_decision_divergent_proceed_payload_still_rejects_via_carrier_arm() {
+        let err = resolve(
+            r#"
+fn t<Args>(args: Args) -> HookDecision<Args> {
+    return HookDecision::Proceed("boom")
+}
+"#,
+            &decision_single_plan(),
+        )
+        .expect_err("a divergent Proceed payload must still be rejected");
+        assert!(
+            err.to_string().contains("delivers `string` at an exit"),
+            "routes through the existing carrier arm: {err}"
+        );
+    }
+
+    // PIN 6 (`?`-exit STILL-TOTAL): `?` in a DECISION before body still rejects
+    // — the door-open OQ-4 message (no permanent hook-`?` prohibition), never a
+    // relaxation (guards leak `102997035238305`).
+    #[test]
+    fn pin6_decision_try_operator_still_total_rejects_door_open() {
+        let err = resolve(
+            r#"
+fn t<Args>(args: Args) -> HookDecision<Args> {
+    let x = fallible()?
+    return HookDecision::Return(x)
+}
+"#,
+            &decision_single_plan(),
+        )
+        .expect_err("`?` in a decision before body must still reject");
+        let message = err.to_string();
+        assert!(
+            message.contains("does not type-check in this decision"),
+            "the ordinary-rule framing: {message}"
+        );
+        assert!(
+            message.contains("HookDecision::Return"),
+            "door-open: names explicit propagate: {message}"
+        );
+    }
+
+    // PIN 7 (f-string-interior STILL-TOTAL): a `?` hidden in an interpolation
+    // interior of a DECISION body still rejects (guards leak `95158939846801`).
+    #[test]
+    fn pin7_decision_fstring_interior_exit_still_total_rejects() {
+        let err = resolve(
+            r#"
+fn t<Args>(args: Args) -> HookDecision<Args> {
+    let s = f"{fallible(0)?}"
+    return HookDecision::Proceed(args)
+}
+"#,
+            &decision_single_plan(),
+        )
+        .expect_err("a `?` in an f-string interior must still reject");
+        assert!(
+            err.to_string().contains("f-string interpolation"),
+            "names the interior boundary: {err}"
+        );
+    }
+
+    // FACT #1: a HookDecision constructor in a NON-exit position (bound to a
+    // local) is not a first-class value → LOUD reject.
+    #[test]
+    fn decision_constructor_in_non_exit_position_rejects() {
+        let err = resolve(
+            r#"
+fn t<Args>(args: Args) -> HookDecision<Args> {
+    let d = HookDecision::Return(5)
+    return HookDecision::Proceed(args)
+}
+"#,
+            &decision_single_plan(),
+        )
+        .expect_err("a bound HookDecision must be rejected");
+        assert!(
+            err.to_string().contains("not a first-class value"),
+            "names fact #1: {err}"
+        );
+    }
+
+    // OQ-3: a wrong-arity (State-adjacent) decision constructor payload →
+    // surface-and-stop, never a silent no-op.
+    #[test]
+    fn decision_multi_arg_payload_surfaces_and_stops() {
+        let err = resolve(
+            r#"
+fn t<Args>(args: Args) -> HookDecision<Args> {
+    return HookDecision::Return(5, 6)
+}
+"#,
+            &decision_single_plan(),
+        )
+        .expect_err("a multi-arg Return payload must surface-and-stop");
+        assert!(
+            err.to_string()
+                .contains("must carry exactly one value in the tuple form"),
+            "names the tuple-form requirement: {err}"
+        );
+    }
+
+    // OQ-7: a NON-decision plan mints NO proof token (the always-Proceed form is
+    // byte-unchanged — no short-circuit surface).
+    #[test]
+    fn non_decision_plan_mints_no_proof() {
+        let proof = resolve_proof(
+            r#"
+fn t<Args>(args: Args) -> Args {
+    return args
+}
+"#,
+            &single_plan(),
+        )
+        .expect("the always-Proceed form resolves");
+        assert!(proof.is_none(), "no token on a non-decision plan");
+    }
+
+    // CONSTRUCTION: the decision-exit constructors validate at construction
+    // (validate face, S4-3) — the surface is legal before specialization.
+    #[test]
+    fn decision_constructors_validate_at_construction() {
+        validate_decision(
+            r#"
+fn t<Args>(args: Args) -> HookDecision<Args> {
+    if args[0] > 0 {
+        return HookDecision::Return(9)
+    }
+    return HookDecision::Proceed(args)
+}
+"#,
+        )
+        .expect("the decision-exit surface validates at construction");
+    }
+
+    // CONSTRUCTION: a non-exit decision constructor rejects at construction too
+    // (the validate face carries the fact-#1 classification).
+    #[test]
+    fn decision_non_exit_constructor_rejects_at_construction() {
+        let err = validate_decision(
+            r#"
+fn t<Args>(args: Args) -> HookDecision<Args> {
+    let d = HookDecision::Proceed(args)
+    return HookDecision::Proceed(args)
+}
+"#,
+        )
+        .expect_err("a non-exit decision constructor must reject at construction");
+        assert!(err.to_string().contains("not a first-class value"), "{err}");
     }
 }
