@@ -39,6 +39,19 @@ preserved + the exit-soundness substrate).
   OPTIONAL/defaultable: the first cut ships `Proceed(args)` / `Return(r)`,
   threading State only where a hook declares it. Couples to D7 for the
   RUNTIME representation inside the wrapper.
+  - **S4-1..S4-3 shipped** (`e4-slice4-report.md`; c1 `3103cd5e`, c2 `d5be907b`).
+    The protocol CORE: `TemplateSig::PolymorphicDecision` classifier (Path 1,
+    OQ-1 — `HookDecision<Args>` recognized by SPELLING, never the erasing
+    resolver; COMPOSES with always-Proceed, OQ-2), the before-exit gate's
+    substantive `HookDecision::Return(result)==R` arm + the private-constructor
+    `ShortCircuitProof(R)` anti-walk-back token (OQ-7), and decision-exit face
+    recognition (Proceed unwrapped to the carrier arms; Return kept for the
+    gate; fact-#1 reject elsewhere). First cut = NO State (OQ-3 loud
+    surface-and-stop). 14 tripwire pins; all suites' FAILED-name sets
+    unchanged. **Remaining: S4-4 weave single-join inlining (the linchpin) →
+    S4-5 failure vocab + D6 issue → S4-6 JIT cells → S4-7 book.**
+    `specialize_polymorphic_decision` is a LOUD door-open surface-and-stop until
+    the weave lands.
 - **E4-D2 (ctx.state typing + storage home).** SEPARATE surfaces (option B,
   degrading to C if Spike 2 proves no live reader): the lifecycle Any-ctx is
   retyped to a concrete schema (or deleted outright with event_log if
@@ -103,6 +116,18 @@ preserved + the exit-soundness substrate).
   rejected-at-install, per the program-wide AsyncDrop out-of-scope). The
   retry × awaited-shadow × after-chain interaction is unmodeled — any design
   touching it is flagged before commitment.
+  - **S4-3 partial** (`e4-slice4-report.md`). The OQ-4 (USER-ruled) `?` posture
+    shipped: `?` follows the ORDINARY Result-typing rule; a bare-`HookDecision`
+    hook rejects `?` with a TRUTHFUL, DOOR-OPEN message (names explicit
+    `Return(<failure-valued>)` propagate + the deferred `Result<HookDecision>`
+    path — never a permanent prohibition); Gate 3 stays total-reject. A
+    failure-valued `Return` already proves `==R` when R has a failure channel
+    (explicit propagate). **Remaining (S4-5):** the `recover`/`retry`/`re_place`
+    reserved-name RECOGNIZERS + verbatim surface-and-stop sentences, the OQ-5
+    "names `recover` + D6" reject, the Gate-2 misplaced-decision reject, and
+    FILE the D6 umbrella + OQ-4-followup issues (interim cite #20 everywhere for
+    now — no dangling cites). Author only the RECOGNIZER, never live
+    `on_failure`/`FailureDecision` variants (the E4 defection attractor).
 - **E4-D7 (JIT posture — spike-decided within these bounds).** Spike 1
   measures: (1a) whether Result/Option match+construct is PROVEN native
   (currently only inferred); (1b) whether a COMPILER-INTERNAL typed
@@ -115,6 +140,17 @@ preserved + the exit-soundness substrate).
   (Proceed=Ok/Return=Err) is REFUSED — it lies about Result and cannot carry
   the payload. Never a vacuous green: the weave unit tests assert only
   mir_data presence and CANNOT catch demotion — the CLI cell must.
+  - **S4 status** (`e4-slice4-report.md`). Spike 1b HELD (S4-0): the
+    compiler-internal typed int tag/branch is the native shape (`1b_int_tag`,
+    0-fallback); the USER surface stays the D1 enum, statically rewritten (no
+    user-enum match/construct on the seam). The `ShortCircuitProof` token +
+    R-arm are in (c2). **Remaining (S4-4/S4-6):** the weave single-join branch
+    that realizes the native tag/branch end-to-end, and the two REVIEW-MANDATORY
+    CLI cells — the zero-fallback 1-ary Single native cell
+    (`count_fallback_lines(jit.stderr)==0`, the ONLY demotion-catcher) and the
+    Result-R NAMED-EXPECTED-FALLBACK cell (`==1` + the §5.16 identity string,
+    scope-fenced to v0.4, NEVER asserted native). Not yet built — no
+    native/fallback numbers to report.
 - **E4-D-baseline.** Preserve-baseline anchors on the slice-7/8 ACTUALS
   (vmlib 3510/6-name/36-ign, ann_runtime 36/0, ann_targets 24/0,
   ann_comptime 116/10-name, comptime 260/3-name, shape-test lsp 506/0,
