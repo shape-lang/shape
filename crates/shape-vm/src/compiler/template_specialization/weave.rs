@@ -84,6 +84,7 @@ use shape_ast::ast::patterns::DestructurePattern;
 
 use super::MutationCarrier;
 use super::install_registry::StagedHookInstall;
+use super::pseudo_tuple;
 use crate::compiler::BytecodeCompiler;
 use crate::compiler::comptime_builtins::expansion_provenance::{
     GeneratedNodePath, GeneratedOrigin, HygienicRole, SymbolReservation,
@@ -106,6 +107,21 @@ impl BytecodeCompiler {
         use std::hash::{Hash, Hasher};
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
         func_name.hash(&mut hasher);
+        self.mint_hygienic_fn_name_stable(HygienicRole::TemplateWeaveImplBody, hasher.finish())
+    }
+
+    /// ADR-009 E4 S4 (S4-4) — the unspellable hygienic name of the DECISION
+    /// weave's `R`-returning helper for `func_name` (the lowered decision body:
+    /// Proceed → impl-shadow call, Return → proven-`R` read). Shares the
+    /// `TemplateWeaveImplBody` provenance role (a weave-generated body) with a
+    /// DISTINCT nonce (a `decision`-salted digest of the function name), so it
+    /// never collides with the impl shadow. Stable digest ⇒ idempotent
+    /// re-registration (`register_function` dedups by name).
+    pub(in crate::compiler) fn template_weave_decision_helper_name(&self, func_name: &str) -> String {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        func_name.hash(&mut hasher);
+        "decision-helper".hash(&mut hasher);
         self.mint_hygienic_fn_name_stable(HygienicRole::TemplateWeaveImplBody, hasher.finish())
     }
 
@@ -285,67 +301,135 @@ impl BytecodeCompiler {
         let mut current_args: Vec<Expr> =
             param_names.iter().map(|name| ident(name)).collect();
 
-        // The `before` chain, in application order.
-        for install in staged
+        // ADR-009 E4 S4 (S4-4) — the DECISION `before` form. When a staged
+        // `before` install carries a `DecisionHandlerPlan`, the wrapper's result
+        // is produced by the single-join branch (spec §1.4): the decision body
+        // is lowered into an `R`-returning hygienic helper (Proceed → call the
+        // impl shadow; Return → short-circuit with the proven `R`, CONSUMING the
+        // ShortCircuitProof — OQ-7), and the wrapper binds ONE `__c3_result: R`
+        // join local from the helper call. The impl call is FOLDED INTO the
+        // helper (Proceed arm), so the wrapper emits no separate shadow call;
+        // afters run on the join local (afters-on-Return, D1). First cut: the
+        // decision hook must be the ONLY `before` install (composing a rebinding
+        // or observer `before` with a decision hook is a LOUD surface-and-stop).
+        let decision_index = staged
             .iter()
-            .filter(|install| install.hook_kind == TemplateHookKind::Before)
-        {
-            let symbol = handler_symbol(self, install)?;
-            // OBSERVER install: called with ZERO arguments (S3b — its
-            // capture values are BAKED into the handler); the target's
-            // arguments thread through UNTOUCHED (module docs).
-            if install.handler.is_observer() {
-                stmts.push(Statement::Expression(call(&symbol, Vec::new()), span));
-                continue;
+            .position(|install| install.handler.decision().is_some());
+        let impl_expr = if let Some(decision_index) = decision_index {
+            let other_before = staged.iter().enumerate().any(|(index, install)| {
+                index != decision_index && install.hook_kind == TemplateHookKind::Before
+            });
+            if other_before {
+                return Err(ShapeError::SemanticError {
+                    message: format!(
+                        "cannot compose another `before` hook with the decision `before` hook on \
+                         `{}`: a `before` hook returning `HookDecision<Args>` must be the only \
+                         `before` install in this cut (stacking befores with a short-circuiting \
+                         decision hook is not yet supported); `after` hooks compose freely",
+                        func_def.name
+                    ),
+                    location: Some(self.span_to_source_location(application_span)),
+                });
             }
-            let args = current_args.clone();
-            match install.handler.carrier() {
-                Some(MutationCarrier::Single { annotation }) => {
-                    let local = fresh_local(&taken);
-                    stmts.push(decl(&local, Some(annotation.clone()), call(&symbol, args)));
-                    current_args = vec![ident(&local)];
-                }
-                Some(MutationCarrier::Aggregate { fields }) => {
-                    let local = fresh_local(&taken);
-                    let aggregate_annotation = TypeAnnotation::Object(
-                        fields
-                            .iter()
-                            .map(|(name, annotation)| ObjectTypeField {
-                                name: name.clone(),
-                                optional: false,
-                                type_annotation: annotation.clone(),
-                                annotations: Vec::new(),
-                            })
-                            .collect(),
-                    );
-                    stmts.push(decl(&local, Some(aggregate_annotation), call(&symbol, args)));
-                    current_args = fields
-                        .iter()
-                        .map(|(name, _)| Expr::PropertyAccess {
-                            object: Box::new(ident(&local)),
-                            property: name.clone(),
-                            optional: false,
-                            span,
-                        })
-                        .collect();
-                }
-                None => {
-                    return Err(internal(format!(
-                        "internal error: staged `before` install (via @{}) carries no \
-                         mutation carrier; specialize_template always attaches one to a \
-                         non-observer before handler",
-                        install.annotation_name
-                    )));
-                }
+            let plan = staged[decision_index]
+                .handler
+                .decision()
+                .expect("decision_index selects a decision install");
+            let helper_name = self.template_weave_decision_helper_name(&func_def.name);
+            let mut helper_def = plan.prepared_def.clone();
+            helper_def.name = helper_name.clone();
+            helper_def.annotations = Vec::new();
+            // Lower the resolved decision body into the `R`-returning helper
+            // (Proceed → impl-shadow call; Return → proven-`R` read, token
+            // consumed). A body shape the first cut cannot statically lower is a
+            // LOUD surface-and-stop from within the lowering (no dynamic
+            // fallback).
+            pseudo_tuple::lower_prepared_decision_def(
+                &mut helper_def,
+                &shadow_name,
+                func_def.is_async,
+                plan,
+            )?;
+            self.template_weave_shadow_names.insert(helper_name.clone());
+            self.register_function(&helper_def)?;
+            let saved_closure_function_ids = std::mem::take(&mut self.closure_function_ids);
+            let saved_local_concrete_facts =
+                std::mem::take(&mut self.current_function_local_concrete_facts);
+            let saved_local_binding_spans = std::mem::take(&mut self.local_binding_spans);
+            let helper_result = self.compile_function(&helper_def);
+            self.closure_function_ids = saved_closure_function_ids;
+            self.current_function_local_concrete_facts = saved_local_concrete_facts;
+            self.local_binding_spans = saved_local_binding_spans;
+            helper_result?;
+            let helper_call = call(&helper_name, current_args);
+            if func_def.is_async {
+                Expr::Await(Box::new(helper_call), span)
+            } else {
+                helper_call
             }
-        }
-
-        // The direct impl call (awaited on async targets).
-        let impl_call = call(&shadow_name, current_args);
-        let impl_expr = if func_def.is_async {
-            Expr::Await(Box::new(impl_call), span)
         } else {
-            impl_call
+            // The `before` chain, in application order.
+            for install in staged
+                .iter()
+                .filter(|install| install.hook_kind == TemplateHookKind::Before)
+            {
+                let symbol = handler_symbol(self, install)?;
+                // OBSERVER install: called with ZERO arguments (S3b — its
+                // capture values are BAKED into the handler); the target's
+                // arguments thread through UNTOUCHED (module docs).
+                if install.handler.is_observer() {
+                    stmts.push(Statement::Expression(call(&symbol, Vec::new()), span));
+                    continue;
+                }
+                let args = current_args.clone();
+                match install.handler.carrier() {
+                    Some(MutationCarrier::Single { annotation }) => {
+                        let local = fresh_local(&taken);
+                        stmts.push(decl(&local, Some(annotation.clone()), call(&symbol, args)));
+                        current_args = vec![ident(&local)];
+                    }
+                    Some(MutationCarrier::Aggregate { fields }) => {
+                        let local = fresh_local(&taken);
+                        let aggregate_annotation = TypeAnnotation::Object(
+                            fields
+                                .iter()
+                                .map(|(name, annotation)| ObjectTypeField {
+                                    name: name.clone(),
+                                    optional: false,
+                                    type_annotation: annotation.clone(),
+                                    annotations: Vec::new(),
+                                })
+                                .collect(),
+                        );
+                        stmts.push(decl(&local, Some(aggregate_annotation), call(&symbol, args)));
+                        current_args = fields
+                            .iter()
+                            .map(|(name, _)| Expr::PropertyAccess {
+                                object: Box::new(ident(&local)),
+                                property: name.clone(),
+                                optional: false,
+                                span,
+                            })
+                            .collect();
+                    }
+                    None => {
+                        return Err(internal(format!(
+                            "internal error: staged `before` install (via @{}) carries no \
+                             mutation carrier; specialize_template always attaches one to a \
+                             non-observer before handler",
+                            install.annotation_name
+                        )));
+                    }
+                }
+            }
+
+            // The direct impl call (awaited on async targets).
+            let impl_call = call(&shadow_name, current_args);
+            if func_def.is_async {
+                Expr::Await(Box::new(impl_call), span)
+            } else {
+                impl_call
+            }
         };
 
         let has_result = !matches!(
@@ -549,6 +633,103 @@ annotation hookann() on function {{
             "@hookann()\nfn victim(a: int) -> int { return a * 10 }\n\nvictim(4)",
         ));
         assert_eq!(value, 100, "before and after must both fire around the impl");
+    }
+
+    // ── ADR-009 E4 S4 (S4-4): the DECISION weave — the single-join branch ──
+    //
+    // `decide` short-circuits (`Return(999)`) when the arg is negative and
+    // otherwise `Proceed`s. These EXECUTED pins are value-distinguishing: a
+    // dropped short-circuit would run the impl (`a*10`) and yield a different
+    // number, and an after that failed to run on the Return arm would too.
+
+    const DECIDE_BODY: &str = "fn decide<Args>(args: Args) -> HookDecision<Args> {\n  \
+        if args[0] < 0 { return HookDecision::Return(999) }\n  \
+        return HookDecision::Proceed(args)\n}";
+
+    // Proceed → the impl runs: compute(5) = 5*10 = 50.
+    #[test]
+    fn decision_proceed_continues_to_the_impl() {
+        let (value, _) = top_level_i64(&hook_source(
+            DECIDE_BODY,
+            "install(before_hook(decide, []))",
+            "@hookann()\nfn compute(a: int) -> int { return a * 10 }\n\ncompute(5)",
+        ));
+        assert_eq!(value, 50, "Proceed continues to the impl (5*10); a dropped Proceed ≠ 50");
+    }
+
+    // Return → the impl NEVER runs: compute(-3) short-circuits to 999, NOT the
+    // impl's -30. This is the load-bearing short-circuit read (token-gated).
+    #[test]
+    fn decision_return_short_circuits_the_impl() {
+        let (value, _) = top_level_i64(&hook_source(
+            DECIDE_BODY,
+            "install(before_hook(decide, []))",
+            "@hookann()\nfn compute(a: int) -> int { return a * 10 }\n\ncompute(-3)",
+        ));
+        assert_eq!(
+            value, 999,
+            "Return short-circuits with the proven R (999); the impl (which would give -30) \
+             must never run"
+        );
+    }
+
+    // afters run on BOTH arms (D1): +1 after ⇒ Proceed 5*10+1=51, Return 999+1=1000.
+    #[test]
+    fn decision_afters_run_on_both_arms() {
+        let body = format!("{DECIDE_BODY}\nfn plus_one(r: int) -> int {{ return r + 1 }}");
+        let handler = "install(before_hook(decide, []))\n    install(after_hook(plus_one, []))";
+        let (proceed, _) = top_level_i64(&hook_source(
+            &body,
+            handler,
+            "@hookann()\nfn compute(a: int) -> int { return a * 10 }\n\ncompute(5)",
+        ));
+        assert_eq!(proceed, 51, "the after runs on the Proceed result: 5*10+1");
+        let (returned, _) = top_level_i64(&hook_source(
+            &body,
+            handler,
+            "@hookann()\nfn compute(a: int) -> int { return a * 10 }\n\ncompute(-3)",
+        ));
+        assert_eq!(
+            returned, 1000,
+            "the after STILL runs on the Return short-circuit (D1 afters-on-Return): 999+1"
+        );
+    }
+
+    // The decision helper is a real registered fn (the lowered R-returning body),
+    // and the woven wrapper carries mir_data (native, C3-G6 SMALL shape).
+    #[test]
+    fn decision_wrapper_and_helper_are_native_registered_fns() {
+        let compiler = compiled_ok(&hook_source(
+            DECIDE_BODY,
+            "install(before_hook(decide, []))",
+            "@hookann()\nfn compute(a: int) -> int { return a * 10 }\n\ncompute(5)",
+        ));
+        let wrapper = function_entry(&compiler, "compute");
+        assert!(
+            wrapper.mir_data.is_some(),
+            "the woven decision wrapper compiles as an ordinary fn with mir_data attached"
+        );
+        let helper_name = compiler.template_weave_decision_helper_name("compute");
+        assert!(
+            compiler.find_function(&helper_name).is_some(),
+            "the lowered R-returning decision helper is registered"
+        );
+    }
+
+    // Composing another `before` with a decision hook is a LOUD surface-and-stop.
+    #[test]
+    fn decision_composed_with_another_before_surfaces_and_stops() {
+        let body = format!("{DECIDE_BODY}\nfn add_one(x: int) -> int {{ return x + 1 }}");
+        let (result, _) = compile_source(&hook_source(
+            &body,
+            "install(before_hook(add_one, []))\n    install(before_hook(decide, []))",
+            "@hookann()\nfn compute(a: int) -> int { return a * 10 }\n\ncompute(5)",
+        ));
+        let err = result.expect_err("stacking a before with a decision hook is not supported");
+        assert!(
+            err.to_string().contains("must be the only `before` install"),
+            "the named composition rejection fires: {err}"
+        );
     }
 
     // ── the heterogeneous AGGREGATE carrier (polymorphic before) ───────────

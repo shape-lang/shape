@@ -518,6 +518,446 @@ fn mint_shortcircuit_proof(proven_return: shape_value::v2::ConcreteType) -> Shor
     ShortCircuitProof { proven_return }
 }
 
+/// ADR-009 E4 S4 (S4-4) — the specialize-time PLAN a decision `before` hook
+/// hands the weave. The decision body is NOT compiled standalone at
+/// specialization (fact #1: a `HookDecision`-typed value would deopt on the
+/// native seam, and the two exit payload types — pack for Proceed, `R` for
+/// Return — cannot both flow through one fn return). Instead, the resolved body
+/// (its exits already recognized by [`resolve_pseudo_tuple`]: Proceed unwrapped
+/// to its pack, Return kept as a `HookDecision::Return` node) rides here to the
+/// weave, which — AFTER the impl shadow is registered — lowers it into an
+/// `R`-returning hygienic helper: each Proceed exit calls the impl shadow over
+/// the pack, each Return exit reads its proven-`R` payload (CONSUMING the
+/// [`ShortCircuitProof`] — OQ-7). The wrapper then binds ONE `__c3_result: R`
+/// join local from the helper call, so Gate 2's existing after-return R-proof
+/// covers both producers, and runs the after-chain on it (afters-on-Return,
+/// D1). No `HookDecision` enum is ever materialized on the hot path.
+#[derive(Debug)]
+pub(in crate::compiler) struct DecisionHandlerPlan {
+    /// The resolved decision body (post [`resolve_pseudo_tuple`]): params are
+    /// the target's typed slot params (`__c3_p{i}`), body is the slot prologue
+    /// plus the user body with exits recognized, return type the carrier. The
+    /// weave clones this, sets the return type to `R`, and lowers the exits.
+    pub(in crate::compiler) prepared_def: FunctionDef,
+    /// How the pack flows to the impl shadow at each Proceed exit.
+    pub(in crate::compiler) carrier: MutationCarrier,
+    /// The proven target return `R` (the after-chain / join-local type).
+    pub(in crate::compiler) return_type: TypeAnnotation,
+    /// The gate-minted anti-walk-back token (OQ-7). The weave's short-circuit
+    /// read emitter CONSUMES it, so a bypass that skips the gate cannot build.
+    pub(in crate::compiler) proof: ShortCircuitProof,
+}
+
+/// ADR-009 E4 S4 (S4-4, OQ-7) — the SOLE emitter of a decision hook's
+/// short-circuit READ: the `return <R>` that skips the impl shadow when a
+/// `before` hook returns `HookDecision::Return(result)`. It CONSUMES
+/// `&ShortCircuitProof` by REQUIREMENT of its signature — the `result` payload
+/// was proved `== R` by [`guard_before_template_exit_kinds`], which is the only
+/// minter of the token ([`mint_shortcircuit_proof`] is module-private, no `pub`
+/// constructor). A future "fast path" that tries to emit a short-circuit read
+/// WITHOUT routing through the gate has no `ShortCircuitProof` to pass, so this
+/// call does not type-check: the walk-back becomes a compiler BUILD failure, the
+/// same discipline `prove_native_kind() -> Result<NativeKind, ProofGap>` uses.
+/// Do NOT add a variant that produces the short-circuit read without the token.
+fn emit_short_circuit_result(proof: &ShortCircuitProof, payload: Expr) -> Expr {
+    // Load-bearing: reaching this emit REQUIRES holding the gate-minted proof.
+    // Bind its `R` so the dependency is real to the compiler (the parameter can
+    // never be silently dropped) — the payload itself is the proven-`R` value.
+    let _proven_r: &shape_value::v2::ConcreteType = proof.proven_return();
+    payload
+}
+
+/// ADR-009 E4 S4 (S4-4) — build the impl-shadow call for a Proceed exit over the
+/// (possibly-rebound) pack. `Single` (1-ary target, off #70): `shadow(pack)`.
+/// `Aggregate` (n-ary): bind the pack once, then `shadow(pack.a0, .., pack.aN-1)`
+/// through a block expression (no double evaluation). Awaited on async targets
+/// (mirrors the straight-line weave's impl call).
+fn build_impl_shadow_call(
+    shadow_name: &str,
+    is_async: bool,
+    carrier: &MutationCarrier,
+    pack: Expr,
+    span: Span,
+) -> Expr {
+    let call = |name: &str, args: Vec<Expr>| Expr::FunctionCall {
+        name: name.to_string(),
+        const_args: Vec::new(),
+        args,
+        named_args: Vec::new(),
+        span,
+    };
+    let raw = match carrier {
+        MutationCarrier::Single { .. } => call(shadow_name, vec![pack]),
+        MutationCarrier::Aggregate { fields } => {
+            let pack_local = format!("{RESERVED_SPECIALIZATION_PREFIX}pack");
+            let unpacked = fields
+                .iter()
+                .map(|(name, _)| Expr::PropertyAccess {
+                    object: Box::new(Expr::Identifier(pack_local.clone(), span)),
+                    property: name.clone(),
+                    optional: false,
+                    span,
+                })
+                .collect();
+            Expr::Block(
+                shape_ast::ast::expr_helpers::BlockExpr {
+                    items: vec![
+                        BlockItem::VariableDecl(VariableDecl {
+                            kind: VarKind::Let,
+                            is_mut: false,
+                            pattern: DestructurePattern::Identifier(pack_local.clone(), span),
+                            type_annotation: None,
+                            value: Some(pack),
+                            ownership: OwnershipModifier::Inferred,
+                        }),
+                        BlockItem::Expression(call(shadow_name, unpacked)),
+                    ],
+                },
+                span,
+            )
+        }
+    };
+    if is_async {
+        Expr::Await(Box::new(raw), span)
+    } else {
+        raw
+    }
+}
+
+/// Lower ONE decision exit value in place. A `HookDecision::Return(payload)` node
+/// becomes its proven-`R` payload (the short-circuit read — token consumed); any
+/// other exit value is a Proceed pack and becomes the impl-shadow call over it.
+fn lower_decision_exit_value(
+    value: &mut Expr,
+    shadow_name: &str,
+    is_async: bool,
+    carrier: &MutationCarrier,
+    proof: &ShortCircuitProof,
+) {
+    let span = value.span();
+    if let Some(payload) = decision_return_payload(value) {
+        let payload = payload.clone();
+        *value = emit_short_circuit_result(proof, payload);
+    } else {
+        let pack = std::mem::replace(value, Expr::Unit(span));
+        *value = build_impl_shadow_call(shadow_name, is_async, carrier, pack, span);
+    }
+}
+
+/// ADR-009 E4 S4 (S4-4) — the weave-time recursive exit lowering. Walks the
+/// resolved decision body and rewrites EVERY `return`-value exit to produce `R`:
+/// a Return exit reads its proven `R` (short-circuit, token consumed), a Proceed
+/// exit calls the impl shadow over its pack. Exits stay `return`s (never
+/// `break`s) — Shape has no labeled break, so a break-based inline would break
+/// the WRONG user loop; a real `return` from the helper fn is control-flow-safe
+/// at ANY depth. The walk recurses through BOTH statement-level (`if`/`for`/
+/// `while`) and expression-level (`if`/`block`/`match`/`loop`/…) control flow,
+/// because the parser lowers a statement-position `if cond { return … }` to a
+/// `Statement::Expression(Expr::If{…})`. The single TOP-LEVEL implicit tail (a
+/// bare Proceed pack, the `return args` shorthand) is lowered too. A residual
+/// `HookDecision` constructor after the walk is caught by the safety scan in
+/// [`lower_prepared_decision_def`] (a missed Return exit) — never a silent
+/// mis-weave.
+fn lower_decision_exits(
+    body: &mut [Statement],
+    shadow_name: &str,
+    is_async: bool,
+    carrier: &MutationCarrier,
+    proof: &ShortCircuitProof,
+    is_top_level: bool,
+) -> Result<()> {
+    let last = body.len().checked_sub(1);
+    for (index, stmt) in body.iter_mut().enumerate() {
+        let is_tail = is_top_level && Some(index) == last;
+        lower_decision_stmt(stmt, shadow_name, is_async, carrier, proof, is_tail)?;
+    }
+    Ok(())
+}
+
+/// Lower one statement's exits in place (see [`lower_decision_exits`]).
+fn lower_decision_stmt(
+    stmt: &mut Statement,
+    shadow_name: &str,
+    is_async: bool,
+    carrier: &MutationCarrier,
+    proof: &ShortCircuitProof,
+    is_tail: bool,
+) -> Result<()> {
+    match stmt {
+        Statement::Return(Some(value), _) => {
+            lower_decision_exit_value(value, shadow_name, is_async, carrier, proof);
+            Ok(())
+        }
+        Statement::Return(None, _) => Err(reject(
+            "internal error: a value-less `return` reached the decision-weave lowering; the \
+             before-exit gate rejects a pack-less decision exit before the weave"
+                .to_string(),
+        )),
+        Statement::If(if_stmt, _) => {
+            lower_decision_expr(&mut if_stmt.condition, shadow_name, is_async, carrier, proof)?;
+            lower_decision_exits(
+                &mut if_stmt.then_body,
+                shadow_name,
+                is_async,
+                carrier,
+                proof,
+                false,
+            )?;
+            if let Some(else_body) = &mut if_stmt.else_body {
+                lower_decision_exits(else_body, shadow_name, is_async, carrier, proof, false)?;
+            }
+            Ok(())
+        }
+        Statement::For(for_loop, _) => {
+            lower_decision_exits(&mut for_loop.body, shadow_name, is_async, carrier, proof, false)
+        }
+        Statement::While(while_loop, _) => {
+            lower_decision_expr(&mut while_loop.condition, shadow_name, is_async, carrier, proof)?;
+            lower_decision_exits(&mut while_loop.body, shadow_name, is_async, carrier, proof, false)
+        }
+        Statement::Expression(value, _) => {
+            // A control-flow expression carries its exits as nested `return`s
+            // (lowered by the recursion); a plain value expression at the TOP
+            // tail is the bare-Proceed implicit return.
+            if is_tail && !is_control_flow_expr(value) {
+                lower_decision_exit_value(value, shadow_name, is_async, carrier, proof);
+                Ok(())
+            } else {
+                lower_decision_expr(value, shadow_name, is_async, carrier, proof)
+            }
+        }
+        Statement::VariableDecl(decl, _) => {
+            if let Some(value) = &mut decl.value {
+                lower_decision_expr(value, shadow_name, is_async, carrier, proof)?;
+            }
+            Ok(())
+        }
+        Statement::Assignment(assign, _) => {
+            lower_decision_expr(&mut assign.value, shadow_name, is_async, carrier, proof)
+        }
+        Statement::Break(_) | Statement::Continue(_) => Ok(()),
+        other => Err(reject(format!(
+            "the HookDecision `before` body uses a construct the first-cut decision weave does \
+             not yet lower ({}); write the decision as `if` / `return` guards ending in `return \
+             HookDecision::Return(<result>)` or `return HookDecision::Proceed(<args>)` — see \
+             ADR-009 E4 S4",
+            statement_kind(other)
+        ))),
+    }
+}
+
+/// Lower every `return`-value exit reachable inside an expression subtree
+/// (expression-level control flow + the expression-position `return` twin).
+/// Block / if / match tail VALUES are NOT fn returns (a decision constructor in
+/// a tail value position was rejected at construction, fact #1), so this lowers
+/// only explicit `return`s.
+fn lower_decision_expr(
+    expr: &mut Expr,
+    shadow_name: &str,
+    is_async: bool,
+    carrier: &MutationCarrier,
+    proof: &ShortCircuitProof,
+) -> Result<()> {
+    match expr {
+        Expr::Return(Some(value), _) => {
+            lower_decision_exit_value(value, shadow_name, is_async, carrier, proof);
+            Ok(())
+        }
+        Expr::Return(None, _) => Err(reject(
+            "internal error: a value-less `return` reached the decision-weave lowering; the \
+             before-exit gate rejects a pack-less decision exit before the weave"
+                .to_string(),
+        )),
+        Expr::Block(block, _) => {
+            for item in &mut block.items {
+                match item {
+                    BlockItem::VariableDecl(decl) => {
+                        if let Some(value) = &mut decl.value {
+                            lower_decision_expr(value, shadow_name, is_async, carrier, proof)?;
+                        }
+                    }
+                    BlockItem::Assignment(assign) => {
+                        lower_decision_expr(&mut assign.value, shadow_name, is_async, carrier, proof)?
+                    }
+                    BlockItem::Statement(stmt) => lower_decision_stmt(
+                        stmt, shadow_name, is_async, carrier, proof, false,
+                    )?,
+                    BlockItem::Expression(inner) => {
+                        lower_decision_expr(inner, shadow_name, is_async, carrier, proof)?
+                    }
+                }
+            }
+            Ok(())
+        }
+        Expr::If(if_expr, _) => {
+            lower_decision_expr(&mut if_expr.condition, shadow_name, is_async, carrier, proof)?;
+            lower_decision_expr(&mut if_expr.then_branch, shadow_name, is_async, carrier, proof)?;
+            if let Some(else_branch) = &mut if_expr.else_branch {
+                lower_decision_expr(else_branch, shadow_name, is_async, carrier, proof)?;
+            }
+            Ok(())
+        }
+        Expr::Conditional {
+            condition,
+            then_expr,
+            else_expr,
+            ..
+        } => {
+            lower_decision_expr(condition, shadow_name, is_async, carrier, proof)?;
+            lower_decision_expr(then_expr, shadow_name, is_async, carrier, proof)?;
+            if let Some(else_expr) = else_expr {
+                lower_decision_expr(else_expr, shadow_name, is_async, carrier, proof)?;
+            }
+            Ok(())
+        }
+        Expr::Match(match_expr, _) => {
+            lower_decision_expr(&mut match_expr.scrutinee, shadow_name, is_async, carrier, proof)?;
+            for arm in &mut match_expr.arms {
+                if let Some(guard) = &mut arm.guard {
+                    lower_decision_expr(guard, shadow_name, is_async, carrier, proof)?;
+                }
+                lower_decision_expr(&mut arm.body, shadow_name, is_async, carrier, proof)?;
+            }
+            Ok(())
+        }
+        Expr::Loop(loop_expr, _) => {
+            lower_decision_expr(&mut loop_expr.body, shadow_name, is_async, carrier, proof)
+        }
+        Expr::While(while_expr, _) => {
+            lower_decision_expr(&mut while_expr.condition, shadow_name, is_async, carrier, proof)?;
+            lower_decision_expr(&mut while_expr.body, shadow_name, is_async, carrier, proof)
+        }
+        Expr::For(for_expr, _) => {
+            lower_decision_expr(&mut for_expr.iterable, shadow_name, is_async, carrier, proof)?;
+            lower_decision_expr(&mut for_expr.body, shadow_name, is_async, carrier, proof)
+        }
+        Expr::Let(let_expr, _) => {
+            if let Some(value) = &mut let_expr.value {
+                lower_decision_expr(value, shadow_name, is_async, carrier, proof)?;
+            }
+            lower_decision_expr(&mut let_expr.body, shadow_name, is_async, carrier, proof)
+        }
+        // A decision constructor is not a first-class value (rejected at
+        // construction), and value expressions carry no fn-return exit; leave.
+        _ => Ok(()),
+    }
+}
+
+/// Whether an expression is a control-flow container whose exits nest as
+/// `return`s rather than being a plain value.
+fn is_control_flow_expr(expr: &Expr) -> bool {
+    matches!(
+        expr,
+        Expr::If(..)
+            | Expr::Block(..)
+            | Expr::Match(..)
+            | Expr::Loop(..)
+            | Expr::While(..)
+            | Expr::For(..)
+            | Expr::Let(..)
+            | Expr::Conditional { .. }
+            | Expr::Return(..)
+    )
+}
+
+/// A short human tag for the unsupported-construct rejection.
+fn statement_kind(stmt: &Statement) -> &'static str {
+    match stmt {
+        Statement::Extend(..) => "a comptime `extend`",
+        Statement::RemoveTarget(..) => "a comptime directive",
+        _ => "an unsupported statement",
+    }
+}
+
+/// ADR-009 E4 S4 (S4-4) — lower a specialize-time [`DecisionHandlerPlan`]'s
+/// resolved body into an `R`-returning helper body, in place. Sets the return
+/// type to `R`, lowers every exit ([`lower_decision_exits`]), and runs the
+/// residual-constructor safety scan (a surviving `HookDecision::Return` node is
+/// an unlowered Return exit — a LOUD internal error, never a silent mis-weave).
+/// The `proof` is CONSUMED by every short-circuit read (OQ-7).
+pub(in crate::compiler) fn lower_prepared_decision_def(
+    def: &mut FunctionDef,
+    shadow_name: &str,
+    is_async: bool,
+    plan: &DecisionHandlerPlan,
+) -> Result<()> {
+    def.return_type = Some(plan.return_type.clone());
+    def.is_async = is_async;
+    lower_decision_exits(
+        &mut def.body,
+        shadow_name,
+        is_async,
+        &plan.carrier,
+        &plan.proof,
+        true,
+    )?;
+    if def.body.iter().any(statement_retains_decision_ctor) {
+        return Err(reject(
+            "internal error: a `HookDecision` constructor survived the decision-weave lowering; \
+             a Return exit was not reached by the exit walk (the decision body shape is not \
+             lowerable by the first cut) — surface-and-stop, never a silent mis-weave"
+                .to_string(),
+        ));
+    }
+    Ok(())
+}
+
+/// Post-lowering safety scan: a `HookDecision::Return`/`::Proceed` constructor
+/// anywhere in the lowered body means an exit was missed.
+fn statement_retains_decision_ctor(stmt: &Statement) -> bool {
+    match stmt {
+        Statement::Return(Some(value), _) | Statement::Expression(value, _) => {
+            decision_variant(value).is_some() || expr_retains_decision_ctor(value)
+        }
+        Statement::If(if_stmt, _) => {
+            if_stmt.then_body.iter().any(statement_retains_decision_ctor)
+                || if_stmt
+                    .else_body
+                    .as_ref()
+                    .is_some_and(|body| body.iter().any(statement_retains_decision_ctor))
+        }
+        Statement::For(for_loop, _) => {
+            for_loop.body.iter().any(statement_retains_decision_ctor)
+        }
+        Statement::While(while_loop, _) => {
+            while_loop.body.iter().any(statement_retains_decision_ctor)
+        }
+        Statement::VariableDecl(decl, _) => decl
+            .value
+            .as_ref()
+            .is_some_and(expr_retains_decision_ctor),
+        Statement::Assignment(assign, _) => expr_retains_decision_ctor(&assign.value),
+        _ => false,
+    }
+}
+
+/// Subtree scan for a residual `HookDecision` constructor (safety net).
+fn expr_retains_decision_ctor(expr: &Expr) -> bool {
+    if decision_variant(expr).is_some() {
+        return true;
+    }
+    match expr {
+        Expr::Block(block, _) => block.items.iter().any(|item| match item {
+            BlockItem::VariableDecl(decl) => decl
+                .value
+                .as_ref()
+                .is_some_and(expr_retains_decision_ctor),
+            BlockItem::Assignment(assign) => expr_retains_decision_ctor(&assign.value),
+            BlockItem::Statement(stmt) => statement_retains_decision_ctor(stmt),
+            BlockItem::Expression(inner) => expr_retains_decision_ctor(inner),
+        }),
+        Expr::If(if_expr, _) => {
+            expr_retains_decision_ctor(&if_expr.then_branch)
+                || if_expr
+                    .else_branch
+                    .as_ref()
+                    .is_some_and(|branch| expr_retains_decision_ctor(branch))
+        }
+        Expr::Await(inner, _) => expr_retains_decision_ctor(inner),
+        _ => false,
+    }
+}
+
 /// ADR-009 E4 S4 (S4-3) — the two decision-exit constructor variants a
 /// `HookDecision`-returning `before` body spells at its exits (spec §1.1).
 #[derive(Clone, Copy, PartialEq, Eq)]

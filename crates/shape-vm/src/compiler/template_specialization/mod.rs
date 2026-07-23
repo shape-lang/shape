@@ -85,7 +85,7 @@ use shape_ast::error::{Result, ShapeError};
 use shape_value::v2::ConcreteType;
 
 use self::const_lift::LiftedConst;
-use self::pseudo_tuple::{PseudoTuplePlan, TemplateSpecializationPlan};
+use self::pseudo_tuple::{DecisionHandlerPlan, PseudoTuplePlan, TemplateSpecializationPlan};
 use crate::compiler::BytecodeCompiler;
 use crate::compiler::comptime_builtins::{CallableDescriptor, FrozenTypeIdentity};
 use crate::compiler::comptime_fragments::checked_body::BodySignature;
@@ -95,6 +95,7 @@ use crate::compiler::comptime_fragments::checked_template::{
 use crate::compiler::comptime_target::type_annotation_to_string;
 use crate::compiler::monomorphization::cache::SpecializationFailure;
 use crate::compiler::monomorphization::semantic_specialization::SemanticSpecializationRequest;
+use crate::compiler::monomorphization::substitution;
 use crate::compiler::monomorphization::type_resolution::declared_annotation_concrete_type;
 
 /// The frozen target a template specializes against: the USER-SPELLED name,
@@ -156,6 +157,13 @@ pub(in crate::compiler) enum MutationCarrier {
     },
 }
 
+/// The function index a DECISION handler carries: it is never compiled
+/// standalone (fact #1), so it has no registered fn — the weave inlines its
+/// resolved body into an `R`-returning helper. Set to the u16 sentinel; the
+/// weave reaches a decision install through [`SpecializedHandler::decision`],
+/// never [`SpecializedHandler::function_index`].
+const DECISION_HANDLER_NO_FUNCTION_INDEX: u16 = u16::MAX;
+
 /// A successfully specialized handler: the template body fn's index in the
 /// current compilation, plus the mutation carrier (`Some` for a mutating
 /// `before`, `None` for `after` handlers and observers).
@@ -170,6 +178,13 @@ pub(in crate::compiler) struct SpecializedHandler {
     /// spelling for hooks on zero-param targets and `after` hooks on void
     /// targets (the S1c "S2 revisits" deferral, discharged here).
     observer: bool,
+    /// ADR-009 E4 S4 (S4-4) — the decision `before` form
+    /// (`-> HookDecision<Args>`). `Some` carries the specialize-time plan the
+    /// weave lowers into an `R`-returning helper (its resolved body + carrier +
+    /// `R` + the [`ShortCircuitProof`] token). `None` for every other form. A
+    /// decision handler has no standalone fn, so `function_index` is the
+    /// sentinel and callers reach it through [`Self::decision`].
+    decision: Option<DecisionHandlerPlan>,
 }
 
 impl SpecializedHandler {
@@ -189,6 +204,13 @@ impl SpecializedHandler {
     /// target's data flow is untouched.
     pub(in crate::compiler) fn is_observer(&self) -> bool {
         self.observer
+    }
+
+    /// ADR-009 E4 S4 (S4-4) — the decision plan for a `HookDecision`-returning
+    /// `before` hook; `Some` iff this is the decision form (the weave lowers it
+    /// into the single-join branch). `None` for every straight-line form.
+    pub(in crate::compiler) fn decision(&self) -> Option<&DecisionHandlerPlan> {
+        self.decision.as_ref()
     }
 }
 
@@ -576,39 +598,173 @@ impl BytecodeCompiler {
             function_index,
             carrier: Some(carrier),
             observer: false,
+            decision: None,
         })
     }
 
-    /// ADR-009 E4 S4 (S4-2) — the decision-capable polymorphic `before` case
-    /// (`fn t<Args>(args: Args) -> HookDecision<Args>`). The protocol's
-    /// classifier + construction-time pseudo-tuple validation are LIVE; its
-    /// before-exit gate extension (the `HookDecision::Return`/`Proceed` arms +
-    /// the [`pseudo_tuple::ShortCircuitProof`] token) lands in S4-3 and its
-    /// single-join short-circuit weave codegen in S4-4.
+    /// ADR-009 E4 S4 (S4-4) — the decision-capable polymorphic `before` case
+    /// (`fn t<Args>(args: Args) -> HookDecision<Args>`). Prepares the decision
+    /// body for the weave's single-join branch (spec §1.4) WITHOUT compiling it
+    /// standalone: a `HookDecision`-typed value on the native seam deopts (fact
+    /// #1), and the two exit payload types (pack for Proceed, `R` for Return)
+    /// cannot both flow through one fn return. So the body is substituted +
+    /// resolved here (the before-exit gate proves every `Return` `== R` and
+    /// mints the [`pseudo_tuple::ShortCircuitProof`] token), then rides a
+    /// [`DecisionHandlerPlan`] to the weave, which — after the impl shadow is
+    /// registered — lowers it into an `R`-returning helper, calling the impl on
+    /// Proceed and reading the proven `R` on Return (CONSUMING the token, OQ-7).
     ///
-    /// Until the weave lands, this arm is a LOUD, DOOR-OPEN surface-and-stop
-    /// (D6 "named surface-and-stop, never a silent no-op"): a decision hook that
-    /// wove through the straight-line always-Proceed weave would silently DROP
-    /// its short-circuit — the worst state. The always-Proceed form
-    /// (`-> Args`) is available now.
+    /// First-cut bounds (LOUD surface-and-stop, never silent — D6): a decision
+    /// hook must have at least one parameter, a resolvable non-void return type,
+    /// and NO captures (`capture(...)` on a decision hook is deferred). A
+    /// State-declaring decision form is rejected earlier (the classifier +
+    /// `reject_decision_malformed_payload`).
     #[allow(clippy::too_many_arguments)]
     fn specialize_polymorphic_decision(
         &mut self,
         template: &CheckedTemplate,
         target: &SpecializationTarget,
-        _type_param: &str,
-        _args_param: &str,
-        _captures: Vec<(String, LiftedConst)>,
+        type_param: &str,
+        args_param: &str,
+        captures: Vec<(String, LiftedConst)>,
     ) -> Result<SpecializedHandler> {
-        Err(self.template_application_error(
-            template,
-            target,
-            "the HookDecision short-circuit protocol (`before` hooks returning \
-             `HookDecision<Args>` with `Proceed`/`Return`) is recognized but its decision weave \
-             codegen is not yet wired in this build (ADR-009 E4 S4-4); use the always-Proceed \
-             `before` form (`fn t<Args>(args: Args) -> Args`, returning the mutated `args` pack) \
-             until the decision form ships",
-        ))
+        if target.params.is_empty() {
+            return Err(self.template_application_error(
+                template,
+                target,
+                "the target declares no parameters, so a decision `before` hook has no arguments \
+                 to receive or short-circuit; declare a zero-parameter void observer \
+                 (`fn t() { ... }`) to observe the call, or give the target parameters",
+            ));
+        }
+        // A decision hook short-circuits WITH an `R`, so the target must declare
+        // a concrete, resolvable, non-void return type (the join-local / after
+        // type). A void target has no `R` to Return.
+        let return_annotation = match &target.return_type {
+            Some(TypeAnnotation::Void) | None => {
+                return Err(self.template_application_error(
+                    template,
+                    target,
+                    "the target returns no value, so a decision `before` hook has no `R` to \
+                     short-circuit with via `HookDecision::Return(...)`; give the target a return \
+                     type, or use the always-Proceed `before` form (`-> Args`)",
+                ));
+            }
+            Some(annotation) => annotation.clone(),
+        };
+        if declared_annotation_concrete_type(self, &return_annotation).is_none() {
+            return Err(self.template_application_error(
+                template,
+                target,
+                &format!(
+                    "the return type `{}` (from the target's signature) does not resolve to a \
+                     concrete type in this compilation; annotate the target with a concrete \
+                     resolvable return type so the decision hook can short-circuit with it",
+                    type_annotation_to_string(&return_annotation)
+                ),
+            ));
+        }
+        // First cut: captures on a decision hook are deferred (the weave inlines
+        // the decision body rather than compiling+baking a standalone handler).
+        if !captures.is_empty() {
+            return Err(self.template_application_error(
+                template,
+                target,
+                "capturing values into a decision `before` hook (`capture(...)` on a hook \
+                 returning `HookDecision<Args>`) is not yet supported in this cut; use the \
+                 always-Proceed `before` form for captured config, or declare the decision hook \
+                 without captures",
+            ));
+        }
+        let mut param_concretes = Vec::with_capacity(target.params.len());
+        for (position, (param_name, annotation)) in target.params.iter().enumerate() {
+            let Some(concrete) = declared_annotation_concrete_type(self, annotation) else {
+                return Err(self.template_application_error(
+                    template,
+                    target,
+                    &format!(
+                        "parameter {} (`{param_name}`): the required specialization's type `{}` \
+                         (from the target's signature) does not resolve to a concrete type in \
+                         this compilation; annotate the target with a concrete resolvable type",
+                        position + 1,
+                        type_annotation_to_string(annotation)
+                    ),
+                ));
+            };
+            param_concretes.push(concrete);
+        }
+        let carrier = if target.params.len() == 1 {
+            MutationCarrier::Single {
+                annotation: target.params[0].1.clone(),
+            }
+        } else {
+            MutationCarrier::Aggregate {
+                fields: target
+                    .params
+                    .iter()
+                    .enumerate()
+                    .map(|(index, (_, annotation))| (format!("a{index}"), annotation.clone()))
+                    .collect(),
+            }
+        };
+        // Substitute `Args` → the target's `Tuple` Sig identity, then resolve the
+        // pseudo-tuple face: the before-exit gate proves every `Return` exit
+        // `== R` and MINTS the ShortCircuitProof token (OQ-7). We do NOT register
+        // or compile this def — its `Return` exits are `HookDecision::Return`
+        // nodes (not the carrier), so it is not a standalone-compilable fn; the
+        // weave lowers it after the impl shadow exists.
+        let original_def = self.function_defs.get(template.body_fn()).cloned().ok_or_else(|| {
+            self.template_application_error(
+                template,
+                target,
+                "internal error: the decision hook's template body fn has no recorded AST",
+            )
+        })?;
+        let subs = std::collections::HashMap::from([(
+            type_param.to_string(),
+            ConcreteType::Tuple(param_concretes),
+        )]);
+        let mut prepared_def = substitution::substitute_function_def(&original_def, &subs);
+        let plan = TemplateSpecializationPlan {
+            pseudo_tuple: Some(PseudoTuplePlan {
+                args_param: args_param.to_string(),
+                type_param: type_param.to_string(),
+                target_params: target.params.clone(),
+                carrier: carrier.clone(),
+                decision_return: Some(return_annotation.clone()),
+            }),
+            captures: Vec::new(),
+        };
+        let proof = pseudo_tuple::resolve_pseudo_tuple(&mut prepared_def, &plan, self)
+            .map_err(|error| {
+                let detail = match error {
+                    ShapeError::SemanticError { message, .. } => message,
+                    ShapeError::TypeError(message) => message,
+                    ShapeError::RuntimeError { message, .. } => message,
+                    other => other.to_string(),
+                };
+                self.template_application_error(template, target, &detail)
+            })?
+            .ok_or_else(|| {
+                self.template_application_error(
+                    template,
+                    target,
+                    "internal error: a decision plan resolved without minting the \
+                     ShortCircuitProof token; guard_before_template_exit_kinds mints it on \
+                     every decision plan (OQ-7)",
+                )
+            })?;
+        Ok(SpecializedHandler {
+            function_index: DECISION_HANDLER_NO_FUNCTION_INDEX,
+            carrier: Some(carrier.clone()),
+            observer: false,
+            decision: Some(DecisionHandlerPlan {
+                prepared_def,
+                carrier,
+                return_type: return_annotation,
+                proof,
+            }),
+        })
     }
 
     /// The C3-G4 polymorphic `after` case. ZERO captures: the specialized
@@ -696,6 +852,7 @@ impl BytecodeCompiler {
             function_index,
             carrier: None,
             observer: false,
+            decision: None,
         })
     }
 
@@ -827,6 +984,7 @@ impl BytecodeCompiler {
                 function_index,
                 carrier: None,
                 observer: true,
+                decision: None,
             });
         }
         match target.params.len() {
@@ -901,6 +1059,7 @@ impl BytecodeCompiler {
                         annotation: required.clone(),
                     }),
                     observer: false,
+                    decision: None,
                 })
             }
             arity => Err(self.template_application_error(
@@ -947,6 +1106,7 @@ impl BytecodeCompiler {
                 function_index,
                 carrier: None,
                 observer: true,
+                decision: None,
             });
         }
         let required = match &target.return_type {
@@ -1016,6 +1176,7 @@ impl BytecodeCompiler {
             function_index,
             carrier: None,
             observer: false,
+            decision: None,
         })
     }
 
