@@ -251,8 +251,19 @@ proof (the mint `mint_shortcircuit_proof` is module-private, no `pub`
 constructor), and the weave reaches a decision install ONLY through
 `SpecializedHandler::decision()` — so a future fast-path that emits the
 short-circuit read without routing through the gate has no token to pass and
-FAILS TO BUILD (the `ProofGap` discipline). The `let _shortcircuit_proof`-dropped
-state is gone; the transient `proven_return is never read` warning is cleared.
+FAILS TO BUILD (the `ProofGap` discipline).
+
+**S4b review correction (append-only).** An earlier draft of this section said
+"the `let _shortcircuit_proof`-dropped state is gone." That is imprecise: the
+`let _shortcircuit_proof = resolve_pseudo_tuple(...)` binding REMAINS at
+`cache.rs:528-533` — but it is the **always-Proceed / non-decision path**, where
+`resolve_pseudo_tuple` returns `None` (no token is minted, so nothing is dropped).
+The token is load-bearing on the SEPARATE decision path
+(`specialize_polymorphic_decision`, `mod.rs:738-766`, which `.ok_or_else`-requires
+`Some(proof)` and moves it into `DecisionHandlerPlan.proof`). The substantive
+guarantee — a gate-bypassing short-circuit read cannot construct the token and
+fails to build — holds and was confirmed by all three S4b lenses via full static
+trace. The `proven_return is never read` warning is cleared on the decision path.
 
 First-cut bounds (each a LOUD surface-and-stop): a decision hook must be the only
 `before` install, have a resolvable non-void `R`, and no captures.
@@ -265,10 +276,28 @@ wrapper+helper are native registered fns; composition reject.
 
 **Filed:** E4-D6 umbrella (recover/retry/re-place) = **#80**; OQ-4 fallible-hooks
 follow-up (`Result<HookDecision<Args>, E>` + the `?`-exit extension) = **#81**.
-The `?` door-open message now cites #81; the recover/retry/re-place recognizer
-sentences + the OQ-5 non-failure-R reject + the Gate-2 misplaced-after reject
-cite #80. State (OQ-3) is a distinct deferral, stays anchored at the epic #20. No
-dangling placeholder cites (`grep #<D6…` empty).
+The recover/retry/re-place recognizer sentences + the OQ-5 non-failure-R reject +
+the Gate-2 misplaced-after reject cite #80. State (OQ-3) is a distinct deferral,
+stays anchored at the epic #20. No dangling placeholder cites (`grep #<D6…` empty);
+#80 and #81 verified OPEN.
+
+**S4b review correction (append-only) — the `?` rejection a user actually sees.**
+An earlier draft said "the `?` door-open message now cites #81." Refined per the
+S4b lenses' executed evidence: for the natural `let x = f()?` form in a
+`-> HookDecision<Args>` hook, the **ordinary type-checker preempts** the
+specialization gate and rejects with `operator '?' requires the function to return
+Result or Option, but '<fn>' has return type '...HookDecision...'`. **This is
+exactly the OQ-4 user ruling working as specified** — `?` follows the ordinary
+`Result`/`Option` typing rule; the rejection is LOUD and truthful and never claims
+a permanent hook-`?` prohibition. Gate 3's decision-aware door-open arm
+(`reject_try_operator_exit`, `pseudo_tuple.rs:2550`, citing #81) is retained as
+**defense-in-depth** for any `?` that reaches specialization without the ordinary
+checker having fired, and Gate 3's total-reject (the soundness gate that closed
+leak `102997035238305`) is fully intact — but it is NOT the user-facing message on
+the common path. `pin6_decision_try_operator_still_total_rejects_door_open` drives
+`resolve()` directly and therefore exercises the fallback arm, not the real user
+path; making the pins representative of the ordinary-checker path is folded into
+the S4b polish follow-up (see §Honest residuals).
 
 propagate: DEFAULT (impl returns a failure-valued `R`, threaded through the
 afters) is sound and pinned; EXPLICIT (`return HookDecision::Return(<failure R>)`)
@@ -362,6 +391,15 @@ book reds STAY red.
 - **Result/Option-R hooked fn matched by a caller** — one loud `[jit-fallback]`
   on the pre-existing EnumPayload payload-bind gap (ADR-006 §2.7.17), independent
   of E4.
+- **S4b polish (#82)** — (i) the `?`-in-decision-hook pin drives `resolve()`
+  directly and tests Gate 3's fallback arm, not the ordinary-checker path a real
+  user hits (per OQ-4); make the pins representative. (ii) A bare-`return
+  args`-only decision hook (no `Return` exit) gives a raw type-solver error
+  instead of a named E4 surface-and-stop — LOUD, degenerate corner. Both
+  diagnostic-quality only; no soundness impact.
 
-Worktree clean at `f20dd21a` (shape) / `8d2e2de` (shape-web, 64 sibling files
-untouched).
+Worktree clean at `03f7d394` (shape) / `8d2e2de` (shape-web, 64 sibling files
+untouched). **S4b review corrections** (§S4-4 token wording, §S4-5 the `?`-message
+reachability) folded in append-only; the substantive guarantees (token
+load-bearing, Gate 3 total-reject, JIT-native decision weave) were confirmed by
+all three S4b lenses via execution.
