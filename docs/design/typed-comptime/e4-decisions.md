@@ -46,6 +46,23 @@ preserved + the exit-soundness substrate).
   and threaded through the weave. State is PER-INVOCATION, minted as an
   initial value into the woven wrapper's locals — there is no existing
   per-application runtime cell and E4 does not invent one.
+  - **S3 shipped** (`e4-slice3-report.md`, D2-C cleanest-C). Spike 2 confirmed no
+    live reader → the always-empty lifecycle `ctx` (`{state:{}, event_log:[]}`)
+    was DELETED outright (not retyped): `emit_annotation_runtime_ctx` +
+    `emit_empty_annotation_event_log` + the `"ctx"` emission arm
+    (`functions_annotations.rs`), the installer `inferred_handler_parameter_type`
+    ctx arm, and the `__annotation_ctx_` post-inference-verify whitelist row (+
+    its sole-consumer test). Paired with a BROAD, pre-inference, LSP-visible LOUD
+    rejection (`planner.rs` `OnDefine|Metadata` block): any lifecycle-handler
+    param that is not the `target`/`fn` descriptor is rejected — `ctx` gets the
+    specific E4-D2/#68 sub-message, any other name the generic one. Collision
+    verdict ratified NO (comptime pre/post ctx surface untouched — twins green).
+    Two supervisor rulings 2026-07-23: OQ1 BROAD, OQ2 DEFER the dead Rust
+    `AnnotationContext` reap (→ #78; `TargetOwner` preserved). 6 pins added, 1
+    deleted; 2 incidental `metadata(target, ctx)` test fixtures dropped their
+    unused ctx. Gate: all six annotation suites' FAILED-name sets unchanged from
+    the S3 base baseline. The typed per-invocation `BeforeContext<State>` returns
+    with #68.
 - **E4-D3 (@remote wire semantics).** Callee identity = the hygienic
   impl-shadow's live fn-ref (UInt64 id) — NEVER the wrapper (infinite
   recursion); arg-pack = the OUTER-TypedArray `serialize_arg_pack` arm; the

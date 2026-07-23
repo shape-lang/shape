@@ -8504,7 +8504,7 @@ mod tests {
     fn test_definition_lifecycle_targets_reject_expression_target() {
         let code = r#"
             annotation info() on expression {
-                metadata(target, ctx) {
+                metadata(target) {
                     target.name
                 }
             }
@@ -8518,6 +8518,148 @@ mod tests {
             msg.contains("not a definition target"),
             "expected definition-target restriction error, got: {}",
             msg
+        );
+    }
+
+    // ADR-009 E4-D2 ctx-removal (slice S3): the always-empty lifecycle `ctx`
+    // carrier was deleted; a lingering `ctx` (or any non-descriptor name) now
+    // degrades to a silent-null `PushNull` param. The planner rejects it LOUD
+    // (pre-inference, LSP-visible). These pins lock the diagnostic in.
+    #[test]
+    fn s3_lifecycle_ctx_param_is_loud_rejected() {
+        let code = r#"
+            annotation trace() {
+                on_define(target, ctx) {
+                    return 1
+                }
+            }
+        "#;
+        let program = parse_program(code).expect("Failed to parse");
+        let err = BytecodeCompiler::new()
+            .compile(&program)
+            .expect_err("on_define(target, ctx) must be loud-rejected after E4-D2 ctx removal");
+        let msg = format!("{}", err);
+        assert!(
+            msg.contains("removed in E4-D2"),
+            "expected the ctx-specific E4-D2 sub-message, got: {}",
+            msg
+        );
+        assert!(
+            msg.contains("#68"),
+            "ctx rejection must cite the HookDecision follow-up (#68), got: {}",
+            msg
+        );
+        assert!(
+            msg.contains("on_define"),
+            "diagnostic must name the on_define handler kind, got: {}",
+            msg
+        );
+    }
+
+    #[test]
+    fn s3_metadata_ctx_param_is_loud_rejected() {
+        let code = r#"
+            annotation info() {
+                metadata(target, ctx) {
+                    return 1
+                }
+            }
+        "#;
+        let program = parse_program(code).expect("Failed to parse");
+        let err = BytecodeCompiler::new()
+            .compile(&program)
+            .expect_err("metadata(target, ctx) must be loud-rejected after E4-D2 ctx removal");
+        let msg = format!("{}", err);
+        assert!(
+            msg.contains("removed in E4-D2") && msg.contains("#68") && msg.contains("metadata"),
+            "expected ctx-specific E4-D2 sub-message naming the metadata kind + #68, got: {}",
+            msg
+        );
+    }
+
+    #[test]
+    fn s3_lifecycle_nondescriptor_param_is_loud_rejected() {
+        let code = r#"
+            annotation trace() {
+                on_define(target, foo) {
+                    return 1
+                }
+            }
+        "#;
+        let program = parse_program(code).expect("Failed to parse");
+        let err = BytecodeCompiler::new()
+            .compile(&program)
+            .expect_err("on_define(target, foo) must be loud-rejected (broad form)");
+        let msg = format!("{}", err);
+        assert!(
+            msg.contains("unknown") && msg.contains("lifecycle handler parameter 'foo'"),
+            "expected the generic unknown-parameter rejection naming 'foo', got: {}",
+            msg
+        );
+        // A non-`ctx` name gets the generic message, NOT the E4-D2 ctx sub-message.
+        assert!(
+            !msg.contains("removed in E4-D2"),
+            "non-ctx param must not get the ctx-specific sub-message, got: {}",
+            msg
+        );
+    }
+
+    #[test]
+    fn s3_lifecycle_descriptor_only_installs_on_define_and_metadata() {
+        // The descriptor path (target/fn only) survives the ctx deletion:
+        // both lifecycle handlers still plan, install, and reserve a handler
+        // slot. Firing at module-init is separately proven by the binary
+        // behavior differential (fx_C on_define(target) -> exit 0).
+        let code = r#"
+            annotation trace() {
+                on_define(target) {
+                    return 1
+                }
+                metadata(target) {
+                    return 1
+                }
+            }
+        "#;
+        let program = parse_program(code).expect("Failed to parse");
+        let bytecode = BytecodeCompiler::new()
+            .compile(&program)
+            .expect("descriptor-only lifecycle handlers must still compile after ctx removal");
+        let ann = bytecode
+            .compiled_annotations
+            .get("trace")
+            .expect("trace annotation must be installed");
+        assert!(
+            ann.on_define_handler.is_some(),
+            "on_define(target) must reserve a handler slot"
+        );
+        assert!(
+            ann.metadata_handler.is_some(),
+            "metadata(target) must reserve a handler slot"
+        );
+    }
+
+    #[test]
+    fn s3_comptime_ctx_twin_stays_green_after_lifecycle_ctx_removal() {
+        // Collision-free anchor: the comptime pre/post ctx surface is a
+        // wholly separate path and is UNTOUCHED by the lifecycle-ctx deletion.
+        // `comptime post(target, ctx)` using target reflection must still
+        // compile (ctx is a valid comptime param name).
+        let code = r#"
+            annotation trace() {
+                comptime post(target, ctx) {
+                    target.name
+                }
+            }
+
+            @trace()
+            fn work() {
+                return 1
+            }
+        "#;
+        let program = parse_program(code).expect("Failed to parse");
+        assert!(
+            BytecodeCompiler::new().compile(&program).is_ok(),
+            "comptime post(target, ctx) must remain green — lifecycle ctx removal must not reach the comptime path"
         );
     }
 

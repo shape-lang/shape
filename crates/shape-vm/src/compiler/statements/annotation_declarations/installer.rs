@@ -185,15 +185,6 @@ fn lifecycle_function(
 }
 
 fn inferred_handler_parameter_type(name: &str) -> Option<TypeAnnotation> {
-    if name == "ctx" {
-        return Some(TypeAnnotation::Object(vec![
-            object_field("state", TypeAnnotation::Basic("unknown".to_string())),
-            object_field(
-                "event_log",
-                TypeAnnotation::Array(Box::new(TypeAnnotation::Basic("unknown".to_string()))),
-            ),
-        ]));
-    }
     if name == "fn" || name == "target" {
         return Some(TypeAnnotation::Object(vec![
             object_field("name", TypeAnnotation::Basic("string".to_string())),

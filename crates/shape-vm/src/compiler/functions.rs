@@ -3175,7 +3175,7 @@ mod tests {
     fn test_expression_annotation_rejects_definition_lifecycle_hooks() {
         let code = r#"
             annotation info() {
-                metadata(target, ctx) {
+                metadata(target) {
                     target.kind
                 }
             }

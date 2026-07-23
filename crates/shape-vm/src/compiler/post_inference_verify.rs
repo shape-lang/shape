@@ -177,16 +177,6 @@ pub(crate) const WHITELIST: &[WhitelistEntry] = &[
                  resolution to the storage's `field_kinds` track",
     },
     WhitelistEntry {
-        rule: WhitelistRule::SchemaNamePrefix("__annotation_ctx_"),
-        section: "§4.D.10",
-        permanent: true,
-        reason: "annotation-handler ctx schemas \
-                 (functions_annotations.rs:228-1555 + \
-                 expressions/mod.rs:309-667); heterogeneous-by-design \
-                 (@before/@after handler ABI receives arbitrary \
-                 user state); parallel-`field_kinds` per ADR-006 §2.7.26",
-    },
-    WhitelistEntry {
         rule: WhitelistRule::EnumPayloadField,
         section: "§4.D.14",
         permanent: true,
@@ -748,35 +738,6 @@ mod tests {
         );
     }
 
-    /// §4.D.10 Annotation-handler ctx schemas. The prefix `__annotation_ctx_`
-    /// is the convention introduced for verification-pass routing per
-    /// audit §5; existing call sites at `functions_annotations.rs:228-1555`
-    /// + `expressions/mod.rs:309-667` need a R5b/R6 rename of their
-    /// schema names to align with this prefix — the whitelist row is
-    /// landed at W17.2-A so the rename can be wired-in without
-    /// re-amending the whitelist.
-    #[test]
-    fn positive_annotation_handler_ctx_passes() {
-        let mut reg = TypeSchemaRegistry::new();
-        let id = reg.allocate_id();
-        let schema = TypeSchema::with_id(
-            id,
-            "__annotation_ctx_logging",
-            vec![
-                ("state".to_string(), FieldType::Any),
-                (
-                    "event_log".to_string(),
-                    FieldType::Array(Box::new(FieldType::Any)),
-                ),
-            ],
-        );
-        reg.register(schema);
-        assert!(
-            run_on(&reg).is_ok(),
-            "annotation-handler ctx schemas must pass §4.D.10"
-        );
-    }
-
     /// §4.D.12 Predeclared-schema carrier-tier — `__predecl_*` prefix.
     /// The parallel-`field_kinds` track at storage construction time IS
     /// the §2.7.5 stamp per ADR-006 §2.7.26.
@@ -797,6 +758,34 @@ mod tests {
         assert!(
             run_on(&reg).is_ok(),
             "predeclared schemas must pass §4.D.12"
+        );
+    }
+
+    /// §4.D.3 + §4.D.5 Inline-object `__inline_obj_N` carrier. ADR-009
+    /// E4-D2 ctx-removal (slice S3) deleted the `__annotation_ctx_` whitelist
+    /// row; this pin proves the SURVIVING `__inline_obj_` row still clears an
+    /// inline-object `FieldType::Any` site, i.e. E0900 is NOT regressed by the
+    /// ctx-row deletion.
+    #[test]
+    fn s3_inline_object_any_still_passes_verify() {
+        let mut reg = TypeSchemaRegistry::new();
+        let id = reg.allocate_id();
+        let schema = TypeSchema::with_id(
+            id,
+            "__inline_obj_0",
+            vec![
+                ("state".to_string(), FieldType::Any),
+                (
+                    "event_log".to_string(),
+                    FieldType::Array(Box::new(FieldType::Any)),
+                ),
+            ],
+        );
+        reg.register(schema);
+        assert!(
+            run_on(&reg).is_ok(),
+            "inline-object __inline_obj_N Any sites must still pass verify \
+             via the surviving __inline_obj_ row (§4.D.3 + §4.D.5)"
         );
     }
 

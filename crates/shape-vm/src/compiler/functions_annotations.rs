@@ -1198,13 +1198,6 @@ impl BytecodeCompiler {
         }
     }
 
-    fn emit_empty_annotation_event_log(&mut self) {
-        self.emit(Instruction::new(
-            crate::compiler::v2_typed_emission::TypedArrayKind::String.new_opcode(),
-            Some(Operand::Count(0)),
-        ));
-    }
-
     fn annotation_type_is_unknown(annotation: &TypeAnnotation) -> bool {
         match annotation {
             TypeAnnotation::Basic(name) => name == "unknown",
@@ -1415,7 +1408,6 @@ impl BytecodeCompiler {
                 "fn" | "target" => {
                     self.emit_annotation_target_descriptor(target_name, target_kind, target_id)?
                 }
-                "ctx" => self.emit_annotation_runtime_ctx()?,
                 _ => {
                     self.emit(Instruction::simple(OpCode::PushNull));
                 }
@@ -1448,45 +1440,6 @@ impl BytecodeCompiler {
             shape_ast::ast::functions::AnnotationTargetKind::AwaitExpr => "await_expr",
             shape_ast::ast::functions::AnnotationTargetKind::Binding => "binding",
         }
-    }
-
-    fn emit_annotation_runtime_ctx(&mut self) -> Result<()> {
-        // W17.2-C §4.D.5 migration: empty-fields case uses the typed
-        // variant directly (no Any fallback needed at empty-schema sites).
-        let empty_schema_id = self.type_tracker.register_inline_object_schema_typed(&[]);
-        if empty_schema_id > u16::MAX as u32 {
-            return Err(ShapeError::RuntimeError {
-                message: "Internal error: annotation ctx schema id overflow".to_string(),
-                location: None,
-            });
-        }
-        self.emit(Instruction::new(
-            OpCode::NewTypedObject,
-            Some(Operand::TypedObjectAlloc {
-                schema_id: empty_schema_id as u16,
-                field_count: 0,
-            }),
-        ));
-        self.emit_empty_annotation_event_log();
-
-        let ctx_schema_id = self.type_tracker.register_inline_object_schema_typed(&[
-            ("state", FieldType::Any),
-            ("event_log", FieldType::Array(Box::new(FieldType::Any))),
-        ]);
-        if ctx_schema_id > u16::MAX as u32 {
-            return Err(ShapeError::RuntimeError {
-                message: "Internal error: annotation ctx schema id overflow".to_string(),
-                location: None,
-            });
-        }
-        self.emit(Instruction::new(
-            OpCode::NewTypedObject,
-            Some(Operand::TypedObjectAlloc {
-                schema_id: ctx_schema_id as u16,
-                field_count: 2,
-            }),
-        ));
-        Ok(())
     }
 
     fn emit_annotation_target_descriptor(
