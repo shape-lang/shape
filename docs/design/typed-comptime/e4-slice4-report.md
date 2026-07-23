@@ -192,3 +192,176 @@ gate-validated at construction/specialization but not yet woven end-to-end; NO
 silent mis-weave, NO regression, every commit green. The one transient
 `proven_return is never read` warning clears the moment S4-4 wires the weave to
 read the token. Worktree clean at `d5be907b`.
+
+---
+
+# S4-COMPLETE — S4-4..S4-7 shipped (append-only; built on `f9f1acd4`)
+
+The residuals above are DISCHARGED. The weave runs end-to-end, the
+`ShortCircuitProof` token is LOAD-BEARING, the failure vocabulary + issues are
+filed, the JIT non-vacuity cells are green, and the book ships the protocol.
+
+## Step 0 — checkpoint re-verified (the review's honest gap closed)
+
+`f9f1acd4` re-built + re-run GREEN before any S4-4 work (`scratchpad/s4/s4b/
+checkpoint-verify.txt`): `cargo test -p shape-vm --lib` = 3543/7/36 — IDENTICAL
+6-name stable FAILED set + the tolerated `nested_exact` flap; all 18 S4 pins
+PASSING; `just check-clean` exit 0.
+
+## Checkpoint commits (append-only on `bbfbd8a8`/`f9f1acd4`)
+
+| Ckpt | Hash | Repo | Scope |
+|------|------|------|-------|
+| c3 | `afdc1da1` | shape | S4-4 the decision weave — single-join branch, token load-bearing |
+| c4 | `cfca9407` | shape | S4-5 failure vocabulary — propagate live + recover/retry/re-place recognizers + D6/OQ-4 issues |
+| c5 | `fcd51a56` | shape | S4-6 JIT non-vacuity cells (native + Result-R named-expected-fallback) |
+| c6 | `f20dd21a` | shape | S4-7 `std::core::hooks` surface stub (`pub enum HookDecision<Sig>`) |
+| c7 | `8d2e2de`  | shape-web | S4-7 the book — HookDecision protocol live + cookbook migration |
+
+## S4-4 the weave — as built
+
+`specialize_polymorphic_decision` (`mod.rs`) no longer door-opens: it substitutes
+`Args → the target Tuple`, runs `resolve_pseudo_tuple` (the before-exit gate
+proves every `Return == R` and MINTS the `ShortCircuitProof`), and rides a
+`DecisionHandlerPlan` (resolved body + carrier + `R` + the token) to the weave
+WITHOUT compiling the body standalone (fact #1: a `HookDecision` value would
+deopt the seam, and the two exit payload types cannot both flow through one
+return). The weave (`weave.rs::materialize_hook_template_weave`), AFTER the impl
+shadow is registered, lowers the resolved body into an `R`-returning hygienic
+helper (`lower_prepared_decision_def` in `pseudo_tuple.rs`): Proceed exits call
+the impl shadow over the pack; Return exits read the proven `R`. The wrapper
+binds ONE `__c3_result: R` join local from the helper call, so Gate 2's existing
+after-return R-proof covers both producers, and the after-chain runs on it
+(afters-on-Return, D1). No `HookDecision` enum on the hot path; the discriminant
+is the handler's own native branch (D7-D).
+
+**Exits stay `return`s (not `break`s).** Shape has no labeled break, so a
+break-based inline would break the WRONG user loop; a real `return` from the
+helper is control-flow-safe at any depth. `lower_decision_exits` recurses BOTH
+statement- and expression-level control flow (the parser lowers `if cond {
+return … }` to `Statement::Expression(Expr::If)`), lowering every `return`-value
+exit + the top-level implicit tail. A residual `HookDecision` constructor after
+the walk is a LOUD internal error (safety scan) — never a silent mis-weave. An
+opaque helper whose exits cannot be statically lowered surfaces-and-stops.
+
+**Token LOAD-BEARING (Hazard #1 discharged).** `emit_short_circuit_result` is the
+SOLE emitter of a short-circuit read and CONSUMES `&ShortCircuitProof` by
+signature; `DecisionHandlerPlan` cannot be constructed without a gate-minted
+proof (the mint `mint_shortcircuit_proof` is module-private, no `pub`
+constructor), and the weave reaches a decision install ONLY through
+`SpecializedHandler::decision()` — so a future fast-path that emits the
+short-circuit read without routing through the gate has no token to pass and
+FAILS TO BUILD (the `ProofGap` discipline). The `let _shortcircuit_proof`-dropped
+state is gone; the transient `proven_return is never read` warning is cleared.
+
+First-cut bounds (each a LOUD surface-and-stop): a decision hook must be the only
+`before` install, have a resolvable non-void `R`, and no captures.
+
+5 executed weave pins (`weave.rs::tests`): Proceed runs impl; Return
+short-circuits (impl never runs); afters run on both arms (51/1000);
+wrapper+helper are native registered fns; composition reject.
+
+## S4-5 failure vocabulary + issues
+
+**Filed:** E4-D6 umbrella (recover/retry/re-place) = **#80**; OQ-4 fallible-hooks
+follow-up (`Result<HookDecision<Args>, E>` + the `?`-exit extension) = **#81**.
+The `?` door-open message now cites #81; the recover/retry/re-place recognizer
+sentences + the OQ-5 non-failure-R reject + the Gate-2 misplaced-after reject
+cite #80. State (OQ-3) is a distinct deferral, stays anchored at the epic #20. No
+dangling placeholder cites (`grep #<D6…` empty).
+
+propagate: DEFAULT (impl returns a failure-valued `R`, threaded through the
+afters) is sound and pinned; EXPLICIT (`return HookDecision::Return(<failure R>)`)
+proves `== R` when the payload is a fully-typed failure value. recover/retry/
+re_place recognized under `HookDecision::`/`FailureDecision::` fire the verbatim
+§4.3 sentences under BOTH vm and jit (reworded "not refused"→"not rejected" — the
+comptime jargon firewall rewrites "refused" to the generic [C0001]).
+
+6 executed pins: 3 recognizers, misplaced-after, OQ-5 non-failure-R, default
+propagate.
+
+## S4-6 CLI non-vacuity — ACTUAL counts (Hazard #4 discharged)
+
+`bin/shape-cli/tests/cli/jit_e4_hook_decision_native.rs` (2 cells, both green):
+
+| Cell | fixture | vm exit / stdout / fallbacks | jit exit / stdout / fallbacks |
+|------|---------|------------------------------|-------------------------------|
+| native | `e4-hook-shortcircuit-single.shape` | 0 / `100700` / **0** | 0 / `100700` / **0** |
+| named-expected-fallback | `e4-hook-shortcircuit-result-r.shape` | 0 / `170000` / **0** | 0 / `170000` / **1** |
+
+The native cell asserts `count_fallback_lines(jit)==0` — the decision weave is
+JIT-native end-to-end (Return short-circuits on even inputs, Proceed on odd, both
+arms fire across 0..200 crossing T1@100). The Result-R cell asserts
+`count_fallback_lines(jit)==1` + the pre-existing EnumPayload payload-bind gap
+identity (`EnumPayload (R8 W9 G.2 Step 2 Bucket 2)` / `receiver-recovery
+soundness gap` / `§2.7.17`) — the deopt is on the CALLER's `match`, independent of
+E4; NEVER asserted native (loud-flip).
+
+## S4-7 the book (first-class)
+
+`std::core::hooks` stub shipped (inert — not in the prelude, a doc/hover surface).
+`advanced/annotations.mdx`: the Dark-Window section is now the LIVE HookDecision
+protocol (Proceed/Return, ArgumentPack, afters-on-Return, no-State first cut,
+failure vocab). Fences F1-F5 gate GREEN vm+jit (90 / -1,50 / 101,51 / -1,90 /
+negative,30) + 3 expected-fail fences (recover/retry/re_place → "see issue #80").
+@remote + ctx + State stay DARK. Cookbook: the 6-7 stale `{args,state}`/`ctx.state`
+reliability recipes demoted to `runnable=false` + prose migrated to point at the
+HookDecision protocol.
+
+## Full gate table (FAILED-name-set IDENTITY vs `bbfbd8a8`; OQ-8)
+
+| Suite | Baseline @ bbfbd8a8 | After S4-4..S4-7 | Verdict |
+|-------|---------------------|------------------|---------|
+| shape-vm lib | 3525 / 7 / 36 (6 stable + `nested_exact` flap) | 3554 / 7 / 36 | IDENTICAL 6-name stable set + flap; +29 pass = S4-2 classifier + S4-3 pins + 5 weave + 6 vocab pins |
+| shape-lsp lib | 884 / 0 | 888 / 0 | GREEN (no regression) |
+| shape-test lsp | 506 / 0 | 507 / 0 | GREEN |
+| modules_visibility | 133 / 1 / 3 | 133 / 1 / 3 | IDENTICAL (the 1 fail + 3 @remote ignores are the known set) |
+| cli_tests | 58 / 0 | 60 / 0 | GREEN (+2 = the S4-6 JIT cells) |
+| `just check-clean` | exit 0 | exit 0 | GREEN |
+
+## Book truth-gate — before/after (hold-or-improve 557/573)
+
+Per-slice with the S4 binary (snippets re-extracted; 574 runnable of 720).
+**FULL: 564 / 574** — improved from the 557 / 573 baseline (+7 pass; 10 reds vs
+16; the 6 cleared are the stale cookbook reds).
+
+| Slice | pass / runnable | reds (all on UNTOUCHED pages / @remote-dark) |
+|-------|-----------------|----------------------------------------------|
+| A | 223 / 225 | fundamentals/modules.mdx:50, :61 (pre-existing) |
+| B | 243 / 245 | stdlib/core/remote.mdx:41, :77 (@remote) |
+| C | 24 / 24 | — clean |
+| D (my pages) | 47 / 48 | advanced/comptime.mdx:130 `set return` (pre-existing, untouched page) |
+| E | 27 / 32 | content-addressed-bytecode.mdx:344,367; polyglot-distributed.mdx:74,213 (@remote); tooling/execution-server.mdx:130 (@remote) |
+
+The 10 reds: **5 @remote-dark** (remote.mdx 41/77, polyglot-distributed 74/213,
+execution-server 130 — STAY red until S5/S6) + **5 pre-existing** on pages S4 did
+not touch (modules.mdx 50/61, comptime.mdx 130, content-addressed-bytecode
+344/367). NONE are S4 regressions.
+
+Slice D (annotations.mdx + cookbook) IMPROVED: the stale cookbook reds are
+cleared, F1-F5 add 5 green, the 3 expected-fail fences pass their expected-fail
+check (`expected-fail-succeeded: 0, expected-fail-missing: 0`), and the only D red
+is the pre-existing `comptime.mdx:130` on a page S4 did not touch. Slices C
+(clean) and E (only pre-existing/@remote reds) confirm the S4 binary did NOT
+regress untouched pages. **No @remote fence made green** (S5/S6). The 5 @remote
+book reds STAY red.
+
+## Honest residuals (post-S4)
+
+- **State threading (OQ-3)** — the no-State first cut ships; the
+  `HookDecision<Args, State>` struct form is a named surface-and-stop (#20).
+- **Explicit propagate with a bare `Err(...)`** — needs a fully-typed failure
+  value (the Ok-type inference does not flow `R`'s Ok arm into a bare `Err`);
+  DEFAULT propagate (impl returns the failure) is the ergonomic path.
+- **recover / retry / re-place** — recognized, not implemented (#80).
+- **Fallible hooks `Result<HookDecision<Args>, E>` + the `?`-exit extension** —
+  deferred (#81); Gate 3 stays total-reject.
+- **First-cut weave bounds** — a decision hook must be the only `before` install,
+  non-void resolvable `R`, no captures; decision-exit body shapes the lowerer
+  cannot statically resolve surface-and-stop (no dynamic fallback).
+- **Result/Option-R hooked fn matched by a caller** — one loud `[jit-fallback]`
+  on the pre-existing EnumPayload payload-bind gap (ADR-006 §2.7.17), independent
+  of E4.
+
+Worktree clean at `f20dd21a` (shape) / `8d2e2de` (shape-web, 64 sibling files
+untouched).
