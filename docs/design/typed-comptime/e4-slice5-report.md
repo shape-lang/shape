@@ -131,10 +131,19 @@ typed @remote is present, the legacy shape absent).
 
 ## Book truth-gate — before/after (hold-or-improve)
 
-FULL book: **567 / 572, 5 pre-existing reds** — up from the S4 baseline
-**564 / 574, 10 reds**. The 5 @remote reds are CLEARED (3 green + 2 honest-dark);
-the 5 pre-existing non-@remote reds remain (modules.mdx 50/61,
-comptime.mdx 130, content-addressed-bytecode 344/367).
+FULL book: **569 / 572, 3 pre-existing reds** — up from the S4 baseline
+**564 / 574, 10 reds**. ALL 5 @remote reds are CLEARED (3 green + 2 honest-dark).
+
+**S5b review correction (append-only).** This section first reported **567 / 572,
+5 reds**, derived from the per-slice method (the full single-run gate exceeds the
+10-min harness cap) with A/B/C *assumed* to carry their S4 baseline reds. The S5b
+book lens re-ran the FULL gate independently against the S5 binary and measured
+**A 225/225, B 245/245, C 24/24, D 47/48, E 28/30 = 569 / 572, 3 reds**
+(comptime.mdx:130, content-addressed-bytecode.mdx:344, :367 — all pre-existing,
+non-@remote; ZERO @remote reds). The original figure over-counted reds by 2 in the
+SAFE (under-claim) direction — the modules.mdx:50/61 pair the assumption carried
+were in fact already green at the measured base. The corrected, executed number is
+**569 / 572**; S5 holds-and-improves the gate by more than the report first claimed.
 
 Measured with the S5 binary (vm+jit, `fixture=serve` loopback):
 - **@remote pages (filtered gate): 8/8 runnable fences PASS** — remote.mdx

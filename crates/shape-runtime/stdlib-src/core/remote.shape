@@ -199,7 +199,7 @@ builtin fn __remote_arg_pack() -> Array<_>;
 /// # Example
 ///
 /// ```shape
-/// use std::core::remote
+/// from std::core::remote use { @remote }
 ///
 /// @remote("worker:9527")
 /// fn compute(data: Array<int>) -> int { return data.length() }
