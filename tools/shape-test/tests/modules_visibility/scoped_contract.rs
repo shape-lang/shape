@@ -61,24 +61,23 @@ fn scoped_contract_namespace_function_calls_use_double_colon() {
     .expect_output("3");
 }
 
-// W9 (v0.3 R2): cross-module annotation imports work end-to-end.
-// Previously these tests were `#[should_panic]` because the namespace +
-// qualified + named-import paths all failed at runtime with
-// `Unknown annotation '@remote'` / `'@remote::remote'`. After W9 wires
-// namespace-import annotation registration in
-// `register_graph_imports_for_module` (statements.rs) and qualified-form
-// resolution in `resolve_compiled_annotation_name_str`
-// (compiler_impl_reference_model.rs), all three forms resolve and the
-// `@remote` `before` handler runs successfully.
+// E4 S6 (ADR-009): the two *explicit-import* annotation forms resolve on a
+// typed @remote target. `@remote` requires typed params + a return type (the
+// decision `before` hook needs an `R` to short-circuit), so `fn compute` carries
+// `(x: int) -> int`. The qualified `use ... as remote` + `@remote::remote(...)`
+// form and the named `from ... use { @remote }` + bare `@remote(...)` form both
+// bind the annotation and apply it — the hook template specializes for the typed
+// target at compile time (an untyped or 0-ary target is loud-rejected here, so
+// reaching `print("ok")` proves the annotation was resolved and applied). (The
+// bare namespace-import form does NOT bind — see the negative contract below.)
 #[test]
-#[ignore = "dark window: E4 re-implements @remote on typed HookDecision — see issue #68"]
 fn scoped_contract_namespace_annotation_refs_use_double_colon() {
     ShapeTest::new(
         r#"
         use std::core::remote as remote
 
         @remote::remote("worker:9527")
-        fn compute(x) { x + 1 }
+        fn compute(x: int) -> int { x + 1 }
 
         print("ok")
     "#,
@@ -88,14 +87,13 @@ fn scoped_contract_namespace_annotation_refs_use_double_colon() {
 }
 
 #[test]
-#[ignore = "dark window: E4 re-implements @remote on typed HookDecision — see issue #68"]
 fn scoped_contract_named_annotation_import_enables_bare_annotation() {
     ShapeTest::new(
         r#"
         from std::core::remote use { @remote }
 
         @remote("worker:9527")
-        fn compute(x) { x + 1 }
+        fn compute(x: int) -> int { x + 1 }
 
         print("ok")
     "#,
@@ -116,15 +114,18 @@ fn scoped_contract_namespace_import_does_not_bind_bare_regular_names() {
     .expect_run_err_contains("new");
 }
 
-// W9 (v0.3 R2): renamed from
+// E4 S6 (ADR-009): the negative contract is RESTORED. A bare namespace import
+// (`use std::core::remote`, no `as` alias, no `{ @remote }` named import) must
+// NOT expose the annotation as a bare `@remote` — the greenfield
+// explicit-import rule (S5 ruling, no-global-builtins) requires either the
+// qualified `@remote::remote(...)` form or a `from ... use { @remote }` named
+// import. A bare `@remote(...)` under a plain namespace import is loud-rejected
+// with `Unknown annotation '@remote'`. This reverses the transient W9 behavior
+// and re-adopts the original name
 // `scoped_contract_namespace_import_does_not_bind_bare_annotations`. The
-// negative-contract intent ("namespace import must NOT expose the
-// annotation as a bare `@remote`") is reversed by W9 per supervisor
-// disposition path (i): the namespace-import path now registers
-// annotation defs from the imported module so bare `@remote` resolves.
+// standalone parse contracts at :34/:43/:48 independently pin the surface.
 #[test]
-#[ignore = "dark window: E4 re-implements @remote on typed HookDecision — see issue #68"]
-fn scoped_contract_namespace_import_binds_bare_annotations() {
+fn scoped_contract_namespace_import_does_not_bind_bare_annotations() {
     ShapeTest::new(
         r#"
         use std::core::remote
@@ -136,7 +137,7 @@ fn scoped_contract_namespace_import_binds_bare_annotations() {
     "#,
     )
     .with_stdlib()
-    .expect_output("ok");
+    .expect_run_err_contains("Unknown annotation");
 }
 
 // ADR-009 C3 #14 (slice 8, S8b) — the ordered W9 coverage re-target (S6
