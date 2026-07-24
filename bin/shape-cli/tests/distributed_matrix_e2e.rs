@@ -182,7 +182,7 @@ fn assert_remote_snapshot_store_isolation(tls: bool) {
         "PLAIN_STORE_MATRIX_HASH"
     };
     let program = format!(
-        r#"use std::core::remote
+        r#"from std::core::remote use {{ @remote }}
 use std::core::snapshot
 
 @remote("{addr}")

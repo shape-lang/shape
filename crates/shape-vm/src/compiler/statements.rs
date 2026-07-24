@@ -8545,8 +8545,8 @@ mod tests {
             msg
         );
         assert!(
-            msg.contains("#68"),
-            "ctx rejection must cite the HookDecision follow-up (#68), got: {}",
+            msg.contains("#83"),
+            "ctx rejection must cite the per-invocation State deferral (#83), got: {}",
             msg
         );
         assert!(
@@ -8571,8 +8571,8 @@ mod tests {
             .expect_err("metadata(target, ctx) must be loud-rejected after E4-D2 ctx removal");
         let msg = format!("{}", err);
         assert!(
-            msg.contains("removed in E4-D2") && msg.contains("#68") && msg.contains("metadata"),
-            "expected ctx-specific E4-D2 sub-message naming the metadata kind + #68, got: {}",
+            msg.contains("removed in E4-D2") && msg.contains("#83") && msg.contains("metadata"),
+            "expected ctx-specific E4-D2 sub-message naming the metadata kind + #83, got: {}",
             msg
         );
     }

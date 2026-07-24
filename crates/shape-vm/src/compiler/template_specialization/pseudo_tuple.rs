@@ -1260,9 +1260,9 @@ fn reject_reserved_failure_transform(transform: FailureTransform) -> ShapeError 
             "the `re-place` (choose-another-placement) failure transform is designed but not \
              implemented in E4 — E4 #20 ships only propagate-typed-failure. `re-place` would \
              re-dispatch the failed call to a different placement/route (the @remote \
-             retry-at-placement path, coupled to @remote issue #68); it is planned, not rejected \
-             — see issue #80. In E4 a hook cannot re-route a failed call: let the typed failure \
-             propagate outward.",
+             retry-at-placement path — @remote itself ships in E4, re-place does not); it is \
+             planned, not rejected — see issue #80. In E4 a hook cannot re-route a failed call: \
+             let the typed failure propagate outward.",
     };
     reject(message.to_string())
 }

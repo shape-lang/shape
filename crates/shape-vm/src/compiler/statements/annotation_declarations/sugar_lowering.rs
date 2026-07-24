@@ -228,8 +228,8 @@ pub(in crate::compiler) fn non_function_target_application_rejection(
 /// FACT this replaces: the hook compiled as a SILENT NO-OP (foreign fns never
 /// reach `execute_comptime_handlers`, and the typed weave targets ordinary
 /// `FunctionDef`s only — the deleted legacy foreign-wrapper block was already
-/// unreachable at the collapse). Hooks on foreign targets are E4/#68
-/// re-implementation territory. ONE producer; C3-G13 string-tag message text
+/// unreachable at the collapse). Hooks on foreign targets are unimplemented
+/// after E4 — tracked in #86. ONE producer; C3-G13 string-tag message text
 /// (uncoded — no new C09xx minted without a census; revisit when #60's coded
 /// path lands). `target_descriptor` renders the foreign flavor:
 /// `extern "C"` for native-ABI declarations, `foreign {language}` otherwise.
@@ -241,8 +241,8 @@ pub(in crate::compiler) fn foreign_target_application_rejection(
     format!(
         "annotation `@{annotation_name}` on {target_descriptor} fn `{fn_name}` is not \
          applied — runtime hook templates weave ordinary Shape function bodies, and \
-         foreign-function targets have no typed hook surface yet (E4 re-implements \
-         hooks on foreign targets — see issue #68); apply @{annotation_name} to an \
+         foreign-function targets have no typed hook surface yet (hooks on foreign \
+         targets are not implemented yet — see issue #86); apply @{annotation_name} to an \
          ordinary Shape function or remove it"
     )
 }

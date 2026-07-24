@@ -1638,9 +1638,9 @@ print(labs(0 - 42))
             message.contains(
                 "annotation `@traced` on extern \"C\" fn `labs` is not applied — runtime \
                  hook templates weave ordinary Shape function bodies, and foreign-function \
-                 targets have no typed hook surface yet (E4 re-implements hooks on foreign \
-                 targets — see issue #68); apply @traced to an ordinary Shape function or \
-                 remove it"
+                 targets have no typed hook surface yet (hooks on foreign targets \
+                 are not implemented yet — see issue #86); apply @traced to an ordinary \
+                 Shape function or remove it"
             ),
             "the foreign-target sentence must fire verbatim, got: {message}"
         );
@@ -1671,9 +1671,9 @@ print("unreachable")
             message.contains(
                 "annotation `@traced2` on foreign python fn `padd` is not applied — runtime \
                  hook templates weave ordinary Shape function bodies, and foreign-function \
-                 targets have no typed hook surface yet (E4 re-implements hooks on foreign \
-                 targets — see issue #68); apply @traced2 to an ordinary Shape function or \
-                 remove it"
+                 targets have no typed hook surface yet (hooks on foreign targets \
+                 are not implemented yet — see issue #86); apply @traced2 to an ordinary \
+                 Shape function or remove it"
             ),
             "the foreign-target sentence must render the dynamic language, got: {message}"
         );
@@ -1797,8 +1797,8 @@ print(labs(0 - 42))
             "#74 is RULED IN; this must not read as a principled refusal, got: {message}"
         );
         assert!(
-            !message.contains("#68"),
-            "the two reasons must not blur — #68 is the hook arm, got: {message}"
+            !message.contains("#86"),
+            "the two reasons must not blur — #86 is the hook arm, got: {message}"
         );
         // S2b / review finding MAJOR-1: the remedy must NOT open with a flat
         // "wrap the call in an ordinary Shape function and annotate that". That
@@ -2019,11 +2019,11 @@ print(labs(0 - 42))
                 "annotation `@both` on extern \"C\" fn `labs` is not applied — runtime \
                  hook templates weave ordinary Shape function bodies"
             ),
-            "a hook-bearing annotation stays on the #68 arm, got: {message}"
+            "a hook-bearing annotation stays on the #86 arm, got: {message}"
         );
         assert!(
-            message.contains("see issue #68"),
-            "the hook reason routes to #68, got: {message}"
+            message.contains("see issue #86"),
+            "the hook reason routes to #86, got: {message}"
         );
         assert!(
             !message.contains("#74"),

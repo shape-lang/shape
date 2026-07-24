@@ -264,12 +264,14 @@ fn plan_definition(
             {
                 let message = if parameter.name == "ctx" {
                     // E4-D2 ctx-removal: specific sub-message names the removed
-                    // lifecycle-ctx surface + the HookDecision follow-up (#68).
+                    // lifecycle-ctx surface + the per-invocation State deferral (#83).
+                    // The HookDecision protocol itself landed in E4 (#68 closed).
                     format!(
                         "Annotation '{}': the '{}' lifecycle handler takes only '(target)'. \
                          The 'ctx' parameter was removed in E4-D2 — the always-empty lifecycle \
-                         ctx ({{state: {{}}, event_log: []}}) had no reader. The typed \
-                         per-invocation context returns with the HookDecision protocol (issue #68).",
+                         ctx ({{state: {{}}, event_log: []}}) had no reader. The HookDecision \
+                         protocol landed in E4; the typed per-invocation context (State \
+                         threading) is a first-cut deferral tracked in issue #83.",
                         definition.name, kind
                     )
                 } else {

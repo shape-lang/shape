@@ -132,7 +132,7 @@ fn remote_snapshot_returns_receiver_hash_over_remote_call() {
     let _guard = lock_process();
     let server = start_serve("none", None, &[]);
     let env = IsolatedEnv::new("shape-remote-snapshot-e2e-");
-    let program = r#"use std::core::remote
+    let program = r#"from std::core::remote use { @remote }
 use std::core::snapshot
 
 @remote("__ADDR__")
@@ -417,7 +417,7 @@ fn remote_snapshot_hash_is_saved_in_selected_receiver_store() {
     let env = IsolatedEnv::new("shape-remote-snapshot-resume-e2e-");
     let receiver_store = env.snapshot_store("receiver-snapshots");
     let server = start_serve_with_snapshot_store("none", None, &[], &receiver_store);
-    let program = r#"use std::core::remote
+    let program = r#"from std::core::remote use { @remote }
 use std::core::snapshot
 
 @remote("__ADDR__")
@@ -464,7 +464,7 @@ fn remote_snapshot_hash_can_be_resumed_from_receiver_store() {
     let env = IsolatedEnv::new("shape-remote-snapshot-resume-e2e-");
     let receiver_store = env.snapshot_store("receiver-snapshots");
     let server = start_serve_with_snapshot_store("none", None, &[], &receiver_store);
-    let program = r#"use std::core::remote
+    let program = r#"from std::core::remote use { @remote }
 use std::core::snapshot
 
 @remote("__ADDR__")

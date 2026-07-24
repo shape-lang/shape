@@ -768,7 +768,7 @@ annotation hookann() on function {{
         let err = decision_failure_transform_reject("HookDecision::RePlace(0)");
         assert!(err.contains("`re-place` (choose-another-placement) failure transform is designed"));
         assert!(err.contains("#80"), "cites the D6 umbrella: {err}");
-        assert!(err.contains("#68"), "names the @remote coupling: {err}");
+        assert!(err.contains("@remote"), "names the @remote coupling (now delivered): {err}");
     }
 
     // Gate 2 misplaced-decision: a decision constructor in an AFTER body rejects.
