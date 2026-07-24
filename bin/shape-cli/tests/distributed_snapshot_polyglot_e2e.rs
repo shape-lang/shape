@@ -270,13 +270,11 @@ print(f"REMOTE_C_ABS={remote_abs(-42)}")
 }
 
 #[test]
-#[ignore = "dark window: E4 re-implements @remote on typed HookDecision — see issue #68"]
 fn remote_python_transfer_self_skips_without_extension_and_refuses_without_opt_in() {
     remote_polyglot_transfer("python", "PY_REMOTE=105", "return x + 5", 100);
 }
 
 #[test]
-#[ignore = "dark window: E4 re-implements @remote on typed HookDecision — see issue #68"]
 fn remote_typescript_transfer_self_skips_without_extension_and_refuses_without_opt_in() {
     remote_polyglot_transfer("typescript", "TS_REMOTE=21", "return x + 1;", 20);
 }
@@ -298,7 +296,7 @@ fn remote_polyglot_transfer(language: &str, expected: &str, body: &str, input: i
         "TS_REMOTE"
     };
     let program = format!(
-        r#"use std::core::remote
+        r#"from std::core::remote use {{ @remote }}
 fn {language} add_remote(x: int) -> Result<int> {{
     {body}
 }}
