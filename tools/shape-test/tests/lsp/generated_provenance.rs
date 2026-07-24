@@ -24,8 +24,7 @@ use shape_test::shape_test::ShapeTest;
 #[test]
 fn generated_method_body_error_links_generated_node_application_and_generator() {
     let code = r#"
-annotation bad_gen() {
-  targets: [type]
+annotation bad_gen() on type {
   comptime post(target, ctx) {
     extend target {
       method broken() -> int { missing_helper() }
@@ -41,9 +40,9 @@ type Point { id: int }
         .expect_semantic_diagnostic_related_locations(
             "error in generated declaration `Point.broken`",
             &[
-                ("in generated declaration `Point.broken`", 10),
-                ("generated from this application site", 10),
-                ("generator defined here", 3),
+                ("in generated declaration `Point.broken`", 9),
+                ("generated from this application site", 9),
+                ("generator defined here", 2),
             ],
         );
 }
@@ -54,8 +53,7 @@ type Point { id: int }
 #[test]
 fn generated_method_body_error_note_carries_the_node_path() {
     let code = r#"
-annotation bad_gen() {
-  targets: [type]
+annotation bad_gen() on type {
   comptime post(target, ctx) {
     extend target {
       method broken() -> int { missing_helper() }
@@ -68,7 +66,7 @@ type Point { id: int }
 "#;
     ShapeTest::new(code).expect_semantic_diagnostic_related_locations(
         "error in generated declaration `Point.broken`",
-        &[("generated node extend:Point/method:broken", 10)],
+        &[("generated node extend:Point/method:broken", 9)],
     );
 }
 
@@ -78,8 +76,7 @@ type Point { id: int }
 #[test]
 fn healthy_generated_method_produces_no_generated_decl_diagnostic() {
     let code = r#"
-annotation gen() {
-  targets: [type]
+annotation gen() on type {
   comptime post(target, ctx) {
     extend target {
       method answer() -> int { 42 }

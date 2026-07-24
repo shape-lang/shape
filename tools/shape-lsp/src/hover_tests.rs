@@ -816,6 +816,36 @@ fn test_hover_local_annotation_usage() {
 }
 
 #[test]
+fn test_hover_annotation_usage_renders_on_clause_contract() {
+    // ADR-009 E4-D4 (#73, S1c): a def with an explicit header `on`-clause
+    // renders the declared target set into the one-line hover signature —
+    // "the full contract in one line" (issue #73). Non-vacuity for DN5.
+    let code = "annotation guarded(level: int) on function, type {\n  before(args) { args }\n}\n\n@guarded(2)\nfn run() { 1 }\n";
+    let hover = get_hover(
+        code,
+        Position {
+            line: 4,
+            character: 2,
+        },
+        None,
+        None,
+        None,
+    )
+    .expect("annotation usage hover renders");
+    if let HoverContents::Markup(markup) = hover.contents {
+        assert!(
+            markup
+                .value
+                .contains("**Annotation**: `@guarded(level) on function, type`"),
+            "hover must render the declared on-clause contract, got: {}",
+            markup.value
+        );
+    } else {
+        panic!("markdown hover expected");
+    }
+}
+
+#[test]
 fn test_hover_locally_defined_annotation_usage_with_module_cache() {
     let code =
         "/// Mark a function for auditing.\nannotation my_ann() {}\n@my_ann\nfn run() { 1 }\n";
@@ -1949,11 +1979,11 @@ fn test_span_contains_offset() {
 
 #[test]
 fn s8c_sugar_application_hover_renders_hook_rows_with_no_soh_byte() {
-    let text = "annotation traced(factor: int) {\n  targets: [function]\n  before(args) {\n    args[0] = args[0] * factor\n    return args\n  }\n}\n\n@traced(3)\nfn victim(a: int) -> int { return a }\n\nvictim(1)\n";
+    let text = "annotation traced(factor: int) on function {\n  before(args) {\n    args[0] = args[0] * factor\n    return args\n  }\n}\n\n@traced(3)\nfn victim(a: int) -> int { return a }\n\nvictim(1)\n";
     let hover = get_hover(
         text,
         Position {
-            line: 8,
+            line: 7,
             character: 2,
         },
         None,
@@ -1981,7 +2011,7 @@ fn s8c_sugar_application_hover_renders_hook_rows_with_no_soh_byte() {
 
 #[test]
 fn s8c_api_body_fn_hover_renders_generic_view_with_no_soh_byte() {
-    let text = "fn tmpl<Args>(args: Args) -> Args {\n  args[0] = args[0] * 2\n  return args\n}\n\nannotation hookann() {\n  targets: [function]\n  comptime post(target, ctx) {\n    install(before_hook(tmpl, []))\n  }\n}\n\n@hookann()\nfn victim(a: int) -> int { return a }\n\nvictim(1)\n";
+    let text = "fn tmpl<Args>(args: Args) -> Args {\n  args[0] = args[0] * 2\n  return args\n}\n\nannotation hookann() on function {\n  comptime post(target, ctx) {\n    install(before_hook(tmpl, []))\n  }\n}\n\n@hookann()\nfn victim(a: int) -> int { return a }\n\nvictim(1)\n";
     let hover = get_hover(
         text,
         Position {

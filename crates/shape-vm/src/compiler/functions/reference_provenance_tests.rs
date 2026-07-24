@@ -77,8 +77,7 @@ impl AnnotationRoute {
         let source = match self {
             Self::SingleRuntime => {
                 r#"
-annotation first() {
-  targets: [function]
+annotation first() on function {
   comptime pre(target, ctx) { set param value: int }
   before(args) { args }
 }
@@ -93,13 +92,11 @@ probe(2)
             }
             Self::ChainedRuntime => {
                 r#"
-annotation first() {
-  targets: [function]
+annotation first() on function {
   before(args) { args }
 }
 
-annotation second() {
-  targets: [function]
+annotation second() on function {
   before(args) { args }
 }
 
@@ -113,8 +110,7 @@ fn probe($PARAM) -> int {
             }
             Self::ReplaceBody => {
                 r#"
-annotation replace_with_original() {
-  targets: [function]
+annotation replace_with_original() on function {
   comptime post(target, ctx) {
     replace body {
       return ctx.original(value)

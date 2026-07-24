@@ -748,8 +748,7 @@ mod tests {
     use shape_ast::parser::parse_program;
 
     const GENERATING_PROGRAM: &str = r#"
-annotation gen() {
-  targets: [type]
+annotation gen() on type {
   comptime post(target, ctx) {
     extend target {
       method answer() -> int { 42 }
@@ -803,8 +802,7 @@ let b = p.answer()
     /// The generated method name here is COMPUTED (`an{suffix}` inside an
     /// f-string snippet): its token never appears in the generator.
     const GENERATOR_CONTROLLED_PROGRAM: &str = r#"
-annotation gen() {
-  targets: [type]
+annotation gen() on type {
   comptime post(target, ctx) {
     let suffix = "swer"
     extend (extend_method_literal(target.name, f"an{suffix}", "int", 42))
@@ -875,8 +873,7 @@ let x = p.answer()
     /// A generating document whose annotation emits a generated FREE
     /// FUNCTION (`{Type}_label()`) — the flagship F1 shape.
     const FREE_FN_GENERATING_PROGRAM: &str = r#"
-annotation schema_of() {
-    targets: [type]
+annotation schema_of() on type {
     comptime post(target, ctx) {
         extend (item_fn(f"{target.name}_label", "string", "User schema"))
     }
@@ -956,8 +953,7 @@ User_label()
     /// generated METHOD — so the generated gate must fall through and
     /// generated navigation must not leak the ordinary call sites.
     const COLLIDING_PROGRAM: &str = r#"
-annotation gen() {
-  targets: [type]
+annotation gen() on type {
   comptime post(target, ctx) {
     extend target {
       method answer() -> int { 42 }
@@ -1084,8 +1080,7 @@ let qualified = m::answer()
     /// reference claim over an ambiguous set would corrupt/mislead one of
     /// the two symbols).
     const METHOD_COLLIDING_PROGRAM: &str = r#"
-annotation gen() {
-  targets: [type]
+annotation gen() on type {
   comptime post(target, ctx) {
     extend target {
       method answer() -> int { 42 }
@@ -1163,8 +1158,7 @@ let b = o.answer()
     /// comment token + call sites edited, expansion still generating the
     /// old name).
     const LINE_COMMENT_DECOY_PROGRAM: &str = r#"
-annotation gen() {
-  targets: [type]
+annotation gen() on type {
   comptime post(target, ctx) {
     // decoy: the computed method is called answer
     let suffix = "swer"
@@ -1181,8 +1175,7 @@ let x = p.answer()
 
     /// Block-comment variant of the round-2 finding-2 decoy.
     const BLOCK_COMMENT_DECOY_PROGRAM: &str = r#"
-annotation gen() {
-  targets: [type]
+annotation gen() on type {
   comptime post(target, ctx) {
     /* decoy: the computed method is called answer */
     let suffix = "swer"
@@ -1265,8 +1258,7 @@ let x = p.answer()
     /// where the method name `"answer"` is a literal producer argument in the
     /// generator; the generator-span SourceBinder coverage is unchanged.)
     const PRODUCER_LITERAL_BINDER_PROGRAM: &str = r#"
-annotation gen() {
-  targets: [type]
+annotation gen() on type {
   comptime post(target, ctx) {
     extend (extend_method_literal(target.name, "answer", "int", 42))
   }
@@ -1309,8 +1301,7 @@ let x = p.answer()
     /// handler splices into the extend snippet) is an explicit source
     /// binder; the binder span sits inside the application anchor.
     const APPLICATION_BINDER_PROGRAM: &str = r#"
-annotation gen(mname: string) {
-  targets: [type]
+annotation gen(mname: string) on type {
   comptime post(target, ctx) {
     extend (extend_method_literal(target.name, mname, "int", 1))
   }

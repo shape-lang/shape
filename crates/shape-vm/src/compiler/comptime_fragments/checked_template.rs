@@ -84,6 +84,22 @@ pub(in crate::compiler) enum TemplateSig {
         type_param: String,
         args_param: String,
     },
+    /// ADR-009 E4 S4 (S4-2) — `fn t<Args>(args: Args) -> HookDecision<Args>` —
+    /// Before only. The DECISION-CAPABLE before form: the body rides the same
+    /// C3-G9 pseudo-tuple surface (`args[i]` / `args.length` / `return args`)
+    /// as [`Self::PolymorphicArgs`], but its exits may ALSO short-circuit with
+    /// `HookDecision::Return(<result>)` or continue with
+    /// `HookDecision::Proceed(<pack>)` (spec §1.1). COMPOSES with the
+    /// always-Proceed form (OQ-2): `return args` stays the Proceed shorthand;
+    /// the classifier selects this variant purely by the `HookDecision<Args>`
+    /// return annotation. Never routed through the erasing generic resolver —
+    /// `Proceed`/`Return` are recognized by variant name and lowered statically
+    /// (OQ-1 Path 1); `HookDecision` itself is a compiler-recognized name, never
+    /// an ordinary resolvable generic (measured fact #2, spec §0).
+    PolymorphicDecision {
+        type_param: String,
+        args_param: String,
+    },
     /// `fn t<R>(result: R) -> R` — After only (the typed result flows through).
     PolymorphicResult {
         type_param: String,
@@ -285,16 +301,29 @@ impl CheckedTemplateBuilder<Present, Present> {
         let def = &snapshot.def;
         let (sig, capture_params) = classify_template_sig(self.hook_kind, def, &captures)?;
 
+        // Both `before` polymorphic forms ride the C3-G9 pseudo-tuple surface,
+        // so both validate their `args[i]` / `args.length` / `return args` uses
+        // at construction. The decision form (PolymorphicDecision) additionally
+        // spells `HookDecision::Proceed(...)` / `::Return(...)` at its exits —
+        // those decision-exit constructors are recognized by the before-exit
+        // gate at specialization (S4-3), not here (the validate face carries the
+        // same construction-legality classification for the shared surface).
+        let is_decision_form = matches!(&sig, TemplateSig::PolymorphicDecision { .. });
         if let TemplateSig::PolymorphicArgs {
+            type_param,
+            args_param,
+        }
+        | TemplateSig::PolymorphicDecision {
             type_param,
             args_param,
         } = &sig
         {
             // The walker's `&mut` is traversal-uniformity with its rewrite
             // face only; the validate face never mutates (pseudo_tuple.rs
-            // module docs).
+            // module docs). `is_decision_form` admits the decision-exit
+            // constructors at exit positions (S4-3).
             let mut body = def.body.clone();
-            validate_pseudo_tuple_uses(&mut body, args_param, type_param)?;
+            validate_pseudo_tuple_uses(&mut body, args_param, type_param, is_decision_form)?;
         }
 
         Ok(CheckedTemplate {
@@ -590,16 +619,72 @@ fn classify_template_sig(
         }
     }
 
-    match &func.return_type {
-        Some(annotation) if is_bare_type_param(annotation, type_param_name) => {}
-        Some(annotation) => {
-            return Err(reject(format!(
-                "template body fn `{}` is generic over `{type_param_name}` but returns `{}`; a \
-                 polymorphic template body returns exactly its type parameter (`{form}`)",
-                func.name,
-                annotation.to_type_string(),
-            )));
-        }
+    // The return-annotation classification. For BOTH hook kinds the bare-`T`
+    // return is the C3-G4 polymorphic form (PolymorphicArgs / PolymorphicResult).
+    // ADR-009 E4 S4 (S4-2): a `before` template may ALSO return
+    // `HookDecision<Args>` — the decision-capable form (PolymorphicDecision),
+    // COMPOSING with the always-Proceed bare-`Args` form (OQ-2). `decision` is
+    // only ever `true` for a `before` template (After + HookDecision rejects).
+    let decision = match &func.return_type {
+        Some(annotation) if is_bare_type_param(annotation, type_param_name) => false,
+        Some(annotation) => match hook_decision_return_form(annotation, type_param_name) {
+            HookDecisionReturnForm::NoState => match hook_kind {
+                TemplateHookKind::Before => true,
+                TemplateHookKind::After => {
+                    return Err(reject(format!(
+                        "template body fn `{}` is an `after` template but returns \
+                         `HookDecision<{type_param_name}>`; the HookDecision short-circuit \
+                         protocol is a `before`-hook decision (Proceed / Return), and an `after` \
+                         template returns the typed result — return exactly its type parameter \
+                         (`fn t<{type_param_name}>(result: {type_param_name}) -> \
+                         {type_param_name}`)",
+                        func.name,
+                    )));
+                }
+            },
+            HookDecisionReturnForm::State => {
+                // OQ-3: ship ONLY the no-State tuple form in the first cut; a
+                // State-declaring decision hook is a NAMED surface-and-stop —
+                // never a silent no-op. State threading (OQ-3) is a DISTINCT
+                // deferral from the D6 failure vocab (#80) and the OQ-4 fallible
+                // hook (#81); it stays anchored at the E4 epic (#20).
+                return Err(reject(format!(
+                    "template body fn `{}` returns `{}`, declaring a HookDecision State \
+                     parameter; HookDecision State threading is designed but not yet \
+                     implemented in this cut — declare the hook without a State parameter \
+                     (`fn t<{type_param_name}>({args}: {type_param_name}) -> \
+                     HookDecision<{type_param_name}>`) and thread per-invocation state through \
+                     captures for now; see issue #20",
+                    func.name,
+                    annotation.to_type_string(),
+                    args = param_name,
+                )));
+            }
+            HookDecisionReturnForm::Malformed => {
+                return Err(reject(format!(
+                    "template body fn `{}` returns `{}`; a decision `before` template returns \
+                     `HookDecision` over its OWN type parameter (`HookDecision<{type_param_name}>`), \
+                     never over a concrete type argument",
+                    func.name,
+                    annotation.to_type_string(),
+                )));
+            }
+            HookDecisionReturnForm::NotDecision => {
+                return Err(reject(format!(
+                    "template body fn `{}` is generic over `{type_param_name}` but returns `{}`; a \
+                     polymorphic template body returns exactly its type parameter (`{form}`){decision_hint}",
+                    func.name,
+                    annotation.to_type_string(),
+                    decision_hint = match hook_kind {
+                        TemplateHookKind::Before => format!(
+                            ", or `HookDecision<{type_param_name}>` for a short-circuit-capable \
+                             `before` hook"
+                        ),
+                        TemplateHookKind::After => String::new(),
+                    },
+                )));
+            }
+        },
         None => {
             return Err(reject(format!(
                 "template body fn `{}` is generic over `{type_param_name}` but declares no \
@@ -608,14 +693,20 @@ fn classify_template_sig(
                 func.name,
             )));
         }
-    }
+    };
 
     Ok((
         match hook_kind {
+            TemplateHookKind::Before if decision => TemplateSig::PolymorphicDecision {
+                type_param: type_param_name.to_string(),
+                args_param: param_name.to_string(),
+            },
             TemplateHookKind::Before => TemplateSig::PolymorphicArgs {
                 type_param: type_param_name.to_string(),
                 args_param: param_name.to_string(),
             },
+            // Unreachable with `decision == true` (After + HookDecision rejects
+            // above); a bare-`R` After body is the typed-result form.
             TemplateHookKind::After => TemplateSig::PolymorphicResult {
                 type_param: type_param_name.to_string(),
                 result_param: param_name.to_string(),
@@ -623,6 +714,54 @@ fn classify_template_sig(
         },
         capture_params,
     ))
+}
+
+/// ADR-009 E4 S4 (S4-2) — how a polymorphic `before` template's return
+/// annotation names the HookDecision protocol (spec §1.1). `HookDecision` is a
+/// COMPILER-RECOGNIZED name here, classified by SPELLING — it is never routed
+/// through the erasing generic resolver (measured fact #2, spec §0).
+enum HookDecisionReturnForm {
+    /// `HookDecision<Args>` (the type argument is the body's own type
+    /// parameter) or bare `HookDecision` — the first-cut no-State decision form.
+    NoState,
+    /// `HookDecision<Args, State>` — the State-declaring form (OQ-3: designed,
+    /// deferred behind a loud surface-and-stop in the first cut).
+    State,
+    /// A `HookDecision`-named return whose single type argument is NOT the
+    /// body's type parameter (`HookDecision<int>`) — malformed for a decision
+    /// hook.
+    Malformed,
+    /// Not a HookDecision return at all.
+    NotDecision,
+}
+
+/// Classify a `before` template's return annotation against the HookDecision
+/// protocol. Recognizes the single-segment `HookDecision` name only (a
+/// qualified `mod::HookDecision` is never the protocol name — the same
+/// single-segment discipline `is_bare_type_param` uses).
+fn hook_decision_return_form(
+    annotation: &TypeAnnotation,
+    type_param: &str,
+) -> HookDecisionReturnForm {
+    match annotation {
+        TypeAnnotation::Basic(name) if name == "HookDecision" => HookDecisionReturnForm::NoState,
+        TypeAnnotation::Reference(path)
+            if !path.is_qualified() && path.name() == "HookDecision" =>
+        {
+            HookDecisionReturnForm::NoState
+        }
+        TypeAnnotation::Generic { name, args }
+            if !name.is_qualified() && name.name() == "HookDecision" =>
+        {
+            match args.len() {
+                0 => HookDecisionReturnForm::NoState,
+                1 if is_bare_type_param(&args[0], type_param) => HookDecisionReturnForm::NoState,
+                1 => HookDecisionReturnForm::Malformed,
+                _ => HookDecisionReturnForm::State,
+            }
+        }
+        _ => HookDecisionReturnForm::NotDecision,
+    }
 }
 
 /// The accepted polymorphic spelling for each hook kind (the positive twin
@@ -713,6 +852,97 @@ mod tests {
             }
             other => panic!("expected PolymorphicArgs, got {other:?}"),
         }
+    }
+
+    // ADR-009 E4 S4 (S4-2) HAPPY PATH: a `before` body returning
+    // `HookDecision<Args>` classifies as the decision-capable form — COMPOSING
+    // with the always-Proceed form above (OQ-2), selected purely by the return
+    // annotation. The `{ args }` tail is the Proceed shorthand.
+    #[test]
+    fn before_hookdecision_return_classifies_as_polymorphic_decision() {
+        let func =
+            fn_def("fn my_decide<Args>(args: Args) -> HookDecision<Args> { args }");
+        let template = CheckedTemplateBuilder::new(TemplateHookKind::Before)
+            .body_fn(&func)
+            .expect("decision before form classifies")
+            .captures(clause(Vec::new()))
+            .finish()
+            .expect("well-formed decision inputs finish");
+
+        assert_eq!(template.hook_kind(), TemplateHookKind::Before);
+        assert_eq!(template.arity(), 1);
+        assert_eq!(template.type_param_count(), 1);
+        match template.sig() {
+            TemplateSig::PolymorphicDecision {
+                type_param,
+                args_param,
+            } => {
+                assert_eq!(type_param, "Args");
+                assert_eq!(args_param, "args");
+            }
+            other => panic!("expected PolymorphicDecision, got {other:?}"),
+        }
+    }
+
+    // ADR-009 E4 S4 (S4-2): an `after` template cannot return `HookDecision` —
+    // the short-circuit protocol is a `before`-hook decision. LOUD reject.
+    #[test]
+    fn after_hookdecision_return_rejects_before_only() {
+        let func = fn_def("fn my_after<R>(result: R) -> HookDecision<R> { result }");
+        let err = CheckedTemplateBuilder::new(TemplateHookKind::After)
+            .body_fn(&func)
+            .expect("type-param shape passes body_fn()")
+            .captures(clause(Vec::new()))
+            .finish()
+            .expect_err("an after HookDecision return must be rejected");
+        let message = err.to_string();
+        assert!(
+            message.contains("an `after` template but returns"),
+            "names the before-only rule: {message}"
+        );
+    }
+
+    // ADR-009 E4 S4 (OQ-3): the State-declaring decision form is designed but
+    // not implemented in the first cut — a LOUD surface-and-stop naming the
+    // no-State remedy, never a silent no-op.
+    #[test]
+    fn before_hookdecision_state_form_surfaces_and_stops() {
+        let func = fn_def(
+            "fn my_decide<Args>(args: Args) -> HookDecision<Args, RetryState> { args }",
+        );
+        let err = CheckedTemplateBuilder::new(TemplateHookKind::Before)
+            .body_fn(&func)
+            .expect("type-param shape passes body_fn()")
+            .captures(clause(Vec::new()))
+            .finish()
+            .expect_err("the State-declaring decision form must surface-and-stop");
+        let message = err.to_string();
+        assert!(
+            message.contains("State threading is designed but not yet implemented"),
+            "names the OQ-3 deferral: {message}"
+        );
+        assert!(
+            message.contains("declare the hook without a State parameter"),
+            "carries the no-State remedy: {message}"
+        );
+    }
+
+    // ADR-009 E4 S4 (S4-2): `HookDecision` over a CONCRETE type argument (not
+    // the body's own type parameter) is malformed for a decision hook.
+    #[test]
+    fn before_hookdecision_over_concrete_arg_is_malformed() {
+        let func =
+            fn_def("fn my_decide<Args>(args: Args) -> HookDecision<int> { args }");
+        let err = CheckedTemplateBuilder::new(TemplateHookKind::Before)
+            .body_fn(&func)
+            .expect("type-param shape passes body_fn()")
+            .captures(clause(Vec::new()))
+            .finish()
+            .expect_err("HookDecision over a concrete arg must be rejected");
+        assert!(
+            err.to_string().contains("over its OWN type parameter"),
+            "names the own-type-parameter rule: {err}"
+        );
     }
 
     // HAPPY PATH: an After template over the polymorphic form classifies as

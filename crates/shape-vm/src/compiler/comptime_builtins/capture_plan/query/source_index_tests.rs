@@ -27,8 +27,7 @@ let expression_value = comptime {
 "#;
 
 const NESTED_CARRIER_BOUNDARIES: &str = r#"
-annotation nested_generators() {
-  targets: [type]
+annotation nested_generators() on type {
   comptime post(target, ctx) {
     extend AnnotationOuter {
       method annotation_outer_probe() -> int { 1 }

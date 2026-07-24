@@ -81,8 +81,7 @@ fn local_annotation_shadows_two_imports_through_the_full_pipeline() {
 from pkg::alpha use { @same }
 from pkg::beta use { @same }
 
-annotation same() {
-  targets: [type]
+annotation same() on type {
   comptime post(target, ctx) {
     extend (extend_method_literal(target.name, "answer", "int", 42))
   }
@@ -120,8 +119,7 @@ from pkg::explicit use { @same }
 @same()
 type Probe { id: int }
 
-annotation same() {
-  targets: [type]
+annotation same() on type {
   comptime post(target, ctx) {
     extend (extend_method_literal(target.name, "answer", "int", 42))
   }
@@ -130,16 +128,14 @@ annotation same() {
     );
     let explicit = parse(
         r#"
-pub annotation same() {
-  targets: [type]
+pub annotation same() on type {
   comptime post(target, ctx) { error("EXPLICIT_HANDLER_MUST_NOT_RUN") }
 }
 "#,
     );
     let synthetic = parse(
         r#"
-pub annotation same() {
-  targets: [type]
+pub annotation same() on type {
   comptime post(target, ctx) { error("SYNTHETIC_HANDLER_MUST_NOT_RUN") }
 }
 "#,
@@ -244,8 +240,7 @@ fn dependency_namespace_cannot_replace_root_namespace_before_materialization() {
     std::fs::write(
         package.join("root_support.shape"),
         r#"
-pub annotation mark() {
-  targets: [type]
+pub annotation mark() on type {
   comptime post(target, ctx) { error("ROOT_NAMESPACE_HANDLER") }
 }
 "#,
@@ -254,8 +249,7 @@ pub annotation mark() {
     std::fs::write(
         package.join("dep_support.shape"),
         r#"
-pub annotation mark() {
-  targets: [type]
+pub annotation mark() on type {
   comptime post(target, ctx) { error("DEPENDENCY_NAMESPACE_HANDLER") }
 }
 "#,
@@ -309,8 +303,7 @@ type Probe { id: int }
     );
     let definition = annotation_definition(
         r#"
-annotation read_text() {
-  targets: [type]
+annotation read_text() on type {
   comptime post(target, ctx) {
     extend (item_fn("forbidden_generated", "int", 1))
   }
@@ -339,7 +332,7 @@ fn allowed_graph_annotation_import_records_exact_permission_on_main_blob() {
     let root_id = ModuleId(0);
     let file_id = ModuleId(1);
     let root = parse("from std::core::file use { @read_text }\n0");
-    let file = parse("pub annotation read_text() { targets: [type] }");
+    let file = parse("pub annotation read_text() on type { }");
     let graph = ModuleGraph::new(
         vec![
             ModuleNode {

@@ -1140,6 +1140,12 @@ fn frozen_type_payload_model_items() -> Vec<Item> {
                 field("type_identity_high", int_ty()),
                 field("type_identity_low", int_ty()),
                 field("optional", TypeAnnotation::Basic("bool".to_string())),
+                // ADR-009 E5 CKPT-3: the additive spell/reflect-only field name
+                // (mirrors `builtin_schemas.rs::COMPTIME_RECORD_FIELD_SCHEMA` — the
+                // type-checker view + the value carrier must match exactly). Layered
+                // beside the hygienic member identity; the record identity + member
+                // strings stay byte-identical (CKPT-0 invariant).
+                field("name", TypeAnnotation::Basic("string".to_string())),
             ],
         ),
         struct_item(
@@ -4011,8 +4017,7 @@ mod tests {
     fn annotation_handler_body_type_ref_is_rewritten_against_the_freeze() {
         let program = shape_ast::parse_program(
             r#"
-annotation reflect() {
-  targets: [type]
+annotation reflect() on type {
   comptime post(target, ctx) {
     let flag = match type_category(type_ref(User)) {
       FrozenTypeCategory::Nominal => 1

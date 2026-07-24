@@ -1,5 +1,4 @@
-annotation serializable() {
-  targets: [type]
+annotation serializable() on type {
 
   comptime pre(target, ctx) {
     comptime for field in target.fields {

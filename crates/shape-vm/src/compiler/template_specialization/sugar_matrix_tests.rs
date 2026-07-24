@@ -84,8 +84,7 @@ fn tmpl<Args>(args: Args, factor: int) -> Args {
     return args
 }
 
-annotation scaled(factor: int) {
-  targets: [function]
+annotation scaled(factor: int) on function {
   comptime post(target, ctx) {
     install(before_hook(tmpl, [capture("factor", factor)]))
   }
@@ -130,8 +129,7 @@ fn r2_before_body_is_a_module_scope_typed_fn() {
     let src = r#"
 fn add_one(x: int) -> int { return x + 1 }
 
-annotation with_before() {
-  targets: [function]
+annotation with_before() on function {
   comptime post(target, ctx) {
     install(before_hook(add_one, []))
   }
@@ -158,8 +156,7 @@ fn r3_after_body_is_a_module_scope_typed_fn() {
     let src = r#"
 fn double(r: int) -> int { return r * 2 }
 
-annotation with_after() {
-  targets: [function]
+annotation with_after() on function {
   comptime post(target, ctx) {
     install(after_hook(double, []))
   }
@@ -189,22 +186,19 @@ fn r4_application_covers_before_only_after_only_and_both() {
 fn add_one(x: int) -> int { return x + 1 }
 fn double(r: int) -> int { return r * 2 }
 
-annotation before_only() {
-  targets: [function]
+annotation before_only() on function {
   comptime post(target, ctx) {
     install(before_hook(add_one, []))
   }
 }
 
-annotation after_only() {
-  targets: [function]
+annotation after_only() on function {
   comptime post(target, ctx) {
     install(after_hook(double, []))
   }
 }
 
-annotation both_hooks() {
-  targets: [function]
+annotation both_hooks() on function {
   comptime post(target, ctx) {
     install(before_hook(add_one, []))
     install(after_hook(double, []))
@@ -259,16 +253,14 @@ fn r5_stacked_annotations_compose_as_wrapping() {
 fn add_ten(x: int) -> int { return x + 10 }
 fn mul_two(x: int) -> int { return x * 2 }
 
-annotation outer_hook() {
-  targets: [function]
+annotation outer_hook() on function {
   comptime post(target, ctx) {
     install(before_hook(add_ten, []))
     install(after_hook(add_ten, []))
   }
 }
 
-annotation inner_hook() {
-  targets: [function]
+annotation inner_hook() on function {
   comptime post(target, ctx) {
     install(before_hook(mul_two, []))
     install(after_hook(mul_two, []))
@@ -300,8 +292,7 @@ fn r6_config_conditional_install_is_ordinary_control_flow() {
     let src = r#"
 fn add_one(x: int) -> int { return x + 1 }
 
-annotation maybe_hook(enabled: bool) {
-  targets: [function]
+annotation maybe_hook(enabled: bool) on function {
   comptime post(target, ctx) {
     if enabled {
       install(before_hook(add_one, []))
@@ -343,8 +334,7 @@ fn r7_target_introspection_selects_the_template() {
 fn bump_int(x: int) -> int { return x + 1 }
 fn bump_num(x: number) -> number { return x + 0.5 }
 
-annotation adaptive() {
-  targets: [function]
+annotation adaptive() on function {
   comptime post(target, ctx) {
     if target.params[0].type == "int" {
       install(before_hook(bump_int, []))
@@ -408,8 +398,7 @@ fn tmpl<Args>(args: Args, factor: int) -> Args {
     return args
 }
 
-annotation hooked() {
-  targets: [function]
+annotation hooked() on function {
   comptime post(target, ctx) {
     install(before_hook(tmpl, [capture("factor", 3)]))
   }
@@ -476,8 +465,7 @@ fn r9_observers_cover_zero_param_and_void_targets() {
 fn note_in() { let x = 1 }
 fn note_out() { let x = 2 }
 
-annotation entry_exit() {
-  targets: [function]
+annotation entry_exit() on function {
   comptime post(target, ctx) {
     install(before_hook(note_in, []))
     install(after_hook(note_out, []))
@@ -539,8 +527,7 @@ log_it(4)
 #[test]
 fn s4c_sugar_mixed_int_string_config_executes_end_to_end() {
     let src = r#"
-annotation retry(times: int, tag: string) {
-  targets: [function]
+annotation retry(times: int, tag: string) on function {
   before(args) {
     args[0] = args[0] * times + tag.length()
     return args
@@ -592,8 +579,7 @@ victim_a(4) * 1000 + victim_b(4)
 #[test]
 fn s4c_sugar_int_and_array_config_executes_end_to_end() {
     let src = r#"
-annotation boost(bump: int, cfg: Array<int>) {
-  targets: [function]
+annotation boost(bump: int, cfg: Array<int>) on function {
   before(args) {
     args[0] = args[0] * bump + cfg[0]
     return args
@@ -630,8 +616,7 @@ victim(4)
 #[test]
 fn s4c_sugar_before_and_after_in_one_definition() {
     let src = r#"
-annotation wrapb(bump: int) {
-  targets: [function]
+annotation wrapb(bump: int) on function {
   before(args) {
     args[0] = args[0] + bump
     return args
@@ -667,8 +652,7 @@ victim(4)
 #[test]
 fn s4c_stacked_sugar_annotations_compose_as_wrapping() {
     let src = r#"
-annotation wrap_x(k: int) {
-  targets: [function]
+annotation wrap_x(k: int) on function {
   before(args) {
     args[0] = args[0] + k
     return args
@@ -678,8 +662,7 @@ annotation wrap_x(k: int) {
   }
 }
 
-annotation wrap_y(k: int) {
-  targets: [function]
+annotation wrap_y(k: int) on function {
   before(args) {
     args[0] = args[0] + k
     return args
@@ -711,8 +694,7 @@ victim(1)
 #[test]
 fn s4c_sugar_observers_on_zero_param_target() {
     let src = r#"
-annotation trace_obs(tag: int) {
-  targets: [function]
+annotation trace_obs(tag: int) on function {
   before() { let x = tag }
   after() { let y = tag }
 }
@@ -745,8 +727,7 @@ fn s4c_sugar_observer_execution_proven_by_error_injection() {
     for hook in ["before()", "after()"] {
         let src = format!(
             r#"
-annotation boom_obs(n: int) {{
-  targets: [function]
+annotation boom_obs(n: int) on function {{
   {hook} {{
     let xs = [1, 2]
     let mut i = 0
@@ -777,8 +758,7 @@ hello()
 #[test]
 fn s4c_sugar_rule6_equal_config_shares_and_differing_splits() {
     let src = r#"
-annotation scale6(k: int) {
-  targets: [function]
+annotation scale6(k: int) on function {
   before(args) {
     args[0] = args[0] * k
     return args
@@ -819,8 +799,7 @@ fn v_c(a: int) -> int { return a + 3 }
 #[test]
 fn s4c_sugar_config_arg_mismatch_is_a_loud_rejection() {
     let src = r#"
-annotation retry(times: int, tag: string) {
-  targets: [function]
+annotation retry(times: int, tag: string) on function {
   before(args) {
     args[0] = args[0] * times + tag.length()
     return args
@@ -851,8 +830,7 @@ fn s4c_sugar_coexists_with_a_user_comptime_post_handler() {
     let src = r#"
 fn add_five(x: int) -> int { return x + 5 }
 
-annotation both_ways(bump: int) {
-  targets: [function]
+annotation both_ways(bump: int) on function {
   comptime post(target, ctx) {
     install(before_hook(add_five, []))
   }
@@ -889,8 +867,7 @@ victim(2)
 #[test]
 fn s4c_sugar_on_generic_target_fires_the_g8_rejection() {
     let src = r#"
-annotation retry_g(times: int) {
-  targets: [function]
+annotation retry_g(times: int) on function {
   before(args) {
     args[0] = args[0] * times
     return args
@@ -935,8 +912,7 @@ victim(1)
 #[test]
 fn s5b_static_g8_sugar_on_uncalled_generic_rejects() {
     let src = r#"
-annotation retry_g(times: int) {
-  targets: [function]
+annotation retry_g(times: int) on function {
   before(args) {
     args[0] = args[0] * times
     return args
@@ -976,8 +952,7 @@ fn id<T>(x: T) -> T { return x }
 #[test]
 fn s4c_typed_config_annotation_on_nested_fn_rejects_loudly() {
     let src = r#"
-annotation retry_n(times: int) {
-  targets: [function]
+annotation retry_n(times: int) on function {
   before(args) {
     args[0] = args[0] * times
     return args
@@ -1012,8 +987,7 @@ outer()
 #[test]
 fn s4c_g12_twin_module_scope_target_weaves() {
     let src = r#"
-annotation retry_n(times: int) {
-  targets: [function]
+annotation retry_n(times: int) on function {
   before(args) {
     args[0] = args[0] * times
     return args
@@ -1037,8 +1011,7 @@ scaled(4)
 #[test]
 fn s6_g12_zero_param_annotation_on_nested_fn_rejects_loudly() {
     let src = r#"
-annotation plain_n() {
-  targets: [function]
+annotation plain_n() on function {
   before(args) { return args }
 }
 
@@ -1082,8 +1055,7 @@ outer()
 #[test]
 fn s5b_nonfn_mixed_targets_fn_application_weaves() {
     let src = r#"
-annotation deco(times: int) {
-  targets: [function, type]
+annotation deco(times: int) on function, type {
   before(args) {
     args[0] = args[0] * times
     return args
@@ -1105,8 +1077,7 @@ scaled(4)
 #[test]
 fn s5b_nonfn_mixed_targets_type_application_rejects() {
     let src = r#"
-annotation deco(times: int) {
-  targets: [function, type]
+annotation deco(times: int) on function, type {
   before(args) {
     args[0] = args[0] * times
     return args
@@ -1140,8 +1111,7 @@ type Widget {
 #[test]
 fn s5b_nonfn_module_application_rejects() {
     let src = r#"
-annotation deco(times: int) {
-  targets: [function, module]
+annotation deco(times: int) on function, module {
   before(args) {
     args[0] = args[0] * times
     return args
@@ -1175,8 +1145,7 @@ mod demo {
 #[test]
 fn s5b_nonfn_expression_application_rejects() {
     let src = r#"
-annotation deco(times: int) {
-  targets: [function, expression]
+annotation deco(times: int) on function, expression {
   before(args) {
     args[0] = args[0] * times
     return args
@@ -1211,8 +1180,7 @@ x
 #[test]
 fn s6_lifecycle_zero_param_def_executes_green() {
     let src = r#"
-annotation traced() {
-  targets: [function]
+annotation traced() on function {
   on_define(target) {
     1
   }
@@ -1276,15 +1244,13 @@ fn api_body<Args>(args: Args, times: int, tag: string) -> Args {
     return args
 }
 
-annotation retry_api(times: int, tag: string) {
-  targets: [function]
+annotation retry_api(times: int, tag: string) on function {
   comptime post(target, ctx) {
     install(before_hook(api_body, [capture("times", times), capture("tag", tag)]))
   }
 }
 
-annotation retry_sugar(times: int, tag: string) {
-  targets: [function]
+annotation retry_sugar(times: int, tag: string) on function {
   before(args) {
     args[0] = args[0] * times + tag.length()
     return args
@@ -1411,8 +1377,7 @@ fn s4d_e3_synthesized_handler_ast_is_public_api_only() {
     use shape_ast::ast::{AnnotationHandlerType, BlockItem, Expr, Item, Literal};
 
     let src = r#"
-annotation retry(times: int, tag: string) {
-  targets: [function]
+annotation retry(times: int, tag: string) on function {
   before(args) {
     args[0] = args[0] * times + tag.length()
     return args

@@ -8,8 +8,8 @@ const TERMINAL: &str = "Runtime error: Internal compiler error: annotation decla
 fn duplicate_planning_error_is_original_then_terminal_without_mutation() {
     let program = parse(
         r#"
-annotation duplicate() { targets: [type] }
-annotation duplicate() { targets: [type] }
+annotation duplicate() on type { }
+annotation duplicate() on type { }
 "#,
     );
     let mut compiler = BytecodeCompiler::new();
@@ -197,7 +197,7 @@ annotation z_bad() { metadata(target) { missing_handler_value } }
 
 #[test]
 fn missing_or_changed_pass_two_evidence_poison_after_original_error() {
-    let program = parse("annotation phased() { targets: [type] }");
+    let program = parse("annotation phased() on type { }");
     let definition = only_definition(&program);
     let mut missing_compiler = BytecodeCompiler::new();
     let missing = missing_compiler

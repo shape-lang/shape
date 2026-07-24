@@ -543,6 +543,27 @@ print(out)
     expect_vm_and_jit_output(source, "21");
 }
 
+/// ADR-009 E5 CKPT-3 (B2 in-scope): the reflect surface now carries each record
+/// field's PLAIN NAME as an additive `RecordField.name` comptime-ABI string
+/// (spell/reflect-only, layered beside the hygienic member identity — the record
+/// identity + member strings stay byte-identical per the CKPT-0 invariant). Fields
+/// are byte-sorted by name, so `{beta: int, alpha?: string}` exposes `alpha` then
+/// `beta`. Read as typed string data on both engines.
+#[test]
+fn record_reflects_field_names_ckpt3() {
+    let source = r#"
+let out = comptime {
+  match reflect(type_ref({beta: int, alpha?: string})) {
+    FrozenType::Record(r) => f"{r.fields[0].name}:{r.fields[1].name}"
+    _ => "wrong"
+  }
+}
+print(out)
+"#;
+    // Byte-sorted: alpha (optional) before beta.
+    expect_vm_and_jit_output(source, "alpha:beta");
+}
+
 /// B7 Reference structural proof: `&User` is `mutable == false`, `&mut User` is
 /// `mutable == true`; both carry the referent's frozen identity halves. Read as
 /// typed data on both engines.
@@ -883,8 +904,7 @@ print("ok")
 fn descriptor_cannot_lift_through_the_set_param_value_directive() {
     ShapeTest::new(
         r#"
-annotation inject_descriptor() {
-  targets: [function]
+annotation inject_descriptor() on function {
   comptime post(target, ctx) {
     set param b = reflect(type_ref(int))
   }

@@ -1,0 +1,44 @@
+// ADR-009 E4 S4 (S4-6) — the HookDecision non-vacuity CLI cell (Hazard #4).
+//
+// A REAL annotation handler (`comptime post`, NOT a top-level comptime block —
+// the vacuity guard checks this) installs a decision `before` hook on a 1-ary
+// `int` target (Single carrier, off #70), scalar R = int. The hook `Return`s a
+// fixed short-circuit value on even inputs and `Proceed`s on odd inputs, so
+// BOTH arms of the single-join branch fire across the 0..200 hot loop crossing
+// T1@100 (tier.rs). The decision is a compiler-internal typed int tag/branch
+// (D7-D) — this cell asserts count_fallback_lines(jit) == 0 (the ONLY assertion
+// that catches a demotion; a user-enum on the seam would deopt whole-program).
+//
+// Arithmetic:
+//   even i (0,2,..198): short-circuit  → 7        ; 100 * 7      =    700
+//   odd  i (1,3,..199): Proceed → impl → i * 10   ; 10000 * 10   = 100000
+//   total = 100700
+// Value-distinguishing: a DROPPED short-circuit (impl always runs) ⇒ 199000;
+// a dropped Proceed (always short-circuit) ⇒ 1400. Only the correct single-join
+// branch yields 100700.
+fn decide<Args>(args: Args) -> HookDecision<Args> {
+  if args[0] % 2 == 0 {
+    return HookDecision::Return(7)
+  }
+  return HookDecision::Proceed(args)
+}
+
+annotation guarded() on function {
+  comptime post(target, ctx) {
+    install(before_hook(decide, []))
+  }
+}
+
+@guarded()
+fn compute(a: int) -> int {
+  return a * 10
+}
+
+fn run() -> int {
+  let mut total = 0
+  for i in 0..200 {
+    total = total + compute(i)
+  }
+  total
+}
+print(run())

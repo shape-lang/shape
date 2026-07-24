@@ -1,6 +1,5 @@
 // ADR-009 C1 slice 4 / #53: the nested closure recaptures the SAME cell.
-annotation add_answer() {
-  targets: [type]
+annotation add_answer() on type {
   comptime post(target, ctx) {
     extend target { method answer() -> int { var total = 40
       let outer = |; share total| {

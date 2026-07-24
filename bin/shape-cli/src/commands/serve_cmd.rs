@@ -2397,7 +2397,6 @@ print(r)
     /// not a client-side fallback. This is the exact `blobs>=2` /
     /// foreign-functions-non-empty regression path the audit found untested.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    #[ignore = "dark window: E4 re-implements @remote on typed HookDecision — see issue #68"]
     async fn test_remote_foreign_extern_c_transfer_over_tcp() {
         // `none` on loopback grants `Ffi`; `extern C` is not gated by the
         // (empty) `ffi_languages` allow-list, so the foreign call is admitted.
@@ -2406,7 +2405,7 @@ print(r)
 
         let code = format!(
             r#"
-use std::core::remote
+from std::core::remote use {{ @remote }}
 
 extern "C" fn labs(x: int) -> int from "c"
 
@@ -2747,7 +2746,6 @@ match r {{
     /// node (python NOT opted in) refuses the identical program server-side — it
     /// never yields `105`. Skips cleanly when `libshape_ext_python.so` is absent.
     #[test]
-    #[ignore = "dark window: E4 re-implements @remote on typed HookDecision — see issue #68"]
     fn test_remote_foreign_python_transfer_over_tcp() {
         let _guard = polyglot_process_lock()
             .lock()
@@ -2766,7 +2764,7 @@ match r {{
         let node = start_polyglot_serve(&shape_bin, &so, "python");
         let program = format!(
             r#"
-use std::core::remote
+from std::core::remote use {{ @remote }}
 
 fn python padd(x: int) -> Result<int> {{
     return x + 5
@@ -2814,7 +2812,7 @@ print(remote_py(100))
         let strict = start_polyglot_serve(&shape_bin, &so, "");
         let refused = format!(
             r#"
-use std::core::remote
+from std::core::remote use {{ @remote }}
 
 fn python padd(x: int) -> Result<int> {{
     return x + 5
@@ -2863,7 +2861,6 @@ print(remote_py(100))
     /// strict-node server-side refusal. Skips cleanly when
     /// `libshape_ext_typescript.so` is absent.
     #[test]
-    #[ignore = "dark window: E4 re-implements @remote on typed HookDecision — see issue #68"]
     fn test_remote_foreign_typescript_transfer_over_tcp() {
         let _guard = polyglot_process_lock()
             .lock()
@@ -2882,7 +2879,7 @@ print(remote_py(100))
         let node = start_polyglot_serve(&shape_bin, &so, "typescript");
         let program = format!(
             r#"
-use std::core::remote
+from std::core::remote use {{ @remote }}
 
 fn typescript tadd(x: int) -> Result<int> {{
     return x + 1;
@@ -2928,7 +2925,7 @@ print(remote_ts(20))
         let strict = start_polyglot_serve(&shape_bin, &so, "");
         let refused = format!(
             r#"
-use std::core::remote
+from std::core::remote use {{ @remote }}
 
 fn typescript tadd(x: int) -> Result<int> {{
     return x + 1;

@@ -122,12 +122,17 @@ match dead {
 }
 
 #[test]
-#[ignore = "dark window: E4 re-implements @remote on typed HookDecision — see issue #68"]
+#[ignore = "0-ary @remote unsupported: the `@remote fn remote_snapshot_hash() -> string` \
+target declares no parameters, so the decision `before` hook has no argument to \
+receive/short-circuit and is loud-rejected (\"the target declares no parameters\"). The \
+1-ary receiver-store save/resume path itself works (proven in Wave B dynamic-snapshot); \
+only the 0-ary shape blocks. Capability tracked in #83 (E4-S5 @remote residual: async, \
+0-ary, heterogeneous multi-arg)."]
 fn remote_snapshot_returns_receiver_hash_over_remote_call() {
     let _guard = lock_process();
     let server = start_serve("none", None, &[]);
     let env = IsolatedEnv::new("shape-remote-snapshot-e2e-");
-    let program = r#"use std::core::remote
+    let program = r#"from std::core::remote use { @remote }
 use std::core::snapshot
 
 @remote("__ADDR__")
@@ -229,12 +234,11 @@ match r {
 }
 
 #[test]
-#[ignore = "dark window: E4 re-implements @remote on typed HookDecision — see issue #68"]
 fn remote_extern_c_transfer_executes_and_strict_node_refuses_ffi() {
     let _guard = lock_process();
     let env = IsolatedEnv::new("shape-remote-c-e2e-");
     let trusted = start_serve("none", None, &[]);
-    let program = r#"use std::core::remote
+    let program = r#"from std::core::remote use { @remote }
 extern "C" fn labs(x: int) -> int from "c"
 
 @remote("__ADDR__")
@@ -266,13 +270,11 @@ print(f"REMOTE_C_ABS={remote_abs(-42)}")
 }
 
 #[test]
-#[ignore = "dark window: E4 re-implements @remote on typed HookDecision — see issue #68"]
 fn remote_python_transfer_self_skips_without_extension_and_refuses_without_opt_in() {
     remote_polyglot_transfer("python", "PY_REMOTE=105", "return x + 5", 100);
 }
 
 #[test]
-#[ignore = "dark window: E4 re-implements @remote on typed HookDecision — see issue #68"]
 fn remote_typescript_transfer_self_skips_without_extension_and_refuses_without_opt_in() {
     remote_polyglot_transfer("typescript", "TS_REMOTE=21", "return x + 1;", 20);
 }
@@ -294,7 +296,7 @@ fn remote_polyglot_transfer(language: &str, expected: &str, body: &str, input: i
         "TS_REMOTE"
     };
     let program = format!(
-        r#"use std::core::remote
+        r#"from std::core::remote use {{ @remote }}
 fn {language} add_remote(x: int) -> Result<int> {{
     {body}
 }}
@@ -404,13 +406,18 @@ fn tls_remote_call_user_surface_over_shape_serve() {
 }
 
 #[test]
-#[ignore = "dark window: E4 re-implements @remote on typed HookDecision — see issue #68"]
+#[ignore = "0-ary @remote unsupported: the `@remote fn remote_snapshot_hash() -> string` \
+target declares no parameters, so the decision `before` hook has no argument to \
+receive/short-circuit and is loud-rejected (\"the target declares no parameters\"). The \
+1-ary receiver-store save path itself works (proven in Wave B dynamic-snapshot); only the \
+0-ary shape blocks. Capability tracked in #83 (E4-S5 @remote residual: async, 0-ary, \
+heterogeneous multi-arg)."]
 fn remote_snapshot_hash_is_saved_in_selected_receiver_store() {
     let _guard = lock_process();
     let env = IsolatedEnv::new("shape-remote-snapshot-resume-e2e-");
     let receiver_store = env.snapshot_store("receiver-snapshots");
     let server = start_serve_with_snapshot_store("none", None, &[], &receiver_store);
-    let program = r#"use std::core::remote
+    let program = r#"from std::core::remote use { @remote }
 use std::core::snapshot
 
 @remote("__ADDR__")
@@ -446,13 +453,18 @@ print(f"REMOTE_SNAPSHOT={remote_snapshot_hash()}")
 }
 
 #[test]
-#[ignore = "dark window: E4 re-implements @remote on typed HookDecision — see issue #68"]
+#[ignore = "0-ary @remote unsupported: the `@remote fn remote_snapshot_hash() -> string` \
+target declares no parameters, so the decision `before` hook has no argument to \
+receive/short-circuit and is loud-rejected (\"the target declares no parameters\"). The \
+1-ary receiver-store resume path itself works (proven in Wave B dynamic-snapshot); only the \
+0-ary shape blocks. Capability tracked in #83 (E4-S5 @remote residual: async, 0-ary, \
+heterogeneous multi-arg)."]
 fn remote_snapshot_hash_can_be_resumed_from_receiver_store() {
     let _guard = lock_process();
     let env = IsolatedEnv::new("shape-remote-snapshot-resume-e2e-");
     let receiver_store = env.snapshot_store("receiver-snapshots");
     let server = start_serve_with_snapshot_store("none", None, &[], &receiver_store);
-    let program = r#"use std::core::remote
+    let program = r#"from std::core::remote use { @remote }
 use std::core::snapshot
 
 @remote("__ADDR__")

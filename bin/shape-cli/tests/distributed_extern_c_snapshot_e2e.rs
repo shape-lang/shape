@@ -5,13 +5,12 @@ use std::time::Duration;
 use support::*;
 
 #[test]
-#[ignore = "dark window: E4 re-implements @remote on typed HookDecision — see issue #68"]
 fn remote_extern_c_snapshot_hash_can_be_resumed_from_receiver_store() {
     let _guard = lock_process();
     let env = IsolatedEnv::new("shape-remote-c-snapshot-resume-e2e-");
     let receiver_store = env.snapshot_store("receiver-c-snapshots");
     let server = start_serve_with_snapshot_store("none", None, &[], &receiver_store);
-    let program = r#"use std::core::remote
+    let program = r#"from std::core::remote use { @remote }
 use std::core::snapshot
 
 extern "C" fn labs(x: int) -> int from "c"

@@ -218,8 +218,7 @@ pub @force_int() fn connect(const uri) { 1 }
             Some(
                 r#"
                 use myext
-                annotation db_schema() {
-                  targets: [function]
+                annotation db_schema() on function {
                   comptime post(target, ctx) {
                     set param uri: string
                     set return (myext::__connect_codegen(uri))
@@ -290,8 +289,7 @@ pub @force_int() fn connect(const uri) { 1 }
                   myext::__connect_codegen(uri)
                 }
 
-                annotation db_schema() {
-                  targets: [function]
+                annotation db_schema() on function {
                   comptime post(target, ctx) {
                     set param uri: string
                     set return (schema_for(uri))
@@ -369,8 +367,7 @@ pub @force_int() fn connect(const uri) { 1 }
             Some(
                 r#"
                 use myext
-                annotation db_schema() {
-                  targets: [function]
+                annotation db_schema() on function {
                   comptime post(target, ctx) {
                     set param uri: string
                     set return (myext::__connect_codegen(uri))

@@ -16,8 +16,7 @@
 // now covers capturing closures; its `move` / `share` native proofs belong to
 // the separate Slice-4 battery.
 
-annotation add_answer() {
-  targets: [type]
+annotation add_answer() on type {
   comptime post(target, ctx) {
     extend target { method answer() -> int { let worker = || 42; worker() } }
   }

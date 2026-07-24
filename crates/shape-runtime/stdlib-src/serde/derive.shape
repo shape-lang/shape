@@ -30,8 +30,7 @@
 /// `@json_schema` — generate `{TypeName}_json_schema() -> string` from a type's
 /// declared fields. Optional fields (`T?`) are omitted from `required`, and
 /// `@description(...)` field annotations become JSON Schema descriptions.
-pub annotation json_schema() {
-    targets: [type]
+pub annotation json_schema() on type {
     comptime post(target, ctx) {
         let mut props = ""
         let mut required = ""

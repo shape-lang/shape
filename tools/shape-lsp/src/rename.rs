@@ -683,8 +683,7 @@ mod tests {
 
     /// `method answer()` is written in the generator: explicit source binder.
     const SOURCE_BINDER_PROGRAM: &str = r#"
-annotation gen() {
-  targets: [type]
+annotation gen() on type {
   comptime post(target, ctx) {
     extend target {
       method answer() -> int { 42 }
@@ -705,8 +704,7 @@ let b = p.answer()
 
     /// The method name is COMPUTED (`an{suffix}`): generator-controlled.
     const GENERATOR_CONTROLLED_PROGRAM: &str = r#"
-annotation gen() {
-  targets: [type]
+annotation gen() on type {
   comptime post(target, ctx) {
     let suffix = "swer"
     extend (extend_method_literal(target.name, f"an{suffix}", "int", 42))
@@ -738,17 +736,17 @@ let x = p.answer()
         let edits = &edit.changes.expect("changes")[&uri];
         let lines: Vec<u32> = edits.iter().map(|e| e.range.start.line).collect();
         assert!(
-            lines.contains(&5),
+            lines.contains(&4),
             "generator binder token edited: {lines:?}"
         );
-        assert!(lines.contains(&17), "first call site edited: {lines:?}");
-        assert!(lines.contains(&18), "second call site edited: {lines:?}");
+        assert!(lines.contains(&16), "first call site edited: {lines:?}");
+        assert!(lines.contains(&17), "second call site edited: {lines:?}");
         assert!(
-            !lines.contains(&10),
+            !lines.contains(&9),
             "decoy comment must not be edited: {lines:?}"
         );
         assert!(
-            !lines.contains(&11),
+            !lines.contains(&10),
             "decoy string must not be edited: {lines:?}"
         );
     }
@@ -784,7 +782,7 @@ let x = p.answer()
             report.message
         );
         assert_eq!(
-            report.generator.range.start.line, 3,
+            report.generator.range.start.line, 2,
             "report links the generator definition"
         );
         assert!(
@@ -807,8 +805,7 @@ let x = p.answer()
     /// "no edits inside generated ranges" guard must not cancel
     /// application-anchored binder edits — they are source text.
     const APPLICATION_BINDER_PROGRAM: &str = r#"
-annotation gen(mname: string) {
-  targets: [type]
+annotation gen(mname: string) on type {
   comptime post(target, ctx) {
     extend (extend_method_literal(target.name, mname, "int", 1))
   }
@@ -836,11 +833,11 @@ let a = p.answer()
         let edits = &edit.changes.expect("changes")[&uri];
         let lines: Vec<u32> = edits.iter().map(|e| e.range.start.line).collect();
         assert!(
-            lines.contains(&8),
+            lines.contains(&7),
             "the application binder token (`@gen(\"answer\")`) must be \
              edited — dropping it makes the rename partial and corrupting: {lines:?}"
         );
-        assert!(lines.contains(&12), "call site edited: {lines:?}");
+        assert!(lines.contains(&11), "call site edited: {lines:?}");
     }
 
     /// Rejection row 4 (prepare): prepare-rename declines on a

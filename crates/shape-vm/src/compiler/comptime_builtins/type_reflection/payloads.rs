@@ -160,13 +160,27 @@ pub(crate) struct TupleDescriptor {
 /// ADR-009 B7 — one normalized field of a [`FrozenPayloadDescriptor::Record`].
 /// Carries the owner-bound HYGIENIC member identity (`#f`, minted from the
 /// record's own identity + field name — NEVER the source-name string, Dec 57),
-/// the field's VALUE-type frozen identity, and its `optional` flag. Field names
-/// are identity-insignificant and stay a freeze fact.
+/// the field's VALUE-type frozen identity, and its `optional` flag.
+///
+/// ADR-009 E5 CKPT-3 (B2 in-scope, under the CKPT-0 record-hygiene binding
+/// invariant): `name` is the field's plain source name, preserved ADDITIVELY as
+/// a SPELL/REFLECT-ONLY freeze fact. It is populated in the SAME `canonical_record`
+/// rebuild that mints the record identity + the hygienic `member` identity, but
+/// is NEVER threaded into either computation — the record IDENTITY descriptor
+/// string and `record_member_identity` stay byte-identical (the binding
+/// invariant). It is identity-INSIGNIFICANT for hashing/dedup, yet already
+/// identity-SIGNIFICANT for the record's own descriptor (which byte-sorts +
+/// interpolates plain field names), so surfacing it adds no new information to
+/// the identity algebra. Read ONLY at spell time (`reconstruct_type_annotation`'s
+/// Record arm re-spells `{name: T}` from it) and reflect time
+/// (`COMPTIME_RECORD_FIELD_SCHEMA.name`). Mirrors [`ParamDescriptor::name`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct RecordFieldDescriptor {
     pub(crate) member: FrozenTypeIdentity,
     pub(crate) type_identity: FrozenTypeIdentity,
     pub(crate) optional: bool,
+    /// The field's plain source name — spell/reflect-only (see the type doc).
+    pub(crate) name: String,
 }
 
 /// ADR-009 B7 — the normalized structural record of a
@@ -700,7 +714,11 @@ fn frozen_record_descriptor_slot(descriptor: &RecordDescriptor) -> Result<Kinded
 }
 
 /// One `RecordField` object: owner-bound hygienic member identity halves + the
-/// field's value-type frozen identity halves + the `optional` flag.
+/// field's value-type frozen identity halves + the `optional` flag + the plain
+/// field `name`. ADR-009 E5 CKPT-3: `name` is the spell/reflect-only freeze fact
+/// (a `String`-kind slot, refcount-cloned into the object by the schema builder —
+/// same pattern as `nb_str` populating `__ComptimeTypeInfo.name`); the member
+/// identity remains the identity/dedup-bearing handle (Dec 57).
 fn record_field_slot(field: &RecordFieldDescriptor) -> KindedSlot {
     typed_object_for_named_schema(
         COMPTIME_RECORD_FIELD_SCHEMA,
@@ -716,6 +734,7 @@ fn record_field_slot(field: &RecordFieldDescriptor) -> KindedSlot {
                 KindedSlot::from_int(field.type_identity.low),
             ),
             ("optional", KindedSlot::from_bool(field.optional)),
+            ("name", KindedSlot::from_string(&field.name)),
         ],
     )
 }

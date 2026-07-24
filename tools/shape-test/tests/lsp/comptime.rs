@@ -7,8 +7,7 @@ use shape_test::shape_test::ShapeTest;
 #[test]
 fn generated_method_call_from_comptime_extend_executes() {
     let code = r#"
-annotation add_sum() {
-    targets: [type]
+annotation add_sum() on type {
     comptime post(target, ctx) {
         extend target {
             method sum() { self.x + self.y }

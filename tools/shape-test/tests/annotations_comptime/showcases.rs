@@ -115,8 +115,7 @@ fn to_json_serializes_via_stdlib_import_jit() {
 fn extend_method_rejects_injection_field_splice() {
     ShapeTest::new(
         r#"
-annotation inject() {
-    targets: [type]
+annotation inject() on type {
     comptime post(target, ctx) {
         extend (extend_method(target.name, "evil", "string", ["{ ", " }"], ["a} + boom() + {b"]))
     }
@@ -242,4 +241,27 @@ print("unreachable")
     )
     .with_stdlib()
     .expect_run_err_contains("{audence}");
+}
+
+/// THE ERGONOMICS CELL for `#74 INTERIM REJECTION` (ADR-009 E4-D5, slice S2).
+/// MEASURED at `75eca793` before the fix: this exact program compiled, ran,
+/// printed `7`, exited 0 — and generated NOTHING, so `labs_tool_def()` simply
+/// did not exist. That is literally the scenario #74's polyglot bullet
+/// describes. It now fails LOUD, citing #74. Sits beside the
+/// `llm_tool_derives_schema_via_stdlib_import_*` positives, which prove the
+/// same annotation still generates its schema on an ordinary Shape fn.
+#[test]
+fn llm_tool_on_extern_c_fn_is_rejected_citing_74() {
+    ShapeTest::new(
+        r#"
+from std::llm::tools use { @llm_tool }
+
+@llm_tool("absolute value")
+extern "C" fn labs(x: int) -> int from "c"
+
+print("unreachable")
+"#,
+    )
+    .with_stdlib()
+    .expect_run_err_contains("see issue #74");
 }

@@ -5,7 +5,6 @@ use std::time::Duration;
 use support::*;
 
 #[test]
-#[ignore = "dark window: E4 re-implements @remote on typed HookDecision — see issue #68"]
 fn tls_remote_python_snapshot_hash_can_be_resumed_from_selected_receiver_store() {
     remote_tls_dynamic_snapshot_resume(
         "python",
@@ -20,7 +19,6 @@ fn tls_remote_python_snapshot_hash_can_be_resumed_from_selected_receiver_store()
 }
 
 #[test]
-#[ignore = "dark window: E4 re-implements @remote on typed HookDecision — see issue #68"]
 fn tls_remote_typescript_snapshot_hash_can_be_resumed_from_selected_receiver_store() {
     remote_tls_dynamic_snapshot_resume(
         "typescript",
@@ -58,7 +56,7 @@ fn remote_tls_dynamic_snapshot_resume(
     let server =
         start_tls_serve_with_snapshot_store("none", Some(&so), &[language], &receiver_store);
     let program = format!(
-        r#"use std::core::remote
+        r#"from std::core::remote use {{ @remote }}
 use std::core::snapshot
 
 fn {language} {function_name}(a: int, b: int) -> Result<int> {{

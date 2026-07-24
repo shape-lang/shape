@@ -11,8 +11,7 @@ use super::{
 use crate::util::{offset_to_line_col, position_to_offset};
 
 const TWO_APPLICATIONS: &str = r#"
-annotation add_reader() {
-  targets: [type]
+annotation add_reader() on type {
   comptime post(target, ctx) {
     extend target {
       method read(x: int) -> int {
@@ -36,8 +35,7 @@ job.read(2) + task.read(3)
 "#;
 
 const NESTED_CAPTURE: &str = r#"
-annotation add_reader() {
-  targets: [type]
+annotation add_reader() on type {
   comptime post(target, ctx) {
     extend target {
       method read() -> int {
@@ -323,8 +321,7 @@ fn imported_annotation_registration_survives_capture_fallthrough() {
     let main_path = temp.path().join("main.shape");
     let manifest_path = temp.path().join("shape.toml");
     let support = r#"
-pub annotation add_reader() {
-  targets: [type]
+pub annotation add_reader() on type {
   comptime post(target, ctx) {
     extend target { method read() -> int { 42 } }
   }
@@ -335,8 +332,7 @@ pub annotation add_reader() {
     // even though root import resolution selects `support::add_reader`, making
     // the `read` definition disappear.
     let decoy = r#"
-pub annotation add_reader() {
-  targets: [type]
+pub annotation add_reader() on type {
   comptime post(target, ctx) {
     extend target { method decoy() -> int { 0 } }
   }

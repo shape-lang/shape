@@ -32,8 +32,7 @@ fn expect_vm_and_jit_output(source: &str, expected: &str) {
 fn d7_direct_extend_target_method_materializes_via_executed_prepass() {
     expect_vm_and_jit_output(
         r#"
-annotation displayable() {
-  targets: [type]
+annotation displayable() on type {
   comptime post(target, ctx) {
     extend target {
       method display() -> string { f"({self.x}, {self.y})" }
@@ -58,8 +57,7 @@ print(p.display())
 fn d8_stacked_annotations_both_extend_via_executed_prepass() {
     expect_vm_and_jit_output(
         r#"
-annotation with_sum() {
-  targets: [type]
+annotation with_sum() on type {
   comptime post(target, ctx) {
     extend target {
       method sum() -> int { self.a + self.b }
@@ -67,8 +65,7 @@ annotation with_sum() {
   }
 }
 
-annotation with_diff() {
-  targets: [type]
+annotation with_diff() on type {
   comptime post(target, ctx) {
     extend target {
       method diff() -> int { self.a - self.b }
@@ -104,8 +101,7 @@ print(n.diff())
 #[test]
 fn computed_snippet_extend_is_rejected_with_named_alternative() {
     let source = r#"
-annotation gen() {
-  targets: [type]
+annotation gen() on type {
   comptime post(target, ctx) {
     extend (f"fn {target.name}_tag() -> int \{ 7 \}")
   }
@@ -130,8 +126,7 @@ print(Widget { id: 1 }.id)
 fn r6_target_resolves_to_annotated_type_per_application() {
     expect_vm_and_jit_output(
         r#"
-annotation label() {
-  targets: [type]
+annotation label() on type {
   comptime post(target, ctx) {
     extend target {
       method tag() -> string { f"{self.id}" }
@@ -164,8 +159,7 @@ print(b.tag())
 fn false_guarded_extend_is_not_materialized_real_method_still_works() {
     expect_vm_and_jit_output(
         r#"
-annotation gen() {
-  targets: [type]
+annotation gen() on type {
   comptime post(target, ctx) {
     if false {
       extend target {
@@ -201,8 +195,7 @@ fn function_target_extend_explicit_type_materializes_via_executed_prepass() {
         r#"
 type Widget { id: int }
 
-annotation add_label() {
-  targets: [function]
+annotation add_label() on function {
   comptime post(target, ctx) {
     extend Widget {
       method label() -> string { f"widget-{self.id}" }
@@ -231,8 +224,7 @@ fn register() -> int { 0 }
 #[test]
 fn u10_former_target_binding_spelling_does_not_leak_into_handler_body() {
     let source = r#"
-annotation leaky() {
-  targets: [type]
+annotation leaky() on type {
   comptime post(target, ctx) {
     let leaked = __target_arg__
     extend target {
@@ -259,8 +251,7 @@ print(p.m())
 fn u10_target_delivered_by_position_after_hygienic_rename() {
     expect_vm_and_jit_output(
         r#"
-annotation named() {
-  targets: [type]
+annotation named() on type {
   comptime post(target, ctx) {
     extend (extend_method_literal(target.name, "who", "string", target.name))
   }
@@ -286,8 +277,7 @@ print(g.who())
 fn s4_extend_owner_binds_by_position_not_the_word_target() {
     expect_vm_and_jit_output(
         r#"
-annotation tagged() {
-  targets: [type]
+annotation tagged() on type {
   comptime post(t, ctx) {
     extend t {
       method tag() -> string { f"{self.id}" }
@@ -321,8 +311,7 @@ extend target {
   method doubled() -> int { self.v * 2 }
 }
 
-annotation stamped() {
-  targets: [type]
+annotation stamped() on type {
   comptime post(owner, ctx) {
     extend owner {
       method stamp() -> int { self.n + 1 }
@@ -353,8 +342,7 @@ print(b.stamp())
 fn s3_ctx_original_invokes_pre_annotation_body_typed_path() {
     expect_vm_and_jit_output(
         r#"
-annotation wrap() {
-  targets: [function]
+annotation wrap() on function {
   comptime post(target, ctx) {
     replace body {
       return ctx.original(5) + 100
@@ -381,8 +369,7 @@ print(add_ten(0))
 fn s3_user_original_spelling_does_not_collide_reaches_body_via_ctx_original() {
     expect_vm_and_jit_output(
         r#"
-annotation wrap() {
-  targets: [function]
+annotation wrap() on function {
   comptime post(target, ctx) {
     replace body {
       let __original__x = 7
@@ -408,8 +395,7 @@ print(add_ten(5))
 #[test]
 fn s3_former_original_spelling_does_not_resolve_the_shadow() {
     let source = r#"
-annotation wrap() {
-  targets: [function]
+annotation wrap() on function {
   comptime post(target, ctx) {
     replace body {
       return __original__(5) + 100
@@ -432,8 +418,7 @@ print(add_ten(0))
 #[test]
 fn false_guarded_extend_phantom_method_is_not_callable() {
     let source = r#"
-annotation gen() {
-  targets: [type]
+annotation gen() on type {
   comptime post(target, ctx) {
     if false {
       extend target {

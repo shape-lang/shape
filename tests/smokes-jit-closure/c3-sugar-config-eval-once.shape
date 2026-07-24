@@ -24,8 +24,7 @@
 //   skipped before → 2 * 10 * 19900 = 398000
 //   times misread as 1 → 2 * 10 * 19900 = 398000 (same as skip: *1 is identity)
 //   one target unwoven → 30*19900 + 10*19900 = 796000
-annotation traced(times: int) {
-  targets: [function]
+annotation traced(times: int) on function {
   comptime post(target, ctx) {
     warning("sugar-cfg-eval")
   }

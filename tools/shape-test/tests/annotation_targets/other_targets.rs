@@ -83,8 +83,7 @@ annotation timed(label: string) {
 fn targets_declaration_function_on_function_works() {
     ShapeTest::new(
         r#"
-annotation fn_target(tag: string) {
-  targets: [function]
+annotation fn_target(tag: string) on function {
   before() {
     print(f"[{tag}] before")
   }
@@ -104,8 +103,7 @@ hello()
 fn targets_declaration_type_on_type_works() {
     ShapeTest::new(
         r#"
-annotation type_target() {
-  targets: [type]
+annotation type_target() on type {
   comptime post(target, ctx) {
     extend target {
       method id_str() { f"id:{self.id}" }
@@ -132,8 +130,7 @@ print(e.id_str())
 fn targets_function_applied_to_type_errors() {
     ShapeTest::new(
         r#"
-annotation fn_only(tag: string) {
-  targets: [function]
+annotation fn_only(tag: string) on function {
   before() {
     print(f"[{tag}] should not reach")
   }
@@ -153,8 +150,7 @@ print("after")
 fn targets_type_applied_to_function_errors() {
     ShapeTest::new(
         r#"
-annotation type_only() {
-  targets: [type]
+annotation type_only() on type {
   comptime post(target, ctx) {
     extend target {
       method nope() { 0 }

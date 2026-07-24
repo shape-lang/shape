@@ -246,6 +246,46 @@ fn plan_definition(
             &handler.handler_type,
             AnnotationHandlerType::OnDefine | AnnotationHandlerType::Metadata
         ) {
+            // ADR-009 E4-D2 ctx-removal (slice S3): the `on_define`/`metadata`
+            // lifecycle handler receives ONLY the `target`/`fn` descriptor. The
+            // always-empty `ctx` carrier was DELETED in E4-D2; a lingering `ctx`
+            // — or any other non-descriptor name — now degrades to a silent-null
+            // `PushNull` param (functions_annotations.rs `match param_name` →
+            // `_ => PushNull`), the silent-no-op / cryptic-runtime footgun the
+            // standing user ruling forbids. Reject it LOUD, pre-inference, once
+            // per declaration, at the handler signature span (LSP-visible). The
+            // accepted set is exactly the names the descriptor emission arm +
+            // `inferred_handler_parameter_type` still recognize (`target`/`fn`).
+            let kind = handler_kind_name(&handler.handler_type);
+            if let Some(parameter) = handler
+                .params
+                .iter()
+                .find(|parameter| parameter.name != "target" && parameter.name != "fn")
+            {
+                let message = if parameter.name == "ctx" {
+                    // E4-D2 ctx-removal: specific sub-message names the removed
+                    // lifecycle-ctx surface + the per-invocation State deferral (#83).
+                    // The HookDecision protocol itself landed in E4 (#68 closed).
+                    format!(
+                        "Annotation '{}': the '{}' lifecycle handler takes only '(target)'. \
+                         The 'ctx' parameter was removed in E4-D2 — the always-empty lifecycle \
+                         ctx ({{state: {{}}, event_log: []}}) had no reader. The HookDecision \
+                         protocol landed in E4; the typed per-invocation context (State \
+                         threading) is a first-cut deferral tracked in issue #83.",
+                        definition.name, kind
+                    )
+                } else {
+                    format!(
+                        "Annotation '{}': unknown '{}' lifecycle handler parameter '{}'. \
+                         Lifecycle handlers receive only the 'target' descriptor.",
+                        definition.name, kind, parameter.name
+                    )
+                };
+                return Err(ShapeError::SemanticError {
+                    message,
+                    location: Some(compiler.span_to_source_location(handler.span)),
+                });
+            }
             let count = 1usize
                 .checked_add(definition.params.len())
                 .and_then(|count| count.checked_add(handler.params.len()))

@@ -405,17 +405,23 @@ pub fn register_builtin_schemas(registry: &mut TypeSchemaRegistry) -> BuiltinSch
         .int_field("comptime_api")
         .register(registry);
 
-    // ADR-009 E1 #17 (slice 5, A-FULL): `identity_high`/`identity_low` carry the
-    // producer-stamped `FrozenTypeIdentity` (INVALID = {-1,-1} for an unstamped
-    // ref). Appended LAST so the existing name-keyed field offsets
-    // (name=0, kind=1, source=2) stay stable and every name-keyed reader is
-    // unaffected. Distinct from `COMPTIME_FROZEN_TYPE_REF_SCHEMA` (below): that
-    // is the `type_ref(T)` intrinsic's opaque frozen ref; THIS is the
-    // annotation-handler `target.params[].type_ref` carrier the U02 corpus reads.
+    // ADR-009 E5 CKPT-5 — the `.source` reparse-fallback FIELD is DELETED. Every
+    // producer now stamps `identity_high`/`identity_low` with the
+    // `FrozenTypeIdentity` (INVALID = {-1,-1} for an unstamped ref) and the
+    // consumer (`type_annotation_from_string_or_type_ref_slot`) resolves
+    // identity-only via `reconstruct_type_annotation` — there is no `.source`
+    // spelling to reparse and no fallback arm in existence. `name`/`kind` remain
+    // as the U02 corpus's spell/reflect-only fields (`field.type_ref.kind`,
+    // derived from the type spelling at build time; NEVER reparsed into a type).
+    // Every reader is name-keyed (`schema.get_field(name)`), so dropping the
+    // middle `source` field — offsets are now name=0, kind=1, identity_high=2,
+    // identity_low=3 — shifts no reader. Distinct from
+    // `COMPTIME_FROZEN_TYPE_REF_SCHEMA` (below): that is the `type_ref(T)`
+    // intrinsic's opaque frozen ref; THIS is the annotation-handler
+    // `target.params[].type_ref` carrier the U02 corpus reads.
     let _comptime_type_ref = TypeSchemaBuilder::new("__ComptimeTypeRef")
         .string_field("name")
         .string_field("kind")
-        .string_field("source")
         .int_field("identity_high")
         .int_field("identity_low")
         .register(registry);
@@ -794,14 +800,21 @@ pub fn register_builtin_schemas(registry: &mut TypeSchemaRegistry) -> BuiltinSch
         .register(registry);
 
     // `RecordField`: one normalized record field — owner-bound hygienic member
-    // identity halves (`#f`, Dec 57: NEVER a source-name string), the field
-    // type's frozen identity halves, and the `optional` flag.
+    // identity halves (`#f`, Dec 57: the identity/dedup-bearing handle is NEVER
+    // a source-name string), the field type's frozen identity halves, and the
+    // `optional` flag. ADR-009 E5 CKPT-3 (B2 in-scope): `name` is the field's
+    // plain source name, surfaced ADDITIVELY as a Dec-55-class spell/reflect-only
+    // comptime-ABI field (mirrors how `__ComptimeFieldDescriptor.name` surfaces a
+    // struct field name). It is a presentation fact layered BESIDE the member
+    // identity — the CKPT-0 binding invariant keeps the record identity + member
+    // strings byte-identical, so this adds no information to the identity algebra.
     let _comptime_record_field = TypeSchemaBuilder::new(COMPTIME_RECORD_FIELD_SCHEMA)
         .int_field("member_high")
         .int_field("member_low")
         .int_field("type_identity_high")
         .int_field("type_identity_low")
         .bool_field("optional")
+        .string_field("name")
         .register(registry);
 
     // `FrozenRecord`: the normalized structural record — the `fields` array

@@ -45,8 +45,7 @@ use shape_ast::ast::{FunctionDef, Item};
 /// the method SIGNATURE; the shared analyzer then infers the generated body and
 /// rejects the undefined callee before pass-2 body compile.
 const FAILING_ANALYSIS_BODY_PROGRAM: &str = r#"
-annotation genfail() {
-  targets: [type]
+annotation genfail() on type {
   comptime post(target, ctx) {
     extend target {
       method answer() -> int { nonexistent() }
@@ -70,8 +69,7 @@ const ANALYSIS_METHOD_NAME: &str = "Ghost.answer";
 /// error). This drives the pass-2 branch of the install transaction, including
 /// fact-bundle rollback.
 const FAILING_PASS2_BODY_PROGRAM: &str = r#"
-annotation genmut() {
-  targets: [type]
+annotation genmut() on type {
   comptime post(target, ctx) {
     extend target {
       method answer() -> int { let x = 1; x = 2; x }
@@ -90,8 +88,7 @@ const PASS2_METHOD_NAME: &str = "Mut.answer";
 /// provenance sibling test): the generated method returns a literal, passing
 /// both phases, so the transaction commits and every publication survives.
 const SUCCEEDING_BODY_PROGRAM: &str = r#"
-annotation gen() {
-  targets: [type]
+annotation gen() on type {
   comptime post(target, ctx) {
     extend (extend_method_literal(target.name, "answer", "int", 42))
   }
@@ -385,8 +382,7 @@ fn failed_install_restores_a_displaced_preexisting_function_def() {
 /// SECOND method passes analysis but fails pass-2 body compile (an immutable
 /// reassignment). The install fails AFTER the witness is written — the M3 ghost.
 const FAILING_PASS2_M3_PROGRAM: &str = r#"
-annotation genm3() {
-  targets: [type]
+annotation genm3() on type {
   comptime post(target, ctx) {
     extend target {
       method witness() -> int { let mut ghost_local = 0; ghost_local }
@@ -403,8 +399,7 @@ type M3 { id: int }
 /// proving the witness IS written on a successful install (so the reject
 /// assertion below is non-vacuous).
 const SUCCEEDING_M3_PROGRAM: &str = r#"
-annotation genm3ok() {
-  targets: [type]
+annotation genm3ok() on type {
   comptime post(target, ctx) {
     extend target {
       method witness() -> int { let mut ghost_local = 0; ghost_local }
@@ -449,8 +444,7 @@ fn failed_install_rolls_back_owned_mutable_locals_witness() {
 /// generated install that passes analysis but fails pass-2 — so the hoist is
 /// written before the failure (the M4 ghost).
 const FAILING_PASS2_M4_PROGRAM: &str = r#"
-annotation genm4() {
-  targets: [type]
+annotation genm4() on type {
   comptime post(target, ctx) {
     extend target {
       method answer() -> int { let z = 1; z = 2; z }
@@ -469,8 +463,7 @@ ghost_obj.extra
 /// The same program with a VALID generated body — the control proving the hoist
 /// IS written on a successful compile.
 const SUCCEEDING_M4_PROGRAM: &str = r#"
-annotation genm4ok() {
-  targets: [type]
+annotation genm4ok() on type {
   comptime post(target, ctx) {
     extend (extend_method_literal(target.name, "answer", "int", 42))
   }

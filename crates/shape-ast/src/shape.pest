@@ -377,7 +377,24 @@ annotation_args = {
 //     metadata() { return { warmup_period: period }; }
 // }
 annotation_def = {
-    "annotation" ~ ident ~ ("(" ~ annotation_def_params? ~ ")")? ~ "{" ~ annotation_body ~ "}"
+    "annotation" ~ ident ~ ("(" ~ annotation_def_params? ~ ")")? ~ annotation_on_clause? ~ "{" ~ annotation_body ~ "}"
+}
+
+// ADR-009 E4-D4 (slice 1, issue #73): the header `on <kind>, <kind>, ...`
+// clause is the ONE accepted spelling for annotation target restrictions
+// (S1b), having replaced the legacy body `targets: [...]` field. It REUSES
+// `annotation_target_kind` verbatim (all seven kinds), so the header inherits
+// the full target vocabulary with no fork. The legacy body form survives ONLY
+// as `annotation_legacy_targets_decl` — an error-recognizer that lexes the old
+// spelling so the parser can emit a NAMED migration diagnostic (extensions.rs)
+// instead of an opaque pest "expected annotation_handler or }". It never yields
+// a valid AST; there is exactly one accepted spelling. `on` is contextual — the
+// grammar already spells "on" in disjoint productions (on_clause,
+// timeframe_expr, join_query_clause) with no global reservation, and after the
+// annotation name/params group the only continuations are `on` or `{`, so there
+// is no collision.
+annotation_on_clause = {
+    "on" ~ annotation_target_kind ~ ("," ~ annotation_target_kind)*
 }
 
 // ADR-009 C3 #14 (slice 4): a config parameter may carry a type annotation
@@ -397,11 +414,17 @@ annotation_body = {
 }
 
 annotation_body_item = {
-    annotation_targets_decl
+    annotation_legacy_targets_decl
     | annotation_handler
 }
 
-annotation_targets_decl = {
+// ADR-009 E4-D4 (slice 1, S1b): TOMBSTONE. The body `targets: [...]` field is
+// no longer an accepted spelling — targets moved to the header `on`-clause. This
+// rule is retained only so the deleted spelling still LEXES; the parser
+// (extensions.rs) matches it and returns a NAMED migration diagnostic pointing
+// at the header form, rather than surfacing an opaque pest parse error. It never
+// produces a valid AST — one accepted spelling, no duality.
+annotation_legacy_targets_decl = {
     "targets" ~ ":" ~ "[" ~ annotation_target_kind ~ ("," ~ annotation_target_kind)* ~ ","? ~ "]" ~ ";"?
 }
 

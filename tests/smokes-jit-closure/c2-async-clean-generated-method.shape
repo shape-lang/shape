@@ -9,8 +9,7 @@
 // pre-existing JIT gap, not a C2 regression.
 async fn tick() -> int { 0 }
 
-annotation add_run() {
-  targets: [type]
+annotation add_run() on type {
   comptime post(target, ctx) {
     extend target { async method run() -> int { let c: int = 1; await tick(); c } }
   }

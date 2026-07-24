@@ -1,0 +1,49 @@
+/// @module std::core::hooks
+/// The `before`-hook decision protocol (ADR-009 E4).
+///
+/// A `before` hook installed by an annotation may return a `HookDecision<Sig>`
+/// to either CONTINUE to the target with a (possibly-rebound) argument pack, or
+/// SHORT-CIRCUIT with a result — without ever running the target. After-hooks
+/// STILL run on a short-circuit (the wrapping/onion semantic).
+///
+/// ## Surface only — the compiler recognizes the variants by name
+///
+/// This enum is the LSP / documentation / comptime SURFACE. `Proceed` and
+/// `Return` are recognized by the compiler by variant NAME at a `before` hook
+/// body's exit and lowered statically to a compiler-internal typed int tag +
+/// branch over concrete locals (the D7-D native shape) — no `HookDecision` value
+/// is ever built on the hot path, and this generic enum is NEVER routed through
+/// the type resolver. As a consequence, do NOT hand-write a plain generic hook
+/// signature `fn hook(...) -> HookDecision<Sig, State>` and expect the solver to
+/// instantiate it; author the hook as a `before`-hook template
+/// (`fn hook<Args>(args: Args) -> HookDecision<Args>`) and let the annotation
+/// sugar install it — the sugar is the only entry.
+///
+/// ## First cut
+///
+/// - `Proceed(args)` continues to the target (or the next `before`) with the
+///   argument pack `args` (today's compiler-internal mutation carrier;
+///   `args[i]` resolves to the target's i-th parameter type). `return args` is
+///   the documented shorthand for `return HookDecision::Proceed(args)`.
+/// - `Return(result)` short-circuits: the target never runs, and `result` is
+///   proved to be the target's declared return type `R` at the before-exit gate.
+///   After-hooks still run on `result`.
+/// - The no-State tuple form is the only one that ships; a State-threading
+///   struct form is designed but not yet implemented (declare the hook without a
+///   State parameter). See the E4 epic (#20).
+///
+/// ## Failure vocabulary
+///
+/// Only **propagate-typed-failure** ships: a hook returns a failure-valued `R`
+/// via `return HookDecision::Return(<failure-valued result>)` (well-typed only
+/// when `R` has a failure channel — `Result<T, E>` / `Option<T>`), and it
+/// threads the after-chain as any success-valued `R` does. The `recover`,
+/// `retry`, and `re-place` transforms are designed but not implemented in E4;
+/// spelling one is a named surface-and-stop diagnostic (see issue #80).
+pub enum HookDecision<Sig> {
+    /// Continue to the target / next `before` with the argument pack.
+    Proceed(Sig),
+    /// Short-circuit with a result of the target's declared return type `R`.
+    /// After-hooks still run on it.
+    Return(Sig),
+}

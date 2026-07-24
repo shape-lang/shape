@@ -1,12 +1,10 @@
 // Probe: declare annotations but DO NOT apply them. Does mere declaration compile/run?
-annotation traced(tag) {
-  targets: [function]
+annotation traced(tag) on function {
   before(args, ctx) { args }
   after(args, result, ctx) { result }
 }
 
-annotation serializable() {
-  targets: [type]
+annotation serializable() on type {
   comptime post(target, ctx) {
     extend target {
       method to_json() { }

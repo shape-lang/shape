@@ -74,8 +74,7 @@ fn install_helper(compiler: &mut BytecodeCompiler, exact_name: &str, value: i64)
 fn selected_handler(target: &str) -> AnnotationDef {
     annotation_def(&format!(
         r#"
-annotation mark() {{
-  targets: [{target}]
+annotation mark() on {target} {{
   comptime post(target, ctx) {{
     if choose() == 11 {{
       error("SELECTED_DEFINING_MODULE")
@@ -91,8 +90,7 @@ annotation mark() {{
 fn missing_handler(target: &str) -> AnnotationDef {
     annotation_def(&format!(
         r#"
-annotation mark() {{
-  targets: [{target}]
+annotation mark() on {target} {{
   comptime post(target, ctx) {{
     if choose() > 0 {{ error("BARE_HELPER_AUTHORITY_LEAK") }}
   }}
@@ -104,8 +102,7 @@ annotation mark() {{
 fn qualified_handler() -> AnnotationDef {
     annotation_def(
         r#"
-annotation mark() {
-  targets: [function]
+annotation mark() on function {
   comptime post(target, ctx) {
     if other::choose() == 22 { error("EXPLICIT_QUALIFIED_HELPER") }
   }
@@ -117,8 +114,7 @@ annotation mark() {
 fn root_local_handler() -> AnnotationDef {
     annotation_def(
         r#"
-annotation mark() {
-  targets: [function]
+annotation mark() on function {
   comptime post(target, ctx) {
     if choose() == 99 { error("ROOT_LOCAL_HELPER") }
   }

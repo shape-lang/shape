@@ -2,8 +2,7 @@
 // One closure shares the local `var total`, mutates it, and the method body
 // reads `total` AFTER the closure ran — so the read observes the closure's
 // mutation, proving `share` is a real shared cell (not a by-value copy).
-annotation add_answer() {
-  targets: [type]
+annotation add_answer() on type {
   comptime post(target, ctx) {
     extend target { method answer() -> int { var total = 40
       let worker = |; share total| { total = total + 2

@@ -7,17 +7,43 @@ use crate::ast::{
 use crate::error::{Result, ShapeError};
 use crate::parser::Rule;
 use crate::parser::expressions::control_flow::parse_block_expr;
-use crate::parser::pair_span;
 use crate::parser::types::parse_type_annotation;
+use crate::parser::{pair_location, pair_span};
 use pest::iterators::Pair;
+
+/// Map an `annotation_target_kind` token to its AST variant.
+///
+/// ADR-009 E4-D4 (slice 1, issue #73): the header `on`-clause is the one
+/// accepted spelling for target restrictions (S1b), and this maps each of the
+/// seven `annotation_target_kind` tokens to its variant. The pest grammar
+/// already constrains the token to the seven-kind alternation, so the `other`
+/// arm is defensive.
+fn parse_target_kind(s: &str) -> Result<crate::ast::AnnotationTargetKind> {
+    Ok(match s {
+        "function" => crate::ast::AnnotationTargetKind::Function,
+        "type" => crate::ast::AnnotationTargetKind::Type,
+        "module" => crate::ast::AnnotationTargetKind::Module,
+        "expression" => crate::ast::AnnotationTargetKind::Expression,
+        "block" => crate::ast::AnnotationTargetKind::Block,
+        "await_expr" => crate::ast::AnnotationTargetKind::AwaitExpr,
+        "binding" => crate::ast::AnnotationTargetKind::Binding,
+        other => {
+            return Err(ShapeError::ParseError {
+                message: format!("unknown annotation target kind '{}'", other),
+                location: None,
+            });
+        }
+    })
+}
 
 /// Parse an annotation definition with lifecycle handlers
 ///
 /// Grammar:
 /// ```pest
 /// annotation_def = {
-///     "annotation" ~ ident ~ "(" ~ annotation_def_params? ~ ")" ~ "{" ~ annotation_body ~ "}"
+///     "annotation" ~ ident ~ ("(" ~ annotation_def_params? ~ ")")? ~ annotation_on_clause? ~ "{" ~ annotation_body ~ "}"
 /// }
+/// annotation_on_clause = { "on" ~ annotation_target_kind ~ ("," ~ annotation_target_kind)* }
 /// annotation_body = { annotation_handler* }
 /// annotation_handler = {
 ///     annotation_handler_name ~ "(" ~ annotation_handler_params? ~ ")" ~ return_type? ~ block_expr
@@ -40,6 +66,24 @@ pub fn parse_annotation_def(pair: Pair<Rule>) -> Result<AnnotationDef> {
 
     for part in inner {
         match part.as_rule() {
+            Rule::annotation_on_clause => {
+                // ADR-009 E4-D4 (slice 1, issue #73): populate
+                // `allowed_targets` from the header on-clause. Reuses the
+                // SAME `annotation_target_kind` vocabulary as the body field
+                // via `parse_target_kind`, so the two spellings cannot drift.
+                // All seven kinds are header-eligible (no scoping cut, per
+                // DN4) — `annotation_target_kind` enumerates all seven, so the
+                // clause inherits them for free. No new AST field, no new
+                // variant, hence no exhaustive-match cascade.
+                let mut targets = Vec::new();
+                for kind_pair in part.into_inner() {
+                    if kind_pair.as_rule() != Rule::annotation_target_kind {
+                        continue;
+                    }
+                    targets.push(parse_target_kind(kind_pair.as_str())?);
+                }
+                allowed_targets = Some(targets);
+            }
             Rule::annotation_def_params => {
                 // ADR-009 C3 #14 (slice 4): each config parameter is an
                 // `annotation_def_param` pair — `ident ~ (":" ~
@@ -95,33 +139,25 @@ pub fn parse_annotation_def(pair: Pair<Rule>) -> Result<AnnotationDef> {
                         Rule::annotation_handler => {
                             handlers.push(parse_annotation_handler(item)?);
                         }
-                        Rule::annotation_targets_decl => {
-                            let mut targets = Vec::new();
-                            for target_pair in item.into_inner() {
-                                if target_pair.as_rule() != Rule::annotation_target_kind {
-                                    continue;
-                                }
-                                let kind = match target_pair.as_str() {
-                                    "function" => crate::ast::AnnotationTargetKind::Function,
-                                    "type" => crate::ast::AnnotationTargetKind::Type,
-                                    "module" => crate::ast::AnnotationTargetKind::Module,
-                                    "expression" => crate::ast::AnnotationTargetKind::Expression,
-                                    "block" => crate::ast::AnnotationTargetKind::Block,
-                                    "await_expr" => crate::ast::AnnotationTargetKind::AwaitExpr,
-                                    "binding" => crate::ast::AnnotationTargetKind::Binding,
-                                    other => {
-                                        return Err(ShapeError::ParseError {
-                                            message: format!(
-                                                "unknown annotation target kind '{}'",
-                                                other
-                                            ),
-                                            location: None,
-                                        });
-                                    }
-                                };
-                                targets.push(kind);
-                            }
-                            allowed_targets = Some(targets);
+                        Rule::annotation_legacy_targets_decl => {
+                            // ADR-009 E4-D4 (slice 1, S1b): TOMBSTONE. The body
+                            // `targets: [...]` field was removed — targets moved
+                            // to the header `on`-clause. The grammar still LEXES
+                            // the old spelling (`annotation_legacy_targets_decl`)
+                            // solely so we can emit this NAMED migration
+                            // diagnostic here rather than surface an opaque pest
+                            // "expected annotation_handler or }" error. This arm
+                            // NEVER populates `allowed_targets`; there is exactly
+                            // one accepted spelling.
+                            return Err(ShapeError::ParseError {
+                                message: format!(
+                                    "annotation targets moved to the header `on` clause — \
+                                     write `annotation {}(...) on function` (issue #73); the \
+                                     body `targets: [...]` field was removed",
+                                    name
+                                ),
+                                location: Some(pair_location(&item)),
+                            });
                         }
                         _ => {}
                     }

@@ -525,8 +525,13 @@ impl BytecodeCompiler {
                     .expect("template_suffix is Some exactly when template_plan is Some"),
             );
             if plan.pseudo_tuple.is_some() {
-                pseudo_tuple::resolve_pseudo_tuple(&mut specialized_def, plan, self)
-                    .map_err(SpecializationFailure::Hard)?;
+                // ADR-009 E4 S4 (S4-3): the gate returns the ShortCircuitProof
+                // token for a decision plan; the weave consumes it (S4-4). The
+                // always-Proceed form (every plan reaching here today) yields
+                // `None` — dropped without effect.
+                let _shortcircuit_proof =
+                    pseudo_tuple::resolve_pseudo_tuple(&mut specialized_def, plan, self)
+                        .map_err(SpecializationFailure::Hard)?;
             }
             // C3 S3b — the heap-constant BAKE, immediately after the G9
             // resolution and BEFORE register + compile_function so the

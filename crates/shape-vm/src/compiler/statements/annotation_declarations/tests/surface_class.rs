@@ -71,8 +71,7 @@ fn untyped_config_rejection_names_the_first_untyped_of_a_mixed_definition() {
 #[test]
 fn untyped_config_rejection_fires_for_declarative_hook_definitions_too() {
     let message = compile_err(
-        "annotation traced(tag) {\n\
-         \x20 targets: [function]\n\
+        "annotation traced(tag) on function {\n\
          \x20 before(args) { return args }\n\
          }",
     );
@@ -91,10 +90,9 @@ fn untyped_config_positive_twin_all_typed_definition_compiles() {
 fn untyped_config_positive_twin_zero_param_definition_compiles() {
     // Zero config params = nothing to type — the definition routes the ONE
     // (new) path for free; there is no opt-in marker and no legacy arm.
-    compile_ok("annotation plain() { targets: [function] }");
+    compile_ok("annotation plain() on function { }");
     compile_ok(
-        "annotation observer() {\n\
-         \x20 targets: [function]\n\
+        "annotation observer() on function {\n\
          \x20 before() { 1 }\n\
          }",
     );
@@ -241,20 +239,17 @@ fn r3_positive_twins_all_four_hook_forms_compile() {
     // before(args) / after(result) / before() / after() — with a body that
     // satisfies each form's shape — all pass the declaration checks.
     compile_ok(
-        "annotation typedcfg(times: int) {\n\
-         \x20 targets: [function]\n\
+        "annotation typedcfg(times: int) on function {\n\
          \x20 before(args) { return args }\n\
          }",
     );
     compile_ok(
-        "annotation typedcfg2(times: int) {\n\
-         \x20 targets: [function]\n\
+        "annotation typedcfg2(times: int) on function {\n\
          \x20 after(result) { return result }\n\
          }",
     );
     compile_ok(
-        "annotation typedcfg3(times: int) {\n\
-         \x20 targets: [function]\n\
+        "annotation typedcfg3(times: int) on function {\n\
          \x20 before() { let x = times }\n\
          \x20 after() { let y = times }\n\
          }",
@@ -271,8 +266,7 @@ fn r3_positive_twins_all_four_hook_forms_compile() {
 #[test]
 fn lifecycle_zero_param_definition_compiles_and_registers_handlers() {
     let program = parse(
-        "annotation traced() {\n\
-         \x20 targets: [function]\n\
+        "annotation traced() on function {\n\
          \x20 on_define(target) { 1 }\n\
          \x20 metadata(target) { { version: 1 } }\n\
          }",
@@ -295,8 +289,7 @@ fn lifecycle_typed_config_definition_now_compiles_with_typed_params() {
     // orders`): typed config params + lifecycle handlers COMPILE on the
     // collapsed surface, in both handler orders and mixed with hooks.
     let program = parse(
-        "annotation typedcfg(times: int) {\n\
-         \x20 targets: [function]\n\
+        "annotation typedcfg(times: int) on function {\n\
          \x20 on_define(target) { 1 }\n\
          }",
     );
@@ -316,15 +309,13 @@ fn lifecycle_typed_config_definition_now_compiles_with_typed_params() {
     );
     // Mixed hook + lifecycle, both handler orders.
     compile_ok(
-        "annotation typedcfg3(times: int) {\n\
-         \x20 targets: [function]\n\
+        "annotation typedcfg3(times: int) on function {\n\
          \x20 before(args) { return args }\n\
          \x20 on_define(target) { 1 }\n\
          }",
     );
     compile_ok(
-        "annotation typedcfg4(times: int) {\n\
-         \x20 targets: [function]\n\
+        "annotation typedcfg4(times: int) on function {\n\
          \x20 on_define(target) { 1 }\n\
          \x20 before(args) { return args }\n\
          }",
@@ -342,8 +333,7 @@ fn lifecycle_typed_config_definition_now_compiles_with_typed_params() {
 #[test]
 fn s5b_nonfn_type_only_targets_with_hooks_reject_at_declaration() {
     let message = compile_err(
-        "annotation deco(times: int) {\n\
-         \x20 targets: [type]\n\
+        "annotation deco(times: int) on type {\n\
          \x20 before(args) { return args }\n\
          }",
     );
@@ -363,8 +353,7 @@ fn s5b_nonfn_zero_param_hook_definition_rejects_at_declaration_too() {
     // fixture classified Legacy (no sugar, no check) and ran the legacy
     // weave; now it carries sugar and the SAME producer fires.
     let message = compile_err(
-        "annotation deco0() {\n\
-         \x20 targets: [expression]\n\
+        "annotation deco0() on expression {\n\
          \x20 before(args) { return args }\n\
          }",
     );
@@ -380,8 +369,7 @@ fn s5b_nonfn_zero_param_hook_definition_rejects_at_declaration_too() {
 #[test]
 fn s5b_nonfn_multi_nonfn_targets_render_the_full_list() {
     let message = compile_err(
-        "annotation deco(times: int) {\n\
-         \x20 targets: [type, module]\n\
+        "annotation deco(times: int) on type, module {\n\
          \x20 after(result) { return result }\n\
          }",
     );
@@ -397,8 +385,7 @@ fn s5b_nonfn_declaration_twins_compile() {
     // (the fn application weaves; the type application is the
     // application-tier rejection, pinned in sugar_matrix_tests).
     compile_ok(
-        "annotation deco(times: int) {\n\
-         \x20 targets: [function, type]\n\
+        "annotation deco(times: int) on function, type {\n\
          \x20 before(args) { return args }\n\
          }",
     );
@@ -406,16 +393,14 @@ fn s5b_nonfn_declaration_twins_compile() {
     // legal — comptime handlers run on type targets; only declarative
     // hooks demand a function seam.
     compile_ok(
-        "annotation info(times: int) {\n\
-         \x20 targets: [type]\n\
+        "annotation info(times: int) on type {\n\
          \x20 comptime post(target, ctx) { 1 }\n\
          }",
     );
     // Twin 3: a zero-param comptime-only def with non-function targets is
     // hook-free — no sugar, no rejection.
     compile_ok(
-        "annotation zero_deco() {\n\
-         \x20 targets: [type]\n\
+        "annotation zero_deco() on type {\n\
          \x20 comptime post(target, ctx) { 1 }\n\
          }",
     );

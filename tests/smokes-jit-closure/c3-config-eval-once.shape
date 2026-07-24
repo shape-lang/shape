@@ -28,8 +28,7 @@ fn tmpl<Args>(args: Args, cfg: Array<int>) -> Args {
   return args
 }
 
-annotation hooked() {
-  targets: [function]
+annotation hooked() on function {
   comptime post(target, ctx) {
     warning("cfg-eval")
     let cfg = [10, 20]

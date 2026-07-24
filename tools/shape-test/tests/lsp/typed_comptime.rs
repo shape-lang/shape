@@ -32,9 +32,9 @@ fn runtime_completion_hides_typed_reflection_builtins() {
 #[test]
 fn annotation_comptime_hook_offers_typed_reflection_builtins() {
     ShapeTest::new(
-        "annotation inspect() {\n  targets: [type]\n  comptime post(target, ctx) {\n    \n  }\n}\n",
+        "annotation inspect() on type {\n  comptime post(target, ctx) {\n    \n  }\n}\n",
     )
-    .at(pos(3, 4))
+    .at(pos(2, 4))
     .expect_completion("type_ref")
     .expect_completion("type_category");
 }
@@ -213,9 +213,9 @@ fn runtime_completion_hides_reflect() {
 #[test]
 fn annotation_comptime_hook_offers_reflect() {
     ShapeTest::new(
-        "annotation inspect() {\n  targets: [type]\n  comptime post(target, ctx) {\n    \n  }\n}\n",
+        "annotation inspect() on type {\n  comptime post(target, ctx) {\n    \n  }\n}\n",
     )
-    .at(pos(3, 4))
+    .at(pos(2, 4))
     .expect_completion("reflect");
 }
 
@@ -806,8 +806,7 @@ fn const_arg_offers_signature_help() {
 fn completion_sees_generated_free_function_after_discovery() {
     // The annotation emits `User_label()`; a bare-name call position on the
     // trailing line must complete the generated declaration.
-    let source = r#"annotation schema_of() {
-    targets: [type]
+    let source = r#"annotation schema_of() on type {
     comptime post(target, ctx) {
         extend (item_fn(f"{target.name}_label", "string", "User schema"))
     }
@@ -837,8 +836,7 @@ User_
 /// execution modes agree.
 #[test]
 fn generated_free_function_visible_to_later_source_runs_identically_in_vm_and_jit() {
-    let source = r#"annotation schema_of() {
-    targets: [type]
+    let source = r#"annotation schema_of() on type {
     comptime post(target, ctx) {
         extend (item_fn(f"{target.name}_answer", "int", 21))
     }
@@ -859,8 +857,7 @@ double_answer()
 fn runtime_completion_hides_generated_methods_from_free_standing_position() {
     // The annotation emits the METHOD `Point.answer`; a bare-name position
     // must NOT complete it (methods are reachable only through a receiver).
-    let source = r#"annotation gen() {
-  targets: [type]
+    let source = r#"annotation gen() on type {
   comptime post(target, ctx) {
     extend target {
       method answer() -> int { 42 }
@@ -891,8 +888,7 @@ ans
 /// Zero-based lines mirror `generated_navigation`'s fixture:
 /// 14  let a = p.answer()   <- generated-method call site (cursor here)
 const D2_VIRTUAL_VIEW_PROGRAM: &str = r#"
-annotation gen() {
-  targets: [type]
+annotation gen() on type {
   comptime post(target, ctx) {
     extend target {
       method answer() -> int { 42 }
@@ -910,7 +906,7 @@ let a = p.answer()
 #[test]
 fn generated_call_site_renders_read_only_virtual_view_with_source_map() {
     ShapeTest::new(D2_VIRTUAL_VIEW_PROGRAM)
-        .at(pos(14, 11))
+        .at(pos(13, 11))
         .expect_expansion_view_renders("Point.answer");
 }
 
@@ -1000,8 +996,7 @@ fn nominal_shape_result_axis_completes_through_the_shared_reflection_lookup() {
 /// 11  type Pair { a: int, b: int }
 /// 14  let t = pair.total()             <- generated-method call site
 const E3_GENERATED_EXTEND_PROGRAM: &str = r#"
-annotation gen() {
-  targets: [type]
+annotation gen() on type {
   comptime post(target, ctx) {
     extend target {
       method total() -> int { self.a + self.b }
@@ -1031,8 +1026,7 @@ let t = pair.total()
 ///  2    before(args) { ... }
 ///  8  @traced(3)                          <- application (cursor here)
 ///  9  fn victim(a: int) -> int ...
-const S8C_SUGAR_HOOK_PROGRAM: &str = r#"annotation traced(factor: int) {
-  targets: [function]
+const S8C_SUGAR_HOOK_PROGRAM: &str = r#"annotation traced(factor: int) on function {
   before(args) {
     args[0] = args[0] * factor
     return args
@@ -1051,7 +1045,7 @@ victim(1)
 #[test]
 fn s8c_sugar_application_hover_shows_template_signature_and_captures() {
     ShapeTest::new(S8C_SUGAR_HOOK_PROGRAM)
-        .at(pos(8, 2))
+        .at(pos(7, 2))
         .expect_hover_contains("<Args>(args: Args) -> Args")
         .expect_hover_contains("factor = 3");
 }
@@ -1062,7 +1056,7 @@ fn s8c_sugar_application_hover_shows_template_signature_and_captures() {
 #[test]
 fn s8c_sugar_application_hover_names_the_hook_origin_phrase() {
     ShapeTest::new(S8C_SUGAR_HOOK_PROGRAM)
-        .at(pos(8, 2))
+        .at(pos(7, 2))
         .expect_hover_contains("hook of annotation")
         .expect_hover_contains("`traced`");
 }
@@ -1077,8 +1071,7 @@ fn s8c_api_body_fn_hover_shows_the_generic_declaration_view() {
   return args
 }
 
-annotation hookann() {
-  targets: [function]
+annotation hookann() on function {
   comptime post(target, ctx) {
     install(before_hook(tmpl, []))
   }
@@ -1100,8 +1093,7 @@ victim(1)
 /// pre-existing definition hover unchanged — no hook section appears.
 #[test]
 fn s8c_application_with_zero_installs_keeps_the_definition_hover_unchanged() {
-    let source = r#"annotation plain() {
-  targets: [function]
+    let source = r#"annotation plain() on function {
   comptime post(target, ctx) {
     let x = 1
   }
@@ -1113,7 +1105,7 @@ fn victim(a: int) -> int { return a }
 victim(1)
 "#;
     ShapeTest::new(source)
-        .at(pos(7, 2))
+        .at(pos(6, 2))
         .expect_hover_contains("**Annotation**")
         .expect_hover_not_contains("Installed hooks");
 }
@@ -1124,8 +1116,8 @@ fn goto_definition_on_generated_extend_method_resolves_via_shared_query() {
     // call site resolves only if the shared generated-symbol query answers
     // it (application line 10 + generator-definition line 3).
     ShapeTest::new(E3_GENERATED_EXTEND_PROGRAM)
-        .at(pos(14, 13))
-        .expect_definition_includes_lines(&[10, 3]);
+        .at(pos(13, 13))
+        .expect_definition_includes_lines(&[9, 2]);
 }
 
 #[test]
@@ -1134,8 +1126,7 @@ fn member_completion_offers_generated_extend_method_via_shared_query() {
     // the generated method — sourced from the executed authority, never the
     // deleted static AST scan.
     let source = r#"
-annotation gen() {
-  targets: [type]
+annotation gen() on type {
   comptime post(target, ctx) {
     extend target {
       method total() -> int { self.a + self.b }

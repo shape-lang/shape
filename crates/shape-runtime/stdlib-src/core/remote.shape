@@ -162,13 +162,52 @@ enum RemoteError {
     Remote { message: string },
 }
 
-// DARK WINDOW (ADR-009 C3-G14 A′, user-ratified 2026-07-21): the `@remote`
-// annotation's implementation rode the deleted legacy runtime-hook surface
-// (untyped config + `ctx.target` + the `{result:}` before-short-circuit — the
-// HookDecision-protocol precursor, E4's charter). It is REMOVED with the C3-S6
-// classification collapse; `@remote` is dark until E4 (#20) re-implements it on
-// the typed HookDecision protocol as its first acceptance consumer — see
-// GitHub issue #68. The distributed e2e tests that ride `@remote` are
-// #[ignore]'d with the same pointer; they are E4's acceptance suite.
-// `remote.execute` / `remote.ping` / `remote::call` / `remote::call_async`
-// (and the compiler-elaborated `__call_*` siblings above) remain fully live.
+/// Two internal weave markers for the `@remote` before-hook (ADR-009 E4 S5).
+/// They are namable ONLY here (`allow_internal_builtins`) and NEVER survive to
+/// runtime: the decision-hook weave SUBSTITUTES them at lowering time
+/// (`pseudo_tuple::substitute_remote_markers`) — `__remote_impl_ref()` becomes
+/// the hygienic impl-shadow's fn-ref (a UInt64 function id, NEVER the wrapper's
+/// — so `@remote` cannot self-recurse), and `__remote_arg_pack()` becomes the
+/// positional `[p0..pN-1]` argument pack (one homogeneous `Array<T>`, the
+/// OUTER-TypedArray wire carrier). A reference to either OUTSIDE a decision-hook
+/// weave FAILS LOUD as an unresolved/reserved builtin — never a silent
+/// misdispatch (E4-D3).
+builtin fn __remote_impl_ref() -> _;
+builtin fn __remote_arg_pack() -> Array<_>;
+
+/// Ship execution to a remote `shape serve` node (ADR-009 E4 S5 — @remote reborn
+/// on the typed HookDecision protocol, closing the #68 dark window).
+///
+/// When applied to a function, calling that function transparently executes it
+/// on the specified remote server instead of locally, returning the peer's value
+/// at the bare declared return type and RAISING an ordinary runtime error on
+/// transport / protocol / remote failure (Q26). The recoverable, `Result`-typed
+/// surface is the imperative `remote::call` primitive.
+///
+/// The before-hook is the HookDecision protocol's first real consumer: it
+/// short-circuits the local call (`HookDecision::Return`) and instead ships the
+/// call to the peer via the live native transport (`__call_raising`). The callee
+/// is the annotated function's own hygienic impl shadow — never the wrapper — and
+/// the arguments are shipped as one positional `Array<T>` pack. `addr` reaches
+/// the hook as a ConstLift config capture.
+///
+/// First-cut bounds (each a LOUD named-defer, issue #83): single-parameter or
+/// homogeneous multi-parameter signatures only (a heterogeneous n-ary signature
+/// cannot form the homogeneous pack); synchronous targets only (async `@remote`
+/// needs a `__call_async_raising` sibling); at least one parameter.
+///
+/// # Example
+///
+/// ```shape
+/// from std::core::remote use { @remote }
+///
+/// @remote("worker:9527")
+/// fn compute(data: Array<int>) -> int { return data.length() }
+///
+/// let result = compute([1, 2, 3])
+/// ```
+pub annotation remote(addr: string) on function {
+    before(args) -> HookDecision<Args> {
+        return HookDecision::Return(__call_raising(addr, __remote_impl_ref(), __remote_arg_pack()))
+    }
+}

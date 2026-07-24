@@ -8,8 +8,8 @@ fn direct_and_exported_forward_declarations_share_one_phase() {
 type DirectProbe { id: int }
 @exported()
 type ExportedProbe { id: int }
-annotation direct() { targets: [type] }
-pub annotation exported() { targets: [type] }
+annotation direct() on type { }
+pub annotation exported() on type { }
 "#,
     );
     let bytecode = BytecodeCompiler::new()

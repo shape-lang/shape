@@ -3023,8 +3023,7 @@ mod tests {
     fn test_comptime_handler_extend_generates_method() {
         // A comptime handler using direct `extend` should register generated methods.
         let code = r#"
-            annotation add_method() {
-                targets: [type]
+            annotation add_method() on type {
                 comptime post(target, ctx) {
                     extend Number {
                         method doubled() { self * 2.0 }
@@ -3049,8 +3048,7 @@ mod tests {
     fn test_comptime_handler_extend_method_executes() {
         // Verify the generated extend method actually runs correctly
         let code = r#"
-            annotation auto_extend() {
-                targets: [type]
+            annotation auto_extend() on type {
                 comptime post(target, ctx) {
                     extend Number {
                         method tripled() { self * 3.0 }
@@ -3112,8 +3110,7 @@ mod tests {
     fn test_comptime_handler_extend_multiple_methods() {
         // A comptime handler can emit multiple methods in one extend block.
         let code = r#"
-            annotation math_ops() {
-                targets: [type]
+            annotation math_ops() on type {
                 comptime post(target, ctx) {
                     extend Number {
                         method add_ten() { self + 10.0 }
@@ -3139,8 +3136,7 @@ mod tests {
     fn test_expression_annotation_comptime_handler_executes() {
         // Expression-level annotation should run comptime handler and process extend directives.
         let code = r#"
-            annotation expr_extend() {
-                targets: [expression]
+            annotation expr_extend() on expression {
                 comptime post(target, ctx) {
                     extend Number {
                         method quadrupled() { self * 4.0 }
@@ -3159,8 +3155,7 @@ mod tests {
     fn test_expression_annotation_target_validation() {
         // Type-only annotation applied to an expression should fail with a target error.
         let code = r#"
-            annotation only_type() {
-                targets: [type]
+            annotation only_type() on type {
                 comptime post(target, ctx) {
                     target.kind
                 }
@@ -3180,7 +3175,7 @@ mod tests {
     fn test_expression_annotation_rejects_definition_lifecycle_hooks() {
         let code = r#"
             annotation info() {
-                metadata(target, ctx) {
+                metadata(target) {
                     target.kind
                 }
             }
@@ -3200,8 +3195,7 @@ mod tests {
     fn test_await_annotation_target_validation() {
         // Await-only annotation should compile in await context.
         let ok_code = r#"
-            annotation only_await() {
-                targets: [await_expr]
+            annotation only_await() on await_expr {
                 comptime post(target, ctx) {
                     target.kind
                 }
@@ -3223,8 +3217,7 @@ mod tests {
 
         // The same await-only annotation on a plain expression must fail.
         let bad_code = r#"
-            annotation only_await() {
-                targets: [await_expr]
+            annotation only_await() on await_expr {
                 comptime post(target, ctx) {
                     target.kind
                 }
@@ -3245,8 +3238,7 @@ mod tests {
     fn test_direct_extend_target_on_type_via_comptime_handler() {
         // Direct `extend target { ... }` should work without action-object indirection.
         let code = r#"
-            annotation add_sum() {
-                targets: [type]
+            annotation add_sum() on type {
                 comptime post(target, ctx) {
                     extend target {
                         method sum() {
@@ -3269,8 +3261,7 @@ mod tests {
     fn test_direct_remove_target_on_expression() {
         // `remove target` on an expression target should replace the expression with null.
         let code = r#"
-            annotation drop_expr() {
-                targets: [expression]
+            annotation drop_expr() on expression {
                 comptime post(target, ctx) {
                     remove target
                 }
@@ -6149,8 +6140,7 @@ mod tests {
         // When a comptime annotation handler removes a function via `remove target`,
         // calling that function should produce a clear compile error, not a stack overflow.
         let code = r#"
-            annotation remove_me() {
-                targets: [function]
+            annotation remove_me() on function {
                 comptime post(target, ctx) {
                     remove target
                 }
@@ -6180,8 +6170,7 @@ mod tests {
     fn test_removed_function_ref_produces_error() {
         // Referencing a removed function (not calling it) should also error.
         let code = r#"
-            annotation remove_me() {
-                targets: [function]
+            annotation remove_me() on function {
                 comptime post(target, ctx) {
                     remove target
                 }

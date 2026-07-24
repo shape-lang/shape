@@ -1,6 +1,7 @@
 //! Read-only semantic-freeze projections for compiler-owned queries.
 
 use super::*;
+use super::super::type_reflection::CanonicalType;
 use shape_runtime::type_system::{
     RecursiveCallableShape, SemanticPassingMode, SemanticTypeCandidate, SemanticTypePathSegment,
     Type, TypeVar, annotation_as_tyvar,
@@ -57,27 +58,19 @@ impl FreezeOverlay {
         annotation: &TypeAnnotation,
     ) -> std::result::Result<FrozenSemanticTypeProjection, String> {
         let canonical = canonicalize_type_annotation(annotation, self)?;
-        let entry = CompositeMemoEntry {
-            category: canonical.category,
-            callable: canonical.callable.clone(),
-            applied_nominal: super::super::type_reflection::canonical_refine(&canonical.descriptor),
-            tuple: canonical.tuple.clone(),
-            record: canonical.record.clone(),
-            reference: canonical.reference,
-            union: canonical.union.clone(),
-        };
-        {
-            let mut composites = self
-                .composites
-                .lock()
-                .expect("freeze-overlay composite memo lock poisoned");
-            if let Some(previous) = composites.insert(canonical.identity, entry) {
-                assert_eq!(
-                    previous.category, canonical.category,
-                    "canonical type identity collision across semantic categories"
-                );
-            }
-        }
+        self.intern_composite_memo(&canonical);
+        // ADR-009 E5 CKPT-1: memoize the composite payload evidence for every
+        // composite SUB-expression too, so a NESTED applied/composite identity
+        // (the inner `Option<int>` of `Array<Option<int>>`) is answerable by
+        // `applied_nominal_of` / `payload_of` off the SAME shared
+        // `Arc<FreezeOverlay>` memo the top-level identity uses. The
+        // identity-indirected recursion in `reconstruct_type_annotation`
+        // (comptime_builtins.rs) then reads these DERIVED facts — it never
+        // re-parses `.source`. The walk is over the FINITE annotation AST; a
+        // bare-nominal argument is a LEAF (spelled by name, never
+        // field-expanded), so a recursive type (`Array<Tree>`) terminates
+        // (ADR-009 E5 A2 identity-indirected-recursion invariant).
+        self.memoize_composite_children(annotation);
         Ok(FrozenSemanticTypeProjection {
             identity: canonical.identity,
             category: canonical.category,
@@ -89,6 +82,90 @@ impl FreezeOverlay {
             presentation: canonical_type_presentation(annotation, self)
                 .unwrap_or_else(|_| format_identity(canonical.identity)),
         })
+    }
+
+    /// Intern one canonicalized type's composite payload evidence into the
+    /// shared `composites` memo. Idempotent: a re-insert of the same identity
+    /// must agree on category (the canonicalizer is deterministic). Shared by
+    /// the top-level projection and the CKPT-1 sub-expression memoization walk
+    /// — the ONE place a `CompositeMemoEntry` is minted, so the two walks can
+    /// never drift.
+    fn intern_composite_memo(&self, canonical: &CanonicalType) {
+        let entry = CompositeMemoEntry {
+            category: canonical.category,
+            callable: canonical.callable.clone(),
+            applied_nominal: super::super::type_reflection::canonical_refine(&canonical.descriptor),
+            tuple: canonical.tuple.clone(),
+            record: canonical.record.clone(),
+            reference: canonical.reference,
+            union: canonical.union.clone(),
+        };
+        let mut composites = self
+            .composites
+            .lock()
+            .expect("freeze-overlay composite memo lock poisoned");
+        if let Some(previous) = composites.insert(canonical.identity, entry) {
+            assert_eq!(
+                previous.category, canonical.category,
+                "canonical type identity collision across semantic categories"
+            );
+        }
+    }
+
+    /// ADR-009 E5 CKPT-1: memoize (idempotently) `annotation`'s composite
+    /// payload evidence, then recurse into its composite children. A
+    /// non-freezable sub-expression's canonicalize error is SWALLOWED — it
+    /// simply leaves no memo entry (the enclosing stamp-gate already decides the
+    /// parent's freezability); this recursion never introduces a `.source`
+    /// reparse and never fabricates an identity. Terminates on the finite type
+    /// expression (bare-nominal arguments are leaves; recursion is over the
+    /// syntactic children, not the referents' declarations).
+    fn memoize_composite_subtree(&self, annotation: &TypeAnnotation) {
+        if let Ok(canonical) = canonicalize_type_annotation(annotation, self) {
+            self.intern_composite_memo(&canonical);
+        }
+        self.memoize_composite_children(annotation);
+    }
+
+    /// Recurse the memoization walk into `annotation`'s composite children only
+    /// — a `Basic`/`Reference` leaf, `Dyn`, and the empty markers have no
+    /// composite sub-expression to intern.
+    fn memoize_composite_children(&self, annotation: &TypeAnnotation) {
+        match annotation {
+            TypeAnnotation::Array(inner)
+            | TypeAnnotation::Borrow { inner, .. }
+            | TypeAnnotation::Existential { inner, .. } => self.memoize_composite_subtree(inner),
+            TypeAnnotation::Generic { args, .. } => {
+                for arg in args {
+                    self.memoize_composite_subtree(arg);
+                }
+            }
+            TypeAnnotation::Tuple(items)
+            | TypeAnnotation::Union(items)
+            | TypeAnnotation::Intersection(items) => {
+                for item in items {
+                    self.memoize_composite_subtree(item);
+                }
+            }
+            TypeAnnotation::Function { params, returns } => {
+                for param in params {
+                    self.memoize_composite_subtree(&param.type_annotation);
+                }
+                self.memoize_composite_subtree(returns);
+            }
+            TypeAnnotation::Object(fields) => {
+                for field in fields {
+                    self.memoize_composite_subtree(&field.type_annotation);
+                }
+            }
+            TypeAnnotation::Basic(_)
+            | TypeAnnotation::Reference(_)
+            | TypeAnnotation::Dyn(_)
+            | TypeAnnotation::Void
+            | TypeAnnotation::Never
+            | TypeAnnotation::Null
+            | TypeAnnotation::Undefined => {}
+        }
     }
 
     /// Convert an inference-engine [`Type`] into the annotation consumed by

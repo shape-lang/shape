@@ -14,17 +14,16 @@
 
 use shape_test::shape_test::{ShapeTest, pos};
 
-/// Zero-based lines:
-///  1  annotation gen() {
-///  3    comptime post(target, ctx) {          <- generator definition
-///  5      method answer() -> int { 42 }
-/// 10  @gen()                                  <- application site
-/// 11  type Point { id: int }
-/// 14  let a = p.answer()                      <- call site (cursor here)
-/// 15  let b = p.answer()                      <- second call site
+/// Zero-based lines (header `on`-clause form; targets: body field removed S1b):
+///  1  annotation gen() on type {
+///  2    comptime post(target, ctx) {          <- generator definition
+///  4      method answer() -> int { 42 }
+///  9  @gen()                                  <- application site
+/// 10  type Point { id: int }
+/// 13  let a = p.answer()                      <- call site (cursor here)
+/// 14  let b = p.answer()                      <- second call site
 const GENERATED_METHOD_PROGRAM: &str = r#"
-annotation gen() {
-  targets: [type]
+annotation gen() on type {
   comptime post(target, ctx) {
     extend target {
       method answer() -> int { 42 }
@@ -47,8 +46,8 @@ let b = p.answer()
 #[test]
 fn goto_definition_on_generated_method_call_site_links_application_and_generator() {
     ShapeTest::new(GENERATED_METHOD_PROGRAM)
-        .at(pos(14, 11))
-        .expect_definition_includes_lines(&[10, 3]);
+        .at(pos(13, 11))
+        .expect_definition_includes_lines(&[9, 2]);
 }
 
 /// Decision 68 LSP behavior 3: references on a generated method include
@@ -57,8 +56,8 @@ fn goto_definition_on_generated_method_call_site_links_application_and_generator
 #[test]
 fn references_on_generated_method_include_call_sites_and_application_site() {
     ShapeTest::new(GENERATED_METHOD_PROGRAM)
-        .at(pos(14, 11))
-        .expect_references_include_lines(&[14, 15, 10]);
+        .at(pos(13, 11))
+        .expect_references_include_lines(&[13, 14, 9]);
 }
 
 /// Decision 68 LSP behavior 5: workspace symbols include generated symbols
@@ -88,8 +87,7 @@ fn document_symbols_include_generated_symbol() {
 /// 13  @gen()                                  <- application site
 /// 17  let a = p.answer()                      <- call site (cursor here)
 const DECOY_PROGRAM: &str = r#"
-annotation gen() {
-  targets: [type]
+annotation gen() on type {
   comptime post(target, ctx) {
     extend target {
       method answer() -> int { 42 }
@@ -115,10 +113,10 @@ let a = p.answer()
 #[test]
 fn references_on_generated_method_exclude_comment_and_string_decoys() {
     ShapeTest::new(DECOY_PROGRAM)
-        .at(pos(17, 11))
-        .expect_references_include_lines(&[17, 13])
-        .expect_references_exclude_line(10)
-        .expect_references_exclude_line(11);
+        .at(pos(16, 11))
+        .expect_references_include_lines(&[16, 12])
+        .expect_references_exclude_line(9)
+        .expect_references_exclude_line(10);
 }
 
 /// Rejection row 6 (definition): the decoy lines are never served as
@@ -128,10 +126,10 @@ fn references_on_generated_method_exclude_comment_and_string_decoys() {
 #[test]
 fn goto_definition_on_generated_method_excludes_decoy_lines() {
     ShapeTest::new(DECOY_PROGRAM)
-        .at(pos(17, 11))
-        .expect_definition_includes_lines(&[13, 3])
-        .expect_definition_excludes_line(10)
-        .expect_definition_excludes_line(11);
+        .at(pos(16, 11))
+        .expect_definition_includes_lines(&[12, 2])
+        .expect_definition_excludes_line(9)
+        .expect_definition_excludes_line(10);
 }
 
 /// Zero-based lines:
@@ -141,8 +139,7 @@ fn goto_definition_on_generated_method_excludes_decoy_lines() {
 /// 16  let x = p.answer()                      <- generated call site
 /// 17  let h = helper()                        <- ordinary call site (cursor)
 const MIXED_PROGRAM: &str = r#"
-annotation gen() {
-  targets: [type]
+annotation gen() on type {
   comptime post(target, ctx) {
     extend target {
       method answer() -> int { 42 }
@@ -166,8 +163,8 @@ let h = helper()
 #[test]
 fn ordinary_function_navigation_is_unchanged_in_a_generating_document() {
     ShapeTest::new(MIXED_PROGRAM)
-        .at(pos(17, 9))
-        .expect_definition_includes_lines(&[10]);
+        .at(pos(16, 9))
+        .expect_definition_includes_lines(&[9]);
 }
 
 /// Round-1 review finding: ordinary symbols COLLIDE with the generated
@@ -181,8 +178,7 @@ fn ordinary_function_navigation_is_unchanged_in_a_generating_document() {
 /// 19    fn answer() -> int { 8 }              <- ordinary module fn
 /// 21  let qualified = m::answer()             <- ordinary qualified call site
 const COLLIDING_PROGRAM: &str = r#"
-annotation gen() {
-  targets: [type]
+annotation gen() on type {
   comptime post(target, ctx) {
     extend target {
       method answer() -> int { 42 }
@@ -211,10 +207,10 @@ let qualified = m::answer()
 #[test]
 fn goto_definition_on_colliding_ordinary_call_finds_the_ordinary_declaration() {
     ShapeTest::new(COLLIDING_PROGRAM)
-        .at(pos(17, 13))
-        .expect_definition_includes_lines(&[10])
-        .expect_definition_excludes_line(12)
-        .expect_definition_excludes_line(3);
+        .at(pos(16, 13))
+        .expect_definition_includes_lines(&[9])
+        .expect_definition_excludes_line(11)
+        .expect_definition_excludes_line(2);
 }
 
 /// A qualified `m::answer()` call is FUNCTION-kind syntax too: the
@@ -223,9 +219,9 @@ fn goto_definition_on_colliding_ordinary_call_finds_the_ordinary_declaration() {
 #[test]
 fn goto_definition_on_colliding_qualified_call_is_not_hijacked() {
     ShapeTest::new(COLLIDING_PROGRAM)
-        .at(pos(21, 20))
-        .expect_definition_excludes_line(12)
-        .expect_definition_excludes_line(3);
+        .at(pos(20, 20))
+        .expect_definition_excludes_line(11)
+        .expect_definition_excludes_line(2);
 }
 
 /// The generated method keeps answering at its METHOD call site even when
@@ -233,8 +229,8 @@ fn goto_definition_on_colliding_qualified_call_is_not_hijacked() {
 #[test]
 fn goto_definition_on_generated_method_still_answers_despite_name_collision() {
     ShapeTest::new(COLLIDING_PROGRAM)
-        .at(pos(16, 11))
-        .expect_definition_includes_lines(&[12, 3]);
+        .at(pos(15, 11))
+        .expect_definition_includes_lines(&[11, 2]);
 }
 
 /// References on the generated method must not leak the ordinary
@@ -243,9 +239,9 @@ fn goto_definition_on_generated_method_still_answers_despite_name_collision() {
 #[test]
 fn references_on_generated_method_exclude_colliding_ordinary_call_sites() {
     ShapeTest::new(COLLIDING_PROGRAM)
-        .at(pos(16, 11))
-        .expect_references_include_lines(&[16, 12])
-        .expect_references_exclude_line(17)
-        .expect_references_exclude_line(21)
-        .expect_references_exclude_line(10);
+        .at(pos(15, 11))
+        .expect_references_include_lines(&[15, 11])
+        .expect_references_exclude_line(16)
+        .expect_references_exclude_line(20)
+        .expect_references_exclude_line(9);
 }

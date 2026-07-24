@@ -130,7 +130,12 @@ pub fn snippet_completions() -> Vec<CompletionItem> {
             // params + the before(args)/after(result)/observer hook forms
             // (the untyped-param + before(fn, args, ctx) legacy spelling is
             // deleted and would no longer compile).
-            "annotation ${1:name}(${2:param}: ${3:int}) {\n  before(args) {\n    ${4}\n    args\n  }\n}",
+            // ADR-009 E4-D4 (#73, S1c): the header `on <kind>` clause is the ONE
+            // accepted target-restriction spelling (the body `targets: [...]`
+            // field is deleted). The snippet models the header form so tooling
+            // never guides toward the rejected spelling; `function` is the
+            // default target placeholder (all seven kinds are header-eligible).
+            "annotation ${1:name}(${2:param}: ${3:int}) on ${4:function} {\n  before(args) {\n    ${5}\n    args\n  }\n}",
             "Define a custom annotation",
         ),
         create_snippet(

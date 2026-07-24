@@ -7,8 +7,7 @@
 // 0 — proves the typed replacement shipped. The runtime program is a plain int
 // function + a module-qualified call; no async, trait/impl, closure, or
 // top-level comptime, so JIT == VM natively (zero [jit-fallback]).
-annotation synth_module() {
-  targets: [module]
+annotation synth_module() on module {
   comptime post(target, ctx) {
     replace module (item_fn("answer", "int", 42))
   }

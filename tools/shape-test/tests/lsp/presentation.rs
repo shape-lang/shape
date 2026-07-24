@@ -131,15 +131,13 @@ fn semantic_tokens_for_comptime_block() {
 #[test]
 fn semantic_tokens_for_annotation_comptime_directives() {
     let code = r#"
-annotation drop_expr() {
-    targets: [expression]
+annotation drop_expr() on expression {
     comptime post(target, ctx) {
         remove target
     }
 }
 
-annotation add_sum() {
-    targets: [type]
+annotation add_sum() on type {
     comptime post(target, ctx) {
         extend target {
             method sum() { self.x + self.y }

@@ -84,6 +84,7 @@ use shape_ast::ast::patterns::DestructurePattern;
 
 use super::MutationCarrier;
 use super::install_registry::StagedHookInstall;
+use super::pseudo_tuple;
 use crate::compiler::BytecodeCompiler;
 use crate::compiler::comptime_builtins::expansion_provenance::{
     GeneratedNodePath, GeneratedOrigin, HygienicRole, SymbolReservation,
@@ -106,6 +107,21 @@ impl BytecodeCompiler {
         use std::hash::{Hash, Hasher};
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
         func_name.hash(&mut hasher);
+        self.mint_hygienic_fn_name_stable(HygienicRole::TemplateWeaveImplBody, hasher.finish())
+    }
+
+    /// ADR-009 E4 S4 (S4-4) — the unspellable hygienic name of the DECISION
+    /// weave's `R`-returning helper for `func_name` (the lowered decision body:
+    /// Proceed → impl-shadow call, Return → proven-`R` read). Shares the
+    /// `TemplateWeaveImplBody` provenance role (a weave-generated body) with a
+    /// DISTINCT nonce (a `decision`-salted digest of the function name), so it
+    /// never collides with the impl shadow. Stable digest ⇒ idempotent
+    /// re-registration (`register_function` dedups by name).
+    pub(in crate::compiler) fn template_weave_decision_helper_name(&self, func_name: &str) -> String {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        func_name.hash(&mut hasher);
+        "decision-helper".hash(&mut hasher);
         self.mint_hygienic_fn_name_stable(HygienicRole::TemplateWeaveImplBody, hasher.finish())
     }
 
@@ -285,67 +301,135 @@ impl BytecodeCompiler {
         let mut current_args: Vec<Expr> =
             param_names.iter().map(|name| ident(name)).collect();
 
-        // The `before` chain, in application order.
-        for install in staged
+        // ADR-009 E4 S4 (S4-4) — the DECISION `before` form. When a staged
+        // `before` install carries a `DecisionHandlerPlan`, the wrapper's result
+        // is produced by the single-join branch (spec §1.4): the decision body
+        // is lowered into an `R`-returning hygienic helper (Proceed → call the
+        // impl shadow; Return → short-circuit with the proven `R`, CONSUMING the
+        // ShortCircuitProof — OQ-7), and the wrapper binds ONE `__c3_result: R`
+        // join local from the helper call. The impl call is FOLDED INTO the
+        // helper (Proceed arm), so the wrapper emits no separate shadow call;
+        // afters run on the join local (afters-on-Return, D1). First cut: the
+        // decision hook must be the ONLY `before` install (composing a rebinding
+        // or observer `before` with a decision hook is a LOUD surface-and-stop).
+        let decision_index = staged
             .iter()
-            .filter(|install| install.hook_kind == TemplateHookKind::Before)
-        {
-            let symbol = handler_symbol(self, install)?;
-            // OBSERVER install: called with ZERO arguments (S3b — its
-            // capture values are BAKED into the handler); the target's
-            // arguments thread through UNTOUCHED (module docs).
-            if install.handler.is_observer() {
-                stmts.push(Statement::Expression(call(&symbol, Vec::new()), span));
-                continue;
+            .position(|install| install.handler.decision().is_some());
+        let impl_expr = if let Some(decision_index) = decision_index {
+            let other_before = staged.iter().enumerate().any(|(index, install)| {
+                index != decision_index && install.hook_kind == TemplateHookKind::Before
+            });
+            if other_before {
+                return Err(ShapeError::SemanticError {
+                    message: format!(
+                        "cannot compose another `before` hook with the decision `before` hook on \
+                         `{}`: a `before` hook returning `HookDecision<Args>` must be the only \
+                         `before` install in this cut (stacking befores with a short-circuiting \
+                         decision hook is not yet supported); `after` hooks compose freely",
+                        func_def.name
+                    ),
+                    location: Some(self.span_to_source_location(application_span)),
+                });
             }
-            let args = current_args.clone();
-            match install.handler.carrier() {
-                Some(MutationCarrier::Single { annotation }) => {
-                    let local = fresh_local(&taken);
-                    stmts.push(decl(&local, Some(annotation.clone()), call(&symbol, args)));
-                    current_args = vec![ident(&local)];
-                }
-                Some(MutationCarrier::Aggregate { fields }) => {
-                    let local = fresh_local(&taken);
-                    let aggregate_annotation = TypeAnnotation::Object(
-                        fields
-                            .iter()
-                            .map(|(name, annotation)| ObjectTypeField {
-                                name: name.clone(),
-                                optional: false,
-                                type_annotation: annotation.clone(),
-                                annotations: Vec::new(),
-                            })
-                            .collect(),
-                    );
-                    stmts.push(decl(&local, Some(aggregate_annotation), call(&symbol, args)));
-                    current_args = fields
-                        .iter()
-                        .map(|(name, _)| Expr::PropertyAccess {
-                            object: Box::new(ident(&local)),
-                            property: name.clone(),
-                            optional: false,
-                            span,
-                        })
-                        .collect();
-                }
-                None => {
-                    return Err(internal(format!(
-                        "internal error: staged `before` install (via @{}) carries no \
-                         mutation carrier; specialize_template always attaches one to a \
-                         non-observer before handler",
-                        install.annotation_name
-                    )));
-                }
+            let plan = staged[decision_index]
+                .handler
+                .decision()
+                .expect("decision_index selects a decision install");
+            let helper_name = self.template_weave_decision_helper_name(&func_def.name);
+            let mut helper_def = plan.prepared_def.clone();
+            helper_def.name = helper_name.clone();
+            helper_def.annotations = Vec::new();
+            // Lower the resolved decision body into the `R`-returning helper
+            // (Proceed → impl-shadow call; Return → proven-`R` read, token
+            // consumed). A body shape the first cut cannot statically lower is a
+            // LOUD surface-and-stop from within the lowering (no dynamic
+            // fallback).
+            pseudo_tuple::lower_prepared_decision_def(
+                &mut helper_def,
+                &shadow_name,
+                func_def.is_async,
+                plan,
+            )?;
+            self.template_weave_shadow_names.insert(helper_name.clone());
+            self.register_function(&helper_def)?;
+            let saved_closure_function_ids = std::mem::take(&mut self.closure_function_ids);
+            let saved_local_concrete_facts =
+                std::mem::take(&mut self.current_function_local_concrete_facts);
+            let saved_local_binding_spans = std::mem::take(&mut self.local_binding_spans);
+            let helper_result = self.compile_function(&helper_def);
+            self.closure_function_ids = saved_closure_function_ids;
+            self.current_function_local_concrete_facts = saved_local_concrete_facts;
+            self.local_binding_spans = saved_local_binding_spans;
+            helper_result?;
+            let helper_call = call(&helper_name, current_args);
+            if func_def.is_async {
+                Expr::Await(Box::new(helper_call), span)
+            } else {
+                helper_call
             }
-        }
-
-        // The direct impl call (awaited on async targets).
-        let impl_call = call(&shadow_name, current_args);
-        let impl_expr = if func_def.is_async {
-            Expr::Await(Box::new(impl_call), span)
         } else {
-            impl_call
+            // The `before` chain, in application order.
+            for install in staged
+                .iter()
+                .filter(|install| install.hook_kind == TemplateHookKind::Before)
+            {
+                let symbol = handler_symbol(self, install)?;
+                // OBSERVER install: called with ZERO arguments (S3b — its
+                // capture values are BAKED into the handler); the target's
+                // arguments thread through UNTOUCHED (module docs).
+                if install.handler.is_observer() {
+                    stmts.push(Statement::Expression(call(&symbol, Vec::new()), span));
+                    continue;
+                }
+                let args = current_args.clone();
+                match install.handler.carrier() {
+                    Some(MutationCarrier::Single { annotation }) => {
+                        let local = fresh_local(&taken);
+                        stmts.push(decl(&local, Some(annotation.clone()), call(&symbol, args)));
+                        current_args = vec![ident(&local)];
+                    }
+                    Some(MutationCarrier::Aggregate { fields }) => {
+                        let local = fresh_local(&taken);
+                        let aggregate_annotation = TypeAnnotation::Object(
+                            fields
+                                .iter()
+                                .map(|(name, annotation)| ObjectTypeField {
+                                    name: name.clone(),
+                                    optional: false,
+                                    type_annotation: annotation.clone(),
+                                    annotations: Vec::new(),
+                                })
+                                .collect(),
+                        );
+                        stmts.push(decl(&local, Some(aggregate_annotation), call(&symbol, args)));
+                        current_args = fields
+                            .iter()
+                            .map(|(name, _)| Expr::PropertyAccess {
+                                object: Box::new(ident(&local)),
+                                property: name.clone(),
+                                optional: false,
+                                span,
+                            })
+                            .collect();
+                    }
+                    None => {
+                        return Err(internal(format!(
+                            "internal error: staged `before` install (via @{}) carries no \
+                             mutation carrier; specialize_template always attaches one to a \
+                             non-observer before handler",
+                            install.annotation_name
+                        )));
+                    }
+                }
+            }
+
+            // The direct impl call (awaited on async targets).
+            let impl_call = call(&shadow_name, current_args);
+            if func_def.is_async {
+                Expr::Await(Box::new(impl_call), span)
+            } else {
+                impl_call
+            }
         };
 
         let has_result = !matches!(
@@ -423,8 +507,7 @@ mod tests {
             r#"
 {body_fns}
 
-annotation hookann() {{
-  targets: [function]
+annotation hookann() on function {{
   comptime post(target, ctx) {{
     {handler_stmts}
   }}
@@ -552,6 +635,191 @@ annotation hookann() {{
         assert_eq!(value, 100, "before and after must both fire around the impl");
     }
 
+    // ── ADR-009 E4 S4 (S4-4): the DECISION weave — the single-join branch ──
+    //
+    // `decide` short-circuits (`Return(999)`) when the arg is negative and
+    // otherwise `Proceed`s. These EXECUTED pins are value-distinguishing: a
+    // dropped short-circuit would run the impl (`a*10`) and yield a different
+    // number, and an after that failed to run on the Return arm would too.
+
+    const DECIDE_BODY: &str = "fn decide<Args>(args: Args) -> HookDecision<Args> {\n  \
+        if args[0] < 0 { return HookDecision::Return(999) }\n  \
+        return HookDecision::Proceed(args)\n}";
+
+    // Proceed → the impl runs: compute(5) = 5*10 = 50.
+    #[test]
+    fn decision_proceed_continues_to_the_impl() {
+        let (value, _) = top_level_i64(&hook_source(
+            DECIDE_BODY,
+            "install(before_hook(decide, []))",
+            "@hookann()\nfn compute(a: int) -> int { return a * 10 }\n\ncompute(5)",
+        ));
+        assert_eq!(value, 50, "Proceed continues to the impl (5*10); a dropped Proceed ≠ 50");
+    }
+
+    // Return → the impl NEVER runs: compute(-3) short-circuits to 999, NOT the
+    // impl's -30. This is the load-bearing short-circuit read (token-gated).
+    #[test]
+    fn decision_return_short_circuits_the_impl() {
+        let (value, _) = top_level_i64(&hook_source(
+            DECIDE_BODY,
+            "install(before_hook(decide, []))",
+            "@hookann()\nfn compute(a: int) -> int { return a * 10 }\n\ncompute(-3)",
+        ));
+        assert_eq!(
+            value, 999,
+            "Return short-circuits with the proven R (999); the impl (which would give -30) \
+             must never run"
+        );
+    }
+
+    // afters run on BOTH arms (D1): +1 after ⇒ Proceed 5*10+1=51, Return 999+1=1000.
+    #[test]
+    fn decision_afters_run_on_both_arms() {
+        let body = format!("{DECIDE_BODY}\nfn plus_one(r: int) -> int {{ return r + 1 }}");
+        let handler = "install(before_hook(decide, []))\n    install(after_hook(plus_one, []))";
+        let (proceed, _) = top_level_i64(&hook_source(
+            &body,
+            handler,
+            "@hookann()\nfn compute(a: int) -> int { return a * 10 }\n\ncompute(5)",
+        ));
+        assert_eq!(proceed, 51, "the after runs on the Proceed result: 5*10+1");
+        let (returned, _) = top_level_i64(&hook_source(
+            &body,
+            handler,
+            "@hookann()\nfn compute(a: int) -> int { return a * 10 }\n\ncompute(-3)",
+        ));
+        assert_eq!(
+            returned, 1000,
+            "the after STILL runs on the Return short-circuit (D1 afters-on-Return): 999+1"
+        );
+    }
+
+    // The decision helper is a real registered fn (the lowered R-returning body),
+    // and the woven wrapper carries mir_data (native, C3-G6 SMALL shape).
+    #[test]
+    fn decision_wrapper_and_helper_are_native_registered_fns() {
+        let compiler = compiled_ok(&hook_source(
+            DECIDE_BODY,
+            "install(before_hook(decide, []))",
+            "@hookann()\nfn compute(a: int) -> int { return a * 10 }\n\ncompute(5)",
+        ));
+        let wrapper = function_entry(&compiler, "compute");
+        assert!(
+            wrapper.mir_data.is_some(),
+            "the woven decision wrapper compiles as an ordinary fn with mir_data attached"
+        );
+        let helper_name = compiler.template_weave_decision_helper_name("compute");
+        assert!(
+            compiler.find_function(&helper_name).is_some(),
+            "the lowered R-returning decision helper is registered"
+        );
+    }
+
+    // Composing another `before` with a decision hook is a LOUD surface-and-stop.
+    #[test]
+    fn decision_composed_with_another_before_surfaces_and_stops() {
+        let body = format!("{DECIDE_BODY}\nfn add_one(x: int) -> int {{ return x + 1 }}");
+        let (result, _) = compile_source(&hook_source(
+            &body,
+            "install(before_hook(add_one, []))\n    install(before_hook(decide, []))",
+            "@hookann()\nfn compute(a: int) -> int { return a * 10 }\n\ncompute(5)",
+        ));
+        let err = result.expect_err("stacking a before with a decision hook is not supported");
+        assert!(
+            err.to_string().contains("must be the only `before` install"),
+            "the named composition rejection fires: {err}"
+        );
+    }
+
+    // ── ADR-009 E4 S4 (S4-5): failure vocabulary (D6) ─────────────────────
+
+    // The reserved failure transforms fire their SPECIFIC named sentence (never
+    // a silent "unknown identifier"), each citing the D6 umbrella (#80).
+    fn decision_failure_transform_reject(exit: &str) -> String {
+        let body = format!(
+            "fn decide<Args>(args: Args) -> HookDecision<Args> {{\n  \
+             if args[0] < 0 {{ return {exit} }}\n  return HookDecision::Proceed(args)\n}}"
+        );
+        let (result, _) = compile_source(&hook_source(
+            &body,
+            "install(before_hook(decide, []))",
+            "@hookann()\nfn compute(a: int) -> int { return a * 10 }\n\ncompute(5)",
+        ));
+        result.expect_err("a reserved failure transform is a named surface-and-stop").to_string()
+    }
+
+    #[test]
+    fn recover_transform_surfaces_and_stops() {
+        let err = decision_failure_transform_reject("HookDecision::Recover(0)");
+        assert!(err.contains("`recover` failure transform is designed but not implemented in E4"));
+        assert!(err.contains("#80"), "cites the D6 umbrella: {err}");
+    }
+
+    #[test]
+    fn retry_transform_surfaces_and_stops() {
+        let err = decision_failure_transform_reject("HookDecision::Retry(args)");
+        assert!(err.contains("`retry` failure transform is designed but not implemented in E4"));
+        assert!(err.contains("#80"), "cites the D6 umbrella: {err}");
+    }
+
+    #[test]
+    fn re_place_transform_surfaces_and_stops() {
+        let err = decision_failure_transform_reject("HookDecision::RePlace(0)");
+        assert!(err.contains("`re-place` (choose-another-placement) failure transform is designed"));
+        assert!(err.contains("#80"), "cites the D6 umbrella: {err}");
+        assert!(err.contains("@remote"), "names the @remote coupling (now delivered): {err}");
+    }
+
+    // Gate 2 misplaced-decision: a decision constructor in an AFTER body rejects.
+    #[test]
+    fn decision_in_after_body_surfaces_and_stops() {
+        let (result, _) = compile_source(&hook_source(
+            "fn af<R>(r: R) -> R { return HookDecision::Return(r) }",
+            "install(after_hook(af, []))",
+            "@hookann()\nfn compute(a: int) -> int { return a * 10 }\n\ncompute(5)",
+        ));
+        let err = result.expect_err("a decision constructor in an after body rejects").to_string();
+        assert!(err.contains("cannot appear in an `after` hook body"), "{err}");
+        assert!(err.contains("#80"), "cites the D6 umbrella: {err}");
+    }
+
+    // OQ-5: propagate on a non-failure `R` (a failure-valued Return on R=int)
+    // rejects and NAMES `recover` + the D6 issue.
+    #[test]
+    fn propagate_on_non_failure_r_names_recover() {
+        let body = "fn decide<Args>(args: Args) -> HookDecision<Args> {\n  \
+             if args[0] < 0 { return HookDecision::Return(Err(\"neg\")) }\n  \
+             return HookDecision::Proceed(args)\n}";
+        let (result, _) = compile_source(&hook_source(
+            body,
+            "install(before_hook(decide, []))",
+            "@hookann()\nfn compute(a: int) -> int { return a * 10 }\n\ncompute(5)",
+        ));
+        let err = result.expect_err("a failure Return on a non-failure R rejects").to_string();
+        assert!(err.contains("failure channel"), "names the missing failure channel: {err}");
+        assert!(err.contains("recover"), "names recover: {err}");
+        assert!(err.contains("#80"), "cites the D6 umbrella: {err}");
+    }
+
+    // Default propagate: the impl returns a failure-valued R, threaded through
+    // the after-chain as any success-valued R (afters run on the failure).
+    // R=Result matched by the caller — value-distinguishing (Err path prints -1).
+    #[test]
+    fn default_propagate_threads_failure_r_through_afters() {
+        let body = "fn decide<Args>(args: Args) -> HookDecision<Args> { return HookDecision::Proceed(args) }\n\
+                    fn pass_after(r: Result<int, string>) -> Result<int, string> { return r }";
+        let src = hook_source(
+            body,
+            "install(before_hook(decide, []))\n    install(after_hook(pass_after, []))",
+            "@hookann()\nfn compute(a: int) -> Result<int, string> {\n  \
+             if a < 0 { return Err(\"neg\") }\n  return Ok(a * 10)\n}\n\n\
+             match compute(-3) { Ok(v) => v, Err(e) => -1 }",
+        );
+        let (value, _) = top_level_i64(&src);
+        assert_eq!(value, -1, "the impl's failure-valued R threads through the after to the caller");
+    }
+
     // ── the heterogeneous AGGREGATE carrier (polymorphic before) ───────────
 
     // Arity-2 (int, number) target: the polymorphic before mutates slot 0
@@ -613,15 +881,13 @@ fn tmpl<Args>(args: Args, factor: int) -> Args {
     return args
 }
 
-annotation with3() {
-  targets: [function]
+annotation with3() on function {
   comptime post(target, ctx) {
     install(before_hook(tmpl, [capture("factor", 3)]))
   }
 }
 
-annotation with5() {
-  targets: [function]
+annotation with5() on function {
   comptime post(target, ctx) {
     install(before_hook(tmpl, [capture("factor", 5)]))
   }
@@ -678,15 +944,13 @@ fn tmpl<Args>(args: Args, factor: int) -> Args {
     return args
 }
 
-annotation first3() {
-  targets: [function]
+annotation first3() on function {
   comptime post(target, ctx) {
     install(before_hook(tmpl, [capture("factor", 3)]))
   }
 }
 
-annotation second3() {
-  targets: [function]
+annotation second3() on function {
   comptime post(target, ctx) {
     install(before_hook(tmpl, [capture("factor", 3)]))
   }
@@ -721,15 +985,13 @@ victim_a(10) * 1000 + victim_b(20)
 fn add_ten(x: int) -> int { return x + 10 }
 fn mul_two(x: int) -> int { return x * 2 }
 
-annotation first_hook() {
-  targets: [function]
+annotation first_hook() on function {
   comptime post(target, ctx) {
     install(before_hook(add_ten, []))
   }
 }
 
-annotation second_hook() {
-  targets: [function]
+annotation second_hook() on function {
   comptime post(target, ctx) {
     install(before_hook(mul_two, []))
   }
@@ -760,15 +1022,13 @@ victim(1)
 fn add_ten(x: int) -> int { return x + 10 }
 fn mul_two(x: int) -> int { return x * 2 }
 
-annotation first_hook() {
-  targets: [function]
+annotation first_hook() on function {
   comptime post(target, ctx) {
     install(after_hook(add_ten, []))
   }
 }
 
-annotation second_hook() {
-  targets: [function]
+annotation second_hook() on function {
   comptime post(target, ctx) {
     install(after_hook(mul_two, []))
   }
@@ -799,8 +1059,7 @@ victim(1)
         let src = r#"
 fn add_one(x: int) -> int { return x + 1 }
 
-annotation edit_and_hook() {
-  targets: [function]
+annotation edit_and_hook() on function {
   comptime post(target, ctx) {
     replace body { return ctx.original(a) + 7 }
     install(before_hook(add_one, []))
@@ -834,8 +1093,7 @@ fn tmpl<Args>(args: Args) -> Args {
     return args
 }
 
-annotation hookann() {
-  targets: [function]
+annotation hookann() on function {
   comptime post(target, ctx) {
     install(before_hook(tmpl, []))
   }
@@ -1537,24 +1795,21 @@ fn tmpl<Args>(args: Args, cfg: Array<int>) -> Args {
     return args
 }
 
-annotation with_one_two() {
-  targets: [function]
+annotation with_one_two() on function {
   comptime post(target, ctx) {
     let cfg = [1, 2]
     install(before_hook(tmpl, [capture("cfg", cfg)]))
   }
 }
 
-annotation with_one_two_three() {
-  targets: [function]
+annotation with_one_two_three() on function {
   comptime post(target, ctx) {
     let cfg = [1, 2, 3]
     install(before_hook(tmpl, [capture("cfg", cfg)]))
   }
 }
 
-annotation with_two_one() {
-  targets: [function]
+annotation with_two_one() on function {
   comptime post(target, ctx) {
     let cfg = [2, 1]
     install(before_hook(tmpl, [capture("cfg", cfg)]))
@@ -1606,16 +1861,14 @@ fn tmpl<Args>(args: Args, cfg: Array<int>) -> Args {
     return args
 }
 
-annotation first_config() {
-  targets: [function]
+annotation first_config() on function {
   comptime post(target, ctx) {
     let cfg = [1, 2]
     install(before_hook(tmpl, [capture("cfg", cfg)]))
   }
 }
 
-annotation second_config() {
-  targets: [function]
+annotation second_config() on function {
   comptime post(target, ctx) {
     let cfg = [1, 2]
     install(before_hook(tmpl, [capture("cfg", cfg)]))
@@ -1665,16 +1918,14 @@ fn tmpl<Args>(args: Args, cfg: Array<string>) -> Args {
     return args
 }
 
-annotation with_ab_c() {
-  targets: [function]
+annotation with_ab_c() on function {
   comptime post(target, ctx) {
     let cfg = ["ab", "c"]
     install(before_hook(tmpl, [capture("cfg", cfg)]))
   }
 }
 
-annotation with_a_bc() {
-  targets: [function]
+annotation with_a_bc() on function {
   comptime post(target, ctx) {
     let cfg = ["a", "bc"]
     install(before_hook(tmpl, [capture("cfg", cfg)]))
@@ -1714,16 +1965,14 @@ fn tmpl<Args>(args: Args, cfg: Array<Array<int>>) -> Args {
     return args
 }
 
-annotation with_nested_a() {
-  targets: [function]
+annotation with_nested_a() on function {
   comptime post(target, ctx) {
     let cfg = [[1, 2], [3]]
     install(before_hook(tmpl, [capture("cfg", cfg)]))
   }
 }
 
-annotation with_nested_b() {
-  targets: [function]
+annotation with_nested_b() on function {
   comptime post(target, ctx) {
     let cfg = [[1], [2, 3]]
     install(before_hook(tmpl, [capture("cfg", cfg)]))
@@ -1766,16 +2015,14 @@ fn tmpl<Args>(args: Args, cfg: Option<int>) -> Args {
     return args
 }
 
-annotation with_some() {
-  targets: [function]
+annotation with_some() on function {
   comptime post(target, ctx) {
     let cfg: Option<int> = Some(5)
     install(before_hook(tmpl, [capture("cfg", cfg)]))
   }
 }
 
-annotation with_none() {
-  targets: [function]
+annotation with_none() on function {
   comptime post(target, ctx) {
     let cfg: Option<int> = None
     install(before_hook(tmpl, [capture("cfg", cfg)]))
@@ -1921,15 +2168,13 @@ fn tmpl_array<Args>(args: Args, cfg: Array<int>) -> Args {
     return args
 }
 
-annotation scalar_ann() {
-  targets: [function]
+annotation scalar_ann() on function {
   comptime post(target, ctx) {
     install(before_hook(tmpl_scalar, [capture("bump", 3)]))
   }
 }
 
-annotation array_ann() {
-  targets: [function]
+annotation array_ann() on function {
   comptime post(target, ctx) {
     let cfg = [5, 6]
     install(before_hook(tmpl_array, [capture("cfg", cfg)]))
@@ -2093,22 +2338,19 @@ fn tmpl<Args>(args: Args, bump: int, tag: string) -> Args {
     return args
 }
 
-annotation ab_one() {
-  targets: [function]
+annotation ab_one() on function {
   comptime post(target, ctx) {
     install(before_hook(tmpl, [capture("bump", 3), capture("tag", "ab")]))
   }
 }
 
-annotation ab_two() {
-  targets: [function]
+annotation ab_two() on function {
   comptime post(target, ctx) {
     install(before_hook(tmpl, [capture("bump", 3), capture("tag", "ab")]))
   }
 }
 
-annotation with_xyz() {
-  targets: [function]
+annotation with_xyz() on function {
   comptime post(target, ctx) {
     install(before_hook(tmpl, [capture("bump", 3), capture("tag", "xyz")]))
   }
@@ -2162,8 +2404,7 @@ fn bump<Args>(args: Args, times: int, tag: string) -> Args {
     return args
 }
 
-annotation retry(times: int, tag: string) {
-  targets: [function]
+annotation retry(times: int, tag: string) on function {
   comptime post(target, ctx) {
     install(before_hook(bump, [capture("times", times), capture("tag", tag)]))
   }
@@ -2221,8 +2462,7 @@ fn bump<Args>(args: Args, times: int, tag: string) -> Args {
     return args
 }
 
-annotation retry(times: int, tag: string) {
-  targets: [function]
+annotation retry(times: int, tag: string) on function {
   comptime post(target, ctx) {
     install(before_hook(bump, [capture("times", times), capture("tag", tag)]))
   }
@@ -2339,8 +2579,7 @@ let ambient = 7
 
 fn hook(x: int) -> int { return x + ambient }
 
-annotation hookann() {
-  targets: [function]
+annotation hookann() on function {
   comptime post(target, ctx) {
     install(before_hook(hook, []))
   }
@@ -2399,8 +2638,7 @@ victim(4)
 mod defs {
     pub const secret: int = 11
 
-    annotation hookann(times: int) {
-      targets: [function]
+    annotation hookann(times: int) on function {
       before(args) {
         args[0] = args[0] + secret + times
         return args
@@ -2433,8 +2671,7 @@ victim(4)
 let sees = 9
 
 mod defs {
-    annotation hookann(times: int) {
-      targets: [function]
+    annotation hookann(times: int) on function {
       before(args) {
         args[0] = args[0] + sees + times
         return args
@@ -2472,8 +2709,7 @@ victim(4)
 mod defs {
     pub const secret: int = 11
 
-    annotation hookann(times: int) {
-      targets: [function]
+    annotation hookann(times: int) on function {
       before(args) {
         args[0] = args[0] + secret + times
         return args
@@ -2508,8 +2744,7 @@ victim(4)
         #[test]
         fn a5_config_only_body_weaves_runs_and_stays_module_binding_free() {
             let src = r#"
-annotation tagged(times: int) {
-  targets: [function]
+annotation tagged(times: int) on function {
   before(args) {
     args[0] = args[0] * times
     return args
@@ -2553,8 +2788,7 @@ fn hook(x: int) -> int {
     return x + 1
 }
 
-annotation hookann() {
-  targets: [function]
+annotation hookann() on function {
   comptime post(target, ctx) {
     install(before_hook(hook, []))
   }
@@ -2600,8 +2834,7 @@ victim(4)
             let src = r#"
 let args = [7, 8]
 
-annotation hookann(times: int) {
-  targets: [function]
+annotation hookann(times: int) on function {
   before(args) {
     let s = f"{args[0]}"
     args[0] = args[0] + times
@@ -2634,8 +2867,7 @@ victim(4)
             let src = r#"
 let args = [7, 8]
 
-annotation tagged(times: int) {
-  targets: [function]
+annotation tagged(times: int) on function {
   before(args) {
     let v = args[0]
     let s = f"{v}"
@@ -2674,8 +2906,7 @@ victim(4)
 let bump = 5
 
 mod defs {
-    annotation hookann(times: int) {
-      targets: [function]
+    annotation hookann(times: int) on function {
       before(args) {
         let f = |y: int; share bump| y + 1
         args[0] = f(args[0])
@@ -2712,8 +2943,7 @@ fn hook(x: int) -> int {
     return x
 }
 
-annotation hookann() {
-  targets: [function]
+annotation hookann() on function {
   comptime post(target, ctx) {
     install(before_hook(hook, []))
   }
@@ -2742,8 +2972,7 @@ fn hook(x: int) -> int {
     return f(x)
 }
 
-annotation hookann() {
-  targets: [function]
+annotation hookann() on function {
   comptime post(target, ctx) {
     install(before_hook(hook, []))
   }
@@ -2769,8 +2998,7 @@ victim(4)
 mod defs {
     pub const secret: int = 11
 
-    annotation hookann(times: int) {
-      targets: [function]
+    annotation hookann(times: int) on function {
       before(args) {
         args[0] = args[0] + defs::secret + times
         return args
@@ -2803,8 +3031,7 @@ fn hook(x: int) -> int {
     return x + bump
 }
 
-annotation hookann() {
-  targets: [function]
+annotation hookann() on function {
   comptime post(target, ctx) {
     install(before_hook(hook, []))
   }
@@ -2832,8 +3059,7 @@ fn hook(x: int) -> int {
     return x + y + bump
 }
 
-annotation hookann() {
-  targets: [function]
+annotation hookann() on function {
   comptime post(target, ctx) {
     install(before_hook(hook, []))
   }
@@ -2866,8 +3092,7 @@ fn hook(x: int) -> int {
     return x + bump
 }
 
-annotation hookann() {
-  targets: [function]
+annotation hookann() on function {
   comptime post(target, ctx) {
     install(before_hook(hook, []))
   }
@@ -2895,8 +3120,7 @@ fn helper(v: int) -> int { return v + 1 }
 
 fn hook(x: int) -> int { return helper(x) }
 
-annotation hookann() {
-  targets: [function]
+annotation hookann() on function {
   comptime post(target, ctx) {
     install(before_hook(hook, []))
   }
@@ -2935,8 +3159,7 @@ victim(4)
             let src = r#"
 let chosen = 5
 
-annotation retry(times: int) {
-  targets: [function]
+annotation retry(times: int) on function {
   before(args) {
     args[0] = args[0] * times
     return args
@@ -2981,8 +3204,7 @@ victim(4)
             let src = r#"
 const n: int = 3
 
-annotation retry(times: int) {
-  targets: [function]
+annotation retry(times: int) on function {
   before(args) {
     args[0] = args[0] * times
     return args
@@ -3019,8 +3241,7 @@ fn hook<Args>(args: Args, x: int) -> Args {
     return args
 }
 
-annotation hookann() {
-  targets: [function]
+annotation hookann() on function {
   comptime post(target, ctx) {
     install(before_hook(hook, [capture("x", args)]))
   }
@@ -3053,8 +3274,7 @@ fn hook(x: int) -> int {
     return x + 1
 }
 
-annotation hookann() {
-  targets: [function]
+annotation hookann() on function {
   comptime post(target, ctx) {
     install(before_hook(hook, []))
   }
@@ -3086,8 +3306,7 @@ fn tmpl<Args>(args: Args) -> Args {
     return args
 }
 
-annotation hookann() {
-  targets: [function]
+annotation hookann() on function {
   comptime post(target, ctx) {
     install(before_hook(tmpl, []))
   }

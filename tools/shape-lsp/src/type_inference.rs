@@ -2975,8 +2975,7 @@ mod tests {
     #[test]
     fn test_extract_type_methods_from_annotation_comptime_extend_target() {
         let code = r#"
-annotation add_sum() {
-    targets: [type]
+annotation add_sum() on type {
     comptime post(target, ctx) {
         extend target {
             method sum() { self.x + self.y }
@@ -2998,8 +2997,7 @@ type Point { x: int, y: int }
     #[test]
     fn test_extract_type_methods_from_annotation_comptime_extend_explicit_type() {
         let code = r#"
-annotation add_number_method() {
-    targets: [function]
+annotation add_number_method() on function {
     comptime post(target, ctx) {
         extend Number {
             method doubled() { self * 2.0 }
@@ -3021,8 +3019,7 @@ fn marker() { 0 }
     #[test]
     fn test_extract_type_methods_annotation_not_applied_does_not_generate() {
         let code = r#"
-annotation add_number_method() {
-    targets: [function]
+annotation add_number_method() on function {
     comptime post(target, ctx) {
         extend Number {
             method doubled() { self * 2.0 }

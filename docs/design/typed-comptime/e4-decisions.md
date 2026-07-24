@@ -39,6 +39,19 @@ preserved + the exit-soundness substrate).
   OPTIONAL/defaultable: the first cut ships `Proceed(args)` / `Return(r)`,
   threading State only where a hook declares it. Couples to D7 for the
   RUNTIME representation inside the wrapper.
+  - **S4-1..S4-3 shipped** (`e4-slice4-report.md`; c1 `3103cd5e`, c2 `d5be907b`).
+    The protocol CORE: `TemplateSig::PolymorphicDecision` classifier (Path 1,
+    OQ-1 — `HookDecision<Args>` recognized by SPELLING, never the erasing
+    resolver; COMPOSES with always-Proceed, OQ-2), the before-exit gate's
+    substantive `HookDecision::Return(result)==R` arm + the private-constructor
+    `ShortCircuitProof(R)` anti-walk-back token (OQ-7), and decision-exit face
+    recognition (Proceed unwrapped to the carrier arms; Return kept for the
+    gate; fact-#1 reject elsewhere). First cut = NO State (OQ-3 loud
+    surface-and-stop). 14 tripwire pins; all suites' FAILED-name sets
+    unchanged. **Remaining: S4-4 weave single-join inlining (the linchpin) →
+    S4-5 failure vocab + D6 issue → S4-6 JIT cells → S4-7 book.**
+    `specialize_polymorphic_decision` is a LOUD door-open surface-and-stop until
+    the weave lands.
 - **E4-D2 (ctx.state typing + storage home).** SEPARATE surfaces (option B,
   degrading to C if Spike 2 proves no live reader): the lifecycle Any-ctx is
   retyped to a concrete schema (or deleted outright with event_log if
@@ -46,12 +59,77 @@ preserved + the exit-soundness substrate).
   and threaded through the weave. State is PER-INVOCATION, minted as an
   initial value into the woven wrapper's locals — there is no existing
   per-application runtime cell and E4 does not invent one.
+  - **S3 shipped** (`e4-slice3-report.md`, D2-C cleanest-C). Spike 2 confirmed no
+    live reader → the always-empty lifecycle `ctx` (`{state:{}, event_log:[]}`)
+    was DELETED outright (not retyped): `emit_annotation_runtime_ctx` +
+    `emit_empty_annotation_event_log` + the `"ctx"` emission arm
+    (`functions_annotations.rs`), the installer `inferred_handler_parameter_type`
+    ctx arm, and the `__annotation_ctx_` post-inference-verify whitelist row (+
+    its sole-consumer test). Paired with a BROAD, pre-inference, LSP-visible LOUD
+    rejection (`planner.rs` `OnDefine|Metadata` block): any lifecycle-handler
+    param that is not the `target`/`fn` descriptor is rejected — `ctx` gets the
+    specific E4-D2/#68 sub-message, any other name the generic one. Collision
+    verdict ratified NO (comptime pre/post ctx surface untouched — twins green).
+    Two supervisor rulings 2026-07-23: OQ1 BROAD, OQ2 DEFER the dead Rust
+    `AnnotationContext` reap (→ #78; `TargetOwner` preserved). 6 pins added, 1
+    deleted; 2 incidental `metadata(target, ctx)` test fixtures dropped their
+    unused ctx. Gate: all six annotation suites' FAILED-name sets unchanged from
+    the S3 base baseline. The typed per-invocation `BeforeContext<State>` returns
+    with #68.
 - **E4-D3 (@remote wire semantics).** Callee identity = the hygienic
   impl-shadow's live fn-ref (UInt64 id) — NEVER the wrapper (infinite
   recursion); arg-pack = the OUTER-TypedArray `serialize_arg_pack` arm; the
   short-circuit = `HookDecision::Return(__call_raising(addr, <shadow>, args))`.
   HARD: no stringly `ctx["__impl"]`, no `?? args[0]` fallback — an
   unavailable binding fails LOUD.
+  - **S5 shipped** (`e4-slice5-report.md`; CP1 `286d8af1`, CP2 `1838c9e8`,
+    CP3+CP4 `4d2f235c`, CP5 `e9250bc6`, CP6a `30335639` + tripwire-flip
+    `97eb4916`; book `8b4d3695` on shape-web). `@remote` re-implemented in FINAL
+    syntax (`pub annotation remote(addr: string) on function` + a
+    `before(args) -> HookDecision<Args>` decision hook) — the HookDecision
+    protocol's FIRST real consumer; the #68 dark window is CLOSED. Callee
+    identity = the impl-shadow fn-ref via the compiler-recognized
+    `__remote_impl_ref()` weave marker (substituted at lowering to
+    `Identifier(<SOH shadow>)` → the shadow's UInt64 id); arg-pack via
+    `__remote_arg_pack()` → `[__c3_p0..__c3_pN-1]` (OUTER-TypedArray arm). Both
+    E4-D3-exact. NO-RECURSION proven by EXECUTION (a loopback `shape serve`
+    logged inbound Calls to the SOH-hygienic SHADOW, never the wrapper;
+    round-trip returned 3 / 42); FAIL-LOUD proven by EXECUTION (`@remote` to a
+    down server RAISES, Q26, no silent arg[0] misdispatch). R-typing: bare `R`
+    raises (no `Result` required), `Result`-R composes via propagate — the
+    documented `remote::call`-is-recoverable duality. First-cut bounds (each a
+    LOUD named-defer, #83): homogeneous-or-single param signatures, sync targets,
+    ≥1 param. Config captures compose (the S4 no-captures bound lifted). @remote'd
+    calls ride the `__call_raising` ModuleFn dispatch → one honest `[jit-fallback]`
+    (the ADR-006 §2.7.14 / v0.4 gap; interpreter-correct). Book 564→567.
+    **The 21 S6 acceptance tests stay `#[ignore]`'d (S6a-f capability waves);**
+    the 3 import-trio `scoped_contract` tests are reachable-and-would-pass but
+    stay ignored for S6f.
+  - **S6 shipped** (`e4-slice6-report.md`; A `c6ec8551`, B `9fd52595`,
+    C `4779717c`, D `893d02db`, E `9cf6a3c4`, F `0c69f0ba`; book `66eb93b7` on
+    shape-web). The @remote acceptance matrix is REAL: 16 of the 21 dark-window
+    tests FLIPPED-GREEN across the capability waves (A wire · B snapshot ·
+    C extern-C · D polyglot · E TLS · F import trio), all proven NON-VACUOUS
+    against real `shape serve` peers / real snapshots / the built
+    `libshape_ext_{python,typescript}.so` (SHAPE_REQUIRE_FFI_EXT=1, no silent
+    skip). The shipped import form is `from std::core::remote use { @remote }`
+    (bare `use std::core::remote` + `@remote` → "Unknown annotation '@remote'",
+    proven standalone); F's :126 restored the greenfield negative contract
+    (bare namespace import does NOT bind a bare annotation). The remaining 5 are
+    the 0-ary `remote_snapshot_hash() -> string` shape, LOUD-rejected ("the
+    target declares no parameters, so a decision `before` hook has no arguments
+    to receive or short-circuit") — re-pointed off the closed #68 to the live
+    **#83** (0-ary arg-pack). ZERO "see #68" ignores survive among the 21. New
+    issues filed: **#83** re-point (0-ary), **#84** (pre-existing stale
+    `scoped_contract_snapshot_requires_explicit_import` — `snapshot()` now
+    returns a recoverable `Result::Err`; unrelated to S6, surfaced not folded),
+    **#85** (book-gate cannot opt its loopback receiver into a language runtime).
+    Book truth-gate 569/572 → **571/574**: the two `extern C` composed cells
+    flipped dark→`fixture=serve` / `fixture=serve-snapshot-resume` GREEN
+    (REMOTE_C_ABS=42 / RESUMED:43); python/typescript foreign-on-receiver cells
+    stay reference sketches (re-pointed to #85), the async-python cell to #83+#85.
+    S6 is READY for the ADR-009 completion gate (the 2026-07-16 run FAILED 3/3);
+    the completion gate is the NEXT step, not run here.
 - **E4-D4 (#73 sequencing).** The `on`-clause header syntax is E4's OPENING
   slice: `annotation name(config) on <kind>(, <kind>)*`; the body `targets:`
   field is DELETED in the same change; ALL SEVEN target kinds are
@@ -63,6 +141,21 @@ preserved + the exit-soundness substrate).
   scope-fence pin flips to a LOUD named rejection of comptime-only
   annotations on foreign targets, citing #74. The run-capability exploration
   remains #74's, NOT an E4 deliverable.
+  - **S2 shipped** (`e4-slice2-report.md`). TWO producers now live in
+    `sugar_lowering.rs`, deliberately separate because they have different
+    deletion dates: `foreign_target_application_rejection` (#68, dies when E4
+    closes #68) and the new `foreign_target_comptime_handler_rejection` (#74,
+    outlives it). ONE loop in `compile_foreign_function` selects between them;
+    inside one annotation the #68 hook reason wins, because D5's word is
+    "comptime-only". Eight supervisor rulings ratified 2026-07-22 and recorded
+    in the report §1: Q1 EXCLUDE `on_define`/`metadata` (→ #75), Q2 no marker
+    rejection, Q3 ONE producer for all three foreign flavours, Q4 message text
+    verbatim, Q5 accept the stacked "first *rejection-bearing* annotation"
+    behaviour change, Q6 rename the test module, Q7 file the adjacent-holes
+    ticket (→ #76), Q8 no `sugar_lowering.rs` rename. 13 pins added, 0 deleted,
+    the 5 #68 must-keeps byte-for-byte unchanged. Grep tag:
+    `#74 INTERIM REJECTION`. Book swept in-slice (`shape-web` `d60bbc0`);
+    book truth-gate 557/573, same 16 pre-existing reds.
 - **E4-D6 (failure/retry vocabulary).** DESIGN the full four-transform
   vocabulary (recover / retry / re-place / propagate-typed-failure) in the
   protocol spec; IMPLEMENT only propagate in E4. The unimplemented three are
@@ -71,6 +164,18 @@ preserved + the exit-soundness substrate).
   rejected-at-install, per the program-wide AsyncDrop out-of-scope). The
   retry × awaited-shadow × after-chain interaction is unmodeled — any design
   touching it is flagged before commitment.
+  - **S4-3 partial** (`e4-slice4-report.md`). The OQ-4 (USER-ruled) `?` posture
+    shipped: `?` follows the ORDINARY Result-typing rule; a bare-`HookDecision`
+    hook rejects `?` with a TRUTHFUL, DOOR-OPEN message (names explicit
+    `Return(<failure-valued>)` propagate + the deferred `Result<HookDecision>`
+    path — never a permanent prohibition); Gate 3 stays total-reject. A
+    failure-valued `Return` already proves `==R` when R has a failure channel
+    (explicit propagate). **Remaining (S4-5):** the `recover`/`retry`/`re_place`
+    reserved-name RECOGNIZERS + verbatim surface-and-stop sentences, the OQ-5
+    "names `recover` + D6" reject, the Gate-2 misplaced-decision reject, and
+    FILE the D6 umbrella + OQ-4-followup issues (interim cite #20 everywhere for
+    now — no dangling cites). Author only the RECOGNIZER, never live
+    `on_failure`/`FailureDecision` variants (the E4 defection attractor).
 - **E4-D7 (JIT posture — spike-decided within these bounds).** Spike 1
   measures: (1a) whether Result/Option match+construct is PROVEN native
   (currently only inferred); (1b) whether a COMPILER-INTERNAL typed
@@ -83,6 +188,17 @@ preserved + the exit-soundness substrate).
   (Proceed=Ok/Return=Err) is REFUSED — it lies about Result and cannot carry
   the payload. Never a vacuous green: the weave unit tests assert only
   mir_data presence and CANNOT catch demotion — the CLI cell must.
+  - **S4 status** (`e4-slice4-report.md`). Spike 1b HELD (S4-0): the
+    compiler-internal typed int tag/branch is the native shape (`1b_int_tag`,
+    0-fallback); the USER surface stays the D1 enum, statically rewritten (no
+    user-enum match/construct on the seam). The `ShortCircuitProof` token +
+    R-arm are in (c2). **Remaining (S4-4/S4-6):** the weave single-join branch
+    that realizes the native tag/branch end-to-end, and the two REVIEW-MANDATORY
+    CLI cells — the zero-fallback 1-ary Single native cell
+    (`count_fallback_lines(jit.stderr)==0`, the ONLY demotion-catcher) and the
+    Result-R NAMED-EXPECTED-FALLBACK cell (`==1` + the §5.16 identity string,
+    scope-fenced to v0.4, NEVER asserted native). Not yet built — no
+    native/fallback numbers to report.
 - **E4-D-baseline.** Preserve-baseline anchors on the slice-7/8 ACTUALS
   (vmlib 3510/6-name/36-ign, ann_runtime 36/0, ann_targets 24/0,
   ann_comptime 116/10-name, comptime 260/3-name, shape-test lsp 506/0,
@@ -116,6 +232,14 @@ S6a-f the 21 acceptance tests flipped in capability waves (A wire → B
 snapshot → C extern-C → D polyglot → E TLS composition → F import trio) →
 close (design-index, defections, LSP query re-flow, full regression vs the
 S0 snapshot, book truth-gate).
+
+**S6 DONE (all waves shipped):** 16/21 FLIPPED-GREEN (waves A–F, commits
+`c6ec8551`/`9fd52595`/`4779717c`/`893d02db`/`9cf6a3c4`/`0c69f0ba`), 5 0-ary
+tests re-pointed off the closed #68 to the live #83; #68 CLOSED; new #84
+(pre-existing stale snapshot test) + #85 (book-gate receiver language opt-in);
+book 569/572 → 571/574 (`66eb93b7` shape-web). Details: `e4-slice6-report.md` +
+the S6-shipped scout headline above. READY for the ADR-009 completion gate
+(next step; not run here).
 
 ## Operating rules
 

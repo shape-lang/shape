@@ -5309,11 +5309,20 @@ impl BytecodeCompiler {
         exports
     }
 
-    fn module_target_fields(items: &[Item]) -> Vec<(String, String)> {
+    // ADR-009 E5 CKPT-4 (design §2 class A — MIGRATE): each field carries its
+    // declared-type AST (a typed member's `Option<TypeAnnotation>`), so
+    // `to_nanboxed(Some(overlay))` STAMPS a typed module member's `type_ref`
+    // identity via the shared `stamp_for` gate. Synthetic members (functions /
+    // types / modules / annotations) have no type AST (`None`) → `INVALID` stamp →
+    // `kind: "Unresolved"` → the consumer rules them LOUD, never a silent
+    // `.source` reparse.
+    fn module_target_fields(items: &[Item]) -> Vec<(String, String, Option<TypeAnnotation>)> {
         let mut fields = Vec::new();
         for item in items {
             match item {
-                Item::Function(func, _) => fields.push((func.name.clone(), "function".to_string())),
+                Item::Function(func, _) => {
+                    fields.push((func.name.clone(), "function".to_string(), None))
+                }
                 Item::VariableDecl(decl, _) => {
                     if let Some(name) = decl.pattern.as_identifier() {
                         let type_name = decl
@@ -5322,7 +5331,7 @@ impl BytecodeCompiler {
                             .and_then(TypeAnnotation::as_simple_name)
                             .unwrap_or("any")
                             .to_string();
-                        fields.push((name.to_string(), type_name));
+                        fields.push((name.to_string(), type_name, decl.type_annotation.clone()));
                     }
                 }
                 Item::Statement(Statement::VariableDecl(decl, _), _) => {
@@ -5333,7 +5342,7 @@ impl BytecodeCompiler {
                             .and_then(TypeAnnotation::as_simple_name)
                             .unwrap_or("any")
                             .to_string();
-                        fields.push((name.to_string(), type_name));
+                        fields.push((name.to_string(), type_name, decl.type_annotation.clone()));
                     }
                 }
                 Item::Export(export, _) => {
@@ -5345,17 +5354,27 @@ impl BytecodeCompiler {
                                 .and_then(TypeAnnotation::as_simple_name)
                                 .unwrap_or("any")
                                 .to_string();
-                            fields.push((name.to_string(), type_name));
+                            fields.push((
+                                name.to_string(),
+                                type_name,
+                                decl.type_annotation.clone(),
+                            ));
                         }
                     }
                 }
-                Item::StructType(def, _) => fields.push((def.name.clone(), "type".to_string())),
-                Item::Enum(def, _) => fields.push((def.name.clone(), "type".to_string())),
-                Item::TypeAlias(def, _) => fields.push((def.name.clone(), "type".to_string())),
-                Item::Module(def, _) => fields.push((def.name.clone(), "module".to_string())),
+                Item::StructType(def, _) => {
+                    fields.push((def.name.clone(), "type".to_string(), None))
+                }
+                Item::Enum(def, _) => fields.push((def.name.clone(), "type".to_string(), None)),
+                Item::TypeAlias(def, _) => {
+                    fields.push((def.name.clone(), "type".to_string(), None))
+                }
+                Item::Module(def, _) => {
+                    fields.push((def.name.clone(), "module".to_string(), None))
+                }
                 // H4: Include annotation definitions in module target fields
                 Item::AnnotationDef(def, _) => {
-                    fields.push((def.name.clone(), "annotation".to_string()))
+                    fields.push((def.name.clone(), "annotation".to_string(), None))
                 }
                 _ => {}
             }
@@ -5462,17 +5481,18 @@ impl BytecodeCompiler {
                     // ADR-009 D1 (S2): expansion site for this module-target
                     // handler application.
                     let expansion_site = self.annotation_expansion_site(ann, &handler, &target);
-                    // R8 W9 G.2 Step 2 Bucket 7: to_nanboxed now returns
-                    // Result; surface the V3-S5 ckpt-5 SURFACE through the
-                    // caller's Result chain instead of panicking. E1 slice-5:
-                    // module fields are string-only (no AST) → `None` overlay,
-                    // every stamp INVALID.
-                    let target_value = target.to_nanboxed(None)?;
-                    let handler_span = handler.span;
-                    // ADR-009 E1 #17 (slice 5): the handler executor still needs a
-                    // freeze handle; acquire it here (no target stamping occurred,
-                    // so any overlay is behavior-equivalent).
+                    // ADR-009 E5 CKPT-4 (design §2 class A — MIGRATE): acquire the
+                    // freeze BEFORE `to_nanboxed` and thread it, so a typed module
+                    // member's `type_ref` STAMPS its identity via `stamp_for` (the
+                    // ONE producer↔consumer gate predicate). Synthetic members carry
+                    // no AST → INVALID → the consumer rules them LOUD (never a
+                    // silent `.source` reparse).
                     let freeze = self.comptime_freeze_overlay()?;
+                    // R8 W9 G.2 Step 2 Bucket 7: to_nanboxed returns Result;
+                    // surface the V3-S5 ckpt-5 SURFACE through the caller's Result
+                    // chain instead of panicking.
+                    let target_value = target.to_nanboxed(Some(freeze.as_ref()))?;
+                    let handler_span = handler.span;
                     // ADR-009 C3 #14 (slice 4): full param definitions —
                     // declared types ride along.
                     let def_params =
@@ -8455,8 +8475,7 @@ mod tests {
         // rejects at the declaration (S5b), so the override subject rides a
         // comptime handler instead.
         let code = r#"
-            annotation traced() {
-                targets: [type]
+            annotation traced() on type {
                 comptime post(target, ctx) {
                     1
                 }
@@ -8504,9 +8523,8 @@ mod tests {
     #[test]
     fn test_definition_lifecycle_targets_reject_expression_target() {
         let code = r#"
-            annotation info() {
-                targets: [expression]
-                metadata(target, ctx) {
+            annotation info() on expression {
+                metadata(target) {
                     target.name
                 }
             }
@@ -8520,6 +8538,148 @@ mod tests {
             msg.contains("not a definition target"),
             "expected definition-target restriction error, got: {}",
             msg
+        );
+    }
+
+    // ADR-009 E4-D2 ctx-removal (slice S3): the always-empty lifecycle `ctx`
+    // carrier was deleted; a lingering `ctx` (or any non-descriptor name) now
+    // degrades to a silent-null `PushNull` param. The planner rejects it LOUD
+    // (pre-inference, LSP-visible). These pins lock the diagnostic in.
+    #[test]
+    fn s3_lifecycle_ctx_param_is_loud_rejected() {
+        let code = r#"
+            annotation trace() {
+                on_define(target, ctx) {
+                    return 1
+                }
+            }
+        "#;
+        let program = parse_program(code).expect("Failed to parse");
+        let err = BytecodeCompiler::new()
+            .compile(&program)
+            .expect_err("on_define(target, ctx) must be loud-rejected after E4-D2 ctx removal");
+        let msg = format!("{}", err);
+        assert!(
+            msg.contains("removed in E4-D2"),
+            "expected the ctx-specific E4-D2 sub-message, got: {}",
+            msg
+        );
+        assert!(
+            msg.contains("#83"),
+            "ctx rejection must cite the per-invocation State deferral (#83), got: {}",
+            msg
+        );
+        assert!(
+            msg.contains("on_define"),
+            "diagnostic must name the on_define handler kind, got: {}",
+            msg
+        );
+    }
+
+    #[test]
+    fn s3_metadata_ctx_param_is_loud_rejected() {
+        let code = r#"
+            annotation info() {
+                metadata(target, ctx) {
+                    return 1
+                }
+            }
+        "#;
+        let program = parse_program(code).expect("Failed to parse");
+        let err = BytecodeCompiler::new()
+            .compile(&program)
+            .expect_err("metadata(target, ctx) must be loud-rejected after E4-D2 ctx removal");
+        let msg = format!("{}", err);
+        assert!(
+            msg.contains("removed in E4-D2") && msg.contains("#83") && msg.contains("metadata"),
+            "expected ctx-specific E4-D2 sub-message naming the metadata kind + #83, got: {}",
+            msg
+        );
+    }
+
+    #[test]
+    fn s3_lifecycle_nondescriptor_param_is_loud_rejected() {
+        let code = r#"
+            annotation trace() {
+                on_define(target, foo) {
+                    return 1
+                }
+            }
+        "#;
+        let program = parse_program(code).expect("Failed to parse");
+        let err = BytecodeCompiler::new()
+            .compile(&program)
+            .expect_err("on_define(target, foo) must be loud-rejected (broad form)");
+        let msg = format!("{}", err);
+        assert!(
+            msg.contains("unknown") && msg.contains("lifecycle handler parameter 'foo'"),
+            "expected the generic unknown-parameter rejection naming 'foo', got: {}",
+            msg
+        );
+        // A non-`ctx` name gets the generic message, NOT the E4-D2 ctx sub-message.
+        assert!(
+            !msg.contains("removed in E4-D2"),
+            "non-ctx param must not get the ctx-specific sub-message, got: {}",
+            msg
+        );
+    }
+
+    #[test]
+    fn s3_lifecycle_descriptor_only_installs_on_define_and_metadata() {
+        // The descriptor path (target/fn only) survives the ctx deletion:
+        // both lifecycle handlers still plan, install, and reserve a handler
+        // slot. Firing at module-init is separately proven by the binary
+        // behavior differential (fx_C on_define(target) -> exit 0).
+        let code = r#"
+            annotation trace() {
+                on_define(target) {
+                    return 1
+                }
+                metadata(target) {
+                    return 1
+                }
+            }
+        "#;
+        let program = parse_program(code).expect("Failed to parse");
+        let bytecode = BytecodeCompiler::new()
+            .compile(&program)
+            .expect("descriptor-only lifecycle handlers must still compile after ctx removal");
+        let ann = bytecode
+            .compiled_annotations
+            .get("trace")
+            .expect("trace annotation must be installed");
+        assert!(
+            ann.on_define_handler.is_some(),
+            "on_define(target) must reserve a handler slot"
+        );
+        assert!(
+            ann.metadata_handler.is_some(),
+            "metadata(target) must reserve a handler slot"
+        );
+    }
+
+    #[test]
+    fn s3_comptime_ctx_twin_stays_green_after_lifecycle_ctx_removal() {
+        // Collision-free anchor: the comptime pre/post ctx surface is a
+        // wholly separate path and is UNTOUCHED by the lifecycle-ctx deletion.
+        // `comptime post(target, ctx)` using target reflection must still
+        // compile (ctx is a valid comptime param name).
+        let code = r#"
+            annotation trace() {
+                comptime post(target, ctx) {
+                    target.name
+                }
+            }
+
+            @trace()
+            fn work() {
+                return 1
+            }
+        "#;
+        let program = parse_program(code).expect("Failed to parse");
+        assert!(
+            BytecodeCompiler::new().compile(&program).is_ok(),
+            "comptime post(target, ctx) must remain green — lifecycle ctx removal must not reach the comptime path"
         );
     }
 

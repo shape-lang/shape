@@ -7,8 +7,7 @@
 // source/JSON string). Printing 7 proves the generated function runs; it is a
 // plain int function + a call, with no async, closure, or top-level comptime,
 // so JIT == VM natively (zero [jit-fallback]).
-annotation add_value() {
-  targets: [type]
+annotation add_value() on type {
   comptime post(target, ctx) {
     extend (item_fn("gen_value", "int", 7))
   }

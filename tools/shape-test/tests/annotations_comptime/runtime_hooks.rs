@@ -10,8 +10,7 @@ fn before_hook_preserves_a_typed_array_parameter() {
     // the implementation consume the woven carrier end-to-end.
     ShapeTest::new(
         r#"
-annotation preserve_args() {
-  targets: [function]
+annotation preserve_args() on function {
   before(args) {
     args
   }

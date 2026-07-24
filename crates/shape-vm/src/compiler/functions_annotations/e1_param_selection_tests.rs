@@ -203,8 +203,7 @@ fn imported_handler_param_miss_surfaces_c0930_not_vanishes() {
     // miss is caught at the shared param-selection seam.
     let imported = annotation_def(
         r#"
-annotation mark() {
-  targets: [function]
+annotation mark() on function {
   comptime post(target, ctx) {
     set param ghost: int
   }

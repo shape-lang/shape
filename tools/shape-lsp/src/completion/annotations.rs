@@ -1,6 +1,8 @@
 //! Annotation completions for @decorator syntax
 
-use crate::annotation_discovery::{AnnotationDiscovery, render_annotation_documentation};
+use crate::annotation_discovery::{
+    AnnotationDiscovery, render_annotation_documentation, render_on_clause,
+};
 use crate::module_cache::ModuleCache;
 use crate::symbols::{SymbolInfo, symbols_to_completions};
 use shape_ast::ast::Program;
@@ -28,10 +30,18 @@ pub fn annotation_completions(
                 format!("{}(${{1}})", ann.name)
             };
 
-            let detail = if ann.params.is_empty() {
+            let detail_base = if ann.params.is_empty() {
                 format!("@{}", ann.name)
             } else {
                 format!("@{}({})", ann.name, params_str)
+            };
+            // ADR-009 E4-D4 (#73, S1c): surface the declared target set in the
+            // completion detail so the popup shows the full contract. This is
+            // display only — application-site @-completion FILTERING by target
+            // kind is a named E4 follow-up, not built here.
+            let detail = match render_on_clause(ann.targets.as_deref()) {
+                Some(on_clause) => format!("{detail_base} on {on_clause}"),
+                None => detail_base,
             };
 
             CompletionItem {

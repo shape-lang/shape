@@ -194,8 +194,7 @@ fn note_out() {
   print("simple_log: exiting")
 }
 
-annotation simple_log() {
-  targets: [function]
+annotation simple_log() on function {
   comptime post(target, ctx) {
     install(before_hook(note_in, []))
     install(after_hook(note_out, []))

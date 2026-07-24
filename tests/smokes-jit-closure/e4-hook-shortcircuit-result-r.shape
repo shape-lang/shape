@@ -1,0 +1,46 @@
+// ADR-009 E4 S4 (S4-6) — the Result-R NAMED-EXPECTED-FALLBACK sibling of
+// e4-hook-shortcircuit-single. The SAME int-tag decision wrapper (native
+// branch), but R = Result<int, string> and the CALLER binds the payload. The
+// pre-existing EnumPayload payload-bind deopt (the receiver-recovery soundness
+// gap at the user-fn return-kind boundary, ADR-006 §2.7.17) fires on the
+// caller's `match` — the payload-BIND site, shared by ALL Result-binding code,
+// wholly independent of hooks/E4 — whole-programming to the interpreter with a
+// loud [jit-fallback]. Pinned NAMED-EXPECTED-FALLBACK with loud-flip: count==1 +
+// the gap identity. NEVER asserted native (would pass vacuously the day the
+// payload-bind gap is closed).
+//
+//   even i: short-circuit Ok(700)  ; 100 * 700   =  70000
+//   odd  i: Proceed → Ok(i*10)     ; 10000 * 10   = 100000
+//   total = 170000
+fn cached() -> Result<int, string> {
+  return Ok(700)
+}
+fn decide<Args>(args: Args) -> HookDecision<Args> {
+  if args[0] % 2 == 0 {
+    return HookDecision::Return(cached())
+  }
+  return HookDecision::Proceed(args)
+}
+
+annotation guarded() on function {
+  comptime post(target, ctx) {
+    install(before_hook(decide, []))
+  }
+}
+
+@guarded()
+fn compute(a: int) -> Result<int, string> {
+  return Ok(a * 10)
+}
+
+fn run() -> int {
+  let mut total = 0
+  for i in 0..200 {
+    match compute(i) {
+      Ok(v) => total = total + v,
+      Err(e) => total = total + 0,
+    }
+  }
+  total
+}
+print(run())

@@ -44,8 +44,7 @@
 //   times misread as 1        → 10i + 15  = 202000
 // Each hook is value-distinguishing: a silently skipped hook can never
 // print 600000.
-annotation boosted(times: int) {
-  targets: [function]
+annotation boosted(times: int) on function {
   before(args) {
     args[0] = args[0] * times + 1
     return args

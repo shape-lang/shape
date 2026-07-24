@@ -8,6 +8,5 @@ pub type Bounds {
   hi: int
 }
 
-pub annotation traced(tag) {
-  targets: [function]
+pub annotation traced(tag) on function {
 }

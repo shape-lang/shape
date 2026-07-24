@@ -591,8 +591,7 @@ mod tests {
             r#"
 {body_fns}
 
-annotation hookann() {{
-  targets: [function]
+annotation hookann() on function {{
   comptime post(target, ctx) {{
     {handler_stmts}
   }}
@@ -841,8 +840,7 @@ annotation hookann() {{
         let src = r#"
 fn my_before(x: int) -> int { return x + 1 }
 
-annotation hookann() {
-  targets: [function]
+annotation hookann() on function {
   comptime post(target, ctx) {
     install(before_hook(my_before, []))
   }
@@ -900,8 +898,7 @@ fn do_install() {
   install(before_hook(my_before, []))
 }
 
-annotation hookann() {
-  targets: [function]
+annotation hookann() on function {
   comptime post(target, ctx) {
     do_install()
   }
@@ -934,8 +931,7 @@ fn do_install() {
   install(before_hook(my_before, []))
 }
 
-annotation hookann() {
-  targets: [function]
+annotation hookann() on function {
   comptime post(target, ctx) {
     do_install()
   }
@@ -960,8 +956,7 @@ victim(7)
             r#"
 fn my_before(x: int) -> int { return x + 1 }
 
-annotation hookann() {
-  targets: [function]
+annotation hookann() on function {
   comptime post(target, ctx) {
     let f = before_hook
     install(f(my_before, []))
@@ -989,8 +984,7 @@ fn victim<T>(x: T) -> T { return x }
     fn s5b_static_g8_value_position_reference_alone_engages_the_scan() {
         let compiler = expect_compile_reject(
             r#"
-annotation hookann() {
-  targets: [function]
+annotation hookann() on function {
   comptime post(target, ctx) {
     let f = install
   }
@@ -1021,8 +1015,7 @@ fn victim<T>(x: T) -> T { return x }
             r#"
 fn h_noise(x: int) -> int { return x + 40 }
 
-annotation noise() {
-  targets: [function]
+annotation noise() on function {
   comptime post(target, ctx) {
     let a = before_hook(h_noise, [])
   }
@@ -1070,8 +1063,7 @@ fn tmpl<Args>(args: Args) -> Args { return args }
     fn s6_static_g8_zero_param_hook_on_generic_target_now_rejects() {
         let (result, compiler) = compile_source(
             r#"
-annotation dbl() {
-  targets: [function]
+annotation dbl() on function {
   before(args) {
     args[0] = args[0] * 2
     return args
@@ -1106,8 +1098,7 @@ id(5)
                 r#"
 fn my_before(x: int) -> int {{ return x + 1 }}
 
-annotation hookann() {{
-  targets: [type]
+annotation hookann() on type {{
   comptime post(target, ctx) {{
     install(before_hook(my_before, []))
   }}
@@ -1240,8 +1231,7 @@ fn h_noise(x: int) -> int { return x + 40 }
 fn h_noise2(x: int) -> int { return x + 100 }
 fn h2(x: int) -> int { return x * 2 }
 
-annotation noise() {
-  targets: [function]
+annotation noise() on function {
   comptime post(target, ctx) {
     let a = before_hook(h_noise, [])
     let b = before_hook(h_noise2, [])
@@ -1254,8 +1244,7 @@ fn tmpl<Args>(args: Args) -> Args {
     return args
 }
 
-annotation hookann() {
-  targets: [function]
+annotation hookann() on function {
   comptime post(target, ctx) {
     install(before_hook(tmpl, []))
     install(before_hook(h2, []))
@@ -1322,8 +1311,7 @@ victim(4)
     fn s8c_sugar_row_projection_is_display_safe_and_carries_both_views() {
         let compiler = compiled_ok(
             r#"
-annotation traced(factor: int) {
-  targets: [function]
+annotation traced(factor: int) on function {
   before(args) {
     args[0] = args[0] * factor
     return args
@@ -1421,8 +1409,7 @@ victim(1)
                 r#"
 fn my_before(x: int) -> int {{ return x + 1 }}
 
-annotation hookann() {{
-  targets: [module]
+annotation hookann() on module {{
   comptime post(target, ctx) {{
     install(before_hook(my_before, []))
   }}

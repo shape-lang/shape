@@ -38,8 +38,7 @@ greet()
 fn annotation_with_targets_function_on_function() {
     ShapeTest::new(
         r#"
-annotation fn_only(tag: string) {
-  targets: [function]
+annotation fn_only(tag: string) on function {
   before() {
     print(f"[{tag}] before")
   }

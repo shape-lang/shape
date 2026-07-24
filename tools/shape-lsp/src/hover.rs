@@ -2,7 +2,9 @@
 //!
 //! Provides type information and documentation when hovering over symbols.
 
-use crate::annotation_discovery::{AnnotationDiscovery, render_annotation_documentation};
+use crate::annotation_discovery::{
+    AnnotationDiscovery, annotation_signature, render_annotation_documentation,
+};
 use crate::context::{CompletionContext, analyze_context, is_inside_interpolation_expression};
 use crate::doc_render::render_doc_comment;
 use crate::module_cache::ModuleCache;
@@ -612,11 +614,11 @@ fn get_annotation_hover(
     }
 
     if let Some(info) = discovery.get(word) {
-        let signature = if info.params.is_empty() {
-            format!("@{}", info.name)
-        } else {
-            format!("@{}({})", info.name, info.params.join(", "))
-        };
+        // ADR-009 E4-D4 (#73, S1c): render the header `on`-clause target set
+        // into the signature when the def declared one, so the hover shows the
+        // full contract in one line. Absent clause => inferred targets => plain
+        // signature (DN1), never a fabricated `on`-clause.
+        let signature = annotation_signature(info);
         let mut sections = vec![format!("**Annotation**: `{signature}`")];
         if let Some(documentation) =
             render_annotation_documentation(info, Some(&program), module_cache, current_file, None)

@@ -22,8 +22,7 @@
 /// serializes a value to a JSON object string. String fields are quoted;
 /// `int` / `number` / `bool` fields are emitted bare. A field whose type has no
 /// JSON representation is a compile error naming the field.
-pub annotation to_json() {
-    targets: [type]
+pub annotation to_json() on type {
     comptime post(target, ctx) {
         // ADR-009 E2 #18 slice 4.5 (E2-Q2/B): build a TYPED template for the
         // `extend_method` producer instead of generating source text. `segments`

@@ -435,6 +435,11 @@ impl SemanticFreeze {
             frozen_primitive_payloads: HashMap::new(),
             frozen_callable_descriptors: HashMap::new(),
             frozen_nominal_descriptors: HashMap::new(),
+            // ADR-009 E5 CKPT-2: both are (re)populated by
+            // `rebuild_frozen_type_index` below; the literal only satisfies the
+            // no-`Default` single-construction-point invariant.
+            builtin_nominal_templates: HashMap::new(),
+            base_applied_nominals: HashMap::new(),
             frozen_tuple_descriptors: HashMap::new(),
             frozen_record_descriptors: HashMap::new(),
             frozen_reference_descriptors: HashMap::new(),
@@ -1102,17 +1107,22 @@ impl FreezeOverlay {
                          FrozenCallable structural descriptor"
                             .to_string()
                     }),
-                // ADR-009 B5 (Dec 55, S2): a site-interned Nominal composite is
-                // an APPLIED generic form (`applied:h<…>`) not interned into the
-                // base (a base user struct/enum is answered by the base arm
-                // above). Generic substitution PRECEDES descriptor issuance: the
-                // refined head + argument identities bind the head's declared
-                // parameters, and the field annotations re-canonicalize through
-                // the ONE canonicalizer under that binding. A head with no
-                // frozen struct field annotations to substitute (a builtin/enum
-                // applied form) has nothing to substitute into and stays the
-                // named applied-substitution-pending rejection — never a
-                // descriptor off the un-substituted form.
+                // ADR-009 B5 (Dec 55, S2) + E5 CKPT-2 (A8-OUT): a site-interned
+                // Nominal composite is an APPLIED generic form (`applied:h<…>`)
+                // not interned into the base (a base user struct/enum is
+                // answered by the base arm above). `substituted_applied_nominal`
+                // now answers ALL THREE applicable-head families with a
+                // COMPLETE, non-fabricating descriptor: a user STRUCT head
+                // re-canonicalizes its field annotations under the head→arg
+                // binding (generic substitution PRECEDES issuance); a builtin
+                // head answers from the static builtin template (container ⇒
+                // `Opaque`, `Option`/`Result` ⇒ arity-only `Enum`); a user ENUM
+                // head reuses its param-agnostic base arity-only descriptor.
+                // Under A8-OUT the descriptor never states an applied type
+                // ARGUMENT (container element/key/value AND enum payload are
+                // recovered via `type_argument`, A7-uniform). The named
+                // `applied_nominal_pending_rejection` stays the LOUD fallback
+                // ONLY for a head that is none of the three (never a silent gap).
                 FrozenTypeCategory::Nominal => entry
                     .applied_nominal
                     .as_ref()
@@ -1207,6 +1217,58 @@ impl FreezeOverlay {
     /// complete diagnostic-name source.
     pub(crate) fn type_names_for_identity(&self, identity: FrozenTypeIdentity) -> Vec<&str> {
         self.base.type_names_for_identity(identity)
+    }
+
+    /// ADR-009 E5 CKPT-1 (design §1a, ruling A1): the refined APPLIED form
+    /// (frozen head + ordered argument identities) for an applied-nominal
+    /// composite identity, or `None`. A pure READ of the already-derived
+    /// `composites` memo's `applied_nominal` field — the SAME memo the producer
+    /// stamp-gate interned via [`Self::canonicalize_type_projection`] (and, since
+    /// CKPT-1, for every composite SUB-expression too, so nested applied forms
+    /// answer). NOT a new derivation, NEVER a `.source` reparse, and — per A1 —
+    /// a sibling accessor rather than a new sealed `FrozenPayloadDescriptor`
+    /// variant.
+    ///
+    /// `Some` iff `identity` is a site-interned `applied:h<…>` form — every
+    /// applied builtin (`Array<int>` / `Option<T>` / `HashMap<K,V>` /
+    /// `Result<T,E>` and the full arity table) AND every applied user
+    /// struct/enum. `None` for a bare leaf, a base-frozen nominal, an un-applied
+    /// generic head, or any non-applied composite. Consumed by
+    /// [`reconstruct_type_annotation`](super::reconstruct_type_annotation)'s
+    /// spelling arm.
+    pub(super) fn applied_nominal_of(
+        &self,
+        identity: FrozenTypeIdentity,
+    ) -> Option<super::type_reflection::RefinedApplication> {
+        self.composites
+            .lock()
+            .expect("freeze-overlay composite memo lock poisoned")
+            .get(&identity)
+            .and_then(|entry| entry.applied_nominal.clone())
+    }
+
+    /// ADR-009 E5 CKPT-1 (design §1a): the spellable bare NAME of a RESOLVED
+    /// base user nominal (a struct/enum that froze a nominal descriptor), or
+    /// `None`. A resolved user nominal spells as `TypeAnnotation::Basic(name)`;
+    /// an un-applied GENERIC head (builtin `Array` / a generic user-struct head
+    /// — declared param kinds but no frozen nominal descriptor), a primitive, or
+    /// any composite returns `None` and stays its EXISTING named rejection at
+    /// `payload_of` (ruling A3 — un-applied heads are not spelled). A pure READ
+    /// of the base freeze's derived `frozen_nominal_descriptors` fact — no
+    /// reparse.
+    pub(super) fn bare_nominal_name_of(&self, identity: FrozenTypeIdentity) -> Option<String> {
+        if self
+            .base
+            .index()
+            .frozen_nominal_descriptors
+            .contains_key(&identity)
+        {
+            self.type_names_for_identity(identity)
+                .first()
+                .map(|name| (*name).to_string())
+        } else {
+            None
+        }
     }
 
     /// The shared base freeze this overlay scopes (no rebuild happened).

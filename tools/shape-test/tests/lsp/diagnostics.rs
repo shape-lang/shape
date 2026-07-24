@@ -276,8 +276,7 @@ fn semantic_diagnostic_reports_unconstrained_result_generic_from_err_only() {
 #[test]
 fn generated_method_call_from_comptime_extend_has_no_semantic_diagnostics() {
     let code = r#"
-annotation add_sum() {
-    targets: [type]
+annotation add_sum() on type {
     comptime post(target, ctx) {
         extend target {
             method sum() { self.x + self.y }

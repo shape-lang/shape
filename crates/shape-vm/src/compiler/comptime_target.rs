@@ -107,27 +107,38 @@ fn type_ref_name_from_source(source: &str) -> String {
     source.to_string()
 }
 
+/// Build the `__ComptimeTypeRef` carrier for a type.
+///
+/// ADR-009 E5 CKPT-5: the `.source` reparse-fallback FIELD is DELETED. This
+/// descriptor carries the producer-stamped `FrozenTypeIdentity`
+/// (`identity_high`/`identity_low`) plus the `name`/`kind` spell/reflect-only
+/// fields. `spelling` is the type's display spelling used SOLELY to derive the
+/// surviving `name`/`kind` reflection fields (the U02 corpus reads
+/// `type_ref.kind`, e.g. serde `derive.shape`); it is NOT stored for reparse —
+/// there is no `.source` field, and the consumer resolves a stamped ref
+/// identity-only via `reconstruct_type_annotation`.
+///
+/// An unstamped ref carries INVALID ({-1,-1}); the consumer
+/// (`type_annotation_from_string_or_type_ref_slot`) rules an INVALID identity a
+/// NAMED surface-and-stop — never a silent reparse (the fallback arm no longer
+/// exists, so the stamped->reparse walk-back is structurally impossible). The int
+/// halves are stamped exactly as `build_frozen_type_ref_heap_value`
+/// (type_reflection.rs) does for the sibling schema.
 pub(crate) fn build_type_ref_descriptor(
-    source: &str,
+    spelling: &str,
     kind: Option<&str>,
     identity: Option<FrozenTypeIdentity>,
 ) -> KindedSlot {
     use shape_runtime::type_schema::typed_object_for_named_schema;
 
-    let source = source.trim();
-    let kind = kind.unwrap_or_else(|| type_ref_kind_from_source(source));
-    // ADR-009 E1 #17 (slice 5, A-FULL): an unstamped ref carries INVALID
-    // ({-1,-1}) so the consumer's identity-only route is a no-op (identity ==
-    // INVALID → the existing `.source` reparse arm, E1-D7(a)). The int halves
-    // are stamped exactly as `build_frozen_type_ref_heap_value`
-    // (type_reflection.rs) does for the sibling schema.
+    let spelling = spelling.trim();
+    let kind = kind.unwrap_or_else(|| type_ref_kind_from_source(spelling));
     let id = identity.unwrap_or(FrozenTypeIdentity::INVALID);
     typed_object_for_named_schema(
         "__ComptimeTypeRef",
         &[
-            ("name", nb_string(type_ref_name_from_source(source))),
+            ("name", nb_string(type_ref_name_from_source(spelling))),
             ("kind", nb_string(kind.to_string())),
-            ("source", nb_string(source.to_string())),
             ("identity_high", KindedSlot::from_int(id.high)),
             ("identity_low", KindedSlot::from_int(id.low)),
         ],
@@ -147,13 +158,17 @@ pub(crate) fn build_type_ref_descriptor(
 /// is written (E1-D7(b)).
 ///
 /// A canonicalize error (a non-freezable ref) is SWALLOWED to `None` — NEVER
-/// propagated — so the `__ComptimeTypeRef` carries `INVALID` and the consumer's
-/// identity-only route is a no-op, falling through to the existing `.source`
-/// reparse arm (E1-D7(a) unstamped fall-through — LIVE for unstamped refs;
-/// deletion bound to B4/B5 → E5 per E1-D8).
-/// The stamp-gate rejects everything that is NOT reconstructable this slice
-/// (applied-generic nominals like `Array<int>`/`Option<T>`, records, bare
-/// user-nominals, un-applied heads) → `INVALID` → reparse.
+/// propagated — so the `__ComptimeTypeRef` carries `INVALID`, and the consumer
+/// (`type_annotation_from_string_or_type_ref_slot`) rules an INVALID identity a
+/// NAMED surface-and-stop (E5 CKPT-4 ruling). Post-E5 CKPT-5 there is NO `.source`
+/// reparse arm to fall through to — the fallback FIELD and its reparse arm are
+/// DELETED, so an unreconstructable ref rejects LOUD and the stamped->reparse
+/// walk-back is structurally impossible.
+/// After CKPT-1..3 the stamp-gate ADMITS every reconstructable type — leaves,
+/// applied-generic nominals (`Array<int>`/`Option<T>`), tuples, records, and bare
+/// user-nominals all stamp a real identity. Only genuinely unreconstructable refs
+/// (an unresolved return, a synthetic member, a scoped generic parameter, an
+/// un-applied generic head) stay `INVALID` → the consumer's NAMED rejection.
 fn stamp_for(
     overlay: Option<&FreezeOverlay>,
     ast: Option<&TypeAnnotation>,
@@ -172,6 +187,26 @@ fn stamp_for(
         }
         _ => None,
     }
+}
+
+/// ADR-009 E5 CKPT-4 (design §2 class D — MIGRATE): build a `__ComptimeTypeRef`
+/// for a bare NAMED type, producer-stamped with the type's frozen identity when
+/// the name reconstructs. `type_info(T)`'s top-level `type_ref` describes the
+/// type `T` itself (a bare nominal / primitive), so its stamp AST is
+/// `Basic(name)`: a resolved struct/enum/alias spells via `bare_nominal_name_of`,
+/// a primitive via the synonym-family inverse. An UNRESOLVED name (a scoped
+/// generic parameter, an unknown name — `kind: "Unresolved"`) does not
+/// reconstruct → stamp `INVALID` → the consumer rules it LOUD (no reparse — the
+/// `.source` fallback is DELETED, E5 CKPT-5). Shares the ONE stamp-gate predicate (`stamp_for`) with
+/// every other producer (E1-D7(b), no parallel gate logic).
+pub(crate) fn build_named_type_ref_descriptor(
+    name: &str,
+    kind: Option<&str>,
+    overlay: Option<&FreezeOverlay>,
+) -> KindedSlot {
+    let ast = TypeAnnotation::Basic(name.to_string());
+    let identity = stamp_for(overlay, Some(&ast));
+    build_type_ref_descriptor(name, kind, identity)
 }
 
 /// Build an `Array<string>` slot carried by a stamped v2-raw
@@ -235,7 +270,8 @@ fn nb_object_array(objs: Vec<KindedSlot>) -> Result<KindedSlot, ShapeError> {
 /// original per-field `TypeAnnotation` AST, or empty (`&[]`) on reflection
 /// surfaces that carry no AST. The producer stamps each field's `type_ref`
 /// identity via the shared [`stamp_for`] gate. A `None` overlay (or absent AST)
-/// leaves the stamp `INVALID` (→ `.source` reparse), preserving current behavior.
+/// leaves the stamp `INVALID`; post-E5 CKPT-5 the consumer rules an INVALID field
+/// type_ref LOUD (no `.source` reparse — the fallback field + arm are deleted).
 pub(crate) fn build_field_descriptor_array(
     fields: &[(String, String, Vec<FieldAnnotation>)],
     overlay: Option<&FreezeOverlay>,
@@ -262,20 +298,26 @@ pub(crate) fn build_field_descriptor_array(
         } else {
             ftype.clone()
         };
-        // E1 slice-5 stamp: the emitted `.source` is `unwrap_option_type(ftype)`,
-        // so the stamp AST must render to that same source. For a non-optional
-        // field the full AST renders to `ftype` == the emitted source; for an
-        // OPTIONAL field the emitted source is the UNWRAPPED inner while the AST
-        // is the full `Option<…>` (a Nominal, non-reconstructable this slice),
-        // so stamping the full AST would mismatch the source — leave it `None`
-        // (→ INVALID → reparse). The gate would reject the applied-Option
-        // identity anyway; gating on `!is_optional` keeps stamp-AST ↔ source
-        // exact.
-        let field_identity = if is_optional {
-            None
+        // ADR-009 E5 CKPT-4 (design §2 class B — MIGRATE; the pre-CKPT-4
+        // `!is_optional → None` gate is DROPPED). The stamp AST must render to the
+        // field descriptor's emitted `.type` spelling, which is
+        // `unwrap_option_type(ftype)` — the UNWRAPPED inner for an optional field
+        // (the Option-ness rides on the separate `optional` flag, not the
+        // type_ref). So for an OPTIONAL field the stamp AST is the UNWRAPPED-INNER
+        // AST (`option_inner`): its frozen identity reconstructs to exactly the
+        // inner type the descriptor names, keeping spelling↔identity consistent AND
+        // stamping the field. (Applied `Option<T>` itself reconstructs
+        // post-CKPT-1, but this descriptor DESCRIBES its inner `T`.) A non-optional
+        // field stamps its full declared AST. A `None` overlay or absent AST leaves
+        // the stamp `INVALID` (the consumer rules an unstamped ref LOUD — no
+        // reparse, the `.source` fallback is DELETED — ADR-009 E5 CKPT-5).
+        let field_ast = field_type_asts.get(idx).and_then(|a| a.as_ref());
+        let stamp_ast = if is_optional {
+            field_ast.and_then(TypeAnnotation::option_inner)
         } else {
-            stamp_for(overlay, field_type_asts.get(idx).and_then(|a| a.as_ref()))
+            field_ast
         };
+        let field_identity = stamp_for(overlay, stamp_ast);
         field_objs.push(typed_object_for_named_schema(
             "__ComptimeFieldDescriptor",
             &[
@@ -423,10 +465,20 @@ impl ComptimeTarget {
     /// Create a target descriptor for a module definition.
     ///
     /// Module fields don't carry annotations, so they get empty annotation lists.
-    pub fn from_module(name: &str, fields: &[(String, String)]) -> Self {
+    ///
+    /// ADR-009 E5 CKPT-4 (design §2 class A — MIGRATE): each field carries its
+    /// declared-type AST (index-parallel to the `(name, type_string)` tuples), so
+    /// a typed module member (`let x: int`) STAMPS its `type_ref` identity via the
+    /// shared `stamp_for` gate when `to_nanboxed` is called with `Some(overlay)`.
+    /// Synthetic members (functions / types / modules / annotations) carry no type
+    /// AST (`None`) → `INVALID` stamp → `kind: "Unresolved"` → the consumer rules
+    /// them LOUD (no reparse — the `.source` fallback is DELETED, E5 CKPT-5).
+    pub fn from_module(name: &str, fields: &[(String, String, Option<TypeAnnotation>)]) -> Self {
+        let field_type_asts: Vec<Option<TypeAnnotation>> =
+            fields.iter().map(|(_, _, ast)| ast.clone()).collect();
         let fields = fields
             .iter()
-            .map(|(n, t)| (n.clone(), t.clone(), Vec::new()))
+            .map(|(n, t, _)| (n.clone(), t.clone(), Vec::new()))
             .collect();
         Self {
             kind: AnnotationTargetKind::Module,
@@ -436,10 +488,9 @@ impl ComptimeTarget {
             return_type: None,
             annotations: Vec::new(),
             captures: Vec::new(),
-            // Module fields are string-only (no AST); expression has no members.
             param_type_asts: Vec::new(),
             return_type_ast: None,
-            field_type_asts: Vec::new(),
+            field_type_asts,
         }
     }
 
@@ -481,9 +532,10 @@ impl ComptimeTarget {
     /// its declared-type AST via the [`stamp_for`] gate (identity + shared
     /// composite-memo interning through `overlay.canonicalize_type_projection`).
     /// `None` (module/expression targets, tests) stamps `INVALID` everywhere.
-    /// The consumer STILL reparses `.source` until the slice-4 flip, so a `Some`
-    /// overlay is behavior-identical to `None` here — the identity is written,
-    /// not yet read.
+    /// The consumer resolves a stamped ref identity-only via
+    /// `reconstruct_type_annotation`; post-E5 CKPT-5 there is NO `.source` field or
+    /// reparse arm, so an `INVALID` stamp is a NAMED consumer rejection, never a
+    /// silent reparse.
     pub fn to_nanboxed(&self, overlay: Option<&FreezeOverlay>) -> Result<KindedSlot, ShapeError> {
         // S2 (comptime-excellence §4.3): every descriptor object is built
         // through `typed_object_for_named_schema`, which resolves a

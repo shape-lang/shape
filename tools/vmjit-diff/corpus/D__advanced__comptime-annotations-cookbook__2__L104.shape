@@ -7,8 +7,7 @@ type Prompt {
   temperature: float
 }
 
-annotation json_schema() {
-  targets: [type]
+annotation json_schema() on type {
 
   comptime post(target, ctx) {
     comptime for field in target.fields {

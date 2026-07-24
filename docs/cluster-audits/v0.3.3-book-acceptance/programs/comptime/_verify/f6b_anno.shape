@@ -1,5 +1,4 @@
-annotation ai() {
-  targets: [type]
+annotation ai() on type {
   comptime post(target, ctx) {
     comptime for field in target.fields {
       comptime for ann in field.annotations {

@@ -22,8 +22,7 @@ fn expect_vm_and_jit_output(source: &str, expected: &str) {
 fn generated_extend_target_method_behaves_identically_in_vm_and_jit() {
     expect_vm_and_jit_output(
         r#"
-annotation displayable() {
-  targets: [type]
+annotation displayable() on type {
   comptime post(target, ctx) {
     extend target {
       method display() { f"({self.x}, {self.y})" }
@@ -46,8 +45,7 @@ print(p.display())
 fn generated_extend_target_arithmetic_method_behaves_identically_in_vm_and_jit() {
     expect_vm_and_jit_output(
         r#"
-annotation summable() {
-  targets: [type]
+annotation summable() on type {
   comptime post(target, ctx) {
     extend target {
       method total() -> int { self.a + self.b * 2 }
@@ -87,8 +85,7 @@ print(pair.total())
 #[test]
 fn generated_free_function_behaves_identically_in_vm_and_jit() {
     let source = r#"
-annotation gen2() {
-  targets: [type]
+annotation gen2() on type {
   comptime post(target, ctx) {
     extend (item_fn("generated_flag", "int", 7))
   }

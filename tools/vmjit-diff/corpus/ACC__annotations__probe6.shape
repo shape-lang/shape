@@ -1,6 +1,5 @@
 // Probe: comptime pre that READS target.params (no error call) - does array access surface?
-annotation count_params() {
-  targets: [function]
+annotation count_params() on function {
 
   comptime pre(target, ctx) {
     let n = target.params.length

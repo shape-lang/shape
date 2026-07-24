@@ -1,6 +1,5 @@
 // ADR-009 C1 slice 4: generated `move` over a plain local `let`.
-annotation add_answer() {
-  targets: [type]
+annotation add_answer() on type {
   comptime post(target, ctx) {
     extend target { method answer() -> int { let base = 40
       let worker = |; move base| base + 2

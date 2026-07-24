@@ -1,6 +1,5 @@
 // Probe: basic runtime before/after annotation on function (annotations.mdx "Define an Annotation")
-annotation traced(tag) {
-  targets: [function]
+annotation traced(tag) on function {
 
   before(args, ctx) {
     print("[" + tag + "] before")

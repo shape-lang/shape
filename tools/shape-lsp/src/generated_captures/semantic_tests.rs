@@ -7,8 +7,7 @@ use shape_vm::compiler::{GeneratedCaptureDescriptorView, GeneratedCaptureQuery};
 use super::query;
 
 const CALLABLE_CAPTURES: &str = r#"
-annotation add_inspector() {
-  targets: [type]
+annotation add_inspector() on type {
   comptime post(target, ctx) {
     extend target {
       method inspect() -> int {
@@ -31,8 +30,7 @@ job.inspect()
 "#;
 
 const CALLABLE_ONLY_GENERIC: &str = r#"
-annotation add_apply() {
-  targets: [type]
+annotation add_apply() on type {
   comptime post(target, ctx) {
     extend target {
       method apply<T>(value: T) -> int {
@@ -53,8 +51,7 @@ let text = job.apply("shape")
 "#;
 
 const ORDER_BASE: &str = r#"
-annotation add_runner() {
-  targets: [type]
+annotation add_runner() on type {
   comptime post(target, ctx) {
     extend target {
       method run(x: int) -> int {
@@ -186,8 +183,7 @@ fn unrelated_earlier_callable_registration_cannot_change_specialization_identity
 /// `generation_reachability_tests` (a distinct directive path E2 does not touch),
 /// which must keep firing `[C0911]`.
 const REPLACE_BODY_EDIT_CAPTURE: &str = r#"
-annotation edit_worker() {
-  targets: [function]
+annotation edit_worker() on function {
   comptime post(target, ctx) {
     replace body {
       let base = 40

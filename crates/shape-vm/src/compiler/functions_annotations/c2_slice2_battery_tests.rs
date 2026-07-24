@@ -138,8 +138,7 @@ fn assert_generated_install_succeeds(program_src: &str) {
 fn battery_row1_type_mismatch_rejects_atomically() {
     assert_generated_install_rejected(
         r#"
-annotation gen1() {
-  targets: [type]
+annotation gen1() on type {
   comptime post(target, ctx) {
     extend target {
       method run() -> int { let y: int = true; y }
@@ -168,8 +167,7 @@ type Widget { id: int }
 fn battery_row3_ownership_use_after_move_rejects_atomically() {
     assert_generated_install_rejected(
         r#"
-annotation gen3() {
-  targets: [type]
+annotation gen3() on type {
   comptime post(target, ctx) {
     extend target {
       method run() -> int { let p = [1, 2, 3]; let q = p; p[0] }
@@ -193,8 +191,7 @@ type Widget { id: int }
 fn battery_row4_borrow_conflict_rejects_atomically() {
     assert_generated_install_rejected(
         r#"
-annotation gen4() {
-  targets: [type]
+annotation gen4() on type {
   comptime post(target, ctx) {
     extend target {
       method run() -> int { let mut x = 1; let shared = &x; let excl = &mut x; let held = shared; 0 }
@@ -229,8 +226,7 @@ type Widget { id: int }
 fn battery_row5_lifetime_reference_escape_rejects_atomically() {
     assert_generated_install_rejected(
         r#"
-annotation gen5() {
-  targets: [type]
+annotation gen5() on type {
   comptime post(target, ctx) {
     extend target {
       method run() -> int { let value = 7; let r = &value; let worker = |y: int; move r| y + r; worker(1) }
@@ -271,8 +267,7 @@ type Widget { id: int }
 fn battery_row6_suspension_exclusive_ref_across_task_boundary_rejects_atomically() {
     assert_generated_install_rejected(
         r#"
-annotation gen6() {
-  targets: [type]
+annotation gen6() on type {
   comptime post(target, ctx) {
     extend target {
       async method run() -> int { let mut x = 1; async let fut = { let r = &mut x; 0 }; await fut; 0 }
@@ -323,8 +318,7 @@ type Widget { id: int }
 fn battery_row7_send_nonsendable_across_task_boundary_rejects_atomically() {
     assert_generated_install_rejected(
         r#"
-annotation gen7() {
-  targets: [type]
+annotation gen7() on type {
   comptime post(target, ctx) {
     extend target {
       async method run() -> int { let mut x = 1; x = x + 1; x = x + 1; async let fut = { let g = |; move x| x; g() }; await fut; 0 }
@@ -359,8 +353,7 @@ impl Drop for AsyncRes {
     async method drop() { }
 }
 
-annotation gen9() {
-  targets: [type]
+annotation gen9() on type {
   comptime post(target, ctx) {
     extend target {
       method run() -> int { let r: AsyncRes = AsyncRes { id: 1 }; r.id }
@@ -400,8 +393,7 @@ type Pool {{ n: int }}
 extend Pool {{ method acquire() -> Conn {{ Conn {{ id: 1 }} }} }}
 async fn tick() -> int {{ 0 }}
 
-annotation gen10b() {{
-  targets: [type]
+annotation gen10b() on type {{
   comptime post(target, ctx) {{
     extend target {{ {method_body} }}
   }}
@@ -545,8 +537,7 @@ impl Drop for Conn {
 }
 async fn tick() -> int { 0 }
 
-annotation gen_generic() {
-  targets: [type]
+annotation gen_generic() on type {
   comptime post(target, ctx) {
     extend target {
       async method run<T>(value: T) -> int {
