@@ -217,6 +217,71 @@ builtin data (not a per-type freeze fact — the binding record/freeze invariant
 untouched). The named `applied_nominal_pending_rejection` STAYS the LOUD fallback
 for any head neither builtin nor struct/enum-resolved.
 
+## CKPT-3 — LANDED (record field-name preservation; report: `e5-ckpt3-report.md`)
+
+Records SPELL + REFLECT. B2 in-scope. **Additive — deletes nothing** (the
+`.source` deletion stays CKPT-5). Base `1d54eb67` (CKPT-2).
+
+### What landed (CKPT-0 mechanism, additive)
+
+- **STORE + POPULATE.** `RecordFieldDescriptor` grows a `name: String`
+  (payloads.rs), populated in `canonical_record` (type_reflection.rs) in the SAME
+  rebuild that mints the record identity + the hygienic `member` identity. The
+  identity descriptor string (`rendered`) and `record_member_identity` are
+  **byte-untouched** — `name` is set on the descriptor ONLY, never threaded into
+  either computation.
+- **SPELL (load-bearing).** `reconstruct_type_annotation`'s Record arm
+  (comptime_builtins.rs) flips from a NAMED Err to building
+  `TypeAnnotation::Object({name: <recurse field type identity>}…)` from the
+  preserved names, PRESERVING optionality (`{x?:int}` keeps the `?`). A2
+  identity-indirected: each field type recurses on its own finite frozen
+  `type_identity` (a nested record spells its own fields; an applied/bare arg
+  spells by head/name — never eager-expands). This AUTO-WIDENS the shared
+  stamp-gate for records (the same `reconstruct(...).is_ok()` predicate — no
+  `stamp_for` edit): records now stamp + stop reparsing `.source`.
+- **REFLECT ABI.** `COMPTIME_RECORD_FIELD_SCHEMA` (builtin_schemas.rs) +
+  `record_field_slot` (payloads.rs) grow an additive `name` string field (Dec-55
+  class, mirroring how `__ComptimeFieldDescriptor.name` surfaces a struct field
+  name). The type-checker view of `RecordField` (`comptime.rs` `struct_item`,
+  the "field names + order match the value carrier exactly" contract) grows the
+  matching `name` field — so `reflect(...).fields[i].name` type-checks + reads on
+  both engines.
+
+### CKPT-0 SAFE realized — the binding invariant HELD (with PROOF)
+
+The record IDENTITY + hygienic MEMBER identity strings stayed BYTE-IDENTICAL.
+Proof is a permanent pin
+(`e1_s5_reconstruction::e1_s5_ckpt3_record_identity_and_member_ids_are_byte_identical`)
+that asserts the concrete pre-CKPT-3 128-bit values captured on HEAD `1d54eb67`:
+
+- `{x:int,y:string}` identity `(high=4972967358956473603, low=-5404863359470070500)`;
+  field `x` member `(5117747860848310177, 1031105497090630829)`; field `y` member
+  `(-9035473693977959263, 304561787195158326)` — byte-sorted x before y.
+- `{x?:int}` identity `(high=-1802259954908786269, low=-200733891727391745)`; field
+  `x` member `(7472345934218968096, -929543014868829712)` — a DISTINCT identity
+  from the required form (optionality-significant).
+
+The pin passes at workspace HEAD → the field-name preservation added ZERO
+information to the identity/member algebra. The existing
+`record_identity_is_field_name_sorted_and_optionality_significant` descriptor-string
+pin (`type_reflection/tests.rs`) is a second, independent guard on the identity
+descriptor bytes.
+
+### A1/A2 posture
+
+A1 — no new sealed-enum variant; one additive field + one arm change. A2 — the
+spelling recurses on field-type IDENTITIES (a recursive `type T = {kids:
+Array<T>}` spells its field as `Array<T>` — head + bare `T` — and TERMINATES on
+the finite type expression); pinned by
+`e1_s5_ckpt3_record_with_nested_record_and_applied_field_terminates`. NO `.source`
+touch (grep of the diff: only comments + the interim rejection message string that
+FLIPS to spelling). The CKPT-1 interim Record rejection (A6) is REPLACED by the
+spelling arm — the CKPT-3 deliverable itself, NOT a machinery deletion. Loud
+failure is PRESERVED: a record that genuinely cannot spell can only be one whose
+field type cannot reconstruct, and that surfaces through the recursive
+`reconstruct_type_annotation(field.type_identity)?` propagating that field type's
+OWN named rejection — never a silent gap.
+
 ## Anti-walk-back substrate (binding at MAXIMUM)
 
 - The `.source` reparse is a Forbidden-Patterns **dynamic-reparse fallback**.

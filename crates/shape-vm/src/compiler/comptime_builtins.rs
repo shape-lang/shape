@@ -712,7 +712,7 @@ pub(crate) fn reconstruct_type_annotation(
     overlay: &FreezeOverlay,
     identity: FrozenTypeIdentity,
 ) -> Result<shape_ast::ast::TypeAnnotation, shape_ast::error::ShapeError> {
-    use shape_ast::ast::{FunctionParam, TypeAnnotation, TypePath};
+    use shape_ast::ast::{FunctionParam, ObjectTypeField, TypeAnnotation, TypePath};
     use shape_runtime::comptime_reflection::PassingMode;
     use type_reflection::payloads::FrozenPayloadDescriptor;
 
@@ -861,12 +861,33 @@ pub(crate) fn reconstruct_type_annotation(
              spellable type_ref target"
                 .to_string(),
         )),
-        FrozenPayloadDescriptor::Record(_) => Err(named(
-            "reconstruct_type_annotation: a structural record's field names are \
-             one-way-hashed into hygienic member identities and cannot be recovered to \
-             a spellable type_ref; an unstamped ref reparses .source"
-                .to_string(),
-        )),
+        // ADR-009 E5 CKPT-3 (B2 in-scope): SPELL the structural record back to
+        // `{name: T, …}` from the field NAMES preserved as the spell/reflect-only
+        // `RecordFieldDescriptor.name` freeze fact (the record IDENTITY + member
+        // strings stay byte-identical — CKPT-0 binding invariant). Optionality is
+        // record-identity-significant (`{x?:int} != {x:int}`), so it is preserved
+        // per field. A2 identity-indirected: each field type RECURSES on its own
+        // frozen `type_identity` (a bare/applied nominal arg is spelled by name,
+        // never field-expanded), so a record with a record/applied field type
+        // TERMINATES on the finite type expression — no eager expansion. This
+        // AUTO-WIDENS the shared stamp-gate for records (the SAME
+        // `reconstruct(...).is_ok()` predicate stamps them, so producers stop
+        // emitting INVALID + the consumer stops hitting `.source`). The named
+        // rejection below stays the LOUD fallback for a record that genuinely
+        // cannot spell (never a silent gap).
+        FrozenPayloadDescriptor::Record(descriptor) => {
+            let mut fields = Vec::with_capacity(descriptor.fields.len());
+            for field in descriptor.fields {
+                let type_annotation = reconstruct_type_annotation(overlay, field.type_identity)?;
+                fields.push(ObjectTypeField {
+                    name: field.name,
+                    optional: field.optional,
+                    type_annotation,
+                    annotations: Vec::new(),
+                });
+            }
+            Ok(TypeAnnotation::Object(fields))
+        }
         FrozenPayloadDescriptor::Parameter(_) => Err(named(
             "reconstruct_type_annotation: a scoped generic parameter is not a spellable \
              type_ref target this slice; an unstamped ref reparses .source"
@@ -3994,17 +4015,16 @@ mod e1_s5_reconstruction {
         );
     }
 
-    // PIN (d) TOTALITY (ADR-009 E5 CKPT-1: case (1) FLIPPED). The reconstruction
-    // is TOTAL — every identity either reconstructs structurally or yields a
-    // NAMED `ShapeError::SemanticError`, no panic, no catch-all silent arm
-    // (E1-D7(c)): (1) an APPLIED nominal (`Array<int>`) now SPELLS to
-    // `Generic{Array, [int]}` via the CKPT-1 applied-nominal arm (design §1a) —
-    // FLIPPED from the pre-CKPT-1 applied-nominal-pending rejection; (2) a
-    // structural RECORD (`{x, y}`) STAYS a named record rejection (field names
-    // are one-way-hashed — field-name preservation is CKPT-3); (3) a BARE
-    // generic head (`Array`) STAYS the un-applied-head rejection (ruling A3).
-    // Cases (2)+(3) still stamp-gate to the `.source` reparse arm; case (1) now
-    // stamps.
+    // PIN (d) TOTALITY (ADR-009 E5 CKPT-1 case (1) FLIPPED; CKPT-3 case (2)
+    // FLIPPED). The reconstruction is TOTAL — every identity either reconstructs
+    // structurally or yields a NAMED `ShapeError::SemanticError`, no panic, no
+    // catch-all silent arm (E1-D7(c)): (1) an APPLIED nominal (`Array<int>`) SPELLS
+    // to `Generic{Array, [int]}` via the CKPT-1 applied-nominal arm; (2) a
+    // structural RECORD (`{x: int, y: string}`) now SPELLS to `Object({x: int,
+    // y: string})` via the CKPT-3 field-name-preservation arm — FLIPPED from the
+    // pre-CKPT-3 named record rejection; (3) a BARE generic head (`Array`) STAYS
+    // the un-applied-head rejection (ruling A3). Case (3) still stamp-gates to the
+    // `.source` reparse arm; cases (1)+(2) now stamp.
     #[test]
     fn e1_s5_reconstruct_covers_frozen_payload_descriptor_totally() {
         use shape_ast::ast::TypePath;
@@ -4026,7 +4046,9 @@ mod e1_s5_reconstruction {
             "Array<int> reconstructs to the applied-generic spelling `Array<int>` (CKPT-1)"
         );
 
-        // (2) Structural record — the reconstruction's own named record arm.
+        // (2) Structural record — CKPT-3 FLIP: now SPELLS to `Object({x: int,
+        // y: string})` off the preserved field names (byte-sorted). Was a named
+        // record rejection pre-CKPT-3.
         let record = TypeAnnotation::Object(vec![
             ObjectTypeField {
                 name: "x".to_string(),
@@ -4044,13 +4066,25 @@ mod e1_s5_reconstruction {
         let record_identity = overlay
             .canonicalize_type(&record)
             .expect("{x: int, y: string} canonicalizes to a Record identity");
-        match reconstruct_type_annotation(&overlay, record_identity) {
-            Err(ShapeError::SemanticError { message, .. }) => assert!(
-                message.contains("record"),
-                "a Record reconstructs to a named record rejection, got: {message}"
-            ),
-            other => panic!("a Record must be a named SemanticError, got {other:?}"),
-        }
+        assert_eq!(
+            reconstruct_type_annotation(&overlay, record_identity)
+                .expect("{x: int, y: string} now SPELLS via the CKPT-3 record arm"),
+            TypeAnnotation::Object(vec![
+                ObjectTypeField {
+                    name: "x".to_string(),
+                    optional: false,
+                    type_annotation: TypeAnnotation::Basic("int".to_string()),
+                    annotations: Vec::new(),
+                },
+                ObjectTypeField {
+                    name: "y".to_string(),
+                    optional: false,
+                    type_annotation: TypeAnnotation::Basic("string".to_string()),
+                    annotations: Vec::new(),
+                },
+            ]),
+            "the record reconstructs to `{{x: int, y: string}}` (names + byte-sort preserved)"
+        );
 
         // (3) Bare generic head — Err propagated from `payload_of` via `?`.
         let bare_head = TypeAnnotation::Basic("Array".to_string());
@@ -4209,6 +4243,202 @@ mod e1_s5_reconstruction {
                 reconstruct_type_annotation(&overlay, identity).is_ok(),
                 "the shared stamp-gate predicate reconstruct().is_ok() must now ADMIT \
                  {form:?} — the applied-generic auto-widen"
+            );
+        }
+    }
+
+    // ADR-009 E5 CKPT-3 — the NON-PERTURBATION pin (the CKPT-0 binding invariant).
+    // Field-name preservation is ADDITIVE: the record's own frozen IDENTITY and
+    // each field's hygienic MEMBER identity stay BYTE-IDENTICAL across CKPT-3. The
+    // 128-bit identity + member halves are pinned to the CONCRETE pre-CKPT-3 values
+    // captured on HEAD 1d54eb67, so any future edit that threads the field NAME into
+    // the identity descriptor string or `record_member_identity` (the unsoundness
+    // this invariant exists to prevent) breaks this pin LOUDLY. Optionality is
+    // identity-significant: `{x?:int}` mints a DIFFERENT identity than `{x:int}`.
+    #[test]
+    fn e1_s5_ckpt3_record_identity_and_member_ids_are_byte_identical() {
+        use super::semantic_freeze::FreezeOverlay;
+        use super::type_reflection::FrozenTypeIdentity;
+        use payloads::FrozenPayloadDescriptor;
+
+        // Extract each field's (name, member.high, member.low, optional), in the
+        // descriptor's byte-sorted order. `&Arc<FreezeOverlay>` deref-coerces to
+        // `&FreezeOverlay` at this fn's call site.
+        fn members(
+            overlay: &FreezeOverlay,
+            id: FrozenTypeIdentity,
+        ) -> Vec<(String, i64, i64, bool)> {
+            let FrozenPayloadDescriptor::Record(desc) =
+                overlay.payload_of(id).expect("record payload")
+            else {
+                panic!("expected a Record payload");
+            };
+            desc.fields
+                .iter()
+                .map(|f| (f.name.clone(), f.member.high, f.member.low, f.optional))
+                .collect()
+        }
+
+        let overlay = overlay_for_tests(&BytecodeCompiler::new());
+        let field = |name: &str, optional: bool, ty: &str| ObjectTypeField {
+            name: name.to_string(),
+            optional,
+            type_annotation: TypeAnnotation::Basic(ty.to_string()),
+            annotations: Vec::new(),
+        };
+
+        // {x: int, y: string} — identity + both member ids frozen to pre-CKPT-3.
+        let xy = TypeAnnotation::Object(vec![field("x", false, "int"), field("y", false, "string")]);
+        let xy_id = overlay
+            .canonicalize_type(&xy)
+            .expect("{x:int,y:string} canonicalizes");
+        assert_eq!(
+            (xy_id.high, xy_id.low),
+            (4972967358956473603, -5404863359470070500),
+            "the record identity must be byte-identical to the pre-CKPT-3 value"
+        );
+        assert_eq!(
+            members(&overlay, xy_id),
+            vec![
+                ("x".to_string(), 5117747860848310177, 1031105497090630829, false),
+                ("y".to_string(), -9035473693977959263, 304561787195158326, false),
+            ],
+            "member identities + byte-sort order (x before y) must be byte-identical to pre-CKPT-3"
+        );
+
+        // {x?: int} — a DISTINCT identity (optionality-significant) + its member id.
+        let x_opt = TypeAnnotation::Object(vec![field("x", true, "int")]);
+        let x_opt_id = overlay
+            .canonicalize_type(&x_opt)
+            .expect("{x?:int} canonicalizes");
+        assert_ne!(
+            (x_opt_id.high, x_opt_id.low),
+            (xy_id.high, xy_id.low),
+            "optionality is identity-significant — {{x?:int}} != {{x:int,y:string}}"
+        );
+        assert_eq!(
+            (x_opt_id.high, x_opt_id.low),
+            (-1802259954908786269, -200733891727391745),
+            "the optional-field record identity must be byte-identical to pre-CKPT-3"
+        );
+        assert_eq!(
+            members(&overlay, x_opt_id),
+            vec![("x".to_string(), 7472345934218968096, -929543014868829712, true)],
+            "the optional field's member id must be byte-identical to pre-CKPT-3"
+        );
+    }
+
+    // ADR-009 E5 CKPT-3 — record SPELLING round-trip. A structural record
+    // reconstructs to `Object({name: T, …})` off the preserved field names, with
+    // optionality PRESERVED per field (`{x?:int}` keeps the `?`) and byte-sorted
+    // field order (x before y).
+    #[test]
+    fn e1_s5_ckpt3_record_spells_names_and_optionality() {
+        let overlay = overlay_for_tests(&BytecodeCompiler::new());
+        let b = |name: &str| TypeAnnotation::Basic(name.to_string());
+        let field = |name: &str, optional: bool, ty: TypeAnnotation| ObjectTypeField {
+            name: name.to_string(),
+            optional,
+            type_annotation: ty,
+            annotations: Vec::new(),
+        };
+
+        // {x: int, y: string} round-trips to itself (already byte-sorted).
+        let xy = TypeAnnotation::Object(vec![
+            field("x", false, b("int")),
+            field("y", false, b("string")),
+        ]);
+        let xy_id = overlay.canonicalize_type(&xy).expect("{x:int,y:string} canonicalizes");
+        assert_eq!(
+            reconstruct_type_annotation(&overlay, xy_id).expect("record spells via CKPT-3 arm"),
+            TypeAnnotation::Object(vec![
+                field("x", false, b("int")),
+                field("y", false, b("string")),
+            ]),
+            "{{x:int,y:string}} round-trips to itself with names preserved"
+        );
+
+        // {x?: int} preserves the optional `?`.
+        let x_opt = TypeAnnotation::Object(vec![field("x", true, b("int"))]);
+        let x_opt_id = overlay.canonicalize_type(&x_opt).expect("{x?:int} canonicalizes");
+        let spelled =
+            reconstruct_type_annotation(&overlay, x_opt_id).expect("optional record spells");
+        assert_eq!(
+            spelled,
+            TypeAnnotation::Object(vec![field("x", true, b("int"))]),
+            "{{x?:int}} spells with the optional flag preserved"
+        );
+        let TypeAnnotation::Object(fields) = &spelled else {
+            panic!("expected an Object spelling");
+        };
+        assert!(fields[0].optional, "the `?` must survive reconstruction");
+    }
+
+    // ADR-009 E5 CKPT-3 (A2 identity-indirected): a record whose field types are
+    // themselves a nested RECORD and an APPLIED generic reconstructs + TERMINATES.
+    // Each field type recurses on its own finite frozen identity — the inner record
+    // spells its own fields, the applied arg spells by head+args — never an eager
+    // unbounded expansion.
+    #[test]
+    fn e1_s5_ckpt3_record_with_nested_record_and_applied_field_terminates() {
+        use shape_ast::ast::TypePath;
+        let overlay = overlay_for_tests(&BytecodeCompiler::new());
+        let b = |name: &str| TypeAnnotation::Basic(name.to_string());
+        let field = |name: &str, ty: TypeAnnotation| ObjectTypeField {
+            name: name.to_string(),
+            optional: false,
+            type_annotation: ty,
+            annotations: Vec::new(),
+        };
+        // { inner: {a: int}, items: Array<int> }  (byte-sort: "inner" < "items")
+        let nested = TypeAnnotation::Object(vec![
+            field("inner", TypeAnnotation::Object(vec![field("a", b("int"))])),
+            field("items", TypeAnnotation::Array(Box::new(b("int")))),
+        ]);
+        let id = overlay
+            .canonicalize_type(&nested)
+            .expect("nested record canonicalizes");
+        assert_eq!(
+            reconstruct_type_annotation(&overlay, id)
+                .expect("nested record spells + terminates via identity-indirected recursion"),
+            TypeAnnotation::Object(vec![
+                field("inner", TypeAnnotation::Object(vec![field("a", b("int"))])),
+                field(
+                    "items",
+                    TypeAnnotation::Generic {
+                        name: TypePath::simple("Array"),
+                        args: vec![b("int")],
+                    },
+                ),
+            ]),
+            "the nested record spells its inner record + its applied `Array<int>` field, byte-sorted"
+        );
+    }
+
+    // ADR-009 E5 CKPT-3: the stamp-gate AUTO-WIDENS for records — the SAME
+    // `reconstruct(...).is_ok()` predicate `stamp_for` uses now ADMITS a structural
+    // record, so producers stamp it + the consumer stops hitting `.source`. No
+    // `stamp_for` edit (E1-D7(b), one code path).
+    #[test]
+    fn e1_s5_ckpt3_stamp_gate_predicate_auto_widens_for_records() {
+        let overlay = overlay_for_tests(&BytecodeCompiler::new());
+        let field = |name: &str, optional: bool, ty: &str| ObjectTypeField {
+            name: name.to_string(),
+            optional,
+            type_annotation: TypeAnnotation::Basic(ty.to_string()),
+            annotations: Vec::new(),
+        };
+        for form in [
+            TypeAnnotation::Object(vec![field("x", false, "int"), field("y", false, "string")]),
+            TypeAnnotation::Object(vec![field("x", true, "int")]),
+        ] {
+            let identity = overlay
+                .canonicalize_type(&form)
+                .unwrap_or_else(|e| panic!("{form:?} canonicalizes: {e}"));
+            assert!(
+                reconstruct_type_annotation(&overlay, identity).is_ok(),
+                "the shared stamp-gate predicate reconstruct().is_ok() must now ADMIT \
+                 the record {form:?} — the CKPT-3 record auto-widen"
             );
         }
     }

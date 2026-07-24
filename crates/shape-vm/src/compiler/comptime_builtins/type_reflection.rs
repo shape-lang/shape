@@ -1602,6 +1602,13 @@ fn canonical_record(
             member: record_member_identity(record_identity, name),
             type_identity: *type_identity,
             optional: *optional,
+            // ADR-009 E5 CKPT-3: preserve the plain field name as a
+            // SPELL/REFLECT-ONLY freeze fact. `name` is NOT threaded into the
+            // identity descriptor string (`rendered`, above) NOR into
+            // `record_member_identity` — both stay byte-identical (the CKPT-0
+            // binding invariant). It is read only when spelling the record back
+            // (`reconstruct_type_annotation`) or reflecting its fields.
+            name: name.to_string(),
         })
         .collect();
     canonical.record = Some(payloads::RecordDescriptor {

@@ -794,14 +794,21 @@ pub fn register_builtin_schemas(registry: &mut TypeSchemaRegistry) -> BuiltinSch
         .register(registry);
 
     // `RecordField`: one normalized record field — owner-bound hygienic member
-    // identity halves (`#f`, Dec 57: NEVER a source-name string), the field
-    // type's frozen identity halves, and the `optional` flag.
+    // identity halves (`#f`, Dec 57: the identity/dedup-bearing handle is NEVER
+    // a source-name string), the field type's frozen identity halves, and the
+    // `optional` flag. ADR-009 E5 CKPT-3 (B2 in-scope): `name` is the field's
+    // plain source name, surfaced ADDITIVELY as a Dec-55-class spell/reflect-only
+    // comptime-ABI field (mirrors how `__ComptimeFieldDescriptor.name` surfaces a
+    // struct field name). It is a presentation fact layered BESIDE the member
+    // identity — the CKPT-0 binding invariant keeps the record identity + member
+    // strings byte-identical, so this adds no information to the identity algebra.
     let _comptime_record_field = TypeSchemaBuilder::new(COMPTIME_RECORD_FIELD_SCHEMA)
         .int_field("member_high")
         .int_field("member_low")
         .int_field("type_identity_high")
         .int_field("type_identity_low")
         .bool_field("optional")
+        .string_field("name")
         .register(registry);
 
     // `FrozenRecord`: the normalized structural record — the `fields` array
