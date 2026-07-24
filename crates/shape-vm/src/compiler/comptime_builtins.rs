@@ -691,9 +691,16 @@ fn type_annotation_from_string_or_type_ref_slot(
 ///   `PassingMode` borrow around its reconstructed VALUE type, the exact inverse
 ///   of the canonicalizer's `Function` arm (the mode axis the identity hash
 ///   factors out).
-/// - Nominal / Record / Parameter are irrecoverable this slice (applied/bare
-///   nominal reconstruction is B4/B5, record field names are one-way-hashed into
-///   hygienic member identities) — each a distinct NAMED rejection.
+/// - Applied nominals (`Array<int>`, `Option<T>`, `HashMap<K,V>`, `Result<T,E>`,
+///   applied user structs/enums) and bare user nominals SPELL directly off the
+///   frozen memo (ADR-009 E5 CKPT-1, design §1a — the early arm below): an
+///   applied form recurses its ordered argument identities under the
+///   identity-indirected recursion invariant (A2, no eager nested expansion), a
+///   bare user nominal spells as its `Basic(name)`. Un-applied generic HEADS
+///   (bare `Array`) stay the `payload_of` un-applied-head NAMED rejection (A3);
+///   Records (field names one-way-hashed into hygienic member identities) and
+///   scoped generic Parameters stay their distinct NAMED rejections — record
+///   field-name preservation is CKPT-3, out of CKPT-1.
 ///
 /// STAGE 4 (LIVE): the consumer flip wired this into the live directive
 /// resolver — `type_annotation_from_string_or_type_ref_slot` now resolves a
@@ -705,7 +712,7 @@ pub(crate) fn reconstruct_type_annotation(
     overlay: &FreezeOverlay,
     identity: FrozenTypeIdentity,
 ) -> Result<shape_ast::ast::TypeAnnotation, shape_ast::error::ShapeError> {
-    use shape_ast::ast::{FunctionParam, TypeAnnotation};
+    use shape_ast::ast::{FunctionParam, TypeAnnotation, TypePath};
     use shape_runtime::comptime_reflection::PassingMode;
     use type_reflection::payloads::FrozenPayloadDescriptor;
 
@@ -714,6 +721,53 @@ pub(crate) fn reconstruct_type_annotation(
             message,
             location: None,
         }
+    }
+
+    // ADR-009 E5 CKPT-1 (design §1a) — SPELLING reconstruction. BEFORE the
+    // descriptor-driven arms below, spell an APPLIED nominal or a bare user
+    // nominal DIRECTLY from the frozen identities the semantic-freeze memo
+    // already derived (`applied_nominal_of` / `bare_nominal_name_of`) — a read
+    // of DERIVED facts, NEVER a `.source` reparse and never a fabricated
+    // identity. This is the additive step that AUTO-WIDENS the shared stamp-gate:
+    // `stamp_for` (comptime_target.rs) admits an identity iff
+    // `reconstruct_type_annotation(...).is_ok()`, so the moment this arm
+    // reconstructs `Array<int>` the SAME predicate stamps it — producers stop
+    // emitting INVALID and the consumer stops hitting `.source` (E1-D7(b),
+    // one code path; no `stamp_for` edit).
+    //
+    // A2 INVARIANT — identity-indirected recursion, NO eager nested expansion:
+    // an applied form spells its HEAD name then RECURSES on its ordered
+    // `arg_identities`; a bare-nominal argument is a LEAF spelled by name (never
+    // field-expanded). So a recursive nominal — `type Tree { kids: Array<Tree> }`
+    // spelled as `Array<Tree>` — spells its head + `Tree` (a bare name) and
+    // TERMINATES; it never descends into `Tree`'s fields. Nested APPLIED args
+    // (`Array<Option<int>>`) terminate because `arg_identities` is the finite,
+    // content-derived decomposition the freeze memo interned for every
+    // sub-expression (projection.rs CKPT-1 recursive memoization), not an
+    // unbounded re-derivation.
+    if let Some(applied) = overlay.applied_nominal_of(identity) {
+        let head = overlay
+            .type_names_for_identity(applied.head_identity)
+            .first()
+            .map(|name| (*name).to_string())
+            .ok_or_else(|| {
+                named(
+                    "reconstruct_type_annotation: an applied nominal's head identity has no \
+                     frozen spellable name"
+                        .to_string(),
+                )
+            })?;
+        let mut args = Vec::with_capacity(applied.arg_identities.len());
+        for arg in applied.arg_identities {
+            args.push(reconstruct_type_annotation(overlay, arg)?);
+        }
+        return Ok(TypeAnnotation::Generic {
+            name: TypePath::simple(head),
+            args,
+        });
+    }
+    if let Some(name) = overlay.bare_nominal_name_of(identity) {
+        return Ok(TypeAnnotation::Basic(name));
     }
 
     // The `?` here converts the freeze query's OWN named rejection (unknown
@@ -794,10 +848,17 @@ pub(crate) fn reconstruct_type_annotation(
                 returns: Box::new(returns),
             })
         }
+        // Post-CKPT-1 this arm is the residual DEFENSIVE case only: an applied
+        // nominal is spelled by the early `applied_nominal_of` arm above, and a
+        // resolved bare user nominal by the `bare_nominal_name_of` arm — both
+        // return before `payload_of` is consulted. A `Nominal` descriptor that
+        // reaches here is a nominal whose head has no frozen spellable name
+        // (would only occur if `type_names_for_identity` were empty) — a NAMED
+        // rejection, never a `.source` fallback.
         FrozenPayloadDescriptor::Nominal(_) => Err(named(
-            "reconstruct_type_annotation: a nominal declaration shape carries no \
-             spellable type_ref target (applied/bare nominal reconstruction is B4/B5, \
-             out of E1); an unstamped ref reparses .source"
+            "reconstruct_type_annotation: a nominal declaration shape reached the \
+             descriptor arm without a frozen spellable head name and carries no \
+             spellable type_ref target"
                 .to_string(),
         )),
         FrozenPayloadDescriptor::Record(_) => Err(named(
@@ -3734,15 +3795,20 @@ mod e1_s5_boundary {
     use crate::compiler::BytecodeCompiler;
     use shape_ast::ast::TypeAnnotation;
 
-    // The strengthened successor to the retired slice-0 PIN4 (which only
-    // asserted `identity_of("Array<int>").is_none()`). `Array<int>`
-    // canonicalizes CLEANLY to a Nominal identity — the boundary is at payload
-    // issuance, not canonicalization: `payload_of` routes the site-interned
+    // ADR-009 E5 CKPT-1 (comment reworded; assertion UNCHANGED): this pin tests
+    // `payload_of` DESCRIPTOR substitution — the declaration SHAPE
+    // (Struct/Enum/Newtype/Opaque) that powers `reflect(Array<int>)` — NOT
+    // `reconstruct_type_annotation` SPELLING. The two are orthogonal (design §0).
+    // Under CKPT-1 `Array<int>` DOES spell (via the applied-nominal arm in
+    // `reconstruct_type_annotation`) and therefore STAMPS — but its `payload_of`
+    // descriptor substitution STILL PENDS: `payload_of` routes the site-interned
     // Nominal to `substituted_applied_nominal(head, args)`, which returns `None`
     // for a builtin generic head (no frozen struct field annotations to
-    // substitute) → the NAMED `applied_nominal_pending_rejection`. This proves
-    // applied generics are stamp-gated to the `.source` reparse arm, NOT
-    // reconstructable in E1 (applied-nominal substitution is B4/B5, out of E1).
+    // substitute) → the NAMED `applied_nominal_pending_rejection`. So the
+    // assertion HOLDS unchanged; only the old comment was stale — the "not
+    // reconstructable" claim was true of the pre-CKPT-1 descriptor-only
+    // reconstruct, and is false of the CKPT-1 speller. Descriptor substitution
+    // (`payload_of`) is CKPT-2; spelling reconstruction landed in CKPT-1.
     #[test]
     fn e1_s5_applied_nominal_is_pending_rejection_not_reconstructable() {
         let overlay = overlay_for_tests(&BytecodeCompiler::new());
@@ -3761,13 +3827,14 @@ mod e1_s5_boundary {
             Err(message) => assert_eq!(
                 message,
                 payloads::applied_nominal_pending_rejection(),
-                "Array<int> must be the NAMED applied-nominal-pending rejection \
-                 (stamp-gated to the .source reparse arm), never a silent gap"
+                "Array<int> `payload_of` DESCRIPTOR substitution must be the NAMED \
+                 applied-nominal-pending rejection (CKPT-2 territory), never a silent gap \
+                 — even though CKPT-1 SPELLING now reconstructs it"
             ),
             Ok(descriptor) => panic!(
-                "Array<int> must NOT reconstruct via the descriptor algebra in E1 \
-                 (applied-generic substitution is B4/B5, out of E1's footprint); \
-                 got {descriptor:?}"
+                "Array<int> must NOT descriptor-substitute via `payload_of` in CKPT-1 \
+                 (applied-nominal descriptor substitution is CKPT-2's footprint; CKPT-1 \
+                 landed spelling, not substitution); got {descriptor:?}"
             ),
         }
     }
@@ -3905,30 +3972,37 @@ mod e1_s5_reconstruction {
         );
     }
 
-    // PIN (d) TOTALITY. Every non-reconstructable identity yields a NAMED
-    // `ShapeError::SemanticError` — no panic, no catch-all silent arm (E1-D7(c)):
-    // (1) an APPLIED nominal (`Array<int>`) surfaces the freeze's own
-    // applied-nominal-pending rejection through `?`; (2) a structural RECORD
-    // (`{x, y}`) hits the reconstruction's named record arm (field names are
-    // one-way-hashed); (3) a BARE generic head (`Array`) surfaces the freeze's
-    // un-applied-head rejection. Each stamp-gates to the `.source` reparse arm.
+    // PIN (d) TOTALITY (ADR-009 E5 CKPT-1: case (1) FLIPPED). The reconstruction
+    // is TOTAL — every identity either reconstructs structurally or yields a
+    // NAMED `ShapeError::SemanticError`, no panic, no catch-all silent arm
+    // (E1-D7(c)): (1) an APPLIED nominal (`Array<int>`) now SPELLS to
+    // `Generic{Array, [int]}` via the CKPT-1 applied-nominal arm (design §1a) —
+    // FLIPPED from the pre-CKPT-1 applied-nominal-pending rejection; (2) a
+    // structural RECORD (`{x, y}`) STAYS a named record rejection (field names
+    // are one-way-hashed — field-name preservation is CKPT-3); (3) a BARE
+    // generic head (`Array`) STAYS the un-applied-head rejection (ruling A3).
+    // Cases (2)+(3) still stamp-gate to the `.source` reparse arm; case (1) now
+    // stamps.
     #[test]
     fn e1_s5_reconstruct_covers_frozen_payload_descriptor_totally() {
+        use shape_ast::ast::TypePath;
         let overlay = overlay_for_tests(&BytecodeCompiler::new());
 
-        // (1) Applied nominal — Err propagated from `payload_of` via `?`.
+        // (1) Applied nominal — CKPT-1 FLIP: now SPELLS to `Generic{Array,[int]}`
+        // (the applied-nominal arm reconstructs off the frozen memo, no reparse).
         let array_int = TypeAnnotation::Array(Box::new(TypeAnnotation::Basic("int".to_string())));
         let applied_identity = overlay
             .canonicalize_type(&array_int)
             .expect("Array<int> canonicalizes");
-        match reconstruct_type_annotation(&overlay, applied_identity) {
-            Err(ShapeError::SemanticError { message, .. }) => assert_eq!(
-                message,
-                payloads::applied_nominal_pending_rejection(),
-                "Array<int> reconstruction surfaces the applied-nominal-pending named error"
-            ),
-            other => panic!("Array<int> must be a named SemanticError, got {other:?}"),
-        }
+        assert_eq!(
+            reconstruct_type_annotation(&overlay, applied_identity)
+                .expect("Array<int> now SPELLS via the CKPT-1 applied-nominal arm"),
+            TypeAnnotation::Generic {
+                name: TypePath::simple("Array"),
+                args: vec![TypeAnnotation::Basic("int".to_string())],
+            },
+            "Array<int> reconstructs to the applied-generic spelling `Array<int>` (CKPT-1)"
+        );
 
         // (2) Structural record — the reconstruction's own named record arm.
         let record = TypeAnnotation::Object(vec![
@@ -3968,6 +4042,152 @@ mod e1_s5_reconstruction {
                 "a bare generic head reconstruction surfaces the un-applied-head named error"
             ),
             other => panic!("a bare generic head must be a named SemanticError, got {other:?}"),
+        }
+    }
+
+    // ADR-009 E5 CKPT-1 (design §1a): the applied-nominal SPELLING arm. Each
+    // applied builtin generic reconstructs to its `Generic{head, args}` spelling
+    // DIRECTLY off the frozen memo (`applied_nominal_of` → head via
+    // `type_names_for_identity`, args recursed) — never a `.source` reparse. The
+    // head reverses to its canonical builtin name; each primitive arg to its
+    // canonical leaf spelling. `Array<int>` is built as the `Array(_)` sugar the
+    // compiler emits, and still spells to the uniform `Generic{Array,[..]}` form.
+    #[test]
+    fn e1_s5_reconstruct_applied_builtin_generics_spell_head_and_args() {
+        use shape_ast::ast::TypePath;
+        let overlay = overlay_for_tests(&BytecodeCompiler::new());
+        let basic = |name: &str| TypeAnnotation::Basic(name.to_string());
+        let generic = |name: &str, args: Vec<TypeAnnotation>| TypeAnnotation::Generic {
+            name: TypePath::simple(name),
+            args,
+        };
+        let cases: Vec<(TypeAnnotation, TypeAnnotation)> = vec![
+            (
+                TypeAnnotation::Array(Box::new(basic("int"))),
+                generic("Array", vec![basic("int")]),
+            ),
+            (
+                generic("Option", vec![basic("int")]),
+                generic("Option", vec![basic("int")]),
+            ),
+            (
+                generic("HashMap", vec![basic("string"), basic("int")]),
+                generic("HashMap", vec![basic("string"), basic("int")]),
+            ),
+            (
+                generic("Result", vec![basic("int"), basic("string")]),
+                generic("Result", vec![basic("int"), basic("string")]),
+            ),
+        ];
+        for (input, expected) in cases {
+            let identity = overlay
+                .canonicalize_type(&input)
+                .unwrap_or_else(|e| panic!("{input:?} canonicalizes: {e}"));
+            let reconstructed = reconstruct_type_annotation(&overlay, identity)
+                .unwrap_or_else(|e| panic!("{input:?} spells via the applied-nominal arm: {e:?}"));
+            assert_eq!(
+                reconstructed, expected,
+                "applied generic {input:?} reconstructs to its head+args spelling"
+            );
+        }
+    }
+
+    // ADR-009 E5 CKPT-1 (design §1a, A2 identity-indirected-recursion invariant):
+    // a NESTED applied generic (`Array<Option<int>>`) spells to its nested
+    // `Generic{Array,[Generic{Option,[int]}]}` and TERMINATES. The inner
+    // `Option<int>` identity resolves off the SAME shared memo (projection.rs
+    // CKPT-1 recursively memoized every composite sub-expression); the recursion
+    // is identity-indirected over the finite `arg_identities`, NEVER an eager
+    // field expansion.
+    #[test]
+    fn e1_s5_reconstruct_nested_applied_generic_terminates_and_spells() {
+        use shape_ast::ast::TypePath;
+        let overlay = overlay_for_tests(&BytecodeCompiler::new());
+        let nested = TypeAnnotation::Array(Box::new(TypeAnnotation::Generic {
+            name: TypePath::simple("Option"),
+            args: vec![TypeAnnotation::Basic("int".to_string())],
+        }));
+        let identity = overlay
+            .canonicalize_type(&nested)
+            .expect("Array<Option<int>> canonicalizes");
+        let reconstructed = reconstruct_type_annotation(&overlay, identity)
+            .expect("Array<Option<int>> spells + terminates via identity-indirected recursion");
+        assert_eq!(
+            reconstructed,
+            TypeAnnotation::Generic {
+                name: TypePath::simple("Array"),
+                args: vec![TypeAnnotation::Generic {
+                    name: TypePath::simple("Option"),
+                    args: vec![TypeAnnotation::Basic("int".to_string())],
+                }],
+            },
+            "the nested applied generic reconstructs its head + its applied arg"
+        );
+    }
+
+    // ADR-009 E5 CKPT-1 (design §1a): a bare RESOLVED user nominal spells as
+    // `Basic(name)` via `bare_nominal_name_of` (a read of the frozen nominal
+    // descriptor). An un-applied generic HEAD stays a named rejection (A3),
+    // proven in the totality pin's case (3).
+    #[test]
+    fn e1_s5_reconstruct_bare_user_nominal_spells_as_basic() {
+        let mut compiler = BytecodeCompiler::new();
+        compiler.struct_types.insert(
+            "User".to_string(),
+            (vec!["id".to_string()], shape_ast::ast::Span::DUMMY),
+        );
+        compiler.struct_generic_info.insert(
+            "User".to_string(),
+            crate::compiler::StructGenericInfo {
+                type_params: Vec::new(),
+                runtime_field_types: [("id".to_string(), TypeAnnotation::Basic("int".to_string()))]
+                    .into_iter()
+                    .collect(),
+            },
+        );
+        let overlay = overlay_for_tests(&compiler);
+        let identity = overlay
+            .canonicalize_type(&TypeAnnotation::Basic("User".to_string()))
+            .expect("bare `User` nominal canonicalizes");
+        assert_eq!(
+            reconstruct_type_annotation(&overlay, identity)
+                .expect("a resolved bare user nominal spells as Basic(name)"),
+            TypeAnnotation::Basic("User".to_string()),
+            "bare user nominal `User` reconstructs to Basic(\"User\")"
+        );
+    }
+
+    // ADR-009 E5 CKPT-1: the STAMP-GATE AUTO-WIDEN pinned on the gate PREDICATE.
+    // `stamp_for` (comptime_target.rs) admits an identity iff
+    // `reconstruct_type_annotation(...).is_ok()`. Pre-CKPT-1 an applied-generic
+    // reconstruct was `Err` → `INVALID` stamp → `.source` reparse. The moment the
+    // CKPT-1 arm reconstructs it, the SAME predicate is `Ok`, so the producer
+    // STAMPS it — E1-D7(b) one code path, NO `stamp_for` edit. Pinned directly on
+    // the applied + nested forms.
+    #[test]
+    fn e1_s5_stamp_gate_predicate_auto_widens_for_applied_generics() {
+        use shape_ast::ast::TypePath;
+        let overlay = overlay_for_tests(&BytecodeCompiler::new());
+        let b = |name: &str| TypeAnnotation::Basic(name.to_string());
+        let g = |name: &str, args: Vec<TypeAnnotation>| TypeAnnotation::Generic {
+            name: TypePath::simple(name),
+            args,
+        };
+        for form in [
+            TypeAnnotation::Array(Box::new(b("int"))),
+            g("Option", vec![b("int")]),
+            g("HashMap", vec![b("string"), b("int")]),
+            g("Result", vec![b("int"), b("string")]),
+            TypeAnnotation::Array(Box::new(g("Option", vec![b("int")]))),
+        ] {
+            let identity = overlay
+                .canonicalize_type(&form)
+                .unwrap_or_else(|e| panic!("{form:?} canonicalizes: {e}"));
+            assert!(
+                reconstruct_type_annotation(&overlay, identity).is_ok(),
+                "the shared stamp-gate predicate reconstruct().is_ok() must now ADMIT \
+                 {form:?} — the applied-generic auto-widen"
+            );
         }
     }
 }
@@ -4168,6 +4388,53 @@ mod e1_s5_route_proof {
             err.to_lowercase().contains("identity"),
             "the error must be the identity-route's named rejection, not a .source reparse; \
              got: {err}"
+        );
+    }
+
+    // (f) ADR-009 E5 CKPT-1: APPLIED-GENERIC identity route past a garbage
+    // source. The applied-generic analogue of pin (b): a `__ComptimeTypeRef`
+    // stamped with `Array<Option<int>>`'s composite identity plus an UNPARSEABLE
+    // `.source` resolves to the nested `Generic{Array,[Generic{Option,[int]}]}`
+    // spelling ON THE SAME overlay. Green proves THREE things at once — (i) the
+    // CKPT-1 stamp-gate auto-widen (the applied identity is stampable), (ii) the
+    // identity route fired (a `.source` reparse of "###unparseable###" would
+    // error), and (iii) the NESTED inner identity resolves off the shared memo
+    // (projection.rs recursive sub-expression memoization). `.source` is
+    // untouched by CKPT-1 — this is the same route the Tuple pin (b) exercises,
+    // now widened to applied generics.
+    #[test]
+    fn e1_s5_applied_generic_identity_route_resolves_past_garbage_source() {
+        use shape_ast::ast::TypePath;
+        let overlay = overlay_for_tests(&BytecodeCompiler::new());
+        let nested = TypeAnnotation::Array(Box::new(TypeAnnotation::Generic {
+            name: TypePath::simple("Option"),
+            args: vec![TypeAnnotation::Basic("int".to_string())],
+        }));
+        // `canonicalize_type_projection` is the producer's own stamp-site call:
+        // it computes the identity AND interns the composite payload for the
+        // whole SUBTREE (CKPT-1), exactly as `stamp_for` does — the same shared
+        // evidence the consumer's identity route then reads.
+        let identity = overlay
+            .canonicalize_type_projection(&nested)
+            .expect("Array<Option<int>> canonicalizes + interns its composite payload subtree")
+            .identity();
+        let slot = build_type_ref_descriptor("###unparseable###", None, Some(identity));
+        let resolved = type_annotation_from_string_or_type_ref_slot(
+            &slot,
+            "__emit_set_return_type",
+            &overlay,
+        )
+        .expect("a stamped applied-generic ref resolves via identity, past the garbage source");
+        assert_eq!(
+            resolved,
+            TypeAnnotation::Generic {
+                name: TypePath::simple("Array"),
+                args: vec![TypeAnnotation::Generic {
+                    name: TypePath::simple("Option"),
+                    args: vec![TypeAnnotation::Basic("int".to_string())],
+                }],
+            },
+            "the applied-generic identity route reconstructs the nested spelling, past .source"
         );
     }
 }

@@ -1209,6 +1209,58 @@ impl FreezeOverlay {
         self.base.type_names_for_identity(identity)
     }
 
+    /// ADR-009 E5 CKPT-1 (design §1a, ruling A1): the refined APPLIED form
+    /// (frozen head + ordered argument identities) for an applied-nominal
+    /// composite identity, or `None`. A pure READ of the already-derived
+    /// `composites` memo's `applied_nominal` field — the SAME memo the producer
+    /// stamp-gate interned via [`Self::canonicalize_type_projection`] (and, since
+    /// CKPT-1, for every composite SUB-expression too, so nested applied forms
+    /// answer). NOT a new derivation, NEVER a `.source` reparse, and — per A1 —
+    /// a sibling accessor rather than a new sealed `FrozenPayloadDescriptor`
+    /// variant.
+    ///
+    /// `Some` iff `identity` is a site-interned `applied:h<…>` form — every
+    /// applied builtin (`Array<int>` / `Option<T>` / `HashMap<K,V>` /
+    /// `Result<T,E>` and the full arity table) AND every applied user
+    /// struct/enum. `None` for a bare leaf, a base-frozen nominal, an un-applied
+    /// generic head, or any non-applied composite. Consumed by
+    /// [`reconstruct_type_annotation`](super::reconstruct_type_annotation)'s
+    /// spelling arm.
+    pub(super) fn applied_nominal_of(
+        &self,
+        identity: FrozenTypeIdentity,
+    ) -> Option<super::type_reflection::RefinedApplication> {
+        self.composites
+            .lock()
+            .expect("freeze-overlay composite memo lock poisoned")
+            .get(&identity)
+            .and_then(|entry| entry.applied_nominal.clone())
+    }
+
+    /// ADR-009 E5 CKPT-1 (design §1a): the spellable bare NAME of a RESOLVED
+    /// base user nominal (a struct/enum that froze a nominal descriptor), or
+    /// `None`. A resolved user nominal spells as `TypeAnnotation::Basic(name)`;
+    /// an un-applied GENERIC head (builtin `Array` / a generic user-struct head
+    /// — declared param kinds but no frozen nominal descriptor), a primitive, or
+    /// any composite returns `None` and stays its EXISTING named rejection at
+    /// `payload_of` (ruling A3 — un-applied heads are not spelled). A pure READ
+    /// of the base freeze's derived `frozen_nominal_descriptors` fact — no
+    /// reparse.
+    pub(super) fn bare_nominal_name_of(&self, identity: FrozenTypeIdentity) -> Option<String> {
+        if self
+            .base
+            .index()
+            .frozen_nominal_descriptors
+            .contains_key(&identity)
+        {
+            self.type_names_for_identity(identity)
+                .first()
+                .map(|name| (*name).to_string())
+        } else {
+            None
+        }
+    }
+
     /// The shared base freeze this overlay scopes (no rebuild happened).
     pub(crate) fn base(&self) -> &Arc<SemanticFreeze> {
         &self.base
