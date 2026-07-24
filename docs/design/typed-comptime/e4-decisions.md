@@ -105,6 +105,31 @@ preserved + the exit-soundness substrate).
     **The 21 S6 acceptance tests stay `#[ignore]`'d (S6a-f capability waves);**
     the 3 import-trio `scoped_contract` tests are reachable-and-would-pass but
     stay ignored for S6f.
+  - **S6 shipped** (`e4-slice6-report.md`; A `c6ec8551`, B `9fd52595`,
+    C `4779717c`, D `893d02db`, E `9cf6a3c4`, F `0c69f0ba`; book `66eb93b7` on
+    shape-web). The @remote acceptance matrix is REAL: 16 of the 21 dark-window
+    tests FLIPPED-GREEN across the capability waves (A wire · B snapshot ·
+    C extern-C · D polyglot · E TLS · F import trio), all proven NON-VACUOUS
+    against real `shape serve` peers / real snapshots / the built
+    `libshape_ext_{python,typescript}.so` (SHAPE_REQUIRE_FFI_EXT=1, no silent
+    skip). The shipped import form is `from std::core::remote use { @remote }`
+    (bare `use std::core::remote` + `@remote` → "Unknown annotation '@remote'",
+    proven standalone); F's :126 restored the greenfield negative contract
+    (bare namespace import does NOT bind a bare annotation). The remaining 5 are
+    the 0-ary `remote_snapshot_hash() -> string` shape, LOUD-rejected ("the
+    target declares no parameters, so a decision `before` hook has no arguments
+    to receive or short-circuit") — re-pointed off the closed #68 to the live
+    **#83** (0-ary arg-pack). ZERO "see #68" ignores survive among the 21. New
+    issues filed: **#83** re-point (0-ary), **#84** (pre-existing stale
+    `scoped_contract_snapshot_requires_explicit_import` — `snapshot()` now
+    returns a recoverable `Result::Err`; unrelated to S6, surfaced not folded),
+    **#85** (book-gate cannot opt its loopback receiver into a language runtime).
+    Book truth-gate 569/572 → **571/574**: the two `extern C` composed cells
+    flipped dark→`fixture=serve` / `fixture=serve-snapshot-resume` GREEN
+    (REMOTE_C_ABS=42 / RESUMED:43); python/typescript foreign-on-receiver cells
+    stay reference sketches (re-pointed to #85), the async-python cell to #83+#85.
+    S6 is READY for the ADR-009 completion gate (the 2026-07-16 run FAILED 3/3);
+    the completion gate is the NEXT step, not run here.
 - **E4-D4 (#73 sequencing).** The `on`-clause header syntax is E4's OPENING
   slice: `annotation name(config) on <kind>(, <kind>)*`; the body `targets:`
   field is DELETED in the same change; ALL SEVEN target kinds are
