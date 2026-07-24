@@ -123,18 +123,66 @@ fn reflect_on_unapplied_generic_head_is_the_named_rejection() {
         );
 }
 
-/// R10 (Dec 55): reflecting an applied BUILTIN/enum generic (`Option<int>`)
-/// stays the named applied-substitution-pending rejection: `Option` is a
-/// builtin enum, and the enum freeze projection carries variant name+arity but
-/// NOT per-variant payload field TYPES, so there is nothing to substitute into
-/// — never a descriptor issued off the un-substituted form. The S2 substitution
-/// path (proven below) resolves applied USER STRUCT forms, whose field type
-/// annotations ARE frozen.
+/// ADR-009 E5 CKPT-2 (A8-OUT — the POSITIVE FLIP of the former
+/// `reflect_on_applied_enum_generic_is_the_named_pending_rejection`): reflecting
+/// an applied BUILTIN enum (`Option<int>`) now RESOLVES to its arity-only
+/// `NominalShape::Enum` — `Option` reflects `None` (arity 0) + `Some` (arity 1).
+/// Under A8-OUT the descriptor states the TRUE variant names + arities but NOT
+/// the payload TYPE (`int` is recovered via the orthogonal `type_argument`
+/// query, A7-uniform). Here `variant_count (2) + arities (0 + 1) = 3`. Proven
+/// dual-engine.
 #[test]
-fn reflect_on_applied_enum_generic_is_the_named_pending_rejection() {
-    ShapeTest::new("let reflected = comptime { reflect(type_ref(Option<int>)) }")
+fn reflect_on_applied_builtin_enum_generic_substitutes_to_arity_only_enum_on_vm_and_jit() {
+    let source = r#"
+let out = comptime {
+  match reflect(type_ref(Option<int>)) {
+    FrozenType::Nominal(n) => match n.shape() {
+      NominalShape::Enum(e) => {
+        let mut total = e.variant_count
+        for v in e.variants {
+          total = total + v.payload_arity
+        }
+        total
+      }
+      _ => 0
+    }
+    _ => 0
+  }
+}
+print(out)
+"#;
+    // variant_count = 2 (None, Some); arities 0 + 1 = 1; total = 3.
+    expect_vm_and_jit_output(source, "3");
+}
+
+/// ADR-009 E5 CKPT-2 (A8-OUT): an applied CONTAINER (`Array<int>`) reflects to
+/// `NominalShape::Opaque` — a container has NO named-field/variant structure to
+/// state, so `Opaque` is the honest "no rows to show" (never a mis-stated
+/// field). Proven dual-engine.
+#[test]
+fn reflect_on_applied_container_generic_is_opaque_on_vm_and_jit() {
+    let source = shape_label_program("", "Array<int>");
+    expect_vm_and_jit_output(&source, "opaque");
+}
+
+/// ADR-009 E5 CKPT-2 (A8-OUT): an applied builtin sum type (`Result<int,
+/// string>`) reflects to `NominalShape::Enum` (its variant SHAPE is a sealed
+/// nominal fact); the payloads are recovered via `type_argument`. Proven
+/// dual-engine.
+#[test]
+fn reflect_on_applied_result_generic_is_enum_on_vm_and_jit() {
+    let source = shape_label_program("", "Result<int, string>");
+    expect_vm_and_jit_output(&source, "enum");
+}
+
+/// ADR-009 E5 CKPT-2 (STAY guard, A3): a BARE generic constructor head
+/// (`Array`, un-applied) is STILL the named un-applied-head rejection — CKPT-2
+/// resolves APPLIED forms, never bare heads.
+#[test]
+fn reflect_on_unapplied_builtin_head_stays_the_named_rejection() {
+    ShapeTest::new("let reflected = comptime { reflect(type_ref(Array)) }")
         .expect_run_err_contains(
-            "reflecting an applied generic nominal requires generic substitution",
+            "un-applied generic type constructor is not a resolved nominal shape",
         );
 }
 

@@ -99,8 +99,11 @@ UNDER a binding invariant that is the substrate for CKPT-3:
   loud named rejection); records SPELL in **CKPT-3** (B2 in-scope). Never a
   silent reparse.
 - **A7/A8 — only live because Piece 1 is IN (CKPT-2):** container→NominalShape =
-  Opaque-for-containers + Enum-for-Option/Result; enrich the enum-payload-type
-  freeze projection. (CKPT-2.)
+  Opaque-for-containers + Enum-for-Option/Result. **A8 RULED OUT of CKPT-2
+  (arity-only) — see the "CKPT-2 — LANDED (A8-OUT)" section below.** The
+  enum-payload-type freeze enrichment this line originally sketched is DEFERRED
+  to issue #87 (A7-uniform `type_argument` recovery makes it redundant for
+  soundness/completeness). (CKPT-2.)
 - **A9 — co-located legacy `type_info` deletion:** rides E5's ticket vs splits —
   supervisor decides at CKPT-5/6 (no user surface).
 
@@ -138,6 +141,81 @@ UNDER a binding invariant that is the substrate for CKPT-3:
 - **CKPT-6 — gate re-baseline.** e1_s5 green, no_json green (extended),
   comptime + annotations_comptime envelope green, `just check-no-dynamic`,
   `just verify-merge`, `no_dynamic.rs` sentinel.
+
+## CKPT-2 — LANDED (A8-OUT; report: `e5-ckpt2-report.md`)
+
+DESCRIPTOR substitution shipped. `payload_of(applied builtin/enum head)` now
+returns a COMPLETE, non-fabricating descriptor; `reflect(Array<int>)` /
+`reflect(Option<int>)` / `reflect(Result<int,string>)` complete. Additive —
+deletes nothing (the `.source` deletion stays CKPT-5). Base `e57a8acd` (CKPT-1).
+
+### The A8-IN → A8-OUT ruling reversal (F1)
+
+The B1 in-scope note above (and the design's original Piece-1 sketch) assumed
+**A8-IN** — grow `NominalVariantDescriptor` with `payload_types` + a real
+applied-enum substitution + a comptime-schema growth. The E5 CKPT-2 design pass
+**refuted the necessity premise** and the supervisor ruled **F1 = A8 OUT
+(arity-only)**:
+
+- **A7-uniform recovery makes A8 redundant for soundness/completeness.** A7
+  already routes container element/key/value recovery to the orthogonal
+  `type_argument` query; the SAME route recovers enum payloads. So the
+  arity-only descriptor + `type_argument` is a COMPLETE, SOUND answer with ZERO
+  unspecced prerequisites — whereas A8-IN needs an enum generic-param-name freeze
+  fact that is not established upstream.
+- **A8-OUT plug-in (§1c A8-OUT):** Branch A (builtin head → static
+  `builtin_nominal_templates`: 9 containers ⇒ `Opaque`, `Option`/`Result` ⇒
+  arity-only `Enum`) + Branch B (user ENUM head → REUSE the param-AGNOSTIC base
+  arity-only enum descriptor — SOUND because member ids + arities are `T`-free,
+  so the base head descriptor IS the applied answer). No `payload_types` on the
+  variant descriptor; no enum-freeze change; no comptime-schema growth.
+- **SP-5 consequence (binding):** under A8-OUT `Result<int,string>` and
+  `Result<string,int>` produce IDENTICAL descriptors — the swap is visible ONLY
+  via `arg_identities` order. The soundness-critical enum-payload mis-type surface
+  is therefore `type_argument`, NOT `payload_of`; the control pin
+  (`e1_s5_ckpt2_sp5_result_swap_equal_descriptor_visible_only_via_arg_order`)
+  asserts on arg ORDER, not the descriptor.
+- **Deferred richer packaging → issue #87** ("Enum-variant self-description:
+  payload TYPES in the variant descriptor + the enum generic-param-name freeze
+  fact"). If #87 is ever taken up, the §1c coupling trap binds: DELETE Branch B's
+  reuse-base shortcut (it would return the unsubstituted `[T]`) and do the real
+  per-variant substitution.
+
+### F2 — alias-of-applied IN (bounded)
+
+`type Ints = Array<int>` / `type PageOfInt = Page<int>` now reflect (removes a
+pre-existing alias-vs-direct asymmetry — the user pulled Piece 1 in SPECIFICALLY
+to remove reflect asymmetry). Bounded mechanism, as specced: store
+`base_applied_nominals: HashMap<FrozenTypeIdentity, RefinedApplication>` during
+the alias fixpoint (keyed by the alias's transparent applied identity, threaded
+write-once beside the composite descriptors); the base `Nominal` arm of
+`payload_for_identity` calls `substituted_applied_nominal` before the pending
+rejection — lazy, symmetric with the overlay memo arm. Stayed within the bounded
+fixpoint + base-arm change (no CKPT-2b split needed).
+
+### F3 — Phantom guard IN
+
+`type Phantom<T>{tag:int}` (a generic head whose fields do NOT reference the
+param) previously landed a `Struct{tag:int}` base descriptor and reflected/spelled
+as if MONOMORPHIC, bypassing A3. Fixed at the rebuild: a struct that declares
+NON-EMPTY generic parameters is excluded from `frozen_nominal_descriptors` (the
+`is_empty` check is load-bearing — every struct gets a `struct_generic_param_kinds`
+entry, empty for non-generic, so `contains_key` alone would wrongly exclude
+monomorphic structs). Both `payload_of` and `bare_nominal_name_of` read that map,
+so the fix covers reflect AND spell. The A3 pin
+(`e1_s5_ckpt2_bare_generic_struct_head_stays_unapplied_rejection_incl_phantom`)
+covers BOTH `Box<T>{value:T}` (param used) and `Phantom<T>{tag:int}` (param
+unused) — never ships a pin that passes on the broken case.
+
+### A1 / Forbidden-Patterns posture
+
+No new `FrozenPayloadDescriptor::AppliedNominal` variant (A1 — one method-internal
+branch + one additive identity-keyed static table + one additive F2 fact). NO
+dynamic dispatch, NO tag decode, NO `.source` touch (grep-confirmed zero `.source`
+changes), NO new sealed-enum variant. `builtin_nominal_templates` is STATIC
+builtin data (not a per-type freeze fact — the binding record/freeze invariant is
+untouched). The named `applied_nominal_pending_rejection` STAYS the LOUD fallback
+for any head neither builtin nor struct/enum-resolved.
 
 ## Anti-walk-back substrate (binding at MAXIMUM)
 

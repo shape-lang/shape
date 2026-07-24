@@ -1631,22 +1631,29 @@ mod payload_query {
             other => panic!("union must answer a Union payload, got {other:?}"),
         }
 
-        // ADR-009 B5: a site-interned APPLIED nominal (`Option<int>`) is a
-        // Nominal composite not interned into the base — reflecting it needs
-        // generic substitution (a later slice), the distinct named
-        // applied-substitution-pending rejection (not the "payload descriptor
-        // has not landed" family).
+        // ADR-009 E5 CKPT-2 (A8-OUT flip): a site-interned APPLIED builtin enum
+        // (`Option<int>`) is a Nominal composite that now RESOLVES to its
+        // arity-only `Enum` descriptor via the builtin template — the former
+        // applied-substitution-pending rejection is gone for the three
+        // applicable-head families. (The dedicated CKPT-2 pins in
+        // `e1_s5_ckpt2_descriptor_substitution` cover the Enum shape + arity +
+        // A7 payload recovery in full.)
         let applied_identity = overlay
             .canonicalize_type(&applied("Option", vec![basic("int")]))
             .expect("applied nominal canonicalizes");
         assert_eq!(overlay.category_of(applied_identity), Ok(FrozenTypeCategory::Nominal));
-        let error = overlay
+        match overlay
             .payload_of(applied_identity)
-            .expect_err("applied nominal must reject");
-        assert!(
-            error.contains("requires generic substitution"),
-            "applied-nominal pending diagnostic missing: {error}"
-        );
+            .expect("Option<int> now descriptor-substitutes (CKPT-2 A8-OUT)")
+        {
+            FrozenPayloadDescriptor::Nominal(super::payloads::NominalDescriptor::Enum {
+                variants,
+                ..
+            }) => {
+                assert_eq!(variants.len(), 2, "Option reflects None + Some");
+            }
+            other => panic!("Option<int> must resolve to an Enum descriptor, got {other:?}"),
+        }
     }
 
     /// A2×B1 seam, Erased disposition: a site-interned `dyn` /
@@ -2352,6 +2359,428 @@ fn frozen_type_category_has_no_trait_variant() {
             .all(|category| category.variant_name() != "Trait"),
         "Dec 50 rule 5: traits are not FrozenType categories"
     );
+}
+
+// ============================================================================
+// ADR-009 E5 CKPT-2 (A8-OUT): DESCRIPTOR substitution for applied
+// builtins/enums. `substituted_applied_nominal` now answers a COMPLETE,
+// NON-FABRICATING descriptor for the two applicable-head families the struct
+// path did not cover — a builtin head (container ⇒ Opaque / Option,Result ⇒
+// arity-only Enum) and a user ENUM head (reuse the param-agnostic base
+// descriptor). SOUNDNESS INVARIANT: no branch fabricates a member type; every
+// applied type ARGUMENT (container element/key/value AND enum payload) is
+// recovered by the orthogonal `type_argument` query (A7-uniform), never stated
+// in the descriptor. SP-5 is the wrong-descriptor control: under A8-OUT
+// `Result<int,string>` and `Result<string,int>` produce IDENTICAL descriptors,
+// so the swap is visible ONLY via `arg_identities` order — the
+// soundness-critical enum-payload mis-type surface under A8-OUT is
+// `type_argument`, NOT `payload_of`. F2 covers alias-of-applied (no reflect
+// asymmetry); the A3 pin covers the Phantom hole (a generic head whose fields
+// do not reference the parameter must NOT reflect monomorphic).
+// ============================================================================
+mod e1_s5_ckpt2_descriptor_substitution {
+    use super::payloads::{FrozenPayloadDescriptor, NominalDescriptor};
+    use super::*;
+    use shape_runtime::type_schema::EnumVariantInfo;
+
+    // SP-2: `HashMap<string,int>` — a 2-arg container ⇒ `Opaque{owner:
+    // HashMap-head}`. Both args are recovered via `type_argument` IN ORDER
+    // (catches a drop/reorder); neither is stated in the descriptor.
+    #[test]
+    fn e1_s5_ckpt2_sp2_hashmap_two_arg_container_opaque_args_in_order() {
+        let overlay = module_overlay(|_| {});
+        let applied_id = overlay
+            .canonicalize_type(&applied("HashMap", vec![basic("string"), basic("int")]))
+            .expect("HashMap<string,int> canonicalizes");
+        let string_id = overlay.identity_of("string").expect("string frozen");
+        let int_id = overlay.identity_of("int").expect("int frozen");
+        let refined = overlay
+            .applied_nominal_of(applied_id)
+            .expect("HashMap<string,int> is a site-interned applied form");
+
+        match overlay.payload_of(applied_id).expect("HashMap descriptor") {
+            FrozenPayloadDescriptor::Nominal(NominalDescriptor::Opaque { owner }) => {
+                assert_eq!(owner, refined.head_identity, "owner: HashMap head");
+            }
+            other => panic!("HashMap<string,int> must be an Opaque container, got {other:?}"),
+        }
+        assert_eq!(refined.arg_identities.len(), 2, "HashMap carries two args");
+        assert_eq!(
+            type_argument(&refined, 0),
+            Ok(string_id),
+            "arg 0 = string, IN ORDER (A7 recovery)"
+        );
+        assert_eq!(
+            type_argument(&refined, 1),
+            Ok(int_id),
+            "arg 1 = int, IN ORDER (catches a drop/reorder)"
+        );
+    }
+
+    // SP-3 (headline): `Result<int,string>` ⇒ arity-only `Enum{owner:
+    // Result-head}` with TRUE variant names (locked via the owner-bound member
+    // identity) + arities. NO payload type in the descriptor (A8-OUT).
+    #[test]
+    fn e1_s5_ckpt2_sp3_result_enum_descriptor_arity_only() {
+        let overlay = module_overlay(|_| {});
+        let applied_id = overlay
+            .canonicalize_type(&applied("Result", vec![basic("int"), basic("string")]))
+            .expect("Result<int,string> canonicalizes");
+        let refined = overlay
+            .applied_nominal_of(applied_id)
+            .expect("Result<int,string> is a site-interned applied form");
+        let ok_member = FrozenTypeIdentity::from_canonical_descriptor("member:Result:Ok");
+        let err_member = FrozenTypeIdentity::from_canonical_descriptor("member:Result:Err");
+
+        match overlay.payload_of(applied_id).expect("Result descriptor") {
+            FrozenPayloadDescriptor::Nominal(NominalDescriptor::Enum { owner, variants }) => {
+                assert_eq!(owner, refined.head_identity, "owner: Result head");
+                assert_eq!(variants.len(), 2, "Result has exactly Ok + Err");
+                let ok = variants
+                    .iter()
+                    .find(|v| v.member == ok_member)
+                    .expect("the Ok variant is present (name-bound member identity)");
+                assert_eq!(ok.payload_arity, 1, "Ok carries one payload");
+                let err = variants
+                    .iter()
+                    .find(|v| v.member == err_member)
+                    .expect("the Err variant is present (name-bound member identity)");
+                assert_eq!(err.payload_arity, 1, "Err carries one payload");
+            }
+            other => panic!("Result<int,string> must be an Enum, got {other:?}"),
+        }
+
+        // A8-OUT: BOTH payloads are recovered via `type_argument` (arg 0 = Ok's,
+        // arg 1 = Err's), never stated in the descriptor.
+        let int_id = overlay.identity_of("int").expect("int frozen");
+        let string_id = overlay.identity_of("string").expect("string frozen");
+        assert_eq!(type_argument(&refined, 0), Ok(int_id), "Ok payload via type_argument");
+        assert_eq!(
+            type_argument(&refined, 1),
+            Ok(string_id),
+            "Err payload via type_argument"
+        );
+    }
+
+    // SP-4: `Option<int>` ⇒ `Enum` with `None` arity 0 / `Some` arity 1; the
+    // Some payload recovered via `type_argument` (A8-OUT).
+    #[test]
+    fn e1_s5_ckpt2_sp4_option_enum_descriptor_none_some_arities() {
+        let overlay = module_overlay(|_| {});
+        let applied_id = overlay
+            .canonicalize_type(&applied("Option", vec![basic("int")]))
+            .expect("Option<int> canonicalizes");
+        let refined = overlay
+            .applied_nominal_of(applied_id)
+            .expect("Option<int> is a site-interned applied form");
+        let none_member = FrozenTypeIdentity::from_canonical_descriptor("member:Option:None");
+        let some_member = FrozenTypeIdentity::from_canonical_descriptor("member:Option:Some");
+
+        match overlay.payload_of(applied_id).expect("Option descriptor") {
+            FrozenPayloadDescriptor::Nominal(NominalDescriptor::Enum { owner, variants }) => {
+                assert_eq!(owner, refined.head_identity, "owner: Option head");
+                assert_eq!(variants.len(), 2, "Option has None + Some");
+                let none = variants
+                    .iter()
+                    .find(|v| v.member == none_member)
+                    .expect("the None variant is present");
+                assert_eq!(none.payload_arity, 0, "None is a unit variant");
+                let some = variants
+                    .iter()
+                    .find(|v| v.member == some_member)
+                    .expect("the Some variant is present");
+                assert_eq!(some.payload_arity, 1, "Some carries one payload");
+            }
+            other => panic!("Option<int> must be an Enum, got {other:?}"),
+        }
+        let int_id = overlay.identity_of("int").expect("int frozen");
+        assert_eq!(
+            type_argument(&refined, 0),
+            Ok(int_id),
+            "the Some payload is recovered via type_argument (A8-OUT)"
+        );
+    }
+
+    // SP-5 (WRONG-DESCRIPTOR control): under A8-OUT the enum-payload swap is NOT
+    // visible at the descriptor level — `Result<int,string>` and
+    // `Result<string,int>` produce IDENTICAL descriptors (owner + arity-only
+    // variants are param-agnostic). The swap IS visible ONLY via the
+    // `arg_identities` order (`type_argument`), which is therefore the
+    // soundness-critical enum-payload mis-type surface under A8-OUT. A mis-bind
+    // that leaked payload types INTO the descriptor would make the two
+    // descriptors differ — this pin proves they do not, and that the order
+    // channel distinguishes them.
+    #[test]
+    fn e1_s5_ckpt2_sp5_result_swap_equal_descriptor_visible_only_via_arg_order() {
+        let overlay = module_overlay(|_| {});
+        let ab = overlay
+            .canonicalize_type(&applied("Result", vec![basic("int"), basic("string")]))
+            .expect("Result<int,string> canonicalizes");
+        let ba = overlay
+            .canonicalize_type(&applied("Result", vec![basic("string"), basic("int")]))
+            .expect("Result<string,int> canonicalizes");
+        assert_ne!(ab, ba, "the two applied identities themselves differ");
+
+        let desc_ab = overlay.payload_of(ab).expect("Result<int,string> descriptor");
+        let desc_ba = overlay.payload_of(ba).expect("Result<string,int> descriptor");
+        assert_eq!(
+            desc_ab, desc_ba,
+            "A8-OUT: the swap is NOT visible at the descriptor level (arity-only \
+             Enum is param-agnostic) — a mis-bind leaking payload types would fail here"
+        );
+
+        // The swap IS visible via the orthogonal arg channel.
+        let refined_ab = overlay.applied_nominal_of(ab).expect("ab applied form");
+        let refined_ba = overlay.applied_nominal_of(ba).expect("ba applied form");
+        assert_ne!(
+            refined_ab.arg_identities, refined_ba.arg_identities,
+            "the swap IS visible via arg_identities order (the soundness surface)"
+        );
+        let int_id = overlay.identity_of("int").expect("int frozen");
+        let string_id = overlay.identity_of("string").expect("string frozen");
+        assert_eq!(type_argument(&refined_ab, 0), Ok(int_id));
+        assert_eq!(type_argument(&refined_ab, 1), Ok(string_id));
+        assert_eq!(type_argument(&refined_ba, 0), Ok(string_id));
+        assert_eq!(type_argument(&refined_ba, 1), Ok(int_id));
+    }
+
+    // SP-6 (user ENUM Branch B): an applied user generic enum
+    // `Either<int,string>` reuses the param-AGNOSTIC arity-only base descriptor
+    // (member ids + arities are `T`-free). The applied descriptor is EQUAL to
+    // the base head descriptor; the payloads are recovered via `type_argument`.
+    #[test]
+    fn e1_s5_ckpt2_sp6_user_enum_reuses_arity_only_base_descriptor() {
+        let overlay = module_overlay(|compiler| {
+            compiler.type_tracker.schema_registry_mut().register_enum_scoped(
+                "Either",
+                vec![
+                    EnumVariantInfo::new("Left", 0, 1),
+                    EnumVariantInfo::new("Right", 1, 1),
+                ],
+            );
+        });
+        let applied_id = overlay
+            .canonicalize_type(&applied("Either", vec![basic("int"), basic("string")]))
+            .expect("Either<int,string> canonicalizes");
+        let refined = overlay
+            .applied_nominal_of(applied_id)
+            .expect("Either<int,string> is a site-interned applied form");
+        let base_id = overlay.identity_of("Either").expect("Either head frozen");
+
+        let applied_desc = overlay.payload_of(applied_id).expect("applied Either descriptor");
+        let base_desc = overlay.payload_of(base_id).expect("base Either descriptor");
+        assert_eq!(
+            applied_desc, base_desc,
+            "Branch B reuse-base: the applied descriptor IS the arity-only base \
+             enum descriptor (SOUND under A8-OUT — param-agnostic)"
+        );
+        match applied_desc {
+            FrozenPayloadDescriptor::Nominal(NominalDescriptor::Enum { owner, variants }) => {
+                assert_eq!(owner, refined.head_identity, "owner: Either head");
+                assert_eq!(variants.len(), 2, "Either has Left + Right");
+                assert!(
+                    variants.iter().all(|v| v.payload_arity == 1),
+                    "Left / Right each carry one payload"
+                );
+            }
+            other => panic!("Either<int,string> must be an Enum via Branch B, got {other:?}"),
+        }
+        let int_id = overlay.identity_of("int").expect("int frozen");
+        let string_id = overlay.identity_of("string").expect("string frozen");
+        assert_eq!(type_argument(&refined, 0), Ok(int_id), "Left payload via type_argument");
+        assert_eq!(
+            type_argument(&refined, 1),
+            Ok(string_id),
+            "Right payload via type_argument"
+        );
+    }
+
+    // SP-7 (nested / A2 identity-indirected): `Array<Result<int,string>>` ⇒
+    // `Opaque{owner: Array-head}`; its single arg IS the `Result<int,string>`
+    // applied identity, whose own `payload_of` is the Result `Enum` — the
+    // recursion is identity-indirected over the finite args and TERMINATES
+    // (never an eager field expansion).
+    #[test]
+    fn e1_s5_ckpt2_sp7_nested_container_over_enum_terminates() {
+        let overlay = module_overlay(|_| {});
+        let outer = overlay
+            .canonicalize_type(&TypeAnnotation::Array(Box::new(applied(
+                "Result",
+                vec![basic("int"), basic("string")],
+            ))))
+            .expect("Array<Result<int,string>> canonicalizes");
+        // Canonicalize the inner form directly so it is site-interned (its own
+        // memo entry backs `payload_of` regardless of outer recursion).
+        let result_id = overlay
+            .canonicalize_type(&applied("Result", vec![basic("int"), basic("string")]))
+            .expect("Result<int,string> canonicalizes");
+        let refined_outer = overlay
+            .applied_nominal_of(outer)
+            .expect("outer is a site-interned applied form");
+
+        match overlay.payload_of(outer).expect("outer descriptor") {
+            FrozenPayloadDescriptor::Nominal(NominalDescriptor::Opaque { owner }) => {
+                assert_eq!(owner, refined_outer.head_identity, "owner: Array head");
+            }
+            other => panic!("Array<Result<..>> must be an Opaque container, got {other:?}"),
+        }
+        assert_eq!(refined_outer.arg_identities.len(), 1, "one outer arg");
+        let arg0 = type_argument(&refined_outer, 0).expect("outer arg 0");
+        assert_eq!(
+            arg0, result_id,
+            "the outer arg IS the Result<int,string> applied identity (A2 identity-indirected)"
+        );
+        match overlay.payload_of(arg0).expect("inner descriptor terminates") {
+            FrozenPayloadDescriptor::Nominal(NominalDescriptor::Enum { variants, .. }) => {
+                assert_eq!(variants.len(), 2, "the inner Result reflects its Enum shape");
+            }
+            other => panic!("payload_of(inner arg) must be the Result Enum, got {other:?}"),
+        }
+    }
+
+    // SP-8 (non-perturbation invariant): a NON-generic base enum
+    // `Color{Red,Green(int),Blue}` reflects its exact member identities +
+    // arities — CKPT-2's Branch A/B/F2 do NOT touch the base enum path, so the
+    // Color descriptor is unchanged (member ids name-derived, arities from the
+    // freeze projection).
+    #[test]
+    fn e1_s5_ckpt2_sp8_nongeneric_enum_descriptor_unchanged() {
+        let overlay = module_overlay(|compiler| {
+            compiler.type_tracker.schema_registry_mut().register_enum_scoped(
+                "Color",
+                vec![
+                    EnumVariantInfo::new("Red", 0, 0),
+                    EnumVariantInfo::new("Green", 1, 1),
+                    EnumVariantInfo::new("Blue", 2, 0),
+                ],
+            );
+        });
+        let color_id = overlay.identity_of("Color").expect("Color head frozen");
+        let red = FrozenTypeIdentity::from_canonical_descriptor("member:Color:Red");
+        let green = FrozenTypeIdentity::from_canonical_descriptor("member:Color:Green");
+        let blue = FrozenTypeIdentity::from_canonical_descriptor("member:Color:Blue");
+
+        match overlay.payload_of(color_id).expect("Color descriptor") {
+            FrozenPayloadDescriptor::Nominal(NominalDescriptor::Enum { owner, variants }) => {
+                assert_eq!(owner, color_id, "a base enum's owner is its own head identity");
+                assert_eq!(variants.len(), 3, "Red + Green + Blue");
+                let arity = |m| variants.iter().find(|v| v.member == m).map(|v| v.payload_arity);
+                assert_eq!(arity(red), Some(0), "Red is a unit variant");
+                assert_eq!(arity(green), Some(1), "Green carries one payload");
+                assert_eq!(arity(blue), Some(0), "Blue is a unit variant");
+            }
+            other => panic!("Color must be an Enum, got {other:?}"),
+        }
+    }
+
+    // A3 + PHANTOM guard: a bare GENERIC struct head must be the named
+    // unapplied-generic-head rejection — NOT a monomorphic descriptor. Two
+    // cases: `Box<T>{value:T}` (param USED in a field — already excluded because
+    // `value:T` fails base canonicalization) AND `Phantom<T>{tag:int}` (param
+    // UNUSED — all fields canonicalize under the base, the F3 hole this pin
+    // closes: without the generic-head exclusion it would land `Struct{tag:int}`
+    // and both reflect + spell as MONOMORPHIC, bypassing A3).
+    #[test]
+    fn e1_s5_ckpt2_bare_generic_struct_head_stays_unapplied_rejection_incl_phantom() {
+        let overlay = module_overlay(|compiler| {
+            add_generic_struct_with_fields(compiler, "Box", &["T"], &[("value", basic("T"))]);
+            add_generic_struct_with_fields(compiler, "Phantom", &["T"], &[("tag", basic("int"))]);
+        });
+        for head in ["Box", "Phantom"] {
+            let id = overlay
+                .canonicalize_type(&basic(head))
+                .unwrap_or_else(|e| panic!("bare {head} head canonicalizes: {e}"));
+            assert_eq!(
+                overlay.payload_of(id),
+                Err(payloads::unapplied_generic_head_rejection()),
+                "the bare generic head {head} must be the named A3 rejection, NOT a \
+                 monomorphic descriptor (Phantom: params unused in fields)"
+            );
+            assert_eq!(
+                overlay.bare_nominal_name_of(id),
+                None,
+                "{head} must not spell as a bare monomorphic nominal"
+            );
+        }
+    }
+
+    // F2 (alias-of-applied builtin): `type Ints = Array<int>` resolves to the
+    // transparent applied identity; reflecting the alias substitutes lazily via
+    // the base arm (`base_applied_nominals`), so alias-of-applied reflects
+    // exactly as the direct `reflect(Array<int>)` does — no reflect asymmetry.
+    #[test]
+    fn e1_s5_ckpt2_f2_alias_of_applied_builtin_reflects_via_base_arm() {
+        let target = applied("Array", vec![basic("int")]);
+        let overlay = module_overlay(|compiler| {
+            compiler
+                .type_aliases
+                .insert("Ints".to_string(), format!("{target:?}"));
+            compiler
+                .type_inference
+                .env
+                .define_type_alias("Ints", &target, None);
+        });
+        let ints_id = overlay.identity_of("Ints").expect("Ints alias resolves");
+        let array_int = overlay
+            .canonicalize_type(&applied("Array", vec![basic("int")]))
+            .expect("Array<int> canonicalizes");
+        assert_eq!(ints_id, array_int, "alias transparency: Ints == Array<int>");
+        match overlay
+            .payload_of(ints_id)
+            .expect("alias-of-applied reflects via the base arm (F2), never a pending gap")
+        {
+            FrozenPayloadDescriptor::Nominal(NominalDescriptor::Opaque { .. }) => {}
+            other => panic!(
+                "type Ints = Array<int> must reflect as Opaque (no reflect asymmetry), got {other:?}"
+            ),
+        }
+    }
+
+    // F2 (alias-of-applied struct): `type PageOfInt = Page<int>` reflects its
+    // SUBSTITUTED Struct shape via the base arm — the pre-existing struct-path
+    // asymmetry (direct `Page<int>` substituted while the alias pended) is
+    // closed symmetrically with the builtin case.
+    #[test]
+    fn e1_s5_ckpt2_f2_alias_of_applied_struct_reflects_via_base_arm() {
+        let target = applied("Page", vec![basic("int")]);
+        let overlay = module_overlay(|compiler| {
+            add_generic_struct_with_fields(
+                compiler,
+                "Page",
+                &["T"],
+                &[
+                    ("items", applied("Array", vec![basic("T")])),
+                    ("total", basic("int")),
+                ],
+            );
+            compiler
+                .type_aliases
+                .insert("PageOfInt".to_string(), format!("{target:?}"));
+            compiler
+                .type_inference
+                .env
+                .define_type_alias("PageOfInt", &target, None);
+        });
+        let page_of_int = overlay.identity_of("PageOfInt").expect("PageOfInt resolves");
+        let expected_items = overlay
+            .canonicalize_type(&applied("Array", vec![basic("int")]))
+            .expect("Array<int> canonicalizes");
+        match overlay
+            .payload_of(page_of_int)
+            .expect("alias-of-applied struct reflects its substituted shape via the base arm (F2)")
+        {
+            FrozenPayloadDescriptor::Nominal(NominalDescriptor::Struct { fields, .. }) => {
+                assert_eq!(fields.len(), 2, "Page has 2 fields");
+                assert!(
+                    fields.iter().any(|f| f.type_identity == expected_items),
+                    "the items field is SUBSTITUTED to Array<int> via the base arm, not Array<T>"
+                );
+            }
+            other => panic!(
+                "type PageOfInt = Page<int> must reflect its substituted Struct shape, got {other:?}"
+            ),
+        }
+    }
 }
 
 // ============================================================================

@@ -3790,32 +3790,32 @@ victim(1)
 // construction.
 #[cfg(test)]
 mod e1_s5_boundary {
+    use super::reconstruct_type_annotation;
     use super::semantic_freeze::overlay_for_tests;
     use super::type_reflection::payloads::{self, FrozenPayloadDescriptor};
+    use super::type_reflection::type_argument;
     use crate::compiler::BytecodeCompiler;
     use shape_ast::ast::TypeAnnotation;
 
-    // ADR-009 E5 CKPT-1 (comment reworded; assertion UNCHANGED): this pin tests
-    // `payload_of` DESCRIPTOR substitution — the declaration SHAPE
-    // (Struct/Enum/Newtype/Opaque) that powers `reflect(Array<int>)` — NOT
-    // `reconstruct_type_annotation` SPELLING. The two are orthogonal (design §0).
-    // Under CKPT-1 `Array<int>` DOES spell (via the applied-nominal arm in
-    // `reconstruct_type_annotation`) and therefore STAMPS — but its `payload_of`
-    // descriptor substitution STILL PENDS: `payload_of` routes the site-interned
-    // Nominal to `substituted_applied_nominal(head, args)`, which returns `None`
-    // for a builtin generic head (no frozen struct field annotations to
-    // substitute) → the NAMED `applied_nominal_pending_rejection`. So the
-    // assertion HOLDS unchanged; only the old comment was stale — the "not
-    // reconstructable" claim was true of the pre-CKPT-1 descriptor-only
-    // reconstruct, and is false of the CKPT-1 speller. Descriptor substitution
-    // (`payload_of`) is CKPT-2; spelling reconstruction landed in CKPT-1.
+    // ADR-009 E5 CKPT-2 (A8-OUT — the POSITIVE FLIP of the former pin 3747
+    // `e1_s5_applied_nominal_is_pending_rejection_not_reconstructable`): SP-1.
+    // `payload_of(Array<int>)` DESCRIPTOR substitution now RESOLVES — `Array`
+    // is a container, so the A8-OUT template answers `Opaque{owner: Array-head}`
+    // (A7: a container has NO named-field/variant structure to state, so
+    // `Opaque` is the honest "no rows to show", never a mis-stated field). The
+    // element type is NOT in the descriptor — it is recovered by the orthogonal
+    // `type_argument`/`arg_identities` query. This is the soundness-critical
+    // surface: the descriptor never fabricates a member type; the arg lives in
+    // `type_argument`. `applied_nominal_pending_rejection` now fires ONLY for a
+    // head that is neither a builtin template, a user enum, nor a resolved user
+    // struct (never a silent gap).
     #[test]
-    fn e1_s5_applied_nominal_is_pending_rejection_not_reconstructable() {
+    fn e1_s5_applied_container_descriptor_substitutes_to_opaque_over_recoverable_arg() {
         let overlay = overlay_for_tests(&BytecodeCompiler::new());
         // `Array<int>` as the compiler sees it at from_function/from_type — a
         // real `TypeAnnotation`, built directly to avoid any grammar dependence.
-        // `TypeAnnotation::Array(int)` routes through `canonical_applied`
-        // (type_reflection.rs:976-977), identical to `Generic{"Array",[int]}`.
+        // `TypeAnnotation::Array(int)` routes through `canonical_applied`,
+        // identical to `Generic{"Array",[int]}`.
         let array_int = TypeAnnotation::Array(Box::new(TypeAnnotation::Basic("int".to_string())));
 
         let identity = overlay
@@ -3823,20 +3823,42 @@ mod e1_s5_boundary {
             .expect("Array<int> canonicalizes to a Nominal identity")
             .identity();
 
+        let applied = overlay
+            .applied_nominal_of(identity)
+            .expect("Array<int> is a site-interned applied form");
+
+        // The descriptor is `Opaque` with `owner == the Array HEAD identity`
+        // (never the applied identity) — NOT pending, NOT Newtype, NOT Struct.
         match overlay.payload_of(identity) {
-            Err(message) => assert_eq!(
-                message,
-                payloads::applied_nominal_pending_rejection(),
-                "Array<int> `payload_of` DESCRIPTOR substitution must be the NAMED \
-                 applied-nominal-pending rejection (CKPT-2 territory), never a silent gap \
-                 — even though CKPT-1 SPELLING now reconstructs it"
-            ),
-            Ok(descriptor) => panic!(
-                "Array<int> must NOT descriptor-substitute via `payload_of` in CKPT-1 \
-                 (applied-nominal descriptor substitution is CKPT-2's footprint; CKPT-1 \
-                 landed spelling, not substitution); got {descriptor:?}"
+            Ok(FrozenPayloadDescriptor::Nominal(payloads::NominalDescriptor::Opaque { owner })) => {
+                assert_eq!(
+                    owner, applied.head_identity,
+                    "the Opaque owner is the Array HEAD identity (owner: head), \
+                     so Array<int> / Array<string> share owner"
+                );
+            }
+            other => panic!(
+                "Array<int> must descriptor-substitute to Opaque (A8-OUT container), \
+                 never Newtype (would mis-imply a 1:1 wrapper over one int), never a \
+                 pending rejection; got {other:?}"
             ),
         }
+
+        // A7 recovery: the element type is recovered via the orthogonal
+        // `type_argument` query, NEVER stated in the descriptor.
+        assert_eq!(
+            applied.arg_identities.len(),
+            1,
+            "Array<int> carries exactly one type argument"
+        );
+        let arg0 = type_argument(&applied, 0).expect("Array<int> arg 0");
+        assert_eq!(
+            reconstruct_type_annotation(&overlay, arg0)
+                .expect("the recovered element identity spells"),
+            TypeAnnotation::Basic("int".to_string()),
+            "the element type is recovered as `int` via type_argument (A7), \
+             not fabricated into the descriptor"
+        );
     }
 
     // The POSITIVE boundary: a `Tuple[int, string]` reconstructs via the

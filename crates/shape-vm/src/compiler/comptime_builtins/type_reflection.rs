@@ -221,6 +221,31 @@ pub(crate) struct FrozenTypeIndex {
     /// rejection. Symmetric with [`Self::frozen_callable_descriptors`].
     pub(crate) frozen_nominal_descriptors:
         HashMap<FrozenTypeIdentity, payloads::NominalDescriptor>,
+    /// ADR-009 E5 CKPT-2 (A8-OUT): the static builtin-nominal declaration-shape
+    /// template per builtin generic HEAD identity (`Array`, `Option`, `Result`,
+    /// …). NOT a per-type freeze fact — it is STATIC builtin data, populated in
+    /// the SAME 11-head intern loop that already interns the builtin arity (one
+    /// source, no second derivation), keyed by the interned head identity.
+    /// [`Self::substituted_applied_nominal`] reads it to answer a COMPLETE
+    /// descriptor for an APPLIED builtin (`Array<int>` ⇒ `Opaque`,
+    /// `Result<T,E>` ⇒ `Enum`) without inverting the identity hash. Under
+    /// A8-OUT the template carries NO payload TYPES: a container states no
+    /// fields (Opaque — none to mis-state), an enum states TRUE variant names +
+    /// arities; every applied type ARGUMENT is recovered by the orthogonal
+    /// [`type_argument`] query (A7-uniform), never fabricated into the
+    /// descriptor.
+    pub(crate) builtin_nominal_templates: HashMap<FrozenTypeIdentity, BuiltinNominalTemplate>,
+    /// ADR-009 E5 CKPT-2 (F2): the refined APPLIED form recovered for a
+    /// BASE-interned applied-nominal identity — an alias whose target is an
+    /// applied generic (`type Ints = Array<int>`, `type PageOfInt = Page<int>`).
+    /// Populated by the alias fixpoint in the SAME rebuild that interns the
+    /// alias's transparent applied identity (write-once, symmetric with the
+    /// composite-descriptor threading). Read ONLY by the base `Nominal` arm of
+    /// [`Self::payload_for_identity`] (before the pending rejection) to
+    /// substitute lazily via [`Self::substituted_applied_nominal`] — symmetric
+    /// with the overlay memo's `applied_nominal` arm, so alias-of-applied
+    /// reflects exactly as the direct applied form does (no reflect asymmetry).
+    pub(crate) base_applied_nominals: HashMap<FrozenTypeIdentity, RefinedApplication>,
     /// ADR-009 B7 (Dec 50/94): the composite structural descriptors per
     /// BASE-interned composite identity — an alias whose target is a composite
     /// (`type Pair = [int, string]`, `type Ref = &User`, `type Id = int |
@@ -247,6 +272,71 @@ pub(crate) struct FrozenEnumVariantDef {
     pub(crate) name: String,
     pub(crate) payload_arity: u16,
 }
+
+/// ADR-009 E5 CKPT-2 (A8-OUT) — the static reflection template for one builtin
+/// generic HEAD. `canonical_name` mints the owner-bound hygienic member
+/// identity (`member:{owner}:{variant}`) for each enum variant — the SAME
+/// identity a monomorphized declaration of the builtin enum would mint. NOT a
+/// per-type freeze fact: static builtin data keyed by the interned head
+/// identity (see [`FrozenTypeIndex::builtin_nominal_templates`]).
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct BuiltinNominalTemplate {
+    pub(crate) canonical_name: &'static str,
+    pub(crate) shape: BuiltinShape,
+}
+
+/// ADR-009 E5 CKPT-2 (A8-OUT) — the two builtin reflection shapes.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum BuiltinShape {
+    /// A homogeneous container (`Array`/`Vec`/`Set`/`HashMap`/`Deque`/
+    /// `PriorityQueue`/`Mutex`/`Slice`/`Future`): reflects as a
+    /// non-decomposable `Opaque` — it states NO named-field/variant structure
+    /// (there is none to state, so nothing to mis-state); its element/key/value
+    /// types are recovered via [`type_argument`], never fabricated into the
+    /// descriptor.
+    Container,
+    /// A builtin sum type (`Option`/`Result`): reflects as an `Enum` stating its
+    /// TRUE variant names + arities. Under A8-OUT payload TYPES are NOT stated
+    /// here (a swap like `Result<int,string>` vs `Result<string,int>` produces
+    /// IDENTICAL descriptors); the payloads are recovered via [`type_argument`].
+    Enum(&'static [BuiltinVariant]),
+}
+
+/// ADR-009 E5 CKPT-2 (A8-OUT) — one builtin enum variant: its source variant
+/// NAME (hashed into the owner-bound hygienic member identity, never exposed as
+/// a selectable string) and its payload ARITY (Unit=0, Tuple(n)/Struct(n)=n).
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct BuiltinVariant {
+    pub(crate) name: &'static str,
+    pub(crate) arity: u16,
+}
+
+/// ADR-009 E5 CKPT-2 (A8-OUT) — `Option` reflects as a two-variant `Enum`
+/// (`None` unit / `Some(_)`), the payload recovered via [`type_argument`].
+const OPTION_BUILTIN_VARIANTS: &[BuiltinVariant] = &[
+    BuiltinVariant {
+        name: "None",
+        arity: 0,
+    },
+    BuiltinVariant {
+        name: "Some",
+        arity: 1,
+    },
+];
+
+/// ADR-009 E5 CKPT-2 (A8-OUT) — `Result` reflects as a two-variant `Enum`
+/// (`Ok(_)` / `Err(_)`), both payloads recovered via [`type_argument`] (arg 0 =
+/// `Ok`'s payload, arg 1 = `Err`'s).
+const RESULT_BUILTIN_VARIANTS: &[BuiltinVariant] = &[
+    BuiltinVariant {
+        name: "Ok",
+        arity: 1,
+    },
+    BuiltinVariant {
+        name: "Err",
+        arity: 1,
+    },
+];
 
 impl FrozenTypeIndex {
     pub(crate) fn frozen_type_id(&self, name: &str) -> Option<FrozenTypeIdentity> {
@@ -324,7 +414,26 @@ impl FrozenTypeIndex {
                 if let Some(descriptor) = self.frozen_nominal_descriptors.get(&identity) {
                     Ok(FrozenPayloadDescriptor::Nominal(descriptor.clone()))
                 } else if self.generic_param_kinds.contains_key(&identity) {
+                    // A declared generic HEAD (builtin `Array` / a generic user
+                    // struct — incl. the F3 Phantom case now excluded from
+                    // `frozen_nominal_descriptors`): un-applied → the named
+                    // A3 rejection.
                     Err(payloads::unapplied_generic_head_rejection())
+                } else if let Some(descriptor) =
+                    self.base_applied_nominals.get(&identity).and_then(|applied| {
+                        self.substituted_applied_nominal(
+                            applied.head_identity,
+                            &applied.arg_identities,
+                        )
+                    })
+                {
+                    // ADR-009 E5 CKPT-2 (F2): a BASE-interned alias-of-applied
+                    // (`type Ints = Array<int>`, `type PageOfInt = Page<int>`)
+                    // resolves to the transparent applied identity; substitute
+                    // lazily via the SAME method the overlay memo arm uses, so
+                    // alias-of-applied reflects exactly as the direct applied
+                    // form (no reflect asymmetry).
+                    Ok(FrozenPayloadDescriptor::Nominal(descriptor))
                 } else {
                     Err(payloads::applied_nominal_pending_rejection())
                 }
@@ -375,15 +484,70 @@ impl FrozenTypeIndex {
     /// ≥2 → Struct), so an applied form and a hypothetical monomorphized
     /// declaration would agree.
     ///
+    /// ADR-009 E5 CKPT-2 (A8-OUT): BEFORE the user-struct path, two additive
+    /// branches answer the two other applicable-head families with a COMPLETE,
+    /// NON-FABRICATING descriptor (removing the reflect asymmetry where an
+    /// applied builtin/enum pended while an applied struct substituted):
+    ///
+    /// * **Branch A — a builtin generic head** (`Array<int>`, `Result<T,E>`, …):
+    ///   the static [`Self::builtin_nominal_templates`] answer. A container ⇒
+    ///   `Opaque` (no fields — none to mis-state); `Option`/`Result` ⇒ `Enum`
+    ///   with TRUE variant names + arities. Under A8-OUT NO payload TYPE is
+    ///   stated — every applied argument (container element/key/value AND enum
+    ///   payload) is recovered by the orthogonal [`type_argument`] query
+    ///   (A7-uniform), never fabricated into the descriptor.
+    /// * **Branch B — a user ENUM head** (`Maybe<int>`, `Either<L,R>`): reuse the
+    ///   arity-only base enum descriptor. SOUND under A8-OUT because that
+    ///   descriptor is param-AGNOSTIC (member identities + arities are
+    ///   name-derived, `T`-free) — the base head descriptor already IS the
+    ///   applied answer; enum payload TYPES are recovered via [`type_argument`].
+    ///
+    /// `owner: head` in every branch (never the applied identity): `Array<int>`
+    /// and `Array<string>` share owner and are distinguished only via the
+    /// applied identity + [`type_argument`].
+    ///
     /// Returns `None` (→ the caller's named applied-substitution-pending
-    /// rejection) when the head is not a resolved user struct with frozen
-    /// parameter names, the arity does not match, or any substituted field type
-    /// fails to canonicalize — never a partial descriptor (R8).
+    /// rejection) when the head is neither a builtin template, a user enum, nor
+    /// a resolved user struct with frozen parameter names, the arity does not
+    /// match (struct path), or any substituted field type fails to canonicalize
+    /// — never a partial descriptor (R8).
     pub(super) fn substituted_applied_nominal(
         &self,
         head: FrozenTypeIdentity,
         args: &[FrozenTypeIdentity],
     ) -> Option<payloads::NominalDescriptor> {
+        // Branch A — a builtin generic head (container or Option/Result): the
+        // static builtin template. Arity-agnostic and arg-agnostic: a container
+        // states no fields, an enum states name-derived variants — no applied
+        // argument is ever read into the descriptor (A7: every arg lives in the
+        // orthogonal `type_argument` query), so the answer is SOUND for any args.
+        if let Some(template) = self.builtin_nominal_templates.get(&head) {
+            return Some(match template.shape {
+                BuiltinShape::Container => payloads::NominalDescriptor::Opaque { owner: head },
+                BuiltinShape::Enum(variants) => payloads::NominalDescriptor::Enum {
+                    owner: head,
+                    variants: variants
+                        .iter()
+                        .map(|variant| payloads::NominalVariantDescriptor {
+                            member: member_identity(template.canonical_name, variant.name),
+                            payload_arity: variant.arity,
+                        })
+                        .collect(),
+                },
+            });
+        }
+        // Branch B — a user ENUM head: reuse the arity-only base enum descriptor.
+        // Param-agnostic (member ids + arities are `T`-free), so the base
+        // `Maybe`-head descriptor IS the applied `Maybe<int>` answer; the enum
+        // payload TYPES are recovered via `type_argument`. A user STRUCT head
+        // (`Struct`/`Newtype`/`Opaque` in the map, or excluded generic head)
+        // falls through to the real 5-step substitution below.
+        if let Some(descriptor @ payloads::NominalDescriptor::Enum { .. }) =
+            self.frozen_nominal_descriptors.get(&head)
+        {
+            return Some(descriptor.clone());
+        }
+
         // Reverse the head identity to the user-struct name (the freeze keys
         // struct definitions by name; only a user struct carries field
         // annotations to substitute — a builtin/enum head has no `struct_defs`
@@ -454,6 +618,14 @@ impl FrozenTypeIndex {
         let mut categories = HashMap::new();
         let mut primitive_payloads = HashMap::new();
         let mut param_kinds: HashMap<FrozenTypeIdentity, Vec<ParamKind>> = HashMap::new();
+        // ADR-009 E5 CKPT-2 (A8-OUT): the builtin declaration-shape templates,
+        // populated in the SAME 11-head intern loop that interns builtin arity.
+        let mut builtin_templates: HashMap<FrozenTypeIdentity, BuiltinNominalTemplate> =
+            HashMap::new();
+        // ADR-009 E5 CKPT-2 (F2): the refined applied form per BASE-interned
+        // alias-of-applied identity, threaded in the alias fixpoint below.
+        let mut base_applied_nominals: HashMap<FrozenTypeIdentity, RefinedApplication> =
+            HashMap::new();
         let mut callable_descriptors: HashMap<FrozenTypeIdentity, payloads::CallableDescriptor> =
             HashMap::new();
         // ADR-009 B7: per-category descriptor maps for BASE-interned composite
@@ -490,24 +662,27 @@ impl FrozenTypeIndex {
             FrozenTypeCategory::Erased,
         );
 
-        // Builtin nominal constructors: one table carries name AND declared
-        // arity (S5 R5 — arity is a freeze fact, enforced by the single
-        // canonicalizer, identity-keyed so alias heads inherit it). Every
-        // builtin generic parameter is a TYPE parameter (ADR-009 B4, Dec 54):
-        // no builtin declares a const generic, so arity `n` projects to
-        // `[ParamKind::Type; n]` — arity is the vector length.
-        for (name, arity) in [
-            ("Array", 1),
-            ("Vec", 1),
-            ("HashMap", 2),
-            ("Option", 1),
-            ("Result", 2),
-            ("Future", 1),
-            ("Set", 1),
-            ("Deque", 1),
-            ("PriorityQueue", 1),
-            ("Mutex", 1),
-            ("Slice", 1),
+        // Builtin nominal constructors: one table carries name, declared arity
+        // (S5 R5 — arity is a freeze fact, enforced by the single canonicalizer,
+        // identity-keyed so alias heads inherit it) AND its A8-OUT reflection
+        // SHAPE (E5 CKPT-2). Every builtin generic parameter is a TYPE parameter
+        // (ADR-009 B4, Dec 54): no builtin declares a const generic, so arity
+        // `n` projects to `[ParamKind::Type; n]` — arity is the vector length.
+        // The `BuiltinShape` column feeds `builtin_nominal_templates` in the
+        // SAME insert (one source, no second table): 9 containers → `Opaque`,
+        // `Option`/`Result` → arity-only `Enum` (payloads via `type_argument`).
+        for (name, arity, shape) in [
+            ("Array", 1, BuiltinShape::Container),
+            ("Vec", 1, BuiltinShape::Container),
+            ("HashMap", 2, BuiltinShape::Container),
+            ("Option", 1, BuiltinShape::Enum(OPTION_BUILTIN_VARIANTS)),
+            ("Result", 2, BuiltinShape::Enum(RESULT_BUILTIN_VARIANTS)),
+            ("Future", 1, BuiltinShape::Container),
+            ("Set", 1, BuiltinShape::Container),
+            ("Deque", 1, BuiltinShape::Container),
+            ("PriorityQueue", 1, BuiltinShape::Container),
+            ("Mutex", 1, BuiltinShape::Container),
+            ("Slice", 1, BuiltinShape::Container),
         ] {
             let identity = intern_identity(
                 &mut ids,
@@ -517,6 +692,13 @@ impl FrozenTypeIndex {
                 FrozenTypeCategory::Nominal,
             );
             param_kinds.insert(identity, vec![ParamKind::Type; arity]);
+            builtin_templates.insert(
+                identity,
+                BuiltinNominalTemplate {
+                    canonical_name: name,
+                    shape,
+                },
+            );
         }
 
         let mut nominal_names: Vec<_> = self
@@ -632,6 +814,20 @@ impl FrozenTypeIndex {
                         .entry(canonical.identity)
                         .or_insert(descriptor);
                 }
+                // ADR-009 E5 CKPT-2 (F2): an alias whose target is an APPLIED
+                // generic (`type Ints = Array<int>`, `type PageOfInt =
+                // Page<int>`) receives the target's transparent applied identity.
+                // Preserve the refined application (head + ordered args) keyed by
+                // that identity — the SAME write-once discipline as the composite
+                // descriptors — so the base `Nominal` arm can substitute lazily
+                // and alias-of-applied reflects exactly as the direct applied
+                // form. `canonical_refine` returns `Some` ONLY for a genuine
+                // `applied:` descriptor, so bare/composite aliases never store.
+                if let Some(refined) = canonical_refine(&canonical.descriptor) {
+                    base_applied_nominals
+                        .entry(canonical.identity)
+                        .or_insert(refined);
+                }
                 changed |=
                     ids.insert((*alias).clone(), canonical.identity) != Some(canonical.identity);
             }
@@ -669,6 +865,31 @@ impl FrozenTypeIndex {
                 let Some(owner) = ids.get(name).copied() else {
                     continue;
                 };
+                // ADR-009 E5 CKPT-2 (F3 — the Phantom guard): a struct that
+                // declares NON-EMPTY generic parameters (a generic HEAD) gets NO
+                // base monomorphic descriptor. Without this, a generic head whose
+                // fields do not reference the parameter (`type Phantom<T>{tag:int}`
+                // — all fields canonicalize under the base freeze) would land a
+                // `Struct{tag:int}` descriptor and both reflect (`payload_of`) and
+                // spell (`bare_nominal_name_of`) as if MONOMORPHIC, bypassing the
+                // A3 un-applied-generic-head rejection. An applied form
+                // (`Phantom<int>`) still substitutes via
+                // `substituted_applied_nominal` (which reads `struct_defs` +
+                // `struct_generic_param_names`, not this map); the bare head stays
+                // the named `unapplied_generic_head_rejection` (it is in
+                // `generic_param_kinds` with a non-empty vec). `Box<T>{value:T}`
+                // was already excluded (its `value:T` field fails base
+                // canonicalization). The `is_empty` check is load-bearing: EVERY
+                // struct in `struct_generic_info` gets a `struct_generic_param_kinds`
+                // entry (empty for a non-generic struct), so `contains_key` alone
+                // would wrongly exclude monomorphic structs.
+                if self
+                    .struct_generic_param_kinds
+                    .get(name)
+                    .is_some_and(|kinds| !kinds.is_empty())
+                {
+                    continue;
+                }
                 let mut field_descriptors = Vec::with_capacity(fields.len());
                 let mut all_resolved = true;
                 for (field_name, annotation) in fields {
@@ -734,6 +955,8 @@ impl FrozenTypeIndex {
         self.frozen_type_categories = categories;
         self.frozen_primitive_payloads = primitive_payloads;
         self.generic_param_kinds = param_kinds;
+        self.builtin_nominal_templates = builtin_templates;
+        self.base_applied_nominals = base_applied_nominals;
         self.frozen_callable_descriptors = callable_descriptors;
         self.frozen_nominal_descriptors = nominal_descriptors;
         self.frozen_tuple_descriptors = tuple_descriptors;
