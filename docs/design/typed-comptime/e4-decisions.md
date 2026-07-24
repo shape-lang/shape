@@ -233,6 +233,14 @@ snapshot → C extern-C → D polyglot → E TLS composition → F import trio) 
 close (design-index, defections, LSP query re-flow, full regression vs the
 S0 snapshot, book truth-gate).
 
+**S6 DONE (all waves shipped):** 16/21 FLIPPED-GREEN (waves A–F, commits
+`c6ec8551`/`9fd52595`/`4779717c`/`893d02db`/`9cf6a3c4`/`0c69f0ba`), 5 0-ary
+tests re-pointed off the closed #68 to the live #83; #68 CLOSED; new #84
+(pre-existing stale snapshot test) + #85 (book-gate receiver language opt-in);
+book 569/572 → 571/574 (`66eb93b7` shape-web). Details: `e4-slice6-report.md` +
+the S6-shipped scout headline above. READY for the ADR-009 completion gate
+(next step; not run here).
+
 ## Operating rules
 
 E1/C3-proven pipeline. MODEL POLICY (user 2026-07-22): Opus fleets
