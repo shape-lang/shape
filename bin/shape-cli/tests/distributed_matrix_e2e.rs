@@ -64,21 +64,28 @@ match remote::call("__WRONG_NAME_ADDR__", mul, 6, 7) {
 }
 
 #[test]
-#[ignore = "dark window: E4 re-implements @remote on typed HookDecision — see issue #68"]
+#[ignore = "0-ary @remote unsupported: the `@remote fn remote_snapshot_hash() -> string` \
+target (see assert_remote_snapshot_store_isolation) declares no parameters, so the decision \
+`before` hook has no argument to receive/short-circuit and is loud-rejected (\"the target \
+declares no parameters\"). Capability tracked in #83 (E4-S5 @remote residual: async, 0-ary, \
+heterogeneous multi-arg)."]
 fn plaintext_remote_snapshot_uses_receiver_store_not_caller_store() {
     let _guard = lock_process();
     assert_remote_snapshot_store_isolation(false);
 }
 
 #[test]
-#[ignore = "dark window: E4 re-implements @remote on typed HookDecision — see issue #68"]
+#[ignore = "0-ary @remote unsupported: the `@remote fn remote_snapshot_hash() -> string` \
+target (see assert_remote_snapshot_store_isolation) declares no parameters, so the decision \
+`before` hook has no argument to receive/short-circuit and is loud-rejected (\"the target \
+declares no parameters\"). TLS transport itself is fine; only the 0-ary shape blocks. \
+Capability tracked in #83 (E4-S5 @remote residual: async, 0-ary, heterogeneous multi-arg)."]
 fn tls_remote_snapshot_uses_receiver_store_not_caller_store() {
     let _guard = lock_process();
     assert_remote_snapshot_store_isolation(true);
 }
 
 #[test]
-#[ignore = "dark window: E4 re-implements @remote on typed HookDecision — see issue #68"]
 fn remote_python_call_refuses_receiver_without_language_opt_in() {
     let _guard = lock_process();
     assert_dynamic_remote_call_refuses_receiver_without_language_opt_in(
@@ -91,7 +98,6 @@ fn remote_python_call_refuses_receiver_without_language_opt_in() {
 }
 
 #[test]
-#[ignore = "dark window: E4 re-implements @remote on typed HookDecision — see issue #68"]
 fn remote_typescript_call_refuses_receiver_without_language_opt_in() {
     let _guard = lock_process();
     assert_dynamic_remote_call_refuses_receiver_without_language_opt_in(
@@ -113,7 +119,7 @@ fn assert_dynamic_remote_call_refuses_receiver_without_language_opt_in(
     let env = IsolatedEnv::new("shape-distributed-matrix-dynamic-refusal-");
     let server = start_serve("none", None, &[]);
     let program = format!(
-        r#"use std::core::remote
+        r#"from std::core::remote use {{ @remote }}
 fn {language} {function_name}(x: int) -> Result<int> {{
     {body}
 }}
