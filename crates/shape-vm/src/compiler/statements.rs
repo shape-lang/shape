@@ -5309,11 +5309,20 @@ impl BytecodeCompiler {
         exports
     }
 
-    fn module_target_fields(items: &[Item]) -> Vec<(String, String)> {
+    // ADR-009 E5 CKPT-4 (design §2 class A — MIGRATE): each field carries its
+    // declared-type AST (a typed member's `Option<TypeAnnotation>`), so
+    // `to_nanboxed(Some(overlay))` STAMPS a typed module member's `type_ref`
+    // identity via the shared `stamp_for` gate. Synthetic members (functions /
+    // types / modules / annotations) have no type AST (`None`) → `INVALID` stamp →
+    // `kind: "Unresolved"` → the consumer rules them LOUD, never a silent
+    // `.source` reparse.
+    fn module_target_fields(items: &[Item]) -> Vec<(String, String, Option<TypeAnnotation>)> {
         let mut fields = Vec::new();
         for item in items {
             match item {
-                Item::Function(func, _) => fields.push((func.name.clone(), "function".to_string())),
+                Item::Function(func, _) => {
+                    fields.push((func.name.clone(), "function".to_string(), None))
+                }
                 Item::VariableDecl(decl, _) => {
                     if let Some(name) = decl.pattern.as_identifier() {
                         let type_name = decl
@@ -5322,7 +5331,7 @@ impl BytecodeCompiler {
                             .and_then(TypeAnnotation::as_simple_name)
                             .unwrap_or("any")
                             .to_string();
-                        fields.push((name.to_string(), type_name));
+                        fields.push((name.to_string(), type_name, decl.type_annotation.clone()));
                     }
                 }
                 Item::Statement(Statement::VariableDecl(decl, _), _) => {
@@ -5333,7 +5342,7 @@ impl BytecodeCompiler {
                             .and_then(TypeAnnotation::as_simple_name)
                             .unwrap_or("any")
                             .to_string();
-                        fields.push((name.to_string(), type_name));
+                        fields.push((name.to_string(), type_name, decl.type_annotation.clone()));
                     }
                 }
                 Item::Export(export, _) => {
@@ -5345,17 +5354,27 @@ impl BytecodeCompiler {
                                 .and_then(TypeAnnotation::as_simple_name)
                                 .unwrap_or("any")
                                 .to_string();
-                            fields.push((name.to_string(), type_name));
+                            fields.push((
+                                name.to_string(),
+                                type_name,
+                                decl.type_annotation.clone(),
+                            ));
                         }
                     }
                 }
-                Item::StructType(def, _) => fields.push((def.name.clone(), "type".to_string())),
-                Item::Enum(def, _) => fields.push((def.name.clone(), "type".to_string())),
-                Item::TypeAlias(def, _) => fields.push((def.name.clone(), "type".to_string())),
-                Item::Module(def, _) => fields.push((def.name.clone(), "module".to_string())),
+                Item::StructType(def, _) => {
+                    fields.push((def.name.clone(), "type".to_string(), None))
+                }
+                Item::Enum(def, _) => fields.push((def.name.clone(), "type".to_string(), None)),
+                Item::TypeAlias(def, _) => {
+                    fields.push((def.name.clone(), "type".to_string(), None))
+                }
+                Item::Module(def, _) => {
+                    fields.push((def.name.clone(), "module".to_string(), None))
+                }
                 // H4: Include annotation definitions in module target fields
                 Item::AnnotationDef(def, _) => {
-                    fields.push((def.name.clone(), "annotation".to_string()))
+                    fields.push((def.name.clone(), "annotation".to_string(), None))
                 }
                 _ => {}
             }
@@ -5462,17 +5481,18 @@ impl BytecodeCompiler {
                     // ADR-009 D1 (S2): expansion site for this module-target
                     // handler application.
                     let expansion_site = self.annotation_expansion_site(ann, &handler, &target);
-                    // R8 W9 G.2 Step 2 Bucket 7: to_nanboxed now returns
-                    // Result; surface the V3-S5 ckpt-5 SURFACE through the
-                    // caller's Result chain instead of panicking. E1 slice-5:
-                    // module fields are string-only (no AST) → `None` overlay,
-                    // every stamp INVALID.
-                    let target_value = target.to_nanboxed(None)?;
-                    let handler_span = handler.span;
-                    // ADR-009 E1 #17 (slice 5): the handler executor still needs a
-                    // freeze handle; acquire it here (no target stamping occurred,
-                    // so any overlay is behavior-equivalent).
+                    // ADR-009 E5 CKPT-4 (design §2 class A — MIGRATE): acquire the
+                    // freeze BEFORE `to_nanboxed` and thread it, so a typed module
+                    // member's `type_ref` STAMPS its identity via `stamp_for` (the
+                    // ONE producer↔consumer gate predicate). Synthetic members carry
+                    // no AST → INVALID → the consumer rules them LOUD (never a
+                    // silent `.source` reparse).
                     let freeze = self.comptime_freeze_overlay()?;
+                    // R8 W9 G.2 Step 2 Bucket 7: to_nanboxed returns Result;
+                    // surface the V3-S5 ckpt-5 SURFACE through the caller's Result
+                    // chain instead of panicking.
+                    let target_value = target.to_nanboxed(Some(freeze.as_ref()))?;
+                    let handler_span = handler.span;
                     // ADR-009 C3 #14 (slice 4): full param definitions —
                     // declared types ride along.
                     let def_params =

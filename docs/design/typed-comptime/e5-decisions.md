@@ -297,3 +297,132 @@ OWN named rejection — never a silent gap.
   checkpoint. The `no_json_comptime_protocol.rs` sentinel (extended at CKPT-5) is
   the mechanical tripwire against a future "boundary reparse helper" walk-back —
   the exact Forbidden-Patterns failure this apparatus exists to stop.
+
+## CKPT-4 — producer migration + irreducible-class rulings (ADDITIVE; deletes nothing)
+
+CKPT-4 migrates the reconstructable producers to STAMP, rules the INVALID
+`__ComptimeTypeRef` surface LOUD, and SURFACES the one irreducible producer the
+design's 5-class inventory mis-dispositioned. It deletes nothing (the `.source`
+field, the `.source` reparse arm, `parse_type_annotation_payload`, and
+`__type_probe` all survive byte-identical — CKPT-5 is the pure deletion).
+
+### The COMPLETE producer inventory (as verified at HEAD `f5b46958`)
+
+`build_type_ref_descriptor` is the ONLY `__ComptimeTypeRef` constructor. Its live
+(non-test) callers + every path feeding the consumer:
+
+| # | Producer site (symbol) | Design class | Disposition realized |
+|---|---|---|---|
+| 1 | `to_nanboxed` param `type_ref` (`comptime_target.rs` param_objs) | (param) | STAMPS — already `Some(overlay)` from `functions_annotations.rs`; concrete param types reconstruct → stamp |
+| 2 | `to_nanboxed` resolved-return `type_ref` | (return) | STAMPS — `stamp_for(overlay, return_type_ast)` |
+| 3 | `to_nanboxed` return FALLBACK `build_type_ref_descriptor("unknown", Some("Unresolved"), None)` | **C** | INVALID/`kind:"Unresolved"` → the consumer's broad-INVALID guard rejects LOUD |
+| 4 | `build_field_descriptor_array` field `type_ref` | **B** | MIGRATED — gate dropped; stamps the UNWRAPPED-inner AST for optional fields (`option_inner`), full AST otherwise |
+| 5 | `ComptimeTarget::from_module` (via `to_nanboxed`), `statements.rs` module handler | **A** | MIGRATED — `module_target_fields` threads each member's declared-type AST; call site acquires the freeze BEFORE `to_nanboxed` and passes `Some(overlay)`. Typed members STAMP; synthetic members (functions/types/modules/annotations, `kind:"Unresolved"`) → LOUD |
+| 6 | `for_expression` target (`expressions/mod.rs`) | **A** (expr) | no stampable fields; its sole `type_ref` is the class-C Unresolved return → LOUD. `None` overlay is correct (nothing to stamp) |
+| 7 | `build_type_info_heap_value` field rows (`type_reflection.rs`) | **D** | MIGRATED — threads `Some(freeze)` + the struct field ASTs |
+| 8 | `build_type_info_heap_value` top-level `type_ref` (new `build_named_type_ref_descriptor`) | **D** | MIGRATED — stamps `Basic(type_name)`; Unresolved names stay INVALID → LOUD |
+
+**Consumer INVALID handling (subsumes class C + A5).** `type_annotation_from_
+string_or_type_ref_slot`: any `__ComptimeTypeRef` with `identity == INVALID` is a
+RULED named surface-and-stop (LOUD), citing `kind`/`name`. This fronts the
+`.source` reparse arm, which is now UNREACHED (every `__ComptimeTypeRef` either
+reconstructs off a stamped identity or rejects loud). Covers class C
+(`kind:"Unresolved"`), scoped generic parameters, un-applied generic heads, and any
+future residual — one predicate, not a per-kind table.
+
+**Records STAMP (not a reject class).** CKPT-3 shipped record-IN spelling, so
+record type-refs reconstruct + stamp like any other stampable type. Migrated in
+classes A/B/D; NOT ruled loud.
+
+**The separate `comptime:TypeRef` carrier is NOT a `.source`-family producer.**
+`build_frozen_type_ref_heap_value` (`type_reflection.rs`) builds the
+`COMPTIME_FROZEN_TYPE_REF_SCHEMA` (`"\u{1}comptime:TypeRef"`) carrier —
+identity-only (no `name`/`kind`/`source` fields), its own reader
+(`frozen_identity_from_ref`), and it ALWAYS carries a valid frozen identity or
+rejects loud (`category_of(identity)?`). It never reaches the `.source`/string
+arms (the consumer rejects a non-`__ComptimeTypeRef` schema). NOT a 6th class.
+
+### class-E blocker (SURFACED — the completeness finding)
+
+The design's 5-class inventory (§2) dispositioned **class E** — the bare-string
+type-payload arm (`type_annotation_from_string_or_type_ref_slot`, `slot.as_str()
+→ parse_type_annotation_payload`) — as a NAMED SURFACE-AND-STOP ("reject the
+runtime-string carrier loud; Int64-index + TypeRef are the two sanctioned
+carriers"). **This disposition is BLOCKED and was NOT applied.**
+
+The bare-string arm is a **SANCTIONED, documented carrier** for the item-generation
+builtins: `item_fn(name, return_type: string | TypeRef, value)` — the `string`
+half is contract (`comptime_builtins.rs`, item_fn registration comment) — plus
+`extend_method` / `build_extend_item_with_method_body`. These have **no sanctioned
+Int64/TypeRef alternative today**, and a string TYPE SPELLING inherently requires
+`parse_type_annotation_payload` (there is no non-parse path from `"Array<int>"` to
+a `TypeAnnotation`). The design's own §2 blast-radius even lists `item_fn` as one
+of the three emit sites for class E — but it did not verify item_fn had a migration
+path off strings. It does not.
+
+Applying the class-E reject BROKE **~19 tests** (measured): `item_fn` /
+`extend_method_producer_tests` (6) / `functions_annotations` generated-install +
+expansion-provenance + source-anchor (8) / `annotation_import_pipeline` (2) /
+`extension_integration` (3) / `e2_d9_closure_free_tripwire` (1) — all the
+item-generation surface. Per the standing ruling *"if migrating a class needs more
+than threading overlay+ASTs → SURFACE it, don't force it,"* class E was REVERTED
+to its reparse and surfaced here.
+
+**Consequence for CKPT-5.** The `.source` FIELD + the `.source` reparse ARM are now
+UNREACHED (fronted by the broad-INVALID ruled reject) → CKPT-5 CAN delete them. But
+`parse_type_annotation_payload` + `__type_probe` retain a LIVE caller (the item_fn/
+extend string arm) → CKPT-5 CANNOT delete the reparse machinery until item_fn/
+extend migrate to a sanctioned type carrier. **DECISION REQUIRED** (not guessed):
+(a) give item_fn/extend an Int64 literal-type or `type_ref` carrier + migrate their
+call sites (user-facing API change), OR (b) declare the item_fn/extend string a
+permanently-sanctioned carrier (then the string arm survives E5 by design — the
+`.source` deletion still lands, but the reparse fn does not).
+
+### Exit-criterion status
+
+- **`.source`/`__ComptimeTypeRef`-identity surface: MET.** Every `__ComptimeTypeRef`
+  reaching the consumer STAMPS (concrete → identity route) or is a RULED LOUD
+  surface-and-stop (INVALID). The `.source` reparse arm is UNREACHED. Pinned by
+  `e1_s5_ckpt4_typeref_producers_stamp_invalid_rejects_loud_string_arm_surfaced`
+  (producers stamp end-to-end via real `to_nanboxed`; class-C/INVALID reject loud)
+  + `e1_s5_ckpt4_unstamped_typeref_is_named_surface_and_stop_not_source_reparse`
+  (the rewritten former "falls_through_to_source_arm" pin — an unstamped ref is now
+  LOUD, never a `.source` reparse, even with a valid parseable source).
+- **bare-STRING arm: BLOCKED/SURFACED** (item_fn/extend, above). The exit pin
+  documents it as a live residual (asserts the string carrier STILL reparses).
+
+### Recursive-record termination (deferred CKPT-3 pin, folded in)
+
+`e1_s5_ckpt4_recursive_named_record_reconstructs_and_terminates`: a recursive NAMED
+record `type Tree { kids: Array<Tree> }` reconstructs + TERMINATES — the nominal
+self-ref `Tree` resolves to the bare-name leaf `Basic("Tree")` (via
+`bare_nominal_name_of`), never field-expanding; so `Array<Tree>` spells head +
+bare-name arg and stops (A2 identity-indirected recursion on a nominal self-ref,
+distinct from the anonymous-record nesting pin).
+
+### Gate (FAILED-name sets vs Step-0 baseline — ZERO regressions)
+
+| Gate | Baseline (`f5b46958`) | Post-CKPT-4 | Verdict |
+|---|---|---|---|
+| `shape-vm --lib` | 3587 pass / 7 fail | 3589 pass / 7 fail (+2 new pins) | same 7 pre-existing; ZERO new |
+| `e1_s5` filter | 29 / 0 | 31 / 0 (+2 pins) | green |
+| `no_json` | 2 / 0 | 2 / 0 | green |
+| `comptime` | 271 / 3 | 271 / 3 | exact 3 pre-existing; ZERO flips |
+| `annotations_comptime` | 117 / 10 | 117 / 10 | exact 10 pre-existing; ZERO flips |
+| `just check-clean` | exit 0 | exit 0 | green (1 pre-existing warning) |
+| `just check-no-dynamic` | success | success | green |
+
+Pre-existing `shape-vm --lib` fails (all comptime-unrelated): `test_async_let_
+binding_is_immutable`, `test_match_arm_empty_array_unprovable_element_is_clean_
+compile_error`, `monomorphization::cache::route_tests::{inlined_closure_keeps_
+outer_authored_type_ref, nested_exact_calls_close_outer_arguments, unavailable_
+and_missing_callsite_evidence}`, `monomorphization::type_resolution::tests::{ws6_
+generic_id_ok_arg, ws6b_inferred_result_variable_arg}`. No TP rebaselines were
+needed (no producer flipped a test: the concrete-typed emit tests still stamp →
+resolve identically; the class-E reject that WOULD have flipped ~19 tests was
+reverted and surfaced instead).
+
+`.source`/reparse machinery UNTOUCHED (grep-confirmed byte-identical): schema
+`.string_field("source")` (builtin_schemas.rs), `parse_type_annotation_payload`
++ the `fn __type_probe` snippet + the `.source` arm (`string_field_from_typed_
+object(storage, &schema, "source")` → `parse_type_annotation_payload(&source)`).

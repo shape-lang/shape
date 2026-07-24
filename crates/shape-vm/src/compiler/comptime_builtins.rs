@@ -611,6 +611,21 @@ fn type_annotation_from_string_or_type_ref_slot(
         });
     }
     if let Some(payload) = slot.as_str() {
+        // ADR-009 E5 CKPT-4 — design §2 class E ("reject the bare-string arm
+        // loud") is BLOCKED and SURFACED, NOT applied. This arm is a SANCTIONED,
+        // documented carrier for `item_fn` / `extend_method` (`item_fn(name,
+        // return_type: string | TypeRef, value)`, comptime_builtins.rs — the
+        // `string` half is contract). Those item-generation builtins have NO
+        // sanctioned Int64/TypeRef alternative today, and a string TYPE SPELLING
+        // inherently requires `parse_type_annotation_payload` to become a
+        // `TypeAnnotation` (there is no non-parse path from "Array<int>" to an
+        // AST). So the design's class-E reject would break item_fn/extend's
+        // documented contract (~19 tests) with no additive migration — the exact
+        // "migrating a class needs more than threading overlay+ASTs → SURFACE it,
+        // don't force it" case. The string arm therefore SURVIVES CKPT-4 as a live
+        // reader; closing it (the full exit criterion + the CKPT-5 string-arm
+        // deletion) is BLOCKED on an item_fn/extend typed-carrier migration
+        // decision. See e5-decisions.md CKPT-4 §"class-E blocker".
         return parse_type_annotation_payload(payload);
     }
     if slot.kind() != NativeKind::Ptr(HeapKind::TypedObject) {
@@ -667,6 +682,29 @@ fn type_annotation_from_string_or_type_ref_slot(
         high: identity_field("identity_high")?,
         low: identity_field("identity_low")?,
     };
+    // ADR-009 E5 CKPT-4 (design §2 class C + A5 — RULED NAMED SURFACE-AND-STOP).
+    // An INVALID identity means the producer could NOT stamp a reconstructable
+    // identity for this type_ref: the type is genuinely not reconstructable — a
+    // function with no declared return (`kind: "Unresolved"`, the design-named
+    // class-C discriminator), a synthetic module member, a scoped generic
+    // parameter, or an un-applied generic head. There is NO concrete type to emit.
+    // Reject LOUD; NEVER silently reparse `.source` into a bogus annotation (the
+    // Forbidden-Patterns dynamic-reparse walk-back). This ruled reject fronts the
+    // `.source` reparse NET below — which is now UNREACHED at runtime, retained
+    // byte-for-byte as the E1-D8 residual until the CKPT-5 pure deletion (kept as
+    // a runtime-dead-but-compilable net by the `!= INVALID` guard immediately
+    // after this one, so the `.source` machinery stays untouched).
+    if identity == FrozenTypeIdentity::INVALID {
+        let kind = string_field_from_typed_object(storage, &schema, "kind").unwrap_or_default();
+        let name = string_field_from_typed_object(storage, &schema, "name").unwrap_or_default();
+        return Err(format!(
+            "{builtin_name}: type reference '{name}' (kind='{kind}') carries no \
+             reconstructable semantic identity — there is no concrete type to emit. A \
+             comptime handler cannot resolve an unstamped/unresolvable type_ref (an \
+             unresolved return, a synthetic member, a scoped generic parameter, or an \
+             un-applied generic head); provide a concrete, reconstructable type."
+        ));
+    }
     if identity != FrozenTypeIdentity::INVALID {
         return reconstruct_type_annotation(overlay, identity).map_err(|e| e.to_string());
     }
@@ -4442,6 +4480,64 @@ mod e1_s5_reconstruction {
             );
         }
     }
+
+    // ADR-009 E5 CKPT-4 (the deferred CKPT-3 termination pin, folded in). A
+    // recursive NAMED record `type Tree { kids: Array<Tree> }` reconstructs +
+    // TERMINATES: the nominal self-reference `Tree` inside `Array<Tree>` resolves
+    // to the BARE-NAME leaf `Basic("Tree")` (via `bare_nominal_name_of`), never
+    // field-expanding `Tree` — the A2 identity-indirected recursion invariant
+    // applied to a NOMINAL self-ref (distinct from the anonymous-record nesting
+    // pinned by `e1_s5_ckpt3_record_with_nested_record_and_applied_field_terminates`).
+    // So reconstructing the field type `Array<Tree>` spells `Array<Tree>` (head +
+    // bare-name arg) and STOPS — it does not descend into `Tree` forever.
+    #[test]
+    fn e1_s5_ckpt4_recursive_named_record_reconstructs_and_terminates() {
+        use shape_ast::ast::TypePath;
+        let mut compiler = BytecodeCompiler::new();
+        compiler.struct_types.insert(
+            "Tree".to_string(),
+            (vec!["kids".to_string()], shape_ast::ast::Span::DUMMY),
+        );
+        compiler.struct_generic_info.insert(
+            "Tree".to_string(),
+            crate::compiler::StructGenericInfo {
+                type_params: Vec::new(),
+                runtime_field_types: [(
+                    "kids".to_string(),
+                    TypeAnnotation::Array(Box::new(TypeAnnotation::Basic("Tree".to_string()))),
+                )]
+                .into_iter()
+                .collect(),
+            },
+        );
+        let overlay = overlay_for_tests(&compiler);
+
+        // The nominal self-ref `Tree` is a bare-name LEAF — it terminates.
+        let tree_id = overlay
+            .canonicalize_type(&TypeAnnotation::Basic("Tree".to_string()))
+            .expect("bare `Tree` nominal canonicalizes");
+        assert_eq!(
+            reconstruct_type_annotation(&overlay, tree_id)
+                .expect("the named self-ref resolves to a bare-name leaf"),
+            TypeAnnotation::Basic("Tree".to_string()),
+            "recursive nominal `Tree` reconstructs to Basic(\"Tree\"), never expanding its fields"
+        );
+
+        // The field type `Array<Tree>` spells head + bare-name arg, then STOPS.
+        let field_ty = TypeAnnotation::Array(Box::new(TypeAnnotation::Basic("Tree".to_string())));
+        let field_id = overlay
+            .canonicalize_type(&field_ty)
+            .expect("Array<Tree> canonicalizes");
+        assert_eq!(
+            reconstruct_type_annotation(&overlay, field_id)
+                .expect("Array<Tree> spells + terminates (identity-indirected recursion)"),
+            TypeAnnotation::Generic {
+                name: TypePath::simple("Array"),
+                args: vec![TypeAnnotation::Basic("Tree".to_string())],
+            },
+            "Array<Tree> spells its head + the bare-name self-ref arg, terminating"
+        );
+    }
 }
 
 // ADR-009 E1 #17 slice-5 A-FULL — STAGE 5 route-proof pins (E1-D7(a)/(b)/(c)).
@@ -4556,38 +4652,57 @@ mod e1_s5_route_proof {
         }
     }
 
-    // (d) UNSTAMPED (INVALID) ref falls through to the `.source` reparse arm,
-    // byte-for-byte. An `identity == INVALID` ref with a VALID source resolves
-    // via the reparse arm; the negative sub-case (INVALID + GARBAGE source) still
-    // Errs — proving the reparse arm is GENUINELY reached and live, not shadowed
-    // by an always-on identity path. This is the legacy path the unstamped/legacy
-    // refs still use — LIVE until B4/B5 → E5 (E1-D8 stamp-gate residual).
+    // (d) ADR-009 E5 CKPT-4 FLIP — an UNSTAMPED (INVALID) `__ComptimeTypeRef` is a
+    // RULED NAMED SURFACE-AND-STOP at the consumer, NOT a silent `.source` reparse.
+    // This is the CKPT-4 successor to the former "falls through to the `.source`
+    // arm bytewise" pin (design §4: "successor asserts unstamped/unresolvable =
+    // named surface-and-stop"), landed at the RULING checkpoint. CKPT-1..3 made
+    // every reconstructable type stamp, so the ONLY refs that still carry INVALID
+    // describe NO reconstructable type (design §2 class C / A5 — an unresolved
+    // return, a synthetic member, a scoped generic parameter, an un-applied head);
+    // the consumer rejects them LOUD and MUST NEVER reparse `.source`. Both a
+    // VALID-source and a GARBAGE-source INVALID ref reject IDENTICALLY — resolution
+    // no longer depends on `.source` at all. The `.source` reparse net is retained
+    // byte-for-byte (deleted at CKPT-5) but is now UNREACHED: a VALID `.source`
+    // ("string") that WOULD have reparsed to `Ok(Basic("string"))` is the
+    // load-bearing witness — an `Ok` here would be unambiguous proof of the
+    // walk-back this pin refuses.
     #[test]
-    fn e1_s5_unstamped_typeref_falls_through_to_source_arm_bytewise() {
+    fn e1_s5_ckpt4_unstamped_typeref_is_named_surface_and_stop_not_source_reparse() {
         let overlay = overlay_for_tests(&BytecodeCompiler::new());
 
-        // INVALID stamp (None identity) + valid source -> reparse arm -> Basic.
-        let valid = build_type_ref_descriptor("string", None, None);
-        let resolved = type_annotation_from_string_or_type_ref_slot(
-            &valid,
-            "__emit_set_return_type",
-            &overlay,
-        )
-        .expect("an unstamped ref with a valid source resolves via the reparse arm");
-        assert_eq!(resolved, TypeAnnotation::Basic("string".to_string()));
-
-        // INVALID stamp + GARBAGE source -> the reparse arm is genuinely reached
-        // and Errs (an always-on identity path would never surface a parse error).
-        let garbage = build_type_ref_descriptor("###unparseable###", None, None);
+        // INVALID stamp + a fully VALID `.source` ("string"): the `.source` arm
+        // WOULD answer `Ok(Basic("string"))` if reached. The consumer must reject
+        // LOUD instead — the CKPT-4 ruling, never a reparse.
+        let valid_source = build_type_ref_descriptor("string", None, None);
         let err = type_annotation_from_string_or_type_ref_slot(
-            &garbage,
+            &valid_source,
             "__emit_set_return_type",
             &overlay,
         )
-        .expect_err("an unstamped ref with a garbage source Errs through the live reparse arm");
+        .expect_err(
+            "an unstamped (INVALID) ref must be a NAMED surface-and-stop, never a silent \
+             `.source` reparse — even when the `.source` is perfectly parseable (E5 CKPT-4)",
+        );
         assert!(
-            err.contains("###unparseable###") || err.to_lowercase().contains("parse"),
-            "the error is the reparse arm's own parse failure, got: {err}"
+            err.contains("reconstructable") || err.to_lowercase().contains("no concrete type"),
+            "the error must be the CKPT-4 ruled rejection (no reconstructable identity), \
+             NOT a `.source` reparse of \"string\"; got: {err}"
+        );
+
+        // INVALID stamp + a GARBAGE `.source`: the SAME ruled rejection — the
+        // outcome does not depend on `.source` content.
+        let garbage_source = build_type_ref_descriptor("###unparseable###", None, None);
+        let err = type_annotation_from_string_or_type_ref_slot(
+            &garbage_source,
+            "__emit_set_return_type",
+            &overlay,
+        )
+        .expect_err("an unstamped ref rejects LOUD regardless of `.source` content");
+        assert!(
+            err.contains("reconstructable") || err.to_lowercase().contains("no concrete type"),
+            "the garbage-source INVALID ref rejects via the SAME CKPT-4 ruling, not a \
+             `.source` parse failure; got: {err}"
         );
     }
 
@@ -4687,6 +4802,103 @@ mod e1_s5_route_proof {
                 }],
             },
             "the applied-generic identity route reconstructs the nested spelling, past .source"
+        );
+    }
+
+    // (g) ADR-009 E5 CKPT-4 EXIT CRITERION (charter-critical) — the `__ComptimeTypeRef`
+    // IDENTITY surface. After CKPT-4, every `__ComptimeTypeRef` reaching the
+    // consumer either STAMPS (concrete types → identity route) or is a RULED named
+    // surface-and-stop (INVALID → LOUD, subsuming design class C). Proven end-to-end
+    // through the REAL `to_nanboxed` producer + the live consumer:
+    //   • a CONCRETE-return producer STAMPS its `return_type_ref` (identity !=
+    //     INVALID) → the consumer resolves it via the IDENTITY route (not `.source`);
+    //   • the class-C fallback (`kind:"Unresolved"`, no real type) rejects LOUD;
+    //   • ANY INVALID `__ComptimeTypeRef` rejects LOUD (pin (d)).
+    // The complementary producer half — concrete applied/record/nominal inputs
+    // stamp — is pinned by the `_stamp_gate_predicate_auto_widens_*` pins.
+    //
+    // NOT ASSERTED (SURFACED residual): the bare-STRING type-payload arm (design
+    // class E) is a SANCTIONED, documented carrier for `item_fn` / `extend_method`
+    // (`item_fn(name, return_type: string | TypeRef, value)`), which have no
+    // sanctioned Int64/TypeRef alternative today and inherently need
+    // `parse_type_annotation_payload` to turn a spelling string into an AST. So the
+    // string arm SURVIVES CKPT-4 as a live reader — the third bullet below pins
+    // that it STILL reparses (documenting the exact surfaced state). Closing it
+    // (the full string-arm exit criterion + the CKPT-5 string-arm deletion) is
+    // BLOCKED on an item_fn/extend typed-carrier migration — see e5-decisions.md
+    // CKPT-4 §"class-E blocker".
+    #[test]
+    fn e1_s5_ckpt4_typeref_producers_stamp_invalid_rejects_loud_string_arm_surfaced() {
+        use crate::compiler::comptime_target::{AnnotationTargetKind, ComptimeTarget};
+        use shape_value::KindedSlot;
+        use std::sync::Arc;
+        let overlay = overlay_for_tests(&BytecodeCompiler::new());
+
+        // --- a concrete producer STAMPS: `fn f() -> int` through `to_nanboxed` ---
+        let target = ComptimeTarget {
+            kind: AnnotationTargetKind::Function,
+            name: "f".to_string(),
+            fields: Vec::new(),
+            params: Vec::new(),
+            return_type: Some("int".to_string()),
+            annotations: Vec::new(),
+            captures: Vec::new(),
+            param_type_asts: Vec::new(),
+            return_type_ast: Some(TypeAnnotation::Basic("int".to_string())),
+            field_type_asts: Vec::new(),
+        };
+        let nb = target
+            .to_nanboxed(Some(overlay.as_ref()))
+            .expect("a concrete-return target builds");
+        let storage = nb
+            .as_typed_object_storage()
+            .expect("__ComptimeTarget is a typed object");
+        // __ComptimeTarget field order: kind, name, fields, params, return_type,
+        // return_type_ref(5), annotations, captures.
+        let ret_ref = storage
+            .clone_field_kinded(5)
+            .expect("return_type_ref slot present");
+        let resolved = type_annotation_from_string_or_type_ref_slot(
+            &ret_ref,
+            "__emit_set_return_type",
+            &overlay,
+        )
+        .expect("a concrete-return producer STAMPS + resolves via the identity route");
+        assert_eq!(
+            resolved,
+            TypeAnnotation::Basic("int".to_string()),
+            "the stamped return_type_ref resolves identity-only to `int`, not via `.source`"
+        );
+
+        // --- class C / any INVALID `__ComptimeTypeRef` rejects LOUD ---
+        let class_c = build_type_ref_descriptor("unknown", Some("Unresolved"), None);
+        let err = type_annotation_from_string_or_type_ref_slot(
+            &class_c,
+            "__emit_set_return_type",
+            &overlay,
+        )
+        .expect_err("a class-C Unresolved type_ref has no concrete type — reject LOUD");
+        assert!(
+            err.contains("reconstructable") || err.to_lowercase().contains("no concrete type"),
+            "class-C rejection must be the named surface-and-stop, got: {err}"
+        );
+
+        // --- SURFACED residual: the bare-string arm (class E) STILL reparses ---
+        // A live reader for item_fn/extend (`return_type: string | TypeRef`). This
+        // pins the exact post-CKPT-4 state: the string arm is NOT ruled (blocked on
+        // the item_fn/extend carrier migration). If a future edit rules it loud, it
+        // MUST be paired with the item_fn/extend migration (this assertion flips).
+        let string_carrier = KindedSlot::from_string_arc(Arc::new("int".to_string()));
+        let resolved = type_annotation_from_string_or_type_ref_slot(
+            &string_carrier,
+            "item_fn",
+            &overlay,
+        )
+        .expect("the item_fn/extend bare-string type carrier STILL reparses (surfaced residual)");
+        assert_eq!(
+            resolved,
+            TypeAnnotation::Basic("int".to_string()),
+            "the string arm remains a live reader for item_fn/extend until their carrier migrates"
         );
     }
 }

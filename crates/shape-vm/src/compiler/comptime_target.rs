@@ -174,6 +174,26 @@ fn stamp_for(
     }
 }
 
+/// ADR-009 E5 CKPT-4 (design §2 class D — MIGRATE): build a `__ComptimeTypeRef`
+/// for a bare NAMED type, producer-stamped with the type's frozen identity when
+/// the name reconstructs. `type_info(T)`'s top-level `type_ref` describes the
+/// type `T` itself (a bare nominal / primitive), so its stamp AST is
+/// `Basic(name)`: a resolved struct/enum/alias spells via `bare_nominal_name_of`,
+/// a primitive via the synonym-family inverse. An UNRESOLVED name (a scoped
+/// generic parameter, an unknown name — `kind: "Unresolved"`) does not
+/// reconstruct → stamp `INVALID` → the consumer rules it LOUD (never a silent
+/// `.source` reparse). Shares the ONE stamp-gate predicate (`stamp_for`) with
+/// every other producer (E1-D7(b), no parallel gate logic).
+pub(crate) fn build_named_type_ref_descriptor(
+    name: &str,
+    kind: Option<&str>,
+    overlay: Option<&FreezeOverlay>,
+) -> KindedSlot {
+    let ast = TypeAnnotation::Basic(name.to_string());
+    let identity = stamp_for(overlay, Some(&ast));
+    build_type_ref_descriptor(name, kind, identity)
+}
+
 /// Build an `Array<string>` slot carried by a stamped v2-raw
 /// `TypedArray<*const StringObj>`.
 fn nb_string_array(strings: Vec<String>) -> Result<KindedSlot, ShapeError> {
@@ -262,20 +282,25 @@ pub(crate) fn build_field_descriptor_array(
         } else {
             ftype.clone()
         };
-        // E1 slice-5 stamp: the emitted `.source` is `unwrap_option_type(ftype)`,
-        // so the stamp AST must render to that same source. For a non-optional
-        // field the full AST renders to `ftype` == the emitted source; for an
-        // OPTIONAL field the emitted source is the UNWRAPPED inner while the AST
-        // is the full `Option<…>` (a Nominal, non-reconstructable this slice),
-        // so stamping the full AST would mismatch the source — leave it `None`
-        // (→ INVALID → reparse). The gate would reject the applied-Option
-        // identity anyway; gating on `!is_optional` keeps stamp-AST ↔ source
-        // exact.
-        let field_identity = if is_optional {
-            None
+        // ADR-009 E5 CKPT-4 (design §2 class B — MIGRATE; the pre-CKPT-4
+        // `!is_optional → None` gate is DROPPED). The stamp AST must render to the
+        // emitted `.source`/`.type`, which is `unwrap_option_type(ftype)` — the
+        // UNWRAPPED inner for an optional field (the Option-ness rides on the
+        // separate `optional` flag, not the type_ref). So for an OPTIONAL field the
+        // stamp AST is the UNWRAPPED-INNER AST (`option_inner`): its frozen identity
+        // reconstructs to exactly the inner type the descriptor names, keeping
+        // source↔identity consistent AND stamping the field. (Applied `Option<T>`
+        // itself reconstructs post-CKPT-1, but this descriptor DESCRIBES its inner
+        // `T`.) A non-optional field stamps its full declared AST. A `None` overlay
+        // or absent AST leaves the stamp `INVALID` (the consumer rules an unstamped
+        // ref LOUD — never a silent `.source` reparse — ADR-009 E5 CKPT-4).
+        let field_ast = field_type_asts.get(idx).and_then(|a| a.as_ref());
+        let stamp_ast = if is_optional {
+            field_ast.and_then(TypeAnnotation::option_inner)
         } else {
-            stamp_for(overlay, field_type_asts.get(idx).and_then(|a| a.as_ref()))
+            field_ast
         };
+        let field_identity = stamp_for(overlay, stamp_ast);
         field_objs.push(typed_object_for_named_schema(
             "__ComptimeFieldDescriptor",
             &[
@@ -423,10 +448,20 @@ impl ComptimeTarget {
     /// Create a target descriptor for a module definition.
     ///
     /// Module fields don't carry annotations, so they get empty annotation lists.
-    pub fn from_module(name: &str, fields: &[(String, String)]) -> Self {
+    ///
+    /// ADR-009 E5 CKPT-4 (design §2 class A — MIGRATE): each field carries its
+    /// declared-type AST (index-parallel to the `(name, type_string)` tuples), so
+    /// a typed module member (`let x: int`) STAMPS its `type_ref` identity via the
+    /// shared `stamp_for` gate when `to_nanboxed` is called with `Some(overlay)`.
+    /// Synthetic members (functions / types / modules / annotations) carry no type
+    /// AST (`None`) → `INVALID` stamp → `kind: "Unresolved"` → the consumer rules
+    /// them LOUD, never a silent `.source` reparse.
+    pub fn from_module(name: &str, fields: &[(String, String, Option<TypeAnnotation>)]) -> Self {
+        let field_type_asts: Vec<Option<TypeAnnotation>> =
+            fields.iter().map(|(_, _, ast)| ast.clone()).collect();
         let fields = fields
             .iter()
-            .map(|(n, t)| (n.clone(), t.clone(), Vec::new()))
+            .map(|(n, t, _)| (n.clone(), t.clone(), Vec::new()))
             .collect();
         Self {
             kind: AnnotationTargetKind::Module,
@@ -436,10 +471,9 @@ impl ComptimeTarget {
             return_type: None,
             annotations: Vec::new(),
             captures: Vec::new(),
-            // Module fields are string-only (no AST); expression has no members.
             param_type_asts: Vec::new(),
             return_type_ast: None,
-            field_type_asts: Vec::new(),
+            field_type_asts,
         }
     }
 

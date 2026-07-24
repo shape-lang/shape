@@ -2575,11 +2575,8 @@ pub(super) fn build_type_info_heap_value(
     freeze: &FreezeOverlay,
 ) -> Result<HeapValue, String> {
     let label = classify_legacy_type_info(type_name, freeze);
-    let field_rows: Vec<(String, String, Vec<comptime_target::FieldAnnotation>)> = freeze
-        .base()
-        .index()
-        .struct_defs
-        .get(type_name)
+    let struct_fields = freeze.base().index().struct_defs.get(type_name);
+    let field_rows: Vec<(String, String, Vec<comptime_target::FieldAnnotation>)> = struct_fields
         .map(|fields| {
             fields
                 .iter()
@@ -2593,11 +2590,27 @@ pub(super) fn build_type_info_heap_value(
                 .collect()
         })
         .unwrap_or_default();
-    // E1 slice-5: the `type_info(T).fields` reflection surface is out of the U02
-    // annotation-handler stamp scope; pass no overlay/ASTs so its `type_ref`
-    // rows stay INVALID (→ `.source`), behavior-identical to before.
-    let fields = comptime_target::build_field_descriptor_array(&field_rows, None, &[])
-        .map_err(|error| format!("failed to build type_info fields for '{type_name}': {error}"))?;
+    // ADR-009 E5 CKPT-4 (design §2 class D — MIGRATE): `type_info(T)` HAS the
+    // type, so thread the field ASTs + the overlay. Each field `type_ref` now
+    // STAMPS its frozen identity via the shared `stamp_for` gate (the SAME
+    // `reconstruct(...).is_ok()` predicate every producer shares — E1-D7(b)), so
+    // the reflection surface stops emitting INVALID stamps into the `.source`
+    // reparse net. Applied generics, records, and bare user nominals all
+    // reconstruct now (CKPT-1..3); a genuinely non-reconstructable field type
+    // stamps INVALID and the consumer rules it LOUD.
+    let field_type_asts: Vec<Option<shape_ast::ast::TypeAnnotation>> = struct_fields
+        .map(|fields| {
+            fields
+                .iter()
+                .map(|(_, annotation)| Some(annotation.clone()))
+                .collect()
+        })
+        .unwrap_or_default();
+    let fields =
+        comptime_target::build_field_descriptor_array(&field_rows, Some(freeze), &field_type_asts)
+            .map_err(|error| {
+                format!("failed to build type_info fields for '{type_name}': {error}")
+            })?;
     typed_slot_into_heap_value(typed_object_for_named_schema(
         "__ComptimeTypeInfo",
         &[
@@ -2605,8 +2618,16 @@ pub(super) fn build_type_info_heap_value(
             ("kind", super::nb_str(label.as_str())),
             ("fields", fields),
             (
+                // The top-level `type_ref` describes the type `T` itself (a bare
+                // nominal / primitive) — stamped via `Basic(type_name)` when it
+                // reconstructs, INVALID (→ LOUD at the consumer) for an Unresolved
+                // name.
                 "type_ref",
-                comptime_target::build_type_ref_descriptor(type_name, Some(label.as_str()), None),
+                comptime_target::build_named_type_ref_descriptor(
+                    type_name,
+                    Some(label.as_str()),
+                    Some(freeze),
+                ),
             ),
         ],
     ))
