@@ -234,12 +234,11 @@ match r {
 }
 
 #[test]
-#[ignore = "dark window: E4 re-implements @remote on typed HookDecision — see issue #68"]
 fn remote_extern_c_transfer_executes_and_strict_node_refuses_ffi() {
     let _guard = lock_process();
     let env = IsolatedEnv::new("shape-remote-c-e2e-");
     let trusted = start_serve("none", None, &[]);
-    let program = r#"use std::core::remote
+    let program = r#"from std::core::remote use { @remote }
 extern "C" fn labs(x: int) -> int from "c"
 
 @remote("__ADDR__")

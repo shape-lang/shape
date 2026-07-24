@@ -2397,7 +2397,6 @@ print(r)
     /// not a client-side fallback. This is the exact `blobs>=2` /
     /// foreign-functions-non-empty regression path the audit found untested.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    #[ignore = "dark window: E4 re-implements @remote on typed HookDecision — see issue #68"]
     async fn test_remote_foreign_extern_c_transfer_over_tcp() {
         // `none` on loopback grants `Ffi`; `extern C` is not gated by the
         // (empty) `ffi_languages` allow-list, so the foreign call is admitted.
@@ -2406,7 +2405,7 @@ print(r)
 
         let code = format!(
             r#"
-use std::core::remote
+from std::core::remote use {{ @remote }}
 
 extern "C" fn labs(x: int) -> int from "c"
 
