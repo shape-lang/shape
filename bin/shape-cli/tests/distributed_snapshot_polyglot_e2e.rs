@@ -122,7 +122,12 @@ match dead {
 }
 
 #[test]
-#[ignore = "dark window: E4 re-implements @remote on typed HookDecision — see issue #68"]
+#[ignore = "0-ary @remote unsupported: the `@remote fn remote_snapshot_hash() -> string` \
+target declares no parameters, so the decision `before` hook has no argument to \
+receive/short-circuit and is loud-rejected (\"the target declares no parameters\"). The \
+1-ary receiver-store save/resume path itself works (proven in Wave B dynamic-snapshot); \
+only the 0-ary shape blocks. Capability tracked in #83 (E4-S5 @remote residual: async, \
+0-ary, heterogeneous multi-arg)."]
 fn remote_snapshot_returns_receiver_hash_over_remote_call() {
     let _guard = lock_process();
     let server = start_serve("none", None, &[]);
@@ -404,7 +409,12 @@ fn tls_remote_call_user_surface_over_shape_serve() {
 }
 
 #[test]
-#[ignore = "dark window: E4 re-implements @remote on typed HookDecision — see issue #68"]
+#[ignore = "0-ary @remote unsupported: the `@remote fn remote_snapshot_hash() -> string` \
+target declares no parameters, so the decision `before` hook has no argument to \
+receive/short-circuit and is loud-rejected (\"the target declares no parameters\"). The \
+1-ary receiver-store save path itself works (proven in Wave B dynamic-snapshot); only the \
+0-ary shape blocks. Capability tracked in #83 (E4-S5 @remote residual: async, 0-ary, \
+heterogeneous multi-arg)."]
 fn remote_snapshot_hash_is_saved_in_selected_receiver_store() {
     let _guard = lock_process();
     let env = IsolatedEnv::new("shape-remote-snapshot-resume-e2e-");
@@ -446,7 +456,12 @@ print(f"REMOTE_SNAPSHOT={remote_snapshot_hash()}")
 }
 
 #[test]
-#[ignore = "dark window: E4 re-implements @remote on typed HookDecision — see issue #68"]
+#[ignore = "0-ary @remote unsupported: the `@remote fn remote_snapshot_hash() -> string` \
+target declares no parameters, so the decision `before` hook has no argument to \
+receive/short-circuit and is loud-rejected (\"the target declares no parameters\"). The \
+1-ary receiver-store resume path itself works (proven in Wave B dynamic-snapshot); only the \
+0-ary shape blocks. Capability tracked in #83 (E4-S5 @remote residual: async, 0-ary, \
+heterogeneous multi-arg)."]
 fn remote_snapshot_hash_can_be_resumed_from_receiver_store() {
     let _guard = lock_process();
     let env = IsolatedEnv::new("shape-remote-snapshot-resume-e2e-");
