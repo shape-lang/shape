@@ -545,7 +545,15 @@ fn comptime_capture_binding_at(index: usize) -> Option<(String, LiftedConst)> {
 }
 
 fn parse_type_annotation_payload(payload: &str) -> Result<shape_ast::ast::TypeAnnotation, String> {
-    // Fallback for older callers that still pass textual type source.
+    // ADR-009 #88 (PRESERVED, NOT the deleted `.source` fallback): the SANCTIONED
+    // parser for the comptime item-generation API — `item_fn` / `extend_method`
+    // (`item_fn(name, return_type: string | TypeRef, value)`), whose `string` half
+    // is documented contract and has no Int64/TypeRef alternative today. A string
+    // TYPE SPELLING inherently requires this parse to become a `TypeAnnotation`
+    // (there is no non-parse path from "Array<int>" to an AST). This is a LIVE,
+    // sanctioned carrier reached ONLY from the bare-string arm of
+    // `type_annotation_from_string_or_type_ref_slot`; it is DISTINCT from the
+    // `__ComptimeTypeRef.source` reparse fallback, which was DELETED at E5 CKPT-5.
     let snippet = format!("fn __type_probe(value: {}) {{ value }}", payload);
     let program = shape_ast::parse_program(&snippet)
         .map_err(|e| format!("invalid type payload '{}': {}", payload, e))?;
@@ -656,19 +664,20 @@ fn type_annotation_from_string_or_type_ref_slot(
             schema.name
         ));
     }
-    // ADR-009 E1 #17 (slice 5, A-FULL) — E1-D7(a) STAMPED->IDENTITY-ONLY: a
-    // type_ref carrying a real frozen identity resolves via the ONE inverse of
-    // the semantic-freeze composite algebra (`reconstruct_type_annotation`),
-    // NEVER by reparsing `.source`. A stamped-but-unresolvable identity is a
-    // NAMED `ShapeError::SemanticError` (surfaced here as its `String` at the
-    // consumer ABI boundary) with NO silent fallback to reparse — silent
-    // stamped->reparse is the canonical walk-back shape and is refused. Only an
-    // UNSTAMPED ref (identity == INVALID) falls through to the `.source` reparse
-    // arm below, byte-unchanged (LIVE for unstamped refs; deletion bound to
-    // B4/B5 → E5 per E1-D8). The identity halves are
-    // read with the same `get_field` -> `clone_field_kinded` -> `as_i64` shape
-    // as `frozen_identity_from_ref` (type_reflection.rs) — an existing
-    // sanctioned read of the sibling schema, not a new decode path.
+    // ADR-009 E1 #17 (slice 5, A-FULL) — E1-D7(a) STAMPED->IDENTITY-ONLY, E5
+    // CKPT-5 FALLBACK DELETED: a type_ref carrying a real frozen identity resolves
+    // via the ONE inverse of the semantic-freeze composite algebra
+    // (`reconstruct_type_annotation`) — the ONLY resolution route. There is NO
+    // `.source` field and NO reparse fallback arm (both DELETED at E5 CKPT-5): a
+    // stamped-but-unresolvable identity is a NAMED `ShapeError::SemanticError`
+    // (surfaced here as its `String` at the consumer ABI boundary), and an
+    // UNSTAMPED ref (identity == INVALID) rejects LOUD via the INVALID arm below.
+    // Neither can silently reparse a spelling, because the reparse arm no longer
+    // exists — the canonical stamped->reparse walk-back is structurally
+    // impossible. The identity halves are read with the same `get_field` ->
+    // `clone_field_kinded` -> `as_i64` shape as `frozen_identity_from_ref`
+    // (type_reflection.rs) — an existing sanctioned read of the sibling schema,
+    // not a new decode path.
     let identity_field = |name: &str| -> Result<i64, String> {
         let field = schema
             .get_field(name)
@@ -682,18 +691,15 @@ fn type_annotation_from_string_or_type_ref_slot(
         high: identity_field("identity_high")?,
         low: identity_field("identity_low")?,
     };
-    // ADR-009 E5 CKPT-4 (design §2 class C + A5 — RULED NAMED SURFACE-AND-STOP).
-    // An INVALID identity means the producer could NOT stamp a reconstructable
-    // identity for this type_ref: the type is genuinely not reconstructable — a
-    // function with no declared return (`kind: "Unresolved"`, the design-named
-    // class-C discriminator), a synthetic module member, a scoped generic
-    // parameter, or an un-applied generic head. There is NO concrete type to emit.
-    // Reject LOUD; NEVER silently reparse `.source` into a bogus annotation (the
-    // Forbidden-Patterns dynamic-reparse walk-back). This ruled reject fronts the
-    // `.source` reparse NET below — which is now UNREACHED at runtime, retained
-    // byte-for-byte as the E1-D8 residual until the CKPT-5 pure deletion (kept as
-    // a runtime-dead-but-compilable net by the `!= INVALID` guard immediately
-    // after this one, so the `.source` machinery stays untouched).
+    // ADR-009 E5 CKPT-4 (design §2 class C + A5 — RULED NAMED SURFACE-AND-STOP),
+    // E5 CKPT-5 (the `.source` reparse fallback DELETED). An INVALID identity means
+    // the producer could NOT stamp a reconstructable identity for this type_ref:
+    // the type is genuinely not reconstructable — a function with no declared
+    // return (`kind: "Unresolved"`, the design-named class-C discriminator), a
+    // synthetic module member, a scoped generic parameter, or an un-applied generic
+    // head. There is NO concrete type to emit. Reject LOUD; there is NO `.source`
+    // field and NO reparse arm to fall back to (both deleted at CKPT-5), so the
+    // Forbidden-Patterns dynamic-reparse walk-back is structurally impossible.
     if identity == FrozenTypeIdentity::INVALID {
         let kind = string_field_from_typed_object(storage, &schema, "kind").unwrap_or_default();
         let name = string_field_from_typed_object(storage, &schema, "name").unwrap_or_default();
@@ -705,17 +711,20 @@ fn type_annotation_from_string_or_type_ref_slot(
              un-applied generic head); provide a concrete, reconstructable type."
         ));
     }
-    if identity != FrozenTypeIdentity::INVALID {
-        return reconstruct_type_annotation(overlay, identity).map_err(|e| e.to_string());
-    }
-    let source = string_field_from_typed_object(storage, &schema, "source")?;
-    parse_type_annotation_payload(&source)
+    // ADR-009 E5 CKPT-5: identity is guaranteed != INVALID here (the INVALID arm
+    // above returned). A stamped `__ComptimeTypeRef` resolves ONLY through the ONE
+    // inverse of the semantic-freeze composite algebra — there is NO `.source`
+    // field to read and NO reparse fallback (both DELETED this checkpoint), so the
+    // stamped->reparse walk-back cannot be written.
+    reconstruct_type_annotation(overlay, identity).map_err(|e| e.to_string())
 }
 
 /// ADR-009 E1 #17 (slice 5, A-FULL): the ONE total inverse of the semantic
 /// freeze's composite algebra — a frozen `FrozenTypeIdentity` back to the AST
-/// `TypeAnnotation` it canonicalized from, WITHOUT reparsing
-/// `__ComptimeTypeRef.source`. This is the E1-D7(c) totality obligation: every
+/// `TypeAnnotation` it canonicalized from. This is the SOLE resolution route for a
+/// stamped `__ComptimeTypeRef`; the `.source` reparse fallback was DELETED at E5
+/// CKPT-5, so there is no spelling to reparse. This is the E1-D7(c) totality
+/// obligation: every
 /// one of the 10 `FrozenPayloadDescriptor` variants either reconstructs
 /// structurally or returns a NAMED `ShapeError::SemanticError` — there is no
 /// catch-all silent arm, and an unresolvable sub-identity surfaces the freeze
@@ -740,12 +749,13 @@ fn type_annotation_from_string_or_type_ref_slot(
 ///   scoped generic Parameters stay their distinct NAMED rejections — record
 ///   field-name preservation is CKPT-3, out of CKPT-1.
 ///
-/// STAGE 4 (LIVE): the consumer flip wired this into the live directive
-/// resolver — `type_annotation_from_string_or_type_ref_slot` now resolves a
-/// stamped `__ComptimeTypeRef` through THIS inverse (identity-only, no
-/// `.source` fallback), and the producer stamp-gate (stage 3) admits an
-/// identity iff `reconstruct_type_annotation(...).is_ok()`, so producer and
-/// consumer share ONE code path (E1-D7(b)).
+/// STAGE 4 (LIVE) + E5 CKPT-5 (fallback deleted): the consumer flip wired this
+/// into the live directive resolver — `type_annotation_from_string_or_type_ref_slot`
+/// resolves a stamped `__ComptimeTypeRef` through THIS inverse, identity-only. The
+/// `.source` field + reparse arm are DELETED, so this is the ONLY route; the
+/// producer stamp-gate (stage 3) admits an identity iff
+/// `reconstruct_type_annotation(...).is_ok()`, so producer and consumer share ONE
+/// code path (E1-D7(b)).
 pub(crate) fn reconstruct_type_annotation(
     overlay: &FreezeOverlay,
     identity: FrozenTypeIdentity,
@@ -928,7 +938,8 @@ pub(crate) fn reconstruct_type_annotation(
         }
         FrozenPayloadDescriptor::Parameter(_) => Err(named(
             "reconstruct_type_annotation: a scoped generic parameter is not a spellable \
-             type_ref target this slice; an unstamped ref reparses .source"
+             type_ref target this slice; the consumer rejects an unstamped/unresolvable \
+             ref LOUD (no `.source` reparse — the fallback field + arm are deleted, E5 CKPT-5)"
                 .to_string(),
         )),
     }
@@ -3836,12 +3847,13 @@ victim(1)
 // Tuple + Reference + Union + Callable(round-tripping); every nominal-headed
 // form (applied generics `Array<int>`/`Option<T>`/`HashMap`, records, bare
 // user-nominals, un-applied heads) is a NAMED rejection at `payload_of`, NOT
-// reconstructable in E1. Applied generics are therefore STAMP-GATED to
-// unstamped (identity = INVALID) → the existing `__ComptimeTypeRef.source`
-// reparse arm (LIVE for unstamped refs; deletion bound to B4/B5 → E5 per
-// E1-D8), which is exactly
-// E1-D7(a) unstamped-fall-through + E1-D7(c) "every variant handled OR a named
-// error" (the nominal-headed variants ARE handled — as named errors).
+// reconstructable in E1. (HISTORICAL: at this stage applied generics stamp-gated
+// to unstamped (identity = INVALID) → the `__ComptimeTypeRef.source` reparse arm.
+// CKPT-1..3 later widened the gate so those forms STAMP, and E5 CKPT-5 DELETED the
+// `.source` field + reparse arm entirely — an INVALID ref is now a NAMED consumer
+// rejection.) This is exactly E1-D7(a) unstamped-fall-through + E1-D7(c) "every
+// variant handled OR a named error" (the nominal-headed variants ARE handled — as
+// named errors).
 //
 // Plain `#[cfg(test)]` (NOT deep-tests-gated) so the standard supervisor gate
 // runs them (E2 finding 5: pins in a deep-tests-gated module never run). No
@@ -3977,8 +3989,11 @@ mod e1_s5_boundary {
 // a NAMED `ShapeError::SemanticError`, no panic, no catch-all silent arm. All
 // three are plain `#[cfg(test)]` so the standard supervisor gate runs them.
 //
-// STAGE 2 is behavior-preserving: the live directive consumer still reparses
-// `.source` (every producer stamp is INVALID this stage), so no baseline moves.
+// STAGE 2 was behavior-preserving at the time: the live directive consumer still
+// reparsed `.source` (every producer stamp was INVALID that stage), so no baseline
+// moved. (HISTORICAL: STAGE 4 flipped the consumer to identity-only and E5 CKPT-5
+// DELETED the `.source` field + reparse arm; these reconstruction pins now assert
+// the sole resolution route.)
 #[cfg(test)]
 mod e1_s5_reconstruction {
     use super::reconstruct_type_annotation;
@@ -4061,8 +4076,9 @@ mod e1_s5_reconstruction {
     // structural RECORD (`{x: int, y: string}`) now SPELLS to `Object({x: int,
     // y: string})` via the CKPT-3 field-name-preservation arm — FLIPPED from the
     // pre-CKPT-3 named record rejection; (3) a BARE generic head (`Array`) STAYS
-    // the un-applied-head rejection (ruling A3). Case (3) still stamp-gates to the
-    // `.source` reparse arm; cases (1)+(2) now stamp.
+    // the un-applied-head rejection (ruling A3). Case (3) stays INVALID → a NAMED
+    // consumer rejection (the `.source` reparse arm is DELETED at E5 CKPT-5); cases
+    // (1)+(2) now stamp.
     #[test]
     fn e1_s5_reconstruct_covers_frozen_payload_descriptor_totally() {
         use shape_ast::ast::TypePath;
@@ -4540,17 +4556,19 @@ mod e1_s5_reconstruction {
     }
 }
 
-// ADR-009 E1 #17 slice-5 A-FULL — STAGE 5 route-proof pins (E1-D7(a)/(b)/(c)).
+// ADR-009 E1 #17 slice-5 A-FULL — STAGE 5 route-proof pins (E1-D7(a)/(b)/(c)),
+// E5 CKPT-5 FALLBACK DELETED.
 //
-// The consumer flip (stage 4) is LIVE: a STAMPED `__ComptimeTypeRef` resolves
-// identity-only via `reconstruct_type_annotation`, never `.source`. These four
-// pins prove the ROUTE the live resolver actually takes, by stamping a real
-// identity onto a ref whose `.source` is UNPARSEABLE — a green result can then
-// ONLY have come from the identity path (a `.source` reparse of
-// "###unparseable###" would error). Plain `#[cfg(test)]` (NOT deep-tests-gated)
-// so the standard supervisor gate runs them (E2 finding 5: pins in a
-// deep-tests-gated module never run under the default gate). No production code
-// changes this stage, so every recorded baseline is unmoved by construction.
+// A STAMPED `__ComptimeTypeRef` resolves identity-only via
+// `reconstruct_type_annotation` — the SOLE route. Post-E5 CKPT-5 there is NO
+// `.source` field and NO reparse arm at all, so the "resolves past a garbage
+// source" pins below are STRONGER than before: the first arg
+// ("###unparseable###") is now merely an unspellable NAME/KIND spelling (it feeds
+// `name`/`kind` only, never a stored reparse field), and a green result can ONLY
+// have come from the identity route — there is no fallback in existence for it to
+// have come from. Plain `#[cfg(test)]` (NOT deep-tests-gated) so the standard
+// supervisor gate runs them (E2 finding 5: pins in a deep-tests-gated module never
+// run under the default gate).
 #[cfg(test)]
 mod e1_s5_route_proof {
     use super::reconstruct_type_annotation;
@@ -4563,10 +4581,12 @@ mod e1_s5_route_proof {
     use shape_ast::error::ShapeError;
 
     // (a) LEAF identity route. A `__ComptimeTypeRef` stamped with `string`'s
-    // frozen identity but an UNPARSEABLE `.source` resolves to `Basic("string")`
-    // — success PROVES the identity route fired, because a `.source` reparse of
-    // "###unparseable###" would error. This is the unit-tier witness for the
-    // byte-identical corpus flip (leaf `string` now resolves via identity).
+    // frozen identity, built with an unspellable "###unparseable###" spelling
+    // (post-E5 CKPT-5 that arg feeds only `name`/`kind` — there is NO `.source`
+    // field), resolves to `Basic("string")`. Success PROVES the identity route
+    // fired: it is the ONLY resolution route in existence (the `.source` reparse
+    // arm is DELETED), so no fallback could have produced this. Unit-tier witness
+    // for the byte-identical corpus (leaf `string` resolves via identity).
     #[test]
     fn e1_s5_leaf_identity_route_resolves_past_garbage_source() {
         let overlay = overlay_for_tests(&BytecodeCompiler::new());
@@ -4576,22 +4596,24 @@ mod e1_s5_route_proof {
         let slot = build_type_ref_descriptor("###unparseable###", None, Some(identity));
         let resolved =
             type_annotation_from_string_or_type_ref_slot(&slot, "__emit_set_return_type", &overlay)
-                .expect("a stamped leaf ref resolves via identity, not the garbage source");
+                .expect("a stamped leaf ref resolves via identity — the sole route");
         assert_eq!(
             resolved,
             TypeAnnotation::Basic("string".to_string()),
-            "the identity route reconstructs the canonical leaf, past the unparseable source"
+            "the identity route reconstructs the canonical leaf; no `.source` arm exists to reparse the garbage spelling"
         );
     }
 
     // (b) COMPOSITE identity route + shared-overlay (unit tier). A
     // `__ComptimeTypeRef` stamped with `[int, string]`'s composite identity plus
-    // a garbage source resolves to the byte-identical Tuple — ON THE SAME overlay
+    // an unspellable spelling (post-E5 CKPT-5: feeds only `name`/`kind`; no
+    // `.source` field) resolves to the byte-identical Tuple — ON THE SAME overlay
     // the identity was minted from (the composite payload lives in that Arc's
     // per-instance `composites` memo, so a DIFFERENT overlay could not answer
     // `payload_of`). Green proves BOTH the composite route AND the shared-overlay
-    // requirement at the unit tier; the Tuple e2e is the integration canary for
-    // the same property across the real handler path.
+    // requirement at the unit tier — with no fallback arm in existence to have
+    // resolved it otherwise; the Tuple e2e is the integration canary for the same
+    // property across the real handler path.
     #[test]
     fn e1_s5_composite_identity_route_resolves_past_garbage_source() {
         let overlay = overlay_for_tests(&BytecodeCompiler::new());
@@ -4618,7 +4640,7 @@ mod e1_s5_route_proof {
                 TypeAnnotation::Basic("int".to_string()),
                 TypeAnnotation::Basic("string".to_string()),
             ]),
-            "the composite route recurses the Tuple element identities, past the garbage source"
+            "the composite route recurses the Tuple element identities; no `.source` arm exists to reparse the garbage spelling"
         );
     }
 
@@ -4652,75 +4674,74 @@ mod e1_s5_route_proof {
         }
     }
 
-    // (d) ADR-009 E5 CKPT-4 FLIP — an UNSTAMPED (INVALID) `__ComptimeTypeRef` is a
-    // RULED NAMED SURFACE-AND-STOP at the consumer, NOT a silent `.source` reparse.
-    // This is the CKPT-4 successor to the former "falls through to the `.source`
-    // arm bytewise" pin (design §4: "successor asserts unstamped/unresolvable =
-    // named surface-and-stop"), landed at the RULING checkpoint. CKPT-1..3 made
-    // every reconstructable type stamp, so the ONLY refs that still carry INVALID
-    // describe NO reconstructable type (design §2 class C / A5 — an unresolved
-    // return, a synthetic member, a scoped generic parameter, an un-applied head);
-    // the consumer rejects them LOUD and MUST NEVER reparse `.source`. Both a
-    // VALID-source and a GARBAGE-source INVALID ref reject IDENTICALLY — resolution
-    // no longer depends on `.source` at all. The `.source` reparse net is retained
-    // byte-for-byte (deleted at CKPT-5) but is now UNREACHED: a VALID `.source`
-    // ("string") that WOULD have reparsed to `Ok(Basic("string"))` is the
-    // load-bearing witness — an `Ok` here would be unambiguous proof of the
-    // walk-back this pin refuses.
+    // (d) ADR-009 E5 CKPT-4 RULING + E5 CKPT-5 DELETION — an UNSTAMPED (INVALID)
+    // `__ComptimeTypeRef` is a RULED NAMED SURFACE-AND-STOP at the consumer. This is
+    // the CKPT-4 successor to the former "falls through to the `.source` arm
+    // bytewise" pin (design §4: "successor asserts unstamped/unresolvable = named
+    // surface-and-stop"). CKPT-1..3 made every reconstructable type stamp, so the
+    // ONLY refs that still carry INVALID describe NO reconstructable type (design §2
+    // class C / A5 — an unresolved return, a synthetic member, a scoped generic
+    // parameter, an un-applied head); the consumer rejects them LOUD. Post-E5
+    // CKPT-5 the `.source` reparse net is DELETED (field + arm), so the rejection no
+    // longer depends on `.source` at all AND the walk-back it guarded is
+    // STRUCTURALLY IMPOSSIBLE: the first arg is now merely a `name`/`kind` spelling.
+    // A perfectly-parseable spelling ("string") that WOULD once have reparsed to
+    // `Ok(Basic("string"))` is the load-bearing witness — there is no arm left that
+    // could ever answer `Ok`, so this pin now proves the arm cannot be re-introduced.
     #[test]
     fn e1_s5_ckpt4_unstamped_typeref_is_named_surface_and_stop_not_source_reparse() {
         let overlay = overlay_for_tests(&BytecodeCompiler::new());
 
-        // INVALID stamp + a fully VALID `.source` ("string"): the `.source` arm
-        // WOULD answer `Ok(Basic("string"))` if reached. The consumer must reject
-        // LOUD instead — the CKPT-4 ruling, never a reparse.
-        let valid_source = build_type_ref_descriptor("string", None, None);
+        // INVALID stamp + a fully VALID spelling ("string"): if a `.source` reparse
+        // arm existed it WOULD answer `Ok(Basic("string"))`. Post-CKPT-5 there is no
+        // such arm — the consumer rejects LOUD (the CKPT-4 ruling; now structural).
+        let valid_spelling = build_type_ref_descriptor("string", None, None);
         let err = type_annotation_from_string_or_type_ref_slot(
-            &valid_source,
+            &valid_spelling,
             "__emit_set_return_type",
             &overlay,
         )
         .expect_err(
-            "an unstamped (INVALID) ref must be a NAMED surface-and-stop, never a silent \
-             `.source` reparse — even when the `.source` is perfectly parseable (E5 CKPT-4)",
+            "an unstamped (INVALID) ref must be a NAMED surface-and-stop — even a \
+             perfectly-parseable spelling can never reparse, the `.source` arm is DELETED (E5 CKPT-5)",
         );
         assert!(
             err.contains("reconstructable") || err.to_lowercase().contains("no concrete type"),
-            "the error must be the CKPT-4 ruled rejection (no reconstructable identity), \
-             NOT a `.source` reparse of \"string\"; got: {err}"
+            "the error must be the ruled rejection (no reconstructable identity), NOT a \
+             reparse of \"string\" — no `.source` arm exists; got: {err}"
         );
 
-        // INVALID stamp + a GARBAGE `.source`: the SAME ruled rejection — the
-        // outcome does not depend on `.source` content.
-        let garbage_source = build_type_ref_descriptor("###unparseable###", None, None);
+        // INVALID stamp + a GARBAGE spelling: the SAME ruled rejection — the outcome
+        // never depended on the spelling content, and no `.source` arm exists.
+        let garbage_spelling = build_type_ref_descriptor("###unparseable###", None, None);
         let err = type_annotation_from_string_or_type_ref_slot(
-            &garbage_source,
+            &garbage_spelling,
             "__emit_set_return_type",
             &overlay,
         )
-        .expect_err("an unstamped ref rejects LOUD regardless of `.source` content");
+        .expect_err("an unstamped ref rejects LOUD regardless of the spelling content");
         assert!(
             err.contains("reconstructable") || err.to_lowercase().contains("no concrete type"),
-            "the garbage-source INVALID ref rejects via the SAME CKPT-4 ruling, not a \
-             `.source` parse failure; got: {err}"
+            "the garbage-spelling INVALID ref rejects via the SAME ruling; there is no \
+             `.source` arm to produce a parse failure either; got: {err}"
         );
     }
 
-    // (e) ANTI-WALK-BACK sentinel THROUGH THE FULL CONSUMER (E1-D7(a)). The
-    // strengthened companion to pin (c): where (c) calls
-    // `reconstruct_type_annotation` DIRECTLY, this drives the WHOLE
-    // `type_annotation_from_string_or_type_ref_slot` consumer with a slot that
-    // is (i) STAMPED — identity != INVALID, so the consumer takes the identity
-    // reconstruct branch (comptime_builtins.rs:490-492) — AND (ii) carries a
-    // VALID, parseable `.source` ("int"). The fabricated identity was never
-    // frozen, so reconstruct Errs; the consumer MUST surface that Err and MUST
-    // NOT fall back to reparsing the valid `.source` arm (:493-494). If a future
-    // edit turned the reconstruct-failure into a `.source` fallback, "int" would
-    // reparse to `Ok(Basic("int"))` and this `expect_err` would fire — catching
-    // the canonical stamped->reparse walk-back that pin (c) cannot see (its slot
-    // has no valid source, and it bypasses the consumer's branch ordering). The
-    // VALID `.source` is the load-bearing difference from pin (c): here a
-    // walk-back WOULD succeed, so an `Ok` is unambiguous proof of the walk-back.
+    // (e) ANTI-WALK-BACK sentinel THROUGH THE FULL CONSUMER (E1-D7(a)), STRENGTHENED
+    // at E5 CKPT-5. The `.source` reparse-fallback FIELD + arm are DELETED, so the
+    // walk-back this pin once guarded — "a stamped-but-unresolvable ref silently
+    // reparses its valid spelling" — is now STRUCTURALLY IMPOSSIBLE: there is no
+    // `.source` field to read and no arm in existence to reparse from. The pin
+    // therefore becomes: a STAMPED-but-never-frozen ref (identity != INVALID → the
+    // consumer takes the identity reconstruct branch) whose FIRST ARG is a
+    // perfectly-parseable spelling ("int") STILL Errs through the WHOLE
+    // `type_annotation_from_string_or_type_ref_slot` consumer with the identity
+    // route's NAMED rejection — never an `Ok`. The spelling "int" now feeds ONLY
+    // `name`/`kind` (no `.source`); it is the load-bearing witness that even a
+    // valid spelling can NEVER become `Ok(Basic("int"))` because no fallback path
+    // exists. If a future edit RE-INTRODUCED a `.source` field + reparse arm, "int"
+    // would reparse to `Ok` and this `expect_err` would fire — this pin guards
+    // against the re-introduction the CKPT-5 deletion made impossible.
     #[test]
     fn e1_s5_stamped_unresolvable_ref_errs_through_full_consumer_never_reparses_valid_source() {
         let overlay = overlay_for_tests(&BytecodeCompiler::new());
@@ -4735,9 +4756,11 @@ mod e1_s5_route_proof {
             FrozenTypeIdentity::INVALID,
             "the sentinel must be a STAMPED identity, not INVALID"
         );
-        // `.source = "int"` is a fully VALID, reparseable type payload: the
-        // `.source` fallback arm WOULD answer `Ok(Basic("int"))` if the consumer
-        // ever reached it. A stamped ref must not.
+        // The spelling "int" is a fully VALID, parseable type payload: if a
+        // `.source` reparse arm existed it WOULD answer `Ok(Basic("int"))`. Post-E5
+        // CKPT-5 there is no `.source` field and no such arm — the spelling feeds
+        // only `name`/`kind` and can never be reparsed. A stamped ref resolves
+        // identity-only.
         let slot = build_type_ref_descriptor("int", None, Some(fabricated));
         let err = type_annotation_from_string_or_type_ref_slot(
             &slot,
@@ -4745,30 +4768,30 @@ mod e1_s5_route_proof {
             &overlay,
         )
         .expect_err(
-            "a stamped-but-unresolvable ref must Err through the FULL consumer, never silently \
-             reparse the valid .source (E1-D7(a) stamped->reparse walk-back refusal)",
+            "a stamped-but-unresolvable ref must Err through the FULL consumer via the identity \
+             route — no `.source` field or reparse arm exists to fall back to (E5 CKPT-5)",
         );
         // The surfaced String is reconstruct's named unknown-identity rejection
         // (`payload_of` -> `category_for_identity`), NOT a reparse of "int" — a
-        // reparse would have been `Ok`, never an error mentioning the identity.
+        // reparse would have been `Ok`, and no arm exists that could produce it.
         assert!(
             err.to_lowercase().contains("identity"),
-            "the error must be the identity-route's named rejection, not a .source reparse; \
-             got: {err}"
+            "the error must be the identity-route's named rejection; there is no `.source` \
+             arm to reparse the valid spelling; got: {err}"
         );
     }
 
     // (f) ADR-009 E5 CKPT-1: APPLIED-GENERIC identity route past a garbage
-    // source. The applied-generic analogue of pin (b): a `__ComptimeTypeRef`
-    // stamped with `Array<Option<int>>`'s composite identity plus an UNPARSEABLE
-    // `.source` resolves to the nested `Generic{Array,[Generic{Option,[int]}]}`
+    // spelling. The applied-generic analogue of pin (b): a `__ComptimeTypeRef`
+    // stamped with `Array<Option<int>>`'s composite identity plus an unspellable
+    // spelling (post-E5 CKPT-5 that arg feeds only `name`/`kind`; no `.source`
+    // field) resolves to the nested `Generic{Array,[Generic{Option,[int]}]}`
     // spelling ON THE SAME overlay. Green proves THREE things at once — (i) the
     // CKPT-1 stamp-gate auto-widen (the applied identity is stampable), (ii) the
-    // identity route fired (a `.source` reparse of "###unparseable###" would
-    // error), and (iii) the NESTED inner identity resolves off the shared memo
-    // (projection.rs recursive sub-expression memoization). `.source` is
-    // untouched by CKPT-1 — this is the same route the Tuple pin (b) exercises,
-    // now widened to applied generics.
+    // identity route fired (it is the SOLE route — no `.source` reparse arm exists),
+    // and (iii) the NESTED inner identity resolves off the shared memo
+    // (projection.rs recursive sub-expression memoization). This is the same route
+    // the Tuple pin (b) exercises, now widened to applied generics.
     #[test]
     fn e1_s5_applied_generic_identity_route_resolves_past_garbage_source() {
         use shape_ast::ast::TypePath;
@@ -4801,32 +4824,35 @@ mod e1_s5_route_proof {
                     args: vec![TypeAnnotation::Basic("int".to_string())],
                 }],
             },
-            "the applied-generic identity route reconstructs the nested spelling, past .source"
+            "the applied-generic identity route reconstructs the nested spelling; no `.source` arm exists to reparse the garbage spelling"
         );
     }
 
-    // (g) ADR-009 E5 CKPT-4 EXIT CRITERION (charter-critical) — the `__ComptimeTypeRef`
-    // IDENTITY surface. After CKPT-4, every `__ComptimeTypeRef` reaching the
-    // consumer either STAMPS (concrete types → identity route) or is a RULED named
-    // surface-and-stop (INVALID → LOUD, subsuming design class C). Proven end-to-end
-    // through the REAL `to_nanboxed` producer + the live consumer:
+    // (g) ADR-009 E5 CKPT-4 EXIT CRITERION (charter-critical) + E5 CKPT-5 — the
+    // `__ComptimeTypeRef` IDENTITY surface AND the OVER-DELETION TRIPWIRE. Every
+    // `__ComptimeTypeRef` reaching the consumer either STAMPS (concrete types →
+    // identity route) or is a RULED named surface-and-stop (INVALID → LOUD,
+    // subsuming design class C). Proven end-to-end through the REAL `to_nanboxed`
+    // producer + the live consumer:
     //   • a CONCRETE-return producer STAMPS its `return_type_ref` (identity !=
-    //     INVALID) → the consumer resolves it via the IDENTITY route (not `.source`);
-    //   • the class-C fallback (`kind:"Unresolved"`, no real type) rejects LOUD;
+    //     INVALID) → the consumer resolves it via the IDENTITY route (the SOLE
+    //     route; the `.source` reparse arm is DELETED at CKPT-5);
+    //   • the class-C case (`kind:"Unresolved"`, no real type) rejects LOUD;
     //   • ANY INVALID `__ComptimeTypeRef` rejects LOUD (pin (d)).
     // The complementary producer half — concrete applied/record/nominal inputs
     // stamp — is pinned by the `_stamp_gate_predicate_auto_widens_*` pins.
     //
-    // NOT ASSERTED (SURFACED residual): the bare-STRING type-payload arm (design
-    // class E) is a SANCTIONED, documented carrier for `item_fn` / `extend_method`
+    // OVER-DELETION TRIPWIRE (#88 PRESERVED): the bare-STRING type-payload arm is a
+    // SANCTIONED, documented carrier for `item_fn` / `extend_method`
     // (`item_fn(name, return_type: string | TypeRef, value)`), which have no
     // sanctioned Int64/TypeRef alternative today and inherently need
-    // `parse_type_annotation_payload` to turn a spelling string into an AST. So the
-    // string arm SURVIVES CKPT-4 as a live reader — the third bullet below pins
-    // that it STILL reparses (documenting the exact surfaced state). Closing it
-    // (the full string-arm exit criterion + the CKPT-5 string-arm deletion) is
-    // BLOCKED on an item_fn/extend typed-carrier migration — see e5-decisions.md
-    // CKPT-4 §"class-E blocker".
+    // `parse_type_annotation_payload` to turn a spelling string into an AST. E5
+    // CKPT-5 deleted the `.source` FALLBACK but PRESERVED this parser (split to
+    // #88). The two string-arm bullets below prove the parser SURVIVES — it parses
+    // a leaf ("int") AND an applied generic ("Array<int>"). If a future edit
+    // over-deletes `parse_type_annotation_payload`/`__type_probe`/the bare-string
+    // arm, those assertions fail — this is the two-sided precision guard (delete the
+    // `.source` fallback AND keep the item_fn parser). See e5-decisions.md CKPT-5.
     #[test]
     fn e1_s5_ckpt4_typeref_producers_stamp_invalid_rejects_loud_string_arm_surfaced() {
         use crate::compiler::comptime_target::{AnnotationTargetKind, ComptimeTarget};
@@ -4867,7 +4893,7 @@ mod e1_s5_route_proof {
         assert_eq!(
             resolved,
             TypeAnnotation::Basic("int".to_string()),
-            "the stamped return_type_ref resolves identity-only to `int`, not via `.source`"
+            "the stamped return_type_ref resolves identity-only to `int` — the SOLE route; the `.source` arm is deleted"
         );
 
         // --- class C / any INVALID `__ComptimeTypeRef` rejects LOUD ---
@@ -4883,22 +4909,43 @@ mod e1_s5_route_proof {
             "class-C rejection must be the named surface-and-stop, got: {err}"
         );
 
-        // --- SURFACED residual: the bare-string arm (class E) STILL reparses ---
-        // A live reader for item_fn/extend (`return_type: string | TypeRef`). This
-        // pins the exact post-CKPT-4 state: the string arm is NOT ruled (blocked on
-        // the item_fn/extend carrier migration). If a future edit rules it loud, it
-        // MUST be paired with the item_fn/extend migration (this assertion flips).
+        // --- OVER-DELETION TRIPWIRE: the bare-string item_fn arm STILL parses ---
+        // #88 PRESERVED. The bare-string arm is the SANCTIONED carrier for
+        // item_fn/extend (`return_type: string | TypeRef`); E5 CKPT-5 deleted the
+        // `.source` fallback but MUST NOT touch this parser. A leaf spelling ("int")
+        // parses via `parse_type_annotation_payload`/`__type_probe`.
         let string_carrier = KindedSlot::from_string_arc(Arc::new("int".to_string()));
         let resolved = type_annotation_from_string_or_type_ref_slot(
             &string_carrier,
             "item_fn",
             &overlay,
         )
-        .expect("the item_fn/extend bare-string type carrier STILL reparses (surfaced residual)");
+        .expect("the item_fn/extend bare-string type carrier STILL parses a leaf (#88 preserved)");
         assert_eq!(
             resolved,
             TypeAnnotation::Basic("int".to_string()),
-            "the string arm remains a live reader for item_fn/extend until their carrier migrates"
+            "the item_fn bare-string arm parses `int` — the #88 parser survives the `.source` deletion"
+        );
+
+        // ...AND an APPLIED-GENERIC spelling: `item_fn(name, "Array<int>", value)`.
+        // This is the load-bearing over-deletion tripwire — a non-trivial spelling
+        // that ONLY `parse_type_annotation_payload` can turn into an AST (there is
+        // no non-parse path from "Array<int>" to a `TypeAnnotation`). If CKPT-5
+        // over-deleted the parser, this `expect` fails.
+        let applied_carrier = KindedSlot::from_string_arc(Arc::new("Array<int>".to_string()));
+        let resolved_applied = type_annotation_from_string_or_type_ref_slot(
+            &applied_carrier,
+            "item_fn",
+            &overlay,
+        )
+        .expect("the item_fn bare-string carrier parses an applied-generic spelling (#88 parser preserved)");
+        assert!(
+            matches!(
+                resolved_applied,
+                TypeAnnotation::Array(_) | TypeAnnotation::Generic { .. }
+            ),
+            "item_fn parses `Array<int>` to an Array/Generic — the #88 parser must survive the \
+             `.source` deletion (over-deletion tripwire); got: {resolved_applied:?}"
         );
     }
 }

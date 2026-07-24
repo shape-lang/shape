@@ -5,12 +5,13 @@
 //! What is (and is not) observable here. Under CKPT-1 an applied generic now
 //! SPELLS off the frozen memo and therefore STAMPS (the stamp-gate
 //! `stamp_for = reconstruct(...).is_ok()` auto-widens); pre-CKPT-1 it fell
-//! UNSTAMPED to the `__ComptimeTypeRef.source` reparse. For a VALID `.source`,
-//! the stamped identity route and the `.source` reparse produce the SAME
-//! spelling, so the two are observationally equivalent at the Shape level — the
-//! definitive stamp-vs-reparse witness lives at the unit tier (the
-//! `e1_s5_route_proof` pins stamp an UNPARSEABLE `.source`, so a green result
-//! can only have come from the identity route). This e2e proves the
+//! UNSTAMPED to the `__ComptimeTypeRef.source` reparse. That `.source` reparse
+//! fallback (field + arm) was DELETED at E5 CKPT-5 — the identity route is now the
+//! SOLE resolution path — but these forms already STAMP under CKPT-1, so this e2e
+//! is unaffected by the deletion. The definitive stamp-vs-reparse witness lived at
+//! the unit tier (the `e1_s5_route_proof` pins stamped an UNPARSEABLE spelling, so
+//! a green result could only have come from the identity route; post-CKPT-5 the
+//! reparse arm no longer exists at all). This e2e proves the
 //! complementary properties the unit tier cannot: the CKPT-1 forms
 //! canonicalize + stamp + are CONSUMABLE through the full comptime handler path
 //! on both engines, and the `Array<Option<int>>` NESTING TERMINATES (the

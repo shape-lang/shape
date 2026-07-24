@@ -258,8 +258,8 @@ annotation assert_signature_refs() on function {
     if target.params[0].type_ref.kind != "String" {
       error(f"expected string param TypeRef, got {target.params[0].type_ref.kind}")
     }
-    if target.return_type_ref.source != "string" {
-      error(f"expected string return TypeRef, got {target.return_type_ref.source}")
+    if target.return_type_ref.kind != "String" {
+      error(f"expected string return TypeRef, got {target.return_type_ref.kind}")
     }
   }
 }

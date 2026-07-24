@@ -2594,10 +2594,10 @@ pub(super) fn build_type_info_heap_value(
     // type, so thread the field ASTs + the overlay. Each field `type_ref` now
     // STAMPS its frozen identity via the shared `stamp_for` gate (the SAME
     // `reconstruct(...).is_ok()` predicate every producer shares — E1-D7(b)), so
-    // the reflection surface stops emitting INVALID stamps into the `.source`
-    // reparse net. Applied generics, records, and bare user nominals all
-    // reconstruct now (CKPT-1..3); a genuinely non-reconstructable field type
-    // stamps INVALID and the consumer rules it LOUD.
+    // the reflection surface resolves identity-only. (The `.source` reparse net it
+    // once fell back to is DELETED at E5 CKPT-5.) Applied generics, records, and
+    // bare user nominals all reconstruct now (CKPT-1..3); a genuinely
+    // non-reconstructable field type stamps INVALID and the consumer rules it LOUD.
     let field_type_asts: Vec<Option<shape_ast::ast::TypeAnnotation>> = struct_fields
         .map(|fields| {
             fields
