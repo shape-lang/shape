@@ -228,3 +228,84 @@ NON-VACUOUS), the residual 5 honestly deferred to a live issue (#83), the book
 green where the gate can prove it. **S6 is READY for the ADR-009 completion gate**
 (the 2026-07-16 run FAILED 3/3). The completion gate is the NEXT step and is NOT
 run here.
+
+## S6b review corrections (2026-07-24)
+
+Two review findings on S6 closed. Append-only, no S6 commit amended.
+
+### FINDING 1 — the 5 deferred fixtures carried a stale import
+
+The 5 `#83`-deferred fixtures still opened their embedded program with the
+pre-S5 `use std::core::remote` + bare `@remote`. Since S5 that combination does
+NOT compile, so run-as-`--ignored` they died at `error[SEMANTIC]: Unknown
+annotation '@remote'` — never reaching the 0-ary reject their ignore-reason
+claims. Each fixture's import line was re-pointed to the S5 form
+(`from std::core::remote use { @remote }`; `{{ @remote }}` in the one `format!`
+fixture). The tests STAY `#[ignore]`'d at #83 — only the fixture import moved.
+
+**Now-reached 0-ary reject, proven** (`--ignored --test-threads=1`, all 5;
+`declares no parameters` ×5, `Unknown annotation` ×0):
+
+```
+error[SEMANTIC]: annotation template `hygienic:…` (declared
+`<…>(args: …) -> HookDecision<…>`) cannot specialize for target
+`remote_snapshot_hash` (required specialization signature `() -> ()`): the
+target declares no parameters, so a decision `before` hook has no arguments to
+receive or short-circuit; declare a zero-parameter void observer
+(`fn t() { ... }`) to observe the call, or give the target parameters
+```
+
+This is exactly the reject the ignore-reasons describe (`"the target declares
+no parameters"`), so no ignore-reason wording change was needed. Fixtures:
+`distributed_matrix_e2e.rs` (`plaintext_` / `tls_remote_snapshot_uses_receiver_store_not_caller_store`)
+and `distributed_snapshot_polyglot_e2e.rs` (`remote_snapshot_returns_receiver_hash_over_remote_call`,
+`_hash_is_saved_in_selected_receiver_store`, `_hash_can_be_resumed_from_receiver_store`).
+
+### FINDING 2 — closing #68 stranded LIVE stale-closed cites
+
+#68 (the @remote dark window) closed with @remote delivered. Live user-facing
+cites still pointing at it were re-pointed. **New issue #86** filed for the one
+capability #68 was wrongly tracking that did NOT land.
+
+| cite (symbol) | kind | was | now | reason |
+|---|---|---|---|---|
+| `sugar_lowering.rs` `foreign_target_application_rejection` (~:244) | rejection MESSAGE producer | #68 | **#86** | Runtime declarative hooks on foreign-fn targets did NOT ship in E4 (E4 shipped @remote + HookDecision on ordinary fns only). New issue #86 is its home. Wording also de-attributed from "E4 re-implements" to "hooks on foreign targets are not implemented yet". |
+| `sugar_lowering.rs:231` doc-comment | code doc | #68 | **#86** | tracks-where pointer, kept in sync with the producer |
+| `functions_foreign.rs` `s8a_…_extern_c_…` / `s8a_…_dynamic_language_…` message-embedding asserts | pinning assertion | #68 | **#86** | lockstep with producer text |
+| `functions_foreign.rs` `e4s2_…reports_the_68_hook_reason` asserts (`see issue #68`, "routes to #68", "stays on the #68 arm") + the sibling `!contains("#68")` blur-guard | pinning assertion | #68 | **#86** | lockstep; test fn NAME left with its `68` mnemonic (not user-facing, no external refs) |
+| `advanced/annotations.mdx:367` + `tooling/polyglot.mdx:142` | book PROSE | #68 | **#86** | user-facing prose (the report's own follow-up #4 flagged these) |
+| `pseudo_tuple.rs:1263` `re-place` failure-transform MESSAGE | rejection MESSAGE | "coupled to @remote issue #68" | **drop #68; note @remote ships in E4; keep #80** | @remote is now DELIVERED; re-place itself is the D6 umbrella #80 (already cited at the sentence tail) |
+| `weave.rs:771` `re_place_transform_surfaces_and_stops` assert | pinning assertion | `contains("#68")` | **`contains("@remote")`** | lockstep with the re-place message; it legitimately names the @remote coupling but must not send a reader to a closed issue |
+| `planner.rs:272` ctx-removal MESSAGE (+ :267 comment) | rejection MESSAGE | "returns with the HookDecision protocol (issue #68)" | **#83** | HookDecision protocol LANDED in E4-S4 (#68 closed); per-invocation State threading is the first-cut deferral, tracked with the E4 residual-signatures issue #83 |
+| `statements.rs:8548` + `:8574` ctx asserts | pinning assertion | `contains("#68")` | **`contains("#83")`** | lockstep with the ctx message |
+
+**#3 reasoning (planner ctx → #83):** the message now states the protocol
+landed and per-invocation State is a first-cut deferral. #83 is the live E4
+residual home (async / 0-ary / heterogeneous multi-arg @remote signatures); the
+no-State first cut is the same residual-signatures family, so #83 is the right
+home rather than minting a fourth issue.
+
+**#4 reasoning (weave.rs:771):** the RePlace rejection is a LIVE user-facing
+message; after the #68 drop it still names `@remote` (now delivered) but sends
+nobody to a closed issue. The assertion was re-pointed to pin `@remote` (the
+coupling) rather than the removed `#68`.
+
+**Deliberately left as historical** (code-comments / developer-facing assert
+failure descriptions — NOT live user-facing messages, assertions of message
+content, or book-runnable content; all correctly reference #68 as the
+now-closed dark-window issue): `functions_foreign.rs` :33/:45/:49/:50/:1527/:1959/:1993/:1995;
+`sugar_lowering.rs` :42/:276/:278/:281; `no_legacy_annotation_weave.rs` :22/:166/:198;
+`executor/tests/mod.rs:56`; `remote.shape:179`; `indicator.shape:26`;
+`jit_c3_carrier_native.rs:82`; shape-test comment cites in
+`comptime/annotations.rs:159`, `annotations_runtime/before_after.rs:251`,
+`annotations_runtime/injection.rs:16/:370`, `modules_visibility/scoped_contract.rs:145`.
+
+### Gates (S6b)
+
+- `cargo test -p shape-vm --lib`: FAILED set held at the stable 6 +
+  permitted `nested_exact` flap (7 total, all in `expressions::advanced` /
+  `monomorphization` — none in the touched modules); all touched pins green.
+- 5 deferred fixtures `--ignored`: reach the 0-ary reject (proof above).
+- `annotations_comptime` 117/10 (10 pre-existing `executed_extend_authority`
+  / `generated_method_runtime` failures, none message-related); `annotations_runtime` 36/0.
+- `just check-clean` exit 0.
