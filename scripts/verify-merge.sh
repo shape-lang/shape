@@ -581,6 +581,23 @@ fi
 echo
 
 # -----------------------------------------------------------------------------
+# CHECK 15 — ADR-011–016 legacy-authority baselines (R14 shrink-only ratchet)
+# -----------------------------------------------------------------------------
+# The #133/#134/#135 legacy inventories may only shrink. Fails on total
+# growth, a new owner path, or per-owner growth; exit 2 on a hand-edited
+# baseline (sets_sha256 mismatch). Regenerate legitimately shrunk sets with
+# `just regen-legacy-baselines` and commit the diff.
+echo "=== CHECK 15: legacy-authority baselines (shrink-only) ==="
+if node scripts/check-adr011-012-legacy-baselines.mjs; then
+  record_pass "legacy-authority baselines"
+  echo "  -> clean"
+else
+  record_fail "legacy-authority baselines" "a legacy set grew or a baseline was hand-edited"
+  echo "  -> FAILED (a legacy set grew or a baseline was hand-edited)"
+fi
+echo
+
+# -----------------------------------------------------------------------------
 # REPORT
 # -----------------------------------------------------------------------------
 echo "=== SUMMARY ==="
