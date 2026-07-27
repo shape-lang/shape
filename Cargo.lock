@@ -5504,6 +5504,7 @@ dependencies = [
  "serde",
  "serde_json",
  "shape-ast",
+ "shape-diagnostics",
  "shape-runtime",
  "shape-vm",
  "shape-wire",
