@@ -175,12 +175,232 @@ impl TypeWitness {
     }
 }
 
-/// A suggested fix — a ranked, optionally-diff-bearing proposal that a
-/// renderer (LSP code action, MCP `apply_fix` tool call) can apply.
+/// One exact replacement: a byte span into the source the emitter compiled,
+/// plus the text that replaces it.
 ///
-/// `confidence` is in `[0.0, 1.0]`. Phase-2 first-session emitters may
-/// produce empty `fixes` lists; richer fix generation is later-session
-/// scope per the dispatch.
+/// `span` is `[start, end)` in bytes. An insertion is the degenerate case
+/// `start == end`. Per ADR-017 §4 this is the machine-applicable form of a
+/// fix — consumers apply it verbatim and add nothing.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StructuredEdit {
+    /// Absolute byte span `[start, end)` to replace.
+    pub span: [u32; 2],
+    /// Replacement text. Empty means deletion.
+    pub new_text: String,
+}
+
+impl StructuredEdit {
+    /// Replace `[start, end)` with `new_text`.
+    pub fn replacement(start: u32, end: u32, new_text: impl Into<String>) -> Self {
+        Self {
+            span: [start, end],
+            new_text: new_text.into(),
+        }
+    }
+
+    /// Insert `new_text` at byte offset `at`.
+    pub fn insertion(at: u32, new_text: impl Into<String>) -> Self {
+        Self::replacement(at, at, new_text)
+    }
+
+    /// Start of the replaced span, in bytes.
+    pub fn start(&self) -> u32 {
+        self.span[0]
+    }
+
+    /// End of the replaced span, in bytes (exclusive).
+    pub fn end(&self) -> u32 {
+        self.span[1]
+    }
+}
+
+/// Why a [`EditPlan`] refused to apply.
+///
+/// Every variant is a refusal, never a partial application: a plan either
+/// applies whole or changes nothing. ADR-017 §4 requires an evidence-backed
+/// fix, and evidence proved against source the emitter no longer recognizes
+/// is not evidence.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FixRejection {
+    /// The source changed after the emitter proved the fix. The plan's spans
+    /// describe a document that no longer exists.
+    SourceChanged {
+        /// Digest recorded when the fix was emitted.
+        expected: String,
+        /// Digest of the source the consumer offered.
+        actual: String,
+    },
+    /// A span reaches past the end of the source.
+    SpanOutOfBounds {
+        /// The offending span.
+        span: [u32; 2],
+        /// Length of the source in bytes.
+        source_len: u32,
+    },
+    /// A span endpoint falls inside a UTF-8 code point.
+    SpanNotCharBoundary {
+        /// The byte offset that is not a boundary.
+        offset: u32,
+    },
+    /// Two edits in the same plan cover overlapping bytes.
+    OverlappingEdits {
+        /// The earlier span.
+        first: [u32; 2],
+        /// The span that overlaps it.
+        second: [u32; 2],
+    },
+    /// The plan carries no edits, so applying it is a no-op the caller
+    /// should not present as a fix.
+    Empty,
+}
+
+impl std::fmt::Display for FixRejection {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::SourceChanged { expected, actual } => write!(
+                f,
+                "source changed since the fix was proved (expected digest {expected}, found {actual})"
+            ),
+            Self::SpanOutOfBounds { span, source_len } => write!(
+                f,
+                "edit span [{}, {}) reaches past the {source_len}-byte source",
+                span[0], span[1]
+            ),
+            Self::SpanNotCharBoundary { offset } => {
+                write!(f, "edit offset {offset} is not a UTF-8 character boundary")
+            }
+            Self::OverlappingEdits { first, second } => write!(
+                f,
+                "edits [{}, {}) and [{}, {}) overlap",
+                first[0], first[1], second[0], second[1]
+            ),
+            Self::Empty => write!(f, "edit plan carries no edits"),
+        }
+    }
+}
+
+impl std::error::Error for FixRejection {}
+
+/// The complete machine-applicable edit set for one fix, bound to the source
+/// revision the emitter proved it against.
+///
+/// `source_digest` is what makes the plan falsifiable: a consumer that holds
+/// a different revision of the file gets [`FixRejection::SourceChanged`]
+/// instead of a silently misplaced edit. It is a staleness check, not a
+/// security check.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EditPlan {
+    /// Digest of the source text the emitter compiled. See [`source_digest`].
+    pub source_digest: String,
+    /// Edits to apply. Order is irrelevant; they may not overlap.
+    pub edits: Vec<StructuredEdit>,
+}
+
+impl EditPlan {
+    /// Build a plan for `source` from the edits it was proved against.
+    pub fn new(source: &str, edits: Vec<StructuredEdit>) -> Self {
+        Self {
+            source_digest: source_digest(source),
+            edits,
+        }
+    }
+
+    /// Check the plan against `source` without applying it.
+    ///
+    /// Consumers that need to decide whether to *offer* a fix (an LSP
+    /// deciding whether to publish a code action) call this; consumers that
+    /// apply call [`EditPlan::apply`], which repeats the check.
+    pub fn validate(&self, source: &str) -> Result<(), FixRejection> {
+        if self.edits.is_empty() {
+            return Err(FixRejection::Empty);
+        }
+
+        let actual = source_digest(source);
+        if actual != self.source_digest {
+            return Err(FixRejection::SourceChanged {
+                expected: self.source_digest.clone(),
+                actual,
+            });
+        }
+
+        let source_len = source.len() as u32;
+        for edit in &self.edits {
+            let (start, end) = (edit.start(), edit.end());
+            if start > end || end > source_len {
+                return Err(FixRejection::SpanOutOfBounds {
+                    span: edit.span,
+                    source_len,
+                });
+            }
+            for offset in [start, end] {
+                if !source.is_char_boundary(offset as usize) {
+                    return Err(FixRejection::SpanNotCharBoundary { offset });
+                }
+            }
+        }
+
+        let mut ordered: Vec<&StructuredEdit> = self.edits.iter().collect();
+        ordered.sort_by_key(|edit| (edit.start(), edit.end()));
+        for pair in ordered.windows(2) {
+            if pair[1].start() < pair[0].end() {
+                return Err(FixRejection::OverlappingEdits {
+                    first: pair[0].span,
+                    second: pair[1].span,
+                });
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Apply the plan to `source`, or refuse.
+    ///
+    /// This is the single authority for turning structured edits into text.
+    /// Every consumer — CLI `--fix`, LSP code action, MCP `apply_fix` —
+    /// applies through here or through a mechanical projection of the same
+    /// spans, so a fix cannot mean two things.
+    pub fn apply(&self, source: &str) -> Result<String, FixRejection> {
+        self.validate(source)?;
+
+        let mut ordered: Vec<&StructuredEdit> = self.edits.iter().collect();
+        ordered.sort_by_key(|edit| (edit.start(), edit.end()));
+
+        let mut out = String::with_capacity(source.len());
+        let mut cursor = 0usize;
+        for edit in ordered {
+            out.push_str(&source[cursor..edit.start() as usize]);
+            out.push_str(&edit.new_text);
+            cursor = edit.end() as usize;
+        }
+        out.push_str(&source[cursor..]);
+        Ok(out)
+    }
+}
+
+/// Digest of a source buffer, used to bind an [`EditPlan`] to the revision
+/// it was proved against.
+///
+/// FNV-1a over the bytes, salted with the length so that a same-length
+/// permutation and a length change are both visible. Rendered as
+/// `<len>:<hash>` so a mismatch is readable in a diagnostic payload.
+pub fn source_digest(source: &str) -> String {
+    const OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+    const PRIME: u64 = 0x1000_0000_01b3;
+
+    let mut hash = OFFSET;
+    for byte in source.as_bytes() {
+        hash ^= *byte as u64;
+        hash = hash.wrapping_mul(PRIME);
+    }
+    format!("{}:{:016x}", source.len(), hash)
+}
+
+/// A suggested fix — a ranked proposal that a renderer (LSP code action, MCP
+/// `apply_fix` tool call) can apply.
+///
+/// `confidence` is in `[0.0, 1.0]`. A fix carrying an [`EditPlan`] is
+/// machine-applicable; one carrying only a `label` (and possibly a `diff`) is
+/// advice the user applies by hand.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SuggestedFix {
     /// Short user-facing label (e.g. `"convert string to int"`).
@@ -191,6 +411,11 @@ pub struct SuggestedFix {
     pub diff: Option<String>,
     /// Confidence in the fix, `0.0..=1.0`. Renderers may rank by this.
     pub confidence: f32,
+    /// Exact spans plus replacement text, when the emitter proved a
+    /// machine-applicable edit (ADR-017 §4). Appended field — absent on
+    /// fixes that carry only advice.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub edit_plan: Option<EditPlan>,
 }
 
 impl SuggestedFix {
@@ -200,6 +425,7 @@ impl SuggestedFix {
             label: label.into(),
             diff: None,
             confidence,
+            edit_plan: None,
         }
     }
 
@@ -207,6 +433,23 @@ impl SuggestedFix {
     pub fn with_diff(mut self, diff: impl Into<String>) -> Self {
         self.diff = Some(diff.into());
         self
+    }
+
+    /// Attach the machine-applicable edits, binding them to `source`.
+    pub fn with_edits(mut self, source: &str, edits: Vec<StructuredEdit>) -> Self {
+        self.edit_plan = Some(EditPlan::new(source, edits));
+        self
+    }
+
+    /// Attach an already-built plan.
+    pub fn with_edit_plan(mut self, plan: EditPlan) -> Self {
+        self.edit_plan = Some(plan);
+        self
+    }
+
+    /// Whether this fix carries edits a tool can apply without guessing.
+    pub fn is_machine_applicable(&self) -> bool {
+        self.edit_plan.is_some()
     }
 }
 
@@ -455,6 +698,160 @@ mod tests {
 
         let back: Diagnostic = serde_json::from_str(&s).expect("deserialize");
         assert_eq!(diag, back);
+    }
+
+    // --- ADR-017 §4 structured-edit channel ---
+
+    const MATCH_SOURCE: &str = "match c {\n  Red => 1,\n}\n";
+
+    fn insert_arm_plan() -> EditPlan {
+        // Insert a second arm just before the closing brace on line 3.
+        let at = MATCH_SOURCE.find("\n}").expect("closing brace") as u32 + 1;
+        EditPlan::new(
+            MATCH_SOURCE,
+            vec![StructuredEdit::insertion(at, "  Blue => 2,\n")],
+        )
+    }
+
+    #[test]
+    fn edit_plan_applies_exact_spans() {
+        let applied = insert_arm_plan().apply(MATCH_SOURCE).expect("applies");
+        assert_eq!(applied, "match c {\n  Red => 1,\n  Blue => 2,\n}\n");
+    }
+
+    #[test]
+    fn edit_plan_replacement_swaps_span_contents() {
+        let source = "let x = 1";
+        let plan = EditPlan::new(
+            source,
+            vec![StructuredEdit::replacement(4, 5, "renamed".to_string())],
+        );
+        assert_eq!(plan.apply(source).expect("applies"), "let renamed = 1");
+    }
+
+    #[test]
+    fn edit_plan_applies_multiple_edits_without_offset_drift() {
+        let source = "a b c";
+        let plan = EditPlan::new(
+            source,
+            vec![
+                StructuredEdit::replacement(4, 5, "third"),
+                StructuredEdit::replacement(0, 1, "first"),
+            ],
+        );
+        assert_eq!(plan.apply(source).expect("applies"), "first b third");
+    }
+
+    /// Tripwire 3: a fix whose source moved under it is rejected, not
+    /// applied at the stale offsets.
+    #[test]
+    fn stale_plan_is_rejected_not_misapplied() {
+        let plan = insert_arm_plan();
+        // The user typed a line above the match before invoking the fix.
+        let edited = format!("let c = Color::Red\n{MATCH_SOURCE}");
+
+        let rejection = plan.apply(&edited).expect_err("stale plan must refuse");
+        assert!(matches!(rejection, FixRejection::SourceChanged { .. }));
+        assert!(plan.validate(&edited).is_err());
+
+        // And the misapplication the rejection prevents would have been
+        // real: at the stale offset the insertion lands mid-statement.
+        let stale_offset = plan.edits[0].start() as usize;
+        assert!(
+            !edited[stale_offset..].starts_with('}'),
+            "offsets must actually have moved for this tripwire to bite"
+        );
+    }
+
+    #[test]
+    fn plan_out_of_bounds_span_is_rejected() {
+        let source = "short";
+        let plan = EditPlan {
+            source_digest: source_digest(source),
+            edits: vec![StructuredEdit::replacement(0, 99, "x")],
+        };
+        assert!(matches!(
+            plan.apply(source),
+            Err(FixRejection::SpanOutOfBounds { .. })
+        ));
+    }
+
+    #[test]
+    fn plan_split_code_point_is_rejected() {
+        let source = "é";
+        let plan = EditPlan {
+            source_digest: source_digest(source),
+            edits: vec![StructuredEdit::replacement(0, 1, "e")],
+        };
+        assert!(matches!(
+            plan.apply(source),
+            Err(FixRejection::SpanNotCharBoundary { offset: 1 })
+        ));
+    }
+
+    #[test]
+    fn plan_overlapping_edits_are_rejected() {
+        let source = "abcdef";
+        let plan = EditPlan {
+            source_digest: source_digest(source),
+            edits: vec![
+                StructuredEdit::replacement(0, 3, "x"),
+                StructuredEdit::replacement(2, 5, "y"),
+            ],
+        };
+        assert!(matches!(
+            plan.apply(source),
+            Err(FixRejection::OverlappingEdits { .. })
+        ));
+    }
+
+    #[test]
+    fn empty_plan_is_rejected() {
+        let plan = EditPlan {
+            source_digest: source_digest("x"),
+            edits: Vec::new(),
+        };
+        assert_eq!(plan.apply("x"), Err(FixRejection::Empty));
+    }
+
+    #[test]
+    fn source_digest_separates_same_length_permutations() {
+        assert_ne!(source_digest("ab"), source_digest("ba"));
+        assert_ne!(source_digest("ab"), source_digest("ab "));
+        assert_eq!(source_digest("ab"), source_digest("ab"));
+    }
+
+    #[test]
+    fn edit_plan_round_trips_through_json() {
+        let fix =
+            SuggestedFix::new("Add missing match arms", 0.95).with_edit_plan(insert_arm_plan());
+        assert!(fix.is_machine_applicable());
+
+        let encoded = serde_json::to_string(&fix).expect("serialize");
+        let decoded: SuggestedFix = serde_json::from_str(&encoded).expect("deserialize");
+        assert_eq!(fix, decoded);
+        assert_eq!(
+            decoded
+                .edit_plan
+                .expect("plan survives")
+                .apply(MATCH_SOURCE)
+                .expect("applies"),
+            "match c {\n  Red => 1,\n  Blue => 2,\n}\n"
+        );
+    }
+
+    /// The schema is append-only: a payload written before `edit_plan`
+    /// existed still deserializes, and a fix without edits still omits the
+    /// field.
+    #[test]
+    fn edit_plan_field_is_append_only() {
+        let legacy = r#"{"label":"advice only","confidence":0.5}"#;
+        let decoded: SuggestedFix = serde_json::from_str(legacy).expect("legacy payload");
+        assert_eq!(decoded.edit_plan, None);
+        assert!(!decoded.is_machine_applicable());
+
+        let encoded = serde_json::to_string(&SuggestedFix::new("advice only", 0.5)).unwrap();
+        assert!(!encoded.contains("edit_plan"));
     }
 
     #[test]
