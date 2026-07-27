@@ -1580,6 +1580,64 @@ pub fn validate_foreign_function_types(program: &Program, source: &str) -> Vec<D
     diagnostics
 }
 
+/// ADR-019 §1 / R25 (POLY-STUB-CHANNEL, issue #196) — surface the `[C0933]`
+/// unmapped-foreign-type rejection in the editor.
+///
+/// The compiler refuses a declared parameter or return type outside the foreign
+/// marshaling table at `compile_foreign_function`. Without this the editor would
+/// show a clean file for a signature `shape run` rejects.
+///
+/// Uses `ForeignFunctionDef::unmapped_foreign_types()`, the producer the
+/// compiler uses, so the two texts and the two codes cannot drift apart.
+pub fn validate_foreign_function_marshal_types(program: &Program, source: &str) -> Vec<Diagnostic> {
+    fn collect<'a>(items: &'a [Item], out: &mut Vec<&'a shape_ast::ast::ForeignFunctionDef>) {
+        for item in items {
+            match item {
+                Item::ForeignFunction(f, _) => out.push(f),
+                Item::Export(export, _) => {
+                    if let shape_ast::ast::ExportItem::ForeignFunction(f) = &export.item {
+                        out.push(f);
+                    }
+                }
+                // The compiler's chokepoint reaches module-nested foreign
+                // declarations, so the editor must too.
+                Item::Module(module, _) => collect(&module.items, out),
+                _ => {}
+            }
+        }
+    }
+
+    let mut foreign_fns = Vec::new();
+    collect(&program.items, &mut foreign_fns);
+
+    foreign_fns
+        .into_iter()
+        .flat_map(|f| {
+            f.unmapped_foreign_types()
+                .into_iter()
+                .map(move |rejection| (f, rejection))
+        })
+        .map(|(f, rejection)| {
+            let range = if rejection.span.is_dummy() {
+                span_to_range(source, &f.name_span)
+            } else {
+                span_to_range(source, &rejection.span)
+            };
+            Diagnostic {
+                range,
+                severity: Some(DiagnosticSeverity::ERROR),
+                code: Some(NumberOrString::String("C0933".to_string())),
+                code_description: None,
+                source: Some("shape".to_string()),
+                message: format!("{}\n\nhelp: {}", rejection.message, rejection.fix_hint),
+                related_information: None,
+                tags: None,
+                data: None,
+            }
+        })
+        .collect()
+}
+
 /// ADR-019 §5 step 1 (POLY-ASYNC-TRUTH, issue #201) — surface the `[C0932]`
 /// foreign-async rejection in the editor.
 ///

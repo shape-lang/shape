@@ -132,6 +132,35 @@ impl BytecodeCompiler {
         // Validate `out` params: only allowed on extern C, must be ptr, no const/&/default.
         self.validate_out_params(def)?;
 
+        // ADR-019 §1 / #196 (POLY-STUB-CHANNEL) — a declared type outside the
+        // foreign marshaling table is refused HERE, at the declaration, instead
+        // of as a `foreign_marshal` `NotImplemented` on the first call that
+        // reaches it. The table is knowable from the signature alone, so the
+        // author should not have to run the program to learn the type cannot
+        // cross.
+        //
+        // Ordered AFTER the annotation and async gates (whose documented
+        // precedence this slice does not disturb) and BEFORE
+        // `validate_type_annotations`' `Result<T>` mandate: an author whose
+        // parameter type cannot cross should hear that first, not be told to
+        // wrap a return type on a signature that is not expressible anyway.
+        //
+        // Producer: `ForeignFunctionDef::unmapped_foreign_types`, shared with
+        // the LSP (`diagnostics.rs`) so both surfaces emit one text.
+        if let Some(rejection) = def.unmapped_foreign_types().into_iter().next() {
+            let span = if rejection.span.is_dummy() {
+                def.name_span
+            } else {
+                rejection.span
+            };
+            let mut location = self.span_to_source_location(span);
+            location.hints.push(rejection.fix_hint);
+            return Err(ShapeError::SemanticError {
+                message: rejection.message,
+                location: Some(location),
+            });
+        }
+
         // Foreign function bodies are opaque — require explicit type annotations.
         // Dynamic-language runtimes require Result<T> returns; native ABI
         // declarations (`extern "C"`) do not.
@@ -2464,6 +2493,226 @@ mod net {
             !message.contains("[C0932]"),
             "the native-ABI rejection must not be re-labelled as the foreign-async one, got: \
              {message}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod foreign_marshal_type_rejection_tests {
+    //! ADR-019 §1 / R25 (POLY-STUB-CHANNEL, issue #196) — tripwire (2): a
+    //! declared type with no foreign mapping is a structured diagnostic AT THE
+    //! DECLARATION, not a marshal-time error.
+    //!
+    //! MEASURED before this rejection existed: `fn python f(t: DataTable) ->
+    //! Result<int>` compiled clean and failed on the first call that reached
+    //! the boundary, with `foreign_marshal: HeapKind::DataTable has no FFI wire
+    //! projection yet (W17-foreign-ffi follow-up)` — an internal follow-up
+    //! label, at a runtime the author may not even reach on a given path.
+    //!
+    //! The producer (`ForeignFunctionDef::unmapped_foreign_types`) is shared
+    //! with the LSP (`diagnostics::validate_foreign_function_marshal_types`),
+    //! so the editor and `shape run` cannot disagree about whether a signature
+    //! is expressible.
+    use crate::compiler::BytecodeCompiler;
+
+    fn compile_err_with_location(code: &str) -> (String, Option<shape_ast::error::SourceLocation>) {
+        let program = shape_ast::parser::parse_program(code).expect("parse failed");
+        let mut compiler = BytecodeCompiler::new();
+        compiler.source_text = Some(code.to_string());
+        match compiler.compile(&program) {
+            Ok(_) => panic!("expected a compile error, but the program compiled"),
+            Err(shape_ast::error::ShapeError::SemanticError { message, location }) => {
+                (message, location)
+            }
+            Err(other) => panic!("expected SemanticError, got {other:?}"),
+        }
+    }
+
+    fn compile_ok(code: &str) -> crate::bytecode::BytecodeProgram {
+        let program = shape_ast::parser::parse_program(code).expect("parse failed");
+        let mut compiler = BytecodeCompiler::new();
+        compiler.compile(&program).expect("fixture must compile")
+    }
+
+    /// The headline case: a Shape builtin with no wire form, in parameter
+    /// position, refused at the parameter's own span.
+    #[test]
+    fn unmarshalable_parameter_type_is_refused_at_the_declaration() {
+        let (message, location) = compile_err_with_location(
+            r#"
+fn python analyze(data: DataTable) -> Result<number> {
+    return 1.0
+}
+"#,
+        );
+        assert!(
+            message.contains("[C0933]"),
+            "the rejection carries its stable code, got: {message}"
+        );
+        assert!(
+            message.contains("DataTable"),
+            "the rejection names the offending type, got: {message}"
+        );
+        assert!(
+            message.contains("parameter 'data'"),
+            "the rejection names the offending parameter, got: {message}"
+        );
+        let location = location.expect("the rejection carries a source location");
+        assert_eq!(
+            location.line, 2,
+            "the rejection anchors at the declaration, got line {}",
+            location.line
+        );
+        assert!(
+            location.hints.iter().any(|h| h.contains("string")),
+            "the rejection carries an actionable remedy, got hints: {:?}",
+            location.hints
+        );
+    }
+
+    /// Return position anchors at the declaration name and reports the return
+    /// type, not a parameter.
+    #[test]
+    fn unmarshalable_return_type_is_refused_at_the_declaration() {
+        let (message, _) = compile_err_with_location(
+            r#"
+fn python when() -> Result<DateTime> {
+    return 1
+}
+"#,
+        );
+        assert!(message.contains("[C0933]"), "got: {message}");
+        assert!(
+            message.contains("return type is declared"),
+            "the rejection says which side of the signature is wrong, got: {message}"
+        );
+        assert!(message.contains("DateTime"), "got: {message}");
+    }
+
+    /// `Array<T>` names the ELEMENT as the problem, not the whole spelling —
+    /// the marshal layer monomorphizes on the scalar element, and a reader who
+    /// is told "Array is unsupported" would draw the wrong conclusion.
+    #[test]
+    fn array_of_struct_names_the_element_as_the_problem() {
+        let (message, _) = compile_err_with_location(
+            r#"
+type Measurement { value: number }
+fn python outlier_ratio(readings: Array<Measurement>) -> Result<number> {
+    return 0.0
+}
+"#,
+        );
+        assert!(message.contains("[C0933]"), "got: {message}");
+        assert!(
+            message.contains("`Measurement`"),
+            "the rejection names the element type, got: {message}"
+        );
+        assert!(
+            message.contains("Array<int>"),
+            "the remedy names the element types that do cross, got: {message}"
+        );
+    }
+
+    /// The table's asymmetry is reported as such: a map crosses inward only, so
+    /// the same type is legal in one position and refused in the other.
+    #[test]
+    fn hashmap_crosses_as_a_parameter_and_is_refused_as_a_return_type() {
+        let bytecode = compile_ok(
+            r#"
+fn python counts(m: HashMap<string, int>) -> Result<int> {
+    return 1
+}
+"#,
+        );
+        assert!(
+            bytecode.foreign_functions.iter().any(|e| e.name == "counts"),
+            "a map parameter must still compile"
+        );
+
+        let (message, _) = compile_err_with_location(
+            r#"
+fn python tally() -> Result<HashMap<string, int>> {
+    return 1
+}
+"#,
+        );
+        assert!(message.contains("[C0933]"), "got: {message}");
+        assert!(
+            message.contains("cannot be returned"),
+            "the rejection states the direction, got: {message}"
+        );
+    }
+
+    /// Differential control: every shape in the marshaling table still
+    /// compiles. Without this, tightening the check to "reject everything" would
+    /// pass the negative tests above.
+    #[test]
+    fn every_mapped_shape_still_compiles() {
+        let bytecode = compile_ok(
+            r#"
+type Candle { open: number }
+fn python scalars(a: int, b: number, c: bool, d: string) -> Result<int> {
+    return 1
+}
+fn python arrays(xs: Array<int>, ys: Array<number>, zs: Array<string>) -> Result<Array<int>> {
+    return xs
+}
+fn python optionals(a: int?, b: Option<string>) -> Result<int?> {
+    return a
+}
+fn python objects(c: Candle) -> Result<Candle> {
+    return c
+}
+fn python unit_return(a: int) -> Result<none> {
+    return 1
+}
+"#,
+        );
+        for name in [
+            "scalars",
+            "arrays",
+            "optionals",
+            "objects",
+            "unit_return",
+        ] {
+            assert!(
+                bytecode.foreign_functions.iter().any(|e| e.name == name),
+                "mapped declaration `{name}` must still compile"
+            );
+        }
+    }
+
+    /// `extern "C"` marshals through libffi against C types (`ptr`, `i32`,
+    /// `cslice`, …), a different table with its own checks. The foreign
+    /// marshaling table must not reach it.
+    #[test]
+    fn extern_c_declarations_are_out_of_scope() {
+        let bytecode =
+            compile_ok(r#"extern "C" fn memcpy_stub(dst: ptr, src: ptr, n: i64) -> ptr from "c";"#);
+        assert!(
+            bytecode
+                .foreign_functions
+                .iter()
+                .any(|e| e.name == "memcpy_stub"),
+            "a native-ABI declaration using C types must still compile"
+        );
+    }
+
+    /// The rejection must not swallow the async one: an `async fn python` with
+    /// an unmappable type reports [C0932] first, because the declaration FORM
+    /// is what does not exist.
+    #[test]
+    fn async_rejection_still_precedes_the_marshal_type_rejection() {
+        let (message, _) = compile_err_with_location(
+            r#"
+async fn python analyze(data: DataTable) -> Result<number> {
+    return 1.0
+}
+"#,
+        );
+        assert!(
+            message.contains("[C0932]"),
+            "the async rejection keeps its precedence, got: {message}"
         );
     }
 }
