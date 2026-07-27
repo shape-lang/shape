@@ -14,6 +14,7 @@ default = []
 # Shape crates for parsing and semantic analysis
 shape-ast = { workspace = true }
 shape-runtime = { workspace = true }
+shape-semantic-db = { workspace = true }
 shape-vm = { workspace = true }
 shape-wire = { workspace = true }
 

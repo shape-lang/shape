@@ -32,6 +32,7 @@ The repo is a monorepo with several top-level projects:
 | **shape-types** | `crates/shape-types/` | **Empty crate skeleton** (only `data/` subdir, no `src/`). Type-system code actually lives at `shape-runtime/src/type_system/` and `shape-runtime/src/type_schema/`. Crate is reserved for a planned move; do not look here for type code. |
 | **shape-common** | `crates/shape-common/` | Shared utilities across crates |
 | **shape-runtime** | `crates/shape-runtime/` | Bytecode compiler, builtin functions, method registry, type schemas, stdlib modules, capability tags |
+| **shape-semantic-db** | `crates/shape-semantic-db/` | `SemanticDb` seam (ADR-013): Salsa-backed incremental semantic queries publishing resolved `DefinitionIdentity`, normalized base contracts, deterministic diagnostics and provenance. Depends on shape-ast only — the R16 stop line is the dependency graph. See `docs/program/adr011-012/salsa-seam.md` |
 | **shape-vm** | `crates/shape-vm/` | Stack-based bytecode interpreter, typed opcodes, feedback vectors, resource limits, content-addressed bytecode, linker |
 | **shape-jit** | `crates/shape-jit/` | Cranelift JIT compiler (tiered: baseline @ 100 calls, optimizing @ 10k) |
 | **shape-wire** | `crates/shape-wire/` | Serialization (MessagePack) and QUIC transport, wire protocol v2 |

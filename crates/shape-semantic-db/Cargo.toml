@@ -1,0 +1,33 @@
+[package]
+name = "shape-semantic-db"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Incremental semantic query database (ADR-013 SemanticDb seam) for Shape"
+
+[dependencies]
+shape-ast = { workspace = true }
+
+# Incremental storage and invalidation (ADR-013 §2, R16).
+#
+# Pinned to one exact release with an explicit feature set; a floating
+# dependency is noncompliant. Rationale for each feature, and the upgrade
+# policy, are in docs/program/adr011-012/salsa-seam.md.
+#
+#   macros         — the #[salsa::db]/input/interned/tracked attribute API.
+#   inventory      — static ingredient registration used by those attributes.
+#   salsa_unstable — Database::memory_usage(), the measured query-memory budget.
+#
+# Deliberately off: accumulator (diagnostics are query results here, not a
+# side channel that bypasses result equality and early cutoff), rayon (no
+# parallel query fan-out in this slice), persistence, detailed-trace, shuttle.
+salsa = { version = "=0.28.1", default-features = false, features = [
+  "macros",
+  "inventory",
+  "salsa_unstable",
+] }
+
+sha2 = "0.10"
+hex = "0.4"

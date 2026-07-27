@@ -34,6 +34,7 @@ pub mod inlay_hints;
 pub mod module_cache;
 pub mod rename;
 pub mod scope;
+pub mod semantic_seam;
 pub mod semantic_tokens;
 pub mod server;
 pub mod signature_help;
