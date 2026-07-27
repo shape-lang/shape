@@ -581,6 +581,43 @@ fi
 echo
 
 # -----------------------------------------------------------------------------
+# CHECK 15 — ADR-011–016 legacy-authority baselines (R14 shrink-only ratchet)
+# -----------------------------------------------------------------------------
+# The #133/#134/#135 legacy inventories may only shrink. Fails on total
+# growth, a new owner path, or per-owner growth; exit 2 on a hand-edited
+# baseline (sets_sha256 mismatch). Regenerate legitimately shrunk sets with
+# `just regen-legacy-baselines` and commit the diff.
+echo "=== CHECK 15: legacy-authority baselines (shrink-only) ==="
+if node scripts/check-adr011-012-legacy-baselines.mjs; then
+  record_pass "legacy-authority baselines"
+  echo "  -> clean"
+else
+  record_fail "legacy-authority baselines" "a legacy set grew or a baseline was hand-edited"
+  echo "  -> FAILED (a legacy set grew or a baseline was hand-edited)"
+fi
+echo
+
+# -----------------------------------------------------------------------------
+# CHECK 16 — ADR-011–016 legacy identity manifest (R14 identity-default routing)
+# -----------------------------------------------------------------------------
+# The #136 manifest enumerates every name-selected builtin identity that
+# currently holds legacy privilege, keyed by BuiltinFunction variant rather than
+# by spelling. An identity or spelling that is NOT listed gets no privilege:
+# adding one fails here until it is listed in the same commit, so the grant is
+# reviewable. Also fails when a legacy mechanism (prefix gate,
+# allow_internal_builtins, stdlib-name membership, module-builtin route) spreads
+# to a new file. Exit 2 on a hand-edited manifest.
+echo "=== CHECK 16: legacy identity manifest (no unlisted privilege) ==="
+if node scripts/check-adr011-012-legacy-identity-manifest.mjs; then
+  record_pass "legacy identity manifest"
+  echo "  -> clean"
+else
+  record_fail "legacy identity manifest" "an unlisted identity/spelling gained privilege, a mechanism spread, or the manifest was hand-edited"
+  echo "  -> FAILED (unlisted privilege, mechanism spread, or hand-edited manifest)"
+fi
+echo
+
+# -----------------------------------------------------------------------------
 # REPORT
 # -----------------------------------------------------------------------------
 echo "=== SUMMARY ==="

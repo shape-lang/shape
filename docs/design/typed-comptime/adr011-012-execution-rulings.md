@@ -800,8 +800,10 @@ grounded in a six-lane code scout at main `7e343c20`, adversarially
 reviewed by two independent passes, and their five open decision points
 were answered by the user the same day (Q1 B, Q2 A, Q3 C, Q4 as
 recommended, Q5 B — recorded in
-`docs/program/workstreams/ratification-grill.md`). Enactment and ticket
-publication await explicit go-ahead. The only approved deltas to the
+`docs/program/workstreams/ratification-grill.md`). Enactment go-ahead was
+given by the user 2026-07-27 (same day, in-session): the authority set
+committed on the #111 baseline and the workstream tickets published per
+`docs/program/workstreams/publication-plan.json`. The only approved deltas to the
 frozen tracker are the Q2 set: two new edges (into #110 and #143) and four
 scope-by-reference expansions (#112, #113, #143, #163), applied at
 publication with re-fetch audit. All other tickets enter the graph only

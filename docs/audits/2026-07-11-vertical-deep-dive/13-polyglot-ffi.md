@@ -116,7 +116,7 @@ extern C differs at link-now (`check_ffi_native_scope` BEFORE `dlopen`; `resolve
 
 ### 1.4 Entry points
 
-- Language users: `fn python|typescript name(…) -> Result<T> { body }`, `async fn python …`, `extern "C" fn name(…) -> T from "lib" [as "sym"];` (grammar `shape.pest:295-330`).
+- Language users: `fn python|typescript name(…) -> Result<T> { body }`, `async fn python …` (still parses; SEMANTICALLY rejected `[C0932]` as of 2026-07-27 — see the §2 feature table), `extern "C" fn name(…) -> T from "lib" [as "sym"];` (grammar `shape.pest:295-330`).
 - CLI: `shape ext install <name>` (crates.io build), `shape ext list`; extension auto-discovery from `~/.shape/extensions` + project/frontmatter (`extension_loading.rs:150-176`).
 - Wire-serve: `--ffi-languages` strict opt-in allow-list (`control_flow/mod.rs:1132-1152`).
 
@@ -152,8 +152,8 @@ Legend: ✅ works end-to-end (empirically verified this audit) · 🟡 partial �
 | Scalar array args (Array<int> in) | ✅ | `py_arr_in ok 60` (sum of [10,20,30]); `marshal_args_typed` uses declared type as element-kind oracle (`foreign_marshal.rs:94-124`) |
 | Scalar array returns (Array<int>/Array<number> out) | ✅ | `py_arr ok len=4 last=3`; `build_scalar_typed_array` (`foreign_marshal.rs:937-1023`) |
 | `Option<T>` returns (nil→None, value→Some) | ✅ | `py_opt(true) Some(42)`; `foreign_marshal.rs:583-589` |
-| `async fn python` (asyncio wrapper) | ✅ | `py_async ok 42`; wrapper gen at `extensions/python/src/runtime.rs:203-214` |
-| `async fn typescript` (event-loop promise resolution) | ✅ code path exists (`runtime.rs:187-227` with cached tokio runtime); not separately exercised this audit | |
+| `async fn python` (asyncio wrapper) | ✅ at audit date — **SUPERSEDED 2026-07-27: now a `[C0932]` compile error** | `py_async ok 42`; wrapper gen at `extensions/python/src/runtime.rs:203-214`. The measurement stands — the wrapper ran and the value was right. What a single-call transcript could not show is that the VM thread blocked for the whole call, so `async` bought no concurrency: the untruthful contract ADR-019 §5 forbids. Rejected by #201; real offload parity tracked in #202 |
+| `async fn typescript` (event-loop promise resolution) | ✅ code path exists (`runtime.rs:187-227` with cached tokio runtime); not separately exercised this audit — **SUPERSEDED 2026-07-27: now a `[C0932]` compile error** | Same ruling, same owners (#201 rejects, #202 delivers) |
 | Cross-call interpreter state (STATEFUL_OPAQUE) | ✅ | `py_state call1 = 1` / `py_state call2 = 2` (global counter persists) |
 | Concurrent foreign calls from async tasks | ✅ (no crash, correct results) | `concurrent python: 10 20` via two `async let` tasks |
 | HashMap args (outgoing) | ✅ code (`hashmap_to_msgpack`, `foreign_marshal.rs:197-260`, scalar-V only) | not exercised end-to-end this audit |

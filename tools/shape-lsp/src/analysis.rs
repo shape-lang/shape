@@ -8,8 +8,9 @@ use crate::diagnostics::{
     enrich_diagnostics_with_code_metadata, validate_annotations, validate_async_join,
     validate_async_structured_concurrency, validate_color_rgb_range,
     validate_comptime_builtins_context, validate_comptime_overrides,
-    validate_comptime_side_effects, validate_foreign_function_types,
-    validate_interpolation_format_specs, validate_trait_bounds, validate_unused_imports,
+    validate_comptime_side_effects, validate_foreign_function_async,
+    validate_foreign_function_types, validate_interpolation_format_specs, validate_trait_bounds,
+    validate_unused_imports,
 };
 use crate::module_cache::ModuleCache;
 use crate::scope::ScopeTree;
@@ -77,6 +78,9 @@ pub fn analyze_program_semantics_for_document(
     diagnostics.extend(validate_trait_bounds(program, text));
     diagnostics.extend(validate_color_rgb_range(program, text));
     diagnostics.extend(validate_foreign_function_types(program, text));
+    // ADR-019 §5 (#201) — the editor must refuse `async fn python` for the same
+    // reason `shape run` does. TRANSITIONAL: deleted when #202 lands.
+    diagnostics.extend(validate_foreign_function_async(program, text));
     // W2.3 / 1.19 — unused-import lint emits W0102 with DiagnosticTag::UNNECESSARY.
     diagnostics.extend(validate_unused_imports(program, text));
 
