@@ -270,7 +270,7 @@ fn get_quick_fixes(
     // the enum name, the missing variants, and the arm insertion point, and
     // ships them as structured edits on the diagnostic —
     // `structured_quick_fixes` above turns them into this action. See
-    // ADR-017 §4 and `fix_baselines::MIGRATED_MESSAGE_SCRAPERS`.
+    // ADR-017 §4 and `migrated_scrapers`.
 
     // Fix for missing required trait method — suggest adding the method
     // stub. E0401 emitted by `validate_trait_bounds` in `diagnostics.rs`
@@ -1430,7 +1430,7 @@ mod tests {
     // `parse_non_exhaustive_match` and its three tests are deleted: the
     // enum name and missing-variant list now arrive as proved facts rather
     // than being recovered from the rendered message. The tombstone in
-    // `fix_baselines` fails if any code path reaches for it again.
+    // `migrated_scrapers` fails if any code path reaches for it again.
 
     #[test]
     fn test_find_match_arm_insert_position_simple() {
