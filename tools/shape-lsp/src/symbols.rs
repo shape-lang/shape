@@ -71,11 +71,7 @@ fn format_type_annotation(annotation: &TypeAnnotation) -> String {
         ),
         // ADR-009 B3 (S1): existential descriptor package type.
         TypeAnnotation::Existential { witnesses, inner } => {
-            format!(
-                "exists<{}> {}",
-                witnesses.join(", "),
-                format_type_annotation(inner)
-            )
+            format!("exists<{}> {}", witnesses.join(", "), format_type_annotation(inner))
         }
     }
 }

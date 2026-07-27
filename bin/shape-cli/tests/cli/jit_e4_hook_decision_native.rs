@@ -42,22 +42,9 @@ fn e4_hook_decision_single_runs_natively_both_tiers() {
     let vm = run_workspace_fixture("vm", "smokes-jit-closure", fixture);
     let jit = run_workspace_fixture("jit", "smokes-jit-closure", fixture);
 
-    assert_eq!(
-        vm.exit_code,
-        Some(0),
-        "{fixture}: VM must exit 0; stderr={}",
-        vm.stderr
-    );
-    assert_eq!(
-        jit.exit_code,
-        Some(0),
-        "{fixture}: native JIT must exit 0; stderr={}",
-        jit.stderr
-    );
-    assert_eq!(
-        vm.stdout, "100700\n",
-        "{fixture}: exact VM stdout (both single-join arms fire)"
-    );
+    assert_eq!(vm.exit_code, Some(0), "{fixture}: VM must exit 0; stderr={}", vm.stderr);
+    assert_eq!(jit.exit_code, Some(0), "{fixture}: native JIT must exit 0; stderr={}", jit.stderr);
+    assert_eq!(vm.stdout, "100700\n", "{fixture}: exact VM stdout (both single-join arms fire)");
     assert_eq!(
         jit.stdout, vm.stdout,
         "{fixture}: native JIT output must exactly match VM; stderr={}",
@@ -95,12 +82,7 @@ fn e4_hook_decision_result_r_is_a_named_expected_fallback() {
     let vm = run_workspace_fixture("vm", "smokes-jit-closure", fixture);
     let jit = run_workspace_fixture("jit", "smokes-jit-closure", fixture);
 
-    assert_eq!(
-        vm.exit_code,
-        Some(0),
-        "{fixture}: VM must exit 0; stderr={}",
-        vm.stderr
-    );
+    assert_eq!(vm.exit_code, Some(0), "{fixture}: VM must exit 0; stderr={}", vm.stderr);
     assert_eq!(
         jit.exit_code,
         Some(0),

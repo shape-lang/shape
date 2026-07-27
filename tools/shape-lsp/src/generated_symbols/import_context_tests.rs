@@ -35,15 +35,13 @@ type Probe { id: int }
 "#;
     let program = shape_ast::parse_program(source).expect("fixture parses");
     assert!(compile_for_generated_symbol_queries(&program, source).is_none());
-    assert!(
-        generated_workspace_symbols(
-            &program,
-            source,
-            &"file:///probe.shape".parse().expect("URI"),
-            "",
-        )
-        .is_empty()
-    );
+    assert!(generated_workspace_symbols(
+        &program,
+        source,
+        &"file:///probe.shape".parse().expect("URI"),
+        "",
+    )
+    .is_empty());
 }
 
 #[test]

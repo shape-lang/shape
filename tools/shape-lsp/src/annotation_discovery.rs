@@ -288,9 +288,10 @@ mod tests {
     #[test]
     fn signature_omits_on_clause_when_targets_inferred() {
         // DN1: absent on-clause => None => no fabricated `on`-clause.
-        let program =
-            shape_ast::parser::parse_program("annotation traced() {\n  before(args) { args }\n}\n")
-                .expect("program");
+        let program = shape_ast::parser::parse_program(
+            "annotation traced() {\n  before(args) { args }\n}\n",
+        )
+        .expect("program");
         let mut discovery = AnnotationDiscovery::new();
         discovery.discover_from_program(&program);
         let info = discovery.get("traced").expect("annotation discovered");
@@ -308,7 +309,9 @@ mod tests {
         ];
         assert_eq!(
             render_on_clause(Some(&all)),
-            Some("function, type, module, expression, block, await_expr, binding".to_string()),
+            Some(
+                "function, type, module, expression, block, await_expr, binding".to_string()
+            ),
         );
         assert_eq!(render_on_clause(None), None);
         assert_eq!(render_on_clause(Some(&[])), None);

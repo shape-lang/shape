@@ -2432,7 +2432,8 @@ mod tests {
         // The comptime block closes at brace depth 1 (still inside the fn
         // body) — the position after it is a RUNTIME position and must not
         // be classified as ComptimeBlock.
-        let text = "fn describe<T>(value: T) -> string {\n  let label = comptime {\n    type_ref(T)\n  }\n  ";
+        let text =
+            "fn describe<T>(value: T) -> string {\n  let label = comptime {\n    type_ref(T)\n  }\n  ";
         let position = Position {
             line: 4,
             character: 2,

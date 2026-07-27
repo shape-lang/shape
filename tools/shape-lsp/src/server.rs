@@ -3266,13 +3266,11 @@ let a = p.answer()
             .find("p.answer()")
             .expect("call site")
             + 2;
-        let (line, character) = crate::util::offset_to_line_col(EXPANSION_METHOD_PROGRAM, offset);
-        let result = expansion_view_command_result(
-            EXPANSION_METHOD_PROGRAM,
-            &uri,
-            Position { line, character },
-        )
-        .expect("a generated call site yields a virtual view payload");
+        let (line, character) =
+            crate::util::offset_to_line_col(EXPANSION_METHOD_PROGRAM, offset);
+        let result =
+            expansion_view_command_result(EXPANSION_METHOD_PROGRAM, &uri, Position { line, character })
+                .expect("a generated call site yields a virtual view payload");
         let obj = result.as_object().expect("view payload is a JSON object");
         let view_uri = obj.get("uri").and_then(|v| v.as_str()).unwrap_or_default();
         assert!(
@@ -3342,13 +3340,7 @@ let a = p.answer()
         let uri = expansion_command_uri(&args).expect("uri parses from arg[0]");
         assert_eq!(uri.as_str(), "file:///test.shape");
         let pos = expansion_command_position(&args).expect("position parses from arg[1..3]");
-        assert_eq!(
-            pos,
-            Position {
-                line: 3,
-                character: 7
-            }
-        );
+        assert_eq!(pos, Position { line: 3, character: 7 });
 
         // Missing position args → None (list command shape, not show command).
         assert!(expansion_command_position(&args[..1]).is_none());

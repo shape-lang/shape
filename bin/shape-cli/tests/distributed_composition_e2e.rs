@@ -89,10 +89,7 @@ print(f"{marker}={{remote_language_tls_snapshot({input})}}")
     let hash = value.strip_prefix("HASH:").unwrap_or_else(|| {
         panic!("TLS remote {language} snapshot should save hash, got {value:?}")
     });
-    assert_hexish(
-        hash,
-        &format!("TLS remote {language} receiver snapshot hash"),
-    );
+    assert_hexish(hash, &format!("TLS remote {language} receiver snapshot hash"));
 
     let mut info = shape_cmd();
     info.arg("--snapshot-store")
