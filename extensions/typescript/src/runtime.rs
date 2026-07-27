@@ -42,6 +42,10 @@ pub struct TsRuntime {
     /// invocation and reused for all subsequent calls, avoiding the overhead
     /// of building a new runtime per call.
     tokio_runtime: Option<tokio::runtime::Runtime>,
+    /// The `.d.ts` document generated from the contract most recently delivered
+    /// through `register_types` (ADR-019 §1 / #196). Empty until the host
+    /// delivers one.
+    stub_document: String,
 }
 
 impl TsRuntime {
@@ -60,18 +64,36 @@ impl TsRuntime {
             functions: HashMap::new(),
             next_id: 1,
             tokio_runtime: None,
+            stub_document: String::new(),
         })
     }
 
-    /// Register Shape type schemas for TypeScript declaration generation.
+    /// Accept the declared Shape contract and generate the `.d.ts` stub for it.
     ///
-    /// The runtime receives the full set of Shape types so it can generate
-    /// TypeScript interface declarations that the user's code can reference.
-    pub fn register_types(&mut self, _types_msgpack: &[u8]) -> Result<(), String> {
-        // Stub: the real implementation will deserialize TypeSchemaExport[]
-        // and generate TypeScript interface declarations injected into the
-        // runtime's global scope.
+    /// ADR-019 §1 / R25 (POLY-STUB-CHANNEL, issue #196). The payload is a
+    /// `ForeignContractExport`: functions and named object types already
+    /// classified against the marshaling table, so this side never parses a
+    /// Shape type spelling.
+    ///
+    /// A payload from a host speaking a newer contract version is refused
+    /// rather than guessed at — a misread contract yields a confidently wrong
+    /// stub, which is worse than none.
+    pub fn register_types(&mut self, types_msgpack: &[u8]) -> Result<(), String> {
+        if types_msgpack.is_empty() {
+            self.stub_document.clear();
+            return Ok(());
+        }
+        let contract: shape_abi_v1::foreign_types::ForeignContractExport =
+            rmp_serde::from_slice(types_msgpack)
+                .map_err(|e| format!("register_types: undecodable contract payload: {e}"))?;
+        contract.check_version()?;
+        self.stub_document = crate::stubs::render_stub(&contract);
         Ok(())
+    }
+
+    /// The `.d.ts` document generated from the last delivered contract.
+    pub fn stub_document(&self) -> &str {
+        &self.stub_document
     }
 
     /// Compile a foreign function body into a callable JavaScript function.
@@ -365,6 +387,32 @@ pub unsafe extern "C" fn ts_register_types(
         Ok(()) => PluginError::Success as i32,
         Err(_) => PluginError::InternalError as i32,
     }
+}
+
+/// Return the `.d.ts` generated from the contract last delivered through
+/// `ts_register_types` (ADR-019 §1 / #196). Caller frees via `free_buffer`.
+pub unsafe extern "C" fn ts_generate_stubs(
+    instance: *mut c_void,
+    out_ptr: *mut *mut u8,
+    out_len: *mut usize,
+) -> i32 {
+    if instance.is_null() {
+        return PluginError::NotInitialized as i32;
+    }
+    if out_ptr.is_null() || out_len.is_null() {
+        return PluginError::InvalidArgument as i32;
+    }
+    let runtime = unsafe { &*(instance as *const TsRuntime) };
+    let mut bytes = runtime.stub_document().as_bytes().to_vec();
+    bytes.shrink_to_fit();
+    let len = bytes.len();
+    let ptr = bytes.as_mut_ptr();
+    std::mem::forget(bytes);
+    unsafe {
+        *out_ptr = ptr;
+        *out_len = len;
+    }
+    PluginError::Success as i32
 }
 
 pub unsafe extern "C" fn ts_compile(

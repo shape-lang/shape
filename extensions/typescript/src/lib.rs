@@ -13,6 +13,7 @@
 pub mod error_mapping;
 pub mod marshaling;
 pub mod runtime;
+pub mod stubs;
 
 /// Bundled `.shape` module artifact for the `typescript` namespace.
 ///
@@ -52,6 +53,7 @@ shape_abi_v1::language_runtime_plugin! {
         dispose_function: runtime::ts_dispose_function,
         language_id: runtime::ts_language_id,
         get_lsp_config: runtime::ts_get_lsp_config,
+        generate_stubs: runtime::ts_generate_stubs,
         free_buffer: runtime::ts_free_buffer,
         drop: runtime::ts_drop,
     }

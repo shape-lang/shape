@@ -62,6 +62,8 @@ impl VirtualMachine {
             task_scheduler: task_scheduler::TaskScheduler::new(),
             foreign_fn_handles: Vec::new(),
             language_runtimes: HashMap::new(),
+            registered_foreign_contracts: std::collections::HashSet::new(),
+            foreign_stub_documents: HashMap::new(),
             native_library_cache: HashMap::new(),
             native_resolutions: None,
             native_root_package_key: None,
@@ -147,15 +149,25 @@ impl VirtualMachine {
         self.language_runtimes = runtimes;
     }
 
+    /// The interface stub document (`.pyi`, `.d.ts`) an extension generated for
+    /// this program's declared contract in `language`.
+    ///
+    /// ADR-019 §1 / #196. Populated on the first foreign link for that language
+    /// — the stub describes the whole program's contract, not one function, so
+    /// one link is enough to produce all of it.
+    pub fn foreign_stub_document(&self, language: &str) -> Option<&str> {
+        self.foreign_stub_documents
+            .get(language)
+            .map(|s| s.as_str())
+    }
+
     /// Install the resolved package-scoped `[native-dependencies]` map
     /// (ffi-rebuild §4.11 / WF-2A). Threaded from the `BytecodeExecutor`'s
     /// `native_resolution_context` so the link-now path can map an `extern C`
     /// declaration's `[native-dependencies]` alias to its real `dlopen` target.
     pub fn set_native_resolutions(
         &mut self,
-        resolutions: Option<
-            Arc<shape_runtime::native_resolution::NativeResolutionSet>,
-        >,
+        resolutions: Option<Arc<shape_runtime::native_resolution::NativeResolutionSet>>,
         root_package_key: Option<String>,
     ) {
         self.native_resolutions = resolutions;

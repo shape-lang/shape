@@ -35,6 +35,10 @@ pub struct PythonRuntime {
     functions: HashMap<usize, CompiledFunction>,
     /// Next handle ID.
     next_id: usize,
+    /// The `.pyi` document generated from the contract most recently delivered
+    /// through `register_types` (ADR-019 §1 / #196). Empty until the host
+    /// delivers one.
+    stub_document: String,
 }
 
 impl PythonRuntime {
@@ -55,6 +59,7 @@ impl PythonRuntime {
         Ok(PythonRuntime {
             functions: HashMap::new(),
             next_id: 1,
+            stub_document: String::new(),
         })
     }
 
@@ -140,15 +145,32 @@ impl PythonRuntime {
         });
     }
 
-    /// Register Shape type schemas for Python stub generation.
+    /// Accept the declared Shape contract and generate the `.pyi` stub for it.
     ///
-    /// The runtime receives the full set of Shape types so it can generate
-    /// Python dataclass stubs that the user's code can reference.
-    pub fn register_types(&mut self, _types_msgpack: &[u8]) -> Result<(), String> {
-        // Stub: the real implementation will deserialize TypeSchemaExport[]
-        // and generate Python dataclass definitions injected into the
-        // interpreter's namespace.
+    /// ADR-019 §1 / R25 (POLY-STUB-CHANNEL, issue #196). The payload is a
+    /// `ForeignContractExport`: functions and named object types already
+    /// classified against the marshaling table, so this side never parses a
+    /// Shape type spelling.
+    ///
+    /// A payload from a host speaking a newer contract version is refused
+    /// rather than guessed at — a misread contract yields a confidently wrong
+    /// stub, which is worse than none.
+    pub fn register_types(&mut self, types_msgpack: &[u8]) -> Result<(), String> {
+        if types_msgpack.is_empty() {
+            self.stub_document.clear();
+            return Ok(());
+        }
+        let contract: shape_abi_v1::foreign_types::ForeignContractExport =
+            rmp_serde::from_slice(types_msgpack)
+                .map_err(|e| format!("register_types: undecodable contract payload: {e}"))?;
+        contract.check_version()?;
+        self.stub_document = crate::stubs::render_stub(&contract);
         Ok(())
+    }
+
+    /// The `.pyi` document generated from the last delivered contract.
+    pub fn stub_document(&self) -> &str {
+        &self.stub_document
     }
 
     /// Compile a foreign function body into a callable Python function.
@@ -377,6 +399,32 @@ pub unsafe extern "C" fn python_register_types(
         Ok(()) => PluginError::Success as i32,
         Err(_) => PluginError::InternalError as i32,
     }
+}
+
+/// Return the `.pyi` generated from the contract last delivered through
+/// `python_register_types` (ADR-019 §1 / #196). Caller frees via `free_buffer`.
+pub unsafe extern "C" fn python_generate_stubs(
+    instance: *mut c_void,
+    out_ptr: *mut *mut u8,
+    out_len: *mut usize,
+) -> i32 {
+    if instance.is_null() {
+        return PluginError::NotInitialized as i32;
+    }
+    if out_ptr.is_null() || out_len.is_null() {
+        return PluginError::InvalidArgument as i32;
+    }
+    let runtime = unsafe { &*(instance as *const PythonRuntime) };
+    let mut bytes = runtime.stub_document().as_bytes().to_vec();
+    bytes.shrink_to_fit();
+    let len = bytes.len();
+    let ptr = bytes.as_mut_ptr();
+    std::mem::forget(bytes);
+    unsafe {
+        *out_ptr = ptr;
+        *out_len = len;
+    }
+    PluginError::Success as i32
 }
 
 pub unsafe extern "C" fn python_compile(

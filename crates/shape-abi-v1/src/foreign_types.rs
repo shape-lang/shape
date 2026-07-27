@@ -322,7 +322,9 @@ impl ForeignType {
             ForeignType::Scalar(s) => s.shape_spelling().to_string(),
             ForeignType::Array(s) => alloc_format(&["Array<", s.shape_spelling(), ">"]),
             ForeignType::Map(s) => alloc_format(&["HashMap<string, ", s.shape_spelling(), ">"]),
-            ForeignType::Optional(inner) => alloc_format(&["Option<", &inner.shape_spelling(), ">"]),
+            ForeignType::Optional(inner) => {
+                alloc_format(&["Option<", &inner.shape_spelling(), ">"])
+            }
             ForeignType::Object { name, fields } => match name {
                 Some(n) => n.clone(),
                 None => match fields {
@@ -454,11 +456,7 @@ fn classify_inner(
             "HashMap" | "Map" => match args.len() {
                 2 => {
                     if scalar_from_spelling(args[0].trim()) != Some(ForeignScalar::String) {
-                        return unmapped(
-                            args[0].trim(),
-                            declared,
-                            UnmappedReason::NonStringMapKey,
-                        );
+                        return unmapped(args[0].trim(), declared, UnmappedReason::NonStringMapKey);
                     }
                     let value = match scalar_from_spelling(args[1].trim()) {
                         Some(v) if v != ForeignScalar::Unit => v,
@@ -513,8 +511,11 @@ fn classify_inner(
 
     // A plain name: a user `type` declaration. It crosses as an object; whether
     // the name resolves at all is ordinary type resolution's job, not ours.
-    if s.chars().next().is_some_and(|c| c.is_alphabetic() || c == '_')
-        && s.chars().all(|c| c.is_alphanumeric() || c == '_' || c == ':')
+    if s.chars()
+        .next()
+        .is_some_and(|c| c.is_alphabetic() || c == '_')
+        && s.chars()
+            .all(|c| c.is_alphanumeric() || c == '_' || c == ':')
     {
         return Ok(ForeignType::Object {
             name: Some(s.to_string()),
@@ -624,6 +625,89 @@ fn split_field(chunk: &str) -> Option<(&str, &str)> {
         }
     }
     None
+}
+
+// ============================================================================
+// The stub channel payload
+// ============================================================================
+
+/// Wire version of [`ForeignContractExport`].
+///
+/// Bumped when the payload shape changes. An extension that reads a version it
+/// does not know must refuse rather than guess — a misread contract produces a
+/// wrong stub, which is worse than no stub.
+pub const FOREIGN_CONTRACT_VERSION: u32 = 1;
+
+/// One declared parameter of a foreign function.
+#[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+pub struct ForeignParamContract {
+    /// Parameter name, as the foreign body binds it.
+    pub name: String,
+    /// The parameter's classified type.
+    pub ty: ForeignType,
+}
+
+/// One declared foreign function, classified for stub rendering.
+#[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+pub struct ForeignFunctionContract {
+    /// Function name as declared in Shape.
+    pub name: String,
+    /// Parameters in call order.
+    pub params: Vec<ForeignParamContract>,
+    /// The return type, with the runtime's `Result<T>` wrapper already
+    /// stripped — the foreign body returns `T`, and failure is the runtime's
+    /// own exception channel.
+    pub returns: ForeignType,
+}
+
+/// The declared Shape contract for one language, delivered to an extension
+/// through `LanguageRuntimeVTable::register_types`.
+///
+/// ADR-019 §1 / R25 (POLY-STUB-CHANNEL, issue #196). Everything the extension
+/// needs to render a `.pyi` / `.d.ts` is here in classified form: the extension
+/// never parses a Shape type spelling, and the host never renders a foreign
+/// one.
+#[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+pub struct ForeignContractExport {
+    /// [`FOREIGN_CONTRACT_VERSION`] at the time of writing.
+    pub version: u32,
+    /// The language this contract is for (`"python"`, `"typescript"`, …).
+    pub language: String,
+    /// Every foreign function declared for this language in the program.
+    pub functions: Vec<ForeignFunctionContract>,
+    /// Named object types referenced by the functions above, in declaration
+    /// order, so a renderer can emit each class once before it is used.
+    pub types: Vec<ForeignType>,
+}
+
+impl ForeignContractExport {
+    /// A contract for `language` at the current wire version.
+    pub fn new(language: impl Into<String>) -> Self {
+        ForeignContractExport {
+            version: FOREIGN_CONTRACT_VERSION,
+            language: language.into(),
+            functions: Vec::new(),
+            types: Vec::new(),
+        }
+    }
+
+    /// Refuse a payload written by a host the extension does not understand.
+    pub fn check_version(&self) -> Result<(), String> {
+        if self.version == FOREIGN_CONTRACT_VERSION {
+            Ok(())
+        } else {
+            Err(alloc_format(&[
+                "foreign contract version ",
+                &self.version.to_string(),
+                " is not supported (this extension speaks version ",
+                &FOREIGN_CONTRACT_VERSION.to_string(),
+                ")",
+            ]))
+        }
+    }
 }
 
 /// The marshaling table: one representative [`ForeignType`] per constructor,

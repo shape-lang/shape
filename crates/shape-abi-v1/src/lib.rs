@@ -884,10 +884,32 @@ pub struct LanguageRuntimeVTable {
     /// runtimes it generates.
     pub state_model: u32,
 
+    /// Return the interface stub document generated from the contract most
+    /// recently delivered through [`Self::register_types`] — a `.pyi` for
+    /// Python, a `.d.ts` for TypeScript.
+    ///
+    /// ADR-019 §1 / R25 (POLY-STUB-CHANNEL, issue #196). `register_types` alone
+    /// has no return channel, so the stubs it exists to produce could never
+    /// reach the host; this is the other half of that channel. The buffer is
+    /// UTF-8 stub source, freed by the caller via `free_buffer`. Returns 0 on
+    /// success.
+    ///
+    /// Landed in the designated additive tail: it occupies the former
+    /// `reserved0` slot, so the struct layout — and therefore
+    /// [`abi_build_fingerprint`] — is unchanged, and an extension built before
+    /// this capability existed stamps `None` here and is read as "no stub
+    /// channel" rather than mis-dispatched.
+    pub generate_stubs: Option<
+        unsafe extern "C" fn(
+            instance: *mut c_void,
+            out_ptr: *mut *mut u8,
+            out_len: *mut usize,
+        ) -> i32,
+    >,
+
     /// Reserved fn-pointer tail padding (null in v4). Lets additive vtable
     /// functions land later (e.g. the ffi-rebuild §7 `request_cancel` hook)
     /// without another ABI bump. Must be `None` when constructed by the macro.
-    pub reserved0: Option<unsafe extern "C" fn()>,
     pub reserved1: Option<unsafe extern "C" fn()>,
     pub reserved2: Option<unsafe extern "C" fn()>,
     pub reserved3: Option<unsafe extern "C" fn()>,
@@ -1628,8 +1650,14 @@ pub const fn abi_build_fingerprint() -> u64 {
         h,
         core::mem::offset_of!(LanguageRuntimeVTable, register_types) as u64,
     );
-    h = abi_fingerprint_mix(h, core::mem::offset_of!(LanguageRuntimeVTable, compile) as u64);
-    h = abi_fingerprint_mix(h, core::mem::offset_of!(LanguageRuntimeVTable, invoke) as u64);
+    h = abi_fingerprint_mix(
+        h,
+        core::mem::offset_of!(LanguageRuntimeVTable, compile) as u64,
+    );
+    h = abi_fingerprint_mix(
+        h,
+        core::mem::offset_of!(LanguageRuntimeVTable, invoke) as u64,
+    );
     h = abi_fingerprint_mix(
         h,
         core::mem::offset_of!(LanguageRuntimeVTable, dispose_function) as u64,
@@ -1663,9 +1691,13 @@ pub const fn abi_build_fingerprint() -> u64 {
         h,
         core::mem::offset_of!(LanguageRuntimeVTable, state_model) as u64,
     );
+    // Formerly `reserved0`; assigned to `generate_stubs` by ADR-019 §1 (#196).
+    // The offset — and therefore this fingerprint — is unchanged, which is the
+    // point of the reserved tail: a pre-#196 extension leaves the slot `None`
+    // and the host reads "no stub channel" instead of mis-dispatching.
     h = abi_fingerprint_mix(
         h,
-        core::mem::offset_of!(LanguageRuntimeVTable, reserved0) as u64,
+        core::mem::offset_of!(LanguageRuntimeVTable, generate_stubs) as u64,
     );
     h = abi_fingerprint_mix(
         h,
@@ -1738,6 +1770,7 @@ macro_rules! language_runtime_plugin {
             dispose_function: $dispose_function:expr,
             language_id: $language_id:expr,
             get_lsp_config: $get_lsp_config:expr,
+            generate_stubs: $generate_stubs:expr,
             free_buffer: $free_buffer:expr,
             drop: $drop_fn:expr $(,)?
         } $(,)?
@@ -1755,6 +1788,7 @@ macro_rules! language_runtime_plugin {
                 dispose_function: $dispose_function,
                 language_id: $language_id,
                 get_lsp_config: $get_lsp_config,
+                generate_stubs: $generate_stubs,
                 free_buffer: $free_buffer,
                 drop: $drop_fn,
             }
@@ -1774,6 +1808,7 @@ macro_rules! language_runtime_plugin {
             dispose_function: $dispose_function:expr,
             language_id: $language_id:expr,
             get_lsp_config: $get_lsp_config:expr,
+            generate_stubs: $generate_stubs:expr,
             free_buffer: $free_buffer:expr,
             drop: $drop_fn:expr $(,)?
         } $(,)?
@@ -1791,6 +1826,7 @@ macro_rules! language_runtime_plugin {
                 dispose_function: $dispose_function,
                 language_id: $language_id,
                 get_lsp_config: $get_lsp_config,
+                generate_stubs: $generate_stubs,
                 free_buffer: $free_buffer,
                 drop: $drop_fn,
             }
@@ -1811,6 +1847,7 @@ macro_rules! language_runtime_plugin {
             dispose_function: $dispose_function:expr,
             language_id: $language_id:expr,
             get_lsp_config: $get_lsp_config:expr,
+            generate_stubs: $generate_stubs:expr,
             free_buffer: $free_buffer:expr,
             drop: $drop_fn:expr $(,)?
         } $(,)?
@@ -1919,6 +1956,19 @@ macro_rules! language_runtime_plugin {
         ) -> i32 {
             match ::std::panic::catch_unwind(::std::panic::AssertUnwindSafe(|| unsafe {
                 $register_types(instance, types, types_len)
+            })) {
+                Ok(v) => v,
+                Err(_) => 1,
+            }
+        }
+
+        unsafe extern "C" fn __shape_pc_generate_stubs(
+            instance: *mut ::std::ffi::c_void,
+            out_ptr: *mut *mut u8,
+            out_len: *mut usize,
+        ) -> i32 {
+            match ::std::panic::catch_unwind(::std::panic::AssertUnwindSafe(|| unsafe {
+                $generate_stubs(instance, out_ptr, out_len)
             })) {
                 Ok(v) => v,
                 Err(_) => 1,
@@ -2048,7 +2098,9 @@ macro_rules! language_runtime_plugin {
                 // null for future additive vtable functions.
                 runtime_descriptor: None,
                 state_model: $crate::STATE_MODEL_STATEFUL_OPAQUE,
-                reserved0: None,
+                // ADR-019 §1 (#196): the stub channel's return half, landed in
+                // the former `reserved0` slot — same layout, same fingerprint.
+                generate_stubs: Some(__shape_pc_generate_stubs),
                 reserved1: None,
                 reserved2: None,
                 reserved3: None,

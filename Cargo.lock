@@ -5370,6 +5370,7 @@ dependencies = [
  "rust_decimal",
  "serde",
  "serde_json",
+ "shape-abi-v1",
  "thiserror 1.0.69",
 ]
 

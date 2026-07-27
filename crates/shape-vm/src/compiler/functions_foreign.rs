@@ -1214,8 +1214,7 @@ mod ffi_permission_tests {
     fn deterministic_context_refuses_foreign_program_at_load() {
         // §4.8.3 (Q6): a Deterministic execution context refuses a foreign-
         // bearing program at LOAD time — even when Ffi itself is granted.
-        let bytecode =
-            compile(r#"fn python add(a: int, b: int) -> Result<int> { return a + b }"#);
+        let bytecode = compile(r#"fn python add(a: int, b: int) -> Result<int> { return a + b }"#);
         let ca = bytecode
             .content_addressed
             .clone()
@@ -1236,8 +1235,7 @@ mod ffi_permission_tests {
 
     #[test]
     fn foreign_program_loads_when_ffi_granted_without_determinism() {
-        let bytecode =
-            compile(r#"fn python add(a: int, b: int) -> Result<int> { return a + b }"#);
+        let bytecode = compile(r#"fn python add(a: int, b: int) -> Result<int> { return a + b }"#);
         let ca = bytecode.content_addressed.clone().expect("ca");
         let granted = shape_abi_v1::PermissionSet::from([shape_abi_v1::Permission::Ffi]);
         let mut vm = VirtualMachine::new(VMConfig::default());
@@ -1247,8 +1245,7 @@ mod ffi_permission_tests {
 
     #[test]
     fn foreign_program_refused_at_load_without_ffi_grant() {
-        let bytecode =
-            compile(r#"fn python add(a: int, b: int) -> Result<int> { return a + b }"#);
+        let bytecode = compile(r#"fn python add(a: int, b: int) -> Result<int> { return a + b }"#);
         let ca = bytecode.content_addressed.clone().expect("ca");
         // readonly does not include Ffi (shape-abi-v1 preset invariant).
         let granted = shape_abi_v1::PermissionSet::readonly();
@@ -1369,8 +1366,7 @@ mod ffi_permission_tests {
     // ----------------------------------------------------------------------
 
     fn python_vm() -> (VirtualMachine, ()) {
-        let bytecode =
-            compile(r#"fn python padd(a: int, b: int) -> Result<int> { return a + b }"#);
+        let bytecode = compile(r#"fn python padd(a: int, b: int) -> Result<int> { return a + b }"#);
         let mut vm = VirtualMachine::new(VMConfig::default());
         vm.load_program(bytecode);
         vm.foreign_fn_handles = vec![None];
@@ -1619,9 +1615,7 @@ mod foreign_target_annotation_rejection_tests {
     use crate::compiler::BytecodeCompiler;
     use shape_ast::error::ShapeError;
 
-    fn compile_err_with_location(
-        src: &str,
-    ) -> (String, Option<shape_ast::error::SourceLocation>) {
+    fn compile_err_with_location(src: &str) -> (String, Option<shape_ast::error::SourceLocation>) {
         let program = shape_ast::parser::parse_program(src).expect("parse failed");
         let mut compiler = BytecodeCompiler::new();
         // The weave.rs/install_registry.rs span-asserting harness shape:
@@ -2625,7 +2619,10 @@ fn python counts(m: HashMap<string, int>) -> Result<int> {
 "#,
         );
         assert!(
-            bytecode.foreign_functions.iter().any(|e| e.name == "counts"),
+            bytecode
+                .foreign_functions
+                .iter()
+                .any(|e| e.name == "counts"),
             "a map parameter must still compile"
         );
 
@@ -2668,13 +2665,7 @@ fn python unit_return(a: int) -> Result<none> {
 }
 "#,
         );
-        for name in [
-            "scalars",
-            "arrays",
-            "optionals",
-            "objects",
-            "unit_return",
-        ] {
+        for name in ["scalars", "arrays", "optionals", "objects", "unit_return"] {
             assert!(
                 bytecode.foreign_functions.iter().any(|e| e.name == name),
                 "mapped declaration `{name}` must still compile"

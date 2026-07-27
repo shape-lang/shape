@@ -187,8 +187,7 @@ fn typed_array_to_msgpack(bits: u64, declared: &str) -> Result<Rmp, VMError> {
         }
         ForeignScalar::Unit => {
             return Err(VMError::NotImplemented(
-                "foreign_marshal: `Array<none>` has no element projection."
-                    .to_string(),
+                "foreign_marshal: `Array<none>` has no element projection.".to_string(),
             ));
         }
     }
@@ -624,7 +623,9 @@ fn foreign_type_to_kinded_slot(
             ))),
         },
 
-        _ if matches!(val, Rmp::Nil) => Err(marshal_error(format!("expected {}, got None", target))),
+        _ if matches!(val, Rmp::Nil) => {
+            Err(marshal_error(format!("expected {}, got None", target)))
+        }
 
         ForeignType::Scalar(ForeignScalar::Int) => match val {
             Rmp::Integer(i) => Ok(KindedSlot::from_int(
@@ -712,7 +713,6 @@ fn foreign_type_to_kinded_slot(
         },
     }
 }
-
 
 /// Construct a `KindedSlot` carrying a `HeapValue::TypedObject` from a
 /// msgpack `Map` using a registered schema.
@@ -991,9 +991,7 @@ fn build_scalar_typed_array(items: &[Rmp], elem: &str) -> Result<KindedSlot, VME
             for (i, it) in items.iter().enumerate() {
                 match it {
                     Rmp::String(s) => {
-                        let s = s
-                            .as_str()
-                            .ok_or_else(|| array_elem_err(i, "string", it))?;
+                        let s = s.as_str().ok_or_else(|| array_elem_err(i, "string", it))?;
                         ptrs.push(StringObj::new(s) as *const StringObj);
                     }
                     _ => return Err(array_elem_err(i, "string", it)),
@@ -1256,9 +1254,16 @@ mod tests {
     fn wrap_dynamic_result_exception_is_plain_err() {
         let (schemas, builtin) = schemas_with_builtins();
         let outcome = Err("ValueError: boom".to_string());
-        let slot =
-            wrap_dynamic_result(outcome, "f", "python", "Result<int>", None, &schemas, &builtin)
-                .unwrap();
+        let slot = wrap_dynamic_result(
+            outcome,
+            "f",
+            "python",
+            "Result<int>",
+            None,
+            &schemas,
+            &builtin,
+        )
+        .unwrap();
         // Result::Err carrier — a TypedObject.
         assert_eq!(slot.kind(), NativeKind::Ptr(HeapKind::TypedObject));
         drop(slot);
@@ -1285,10 +1290,7 @@ mod tests {
         assert!(!carrier.is_ok());
         let payload = carrier.clone_payload().unwrap();
         let msg = payload.as_str().unwrap();
-        assert!(
-            msg.starts_with("TypeConformanceError: "),
-            "got: {msg}"
-        );
+        assert!(msg.starts_with("TypeConformanceError: "), "got: {msg}");
         assert!(msg.contains("int"));
         drop(payload);
         drop(slot);
@@ -1405,7 +1407,10 @@ mod tests {
         match err {
             VMError::NotImplemented(msg) => {
                 assert!(msg.contains("DataTable"), "message names the type: {msg}");
-                assert!(msg.contains("C0933"), "message cites the declaration check: {msg}");
+                assert!(
+                    msg.contains("C0933"),
+                    "message cites the declaration check: {msg}"
+                );
             }
             other => panic!("expected NotImplemented, got {other:?}"),
         }
