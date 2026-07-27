@@ -219,6 +219,55 @@ pub fn startup_adjusted_ratio(
     (reference_kernel > 0.0 && shape_kernel > 0.0).then_some(reference_kernel / shape_kernel)
 }
 
+pub struct RatioInputs {
+    pub comparison_rendered: bool,
+    pub reference_ms: Option<f64>,
+    pub reference_floor_ms: f64,
+    pub shape_ms: f64,
+    pub shape_floor_ms: f64,
+    pub is_startup: bool,
+}
+
+#[derive(Debug, Default, PartialEq)]
+pub struct Ratios {
+    pub process: Option<f64>,
+    pub startup_adjusted: Option<f64>,
+    pub confidence: Option<String>,
+}
+
+/// Every derived comparison number in one place, so that "refuses to render a
+/// comparison" means no ratio appears anywhere — not merely that the bar is
+/// left unjudged while the ratio is printed next to it. Raw timings are
+/// unaffected: refusing to compare is not refusing to measure.
+pub fn compute_ratios(input: &RatioInputs) -> Ratios {
+    if !input.comparison_rendered {
+        return Ratios::default();
+    }
+    let Some(reference_ms) = input.reference_ms else {
+        return Ratios::default();
+    };
+    let mut out = Ratios {
+        process: ratio(reference_ms, input.shape_ms),
+        ..Ratios::default()
+    };
+    if !input.is_startup {
+        out.startup_adjusted = startup_adjusted_ratio(
+            reference_ms,
+            input.reference_floor_ms,
+            input.shape_ms,
+            input.shape_floor_ms,
+        );
+        if reference_ms - input.reference_floor_ms < 50.0 {
+            out.confidence = Some(
+                "low: the reference kernel time left after subtracting its startup floor is \
+                 under 50ms, so this adjusted ratio should not be read precisely"
+                    .to_string(),
+            );
+        }
+    }
+    out
+}
+
 /// Canonicalise program output so that `3` and `3.0` compare equal while a
 /// genuinely different result still shows up as a mismatch. Numeric tokens are
 /// re-rendered at 9 significant digits; everything else is compared verbatim.
@@ -562,6 +611,54 @@ mod tests {
     #[test]
     fn startup_adjustment_declines_when_a_kernel_does_not_survive_it() {
         assert_eq!(startup_adjusted_ratio(20.0, 25.0, 4000.0, 200.0), None);
+    }
+
+    fn ratio_inputs(rendered: bool) -> RatioInputs {
+        RatioInputs {
+            comparison_rendered: rendered,
+            reference_ms: Some(100.0),
+            reference_floor_ms: 25.0,
+            shape_ms: 4000.0,
+            shape_floor_ms: 200.0,
+            is_startup: false,
+        }
+    }
+
+    /// Tripwire 2 taken literally: a refused comparison renders no ratio at
+    /// all, not a ratio next to an unjudged bar.
+    #[test]
+    fn a_refused_comparison_withholds_every_ratio() {
+        assert_eq!(compute_ratios(&ratio_inputs(false)), Ratios::default());
+    }
+
+    #[test]
+    fn a_rendered_comparison_produces_both_ratios() {
+        let ratios = compute_ratios(&ratio_inputs(true));
+        assert!(ratios.process.is_some());
+        assert!(ratios.startup_adjusted.is_some());
+    }
+
+    #[test]
+    fn a_missing_reference_withholds_every_ratio() {
+        let mut input = ratio_inputs(true);
+        input.reference_ms = None;
+        assert_eq!(compute_ratios(&input), Ratios::default());
+    }
+
+    #[test]
+    fn the_startup_workload_gets_no_startup_adjustment() {
+        let mut input = ratio_inputs(true);
+        input.is_startup = true;
+        let ratios = compute_ratios(&input);
+        assert!(ratios.process.is_some());
+        assert_eq!(ratios.startup_adjusted, None);
+    }
+
+    #[test]
+    fn a_tiny_reference_kernel_is_marked_low_confidence() {
+        let mut input = ratio_inputs(true);
+        input.reference_ms = Some(40.0);
+        assert!(compute_ratios(&input).confidence.is_some());
     }
 
     #[test]

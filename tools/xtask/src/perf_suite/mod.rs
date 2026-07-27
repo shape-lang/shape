@@ -130,6 +130,18 @@ impl Manifest {
                 );
             }
         }
+        // The stored identity is a convenience for readers; the fields are the
+        // authority. A disagreement means the identity was hand-edited, and a
+        // hand-edited identity is exactly how a refusal gets silenced.
+        let derived = manifest.environment.environment.identity();
+        if manifest.environment.identity != derived {
+            bail!(
+                "the manifest's pinned environment identity ({}) is not the hash of the fields \
+                 it pins ({derived}); re-record it with `perf-suite record-environment` rather \
+                 than editing it by hand",
+                manifest.environment.identity
+            );
+        }
         Ok(manifest)
     }
 
@@ -346,8 +358,14 @@ pub fn run_suite(repo_root: &Path, opts: &RunOptions) -> Result<Report> {
         },
         None => ReferenceState::Unavailable {
             runtime: manifest.reference.runtime.clone(),
-            reason: "no `node` binary was found on PATH and none was supplied with --node"
-                .to_string(),
+            reason: match opts.node.as_deref() {
+                Some(path) => format!(
+                    "the reference runtime supplied with --node ({}) does not exist",
+                    path.display()
+                ),
+                None => "no `node` binary was found on PATH and none was supplied with --node"
+                    .to_string(),
+            },
         },
     };
 
@@ -426,25 +444,17 @@ pub fn run_suite(repo_root: &Path, opts: &RunOptions) -> Result<Report> {
             .as_ref()
             .map(|r| primary(&r.timing, &statistic));
 
-        if let Some(reference_ms) = reference_ms {
-            result.ratio_process = report::ratio(reference_ms, shape_ms);
-            if result.category != "startup" {
-                result.ratio_startup_adjusted = report::startup_adjusted_ratio(
-                    reference_ms,
-                    reference_floor,
-                    shape_ms,
-                    shape_floor,
-                );
-                if reference_ms - reference_floor < 50.0 {
-                    result.adjusted_ratio_confidence = Some(
-                        "low: the reference kernel time left after subtracting its startup \
-                         floor is under 50ms, so this adjusted ratio should not be read \
-                         precisely"
-                            .to_string(),
-                    );
-                }
-            }
-        }
+        let ratios = report::compute_ratios(&report::RatioInputs {
+            comparison_rendered: comparison.rendered(),
+            reference_ms,
+            reference_floor_ms: reference_floor,
+            shape_ms,
+            shape_floor_ms: shape_floor,
+            is_startup: result.category == "startup",
+        });
+        result.ratio_process = ratios.process;
+        result.ratio_startup_adjusted = ratios.startup_adjusted;
+        result.adjusted_ratio_confidence = ratios.confidence;
 
         let category = &manifest.categories[&result.category];
         result.bar = evaluate_bar(&BarInputs {
