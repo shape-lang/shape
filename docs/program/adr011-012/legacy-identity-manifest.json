@@ -1,0 +1,1392 @@
+{
+  "record_kind": "LegacyIdentityManifest",
+  "record_version": 1,
+  "program_id": "adr011-012",
+  "ticket": 136,
+  "entry_id": "MIGRATION-GUARD",
+  "manifest_ordinal": 26,
+  "step": "docs/design/typed-comptime/adr011-012-execution-rulings.md — ten required steps, step 5",
+  "authority": {
+    "adrs": [
+      "ADR-011",
+      "ADR-012",
+      "ADR-013"
+    ],
+    "rulings": [
+      "R14",
+      "R20"
+    ]
+  },
+  "source_revision": "11d9c546c811f0bb2e7522635ba05e6ddc4e2cb0",
+  "regenerate_with": "node scripts/generate-adr011-012-legacy-identity-manifest.mjs",
+  "check_with": "node scripts/check-adr011-012-legacy-identity-manifest.mjs",
+  "key_scheme": {
+    "identity_key": "BuiltinFunction::<Variant>",
+    "rationale": "Names the behavior, not the spelling: it lives in the compiler's own namespace, is unreachable from Shape source, survives any rename of a surface name, and collapses multi-spelling arms to one entry. A same-spelled user declaration cannot collide with it.",
+    "stand_in_for": "the ADR-011 §1 resolved definition identity issued by the semantic database",
+    "stand_in_because": "No semantic database exists at this revision: IntrinsicId, IntrinsicCatalog, DefinitionId and SemanticIdentity are absent from crates/, bin/, tools/ and extensions/. #92 introduces the catalog seam; #177 freezes the catalog program.",
+    "forward_mapping": "Each entry is exactly one behavior, so it maps to exactly one catalog identity when #92 lands. The mapping refines; it never merges two entries or splits one across a spelling boundary.",
+    "not_spelling_keyed_evidence": "149 live spellings collapse to 131 identities; six behaviors are reachable through both a surface and an internal spelling at once."
+  },
+  "default_rule": {
+    "statement": "An identity absent from this manifest receives NO legacy privilege and resolves through the ordinary typed pipeline. It is never 'legacy unless opted in.'",
+    "how_enforced_today": "Structurally, by the classifier itself: a name matching no arm hits `_ => return None` and gains no builtin privilege. Mechanically, by check-adr011-012-legacy-identity-manifest.mjs, which fails the build when a NEW privileged identity or spelling appears without a manifest entry.",
+    "not_claimed": "This manifest is not consulted by the compiler at run time, and must not become a JSON-driven resolution table — that would be the adapter R14 forbids. It is an enumeration plus a guard; the catalog seam (#92) is the routing change."
+  },
+  "counts": {
+    "identities": 131,
+    "classifier_arms": 137,
+    "live_spellings": 149,
+    "identities_reachable_both_internally_and_from_surface": 7,
+    "mechanisms": 4,
+    "mechanisms_with_open_population": 1
+  },
+  "open_population_finding": {
+    "summary": "R14's finiteness requirement is NOT satisfiable today for the module-builtin export route, and no amount of enumeration here can fix it.",
+    "detail": "`resolve_scoped_module_builtin_function` (crates/shape-vm/src/compiler/expressions/function_calls.rs) is consulted BEFORE the name table and privileges `source_module_path::export_name`. Its membership test `is_native_module_export` reads the runtime `extension_registry`, so the privileged population depends on which extension modules are registered in a given compilation rather than on anything committed. Any extension that registers an export gains module-builtin privilege for that name.",
+    "consequence": "The identity KEY for this route is already the forward-stable one ADR-011 wants (declaration site). The POPULATION is open, so this manifest pins the mechanism and its exact sites instead of pretending to enumerate it.",
+    "owner": "#92 (catalog seam) and #105 (close the target matrix and delete parallel routing)"
+  },
+  "identity_entries": [
+    {
+      "identity": "BuiltinFunction::Abs",
+      "legacy_spellings": [
+        "abs"
+      ],
+      "reachable_internal_only": false,
+      "reachable_from_surface": true,
+      "arms": 1
+    },
+    {
+      "identity": "BuiltinFunction::Acos",
+      "legacy_spellings": [
+        "__intrinsic_acos",
+        "acos"
+      ],
+      "reachable_internal_only": true,
+      "reachable_from_surface": true,
+      "arms": 2
+    },
+    {
+      "identity": "BuiltinFunction::Asin",
+      "legacy_spellings": [
+        "__intrinsic_asin",
+        "asin"
+      ],
+      "reachable_internal_only": true,
+      "reachable_from_surface": true,
+      "arms": 2
+    },
+    {
+      "identity": "BuiltinFunction::Atan",
+      "legacy_spellings": [
+        "__intrinsic_atan",
+        "atan"
+      ],
+      "reachable_internal_only": true,
+      "reachable_from_surface": true,
+      "arms": 2
+    },
+    {
+      "identity": "BuiltinFunction::AtomicCtor",
+      "legacy_spellings": [
+        "Atomic"
+      ],
+      "reachable_internal_only": false,
+      "reachable_from_surface": true,
+      "arms": 1
+    },
+    {
+      "identity": "BuiltinFunction::Ceil",
+      "legacy_spellings": [
+        "ceil"
+      ],
+      "reachable_internal_only": false,
+      "reachable_from_surface": true,
+      "arms": 1
+    },
+    {
+      "identity": "BuiltinFunction::ChannelCtor",
+      "legacy_spellings": [
+        "Channel"
+      ],
+      "reachable_internal_only": false,
+      "reachable_from_surface": true,
+      "arms": 1
+    },
+    {
+      "identity": "BuiltinFunction::Clamp",
+      "legacy_spellings": [
+        "clamp"
+      ],
+      "reachable_internal_only": false,
+      "reachable_from_surface": true,
+      "arms": 1
+    },
+    {
+      "identity": "BuiltinFunction::ControlFold",
+      "legacy_spellings": [
+        "fold"
+      ],
+      "reachable_internal_only": false,
+      "reachable_from_surface": true,
+      "arms": 1
+    },
+    {
+      "identity": "BuiltinFunction::Cos",
+      "legacy_spellings": [
+        "__intrinsic_cos",
+        "cos"
+      ],
+      "reachable_internal_only": true,
+      "reachable_from_surface": true,
+      "arms": 2
+    },
+    {
+      "identity": "BuiltinFunction::DequeCtor",
+      "legacy_spellings": [
+        "Deque"
+      ],
+      "reachable_internal_only": false,
+      "reachable_from_surface": true,
+      "arms": 1
+    },
+    {
+      "identity": "BuiltinFunction::ErrCtor",
+      "legacy_spellings": [
+        "Err"
+      ],
+      "reachable_internal_only": false,
+      "reachable_from_surface": true,
+      "arms": 1
+    },
+    {
+      "identity": "BuiltinFunction::Exit",
+      "legacy_spellings": [
+        "exit"
+      ],
+      "reachable_internal_only": false,
+      "reachable_from_surface": true,
+      "arms": 1
+    },
+    {
+      "identity": "BuiltinFunction::Exp",
+      "legacy_spellings": [
+        "exp"
+      ],
+      "reachable_internal_only": false,
+      "reachable_from_surface": true,
+      "arms": 1
+    },
+    {
+      "identity": "BuiltinFunction::Filter",
+      "legacy_spellings": [
+        "__intrinsic_filter"
+      ],
+      "reachable_internal_only": true,
+      "reachable_from_surface": false,
+      "arms": 1
+    },
+    {
+      "identity": "BuiltinFunction::Floor",
+      "legacy_spellings": [
+        "floor"
+      ],
+      "reachable_internal_only": false,
+      "reachable_from_surface": true,
+      "arms": 1
+    },
+    {
+      "identity": "BuiltinFunction::Format",
+      "legacy_spellings": [
+        "format"
+      ],
+      "reachable_internal_only": false,
+      "reachable_from_surface": true,
+      "arms": 1
+    },
+    {
+      "identity": "BuiltinFunction::Gcd",
+      "legacy_spellings": [
+        "gcd"
+      ],
+      "reachable_internal_only": false,
+      "reachable_from_surface": true,
+      "arms": 1
+    },
+    {
+      "identity": "BuiltinFunction::HashMapCtor",
+      "legacy_spellings": [
+        "HashMap"
+      ],
+      "reachable_internal_only": false,
+      "reachable_from_surface": true,
+      "arms": 1
+    },
+    {
+      "identity": "BuiltinFunction::Hypot",
+      "legacy_spellings": [
+        "hypot"
+      ],
+      "reachable_internal_only": false,
+      "reachable_from_surface": true,
+      "arms": 1
+    },
+    {
+      "identity": "BuiltinFunction::IntrinsicAtan2",
+      "legacy_spellings": [
+        "__intrinsic_atan2"
+      ],
+      "reachable_internal_only": true,
+      "reachable_from_surface": false,
+      "arms": 1
+    },
+    {
+      "identity": "BuiltinFunction::IntrinsicBrownianMotion",
+      "legacy_spellings": [
+        "__intrinsic_brownian_motion"
+      ],
+      "reachable_internal_only": true,
+      "reachable_from_surface": false,
+      "arms": 1
+    },
+    {
+      "identity": "BuiltinFunction::IntrinsicBspline2_3dBatch",
+      "legacy_spellings": [
+        "__intrinsic_bspline2_3d_batch"
+      ],
+      "reachable_internal_only": true,
+      "reachable_from_surface": false,
+      "arms": 1
+    },
+    {
+      "identity": "BuiltinFunction::IntrinsicCharCode",
+      "legacy_spellings": [
+        "__intrinsic_char_code"
+      ],
+      "reachable_internal_only": true,
+      "reachable_from_surface": false,
+      "arms": 1
+    },
+    {
+      "identity": "BuiltinFunction::IntrinsicClip",
+      "legacy_spellings": [
+        "__intrinsic_clip"
+      ],
+      "reachable_internal_only": true,
+      "reachable_from_surface": false,
+      "arms": 1
+    },
+    {
+      "identity": "BuiltinFunction::IntrinsicCorrelation",
+      "legacy_spellings": [
+        "__intrinsic_correlation"
+      ],
+      "reachable_internal_only": true,
+      "reachable_from_surface": false,
+      "arms": 1
+    },
+    {
+      "identity": "BuiltinFunction::IntrinsicCosh",
+      "legacy_spellings": [
+        "__intrinsic_cosh"
+      ],
+      "reachable_internal_only": true,
+      "reachable_from_surface": false,
+      "arms": 1
+    },
+    {
+      "identity": "BuiltinFunction::IntrinsicCovariance",
+      "legacy_spellings": [
+        "__intrinsic_covariance"
+      ],
+      "reachable_internal_only": true,
+      "reachable_from_surface": false,
+      "arms": 1
+    },
+    {
+      "identity": "BuiltinFunction::IntrinsicCumprod",
+      "legacy_spellings": [
+        "__intrinsic_cumprod"
+      ],
+      "reachable_internal_only": true,
+      "reachable_from_surface": false,
+      "arms": 1
+    },
+    {
+      "identity": "BuiltinFunction::IntrinsicCumsum",
+      "legacy_spellings": [
+        "__intrinsic_cumsum"
+      ],
+      "reachable_internal_only": true,
+      "reachable_from_surface": false,
+      "arms": 1
+    },
+    {
+      "identity": "BuiltinFunction::IntrinsicDiff",
+      "legacy_spellings": [
+        "__intrinsic_diff"
+      ],
+      "reachable_internal_only": true,
+      "reachable_from_surface": false,
+      "arms": 1
+    },
+    {
+      "identity": "BuiltinFunction::IntrinsicDistExponential",
+      "legacy_spellings": [
+        "__intrinsic_dist_exponential"
+      ],
+      "reachable_internal_only": true,
+      "reachable_from_surface": false,
+      "arms": 1
+    },
+    {
+      "identity": "BuiltinFunction::IntrinsicDistLognormal",
+      "legacy_spellings": [
+        "__intrinsic_dist_lognormal"
+      ],
+      "reachable_internal_only": true,
+      "reachable_from_surface": false,
+      "arms": 1
+    },
+    {
+      "identity": "BuiltinFunction::IntrinsicDistPoisson",
+      "legacy_spellings": [
+        "__intrinsic_dist_poisson"
+      ],
+      "reachable_internal_only": true,
+      "reachable_from_surface": false,
+      "arms": 1
+    },
+    {
+      "identity": "BuiltinFunction::IntrinsicDistSampleN",
+      "legacy_spellings": [
+        "__intrinsic_dist_sample_n"
+      ],
+      "reachable_internal_only": true,
+      "reachable_from_surface": false,
+      "arms": 1
+    },
+    {
+      "identity": "BuiltinFunction::IntrinsicDistUniform",
+      "legacy_spellings": [
+        "__intrinsic_dist_uniform"
+      ],
+      "reachable_internal_only": true,
+      "reachable_from_surface": false,
+      "arms": 1
+    },
+    {
+      "identity": "BuiltinFunction::IntrinsicEma",
+      "legacy_spellings": [
+        "__intrinsic_ema"
+      ],
+      "reachable_internal_only": true,
+      "reachable_from_surface": false,
+      "arms": 1
+    },
+    {
+      "identity": "BuiltinFunction::IntrinsicFillna",
+      "legacy_spellings": [
+        "__intrinsic_fillna"
+      ],
+      "reachable_internal_only": true,
+      "reachable_from_surface": false,
+      "arms": 1
+    },
+    {
+      "identity": "BuiltinFunction::IntrinsicFromCharCode",
+      "legacy_spellings": [
+        "__intrinsic_from_char_code"
+      ],
+      "reachable_internal_only": true,
+      "reachable_from_surface": false,
+      "arms": 1
+    },
+    {
+      "identity": "BuiltinFunction::IntrinsicGbm",
+      "legacy_spellings": [
+        "__intrinsic_gbm"
+      ],
+      "reachable_internal_only": true,
+      "reachable_from_surface": false,
+      "arms": 1
+    },
+    {
+      "identity": "BuiltinFunction::IntrinsicLinearRecurrence",
+      "legacy_spellings": [
+        "__intrinsic_linear_recurrence"
+      ],
+      "reachable_internal_only": true,
+      "reachable_from_surface": false,
+      "arms": 1
+    },
+    {
+      "identity": "BuiltinFunction::IntrinsicMatAdd",
+      "legacy_spellings": [
+        "__intrinsic_mat_add"
+      ],
+      "reachable_internal_only": true,
+      "reachable_from_surface": false,
+      "arms": 1
+    },
+    {
+      "identity": "BuiltinFunction::IntrinsicMatMulMat",
+      "legacy_spellings": [
+        "__intrinsic_matmul_mat"
+      ],
+      "reachable_internal_only": true,
+      "reachable_from_surface": false,
+      "arms": 1
+    },
+    {
+      "identity": "BuiltinFunction::IntrinsicMatMulVec",
+      "legacy_spellings": [
+        "__intrinsic_matmul_vec"
+      ],
+      "reachable_internal_only": true,
+      "reachable_from_surface": false,
+      "arms": 1
+    },
+    {
+      "identity": "BuiltinFunction::IntrinsicMatSub",
+      "legacy_spellings": [
+        "__intrinsic_mat_sub"
+      ],
+      "reachable_internal_only": true,
+      "reachable_from_surface": false,
+      "arms": 1
+    },
+    {
+      "identity": "BuiltinFunction::IntrinsicMax",
+      "legacy_spellings": [
+        "__intrinsic_max"
+      ],
+      "reachable_internal_only": true,
+      "reachable_from_surface": false,
+      "arms": 1
+    },
+    {
+      "identity": "BuiltinFunction::IntrinsicMean",
+      "legacy_spellings": [
+        "__intrinsic_mean"
+      ],
+      "reachable_internal_only": true,
+      "reachable_from_surface": false,
+      "arms": 1
+    },
+    {
+      "identity": "BuiltinFunction::IntrinsicMedian",
+      "legacy_spellings": [
+        "__intrinsic_median"
+      ],
+      "reachable_internal_only": true,
+      "reachable_from_surface": false,
+      "arms": 1
+    },
+    {
+      "identity": "BuiltinFunction::IntrinsicMin",
+      "legacy_spellings": [
+        "__intrinsic_min"
+      ],
+      "reachable_internal_only": true,
+      "reachable_from_surface": false,
+      "arms": 1
+    },
+    {
+      "identity": "BuiltinFunction::IntrinsicMinimize",
+      "legacy_spellings": [
+        "__intrinsic_minimize"
+      ],
+      "reachable_internal_only": true,
+      "reachable_from_surface": false,
+      "arms": 1
+    },
+    {
+      "identity": "BuiltinFunction::IntrinsicOuProcess",
+      "legacy_spellings": [
+        "__intrinsic_ou_process"
+      ],
+      "reachable_internal_only": true,
+      "reachable_from_surface": false,
+      "arms": 1
+    },
+    {
+      "identity": "BuiltinFunction::IntrinsicPctChange",
+      "legacy_spellings": [
+        "__intrinsic_pct_change"
+      ],
+      "reachable_internal_only": true,
+      "reachable_from_surface": false,
+      "arms": 1
+    },
+    {
+      "identity": "BuiltinFunction::IntrinsicPercentile",
+      "legacy_spellings": [
+        "__intrinsic_percentile"
+      ],
+      "reachable_internal_only": true,
+      "reachable_from_surface": false,
+      "arms": 1
+    },
+    {
+      "identity": "BuiltinFunction::IntrinsicRandom",
+      "legacy_spellings": [
+        "__intrinsic_random"
+      ],
+      "reachable_internal_only": true,
+      "reachable_from_surface": false,
+      "arms": 1
+    },
+    {
+      "identity": "BuiltinFunction::IntrinsicRandomArray",
+      "legacy_spellings": [
+        "__intrinsic_random_array"
+      ],
+      "reachable_internal_only": true,
+      "reachable_from_surface": false,
+      "arms": 1
+    },
+    {
+      "identity": "BuiltinFunction::IntrinsicRandomInt",
+      "legacy_spellings": [
+        "__intrinsic_random_int"
+      ],
+      "reachable_internal_only": true,
+      "reachable_from_surface": false,
+      "arms": 1
+    },
+    {
+      "identity": "BuiltinFunction::IntrinsicRandomNormal",
+      "legacy_spellings": [
+        "__intrinsic_random_normal"
+      ],
+      "reachable_internal_only": true,
+      "reachable_from_surface": false,
+      "arms": 1
+    },
+    {
+      "identity": "BuiltinFunction::IntrinsicRandomSeed",
+      "legacy_spellings": [
+        "__intrinsic_random_seed"
+      ],
+      "reachable_internal_only": true,
+      "reachable_from_surface": false,
+      "arms": 1
+    },
+    {
+      "identity": "BuiltinFunction::IntrinsicRandomWalk",
+      "legacy_spellings": [
+        "__intrinsic_random_walk"
+      ],
+      "reachable_internal_only": true,
+      "reachable_from_surface": false,
+      "arms": 1
+    },
+    {
+      "identity": "BuiltinFunction::IntrinsicRollingMax",
+      "legacy_spellings": [
+        "__intrinsic_rolling_max"
+      ],
+      "reachable_internal_only": true,
+      "reachable_from_surface": false,
+      "arms": 1
+    },
+    {
+      "identity": "BuiltinFunction::IntrinsicRollingMean",
+      "legacy_spellings": [
+        "__intrinsic_rolling_mean"
+      ],
+      "reachable_internal_only": true,
+      "reachable_from_surface": false,
+      "arms": 1
+    },
+    {
+      "identity": "BuiltinFunction::IntrinsicRollingMin",
+      "legacy_spellings": [
+        "__intrinsic_rolling_min"
+      ],
+      "reachable_internal_only": true,
+      "reachable_from_surface": false,
+      "arms": 1
+    },
+    {
+      "identity": "BuiltinFunction::IntrinsicRollingStd",
+      "legacy_spellings": [
+        "__intrinsic_rolling_std"
+      ],
+      "reachable_internal_only": true,
+      "reachable_from_surface": false,
+      "arms": 1
+    },
+    {
+      "identity": "BuiltinFunction::IntrinsicRollingSum",
+      "legacy_spellings": [
+        "__intrinsic_rolling_sum"
+      ],
+      "reachable_internal_only": true,
+      "reachable_from_surface": false,
+      "arms": 1
+    },
+    {
+      "identity": "BuiltinFunction::IntrinsicSeries",
+      "legacy_spellings": [
+        "__intrinsic_series"
+      ],
+      "reachable_internal_only": true,
+      "reachable_from_surface": false,
+      "arms": 1
+    },
+    {
+      "identity": "BuiltinFunction::IntrinsicShift",
+      "legacy_spellings": [
+        "__intrinsic_shift"
+      ],
+      "reachable_internal_only": true,
+      "reachable_from_surface": false,
+      "arms": 1
+    },
+    {
+      "identity": "BuiltinFunction::IntrinsicSinh",
+      "legacy_spellings": [
+        "__intrinsic_sinh"
+      ],
+      "reachable_internal_only": true,
+      "reachable_from_surface": false,
+      "arms": 1
+    },
+    {
+      "identity": "BuiltinFunction::IntrinsicStd",
+      "legacy_spellings": [
+        "__intrinsic_std"
+      ],
+      "reachable_internal_only": true,
+      "reachable_from_surface": false,
+      "arms": 1
+    },
+    {
+      "identity": "BuiltinFunction::IntrinsicTanh",
+      "legacy_spellings": [
+        "__intrinsic_tanh"
+      ],
+      "reachable_internal_only": true,
+      "reachable_from_surface": false,
+      "arms": 1
+    },
+    {
+      "identity": "BuiltinFunction::IntrinsicVariance",
+      "legacy_spellings": [
+        "__intrinsic_variance"
+      ],
+      "reachable_internal_only": true,
+      "reachable_from_surface": false,
+      "arms": 1
+    },
+    {
+      "identity": "BuiltinFunction::IntrinsicVecAbs",
+      "legacy_spellings": [
+        "__intrinsic_vec_abs"
+      ],
+      "reachable_internal_only": true,
+      "reachable_from_surface": false,
+      "arms": 1
+    },
+    {
+      "identity": "BuiltinFunction::IntrinsicVecAdd",
+      "legacy_spellings": [
+        "__intrinsic_vec_add"
+      ],
+      "reachable_internal_only": true,
+      "reachable_from_surface": false,
+      "arms": 1
+    },
+    {
+      "identity": "BuiltinFunction::IntrinsicVecAddI64",
+      "legacy_spellings": [
+        "__intrinsic_vec_add_i64"
+      ],
+      "reachable_internal_only": true,
+      "reachable_from_surface": false,
+      "arms": 1
+    },
+    {
+      "identity": "BuiltinFunction::IntrinsicVecDiv",
+      "legacy_spellings": [
+        "__intrinsic_vec_div"
+      ],
+      "reachable_internal_only": true,
+      "reachable_from_surface": false,
+      "arms": 1
+    },
+    {
+      "identity": "BuiltinFunction::IntrinsicVecExp",
+      "legacy_spellings": [
+        "__intrinsic_vec_exp"
+      ],
+      "reachable_internal_only": true,
+      "reachable_from_surface": false,
+      "arms": 1
+    },
+    {
+      "identity": "BuiltinFunction::IntrinsicVecLn",
+      "legacy_spellings": [
+        "__intrinsic_vec_ln"
+      ],
+      "reachable_internal_only": true,
+      "reachable_from_surface": false,
+      "arms": 1
+    },
+    {
+      "identity": "BuiltinFunction::IntrinsicVecMax",
+      "legacy_spellings": [
+        "__intrinsic_vec_max"
+      ],
+      "reachable_internal_only": true,
+      "reachable_from_surface": false,
+      "arms": 1
+    },
+    {
+      "identity": "BuiltinFunction::IntrinsicVecMin",
+      "legacy_spellings": [
+        "__intrinsic_vec_min"
+      ],
+      "reachable_internal_only": true,
+      "reachable_from_surface": false,
+      "arms": 1
+    },
+    {
+      "identity": "BuiltinFunction::IntrinsicVecMul",
+      "legacy_spellings": [
+        "__intrinsic_vec_mul"
+      ],
+      "reachable_internal_only": true,
+      "reachable_from_surface": false,
+      "arms": 1
+    },
+    {
+      "identity": "BuiltinFunction::IntrinsicVecSelect",
+      "legacy_spellings": [
+        "__intrinsic_vec_select"
+      ],
+      "reachable_internal_only": true,
+      "reachable_from_surface": false,
+      "arms": 1
+    },
+    {
+      "identity": "BuiltinFunction::IntrinsicVecSqrt",
+      "legacy_spellings": [
+        "__intrinsic_vec_sqrt"
+      ],
+      "reachable_internal_only": true,
+      "reachable_from_surface": false,
+      "arms": 1
+    },
+    {
+      "identity": "BuiltinFunction::IntrinsicVecSub",
+      "legacy_spellings": [
+        "__intrinsic_vec_sub"
+      ],
+      "reachable_internal_only": true,
+      "reachable_from_surface": false,
+      "arms": 1
+    },
+    {
+      "identity": "BuiltinFunction::IsArray",
+      "legacy_spellings": [
+        "isArray",
+        "is_array"
+      ],
+      "reachable_internal_only": false,
+      "reachable_from_surface": true,
+      "arms": 1
+    },
+    {
+      "identity": "BuiltinFunction::IsBool",
+      "legacy_spellings": [
+        "isBool",
+        "is_bool"
+      ],
+      "reachable_internal_only": false,
+      "reachable_from_surface": true,
+      "arms": 1
+    },
+    {
+      "identity": "BuiltinFunction::IsDataRow",
+      "legacy_spellings": [
+        "isDataRow",
+        "is_data_row"
+      ],
+      "reachable_internal_only": false,
+      "reachable_from_surface": true,
+      "arms": 1
+    },
+    {
+      "identity": "BuiltinFunction::IsFinite",
+      "legacy_spellings": [
+        "isFinite",
+        "is_finite"
+      ],
+      "reachable_internal_only": false,
+      "reachable_from_surface": true,
+      "arms": 1
+    },
+    {
+      "identity": "BuiltinFunction::IsNaN",
+      "legacy_spellings": [
+        "isNaN",
+        "is_nan"
+      ],
+      "reachable_internal_only": false,
+      "reachable_from_surface": true,
+      "arms": 1
+    },
+    {
+      "identity": "BuiltinFunction::IsNumber",
+      "legacy_spellings": [
+        "isNumber",
+        "is_number"
+      ],
+      "reachable_internal_only": false,
+      "reachable_from_surface": true,
+      "arms": 1
+    },
+    {
+      "identity": "BuiltinFunction::IsObject",
+      "legacy_spellings": [
+        "isObject",
+        "is_object"
+      ],
+      "reachable_internal_only": false,
+      "reachable_from_surface": true,
+      "arms": 1
+    },
+    {
+      "identity": "BuiltinFunction::IsString",
+      "legacy_spellings": [
+        "isString",
+        "is_string"
+      ],
+      "reachable_internal_only": false,
+      "reachable_from_surface": true,
+      "arms": 1
+    },
+    {
+      "identity": "BuiltinFunction::JsonArrayAt",
+      "legacy_spellings": [
+        "__json_array_at"
+      ],
+      "reachable_internal_only": true,
+      "reachable_from_surface": false,
+      "arms": 1
+    },
+    {
+      "identity": "BuiltinFunction::JsonArrayLen",
+      "legacy_spellings": [
+        "__json_array_len"
+      ],
+      "reachable_internal_only": true,
+      "reachable_from_surface": false,
+      "arms": 1
+    },
+    {
+      "identity": "BuiltinFunction::JsonObjectGet",
+      "legacy_spellings": [
+        "__json_object_get"
+      ],
+      "reachable_internal_only": true,
+      "reachable_from_surface": false,
+      "arms": 1
+    },
+    {
+      "identity": "BuiltinFunction::JsonObjectKeys",
+      "legacy_spellings": [
+        "__json_object_keys"
+      ],
+      "reachable_internal_only": true,
+      "reachable_from_surface": false,
+      "arms": 1
+    },
+    {
+      "identity": "BuiltinFunction::JsonObjectLen",
+      "legacy_spellings": [
+        "__json_object_len"
+      ],
+      "reachable_internal_only": true,
+      "reachable_from_surface": false,
+      "arms": 1
+    },
+    {
+      "identity": "BuiltinFunction::LazyCtor",
+      "legacy_spellings": [
+        "Lazy"
+      ],
+      "reachable_internal_only": false,
+      "reachable_from_surface": true,
+      "arms": 1
+    },
+    {
+      "identity": "BuiltinFunction::Lcm",
+      "legacy_spellings": [
+        "lcm"
+      ],
+      "reachable_internal_only": false,
+      "reachable_from_surface": true,
+      "arms": 1
+    },
+    {
+      "identity": "BuiltinFunction::Ln",
+      "legacy_spellings": [
+        "ln"
+      ],
+      "reachable_internal_only": false,
+      "reachable_from_surface": true,
+      "arms": 1
+    },
+    {
+      "identity": "BuiltinFunction::Log",
+      "legacy_spellings": [
+        "log"
+      ],
+      "reachable_internal_only": false,
+      "reachable_from_surface": true,
+      "arms": 1
+    },
+    {
+      "identity": "BuiltinFunction::Map",
+      "legacy_spellings": [
+        "__intrinsic_map"
+      ],
+      "reachable_internal_only": true,
+      "reachable_from_surface": false,
+      "arms": 1
+    },
+    {
+      "identity": "BuiltinFunction::MatFromFlat",
+      "legacy_spellings": [
+        "mat"
+      ],
+      "reachable_internal_only": false,
+      "reachable_from_surface": true,
+      "arms": 1
+    },
+    {
+      "identity": "BuiltinFunction::Max",
+      "legacy_spellings": [
+        "max"
+      ],
+      "reachable_internal_only": false,
+      "reachable_from_surface": true,
+      "arms": 1
+    },
+    {
+      "identity": "BuiltinFunction::Min",
+      "legacy_spellings": [
+        "min"
+      ],
+      "reachable_internal_only": false,
+      "reachable_from_surface": true,
+      "arms": 1
+    },
+    {
+      "identity": "BuiltinFunction::MutexCtor",
+      "legacy_spellings": [
+        "Mutex"
+      ],
+      "reachable_internal_only": false,
+      "reachable_from_surface": true,
+      "arms": 1
+    },
+    {
+      "identity": "BuiltinFunction::NativePtrFreeCell",
+      "legacy_spellings": [
+        "__native_ptr_free_cell"
+      ],
+      "reachable_internal_only": true,
+      "reachable_from_surface": false,
+      "arms": 1
+    },
+    {
+      "identity": "BuiltinFunction::NativePtrNewCell",
+      "legacy_spellings": [
+        "__native_ptr_new_cell"
+      ],
+      "reachable_internal_only": true,
+      "reachable_from_surface": false,
+      "arms": 1
+    },
+    {
+      "identity": "BuiltinFunction::NativePtrReadPtr",
+      "legacy_spellings": [
+        "__native_ptr_read_ptr"
+      ],
+      "reachable_internal_only": true,
+      "reachable_from_surface": false,
+      "arms": 1
+    },
+    {
+      "identity": "BuiltinFunction::NativePtrSize",
+      "legacy_spellings": [
+        "__native_ptr_size"
+      ],
+      "reachable_internal_only": true,
+      "reachable_from_surface": false,
+      "arms": 1
+    },
+    {
+      "identity": "BuiltinFunction::NativePtrWritePtr",
+      "legacy_spellings": [
+        "__native_ptr_write_ptr"
+      ],
+      "reachable_internal_only": true,
+      "reachable_from_surface": false,
+      "arms": 1
+    },
+    {
+      "identity": "BuiltinFunction::NativeTableBindType",
+      "legacy_spellings": [
+        "__native_table_bind_type"
+      ],
+      "reachable_internal_only": true,
+      "reachable_from_surface": false,
+      "arms": 1
+    },
+    {
+      "identity": "BuiltinFunction::NativeTableFromArrowC",
+      "legacy_spellings": [
+        "__native_table_from_arrow_c"
+      ],
+      "reachable_internal_only": true,
+      "reachable_from_surface": false,
+      "arms": 1
+    },
+    {
+      "identity": "BuiltinFunction::NativeTableFromArrowCTyped",
+      "legacy_spellings": [
+        "__native_table_from_arrow_c_typed"
+      ],
+      "reachable_internal_only": true,
+      "reachable_from_surface": false,
+      "arms": 1
+    },
+    {
+      "identity": "BuiltinFunction::OkCtor",
+      "legacy_spellings": [
+        "Ok"
+      ],
+      "reachable_internal_only": false,
+      "reachable_from_surface": true,
+      "arms": 1
+    },
+    {
+      "identity": "BuiltinFunction::Pow",
+      "legacy_spellings": [
+        "pow"
+      ],
+      "reachable_internal_only": false,
+      "reachable_from_surface": true,
+      "arms": 1
+    },
+    {
+      "identity": "BuiltinFunction::Print",
+      "legacy_spellings": [
+        "print"
+      ],
+      "reachable_internal_only": false,
+      "reachable_from_surface": true,
+      "arms": 1
+    },
+    {
+      "identity": "BuiltinFunction::PriorityQueueCtor",
+      "legacy_spellings": [
+        "PriorityQueue"
+      ],
+      "reachable_internal_only": false,
+      "reachable_from_surface": true,
+      "arms": 1
+    },
+    {
+      "identity": "BuiltinFunction::Range",
+      "legacy_spellings": [
+        "range"
+      ],
+      "reachable_internal_only": false,
+      "reachable_from_surface": true,
+      "arms": 1
+    },
+    {
+      "identity": "BuiltinFunction::Reduce",
+      "legacy_spellings": [
+        "__intrinsic_reduce"
+      ],
+      "reachable_internal_only": true,
+      "reachable_from_surface": false,
+      "arms": 1
+    },
+    {
+      "identity": "BuiltinFunction::Reflect",
+      "legacy_spellings": [
+        "reflect"
+      ],
+      "reachable_internal_only": false,
+      "reachable_from_surface": true,
+      "arms": 1
+    },
+    {
+      "identity": "BuiltinFunction::Round",
+      "legacy_spellings": [
+        "round"
+      ],
+      "reachable_internal_only": false,
+      "reachable_from_surface": true,
+      "arms": 1
+    },
+    {
+      "identity": "BuiltinFunction::SetCtor",
+      "legacy_spellings": [
+        "Set"
+      ],
+      "reachable_internal_only": false,
+      "reachable_from_surface": true,
+      "arms": 1
+    },
+    {
+      "identity": "BuiltinFunction::Sign",
+      "legacy_spellings": [
+        "sign"
+      ],
+      "reachable_internal_only": false,
+      "reachable_from_surface": true,
+      "arms": 1
+    },
+    {
+      "identity": "BuiltinFunction::Sin",
+      "legacy_spellings": [
+        "__intrinsic_sin",
+        "sin"
+      ],
+      "reachable_internal_only": true,
+      "reachable_from_surface": true,
+      "arms": 2
+    },
+    {
+      "identity": "BuiltinFunction::Snapshot",
+      "legacy_spellings": [
+        "__intrinsic_snapshot",
+        "snapshot"
+      ],
+      "reachable_internal_only": true,
+      "reachable_from_surface": true,
+      "arms": 1
+    },
+    {
+      "identity": "BuiltinFunction::SomeCtor",
+      "legacy_spellings": [
+        "Some"
+      ],
+      "reachable_internal_only": false,
+      "reachable_from_surface": true,
+      "arms": 1
+    },
+    {
+      "identity": "BuiltinFunction::Sqrt",
+      "legacy_spellings": [
+        "sqrt"
+      ],
+      "reachable_internal_only": false,
+      "reachable_from_surface": true,
+      "arms": 1
+    },
+    {
+      "identity": "BuiltinFunction::StdDev",
+      "legacy_spellings": [
+        "stddev"
+      ],
+      "reachable_internal_only": false,
+      "reachable_from_surface": true,
+      "arms": 1
+    },
+    {
+      "identity": "BuiltinFunction::Tan",
+      "legacy_spellings": [
+        "__intrinsic_tan",
+        "tan"
+      ],
+      "reachable_internal_only": true,
+      "reachable_from_surface": true,
+      "arms": 2
+    },
+    {
+      "identity": "BuiltinFunction::ToBool",
+      "legacy_spellings": [
+        "toBool",
+        "to_bool"
+      ],
+      "reachable_internal_only": false,
+      "reachable_from_surface": true,
+      "arms": 1
+    },
+    {
+      "identity": "BuiltinFunction::ToNumber",
+      "legacy_spellings": [
+        "toNumber",
+        "to_number"
+      ],
+      "reachable_internal_only": false,
+      "reachable_from_surface": true,
+      "arms": 1
+    },
+    {
+      "identity": "BuiltinFunction::ToString",
+      "legacy_spellings": [
+        "toString",
+        "to_string"
+      ],
+      "reachable_internal_only": false,
+      "reachable_from_surface": true,
+      "arms": 1
+    }
+  ],
+  "mechanism_entries": [
+    {
+      "id": "internal-intrinsic-name-prefix-gate",
+      "authority": "`__native_` / `__intrinsic_` / `__json_` name prefix selects InternalIntrinsic resolution scope",
+      "population_finite": true,
+      "why_not_identity_keyed": "A prefix is a spelling rule, not an identity. It is finite only because it can fire exclusively on names that already matched a classifier arm — the identities it can reach are therefore a subset of the name-selected manifest above.",
+      "successor": "#92 (resolve one live intrinsic by catalog identity), #177 (INTRINSIC-INVENTORY)",
+      "pattern": "is_internal_intrinsic_name",
+      "scope": [
+        "crates",
+        "bin",
+        "tools",
+        "extensions"
+      ],
+      "site_count": 3,
+      "sites": [
+        {
+          "path": "crates/shape-vm/src/compiler/expressions/function_calls.rs",
+          "count": 1
+        },
+        {
+          "path": "crates/shape-vm/src/compiler/helpers.rs",
+          "count": 2
+        }
+      ]
+    },
+    {
+      "id": "allow-internal-builtins-privilege-flag",
+      "authority": "`allow_internal_builtins` compiler flag lifts the InternalOnly rejection wholesale",
+      "population_finite": true,
+      "why_not_identity_keyed": "A single boolean that re-privileges every internal identity at once. ADR-011 names it, with the terminal-name gates, as migration debt.",
+      "successor": "#92, #177",
+      "pattern": "allow_internal_builtins",
+      "scope": [
+        "crates",
+        "bin",
+        "tools",
+        "extensions"
+      ],
+      "site_count": 37,
+      "sites": [
+        {
+          "path": "bin/shape-cli/tests/common/mod.rs",
+          "count": 1
+        },
+        {
+          "path": "crates/shape-runtime/src/type_system/environment/mod.rs",
+          "count": 1
+        },
+        {
+          "path": "crates/shape-runtime/stdlib-src/core/remote.shape",
+          "count": 1
+        },
+        {
+          "path": "crates/shape-vm/src/compiler/compiler_impl_initialization.rs",
+          "count": 1
+        },
+        {
+          "path": "crates/shape-vm/src/compiler/compiler_impl_reference_model.rs",
+          "count": 6
+        },
+        {
+          "path": "crates/shape-vm/src/compiler/expressions/function_calls.rs",
+          "count": 3
+        },
+        {
+          "path": "crates/shape-vm/src/compiler/functions.rs",
+          "count": 11
+        },
+        {
+          "path": "crates/shape-vm/src/compiler/functions_foreign.rs",
+          "count": 4
+        },
+        {
+          "path": "crates/shape-vm/src/compiler/helpers.rs",
+          "count": 4
+        },
+        {
+          "path": "crates/shape-vm/src/compiler/loops.rs",
+          "count": 2
+        },
+        {
+          "path": "crates/shape-vm/src/compiler/mod.rs",
+          "count": 1
+        },
+        {
+          "path": "crates/shape-vm/src/configuration.rs",
+          "count": 2
+        }
+      ]
+    },
+    {
+      "id": "stdlib-function-name-membership",
+      "authority": "`stdlib_function_names` string-set membership decides annotation-planner and pseudo-pack behavior",
+      "population_finite": true,
+      "why_not_identity_keyed": "Authority is a raw `.contains(name)` over a set populated per-compilation from whatever the stdlib declares; there is no resolution behind the name to key on. Both read sites are in machinery slated for deletion, one of them in pseudo_tuple.rs.",
+      "successor": "#110 (delete universal, string-backed, and duplicate tooling authority)",
+      "pattern": "stdlib_function_names\\s*\\.\\s*contains",
+      "scope": [
+        "crates",
+        "bin",
+        "tools",
+        "extensions"
+      ],
+      "site_count": 2,
+      "sites": [
+        {
+          "path": "crates/shape-vm/src/compiler/statements/annotation_declarations/planner.rs",
+          "count": 1
+        },
+        {
+          "path": "crates/shape-vm/src/compiler/template_specialization/pseudo_tuple.rs",
+          "count": 1
+        }
+      ]
+    },
+    {
+      "id": "module-builtin-export-route",
+      "authority": "`resolve_scoped_module_builtin_function` privileges `source_module_path::export_name`, resolved against the runtime `extension_registry` before the name table is consulted",
+      "population_finite": false,
+      "why_not_identity_keyed": "The identity key IS forward-stable — declaration site (source module path + export name) is exactly what ADR-011 asks for. The POPULATION is not enumerable at build time: `is_native_module_export` consults a runtime extension registry, so any extension that registers an export gains this privilege for that name. See the manifest's open_population_finding.",
+      "successor": "#92, #105 (close the target matrix and delete parallel routing)",
+      "pattern": "resolve_scoped_module_builtin_function|is_native_module_export",
+      "scope": [
+        "crates",
+        "bin",
+        "tools",
+        "extensions"
+      ],
+      "site_count": 14,
+      "sites": [
+        {
+          "path": "crates/shape-vm/src/compiler/expressions/function_calls.rs",
+          "count": 13
+        },
+        {
+          "path": "crates/shape-vm/src/compiler/template_specialization/e4_s5_remote_tests.rs",
+          "count": 1
+        }
+      ]
+    }
+  ],
+  "manifest_sha256": "cec7e0795ce83806587330e5575b76cef782d97264ca5e645c2042d75643dde2"
+}

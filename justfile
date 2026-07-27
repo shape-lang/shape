@@ -193,6 +193,24 @@ check-legacy-baselines:
 regen-legacy-baselines:
 	node scripts/generate-adr011-012-legacy-baselines.mjs
 
+# --- ADR-011..016 step-5 legacy identity manifest (#136) ---
+
+# Identity-default guard: every name-selected builtin identity that currently
+# holds legacy privilege is enumerated in
+# docs/program/adr011-012/legacy-identity-manifest.json, keyed by
+# BuiltinFunction variant (the behavior) rather than by source spelling.
+# Anything unlisted gets no privilege, so adding a privileged arm or a new
+# spelling fails until it is listed in the same commit. Also fails when a legacy
+# mechanism (prefix gate, allow_internal_builtins, stdlib-name membership,
+# module-builtin route) spreads to a new file.
+check-legacy-identity:
+	node scripts/check-adr011-012-legacy-identity-manifest.mjs
+
+# Regenerate the #136 manifest after real migration progress — a retired
+# builtin, a narrowed mechanism. The committed diff is the review surface.
+regen-legacy-identity:
+	node scripts/generate-adr011-012-legacy-identity-manifest.mjs
+
 # Phase 2d merge gate. Run before merging any sub-cluster branch into
 # bulldozer-strictly-typed. Exit-code-based (NOT grep -c) per handover §0.
 # See docs/cluster-audits/phase-2d-handover.md §0 + scripts/verify-merge.sh.
