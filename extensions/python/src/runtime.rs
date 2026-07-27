@@ -49,6 +49,9 @@ pub struct CompiledFunction {
     /// shared global namespace. Two functions defining the same module-level
     /// name clobbered each other, and "module setup runs once per handle"
     /// could not be true of a module shared by every handle.
+    ///
+    /// Not dunder-prefixed: this is an ordinary `sys.modules` key, and a
+    /// `__name__` would suggest a Python internal it is not.
     pub module_name: String,
 }
 
@@ -273,7 +276,7 @@ impl PythonRuntime {
             return_type: return_type.to_string(),
             #[cfg(feature = "pyo3")]
             compiled_fn: std::sync::OnceLock::new(),
-            module_name: format!("__shape_{name}_{id}__"),
+            module_name: format!("shape_foreign_{name}_{id}"),
         };
 
         self.functions.insert(id, func);
