@@ -52,6 +52,11 @@ fn single(err: &ShapeError) -> Diagnostic {
         for note in &loc.notes {
             builder = builder.with_note(error_note_to_lsds(note));
         }
+        // ADR-017 §4: machine-applicable fixes are carried verbatim from the
+        // emitter. This adapter re-derives nothing.
+        for fix in &loc.fixes {
+            builder = builder.with_fix(fix.clone());
+        }
     }
     builder.build()
 }
@@ -165,5 +170,171 @@ mod tests {
         let (id, msg) = split_leading_code("plain message", "SEMANTIC");
         assert_eq!(id, "SEMANTIC");
         assert_eq!(msg, "plain message");
+    }
+
+    // --- ADR-017 §4 tripwire 1 ---
+
+    /// A program whose match is missing one variant.
+    const NON_EXHAUSTIVE: &str = "enum Status { Active, Inactive }\n\
+                                  fn describe(s: Status) -> string {\n\
+                                  \x20 match s {\n\
+                                  \x20   Status::Active => \"on\",\n\
+                                  \x20 }\n\
+                                  }\n";
+
+    /// Compile `source` the way `shape run` does — the run path sets the
+    /// compiler's source (`shape_vm::execution`), which is what lets the
+    /// checker bind a fix to a revision.
+    fn compile_err(source: &str) -> ShapeError {
+        let program = shape_ast::parse_program(source).expect("parse");
+        let mut compiler = shape_vm::compiler::BytecodeCompiler::new();
+        compiler.set_source(source);
+        compiler
+            .compile_in_place(&program)
+            .expect_err("non-exhaustive match must fail to compile")
+    }
+
+    /// The CLI's consumer: `ShapeError` -> LSDS -> `--diagnostics json`
+    /// bytes -> back -> apply. The JSON round trip is deliberate: the CLI
+    /// emits text, so the fix has to survive serialization to be usable.
+    fn apply_through_cli_json(source: &str, err: &ShapeError) -> String {
+        let rendered: Vec<String> = shape_error_to_diagnostics(err)
+            .iter()
+            .map(shape_diagnostics::render::json::render)
+            .collect();
+
+        let plan = rendered
+            .iter()
+            .map(|line| {
+                serde_json::from_str::<shape_diagnostics::Diagnostic>(line)
+                    .expect("rendered LSDS is valid JSON")
+            })
+            .find_map(|diag| diag.fixes.into_iter().find_map(|fix| fix.edit_plan))
+            .expect("a machine-applicable fix reaches --diagnostics json");
+
+        plan.apply(source).expect("plan applies")
+    }
+
+    /// The LSP's consumer: analyze, take the published diagnostics, ask for
+    /// code actions, apply the resulting `TextEdit`s.
+    fn apply_through_lsp_code_action(source: &str) -> String {
+        use tower_lsp_server::ls_types::{CodeActionOrCommand, TextEdit, Uri};
+
+        let program = shape_ast::parse_program(source).expect("parse");
+        let diagnostics =
+            shape_lsp::analysis::analyze_program_semantics(&program, source, None, None, None);
+        let uri = Uri::from_file_path("/tmp/tripwire.shape").expect("uri");
+
+        let mut applied: Option<String> = None;
+        for diagnostic in &diagnostics {
+            let actions = shape_lsp::code_actions::get_code_actions(
+                source,
+                &uri,
+                diagnostic.range,
+                std::slice::from_ref(diagnostic),
+                None,
+                None,
+            );
+            for action in actions {
+                let CodeActionOrCommand::CodeAction(action) = action else {
+                    continue;
+                };
+                if !action.title.starts_with("Add missing match arm") {
+                    continue;
+                }
+                let edits: Vec<TextEdit> = action
+                    .edit
+                    .as_ref()
+                    .and_then(|e| e.changes.as_ref())
+                    .and_then(|c| c.get(&uri))
+                    .expect("edits for this document")
+                    .clone();
+
+                let mut out = source.to_string();
+                // Apply back-to-front so earlier offsets stay valid.
+                let mut ordered = edits;
+                ordered.sort_by_key(|e| (e.range.start.line, e.range.start.character));
+                for edit in ordered.iter().rev() {
+                    let start = offset_of(source, edit.range.start);
+                    let end = offset_of(source, edit.range.end);
+                    out.replace_range(start..end, &edit.new_text);
+                }
+                applied = Some(out);
+            }
+        }
+
+        applied.expect("the LSP offers the missing-arms code action")
+    }
+
+    fn offset_of(text: &str, position: tower_lsp_server::ls_types::Position) -> usize {
+        let mut line = 0u32;
+        let mut character = 0u32;
+        for (offset, ch) in text.char_indices() {
+            if line == position.line && character == position.character {
+                return offset;
+            }
+            if ch == '\n' {
+                line += 1;
+                character = 0;
+            } else {
+                character += 1;
+            }
+        }
+        text.len()
+    }
+
+    /// Tripwire 1: one compiler-emitted fix, two consumers, byte-identical
+    /// result. This is the whole point of single-sourcing — if the CLI and
+    /// the LSP could disagree, they would be two authorities again.
+    #[test]
+    fn compiler_fix_applies_identically_through_cli_json_and_lsp_code_action() {
+        let err = compile_err(NON_EXHAUSTIVE);
+
+        let via_cli = apply_through_cli_json(NON_EXHAUSTIVE, &err);
+        let via_lsp = apply_through_lsp_code_action(NON_EXHAUSTIVE);
+
+        assert_eq!(
+            via_cli, via_lsp,
+            "the same proved fix must produce the same bytes through both consumers"
+        );
+
+        // And it is the repair it claims to be, not merely a shared result.
+        assert_eq!(
+            via_cli,
+            "enum Status { Active, Inactive }\n\
+             fn describe(s: Status) -> string {\n\
+             \x20 match s {\n\
+             \x20   Status::Active => \"on\",\n\
+             \x20   Status::Inactive => {\n\
+             \x20   },\n\
+             \x20 }\n\
+             }\n"
+        );
+        assert!(shape_ast::parse_program(&via_cli).is_ok());
+    }
+
+    /// The CLI's JSON payload carries the spans themselves, not just a
+    /// label — a machine caller can apply the fix without the compiler.
+    #[test]
+    fn cli_json_payload_carries_exact_spans() {
+        let err = compile_err(NON_EXHAUSTIVE);
+        let diags = shape_error_to_diagnostics(&err);
+        let rendered = shape_diagnostics::render::json::render(
+            diags
+                .iter()
+                .find(|d| !d.fixes.is_empty())
+                .expect("a fix-bearing diagnostic"),
+        );
+
+        let value: serde_json::Value = serde_json::from_str(&rendered).expect("valid JSON");
+        let edit = &value["fixes"][0]["edit_plan"]["edits"][0];
+        assert!(edit["span"].is_array(), "payload: {rendered}");
+        assert!(
+            edit["new_text"]
+                .as_str()
+                .expect("new_text")
+                .contains("Status::Inactive")
+        );
+        assert!(value["fixes"][0]["edit_plan"]["source_digest"].is_string());
     }
 }

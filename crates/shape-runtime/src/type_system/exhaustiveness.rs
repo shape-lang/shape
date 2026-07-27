@@ -88,9 +88,20 @@ pub fn check_exhaustiveness(
         return ExhaustivenessResult::TriviallyExhaustive;
     }
 
-    // Compute missing variants
-    let all_variants: HashSet<_> = variants.iter().map(|v| v.name.clone()).collect();
-    let missing: Vec<_> = all_variants.difference(&covered).cloned().collect();
+    // Compute missing variants, in declaration order.
+    //
+    // Walking the declared variant list — rather than differencing two hash
+    // sets — is what makes this deterministic. `HashSet::difference` yields
+    // hash order, and Rust seeds its default hasher per process, so the same
+    // program reported its missing variants in a different order from run to
+    // run. That order reaches the diagnostic message and, through
+    // `type_system::fixes`, the bytes of a machine-applicable fix; an edit
+    // that is not byte-identical for the same input is not evidence.
+    let missing: Vec<_> = variants
+        .iter()
+        .map(|v| v.name.clone())
+        .filter(|name| !covered.contains(name))
+        .collect();
 
     if missing.is_empty() {
         ExhaustivenessResult::Exhaustive
@@ -261,7 +272,11 @@ fn format_type_annotation(ann: &TypeAnnotation) -> String {
         TypeAnnotation::Dyn(traits) => format!("dyn {}", traits.join(" + ")),
         // ADR-009 B3 (S1): existential descriptor package type.
         TypeAnnotation::Existential { witnesses, inner } => {
-            format!("exists<{}> {}", witnesses.join(", "), format_type_annotation(inner))
+            format!(
+                "exists<{}> {}",
+                witnesses.join(", "),
+                format_type_annotation(inner)
+            )
         }
     }
 }
@@ -398,6 +413,54 @@ mod tests {
 
         let result = check_exhaustiveness(&match_expr, &status_type);
         assert_eq!(result, ExhaustivenessResult::Exhaustive);
+    }
+
+    /// Missing variants come out in declaration order, not hash order.
+    ///
+    /// This is a correctness property, not a cosmetic one: the list reaches
+    /// the diagnostic message and the bytes of the machine-applicable fix
+    /// (`type_system::fixes`). Differencing two hash sets used to yield a
+    /// different order from run to run, because Rust seeds its default
+    /// hasher per process.
+    #[test]
+    fn missing_variants_follow_declaration_order() {
+        let status_type = make_enum_type("Status", &["Active", "Inactive", "Pending", "Archived"]);
+        let match_expr = MatchExpr {
+            scrutinee: Box::new(Expr::Identifier("status".to_string(), make_span())),
+            arms: vec![make_match_arm(
+                make_constructor_pattern(Some("Status"), "Active"),
+                None,
+                make_string_expr("yes"),
+            )],
+        };
+
+        match check_exhaustiveness(&match_expr, &status_type) {
+            ExhaustivenessResult::NonExhaustive {
+                missing_variants, ..
+            } => assert_eq!(missing_variants, vec!["Inactive", "Pending", "Archived"]),
+            other => panic!("Expected NonExhaustive, got {other:?}"),
+        }
+    }
+
+    /// Repeating the check inside one process must give the same order every
+    /// time. Two `HashSet`s built in the same thread do not share an
+    /// iteration order, so a single-process repeat is a real test of this.
+    #[test]
+    fn missing_variants_are_stable_across_repeated_checks() {
+        let status_type = make_enum_type("Status", &["Active", "Inactive", "Pending", "Archived"]);
+        let build = || MatchExpr {
+            scrutinee: Box::new(Expr::Identifier("status".to_string(), make_span())),
+            arms: vec![make_match_arm(
+                make_constructor_pattern(Some("Status"), "Active"),
+                None,
+                make_string_expr("yes"),
+            )],
+        };
+
+        let first = check_exhaustiveness(&build(), &status_type);
+        for _ in 0..16 {
+            assert_eq!(check_exhaustiveness(&build(), &status_type), first);
+        }
     }
 
     #[test]

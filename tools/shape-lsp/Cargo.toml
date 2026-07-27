@@ -13,6 +13,9 @@ default = []
 [dependencies]
 # Shape crates for parsing and semantic analysis
 shape-ast = { workspace = true }
+# ADR-017 §4: the LSP consumes the compiler's structured fixes instead of
+# deriving its own from rendered message text.
+shape-diagnostics = { workspace = true }
 shape-runtime = { workspace = true }
 shape-semantic-db = { workspace = true }
 shape-vm = { workspace = true }

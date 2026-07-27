@@ -507,6 +507,12 @@ fn create_diagnostic_with_code(
     }
     // W2.3 / 1.19 — derive UNNECESSARY tag from code/message at construction.
     diag.tags = diagnostic_tags_for(error_code, &diag.message);
+    // ADR-017 §4 — carry the emitter's machine-applicable fixes so the code
+    // action applies what the compiler proved instead of re-deriving a fix
+    // from this diagnostic's rendered message.
+    if let Some(loc) = location {
+        crate::structured_fixes::attach_fixes(&mut diag, &loc.fixes);
+    }
     diag
 }
 

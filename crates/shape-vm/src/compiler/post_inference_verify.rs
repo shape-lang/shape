@@ -630,6 +630,7 @@ fn emit_e0900(schema: &TypeSchema, field_name: &str, ft: &FieldType) -> ShapeErr
         )],
         notes: vec![],
         is_synthetic: true,
+        fixes: vec![],
     };
 
     let _ = ErrorCode::E0900; // ADR-006 §2.7.5 stamp marker — code allocated

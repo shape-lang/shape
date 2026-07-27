@@ -607,6 +607,7 @@ impl TypeChecker {
 
     /// Add an error with location information
     fn add_error(&mut self, error: TypeError, line: usize, column: usize) {
+        let fixes = self.machine_applicable_fixes(&error);
         let mut err = TypeErrorWithLocation::new(error, line, column);
 
         if let Some(filename) = &self.filename {
@@ -620,7 +621,38 @@ impl TypeChecker {
             }
         }
 
-        self.errors.push(err);
+        self.errors.push(err.with_fixes(fixes));
+    }
+
+    /// Fixes the checker can prove for `error` (ADR-017 §4).
+    ///
+    /// Every consumer reads what this returns; nothing downstream re-derives
+    /// a fix from the rendered message. Errors with no proved fix return
+    /// empty, which is not the same as "the tool should guess".
+    fn machine_applicable_fixes(&self, error: &TypeError) -> Vec<shape_diagnostics::SuggestedFix> {
+        let Some(source) = self.source.as_deref() else {
+            return Vec::new();
+        };
+
+        match error {
+            TypeError::NonExhaustiveMatch {
+                enum_name,
+                missing_variants,
+            } => self
+                .inference_engine
+                .lookup_non_exhaustive_match_origin(enum_name)
+                .and_then(|span| {
+                    super::fixes::non_exhaustive_match_fix(
+                        source,
+                        span,
+                        enum_name,
+                        missing_variants,
+                    )
+                })
+                .into_iter()
+                .collect(),
+            _ => Vec::new(),
+        }
     }
 
     /// Get all collected errors
@@ -890,6 +922,135 @@ mod tests {
             "Expected non-exhaustive match error, got: {}",
             err
         );
+    }
+
+    /// ADR-017 §4: the checker hands out the fix as proved facts, and
+    /// applying it produces source that type-checks clean. The fix's
+    /// insertion point comes from the match's own span, so this also pins
+    /// that the span reaches through the closing brace.
+    #[test]
+    fn non_exhaustive_match_carries_an_applicable_fix() {
+        let source = "enum Status { Active, Inactive, Pending }\n\
+                      fn check(s: Status) -> string {\n\
+                      \x20 match s {\n\
+                      \x20   Status::Active => \"yes\",\n\
+                      \x20 }\n\
+                      }\n";
+        let program = shape_ast::parser::parse_program(source).expect("parse");
+        let errors = analyze_program(&program, Some(source), None, None)
+            .expect_err("non-exhaustive match must fail");
+
+        let non_exhaustive = errors
+            .iter()
+            .find(|e| matches!(e.error, TypeError::NonExhaustiveMatch { .. }))
+            .expect("NonExhaustiveMatch reported");
+
+        assert_eq!(
+            non_exhaustive.fixes.len(),
+            1,
+            "expected exactly one proved fix, got {:?}",
+            non_exhaustive.fixes
+        );
+        let fix = &non_exhaustive.fixes[0];
+        assert_eq!(fix.label, "Add missing match arms for Status");
+
+        let repaired = fix
+            .edit_plan
+            .as_ref()
+            .expect("machine-applicable")
+            .apply(source)
+            .expect("plan applies to the source it was proved against");
+        assert_eq!(
+            repaired,
+            "enum Status { Active, Inactive, Pending }\n\
+             fn check(s: Status) -> string {\n\
+             \x20 match s {\n\
+             \x20   Status::Active => \"yes\",\n\
+             \x20   Status::Inactive => {\n\
+             \x20   },\n\
+             \x20   Status::Pending => {\n\
+             \x20   },\n\
+             \x20 }\n\
+             }\n"
+        );
+
+        let repaired_program = shape_ast::parser::parse_program(&repaired).expect("fix parses");
+        let remaining = analyze_program(&repaired_program, Some(&repaired), None, None).err();
+        assert!(
+            !remaining
+                .iter()
+                .flatten()
+                .any(|e| matches!(e.error, TypeError::NonExhaustiveMatch { .. })),
+            "the applied fix must retire the diagnostic it fixes, got: {remaining:?}"
+        );
+    }
+
+    /// The same input must produce the same edit bytes, every compile.
+    ///
+    /// A machine-applicable fix that varies run to run is not evidence, and
+    /// this varied: the missing-variant list came from a hash-set difference,
+    /// so the arms were emitted in a different order from process to process.
+    /// Repeating inside one process is a real test of the property — two
+    /// `HashSet`s in the same thread do not share an iteration order — and
+    /// the expected value pins declaration order specifically.
+    #[test]
+    fn the_proved_fix_is_byte_identical_across_compiles() {
+        let source = "enum Status { Active, Inactive, Pending, Archived }\n\
+                      fn check(s: Status) -> string {\n\
+                      \x20 match s {\n\
+                      \x20   Status::Active => \"yes\",\n\
+                      \x20 }\n\
+                      }\n";
+
+        let edit_bytes = || {
+            let program = shape_ast::parser::parse_program(source).expect("parse");
+            let errors = analyze_program(&program, Some(source), None, None)
+                .expect_err("non-exhaustive match must fail");
+            errors
+                .iter()
+                .find(|e| matches!(e.error, TypeError::NonExhaustiveMatch { .. }))
+                .expect("NonExhaustiveMatch reported")
+                .fixes
+                .first()
+                .expect("a proved fix")
+                .edit_plan
+                .as_ref()
+                .expect("machine-applicable")
+                .edits[0]
+                .new_text
+                .clone()
+        };
+
+        let first = edit_bytes();
+        assert_eq!(
+            first,
+            "    Status::Inactive => {\n    },\n\
+             \x20   Status::Pending => {\n    },\n\
+             \x20   Status::Archived => {\n    },\n",
+            "arms must materialize in enum declaration order"
+        );
+        for _ in 0..16 {
+            assert_eq!(
+                edit_bytes(),
+                first,
+                "the same input must give the same edit"
+            );
+        }
+    }
+
+    /// A checker with no source cannot bind a plan to a revision, so it
+    /// proves no machine-applicable fix rather than emitting an unbound one.
+    #[test]
+    fn non_exhaustive_match_without_source_proves_no_fix() {
+        let source = "enum Status { Active, Inactive }\n\
+                      fn check(s: Status) -> string {\n\
+                      \x20 match s {\n\
+                      \x20   Status::Active => \"yes\",\n\
+                      \x20 }\n\
+                      }\n";
+        let program = shape_ast::parser::parse_program(source).expect("parse");
+        let errors = analyze_program(&program, None, None, None).expect_err("must fail");
+        assert!(errors.iter().all(|e| e.fixes.is_empty()));
     }
 
     #[test]

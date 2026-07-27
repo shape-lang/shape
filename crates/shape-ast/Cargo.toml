@@ -12,6 +12,11 @@ default = []
 deep-tests = []
 
 [dependencies]
+# ADR-017 §4: a located error carries the emitter's machine-applicable
+# fixes, so `SourceLocation` names the LSDS `SuggestedFix` type directly
+# rather than growing a parallel copy of it. shape-diagnostics is a leaf
+# crate (serde only), so this stays acyclic.
+shape-diagnostics = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 chrono = { workspace = true }

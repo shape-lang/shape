@@ -91,7 +91,7 @@ fn get_quick_fixes(
     diagnostic: &Diagnostic,
     module_cache: Option<&ModuleCache>,
 ) -> Option<Vec<CodeActionOrCommand>> {
-    let mut fixes = Vec::new();
+    let mut fixes = structured_quick_fixes(text, uri, diagnostic);
     let message = &diagnostic.message;
     let code = diagnostic_code(diagnostic);
 
@@ -266,40 +266,11 @@ fn get_quick_fixes(
         }
     }
 
-    // Non-exhaustive match — E0103 (invalid arguments / exhaustiveness
-    // family) preferred when present; the variant list itself comes
-    // from `parse_non_exhaustive_match(message)` which inherently has
-    // to read the message text (structured payload not threaded
-    // through the diagnostic shape). Code guard is defensive: a future
-    // compiler emitter with a different message format but the right
-    // code still benefits from the fallback.
-    let is_non_exhaustive =
-        matches!(code, Some("E0103")) || message.contains("Non-exhaustive match");
-    if is_non_exhaustive
-        && let Some((enum_name, missing_variants)) = parse_non_exhaustive_match(message)
-    {
-        if let Some((insert_pos, indent)) = find_match_arm_insert_position(text, diagnostic.range) {
-            let arm_indent = format!("{indent}  ");
-            let mut new_text = String::new();
-            for variant in missing_variants {
-                new_text.push_str(&format!(
-                    "{arm_indent}{enum_name}::{variant} => {{\n{arm_indent}}},\n"
-                ));
-            }
-            fixes.push(create_quick_fix(
-                format!("Add missing match arms for {}", enum_name),
-                uri.clone(),
-                vec![TextEdit {
-                    range: Range {
-                        start: insert_pos,
-                        end: insert_pos,
-                    },
-                    new_text,
-                }],
-                diagnostic.clone(),
-            ));
-        }
-    }
+    // Non-exhaustive match is no longer derived here. The checker proves
+    // the enum name, the missing variants, and the arm insertion point, and
+    // ships them as structured edits on the diagnostic —
+    // `structured_quick_fixes` above turns them into this action. See
+    // ADR-017 §4 and `migrated_scrapers`.
 
     // Fix for missing required trait method — suggest adding the method
     // stub. E0401 emitted by `validate_trait_bounds` in `diagnostics.rs`
@@ -557,6 +528,34 @@ fn get_source_actions(
     }
 }
 
+/// Quick fixes the compiler proved and shipped on the diagnostic
+/// (ADR-017 §4).
+///
+/// Purely mechanical: each machine-applicable `SuggestedFix` becomes one
+/// action whose title is the emitter's label and whose edits are the
+/// emitter's spans. Nothing here inspects the message, and a fix whose spans
+/// no longer match the document is dropped rather than adjusted — the user
+/// re-triggers diagnostics and gets a fix proved against what they now have.
+fn structured_quick_fixes(
+    text: &str,
+    uri: &Uri,
+    diagnostic: &Diagnostic,
+) -> Vec<CodeActionOrCommand> {
+    crate::structured_fixes::fixes_from_diagnostic(diagnostic)
+        .into_iter()
+        .filter_map(|fix| {
+            let plan = fix.edit_plan.as_ref()?;
+            let edits = crate::structured_fixes::plan_to_text_edits(text, plan).ok()?;
+            Some(create_quick_fix(
+                fix.label.clone(),
+                uri.clone(),
+                edits,
+                diagnostic.clone(),
+            ))
+        })
+        .collect()
+}
+
 /// Create a quick fix code action
 fn create_quick_fix(
     title: String,
@@ -610,29 +609,6 @@ fn extract_unused_name(message: &str) -> Option<String> {
         }
     }
     None
-}
-
-fn parse_non_exhaustive_match(message: &str) -> Option<(String, Vec<String>)> {
-    const PREFIX: &str = "Non-exhaustive match on '";
-    const MARKER: &str = "': missing variants ";
-    let after_prefix = message.strip_prefix(PREFIX)?;
-    let marker_pos = after_prefix.find(MARKER)?;
-    let enum_name = after_prefix[..marker_pos].trim().to_string();
-    if enum_name.is_empty() {
-        return None;
-    }
-    let variants_part = &after_prefix[marker_pos + MARKER.len()..];
-    let variants = variants_part
-        .split(',')
-        .map(|v| v.trim())
-        .filter(|v| !v.is_empty())
-        .map(|v| v.to_string())
-        .collect::<Vec<_>>();
-    if variants.is_empty() {
-        None
-    } else {
-        Some((enum_name, variants))
-    }
 }
 
 fn find_match_arm_insert_position(text: &str, range: Range) -> Option<(Position, String)> {
@@ -1279,11 +1255,32 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_non_exhaustive_match_quick_fix_adds_missing_arms() {
-        let text = "match snapshot() {\n  Snapshot::Resumed => { }\n}\n";
-        let uri = Uri::from_file_path("/tmp/test.shape").unwrap();
-        let diagnostic = Diagnostic {
+    const NON_EXHAUSTIVE_TEXT: &str = "match snapshot() {\n  Snapshot::Resumed => { }\n}\n";
+
+    fn action_titles(actions: &[CodeActionOrCommand]) -> Vec<String> {
+        actions
+            .iter()
+            .map(|a| match a {
+                CodeActionOrCommand::CodeAction(action) => action.title.clone(),
+                CodeActionOrCommand::Command(cmd) => cmd.title.clone(),
+            })
+            .collect()
+    }
+
+    /// Build the diagnostic the compiler publishes for a non-exhaustive
+    /// match: message plus the structured fix it proved.
+    fn non_exhaustive_diagnostic(fix_source: &str) -> Diagnostic {
+        let insert_at = NON_EXHAUSTIVE_TEXT.rfind("}\n").expect("closing brace") as u32;
+        let fix = shape_diagnostics::SuggestedFix::new("Add missing match arms for Snapshot", 0.9)
+            .with_edits(
+                fix_source,
+                vec![shape_diagnostics::StructuredEdit::insertion(
+                    insert_at,
+                    "  Snapshot::Hash => {\n  },\n",
+                )],
+            );
+
+        let mut diagnostic = Diagnostic {
             range: Range {
                 start: Position {
                     line: 0,
@@ -1303,7 +1300,12 @@ mod tests {
             tags: None,
             data: None,
         };
-        let range = Range {
+        crate::structured_fixes::attach_fixes(&mut diagnostic, &[fix]);
+        diagnostic
+    }
+
+    fn cursor_in_match() -> Range {
+        Range {
             start: Position {
                 line: 1,
                 character: 5,
@@ -1312,23 +1314,101 @@ mod tests {
                 line: 1,
                 character: 5,
             },
-        };
+        }
+    }
 
-        let actions = get_code_actions(text, &uri, range, &[diagnostic], None, None);
+    /// ADR-017 §4: the missing-arms action now comes from the compiler's
+    /// structured edits. Its title is the emitter's label and its edit is
+    /// the emitter's span.
+    #[test]
+    fn test_non_exhaustive_match_quick_fix_adds_missing_arms() {
+        let uri = Uri::from_file_path("/tmp/test.shape").unwrap();
+        let diagnostic = non_exhaustive_diagnostic(NON_EXHAUSTIVE_TEXT);
+
+        let actions = get_code_actions(
+            NON_EXHAUSTIVE_TEXT,
+            &uri,
+            cursor_in_match(),
+            &[diagnostic],
+            None,
+            None,
+        );
+
+        let arms = actions
+            .iter()
+            .find_map(|a| match a {
+                CodeActionOrCommand::CodeAction(action)
+                    if action.title == "Add missing match arms for Snapshot" =>
+                {
+                    Some(action)
+                }
+                _ => None,
+            })
+            .unwrap_or_else(|| {
+                panic!(
+                    "expected missing-arms quick fix, got: {:?}",
+                    action_titles(&actions)
+                )
+            });
+
+        let edits = arms
+            .edit
+            .as_ref()
+            .and_then(|e| e.changes.as_ref())
+            .and_then(|c| c.get(&uri))
+            .expect("workspace edit for this document");
+        assert_eq!(edits.len(), 1);
+        assert_eq!(edits[0].new_text, "  Snapshot::Hash => {\n  },\n");
+        assert_eq!(
+            edits[0].range.start,
+            Position {
+                line: 2,
+                character: 0
+            }
+        );
+    }
+
+    /// The message alone no longer produces the fix: with the structured
+    /// payload stripped, nothing scrapes "missing variants" out of the text.
+    #[test]
+    fn non_exhaustive_match_message_alone_offers_no_arms_fix() {
+        let uri = Uri::from_file_path("/tmp/test.shape").unwrap();
+        let mut diagnostic = non_exhaustive_diagnostic(NON_EXHAUSTIVE_TEXT);
+        diagnostic.data = None;
+
+        let actions = get_code_actions(
+            NON_EXHAUSTIVE_TEXT,
+            &uri,
+            cursor_in_match(),
+            &[diagnostic],
+            None,
+            None,
+        );
         assert!(
-            actions.iter().any(|a| matches!(
-                a,
-                CodeActionOrCommand::CodeAction(CodeAction { title, .. })
-                    if title == "Add missing match arms for Snapshot"
-            )),
-            "Expected missing-arms quick fix. Got: {:?}",
-            actions
+            !action_titles(&actions)
                 .iter()
-                .map(|a| match a {
-                    CodeActionOrCommand::CodeAction(action) => action.title.clone(),
-                    CodeActionOrCommand::Command(cmd) => cmd.title.clone(),
-                })
-                .collect::<Vec<_>>()
+                .any(|t| t.starts_with("Add missing match arms")),
+            "message scraping must be gone, got: {:?}",
+            action_titles(&actions)
+        );
+    }
+
+    /// Tripwire 3 at the code-action boundary: a fix proved against an older
+    /// revision of the document offers no action rather than a misplaced one.
+    #[test]
+    fn stale_structured_fix_offers_no_action() {
+        let uri = Uri::from_file_path("/tmp/test.shape").unwrap();
+        // The fix was proved against the document before this leading line.
+        let diagnostic = non_exhaustive_diagnostic(NON_EXHAUSTIVE_TEXT);
+        let edited = format!("// typed since\n{NON_EXHAUSTIVE_TEXT}");
+
+        let actions = get_code_actions(&edited, &uri, cursor_in_match(), &[diagnostic], None, None);
+        assert!(
+            !action_titles(&actions)
+                .iter()
+                .any(|t| t.starts_with("Add missing match arms")),
+            "stale fix must not be offered, got: {:?}",
+            action_titles(&actions)
         );
     }
 
@@ -1347,28 +1427,10 @@ mod tests {
         assert_eq!(extract_unused_name("nothing here"), None);
     }
 
-    #[test]
-    fn test_parse_non_exhaustive_match_basic() {
-        let parsed = parse_non_exhaustive_match(
-            "Non-exhaustive match on 'Color': missing variants Red, Green, Blue",
-        );
-        assert!(parsed.is_some());
-        let (name, variants) = parsed.unwrap();
-        assert_eq!(name, "Color");
-        assert_eq!(variants, vec!["Red", "Green", "Blue"]);
-    }
-
-    #[test]
-    fn test_parse_non_exhaustive_match_no_prefix() {
-        let parsed = parse_non_exhaustive_match("Some other message");
-        assert!(parsed.is_none());
-    }
-
-    #[test]
-    fn test_parse_non_exhaustive_match_no_variants() {
-        let parsed = parse_non_exhaustive_match("Non-exhaustive match on 'Foo': missing variants ");
-        assert!(parsed.is_none());
-    }
+    // `parse_non_exhaustive_match` and its three tests are deleted: the
+    // enum name and missing-variant list now arrive as proved facts rather
+    // than being recovered from the rendered message. The tombstone in
+    // `migrated_scrapers` fails if any code path reaches for it again.
 
     #[test]
     fn test_find_match_arm_insert_position_simple() {
