@@ -97,7 +97,8 @@ pub use statements::{Block, ForInit, ForLoop, IfStatement, Statement, WhileLoop}
 // From functions.rs
 pub use functions::{
     Annotation, AnnotationDef, AnnotationHandler, AnnotationHandlerParam, AnnotationHandlerType,
-    AnnotationTargetKind, ForeignFunctionDef, FunctionDef, FunctionParameter, NativeAbiBinding,
+    AnnotationTargetKind, ForeignAsyncRejection, ForeignFunctionDef, FunctionDef,
+    FunctionParameter, NativeAbiBinding,
 };
 
 // From modules.rs
