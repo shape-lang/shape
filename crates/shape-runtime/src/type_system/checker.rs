@@ -985,6 +985,59 @@ mod tests {
         );
     }
 
+    /// The same input must produce the same edit bytes, every compile.
+    ///
+    /// A machine-applicable fix that varies run to run is not evidence, and
+    /// this varied: the missing-variant list came from a hash-set difference,
+    /// so the arms were emitted in a different order from process to process.
+    /// Repeating inside one process is a real test of the property — two
+    /// `HashSet`s in the same thread do not share an iteration order — and
+    /// the expected value pins declaration order specifically.
+    #[test]
+    fn the_proved_fix_is_byte_identical_across_compiles() {
+        let source = "enum Status { Active, Inactive, Pending, Archived }\n\
+                      fn check(s: Status) -> string {\n\
+                      \x20 match s {\n\
+                      \x20   Status::Active => \"yes\",\n\
+                      \x20 }\n\
+                      }\n";
+
+        let edit_bytes = || {
+            let program = shape_ast::parser::parse_program(source).expect("parse");
+            let errors = analyze_program(&program, Some(source), None, None)
+                .expect_err("non-exhaustive match must fail");
+            errors
+                .iter()
+                .find(|e| matches!(e.error, TypeError::NonExhaustiveMatch { .. }))
+                .expect("NonExhaustiveMatch reported")
+                .fixes
+                .first()
+                .expect("a proved fix")
+                .edit_plan
+                .as_ref()
+                .expect("machine-applicable")
+                .edits[0]
+                .new_text
+                .clone()
+        };
+
+        let first = edit_bytes();
+        assert_eq!(
+            first,
+            "    Status::Inactive => {\n    },\n\
+             \x20   Status::Pending => {\n    },\n\
+             \x20   Status::Archived => {\n    },\n",
+            "arms must materialize in enum declaration order"
+        );
+        for _ in 0..16 {
+            assert_eq!(
+                edit_bytes(),
+                first,
+                "the same input must give the same edit"
+            );
+        }
+    }
+
     /// A checker with no source cannot bind a plan to a revision, so it
     /// proves no machine-applicable fix rather than emitting an unbound one.
     #[test]
