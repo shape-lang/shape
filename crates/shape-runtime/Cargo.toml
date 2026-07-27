@@ -80,6 +80,9 @@ reqwest = { workspace = true }
 
 # Internal
 shape-ast = { workspace = true }
+# ADR-017 §4: the type checker proves machine-applicable fixes and hands
+# them out as LSDS `SuggestedFix` values.
+shape-diagnostics = { workspace = true }
 shape-value = { workspace = true }
 shape-macros = { workspace = true }
 shape-wire = { workspace = true }

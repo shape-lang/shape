@@ -28,6 +28,7 @@ pub mod environment;
 pub mod error_bridge;
 pub mod errors;
 pub mod exhaustiveness;
+pub mod fixes;
 pub mod inference;
 pub mod semantic;
 pub mod storage;

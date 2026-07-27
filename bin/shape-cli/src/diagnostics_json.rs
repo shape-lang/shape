@@ -52,6 +52,11 @@ fn single(err: &ShapeError) -> Diagnostic {
         for note in &loc.notes {
             builder = builder.with_note(error_note_to_lsds(note));
         }
+        // ADR-017 §4: machine-applicable fixes are carried verbatim from the
+        // emitter. This adapter re-derives nothing.
+        for fix in &loc.fixes {
+            builder = builder.with_fix(fix.clone());
+        }
     }
     builder.build()
 }

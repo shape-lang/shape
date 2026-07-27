@@ -280,6 +280,9 @@ pub struct TypeErrorWithLocation {
     pub line: usize,
     pub column: usize,
     pub source_line: Option<String>,
+    /// Machine-applicable fixes proved alongside the error (ADR-017 §4).
+    /// Empty when the checker proved none.
+    pub fixes: Vec<shape_diagnostics::SuggestedFix>,
 }
 
 impl TypeErrorWithLocation {
@@ -290,6 +293,7 @@ impl TypeErrorWithLocation {
             line,
             column,
             source_line: None,
+            fixes: Vec::new(),
         }
     }
 
@@ -300,6 +304,12 @@ impl TypeErrorWithLocation {
 
     pub fn with_source_line(mut self, source: String) -> Self {
         self.source_line = Some(source);
+        self
+    }
+
+    /// Attach machine-applicable fixes (ADR-017 §4).
+    pub fn with_fixes(mut self, fixes: Vec<shape_diagnostics::SuggestedFix>) -> Self {
+        self.fixes = fixes;
         self
     }
 

@@ -5370,6 +5370,7 @@ dependencies = [
  "rust_decimal",
  "serde",
  "serde_json",
+ "shape-diagnostics",
  "thiserror 1.0.69",
 ]
 
@@ -5574,6 +5575,7 @@ dependencies = [
  "sha2",
  "shape-abi-v1",
  "shape-ast",
+ "shape-diagnostics",
  "shape-macros",
  "shape-value",
  "shape-wire",
