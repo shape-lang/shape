@@ -2162,7 +2162,7 @@ mod tests {
     // ── ADR-019 §1 (#196) — unmapped foreign types, editor side ───────────
 
     #[test]
-    fn test_unmapped_foreign_type_is_an_editor_error_carrying_the_compilers_code() {
+    fn test_unmapped_foreign_type_is_an_editor_error_carrying_the_compilers_text() {
         use shape_ast::parser::parse_program;
 
         let source = "fn python analyze(data: DataTable) -> Result<number> {\n    return 1.0\n}\n";
@@ -2175,10 +2175,19 @@ mod tests {
         assert_eq!(c0933.len(), 1, "got: {diagnostics:?}");
         let d = c0933[0];
         assert_eq!(d.severity, Some(DiagnosticSeverity::ERROR));
-        assert!(
-            d.message.contains("DataTable") && d.message.contains("help:"),
-            "the editor message names the type and carries the fix-it, got: {}",
-            d.message
+
+        // Single-sourcing asserted against the producer itself rather than by
+        // scraping the rendered prose: the editor's text must BE the
+        // compiler's, so a reworded diagnostic cannot drift between them.
+        let Item::ForeignFunction(foreign_fn, _) = &program.items[0] else {
+            panic!("fixture declares a foreign function");
+        };
+        let rejections = foreign_fn.unmapped_foreign_types();
+        assert_eq!(rejections.len(), 1);
+        assert_eq!(
+            d.message,
+            format!("{}\n\nhelp: {}", rejections[0].message, rejections[0].fix_hint),
+            "the editor must render the compiler's producer output verbatim"
         );
     }
 
