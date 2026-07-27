@@ -362,15 +362,16 @@ fn alloc_format(parts: &[&str]) -> String {
 /// Strip one `Result<...>` wrapper. Mirrors
 /// `foreign_marshal::strip_result_wrapper`.
 fn strip_result_wrapper(s: &str) -> &str {
-    if let Some(rest) = s.strip_prefix("Result<") {
-        if let Some(inner) = rest.strip_suffix('>') {
-            // `Result<T, E>` — the error arm is the host's string channel and
-            // never crosses; classify `T`.
-            return match split_top_level(inner) {
-                Some((first, _)) => first.trim(),
-                None => inner.trim(),
-            };
-        }
+    if let Some(inner) = s
+        .strip_prefix("Result<")
+        .and_then(|rest| rest.strip_suffix('>'))
+    {
+        // `Result<T, E>` — the error arm is the host's string channel and
+        // never crosses; classify `T`.
+        return match split_top_level(inner) {
+            Some((first, _)) => first.trim(),
+            None => inner.trim(),
+        };
     }
     s
 }
@@ -425,11 +426,12 @@ fn classify_inner(
 
     // `T?` optional sugar. Checked before scalars so `int?` does not read as a
     // name. Guarded against `??` exactly as `strip_option_inner` is.
-    if let Some(head) = s.strip_suffix('?') {
-        if !head.is_empty() && !head.ends_with('?') {
-            let inner = classify_inner(head, declared, direction, false)?;
-            return Ok(ForeignType::Optional(Box::new(inner)));
-        }
+    if let Some(head) = s
+        .strip_suffix('?')
+        .filter(|head| !head.is_empty() && !head.ends_with('?'))
+    {
+        let inner = classify_inner(head, declared, direction, false)?;
+        return Ok(ForeignType::Optional(Box::new(inner)));
     }
 
     if let Some(scalar) = scalar_from_spelling(s) {
@@ -580,10 +582,11 @@ fn parse_object_fields(
             // `@"alias" field` — the alias is the wire name.
             if let Some(after_at) = name.strip_prefix('@') {
                 let after_at = after_at.trim_start();
-                if let Some(rest_alias) = after_at.strip_prefix('"') {
-                    if let Some(end) = rest_alias.find('"') {
-                        name = &rest_alias[..end];
-                    }
+                if let Some((quoted, _)) = after_at
+                    .strip_prefix('"')
+                    .and_then(|rest| rest.split_once('"'))
+                {
+                    name = quoted;
                 }
             }
             let optional = name.ends_with('?');
