@@ -1,0 +1,249 @@
+{
+  "record_kind": "PairCandidate",
+  "record_version": 1,
+  "candidate_id": "adr011-012-pair-001",
+  "program_id": "adr011-012",
+  "created_at": "2026-07-27",
+  "authority": {
+    "ticket": "#111 (AUTHORITY-BASELINE)",
+    "step": "docs/design/typed-comptime/adr011-012-execution-rulings.md — '#90 authority enactment — ten required steps', step 2",
+    "adr": "ADR-016 §7 (exact pairs are promoted through external attestation)",
+    "authority_set_commit": {
+      "repository": "shape-lang/shape",
+      "sha": "87f51f6139327b8468563d959f858336c7463486",
+      "subject": "docs(authority): commit the ADR-011–019 authority set on the #111 baseline",
+      "committed_at": "2026-07-27T17:48:35+02:00",
+      "note": "The commit that landed ADR-011..ADR-019, the ADR index, and the rulings file. It is an ancestor of the candidate Shape revision, not the candidate itself."
+    }
+  },
+
+  "sources": {
+    "shape": {
+      "repository": "shape-lang/shape",
+      "sha": "cdb0be5de0f3aa346c99549f2beb8afa13918fd6",
+      "tree_sha": "440ba57b8b9ba79db4720167d5a1c5ad88afe664",
+      "subject": "docs(program): commit exact publication rows for the ERGO/PERF/POLY wave",
+      "committed_at": "2026-07-27T18:04:04+02:00",
+      "ancestor_of_authority_set_commit": false,
+      "descends_from_authority_set_commit": true,
+      "selection_reason": "Newest revision carrying the complete committed authority set plus the ERGO/PERF/POLY publication rows. Chosen by explicit hash, not by branch position.",
+      "worktree_intent": "Verification source only. The BookTruthGate Shape-side adapter builds the shape binary from exactly this revision and runs the gate against it. No lane commits, no merges, and no branch movement may be attributed to this pin; later Shape work produces a NEW candidate, never an update of this one."
+    },
+    "shape_web": {
+      "repository": "shape-lang/shape-web",
+      "local_path_observed": "/home/dev/dev/shape-lang/shape-web",
+      "sha": "f4c780467d2bd1a7eb297e062e9692e34eae31d5",
+      "subject": "docs(comptime): retire type_info / implements from the book (E5 #21 Tranche 1)",
+      "committed_at": "2026-07-24T21:06:38+02:00",
+      "observed_on_branch": "adr009-c3-annotations",
+      "observed_on_branch_is_metadata_only": true,
+      "selection_reason": "Exact HEAD commit of the only shape-web checkout available at candidate-binding time. Recorded by hash; the branch name is provenance metadata and is NOT the pin.",
+      "worktree_intent": "Verification source only. The BookTruthGate shape-web-side adapter extracts the fence universe and the coverage manifest from exactly this revision.",
+      "working_tree_observation": {
+        "observed_at": "2026-07-27",
+        "clean": false,
+        "modified_tracked_paths": 55,
+        "untracked_paths": 2,
+        "untracked_list": [
+          "book/book-site/book-coverage-manifest.example.json",
+          "book/book-site/book-coverage-manifest.schema.json"
+        ],
+        "staged_paths": 0,
+        "note": "Read-only inspection; nothing in that checkout was modified, staged, committed, or cleaned. All 55 modified paths are book/book-site/src/content/docs/**.mdx. NONE of this uncommitted state is part of the candidate: the candidate names only the committed revision f4c78046. Any gate run must use a clean export of that SHA, not the working tree.",
+        "consequence": "The BookCoverageManifest schema and example are UNCOMMITTED at the candidate revision, so the ADR-016 §3 coverage-manifest half of the pair cannot be satisfied by this candidate as it stands. See open_prerequisites."
+      }
+    }
+  },
+
+  "manifest_identities": [
+    {
+      "name": "program-manifest",
+      "path": "docs/program/adr011-012/program-manifest.draft.json",
+      "host_repository": "shape-lang/shape",
+      "host_sha": "cdb0be5de0f3aa346c99549f2beb8afa13918fd6",
+      "sha256": "b1819b87506cf785d603f6b4b3c9a5a06f5a57ab71a02f41ceae07d2310d0591",
+      "note": "Byte-identical at 87f51f61 and at the candidate SHA. Matches the manifest SHA-256 published in the body marker of issue #111."
+    },
+    {
+      "name": "publication-plan",
+      "path": "docs/program/workstreams/publication-plan.json",
+      "host_repository": "shape-lang/shape",
+      "host_sha": "cdb0be5de0f3aa346c99549f2beb8afa13918fd6",
+      "sha256": "89a6c37100c05502443854958f1cae28eeb3d96fd39a776a56c93711a50fe2db",
+      "bytes": 44971,
+      "note": "Introduced by the candidate commit itself; absent at 87f51f61."
+    },
+    {
+      "name": "program-manifest-schema",
+      "path": "docs/program/adr011-012/program-manifest.schema.json",
+      "host_sha": "87f51f6139327b8468563d959f858336c7463486",
+      "sha256": "0a9e1194a48f18cfff451388c89515178dc0cb53a4c51660f12e03043c2d38aa"
+    },
+    {
+      "name": "public-feature-manifest-schema",
+      "path": "docs/program/adr011-012/public-feature-manifest.schema.json",
+      "host_sha": "87f51f6139327b8468563d959f858336c7463486",
+      "sha256": "5089d2b28a7743964441f08dadd39bef8aebee756860bc0b5eacfe165150c486"
+    },
+    {
+      "name": "public-feature-manifest-example",
+      "path": "docs/program/adr011-012/public-feature-manifest.example.json",
+      "host_sha": "87f51f6139327b8468563d959f858336c7463486",
+      "sha256": "f19b4c22e884f377689175d314f89d4d25ce6ccee91b3e333f8ccf1bc346d91c",
+      "note": "Example, not the real manifest. See unbound_identities.public_feature_manifest."
+    },
+    {
+      "name": "tracker-publication-record",
+      "path": "docs/program/adr011-012/tracker-publication.json",
+      "host_sha": "87f51f6139327b8468563d959f858336c7463486",
+      "sha256": "1b531eb4208850735c0b3a1fe40470876eb33ea2d21e3e9308e7ee1360d607dc"
+    },
+    {
+      "name": "execution-rulings",
+      "path": "docs/design/typed-comptime/adr011-012-execution-rulings.md",
+      "host_sha": "cdb0be5de0f3aa346c99549f2beb8afa13918fd6",
+      "sha256": "e08229032ba940eb0a011a8aec12b5aaa63a5d561ef5c5fae1d5978e4dec5422",
+      "sha256_at_authority_set_commit": "08e0c5d5268c3a306f19a12cc97399599087536de9597e3f8c874e2545c2f985",
+      "note": "Amended by the candidate commit; both hashes recorded so neither revision is guessed."
+    },
+    {
+      "name": "workstreams-readme",
+      "path": "docs/program/workstreams/README.md",
+      "host_sha": "cdb0be5de0f3aa346c99549f2beb8afa13918fd6",
+      "sha256": "331cca660c9340b3144d749548aed2765580060c49ea334b1b534ab311e5a0a9"
+    },
+    {
+      "name": "ratification-grill",
+      "path": "docs/program/workstreams/ratification-grill.md",
+      "host_sha": "cdb0be5de0f3aa346c99549f2beb8afa13918fd6",
+      "sha256": "a2cff549f49719b547ff19883977fdc0c9c0a7d049644b3cdc6500390a21bd91"
+    }
+  ],
+
+  "harness_identities": [
+    {
+      "name": "book-truth-gate",
+      "path": "book/book-site/scripts/run-book-truth-gate.mjs",
+      "host_repository": "shape-lang/shape-web",
+      "host_sha": "f4c780467d2bd1a7eb297e062e9692e34eae31d5",
+      "sha256": "09b2aa5c6b43532214ca3b61a734de20cdb96dcab23534090c011ea44ab15820",
+      "report_schema_version": 1,
+      "note": "Tracked and committed at the candidate revision (an earlier concern that this harness was unversioned is stale for these paths). This is the pre-ADR-016 harness: its CLI is not yet the versioned `book-truth-gate --shape-sha/--shape-web-sha/--public-features/--book-coverage/--report` interface of ADR-016 §6, and its report has no manifest/revision/toolchain binding fields. GATE-CLI (#118) owns that replacement."
+    },
+    {
+      "name": "book-truth-gate-tests",
+      "path": "book/book-site/scripts/run-book-truth-gate.test.mjs",
+      "host_sha": "f4c780467d2bd1a7eb297e062e9692e34eae31d5",
+      "sha256": "a45a22238cbb37fefac23a2f97208cc9660b3ff88885dfa5a5f91eab9065a316"
+    },
+    {
+      "name": "book-truth-workflow",
+      "path": ".github/workflows/book-truth.yml",
+      "host_sha": "f4c780467d2bd1a7eb297e062e9692e34eae31d5",
+      "sha256": "f83721e94d5e12d286e3a40b82972ca2a7a39f1acb3ec2c3d7023871a6de0147",
+      "note": "Existing workflow file; NOT yet an exact-pair adapter. SHAPE-GATE-CI (#128) and BOOK-GATE-CI (#129) own the adapters that must consume this candidate."
+    }
+  ],
+
+  "toolchain_identity": {
+    "rustc": {
+      "version": "1.94.1",
+      "commit_hash": "e408947bfd200af42db322daf0fadfe7e26d3bd1",
+      "commit_date": "2026-03-25",
+      "host": "x86_64-unknown-linux-gnu",
+      "llvm": "21.1.8",
+      "source": "built from a source tarball"
+    },
+    "cargo": { "version": "1.94.0", "commit_hash": "29ea6fb6a", "commit_date": "2026-03-24" },
+    "node": { "version": "v24.14.1" },
+    "rust_toolchain_file_in_repo": null,
+    "provisioning": {
+      "mechanism": "devenv (nix)",
+      "devenv_version": "1.11.1",
+      "invocation": "direnv exec /home/dev/dev/shape-lang <cmd>",
+      "devenv_lock_path": "/home/dev/dev/shape-lang/devenv.lock",
+      "devenv_lock_sha256": "543a17c40b1cc7b3d5c052a8cc20df8256f3ff2b939ce649af7f743b209d65e5",
+      "devenv_nix_path": "/home/dev/dev/shape-lang/devenv.nix",
+      "devenv_nix_sha256": "c6ba29aacdd8e2d96779d764c4e5046fa21732172aa4099f4c00c05726bbda4d",
+      "rust_toolchain_store_path": "/nix/store/n3324sw6xnhzga0rkv14ygsx1xv8sgms-rust-toolchain-nixpkgs",
+      "note": "The repository pins no rust-toolchain.toml; the toolchain identity comes from the devenv/nix environment above. devenv.lock and devenv.nix live in the parent directory /home/dev/dev/shape-lang, which is OUTSIDE both named source revisions, so their hashes are recorded here by value."
+    }
+  },
+
+  "binary_identity": {
+    "status": "unbound",
+    "reason": "No shape binary has been built from the candidate Shape revision, so no digest exists to name. A guessed, stale, or 'to be filled in later' digest would be exactly the mutable verification field step 2 forbids.",
+    "required_before_promotion": true,
+    "build_recipe": {
+      "source_sha": "cdb0be5de0f3aa346c99549f2beb8afa13918fd6",
+      "command": "direnv exec /home/dev/dev/shape-lang cargo build --release --bin shape",
+      "artifact_path": "target/release/shape",
+      "target_triple": "x86_64-unknown-linux-gnu",
+      "digest_algorithm": "sha256",
+      "toolchain": "the toolchain_identity block above"
+    }
+  },
+
+  "unbound_identities": {
+    "public_feature_manifest": {
+      "status": "unbound",
+      "reason": "Only the schema and an example exist at the candidate Shape revision; the real complete PublicFeatureManifest is not yet generated.",
+      "owning_tickets": ["#112 (PF-CONTRACT)", "#114 (PF-INVENTORY)", "#124 (PF-CAPSTONE)"]
+    },
+    "book_coverage_manifest": {
+      "status": "unbound",
+      "reason": "The coverage-manifest schema and example are untracked in the shape-web checkout and therefore absent from the candidate shape-web revision f4c78046.",
+      "owning_tickets": ["#113 (BOOK-CONTRACT)", "#115 (BOOK-FENCE-INVENTORY)"]
+    },
+    "pair_attestation": {
+      "status": "not-applicable-at-candidate-time",
+      "reason": "An attestation is minted by the coordinator after both adapters agree; a PairCandidate never contains one.",
+      "owning_tickets": ["#131 (PAIR-ATTEST)", "#132 (BOOK-PAIR-PROMOTE)"]
+    }
+  },
+
+  "storage": {
+    "current": {
+      "location": "docs/program/adr011-012/pair-candidate-001.json in shape-lang/shape",
+      "committed_at_revision": "a revision strictly newer than, and different from, both named source revisions",
+      "self_reference_check": "This record does not name the commit that contains it, does not name a branch, and is not referenced from either named source revision. Neither named source revision contains this file: it is absent from Shape cdb0be5d and from shape-web f4c78046."
+    },
+    "required_for_promotion": {
+      "location": "a protected coordination ref or release outside both named source repositories (ADR-016 §7)",
+      "status": "not yet provisioned",
+      "owning_ticket": "#127 (PAIR-PROTOCOL)"
+    }
+  },
+
+  "promotion_status": {
+    "state": "bound-but-unpromoted",
+    "meaning": "The revision pair, manifest, harness and toolchain identities below are exact and immutable. The candidate is NOT verified, NOT attested, and NOT promotable until every entry in open_prerequisites closes.",
+    "explicit_non_claims": [
+      "No BookTruthGate run has been executed against this pair.",
+      "No adapter report, attestation, or accepted-pair transition exists for this pair.",
+      "Nothing here asserts that the pair passes any gate."
+    ]
+  },
+
+  "open_prerequisites": [
+    { "ticket": "#127", "id": "PAIR-PROTOCOL", "need": "define the immutable pair-evidence format and the protected external storage this record must move to" },
+    { "ticket": "#118", "id": "GATE-CLI", "need": "the versioned ADR-016 §6 BookTruthGate CLI that consumes a candidate" },
+    { "ticket": "#112", "id": "PF-CONTRACT", "need": "PublicFeatureManifest contract, then the real manifest" },
+    { "ticket": "#113", "id": "BOOK-CONTRACT", "need": "BookCoverageManifest contract committed in shape-web" },
+    { "ticket": "#128", "id": "SHAPE-GATE-CI", "need": "Shape-side exact-pair adapter reading this candidate" },
+    { "ticket": "#129", "id": "BOOK-GATE-CI", "need": "shape-web-side exact-pair adapter reading this candidate" },
+    { "ticket": "#130", "id": "PAIR-DRIFT-GUARD", "need": "reject drift between the two adapter reports" },
+    { "ticket": "#131", "id": "PAIR-ATTEST", "need": "mint the signed content-addressed PairAttestation" },
+    { "ticket": "#132", "id": "BOOK-PAIR-PROMOTE", "need": "promotion and rollback rehearsal; the explicit native blocker for #90" }
+  ],
+
+  "forbidden_form_audit": {
+    "no_current_main": "Both source revisions are full 40-character SHAs. The word 'main' appears nowhere as a pin.",
+    "no_relative_head": "No HEAD, HEAD~n, @{...}, or symbolic revision is used as a pin.",
+    "no_moving_branch": "Branch names appear only as provenance metadata explicitly marked observed_on_branch_is_metadata_only.",
+    "no_reciprocal_sha": "Neither named source revision contains a copy of, or a pointer to, the counterpart SHA. Both counterpart SHAs live only in this external record.",
+    "no_self_sha": "This record does not contain the SHA of the commit that introduces it.",
+    "no_mutable_verification_fields_in_sources": "No 'last verified', 'status', pass/fail, count, or attestation field is written into either named source revision by this record. The unbound/status fields here belong to the candidate record itself, which is external evidence, not source authority.",
+    "no_count_substitutes": "The dirty-worktree observation records exact path counts as an observation of a checkout, never as gate evidence."
+  }
+}

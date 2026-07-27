@@ -1595,7 +1595,6 @@ mod foreign_target_annotation_rejection_tests {
     ) -> (String, Option<shape_ast::error::SourceLocation>) {
         let program = shape_ast::parser::parse_program(src).expect("parse failed");
         let mut compiler = BytecodeCompiler::new();
-        compiler.allow_internal_builtins = true;
         // The weave.rs/install_registry.rs span-asserting harness shape:
         // source_text gives real span→line mapping.
         compiler.source_text = Some(src.to_string());
@@ -1608,7 +1607,6 @@ mod foreign_target_annotation_rejection_tests {
     fn compile_ok(src: &str) -> BytecodeCompiler {
         let program = shape_ast::parser::parse_program(src).expect("parse failed");
         let mut compiler = BytecodeCompiler::new();
-        compiler.allow_internal_builtins = true;
         compiler
             .compile_in_place(&program)
             .expect("fixture must compile");

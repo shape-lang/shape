@@ -1,0 +1,229 @@
+{
+  "plan_version": 1,
+  "program_id": "adr017-019-workstreams",
+  "date": "2026-07-27",
+  "authority_commit": "87f51f61",
+  "ratification": {
+    "grill": "docs/program/workstreams/ratification-grill.md",
+    "rulings": "Q1=B Q2=A Q3=C Q4=as-recommended Q5=B (user, 2026-07-27); enactment go-ahead given 2026-07-27",
+    "row_sources": [
+      "docs/program/workstreams/ergo.md",
+      "docs/program/workstreams/perf.md",
+      "docs/program/workstreams/poly-depth.md",
+      "docs/design/typed-comptime/adr011-012-execution-rulings.md (R21-R25)"
+    ]
+  },
+  "disclosures": [
+    "26 issues, not 25: the approved Q2 edge 'the R21 row-in-type slice precedes #143' requires the slice to exist as an issue; no published issue owns that work (verified against the 67-entry symbolic mapping and #91-#96/#143-#144 titles), so EFFECT-ROW-IN-TYPE is published as the edge's carrier, grounded entirely in R21 + ADR-014 §8. ergo.md additionally declares ERGO-CONTRACT-FIXIT blocked by this slice.",
+    "The ADR-012 §11 step-8 @remote rebuild slice referenced by ERGO-SUPERVISOR-SCOPE resolves to published #103 'Rebuild remote as the ordinary stdlib consumer'.",
+    "PERF-SUITE's 'blocks every other PERF ticket's close' is carried as native edges only where each ticket's committed row states 'Blocked by: PERF-SUITE'; PERF-HOF-CARRIER inherits it transitively via PERF-CLOSURE-NATIVE; PERF-ALLOC-SEAM's row states 'none (independent)' and PERF-ARENA is downstream of PERF-ESCAPE; the no-measurement-no-close rule additionally binds through each ticket's acceptance text.",
+    "'joint with ERGO-VAR-TRUTH' on PERF-RC-ELISION and 'coordinates with #160/#167' on POLY-ENV-PIN and '#163/#164' relations on POLY-FOREIGN-REF / POLY-ASYNC-OFFLOAD are prose coordination notes per the committed rows, not native edges.",
+    "The POLY workstream's acceptance capstone (poly-depth.md §Sequencing: remote placement of a checked, environment-pinned fn python with digest-verified admission, feeding GATE-DISTRIBUTED #122 evidence) is carried in POLY-ENV-PIN's body so it is issue-visible; it is a workstream close condition, not a single ticket's tripwire.",
+    "ergo.md's §Sequencing waiver rule (mechanism slice reaching public before its ERGO counterpart needs the dated ADR-017 §1 user waiver) binds through R23, cited in every ERGO entry's Authority; it is not restated per-issue."
+  ],
+  "body_rendering": "Published body = marker comment (id, plan sha256, authority commit) + entry.body + a '## Blocked by' section rendered from blocked_by with symbolic refs resolved to issue numbers ('- none' when empty). The body-blockers-equal-native acceptance criterion binds against that rendered section.",
+  "labels_all": ["adr-009"],
+  "readiness_label": "ready-for-agent",
+  "readiness_rule": "applied only after the independent re-fetch audit passes, to new issues with zero open blockers",
+  "amendments": [
+    {
+      "issue": 110,
+      "op": "append-blocked-by",
+      "new_blocker_symbolic": "ERGO-QUASIQUOTE",
+      "reason": "Q2-approved edge: quasiquote is the typed alternative that unblocks deleting the retained parse_type_annotation_payload string arm (the deletion E5 CKPT-4 deferred)."
+    },
+    {
+      "issue": 143,
+      "op": "append-blocked-by",
+      "new_blocker_symbolic": "EFFECT-ROW-IN-TYPE",
+      "reason": "Q2-approved edge: #143 must not land a contract-row representation the type system cannot express (R21 precedence)."
+    }
+  ],
+  "scope_reference_comments": [112, 113, 143, 163],
+  "scope_reference_comment_text": "Scope-by-reference expansion (user-ratified 2026-07-27, grill Q2 = A): this ticket's acceptance criterion of the form \"conforms to ADR-014 / ADR-016\" now binds the amended ADR-014 §8 (effect rows in function types, EffectParamRef closure at instantiation, DurableSupervisor classification) and/or ADR-016 §10 (script tier, ceremony budgets, concept-identity mapping) as committed in the 2026-07-27 authority commit. Pinning to the pre-amendment ADR text was explicitly rejected (grill Q2 option B) to avoid dual authority.",
+  "creation_order_note": "EFFECT-ROW-IN-TYPE first so every later Blocked-by reference points backward; then ERGO, PERF, POLY in file order.",
+  "entries": [
+    {
+      "id": "EFFECT-ROW-IN-TYPE",
+      "title": "Land effect rows as function-type components that close at instantiation",
+      "blocked_by": [],
+      "blocks_existing": [143],
+      "body": "## What to build\n\nThe R21 row-in-type slice (ADR-014 §8): effect rows as components of `Type::Function`, unification and subtyping extended with subset subsumption, and `EffectParamRef` binders on generic signatures that substitute to closed rows before checking, freezing, or persistence. Boundaries declare, interiors infer. ADR-010 §13's \"open rows must close before materialization\" is the governing clause; per-specialization effect proofs mirror the per-specialization capability proofs of ADR-014 §6. Surface syntax is user-ratified (grill Q4a): the `!` clause and `effect F` binders. PERF-independent; precedes and feeds EFFECT-CONTRACT #143 and the ERGO-CONTRACT-FIXIT row fix.\n\n## Acceptance criteria\n\n- [ ] Named tracer: generic `fn apply<T, effect F>(f: fn() -> T ! F) -> T ! F` with a positive subsumption case (pure closure passed where `{FsRead}` accepted), a negative boundary case (closure row exceeding a declared boundary row rejects with the materialization fix), and an instantiation-closure case proving no unbound effect parameter survives into any persisted fact.\n- [ ] Two standing soundness caveats close with this work and may not be inherited: the `pure()` catch-all in the string-keyed permission table is not a purity proof, and closures currently have no per-value permission identity.\n- [ ] The declared body blockers and native GitHub blockers are identical.\n- [ ] Follows the program-wide slice rule (rulings file): semantic fact + compiler/LSP projection + VM/JIT behavior + negative diagnostics + docs/manifest updates + shrink-only deletion evidence.\n- [ ] Any public-behavior change in this slice completes the standing Book gate in the same slice.\n\n## Authority\n\n- ADR-014 §8; R21; grill Q2/Q4a (user, 2026-07-27)\n- Workstream row source: docs/design/typed-comptime/adr011-012-execution-rulings.md R21"
+    },
+    {
+      "id": "ERGO-FIX-CHANNEL",
+      "title": "Single-source structured fixes through shape-diagnostics",
+      "blocked_by": [],
+      "blocks_existing": [],
+      "body": "## What to build\n\nAppend a structured-edit field (exact spans + replacement text) to `shape-diagnostics` (`SuggestedFix`, `crates/shape-diagnostics/src/lib.rs:185`; schema is append-only). Make `tools/shape-lsp` a consumer of `shape-diagnostics` (today: not even a dependency) converting structured edits to `TextEdit` mechanically. Generate shrink-only baselines for the LSP's message-scraping fix-extractors (`code_actions.rs:587-615`) and its eleven parallel validators (`analysis.rs:70-81`); each migrated fix/validator reduces them.\n\n## Acceptance criteria\n\n- [ ] A compiler-emitted fix applies byte-identically through CLI `--json` and through LSP code action on the same source.\n- [ ] Deleting one regex extractor turns its baseline red if any code path still depends on it.\n- [ ] A fix with stale spans (source edited since) is rejected, not misapplied.\n- [ ] The declared body blockers and native GitHub blockers are identical.\n- [ ] Follows the program-wide slice rule (rulings file).\n- [ ] Any public-behavior change in this slice completes the standing Book gate in the same slice.\n\n## Authority\n\n- ADR-017; ADR-016 §10; R23\n- Workstream row source: docs/program/workstreams/ergo.md"
+    },
+    {
+      "id": "ERGO-CONTRACT-FIXIT",
+      "title": "Materialize declared signatures and effect rows as machine-applicable fixes",
+      "blocked_by": ["ERGO-FIX-CHANNEL", "#91", "EFFECT-ROW-IN-TYPE"],
+      "blocks_existing": [],
+      "body": "## What to build\n\nMachine-applicable fixes for \"annotated/exported callable needs a declared contract\" (materialize from inferred facts) and \"boundary needs an effect row\" (materialize inferred row; `! {}` when pure). One keystroke in LSP; `--fix`-style application in CLI. The row fix is additionally blocked by the R21 row-in-type slice (PERF-independent).\n\n## Acceptance criteria\n\n- [ ] Fix output re-checks clean with zero diagnostics on the canonical tracer fns.\n- [ ] The materialized row equals the checker's inferred row exactly (asserted against the semantic fact, not string comparison).\n- [ ] Applying the signature fix to a generic callable preserves explicit `TypeParamRef` binders (no `unknown` leakage — regression vs the `Type::to_annotation()` TypeVar-loss constraint).\n- [ ] The declared body blockers and native GitHub blockers are identical.\n- [ ] Follows the program-wide slice rule (rulings file).\n- [ ] Any public-behavior change in this slice completes the standing Book gate in the same slice.\n\n## Authority\n\n- ADR-017; ADR-016 §10; ADR-014 §8.2; R21; R23\n- Workstream row source: docs/program/workstreams/ergo.md"
+    },
+    {
+      "id": "ERGO-VAR-TRUTH",
+      "title": "Make var smart-default storage real and truthfully surfaced",
+      "blocked_by": [],
+      "blocks_existing": [],
+      "body": "## What to build\n\nRetire the force-`SharedCow` flag (`crates/shape-vm/src/mir/storage_planning.rs:37-42`) so the refined aliased-and-mutated rule (row 3) decides `var` storage; replace the LSP's heuristic storage-class inlay (`inlay_hints.rs:446,1083`) with a projection of the compiler's own storage decision (pattern: `expansion_views.rs`); default the hint on for `var`. Joint with PERF-RC-ELISION, which consumes the unpinning.\n\n## Acceptance criteria\n\n- [ ] Blast-radius module diff vs main for the flag flip (per the standing regression-scope ruling), with every storage-class change classified.\n- [ ] LSP hint text equals the storage planner's decision on a matrix of aliased/mutated/captured cases — a divergence fails the test, not the reader.\n- [ ] `var` bindings that qualify now take the `LoadLocalMove` path (asserted on emitted opcodes).\n- [ ] The declared body blockers and native GitHub blockers are identical.\n- [ ] Follows the program-wide slice rule (rulings file).\n- [ ] Any public-behavior change in this slice completes the standing Book gate in the same slice.\n\n## Authority\n\n- ADR-017; ADR-006; R23 (\"the `var` force-SharedCow flag retires so the smart default is real before it is documented\")\n- Workstream row source: docs/program/workstreams/ergo.md"
+    },
+    {
+      "id": "ERGO-QUASIQUOTE",
+      "title": "Typed-hole quasiquote templates over the construction API",
+      "blocked_by": ["#106"],
+      "blocks_existing": [110],
+      "body": "## What to build\n\nQuasiquote templates parsed as generator source with typed holes (name→`GeneratedName`, type→`TypeRef`/`TypeParamRef`, expr/stmt→checked fragments), lowering to the #106 typed builders. Ratified spelling (grill Q4c): `quote { ... }` with `${hole}` splices. Migrate the `item_fn`/`extend_method` string-typed-return arm and its ~19 dependent tests to typed holes; delete `parse_type_annotation_payload`'s bare-string arm (`comptime_builtins.rs:621-638`) — the deletion E5 CKPT-4 deferred for lack of a typed alternative. Blocks the #110 deletion path for the string arm (Q2-approved edge).\n\n## Acceptance criteria\n\n- [ ] A template with a misspelled hole name is a compile error at the generator, with the template-local span.\n- [ ] Generated items from templates carry the same `ExpansionIdentity` facts as builder-constructed items (identity tests, not output comparison).\n- [ ] `no_json_comptime_protocol.rs` sentinel extended: zero string→AST reparse paths remain reachable from comptime builtins.\n- [ ] The declared body blockers and native GitHub blockers are identical.\n- [ ] Follows the program-wide slice rule (rulings file).\n- [ ] Any public-behavior change in this slice completes the standing Book gate in the same slice.\n\n## Authority\n\n- ADR-017 §3; R23; grill Q4c (user, 2026-07-27)\n- Workstream row source: docs/program/workstreams/ergo.md"
+    },
+    {
+      "id": "ERGO-SUPERVISOR-SCOPE",
+      "title": "with supervisor scope and ? on remote outcomes",
+      "blocked_by": ["#157", "#103"],
+      "blocks_existing": [],
+      "body": "## What to build\n\nADR-017 §5 exactly — lexically scoped supervisor (ratified spelling, grill Q4b: `with supervisor`), `?` on `RemoteCallOutcome<R>` with uniform `Result` propagation (accepted transfer projects to a typed `Err` carrying uncertainty evidence + receipt), evaluator-run acceptance, refusal-only outward escalation (`AcceptancePending` resolves at its producing scope, never escalates), `Suspend` contributed to the enclosing row at contract elaboration, compile error with teaching diagnostic outside a scope, and the non-escaping-closure capture exemption.\n\n## Acceptance criteria\n\n- [ ] Fault-injected `Refused` and `AcceptancePending` cases prove the obligation is never dropped and never double-owned (finalization observers, per ADR-015 §9) — including the two-owner race: a pending acceptance that later lands while escalation was attempted must be impossible by construction.\n- [ ] The sugar's lowering is bit-identical in semantic facts to the hand-written exhaustive consumption it abbreviates.\n- [ ] `?` outside a scope — lexically outside every scope with no captured supervisor in reach — names both alternatives in the structured payload.\n- [ ] Closure capture of the supervisor is ordinary (`DurableSupervisor` is unrestricted per amended ADR-014 §4): a `map` closure inside the scope compiles, and an escaping closure remains well-defined, with `?` using its lexically captured supervisor wherever it runs.\n- [ ] The declared body blockers and native GitHub blockers are identical.\n- [ ] Follows the program-wide slice rule (rulings file).\n- [ ] Any public-behavior change in this slice completes the standing Book gate in the same slice.\n\n## Authority\n\n- ADR-017 §5; ADR-015 §9; ADR-014 §4 (amended); R23; grill Q4b (user, 2026-07-27)\n- Workstream row source: docs/program/workstreams/ergo.md"
+    },
+    {
+      "id": "ERGO-TEACHING-DIAG",
+      "title": "Concept identities in teaching diagnostics",
+      "blocked_by": ["ERGO-FIX-CHANNEL", "#113"],
+      "blocks_existing": [],
+      "body": "## What to build\n\nStable concept identities in the diagnostic catalog; first-crossing diagnostics for linearity, effect boundaries, uncertainty, and retry budgets carry them; coverage-manifest mapping per ADR-016 §10.\n\n## Acceptance criteria\n\n- [ ] An unmapped concept identity in gated evidence fails BookTruthGate.\n- [ ] Concept identities survive diagnostic rewording (asserted on identity, not message).\n- [ ] The declared body blockers and native GitHub blockers are identical.\n- [ ] Follows the program-wide slice rule (rulings file).\n- [ ] Any public-behavior change in this slice completes the standing Book gate in the same slice.\n\n## Authority\n\n- ADR-017; ADR-016 §10; R23\n- Workstream row source: docs/program/workstreams/ergo.md"
+    },
+    {
+      "id": "ERGO-CEREMONY-GATE",
+      "title": "Mechanical ceremony counts and budgets",
+      "blocked_by": ["#118", "#119"],
+      "blocks_existing": [],
+      "body": "## What to build\n\nCompiler emits the ceremony-count structured fact per compiled fence unit; harness enforces `ceremony: none` and flagship budgets per ADR-016 §10. shape-web side: fence metadata, flagship set, ratchet.\n\n## Acceptance criteria\n\n- [ ] Moving ceremony into hidden setup code still fails (fact covers the compiled fence unit).\n- [ ] Loosening a budget without a review reason fails manifest validation.\n- [ ] The script-tier chapter compiles green with zero ceremony end-to-end.\n- [ ] The declared body blockers and native GitHub blockers are identical.\n- [ ] Follows the program-wide slice rule (rulings file).\n- [ ] Any public-behavior change in this slice completes the standing Book gate in the same slice.\n\n## Authority\n\n- ADR-017; ADR-016 §10; R23\n- Workstream row source: docs/program/workstreams/ergo.md"
+    },
+    {
+      "id": "PERF-SUITE",
+      "title": "Commit the comparison suite and pinned-reference harness",
+      "blocked_by": [],
+      "blocks_existing": [],
+      "body": "## What to build\n\nCommitted suite (numeric kernels, collection pipelines, strings, allocation-heavy graphs, closure-heavy code) with pinned Node LTS reference, pinned environment manifest, and a one-command harness emitting a machine-readable report (revisions, binary hash, environment, per-workload results). Extends `shape/benchmarks/` without modifying existing files. Charter target (user-ratified 2026-07-27, Q5 = B): per-category bars vs the pinned Node LTS — numeric ≥ 1.5×, collections ≥ 1.0× post-closure-nativity, strings/JSON ≥ 1.0×, allocation-heavy ≥ 0.8× ratcheting to ≥ 1.0× post-arena, startup ≥ 5× — one recorded calibration allowed after the first baseline; per-ticket before/after measurements; immutable benchmarks. Every other PERF ticket's close requires measurement on this suite (no measurement, no close).\n\n## Acceptance criteria\n\n- [ ] Two consecutive runs on the same revision agree within a declared noise bound, asserted in CI.\n- [ ] The report refuses to render a comparison when environment identities differ.\n- [ ] Benchmark-file hashes are asserted (integrity rule made mechanical).\n- [ ] The declared body blockers and native GitHub blockers are identical.\n- [ ] Follows the program-wide slice rule (rulings file).\n- [ ] Any public-behavior change in this slice completes the standing Book gate in the same slice.\n\n## Authority\n\n- ADR-018 §1; R24; grill Q5 (user, 2026-07-27)\n- Workstream row source: docs/program/workstreams/perf.md"
+    },
+    {
+      "id": "PERF-DEOPT-GRANULARITY",
+      "title": "Per-function deopt granularity and tiered CLI default",
+      "blocked_by": ["PERF-SUITE"],
+      "blocks_existing": [],
+      "body": "## What to build\n\nConvert whole-program bail sites (~12 in `shape-jit/src/executor.rs`, plus `compiler/strategy.rs:40,:226`) to per-function interpreter fallback; generate the whole-program-bail baseline and ratchet to zero; make tiered execution (T1@100/T2@10k + OSR, already implemented in `crates/shape-vm/src/tier.rs`) the CLI default with whole-program compile as opt-in.\n\n## Acceptance criteria\n\n- [ ] A program with one unsupported construct keeps every other hot function native (asserted via NativeExecutionWitness on a two-function fixture).\n- [ ] The bail baseline increasing fails CI.\n- [ ] Suite geomean does not regress under the tiered default.\n- [ ] Before/after measurements on the committed suite reported in this ticket.\n- [ ] The declared body blockers and native GitHub blockers are identical.\n- [ ] Follows the program-wide slice rule (rulings file).\n- [ ] Any public-behavior change in this slice completes the standing Book gate in the same slice.\n\n## Authority\n\n- ADR-018 §2; R24; R15 (witness)\n- Workstream row source: docs/program/workstreams/perf.md"
+    },
+    {
+      "id": "PERF-CLOSURE-NATIVE",
+      "title": "First-class closure dispatch goes native",
+      "blocked_by": ["PERF-SUITE", "#117"],
+      "blocks_existing": [],
+      "body": "## What to build\n\nWiden stack-closure direct dispatch (`terminators.rs:1646` side table) to first-class and escaping closures so ordinary closure calls stop trampolining through `jit_call_value` (`terminators.rs:2016`). Fresh-repro rule per R15; the historical arity/`todo!()` framing is fixed and must not be re-litigated. Role disclosure: this ticket IS the \"separate post-callable-carrier ticket\" R15 mandates for the fresh capturing-HOF repro and, if still red, the general first-class-callable repair — it assumes that R15 role explicitly rather than inverting it silently; #97's native close criterion and HOF-NATIVE-TRACER (#146) consume its witness, exactly as R15 specifies.\n\n## Acceptance criteria\n\n- [ ] `NativeExecutionWitness` for a capturing closure called through a variable, a parameter, and a return value.\n- [ ] Zero `PENDING_CALL_ERROR` deopt checks on covered paths.\n- [ ] VM/JIT differential on the closure-dispatch regression suite stays green.\n- [ ] Before/after measurements on the committed suite reported in this ticket.\n- [ ] The declared body blockers and native GitHub blockers are identical.\n- [ ] Follows the program-wide slice rule (rulings file).\n- [ ] Any public-behavior change in this slice completes the standing Book gate in the same slice.\n\n## Authority\n\n- ADR-018 §7; R24; R15\n- Workstream row source: docs/program/workstreams/perf.md"
+    },
+    {
+      "id": "PERF-HOF-CARRIER",
+      "title": "Unify the closure-argument carrier across the JIT/VM boundary",
+      "blocked_by": ["PERF-CLOSURE-NATIVE"],
+      "blocks_existing": [],
+      "body": "## What to build\n\nUnify the closure-argument carrier across the JIT/VM boundary so `Ptr(HeapKind::Iterator)` receivers stop whole-function bailing (`terminators.rs:198`); immediate sub-slice: replace the process-aborting `ffi/call_method/array.rs:25` `todo!()` with a structured per-function bail.\n\n## Acceptance criteria\n\n- [ ] `arr.map(|x| x * 2.0)` executes natively with a witness.\n- [ ] The aborting-`todo!()` fixture becomes a loud fallback line, not a SIGABRT.\n- [ ] The ~17 stale deleted-path `#[ignore]` tests in this territory are re-pointed or deleted (no silent ignore inheritance).\n- [ ] Before/after measurements on the committed suite reported in this ticket.\n- [ ] The declared body blockers and native GitHub blockers are identical.\n- [ ] Follows the program-wide slice rule (rulings file).\n- [ ] Any public-behavior change in this slice completes the standing Book gate in the same slice.\n\n## Authority\n\n- ADR-018 §7; R24; R15\n- Workstream row source: docs/program/workstreams/perf.md"
+    },
+    {
+      "id": "PERF-RC-ELISION",
+      "title": "Cancel dominated retain/release pairs in MIR",
+      "blocked_by": ["PERF-SUITE"],
+      "blocks_existing": [],
+      "body": "## What to build\n\nMIR pass canceling dominated retain/release pairs using existing `loans_at_point`/liveness facts (`solver.rs:1010,:1788`); consume ERGO-VAR-TRUTH's unpinning so qualifying `var` bindings take the move path (`solver.rs:1810` caveat removed). Joint with ERGO-VAR-TRUTH (coordination, not a native edge). Elision legality per ADR-018 §3: covering owning reference across the whole interval, or a safepoint-free interval; barrier side effects decoupled from the refcount arithmetic for cycle-capable kinds.\n\n## Acceptance criteria\n\n- [ ] Refcount-balance differential — identical final counts and finalization order with the pass on/off across the auto-drop and declared-capture-teardown suites.\n- [ ] Forced-collection differential: cycle collection triggered INSIDE each elided interval class must not free the value (end-state comparison cannot catch a mid-interval free).\n- [ ] Cycle-collection completeness: known cycle fixtures still collect within a bounded number of safepoints with the pass on.\n- [ ] Measured retain/release dynamic count reduction on the allocation-heavy suite reported in the ticket.\n- [ ] The declared body blockers and native GitHub blockers are identical.\n- [ ] Follows the program-wide slice rule (rulings file).\n- [ ] Any public-behavior change in this slice completes the standing Book gate in the same slice.\n\n## Authority\n\n- ADR-018 §3; R24\n- Workstream row source: docs/program/workstreams/perf.md"
+    },
+    {
+      "id": "PERF-BCE-WIDEN",
+      "title": "Widen the live bounds-elision matcher",
+      "blocked_by": ["PERF-SUITE"],
+      "blocks_existing": [],
+      "body": "## What to build\n\nExtend `resolve_simple_index_pair` (`places.rs:725`) to constant indices with proven bounds, `iv ± constant`, and field-projected receivers proven unreassigned; every widening preserves non-negativity independently (the unchecked path skips normalization, `places.rs:694`). Evaluate `optimizer/bounds.rs`'s affine-guard analysis as the engine (see PERF-DEAD-OPT).\n\n## Acceptance criteria\n\n- [ ] A deliberately out-of-range constant index still traps via the checked path (negative control per widened shape).\n- [ ] Elision plans are asserted per fixture (which accesses elide), not inferred from timing.\n- [ ] bspline-class kernel time reported before/after.\n- [ ] The declared body blockers and native GitHub blockers are identical.\n- [ ] Follows the program-wide slice rule (rulings file).\n- [ ] Any public-behavior change in this slice completes the standing Book gate in the same slice.\n\n## Authority\n\n- ADR-018 §5; R24\n- Workstream row source: docs/program/workstreams/perf.md"
+    },
+    {
+      "id": "PERF-DEAD-OPT",
+      "title": "Wire or delete every dead optimizer component",
+      "blocked_by": ["PERF-SUITE", "PERF-BCE-WIDEN"],
+      "blocks_existing": [],
+      "body": "## What to build\n\nOne disposition per component of `shape-jit/src/optimizer/` — the FULL thirteen-component inventory (~5,350 lines): bounds, licm, vectorization, loop_lowering, escape_analysis, call_path, correctness, cross_function, hof_inline, numeric_arrays, table_queryable, typed_mir, and the shared plan/cache types — wired behind a measured ticket or deleted with tests. No third state; a highlight-subset disposition leaves the remainder in exactly the forbidden reserve. `escape_analysis.rs`'s disposition precedes PERF-ESCAPE (ADR-018 §4 prior-art rule). Blocked by PERF-BCE-WIDEN for the bounds decision specifically.\n\n## Acceptance criteria\n\n- [ ] After close, a workspace grep finds zero uncalled optimizer entry points.\n- [ ] Each deletion names what evidence a future re-derivation must produce (so deletion is not silent capability loss).\n- [ ] The disposition table enumerates all thirteen with none marked \"later\".\n- [ ] Any component wired live carries before/after measurements on the committed suite (charter rule: no measurement, no close).\n- [ ] The declared body blockers and native GitHub blockers are identical.\n- [ ] Follows the program-wide slice rule (rulings file).\n- [ ] Any public-behavior change in this slice completes the standing Book gate in the same slice.\n\n## Authority\n\n- ADR-018 §6 (wire-or-delete, no third state); §4 prior-art rule; R24\n- Workstream row source: docs/program/workstreams/perf.md"
+    },
+    {
+      "id": "PERF-ESCAPE",
+      "title": "Value-escape and inbound-reference analysis",
+      "blocked_by": ["PERF-SUITE"],
+      "blocks_existing": [],
+      "body": "## What to build\n\nTwo solver products — (a) outbound value-escape: \"allocation dies with frame/region\", distinct from reference-escape promotions (`solver.rs:1453`) and from the sink-blind `detect_escape_status` heuristic that the promotion rule at `storage_planning.rs:996` explicitly refuses to consume; (b) inbound-reference analysis: no outside cycle-capable value is stored into region-confined objects (ADR-018 §4 prerequisite 2 — a distinct obligation, not a corollary). Consumers: RC elision breadth, stack promotion, later arenas.\n\n## Acceptance criteria\n\n- [ ] Known-escaping fixtures (return, capture, module store, container insert, task spawn) are each negative controls.\n- [ ] The B0004 container-referent false-positive class that disqualified the heuristic is an explicit test.\n- [ ] Inbound negative controls: outside-object-stored-into-region fixtures must fail the exemption proof.\n- [ ] Analysis-precision measurements on the committed suite reported in this ticket (charter rule: no measurement, no close — e.g. proportion of allocations proven frame/region-confined on the allocation-heavy workloads).\n- [ ] The declared body blockers and native GitHub blockers are identical.\n- [ ] Follows the program-wide slice rule (rulings file).\n- [ ] Any public-behavior change in this slice completes the standing Book gate in the same slice.\n\n## Authority\n\n- ADR-018 §4; R24\n- Workstream row source: docs/program/workstreams/perf.md"
+    },
+    {
+      "id": "PERF-ALLOC-SEAM",
+      "title": "One allocation seam for typed heap carriers",
+      "blocked_by": [],
+      "blocks_existing": [],
+      "body": "## What to build\n\nSingle allocator API for typed heap carriers replacing the twelve files making direct `std::alloc` calls; collapse `TypedArray`'s header+buffer double allocation (`typed_array.rs:63`); system-allocator semantics initially (pure refactor). Independent of the rest of the PERF lane; its close still requires suite measurement once PERF-SUITE exists (no measurement, no close).\n\n## Acceptance criteria\n\n- [ ] Allocation-count and layout-identity differential vs main across the v2 carrier test suites.\n- [ ] Miri provenance tests stay green.\n- [ ] `alloc_budget` behavior preserved and now enforced at the seam.\n- [ ] The declared body blockers and native GitHub blockers are identical.\n- [ ] Follows the program-wide slice rule (rulings file).\n- [ ] Any public-behavior change in this slice completes the standing Book gate in the same slice.\n\n## Authority\n\n- ADR-018 §4; R24\n- Workstream row source: docs/program/workstreams/perf.md"
+    },
+    {
+      "id": "PERF-ARENA",
+      "title": "Region arenas with bulk retirement",
+      "blocked_by": ["PERF-ESCAPE", "PERF-ALLOC-SEAM"],
+      "blocks_existing": [],
+      "body": "## What to build\n\nPer-region bump allocation for proven region-confined values with bulk retirement, finalization order untouched (ADR-010 §4), GC co-design per ADR-018 §4: candidate-buffer exemption only under the combined outbound + inbound proof (PERF-ESCAPE's both products), and a NEW range-based invalidation primitive for candidate buffer + side table so retirement is O(1) plus finalization (the per-address `gc_note_object_freed` contract exists to defeat address-reuse aliasing, and a reused bump range is exactly that case). Additionally gated on the ADR-010 region-plan pipeline (currently zero implementation — this ticket does not start it); that prerequisite is prose because no pipeline ticket exists yet.\n\n## Acceptance criteria\n\n- [ ] Finalization-order differential vs non-arena execution is byte-identical on Drop-observing fixtures.\n- [ ] GC stress with cross-region references detects zero stale side-table entries after range invalidation, including address-reuse (ABA) fixtures that re-allocate inside a retired range.\n- [ ] Allocation-heavy suite improvement reported with the charter harness.\n- [ ] The declared body blockers and native GitHub blockers are identical.\n- [ ] Follows the program-wide slice rule (rulings file).\n- [ ] Any public-behavior change in this slice completes the standing Book gate in the same slice.\n\n## Authority\n\n- ADR-018 §4; ADR-010 §4; R24\n- Workstream row source: docs/program/workstreams/perf.md"
+    },
+    {
+      "id": "POLY-STUB-CHANNEL",
+      "title": "Make register_types load-bearing with generated foreign stubs",
+      "blocked_by": [],
+      "blocks_existing": [],
+      "body": "## What to build\n\nHost calls the vtable stub channel (`crates/shape-runtime/src/plugins/language_runtime.rs:188`, today caller-less); Python/TypeScript extensions generate real `.pyi`/`.d.ts` from declared Shape contracts (both sides are explicit stubs today). Includes the Python invoke fix: cache the compiled module object instead of re-executing the module per call (`extensions/python/src/runtime.rs:252`).\n\n## Acceptance criteria\n\n- [ ] Generated stubs round-trip every type in the marshaling table, asserted per type.\n- [ ] A declared type with no foreign mapping is a structured diagnostic at the declaration, not a marshal-time error.\n- [ ] An invoke-count fixture proves module setup runs once per handle.\n- [ ] The declared body blockers and native GitHub blockers are identical.\n- [ ] Follows the program-wide slice rule (rulings file).\n- [ ] Any public-behavior change in this slice completes the standing Book gate in the same slice.\n\n## Authority\n\n- ADR-019 §1; R25\n- Workstream row source: docs/program/workstreams/poly-depth.md"
+    },
+    {
+      "id": "POLY-FOREIGN-CHECK",
+      "title": "Compile-time foreign body checking via toolchain providers",
+      "blocked_by": ["POLY-STUB-CHANNEL", "#138"],
+      "blocks_existing": [],
+      "body": "## What to build\n\n`ForeignToolchainProvider` per language via `ComptimeHost` running pyright/tsc over body+stubs; diagnostics mapped through the existing bidirectional position mapping (`tools/shape-lsp/src/foreign_lsp.rs:71-152`), promoted into the shared semantic query per ADR-011 §6 — the LSP-only foreign diagnostics path is deleted as its consumer migrates. Tracked inputs: toolchain identity/version, body digest, stub digest, environment digest. Mismatch = compile error; absent toolchain = structured local degradation; release/remote requires evidence.\n\n## Acceptance criteria\n\n- [ ] A type error inside an inline Python body fails `shape run` with the fence-local span.\n- [ ] Comment-only body edits hit the memoized result (invalidation trace).\n- [ ] Canary secrets in provider config never appear in query dumps or diagnostics (ADR-013 acceptance item applied here).\n- [ ] Compiler and LSP surface the identical structured diagnostic (one-source assertion).\n- [ ] The declared body blockers and native GitHub blockers are identical.\n- [ ] Follows the program-wide slice rule (rulings file).\n- [ ] Any public-behavior change in this slice completes the standing Book gate in the same slice.\n\n## Authority\n\n- ADR-019 §1; ADR-013 §4; ADR-011 §6; R25\n- Workstream row source: docs/program/workstreams/poly-depth.md"
+    },
+    {
+      "id": "POLY-ENV-PIN",
+      "title": "Declared, locked, content-addressed foreign environments",
+      "blocked_by": ["POLY-STUB-CHANNEL"],
+      "blocks_existing": [],
+      "body": "## What to build\n\n`shape.toml` per-language dependency tables + lockfiles, including the CHECKER toolchain (identity, version, settings digest — ADR-019 §1 pinning rule); `ForeignEnvironmentDigest` (interpreter/runtime identity + resolved set + lock hash + checker pin) as `TrackedBuildInput`, derived from declared locked inputs only, never ambient host inspection; digest joins `ForeignFunctionEntry.content_hash` (`core_types.rs:64`) — a deliberate, versioned bytecode-format bump sequenced with VERIFIED-ARTIFACT-PERSISTENCE (#160), with load-time refusal on digest mismatch; digest enters the portable artifact's foreign-dependency manifest and receiver admission (TARGET-ADMISSION-DYNAMIC #167 consumes). Delete the runtime venv-sniffing silent fallback (`extensions/python/src/runtime.rs:73`); add the lockfile-backed TS module loader (none exists today — `import` cannot resolve). Coordinates with #160 and #167 (prose coordination, not native edges).\n\nThe POLY workstream's composition test — remote placement of a checked, environment-pinned `fn python` with digest-verified admission — is the acceptance capstone and feeds GATE-DISTRIBUTED (#122) evidence; this ticket owns the environment-pinning leg of that capstone.\n\n## Acceptance criteria\n\n- [ ] The same source with a different lockfile produces a different content hash and a different tracked digest.\n- [ ] A declared-but-unavailable environment is a structured pre-entry failure, with the silent ambient fallback proven gone (negative control: a stray ambient site-packages must NOT satisfy the import).\n- [ ] Remote placement of a foreign-calling continuation is refused on digest mismatch with a version-refusal-class diagnostic.\n- [ ] The declared body blockers and native GitHub blockers are identical.\n- [ ] Follows the program-wide slice rule (rulings file).\n- [ ] Any public-behavior change in this slice completes the standing Book gate in the same slice.\n\n## Authority\n\n- ADR-019 §1/§4; R25\n- Workstream row source: docs/program/workstreams/poly-depth.md"
+    },
+    {
+      "id": "POLY-ZERO-COPY",
+      "title": "Negotiated zero-copy buffer sharing",
+      "blocked_by": ["POLY-STUB-CHANNEL"],
+      "blocks_existing": [],
+      "body": "## What to build\n\nVersioned vtable buffer capability in the reserved ABI tail (`shape-abi-v1/src/lib.rs:884`), negotiated at load; `TypedArray<T>` call-scoped views (buffer protocol / ArrayBuffer) with shared-immutable and exclusive-mutable modes per ADR-006 borrows; opt-in per parameter (per-parameter `shared`/`shared mut` spelling per ADR-019 §2); bulk fast path replacing the element-wise msgpack walk (`foreign_marshal.rs:145`) for both modes. Blocked by POLY-STUB-CHANNEL because the contract surface declares the mode.\n\n## Acceptance criteria\n\n- [ ] A mutation through a shared-immutable view is prevented or detected (per-language mechanism documented).\n- [ ] Python export-count verification: a fence that stashes a view (`numpy.asarray` into a global) fails with a structured boundary error on return — the named corruption class is a negative control, not documentation; a language without release accounting has the mode refused, asserted.\n- [ ] Large-array round-trip benchmark in the PERF suite shows the copy tax gone.\n- [ ] Refcount/pin balance asserted across panic-in-extension paths.\n- [ ] The declared body blockers and native GitHub blockers are identical.\n- [ ] Follows the program-wide slice rule (rulings file).\n- [ ] Any public-behavior change in this slice completes the standing Book gate in the same slice.\n\n## Authority\n\n- ADR-019 §2; ADR-006; R25\n- Workstream row source: docs/program/workstreams/poly-depth.md"
+    },
+    {
+      "id": "POLY-FOREIGN-REF",
+      "title": "Opaque foreign-reference carrier",
+      "blocked_by": ["POLY-STUB-CHANNEL"],
+      "blocks_existing": [],
+      "body": "## What to build\n\nNew pure-discriminator `HeapKind` with typed `Arc` payload (instance, handle, disposer) per ADR-005/006 rules (FilterExpr precedent; 2026-07-05 ratification); drop via the owning instance's dispose under ADR-010 lexical teardown; `Ffi` on every operation; snapshot refusal with provenance (`STATE_MODEL_STATEFUL_OPAQUE`); remote rejection at artifact construction absent matching admission. Coordinates with TARGET-PYTHON (#163) and TARGET-TYPESCRIPT (#164) (prose coordination, not native edges).\n\n## Acceptance criteria\n\n- [ ] Q8/Q10 dispatch-table lockstep tests extended for the new kind (4-table HeapKind lockstep per the merge gate).\n- [ ] Drop-order and double-drop balance fixtures with a finalization-observing fake extension.\n- [ ] Snapshot of a live foreign ref refuses naming value and origin.\n- [ ] `as_heap_value()` soundness rules asserted for the new label.\n- [ ] The declared body blockers and native GitHub blockers are identical.\n- [ ] Follows the program-wide slice rule (rulings file).\n- [ ] Any public-behavior change in this slice completes the standing Book gate in the same slice.\n\n## Authority\n\n- ADR-019 §3; ADR-005/006; ADR-010; R25\n- Workstream row source: docs/program/workstreams/poly-depth.md"
+    },
+    {
+      "id": "POLY-ASYNC-TRUTH",
+      "title": "Reject untruthful foreign async declarations",
+      "blocked_by": [],
+      "blocks_existing": [],
+      "body": "## What to build\n\nADR-019 §5 — async foreign declarations reject with a structured diagnostic until POLY-ASYNC-OFFLOAD lands; the rejection's negative test becomes OFFLOAD's flip-to-green control. Lands within the existing scope of #163/#164; no edge changes. Supervisor discretion: if OFFLOAD is ready within the same review window, the two land as one branch with the rejection commit first for bisectability. Transitional, days-scale (grill Q3 = C: truthfulness ordering preserved).\n\n## Acceptance criteria\n\n- [ ] `async fn python` is a compile error naming the owning issue.\n- [ ] Sync foreign functions are unaffected (differential).\n- [ ] The Book documents the rejection as the current truthful state per ADR-016's unsupported-surface rule.\n- [ ] The declared body blockers and native GitHub blockers are identical.\n- [ ] Follows the program-wide slice rule (rulings file).\n- [ ] Any public-behavior change in this slice completes the standing Book gate in the same slice.\n\n## Authority\n\n- ADR-019 §5; ADR-012 §5 (amended matrix cell); R25; grill Q3 (user, 2026-07-27)\n- Workstream row source: docs/program/workstreams/poly-depth.md"
+    },
+    {
+      "id": "POLY-ASYNC-OFFLOAD",
+      "title": "Real foreign async at parity with Shape's await",
+      "blocked_by": ["POLY-ASYNC-TRUTH"],
+      "blocks_existing": [],
+      "body": "## What to build\n\n\"Offload and resolve at await\", the exact pattern of Shape's own async module calls (`spawn_async_module_future`, `crates/shape-vm/src/executor/vm_impl/modules.rs:611-654`, + `resolve_pending_async_task` `:665-682`): an async foreign stub returns `Future(id)` (new `CallForeignAsync` or `is_async` branch in the stub emitter, `compiler/functions_foreign.rs:320`), the invoke runs off-thread, `await` resolves via the existing `PendingAsyncTask` completion channel. Two `async fn python` calls overlap instead of serializing.\n\nWork items per the 2026-07-27 feasibility scout: Python via `spawn_blocking` + per-call GIL attach (SMALL); TypeScript via a dedicated worker thread owning the V8 isolate through `fresh_instance()` (the documented `serve_cmd.rs:35` precedent) with a command/reply channel (MEDIUM); msgpack `Vec<u8>` crosses the channel, unmarshal on the interpreter thread (SMALL); cancellation through the existing abort handle + `set_pending_async_cancellation_hook` with run-to-completion-then-discard semantics (SMALL-MEDIUM); serialize per-worker instance access, curing the latent `&mut`-through-`Send+Sync` aliasing hazard (`extensions/typescript/src/runtime.rs:357+`) (MEDIUM, riskiest item); thread `language_runtimes` into `run_isolated_async_fn` (`async_runtime.rs:102-126`) — fixing the LIVE bug that foreign calls inside spawned user async fns fail with \"no extension provides language\" (SMALL). Estimate: Python alone 3–5 days; both languages 1.5–2.5 weeks.\n\nHonest contract note: this is parity with Shape's shipped await (blocking receive at the await point), which satisfies the ADR-012 matrix cell at the same fidelity as native Shape async; true interpreter suspension is a runtime-wide later item (`resume()` is `todo!()`, Phase-2c) and changes no contract. Related: #163/#164 (matrix-cell owners); JIT untouched (functions containing `CallForeign` are already interpreter-only, `shape-jit/src/compiler/accessors.rs:706`).\n\n## Acceptance criteria\n\n- [ ] Overlap fixture: two `async fn python` sleeps of 200ms complete in ~200ms wall, not ~400ms (and the equivalent TS pair).\n- [ ] `await` on a sync foreign call is unchanged (the `op_await` pass-through differential).\n- [ ] Foreign call inside a spawned user `async fn` succeeds (regression for the live language_runtimes bug).\n- [ ] Cancellation of an in-flight foreign await settles per the declared run-to-completion-then-discard semantics with no double-completion — and a cancellation request is never reported as confirmed foreign termination.\n- [ ] Concurrent-invoke stress on one extension instance shows serialized access (the aliasing hazard fixture).\n- [ ] VM/JIT differential green (JIT bails on CallForeign functions loudly, as today).\n- [ ] The declared body blockers and native GitHub blockers are identical.\n- [ ] Follows the program-wide slice rule (rulings file).\n- [ ] Any public-behavior change in this slice completes the standing Book gate in the same slice.\n\n## Authority\n\n- ADR-019 §5; ADR-012 §5; R25; grill Q3 = C (user, 2026-07-27)\n- Workstream row source: docs/program/workstreams/poly-depth.md"
+    },
+    {
+      "id": "POLY-LSP-FENCE",
+      "title": "Full embedded-language editing in fences",
+      "blocked_by": ["POLY-FOREIGN-CHECK"],
+      "blocks_existing": [],
+      "body": "## What to build\n\nExtend the existing foreign-LSP pipeline (diagnostics relay works today) to completions and hover inside fences, driven by the same stubs as POLY-FOREIGN-CHECK so editor feedback and compiler verdicts agree.\n\n## Acceptance criteria\n\n- [ ] Completion inside a `fn python` body offers stub-declared parameter names/types.\n- [ ] LSP diagnostics and compiler diagnostics for the same defect carry the same structured identity (no re-fork of the promoted pipeline).\n- [ ] The declared body blockers and native GitHub blockers are identical.\n- [ ] Follows the program-wide slice rule (rulings file).\n- [ ] Any public-behavior change in this slice completes the standing Book gate in the same slice.\n\n## Authority\n\n- ADR-019 §1; R25\n- Workstream row source: docs/program/workstreams/poly-depth.md"
+    }
+  ]
+}

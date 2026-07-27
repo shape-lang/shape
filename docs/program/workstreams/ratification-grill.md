@@ -1,7 +1,10 @@
 # Ratification grill — five ruling questions (2026-07-27)
 
 Status: **ANSWERED 2026-07-27** (user rulings recorded below; bundle text
-updated to match). Enactment/publication awaits explicit go-ahead.
+updated to match). **Enactment go-ahead given by the user 2026-07-27**
+(same-day, in-session); the authority set committed on the #111 baseline
+and the workstream tickets published per
+[publication-plan.json](./publication-plan.json).
 
 ## Rulings (user, 2026-07-27)
 
