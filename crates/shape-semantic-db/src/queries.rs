@@ -154,17 +154,11 @@ pub fn resolve_callable(
         if let Some(import) = index.import(&name) {
             diagnostics.push(SemanticDiagnostic::warning(
                 codes::IMPORT_SHADOWED_BY_LOCAL_DECLARATION,
-                [
-                    ("name", name.clone()),
-                    ("from", import.from_unit.clone()),
-                ],
+                [("name", name.clone()), ("from", import.from_unit.clone())],
             ));
         }
-        let path = DefinitionPath::top_level_callable(
-            unit.path(db),
-            &local.name,
-            local.same_name_ordinal,
-        );
+        let path =
+            DefinitionPath::top_level_callable(unit.path(db), &local.name, local.same_name_ordinal);
         diagnostics.sort();
         return CallableResolution {
             outcome: ResolutionOutcome::Resolved(ResolvedDefinition {

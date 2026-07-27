@@ -99,7 +99,10 @@ impl SemanticDiagnostic {
         Self::new(code, DiagnosticSeverity::Warning, args)
     }
 
-    pub fn note(code: &'static str, args: impl IntoIterator<Item = (&'static str, String)>) -> Self {
+    pub fn note(
+        code: &'static str,
+        args: impl IntoIterator<Item = (&'static str, String)>,
+    ) -> Self {
         Self::new(code, DiagnosticSeverity::Note, args)
     }
 
@@ -145,11 +148,9 @@ impl SemanticDiagnostic {
                 arg("name"),
                 arg("from")
             ),
-            codes::IMPORTED_DEFINITION_NOT_FOUND => format!(
-                "`{}` is not declared in `{}`",
-                arg("name"),
-                arg("from")
-            ),
+            codes::IMPORTED_DEFINITION_NOT_FOUND => {
+                format!("`{}` is not declared in `{}`", arg("name"), arg("from"))
+            }
             codes::RESULT_TYPE_NOT_DECLARED => format!(
                 "`{}` has no declared result type; this slice publishes declared contracts only",
                 arg("name")
@@ -224,10 +225,7 @@ mod tests {
             ],
         );
         assert_eq!(one, two);
-        assert_eq!(
-            one.canonical_digest("test"),
-            two.canonical_digest("test")
-        );
+        assert_eq!(one.canonical_digest("test"), two.canonical_digest("test"));
     }
 
     #[test]

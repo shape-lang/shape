@@ -142,7 +142,9 @@ fn normalize(annotation: &TypeAnnotation) -> NormalizedType {
     match annotation {
         TypeAnnotation::Basic(name) => normalize_name(name, Vec::new()),
         TypeAnnotation::Array(inner) => NormalizedType::Array(Box::new(normalize(inner))),
-        TypeAnnotation::Tuple(items) => NormalizedType::Tuple(items.iter().map(normalize).collect()),
+        TypeAnnotation::Tuple(items) => {
+            NormalizedType::Tuple(items.iter().map(normalize).collect())
+        }
         TypeAnnotation::Object(fields) => {
             let mut normalized: Vec<(String, NormalizedType)> = fields
                 .iter()
@@ -358,8 +360,8 @@ mod tests {
     fn distinct_types_have_distinct_digests() {
         let int = NormalizedType::Int.canonical_digest("test");
         let number = NormalizedType::Number.canonical_digest("test");
-        let array_of_int = NormalizedType::Array(Box::new(NormalizedType::Int))
-            .canonical_digest("test");
+        let array_of_int =
+            NormalizedType::Array(Box::new(NormalizedType::Int)).canonical_digest("test");
         assert_ne!(int, number);
         assert_ne!(int, array_of_int);
     }

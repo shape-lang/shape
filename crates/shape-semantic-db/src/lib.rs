@@ -297,18 +297,43 @@ impl SemanticSession {
     /// Unit-level diagnostics (parse failures, duplicate declarations).
     pub fn unit_diagnostics(&self, unit_path: &str) -> Vec<SemanticDiagnostic> {
         self.unit(unit_path)
-            .map(|unit| queries::declaration_index(&self.db, unit).diagnostics.clone())
+            .map(|unit| {
+                queries::declaration_index(&self.db, unit)
+                    .diagnostics
+                    .clone()
+            })
             .unwrap_or_default()
     }
 
     /// Takes the recorded query events since the last call. Empty unless the
     /// session was created with [`Self::with_query_trace`].
+    ///
+    /// Salsa reports keys as `query(Id(n))`. Ids of this session's units are
+    /// rewritten to their module path, so a trace reads `declaration_index(app::math)`
+    /// and a test can say which unit re-executed.
     pub fn take_trace(&self) -> QueryTrace {
-        self.db
+        use salsa::plumbing::AsId;
+
+        let mut trace = self
+            .db
             .recorder
             .as_ref()
             .map(QueryTraceRecorder::take)
-            .unwrap_or_default()
+            .unwrap_or_default();
+        let labels: Vec<(String, String)> = self
+            .units
+            .iter()
+            .map(|(path, unit)| (format!("({:?})", unit.as_id()), format!("({path})")))
+            .collect();
+        for event in &mut trace.events {
+            for (id, path) in &labels {
+                if event.key.ends_with(id) {
+                    event.key = event.key.replace(id, path);
+                    break;
+                }
+            }
+        }
+        trace
     }
 
     /// Measures memo memory currently held by this session.

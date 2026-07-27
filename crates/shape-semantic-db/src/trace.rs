@@ -24,12 +24,19 @@ pub struct QueryEvent {
 }
 
 impl QueryEvent {
-    /// Whether this event belongs to the named query function.
+    /// Whether this event belongs to the named query.
+    ///
+    /// Accepts either a bare function name (`callable_contract`, matching every
+    /// key of that query) or a full key (`declaration_index(app::math)`, after
+    /// [`crate::SemanticSession::take_trace`] has labelled unit ids).
     pub fn is_query(&self, query: &str) -> bool {
+        if self.key == query {
+            return true;
+        }
         self.key
             .split(['(', '['])
             .next()
-            .map(|name| name.trim().ends_with(query))
+            .map(|name| name.trim() == query)
             .unwrap_or(false)
     }
 }
@@ -100,7 +107,10 @@ impl QueryTraceRecorder {
             _ => None,
         };
         if let Some(recorded) = recorded {
-            self.events.lock().expect("trace sink poisoned").push(recorded);
+            self.events
+                .lock()
+                .expect("trace sink poisoned")
+                .push(recorded);
         }
     }
 

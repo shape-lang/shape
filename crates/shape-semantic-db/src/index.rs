@@ -156,11 +156,9 @@ pub fn build_provenance(program: &Program) -> UnitProvenance {
             _ => continue,
         };
         let ordinal = next_ordinal(&mut seen_names, &function.name);
-        provenance.declarations.push((
-            (function.name.clone(), ordinal),
-            span,
-            function.name_span,
-        ));
+        provenance
+            .declarations
+            .push(((function.name.clone(), ordinal), span, function.name_span));
     }
 
     provenance.call_sites = collect_call_sites(program).1;
