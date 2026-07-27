@@ -7782,7 +7782,9 @@ dependencies = [
  "chrono",
  "clap",
  "regex",
+ "serde",
  "serde_json",
+ "sha2",
  "walkdir",
 ]
 
