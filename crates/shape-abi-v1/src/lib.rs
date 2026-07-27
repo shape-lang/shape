@@ -37,6 +37,12 @@
 
 pub mod binary_builder;
 pub mod binary_format;
+pub mod foreign_types;
+
+pub use foreign_types::{
+    ForeignDirection, ForeignField, ForeignScalar, ForeignType, ForeignTypeShape,
+    UnmappedForeignType, UnmappedReason,
+};
 
 use std::ffi::{c_char, c_void};
 
