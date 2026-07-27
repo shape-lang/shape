@@ -120,6 +120,8 @@ of contents.
 | What | Where |
 |---|---|
 | Wire protocol v1 | `crates/shape-wire/src/lib.rs:51` |
+| Shared semantic facts (SemanticDb seam) | `crates/shape-semantic-db/src/lib.rs` |
+| Portable semantic identity scheme | `crates/shape-semantic-db/src/identity.rs` |
 | Ed25519 signing | `crates/shape-runtime/src/crypto/signing.rs` |
 | CLI entry | `bin/shape-cli/` |
 | LSP server | `tools/shape-lsp/` |
