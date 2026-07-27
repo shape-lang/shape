@@ -5,6 +5,7 @@ members = [
   "crates/shape-value",
   "crates/shape-wire",
   "crates/shape-runtime",
+  "crates/shape-semantic-db",
   "crates/shape-vm",
   "crates/shape-jit",
   "crates/shape-diagnostics",
@@ -49,6 +50,7 @@ shape-ast = { version = "=0.3.2", path = "crates/shape-ast" }
 shape-value = { version = "=0.3.2", path = "crates/shape-value" }
 shape-wire = { version = "=0.3.2", path = "crates/shape-wire" }
 shape-runtime = { version = "=0.3.2", path = "crates/shape-runtime" }
+shape-semantic-db = { version = "=0.3.2", path = "crates/shape-semantic-db" }
 shape-vm = { version = "=0.3.2", path = "crates/shape-vm" }
 shape-jit = { version = "=0.3.2", path = "crates/shape-jit" }
 shape-diagnostics = { version = "=0.3.2", path = "crates/shape-diagnostics" }
