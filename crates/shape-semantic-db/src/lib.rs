@@ -55,6 +55,7 @@ pub mod types;
 mod acceptance;
 
 use std::collections::BTreeMap;
+use std::path::Path;
 
 use shape_ast::ast::span::Span;
 
@@ -73,6 +74,39 @@ pub use types::NormalizedType;
 
 use queries::DefinitionRef;
 use salsa::Setter;
+
+/// The unit path (module path) for a source file.
+///
+/// Unit path is part of every published identity, so compiler and tooling must
+/// derive it the same way or they would publish different identities for the
+/// same declaration. Both consumers call this function; neither has its own
+/// rule.
+///
+/// Slice 1 derives the path from the file stem. Shape's real module-path
+/// resolution (shape.toml / frontmatter) is not part of this slice, and
+/// adopting it later will change published identities for files whose module
+/// path is not their stem — recorded as an open question in
+/// `docs/program/adr011-012/salsa-seam.md`.
+pub fn unit_path_for_file(path: Option<&Path>) -> String {
+    path.and_then(|path| path.file_stem())
+        .and_then(|stem| stem.to_str())
+        .map(|stem| stem.to_string())
+        .unwrap_or_else(|| "<buffer>".to_string())
+}
+
+/// Builds a one-unit session over `text` and publishes the facts for the
+/// definition `name` refers to in it.
+///
+/// This is the entry point both the compiler CLI and the LSP call. Sharing it
+/// is what makes "compiler and LSP consume the same `CallableFacts` content
+/// identity" a structural property rather than a convention: there is one
+/// resolution, one contract normalization and one identity scheme, and neither
+/// consumer can drift from the other without changing this function.
+pub fn callable_facts_for_source(unit_path: &str, text: &str, name: &str) -> Option<CallableFacts> {
+    let mut session = SemanticSession::new();
+    session.insert_unit(unit_path, text);
+    session.callable_facts_of(unit_path, name)
+}
 
 /// The Salsa database backing one semantic session.
 #[salsa::db]

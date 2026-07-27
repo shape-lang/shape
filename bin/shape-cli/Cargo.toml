@@ -42,6 +42,7 @@ shape-ast = { workspace = true }
 shape-abi-v1 = { workspace = true }
 shape-diagnostics = { workspace = true }
 shape-runtime = { workspace = true }
+shape-semantic-db = { workspace = true }
 shape-wire = { workspace = true }
 shape-jit = { workspace = true, optional = true }
 shape-vm = { workspace = true }

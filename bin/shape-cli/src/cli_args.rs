@@ -209,6 +209,19 @@ pub enum Commands {
         opts: ExpandFilterOptions,
     },
 
+    /// Print the shared semantic facts (resolved identity, base contract,
+    /// diagnostics, provenance) the compiler and LSP both consume
+    SemanticFacts {
+        /// Path to Shape source file
+        script: PathBuf,
+        /// Report only this callable and calls written with this name
+        #[arg(long)]
+        callable: Option<String>,
+        /// Emit JSON instead of text
+        #[arg(long)]
+        json: bool,
+    },
+
     /// Compile a Shape package into a distributable .shapec bundle
     Build {
         /// Output path for the bundle (defaults to <name>-<version>.shapec)

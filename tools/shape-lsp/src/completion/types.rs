@@ -1082,7 +1082,9 @@ mod tests {
     #[test]
     fn primitive_type_completions_cover_the_primary_spellings() {
         let names = labels(&primitive_type_completions());
-        for expected in ["int", "number", "bool", "string", "decimal", "bigint", "any"] {
+        for expected in [
+            "int", "number", "bool", "string", "decimal", "bigint", "any",
+        ] {
             assert!(names.contains(&expected.to_string()), "missing {expected}");
         }
     }
