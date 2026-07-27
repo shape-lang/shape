@@ -27,6 +27,29 @@ pub struct CompiledFunction {
     /// Declared return type string from Shape (e.g. "Result<int>", "Result<{id: int, name: string}>").
     /// Used by the typed marshalling path to validate/coerce Python return values.
     pub return_type: String,
+    /// The resolved `__shape_fn__` callable, compiled once per handle.
+    ///
+    /// ADR-019 §1 / #196. `invoke` used to run `PyModule::from_code` on EVERY
+    /// call: it recompiled the wrapper source and built a fresh module every
+    /// time, so module-level state could not persist between calls and the
+    /// compile cost was paid per invocation. Holding the callable keeps its
+    /// `__globals__` — the module dict — alive, which is what makes a foreign
+    /// function's module state behave like a module's.
+    ///
+    /// `OnceLock` rather than a `Mutex`: the value is written once and read
+    /// forever, and `invoke` takes `&self`.
+    #[cfg(feature = "pyo3")]
+    pub compiled_fn: std::sync::OnceLock<pyo3::Py<pyo3::PyAny>>,
+    /// The Python module name this function's wrapper is executed under.
+    ///
+    /// Unique per handle. `PyModule::from_code`'s module-name argument goes
+    /// through `PyImport_ExecCodeModuleEx`, which registers the module in
+    /// `sys.modules` and REUSES an existing entry of the same name — so the
+    /// former fixed `"__shape__"` gave every `fn python` in a program one
+    /// shared global namespace. Two functions defining the same module-level
+    /// name clobbered each other, and "module setup runs once per handle"
+    /// could not be true of a module shared by every handle.
+    pub module_name: String,
 }
 
 /// The Python runtime instance. One per `init()` call.
@@ -248,6 +271,9 @@ impl PythonRuntime {
             shape_body_start_line: 0,
             is_async,
             return_type: return_type.to_string(),
+            #[cfg(feature = "pyo3")]
+            compiled_fn: std::sync::OnceLock::new(),
+            module_name: format!("__shape_{name}_{id}__"),
         };
 
         self.functions.insert(id, func);
@@ -272,15 +298,36 @@ impl PythonRuntime {
             use pyo3::types::PyModule;
 
             Python::attach(|py| {
-                // 1. Execute the compiled source to define __shape_fn__
-                let source_cstring = std::ffi::CString::new(func.python_source.as_str())
-                    .map_err(|e| format!("Invalid source (contains null byte): {}", e))?;
-                let code = PyModule::from_code(py, &source_cstring, c"<shape>", c"__shape__")
-                    .map_err(|e| error_mapping::format_python_error(py, &e, func))?;
-
-                let shape_fn = code
-                    .getattr("__shape_fn__")
-                    .map_err(|e| error_mapping::format_python_error(py, &e, func))?;
+                // 1. Resolve `__shape_fn__`, compiling the wrapper module the
+                //    FIRST time this handle is invoked and reusing it after
+                //    (ADR-019 §1 / #196).
+                //
+                //    Before: `PyModule::from_code` ran on every call, so the
+                //    wrapper source was recompiled per invocation and each call
+                //    got a fresh module dict — module-level state could not
+                //    survive between calls of the same foreign function, which
+                //    is not what a Python module does. Keeping the callable
+                //    keeps its `__globals__` alive and fixes both.
+                let shape_fn = match func.compiled_fn.get() {
+                    Some(cached) => cached.bind(py).clone(),
+                    None => {
+                        let source_cstring = std::ffi::CString::new(func.python_source.as_str())
+                            .map_err(|e| format!("Invalid source (contains null byte): {}", e))?;
+                        let module_name = std::ffi::CString::new(func.module_name.as_str())
+                            .map_err(|e| format!("Invalid module name: {}", e))?;
+                        let code =
+                            PyModule::from_code(py, &source_cstring, c"<shape>", &module_name)
+                                .map_err(|e| error_mapping::format_python_error(py, &e, func))?;
+                        let resolved = code
+                            .getattr("__shape_fn__")
+                            .map_err(|e| error_mapping::format_python_error(py, &e, func))?;
+                        // A racing caller may have won; either callable is the
+                        // same function object semantically, so take whichever
+                        // is stored.
+                        let _ = func.compiled_fn.set(resolved.clone().unbind());
+                        resolved
+                    }
+                };
 
                 // 2. Deserialize msgpack args -> Vec<rmpv::Value> -> Vec<Py<PyAny>>
                 let args_values: Vec<rmpv::Value> = if args_msgpack.is_empty() {
@@ -335,7 +382,25 @@ impl PythonRuntime {
     /// Dispose a compiled function handle, freeing associated resources.
     pub fn dispose_function(&mut self, handle: *mut c_void) {
         let id = handle as usize;
-        self.functions.remove(&id);
+        let removed = self.functions.remove(&id);
+
+        // Each handle owns a module in `sys.modules` (see
+        // `CompiledFunction::module_name`); dropping the handle without
+        // dropping the module would leak one module per compiled function for
+        // the life of the interpreter.
+        #[cfg(feature = "pyo3")]
+        if let Some(func) = removed {
+            use pyo3::prelude::*;
+            pyo3::Python::attach(|py| {
+                if let Ok(sys) = py.import("sys") {
+                    if let Ok(modules) = sys.getattr("modules") {
+                        let _ = modules.del_item(&func.module_name);
+                    }
+                }
+            });
+        }
+        #[cfg(not(feature = "pyo3"))]
+        let _ = removed;
     }
 
     /// Return the language identifier.
@@ -712,5 +777,162 @@ mod tests {
         assert_eq!(decoded.file_extension, ".py");
 
         unsafe { python_free_buffer(out_ptr, out_len) };
+    }
+}
+
+#[cfg(all(test, feature = "pyo3"))]
+mod module_setup_tests {
+    //! ADR-019 §1 / #196 — tripwire (3): module setup runs ONCE per handle.
+    //!
+    //! MEASURED before the fix: `invoke` called `PyModule::from_code` on every
+    //! call, so each invocation recompiled the wrapper source into a FRESH
+    //! module. Two consequences, one of them a correctness bug: the compile
+    //! cost was paid per call, and module-level state could not survive between
+    //! calls of the same foreign function — `globals()` was a new dict each
+    //! time, which is not how a Python module behaves.
+    //!
+    //! The fixture counts module-level executions the only way a caller can
+    //! observe them: through the module dict's own persistence. Under the old
+    //! behaviour the body below returns 1 forever; under the fix it counts up.
+    use super::*;
+
+    fn runtime_with(body: &str, name: &str) -> (PythonRuntime, *mut c_void) {
+        let mut runtime = PythonRuntime::new(&[]).expect("runtime initializes");
+        let handle = runtime
+            .compile(name, body, &[], &[], "Result<int>", false)
+            .expect("compile succeeds");
+        (runtime, handle)
+    }
+
+    fn invoke_int(runtime: &PythonRuntime, handle: *mut c_void) -> i64 {
+        let out = runtime.invoke(handle, &[]).expect("invoke succeeds");
+        let value: rmpv::Value = rmp_serde::from_slice(&out).expect("decodable result");
+        value.as_i64().expect("integer result")
+    }
+
+    /// The counter lives in the module's own globals, so it increments only if
+    /// the module survives between calls.
+    const COUNTING_BODY: &str = "global _setups\n\
+                                 _setups = globals().get('_setups', 0) + 1\n\
+                                 return _setups\n";
+
+    #[test]
+    fn module_setup_runs_once_per_handle_across_many_invocations() {
+        let (runtime, handle) = runtime_with(COUNTING_BODY, "count_setups");
+
+        let observed: Vec<i64> = (0..4).map(|_| invoke_int(&runtime, handle)).collect();
+
+        assert_eq!(
+            observed,
+            vec![1, 2, 3, 4],
+            "the module dict must persist across calls — all-ones means the \
+             module was re-executed per invocation"
+        );
+    }
+
+    /// The flip side, and the shape a real program has: two `fn python`
+    /// declarations in ONE runtime must not share module state.
+    ///
+    /// This is what caught the fixed-module-name defect. `PyModule::from_code`
+    /// registers under its module-name argument, and the former literal
+    /// `"__shape__"` meant every foreign function in a program executed into
+    /// one `sys.modules` entry — so one function's module-level names silently
+    /// clobbered another's, and this test read 2 where it should read 1.
+    #[test]
+    fn two_functions_in_one_runtime_do_not_share_a_module() {
+        let mut runtime = PythonRuntime::new(&[]).expect("runtime initializes");
+        let first = runtime
+            .compile("counter_a", COUNTING_BODY, &[], &[], "Result<int>", false)
+            .expect("first compiles");
+        let second = runtime
+            .compile("counter_b", COUNTING_BODY, &[], &[], "Result<int>", false)
+            .expect("second compiles");
+
+        assert_eq!(invoke_int(&runtime, first), 1);
+        assert_eq!(invoke_int(&runtime, first), 2);
+        assert_eq!(
+            invoke_int(&runtime, second),
+            1,
+            "a second declaration starts with its own module state"
+        );
+        assert_eq!(invoke_int(&runtime, first), 3, "and the first is undisturbed");
+    }
+
+    /// Disposal takes the handle's module with it — otherwise a long-running
+    /// host leaks one `sys.modules` entry per compiled foreign function.
+    #[test]
+    fn disposing_a_handle_removes_its_module() {
+        let mut runtime = PythonRuntime::new(&[]).expect("runtime initializes");
+        let handle = runtime
+            .compile("disposable", COUNTING_BODY, &[], &[], "Result<int>", false)
+            .expect("compiles");
+        let module_name = runtime.functions[&(handle as usize)].module_name.clone();
+        invoke_int(&runtime, handle);
+
+        let registered = |name: &str| -> bool {
+            use pyo3::prelude::*;
+            pyo3::Python::attach(|py| {
+                py.import("sys")
+                    .and_then(|sys| sys.getattr("modules"))
+                    .and_then(|m| m.contains(name))
+                    .unwrap_or(false)
+            })
+        };
+        assert!(registered(&module_name), "the module is registered while live");
+        runtime.dispose_function(handle);
+        assert!(
+            !registered(&module_name),
+            "disposal must remove the module from sys.modules"
+        );
+    }
+
+    /// The direct structural claim: the callable is resolved once and reused.
+    #[test]
+    fn the_compiled_callable_is_resolved_once_and_reused() {
+        let (runtime, handle) = runtime_with("return 1\n", "identity");
+        let id = handle as usize;
+
+        assert!(
+            runtime.functions[&id].compiled_fn.get().is_none(),
+            "nothing is compiled before the first call — compilation stays lazy"
+        );
+
+        invoke_int(&runtime, handle);
+        let first = runtime.functions[&id]
+            .compiled_fn
+            .get()
+            .expect("the first call populates the cache")
+            .as_ptr();
+
+        invoke_int(&runtime, handle);
+        let second = runtime.functions[&id]
+            .compiled_fn
+            .get()
+            .expect("still populated")
+            .as_ptr();
+
+        assert_eq!(
+            first, second,
+            "the second call must reuse the same callable object"
+        );
+    }
+
+    /// A body that fails to compile must still fail on every call, not be
+    /// cached as broken or silently succeed the second time.
+    #[test]
+    fn a_body_that_does_not_compile_fails_on_every_call() {
+        // A genuine syntax error, not merely an undefined name: `if True` with
+        // no colon cannot compile, so the failure happens at module setup —
+        // the step being cached.
+        let (runtime, handle) = runtime_with("if True\n    pass\n", "broken");
+        for _ in 0..2 {
+            let err = runtime
+                .invoke(handle, &[])
+                .expect_err("a syntax error must surface on every call");
+            assert!(
+                err.contains("SyntaxError") || err.contains("invalid syntax"),
+                "the Python error must reach the caller verbatim, got: {err}"
+            );
+        }
     }
 }
