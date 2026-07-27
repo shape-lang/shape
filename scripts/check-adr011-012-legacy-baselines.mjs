@@ -101,6 +101,21 @@ for (const baseline of selected) {
       );
       fatal += 1;
     }
+    // Scope and exclusions are as much a part of the counting rule as the
+    // pattern. Without this, widening an exclusion could retire legacy sites
+    // from view behind an unchanged-looking count.
+    if (definition && JSON.stringify(definition.scope) !== JSON.stringify(set.scope)) {
+      console.error(
+        `FATAL  #${baseline.ticket}: set '${set.id}' scope changed since the baseline was taken; regenerate so the recorded rows match the enforced rule.`,
+      );
+      fatal += 1;
+    }
+    if (definition && JSON.stringify(definition.exclude ?? []) !== JSON.stringify(set.exclude ?? [])) {
+      console.error(
+        `FATAL  #${baseline.ticket}: set '${set.id}' exclusion list changed since the baseline was taken; regenerate so the recorded rows match the enforced rule, and review that diff — a widened exclusion can hide legacy sites behind an unchanged count.`,
+      );
+      fatal += 1;
+    }
   }
   if (fatal > 0) continue;
 

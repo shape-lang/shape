@@ -21,7 +21,7 @@
     ]
   },
   "step": "docs/design/typed-comptime/adr011-012-execution-rulings.md — ten required steps, step 4",
-  "source_revision": "d5579d481a132d53222f9c9ef70459b98fb2ed09",
+  "source_revision": "11d9c546c811f0bb2e7522635ba05e6ddc4e2cb0",
   "regenerate_with": "node scripts/generate-adr011-012-legacy-baselines.mjs --ticket 135",
   "check_with": "node scripts/check-adr011-012-legacy-baselines.mjs --ticket 135",
   "direction_rule": "Monotonic non-increasing. A set count may fall (migration progress) and may never rise. A new owner path is growth even when the total is unchanged, because it is a new surface carrying old authority.",
@@ -31,7 +31,7 @@
   ],
   "total_count": 547,
   "total_count_note": "Sum of the set counts. Sets may deliberately overlap (a narrowly scoped set can re-count sites a broader set already counts), so this is a ratchet aggregate for reporting movement — never a count of distinct legacy sites.",
-  "sets_sha256": "6091666e5b032ff64977ace120a996c0bde6dee5221efea86e3cfc8848de41b6",
+  "sets_sha256": "90ab37a94140d2aa66d23a5a05e69f42d27923a6ee1743e0e7bdd76e2da0ecfb",
   "sets": [
     {
       "id": "lsp-parallel-validators",
@@ -329,7 +329,8 @@
         "docs"
       ],
       "exclude": [
-        "docs/program/adr011-012/baselines/**"
+        "docs/program/adr011-012/baselines/**",
+        "docs/program/adr011-012/legacy-identity-manifest.json"
       ],
       "pattern": "HookDecision|__ComptimeTarget|\\bstring_lit\\b|pseudo-tuple|pseudo_tuple|marker substitution",
       "count": 237,

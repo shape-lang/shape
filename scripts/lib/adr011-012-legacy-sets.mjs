@@ -197,10 +197,19 @@ const TOOLING_SETS = [
     description:
       "Documentation occurrences of a superseded mechanism name. Scanned over docs/ ONLY, and deliberately unlike scripts/check-no-dynamic.sh, which excludes documentation: #135's territory is exactly old documentation claims. Enforcement prose that names a mechanism in order to forbid it is counted too — the ratchet measures direction, and the authority set is expected to shrink this as ADR-011/012 documentation lands.",
     scope: DOCS_SCOPE,
-    // The generated baselines live under docs/ and quote these very names in
-    // their patterns and descriptions. Counting them would make the instrument
-    // measure itself: regenerating would change the number it just recorded.
-    exclude: ["docs/program/adr011-012/baselines/**"],
+    // GENERATED migration evidence is excluded, because it quotes these names
+    // in its own patterns, descriptions, and recorded site paths: counting it
+    // would make the instrument measure itself, and regenerating would change
+    // the number it had just recorded.
+    //
+    // Hand-written prose is NOT excluded. Per this set's own rule, documentation
+    // that names a mechanism counts even when it names it in order to forbid it.
+    // So legacy-identity-manifest.md is counted and legacy-identity-manifest.json
+    // is not.
+    exclude: [
+      "docs/program/adr011-012/baselines/**",
+      "docs/program/adr011-012/legacy-identity-manifest.json",
+    ],
     pattern: "HookDecision|__ComptimeTarget|\\bstring_lit\\b|pseudo-tuple|pseudo_tuple|marker substitution",
   },
 ];
