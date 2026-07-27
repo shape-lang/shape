@@ -171,6 +171,28 @@ check-clean:
 check-no-dynamic:
 	bash scripts/check-no-dynamic.sh
 
+# --- ADR-011..016 step-4 migration baselines (#133 / #134 / #135) ---
+
+# Growth gate for the frozen legacy-authority sets: discovery producers, ambient
+# comptime entry points and intrinsic selectors (#133); annotation identities,
+# universal/string descriptors and backend exceptions (#134); duplicate LSP
+# semantics, stale tests and old documentation claims (#135).
+#
+# Per ruling R14 a legacy set may only shrink. The gate fails on three shapes of
+# growth: a rising set total, a new owner path, and a rising per-owner count
+# that a fall elsewhere would otherwise hide. Definitions live in
+# scripts/lib/adr011-012-legacy-sets.mjs; baselines in
+# docs/program/adr011-012/baselines/.
+check-legacy-baselines:
+	node scripts/check-adr011-012-legacy-baselines.mjs
+
+# Regenerate the step-4 baselines. Legitimate and expected after real migration
+# progress — and always visible, because the committed diff is the review
+# surface. Regenerating to silence a rise is the walk-back this gate exists to
+# catch.
+regen-legacy-baselines:
+	node scripts/generate-adr011-012-legacy-baselines.mjs
+
 # Phase 2d merge gate. Run before merging any sub-cluster branch into
 # bulldozer-strictly-typed. Exit-code-based (NOT grep -c) per handover §0.
 # See docs/cluster-audits/phase-2d-handover.md §0 + scripts/verify-merge.sh.
