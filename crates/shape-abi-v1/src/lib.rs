@@ -750,8 +750,10 @@ pub struct LanguageRuntimeVTable {
     /// Returns: opaque instance pointer, or null on error.
     pub init: Option<unsafe extern "C" fn(config: *const u8, config_len: usize) -> *mut c_void>,
 
-    /// Register Shape type schemas for stub generation (e.g. `.pyi` files).
-    /// `types_msgpack`: MessagePack-encoded `Vec<TypeSchemaExport>`.
+    /// Deliver the declared Shape contract so the runtime can generate
+    /// interface stubs; read them back with [`Self::generate_stubs`].
+    /// `types_msgpack`: MessagePack-encoded
+    /// [`foreign_types::ForeignContractExport`] (ADR-019 §1 / #196).
     /// Returns: 0 on success.
     pub register_types: Option<
         unsafe extern "C" fn(instance: *mut c_void, types: *const u8, types_len: usize) -> i32,
@@ -927,55 +929,6 @@ pub struct LanguageRuntimeLspConfig {
     pub file_extension: std::string::String,
     /// Extra search paths for the child LSP (e.g. stub directories).
     pub extra_paths: Vec<std::string::String>,
-}
-
-/// Exported Shape type schema for foreign language runtimes.
-///
-/// Serialized as MessagePack and passed to `register_types()`.
-#[derive(Debug, Clone, PartialEq)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-pub struct TypeSchemaExport {
-    /// Type name.
-    pub name: std::string::String,
-    /// Kind of type.
-    pub kind: TypeSchemaExportKind,
-    /// Fields (for struct types).
-    pub fields: Vec<TypeFieldExport>,
-    /// Enum variants (for enum types).
-    pub enum_variants: Option<Vec<EnumVariantExport>>,
-}
-
-/// Kind of exported type schema.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-pub enum TypeSchemaExportKind {
-    Struct,
-    Enum,
-    Alias,
-}
-
-/// A single field in an exported type schema.
-#[derive(Debug, Clone, PartialEq)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-pub struct TypeFieldExport {
-    /// Field name.
-    pub name: std::string::String,
-    /// Shape type name (e.g. "number", "string", "Array<Candle>").
-    pub type_name: std::string::String,
-    /// Whether the field is optional.
-    pub optional: bool,
-    /// Human-readable description.
-    pub description: Option<std::string::String>,
-}
-
-/// A single enum variant in an exported type schema.
-#[derive(Debug, Clone, PartialEq)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-pub struct EnumVariantExport {
-    /// Variant name.
-    pub name: std::string::String,
-    /// Payload fields (if any).
-    pub payload_fields: Option<Vec<TypeFieldExport>>,
 }
 
 // ============================================================================
