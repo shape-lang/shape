@@ -1,0 +1,40 @@
+// Charter workload: JSON — parse, navigate, re-serialize.
+// Checksum: total serialized length across all rounds.
+use std::core::json
+
+fn document(i: int) -> string {
+    return f"{{\"id\":{i},\"name\":\"row-{i}\",\"tags\":[1,2,3],\"nested\":{{\"score\":{i * 2},\"ok\":true}}}}"
+}
+
+fn roundtrip(rounds: int) -> int {
+    let mut total = 0
+    let mut i = 0
+    while i < rounds {
+        let text = document(i)
+        match json::parse(text) {
+            Ok(value) => {
+                match json::stringify(value, false) {
+                    Ok(out) => {
+                        // The `Ok(_)` payload binder does not currently carry
+                        // the declared `Result<string, string>` payload type
+                        // through to the binding, so the annotation is what
+                        // makes the program compile at all -- not a hint added
+                        // to flatter the compiler.
+                        let serialized: string = out
+                        total = total + serialized.len()
+                    },
+                    Err(e) => {
+                        total = total - 1
+                    },
+                }
+            },
+            Err(e) => {
+                total = total - 1
+            },
+        }
+        i = i + 1
+    }
+    return total
+}
+
+print(roundtrip(60000))

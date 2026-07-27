@@ -1,0 +1,33 @@
+// Charter workload: numeric kernel — Mandelbrot escape-time.
+// Pure f64 arithmetic in nested counted loops, no allocation in the hot loop.
+// Checksum: total escape iterations (integer, exact across runtimes).
+fn mandelbrot(width: int, height: int, max_iter: int) -> int {
+    let mut total = 0
+    let mut py = 0
+    while py < height {
+        let y0 = (py as number) / (height as number) * 2.0 - 1.0
+        let mut px = 0
+        while px < width {
+            let x0 = (px as number) / (width as number) * 3.0 - 2.0
+            let mut x = 0.0
+            let mut y = 0.0
+            let mut it = 0
+            while it < max_iter {
+                let x2 = x * x
+                let y2 = y * y
+                if x2 + y2 > 4.0 {
+                    break
+                }
+                y = 2.0 * x * y + y0
+                x = x2 - y2 + x0
+                it = it + 1
+            }
+            total = total + it
+            px = px + 1
+        }
+        py = py + 1
+    }
+    return total
+}
+
+print(mandelbrot(420, 420, 200))

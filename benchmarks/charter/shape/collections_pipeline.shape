@@ -1,0 +1,30 @@
+// Charter workload: collection pipeline — map/filter/reduce chains with
+// closures over `Array<number>`, repeated so pipeline construction and closure
+// dispatch both stay on the hot path.
+// Checksum: accumulated reduction, rounded to an integer.
+fn source(n: int) -> Array<number> {
+    let mut xs: Array<number> = []
+    let mut i = 0
+    while i < n {
+        xs.push((i % 97) as number)
+        i = i + 1
+    }
+    return xs
+}
+
+fn pipeline(xs: Array<number>) -> number {
+    return xs
+        .map(|x| x * 1.5 + 1.0)
+        .filter(|x| x > 20.0)
+        .map(|x| x - 0.5)
+        .reduce(|acc, x| acc + x, 0.0)
+}
+
+let xs = source(20000)
+let mut total = 0.0
+let mut r = 0
+while r < 60 {
+    total = total + pipeline(xs)
+    r = r + 1
+}
+print(total as int)

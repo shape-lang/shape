@@ -1,0 +1,181 @@
+{
+  "categories": {
+    "allocation": {
+      "bar_ratio": 0.8,
+      "gating": true
+    },
+    "closures": {
+      "bar_ratio": null,
+      "gating": false,
+      "precondition": "The charter defines no bar for closure dispatch on its own; this workload is the informational input to PERF-CLOSURE-NATIVE and its witness."
+    },
+    "collections": {
+      "bar_ratio": 1.0,
+      "gating": false,
+      "precondition": "The charter states this bar as '>= 1.0x post closure-nativity'. PERF-CLOSURE-NATIVE has not landed, so the measurement is reported and no pass/fail is claimed."
+    },
+    "numeric": {
+      "bar_ratio": 1.5,
+      "gating": true
+    },
+    "startup": {
+      "bar_ratio": 5.0,
+      "gating": true
+    },
+    "strings_json": {
+      "bar_ratio": 1.0,
+      "gating": true
+    }
+  },
+  "charter": {
+    "authority": "ADR-018 \u00a71; R24; grill Q5 (user-ratified 2026-07-27). Workstream row: docs/program/workstreams/perf.md, PERF-SUITE. Issue: #186.",
+    "calibration_state": "pre-calibration",
+    "calibrations": [],
+    "notes": [
+      "The charter allows exactly one recorded calibration of the multipliers after the first measured baseline. Until that calibration is recorded, bar outcomes in this suite are measurements against the ratified targets, not a settled gate.",
+      "Ratios are reference-runtime time divided by Shape time on the primary statistic: a ratio of 1.5 means Shape is 1.5x faster than the reference.",
+      "The primary ratio is whole-process wall time on both sides, which includes each runtime's own startup. Because Shape's startup floor is the larger one in absolute terms and the smaller one as a fraction of a long workload, this primary ratio is the more favourable number for Shape; the startup-adjusted ratio is reported alongside it and is the harsher one.",
+      "Recorded [jit-fallback] lines are observations. Their absence is NOT evidence that a workload executed natively -- that claim requires R15's NativeExecutionWitness (NATIVE-WITNESS, #117), which is outside this ticket.",
+      "The 15% noise bound is declared from the first baseline run on the pinned machine, where the worst quiet-machine run-to-run deviation observed was 8.3%. It is a declared bound, not a derived one. When a noise check fails, the pinned reference runtime acts as the control: if it moved by the same order on the same workload, the verdict is machine contention and the bound must not be widened to make the check pass."
+    ]
+  },
+  "environment": {
+    "arch": "x86_64",
+    "cpu_logical_cores": "32",
+    "cpu_model": "AMD RYZEN AI MAX+ 395 w/ Radeon 8060S",
+    "extensions_fingerprint": "sha256:dc1182d811aa767385f1badfda40409952e7cd712ebaaa76199647edc94f7fdf",
+    "identity": "sha256:415aa49313d7d645b6b715f0b44d4bc96f34f102edbae8a9058453918c7a381c",
+    "node_binary": "/nix/store/785jidgnryzj566s25s3rb262d4g5znb-nodejs-24.14.1/bin/node",
+    "node_v8_version": "13.6.233.17-node.44",
+    "node_version": "v24.14.1",
+    "os_kernel": "Linux 6.12.93",
+    "rustc_version": "rustc 1.94.1 (e408947bf 2026-03-25) (built from a source tarball)"
+  },
+  "integrity": {
+    "covered": [
+      {
+        "dir": "benchmarks/charter/shape",
+        "ext": "shape"
+      },
+      {
+        "dir": "benchmarks/charter/node",
+        "ext": "mjs"
+      },
+      {
+        "dir": "benchmarks/shape",
+        "ext": "shape"
+      },
+      {
+        "dir": "benchmarks/node",
+        "ext": "mjs"
+      },
+      {
+        "dir": "benchmarks/python",
+        "ext": "py"
+      },
+      {
+        "dir": "benchmarks/go",
+        "ext": "go"
+      },
+      {
+        "dir": "benchmarks/rust/src",
+        "ext": "rs"
+      }
+    ],
+    "digest_file": "benchmarks/charter/integrity.sha256"
+  },
+  "measurement": {
+    "iterations": 3,
+    "noise_bound_pct": 15.0,
+    "primary_statistic": "min",
+    "timeout_secs": 300,
+    "warmup_runs": 1
+  },
+  "reference": {
+    "pinned_binary": "/nix/store/785jidgnryzj566s25s3rb262d4g5znb-nodejs-24.14.1/bin/node",
+    "pinned_v8_version": "13.6.233.17-node.44",
+    "pinned_version": "v24.14.1",
+    "runtime": "node"
+  },
+  "schema": "shape.perf-suite.manifest/v1",
+  "suite_dir": "benchmarks/charter",
+  "workloads": [
+    {
+      "category": "numeric",
+      "description": "Mandelbrot escape-time: f64 arithmetic in nested counted loops with no allocation on the hot path.",
+      "id": "numeric_mandelbrot",
+      "reference": "node/numeric_mandelbrot.mjs",
+      "shape": "shape/numeric_mandelbrot.shape"
+    },
+    {
+      "category": "numeric",
+      "description": "Dense 260x260 matrix multiply over contiguous f64 storage; three-deep loop nest with computed indices.",
+      "id": "numeric_matmul",
+      "reference": "node/numeric_matmul.mjs",
+      "shape": "shape/numeric_matmul.shape"
+    },
+    {
+      "category": "numeric",
+      "description": "Cubic B-spline evaluation over a control array -- the bspline-class array-indexing shape named in ADR-018 \u00a71.",
+      "id": "numeric_spline",
+      "reference": "node/numeric_spline.mjs",
+      "shape": "shape/numeric_spline.shape"
+    },
+    {
+      "category": "collections",
+      "description": "map/filter/map/reduce chain with closures over a 20k-element array, repeated 60 times.",
+      "id": "collections_pipeline",
+      "reference": "node/collections_pipeline.mjs",
+      "shape": "shape/collections_pipeline.shape"
+    },
+    {
+      "category": "collections",
+      "description": "String-keyed hash map: 4k-entry build followed by 320k keyed lookups.",
+      "id": "collections_hashmap",
+      "reference": "node/collections_hashmap.mjs",
+      "shape": "shape/collections_hashmap.shape"
+    },
+    {
+      "category": "strings_json",
+      "description": "Record build, split, case-fold and re-join across 384k records.",
+      "id": "strings_transform",
+      "reference": "node/strings_transform.mjs",
+      "shape": "shape/strings_transform.shape"
+    },
+    {
+      "category": "strings_json",
+      "description": "JSON parse then re-serialize, 60k nested documents.",
+      "id": "json_roundtrip",
+      "reference": "node/json_roundtrip.mjs",
+      "shape": "shape/json_roundtrip.shape"
+    },
+    {
+      "category": "allocation",
+      "description": "Object-graph churn: 240 rounds of building, walking and discarding a 5k-record index-linked graph.",
+      "id": "alloc_object_graph",
+      "reference": "node/alloc_object_graph.mjs",
+      "shape": "shape/alloc_object_graph.shape"
+    },
+    {
+      "category": "allocation",
+      "description": "Build-and-discard of a depth-14 complete binary tree, 160 rounds.",
+      "id": "alloc_tree",
+      "reference": "node/alloc_tree.mjs",
+      "shape": "shape/alloc_tree.shape"
+    },
+    {
+      "category": "closures",
+      "description": "The same closure called through a local variable, a function parameter and a returned value -- the surface PERF-CLOSURE-NATIVE has to make native.",
+      "id": "closures_dispatch",
+      "reference": "node/closures_dispatch.mjs",
+      "shape": "shape/closures_dispatch.shape"
+    },
+    {
+      "category": "startup",
+      "description": "Cold-start floor: everything the runtime does before user code runs. Supplies the startup floor the other workloads are adjusted by.",
+      "id": "startup_hello",
+      "reference": "node/startup_hello.mjs",
+      "shape": "shape/startup_hello.shape"
+    }
+  ]
+}

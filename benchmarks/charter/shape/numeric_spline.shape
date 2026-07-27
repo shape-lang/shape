@@ -1,0 +1,37 @@
+// Charter workload: numeric kernel — cubic B-spline evaluation over a control
+// array. This is the "bspline-class" shape named in ADR-018 §1: array-heavy
+// scalar code where every inner step is an indexed read with a computed index.
+// Checksum: accumulated sample values, rounded to an integer.
+fn control_points(n: int) -> Array<number> {
+    let mut cp: Array<number> = []
+    let mut i = 0
+    while i < n {
+        cp.push(((i % 23) as number) * 0.75 - 4.0)
+        i = i + 1
+    }
+    return cp
+}
+
+fn eval_spline(cp: Array<number>, segments: int, samples: int) -> number {
+    let mut acc = 0.0
+    let mut seg = 1
+    while seg < segments {
+        let mut s = 0
+        while s < samples {
+            let t = (s as number) / (samples as number)
+            let t2 = t * t
+            let t3 = t2 * t
+            let b0 = (1.0 - 3.0 * t + 3.0 * t2 - t3) / 6.0
+            let b1 = (4.0 - 6.0 * t2 + 3.0 * t3) / 6.0
+            let b2 = (1.0 + 3.0 * t + 3.0 * t2 - 3.0 * t3) / 6.0
+            let b3 = t3 / 6.0
+            acc = acc + b0 * cp[seg - 1] + b1 * cp[seg] + b2 * cp[seg + 1] + b3 * cp[seg + 2]
+            s = s + 1
+        }
+        seg = seg + 1
+    }
+    return acc
+}
+
+let cp = control_points(1024)
+print(eval_spline(cp, 1021, 2200) as int)
