@@ -152,7 +152,7 @@ Legend: ✅ works end-to-end (empirically verified this audit) · 🟡 partial �
 | Scalar array args (Array<int> in) | ✅ | `py_arr_in ok 60` (sum of [10,20,30]); `marshal_args_typed` uses declared type as element-kind oracle (`foreign_marshal.rs:94-124`) |
 | Scalar array returns (Array<int>/Array<number> out) | ✅ | `py_arr ok len=4 last=3`; `build_scalar_typed_array` (`foreign_marshal.rs:937-1023`) |
 | `Option<T>` returns (nil→None, value→Some) | ✅ | `py_opt(true) Some(42)`; `foreign_marshal.rs:583-589` |
-| `async fn python` (asyncio wrapper) | ✅ | `py_async ok 42`; wrapper gen at `extensions/python/src/runtime.rs:203-214` |
+| `async fn python` (asyncio wrapper) | ❌ REJECTED since 2026-07-27 | Was ✅ (`py_async ok 42`) at audit time; now a [C0932] compile error per ADR-019 §5 / #201 (untruthful concurrency — the VM thread blocked). Real foreign async is #202. Wrapper gen at `extensions/python/src/runtime.rs:203-214` remains for #202 to reuse. |
 | `async fn typescript` (event-loop promise resolution) | ✅ code path exists (`runtime.rs:187-227` with cached tokio runtime); not separately exercised this audit | |
 | Cross-call interpreter state (STATEFUL_OPAQUE) | ✅ | `py_state call1 = 1` / `py_state call2 = 2` (global counter persists) |
 | Concurrent foreign calls from async tasks | ✅ (no crash, correct results) | `concurrent python: 10 20` via two `async let` tasks |
