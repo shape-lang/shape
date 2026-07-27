@@ -1,0 +1,671 @@
+{
+  "record_kind": "LegacyMigrationBaseline",
+  "record_version": 1,
+  "program_id": "adr011-012",
+  "ticket": 134,
+  "entry_id": "ELABORATION-LEGACY-INVENTORY",
+  "manifest_ordinal": 24,
+  "title": "Freeze legacy elaboration and carrier authority",
+  "territory": "annotation identities and routes, universal and string descriptors, generated-type parser consumers, annotation/backend exceptions",
+  "authority": {
+    "adrs": [
+      "ADR-011",
+      "ADR-012",
+      "ADR-014"
+    ],
+    "rulings": [
+      "R2",
+      "R4",
+      "R5",
+      "R11",
+      "R12",
+      "R14",
+      "R20"
+    ]
+  },
+  "step": "docs/design/typed-comptime/adr011-012-execution-rulings.md — ten required steps, step 4",
+  "source_revision": "d5579d481a132d53222f9c9ef70459b98fb2ed09",
+  "regenerate_with": "node scripts/generate-adr011-012-legacy-baselines.mjs --ticket 134",
+  "check_with": "node scripts/check-adr011-012-legacy-baselines.mjs --ticket 134",
+  "direction_rule": "Monotonic non-increasing. A set count may fall (migration progress) and may never rise. A new owner path is growth even when the total is unchanged, because it is a new surface carrying old authority.",
+  "excluded_from_hash": [
+    "source_revision",
+    "description"
+  ],
+  "total_count": 1064,
+  "total_count_note": "Sum of the set counts. Sets may deliberately overlap (a narrowly scoped set can re-count sites a broader set already counts), so this is a ratchet aggregate for reporting movement — never a count of distinct legacy sites.",
+  "sets_sha256": "fe2924e51dd89ece1069cced94e593156fe645bdd717bd2c44b5f1f2b873bee0",
+  "sets": [
+    {
+      "id": "universal-comptime-target",
+      "category": "universal descriptors",
+      "description": "References to the universal `ComptimeTarget` / `__ComptimeTarget` carrier. CLAUDE.md forbids a universal ComptimeTarget; ADR-012 replaces it with typed ArgumentPack<Sig> and Next<Sig>. #110 owns the deletion.",
+      "scope": [
+        "crates",
+        "bin",
+        "tools",
+        "extensions"
+      ],
+      "exclude": [],
+      "pattern": "\\bComptimeTarget\\b",
+      "count": 36,
+      "owner_count": 9,
+      "owners": [
+        {
+          "path": "crates/shape-vm/src/compiler/comptime.rs",
+          "count": 3
+        },
+        {
+          "path": "crates/shape-vm/src/compiler/comptime_builtins.rs",
+          "count": 2
+        },
+        {
+          "path": "crates/shape-vm/src/compiler/comptime_target.rs",
+          "count": 12
+        },
+        {
+          "path": "crates/shape-vm/src/compiler/expressions/mod.rs",
+          "count": 1
+        },
+        {
+          "path": "crates/shape-vm/src/compiler/functions_annotations.rs",
+          "count": 8
+        },
+        {
+          "path": "crates/shape-vm/src/compiler/functions_annotations/declaration_discovery.rs",
+          "count": 3
+        },
+        {
+          "path": "crates/shape-vm/src/compiler/functions_annotations/handler_helper_authority_tests.rs",
+          "count": 1
+        },
+        {
+          "path": "crates/shape-vm/src/compiler/statements.rs",
+          "count": 5
+        },
+        {
+          "path": "crates/shape-vm/src/compiler/template_specialization/sugar_matrix_tests.rs",
+          "count": 1
+        }
+      ]
+    },
+    {
+      "id": "string-backed-construction",
+      "category": "string descriptors",
+      "description": "String-backed generated-item construction and its parser consumers: `string_lit`, `render_shape_string_literal`, and the retained `parse_type_annotation_payload` string arm. R11/R14 forbid string-backed typed construction and any later parsing bridge; #106 (typed construction) unblocks the deletion.",
+      "scope": [
+        "crates",
+        "bin",
+        "tools",
+        "extensions"
+      ],
+      "exclude": [],
+      "pattern": "\\bstring_lit\\b|render_shape_string_literal|parse_type_annotation_payload",
+      "count": 32,
+      "owner_count": 10,
+      "owners": [
+        {
+          "path": "crates/shape-ast/src/transform/desugar.rs",
+          "count": 2
+        },
+        {
+          "path": "crates/shape-runtime/src/builtin_metadata.rs",
+          "count": 4
+        },
+        {
+          "path": "crates/shape-runtime/src/type_system/inference/access.rs",
+          "count": 1
+        },
+        {
+          "path": "crates/shape-runtime/stdlib-src/llm/tools.shape",
+          "count": 2
+        },
+        {
+          "path": "crates/shape-runtime/stdlib-src/serde/derive.shape",
+          "count": 2
+        },
+        {
+          "path": "crates/shape-vm/src/compiler/comptime.rs",
+          "count": 3
+        },
+        {
+          "path": "crates/shape-vm/src/compiler/comptime_builtins.rs",
+          "count": 11
+        },
+        {
+          "path": "crates/shape-vm/src/compiler/v2_array_emission.rs",
+          "count": 3
+        },
+        {
+          "path": "crates/shape-vm/src/executor/tests/no_json_comptime_protocol.rs",
+          "count": 3
+        },
+        {
+          "path": "tools/shape-test/tests/annotations_comptime/showcases.rs",
+          "count": 1
+        }
+      ]
+    },
+    {
+      "id": "pseudo-pack-and-marker-substitution",
+      "category": "annotation routes",
+      "description": "Pseudo-pack carriers and marker substitution: `pseudo_tuple`, `substitute_*_markers`, `build_impl_shadow_call`. CLAUDE.md forbids pseudo-tuple carriers and marker-call substitution; R10 requires packs that preserve exact passing and ownership modes.",
+      "scope": [
+        "crates",
+        "bin",
+        "tools",
+        "extensions"
+      ],
+      "exclude": [],
+      "pattern": "pseudo_tuple|substitute_\\w*markers?|build_impl_shadow_call",
+      "count": 105,
+      "owner_count": 8,
+      "owners": [
+        {
+          "path": "crates/shape-runtime/stdlib-src/core/remote.shape",
+          "count": 2
+        },
+        {
+          "path": "crates/shape-vm/src/compiler/comptime_builtins.rs",
+          "count": 1
+        },
+        {
+          "path": "crates/shape-vm/src/compiler/comptime_fragments/checked_template.rs",
+          "count": 8
+        },
+        {
+          "path": "crates/shape-vm/src/compiler/expressions/function_calls.rs",
+          "count": 4
+        },
+        {
+          "path": "crates/shape-vm/src/compiler/monomorphization/cache.rs",
+          "count": 6
+        },
+        {
+          "path": "crates/shape-vm/src/compiler/template_specialization/mod.rs",
+          "count": 26
+        },
+        {
+          "path": "crates/shape-vm/src/compiler/template_specialization/pseudo_tuple.rs",
+          "count": 49
+        },
+        {
+          "path": "crates/shape-vm/src/compiler/template_specialization/weave.rs",
+          "count": 9
+        }
+      ]
+    },
+    {
+      "id": "hook-decision-protocol",
+      "category": "annotation identities",
+      "description": "References to the spelling-recognized `HookDecision` protocol. ADR-012 replaces it with ordinary typed Callable Transforms; CLAUDE.md forbids extending it. Issue #20 is superseded by #147/#97/#148/#149/#109.",
+      "scope": [
+        "crates",
+        "bin",
+        "tools",
+        "extensions"
+      ],
+      "exclude": [],
+      "pattern": "HookDecision",
+      "count": 258,
+      "owner_count": 16,
+      "owners": [
+        {
+          "path": "bin/shape-cli/tests/cli/jit_c3_carrier_native.rs",
+          "count": 1
+        },
+        {
+          "path": "bin/shape-cli/tests/cli/jit_e4_hook_decision_native.rs",
+          "count": 1
+        },
+        {
+          "path": "crates/shape-runtime/stdlib-src/core/hooks.shape",
+          "count": 7
+        },
+        {
+          "path": "crates/shape-runtime/stdlib-src/core/remote.shape",
+          "count": 5
+        },
+        {
+          "path": "crates/shape-runtime/stdlib-src/finance/annotations/indicator.shape",
+          "count": 2
+        },
+        {
+          "path": "crates/shape-vm/src/compiler/comptime_fragments/checked_template.rs",
+          "count": 53
+        },
+        {
+          "path": "crates/shape-vm/src/compiler/statements/annotation_declarations/planner.rs",
+          "count": 2
+        },
+        {
+          "path": "crates/shape-vm/src/compiler/statements/annotation_declarations/sugar_lowering.rs",
+          "count": 13
+        },
+        {
+          "path": "crates/shape-vm/src/compiler/template_specialization/e4_s5_remote_tests.rs",
+          "count": 16
+        },
+        {
+          "path": "crates/shape-vm/src/compiler/template_specialization/mod.rs",
+          "count": 9
+        },
+        {
+          "path": "crates/shape-vm/src/compiler/template_specialization/pseudo_tuple.rs",
+          "count": 121
+        },
+        {
+          "path": "crates/shape-vm/src/compiler/template_specialization/weave.rs",
+          "count": 15
+        },
+        {
+          "path": "crates/shape-vm/src/executor/tests/no_legacy_annotation_weave.rs",
+          "count": 10
+        },
+        {
+          "path": "tools/shape-test/tests/annotations_runtime/before_after.rs",
+          "count": 1
+        },
+        {
+          "path": "tools/shape-test/tests/annotations_runtime/injection.rs",
+          "count": 1
+        },
+        {
+          "path": "tools/shape-test/tests/comptime/annotations.rs",
+          "count": 1
+        }
+      ]
+    },
+    {
+      "id": "any-typed-carriers",
+      "category": "string descriptors",
+      "description": "`FieldType::Any` carrier sites — the untyped hook/descriptor payload ADR-012 replaces with typed per-layer state. Not every occurrence is an annotation carrier; the ratchet's claim is that the total may not grow.",
+      "scope": [
+        "crates",
+        "bin",
+        "tools",
+        "extensions"
+      ],
+      "exclude": [],
+      "pattern": "FieldType::Any",
+      "count": 224,
+      "owner_count": 36,
+      "owners": [
+        {
+          "path": "bin/shape-cli/tests/stdlib/stdlib_advanced.rs",
+          "count": 1
+        },
+        {
+          "path": "crates/shape-ast/src/error/types.rs",
+          "count": 2
+        },
+        {
+          "path": "crates/shape-jit/src/mir_compiler/mod.rs",
+          "count": 3
+        },
+        {
+          "path": "crates/shape-runtime/src/stdlib/csv_module.rs",
+          "count": 1
+        },
+        {
+          "path": "crates/shape-runtime/src/stdlib/json.rs",
+          "count": 4
+        },
+        {
+          "path": "crates/shape-runtime/src/type_schema/builtin_schemas.rs",
+          "count": 14
+        },
+        {
+          "path": "crates/shape-runtime/src/type_schema/field_types.rs",
+          "count": 22
+        },
+        {
+          "path": "crates/shape-runtime/src/type_schema/mod.rs",
+          "count": 2
+        },
+        {
+          "path": "crates/shape-runtime/src/type_schema/registry.rs",
+          "count": 7
+        },
+        {
+          "path": "crates/shape-runtime/src/type_schema/schema.rs",
+          "count": 4
+        },
+        {
+          "path": "crates/shape-vm/src/compiler/compiler_impl_reference_model.rs",
+          "count": 3
+        },
+        {
+          "path": "crates/shape-vm/src/compiler/comptime.rs",
+          "count": 7
+        },
+        {
+          "path": "crates/shape-vm/src/compiler/comptime_builtins.rs",
+          "count": 1
+        },
+        {
+          "path": "crates/shape-vm/src/compiler/expressions/assignment.rs",
+          "count": 2
+        },
+        {
+          "path": "crates/shape-vm/src/compiler/expressions/collections.rs",
+          "count": 16
+        },
+        {
+          "path": "crates/shape-vm/src/compiler/expressions/function_calls.rs",
+          "count": 5
+        },
+        {
+          "path": "crates/shape-vm/src/compiler/functions.rs",
+          "count": 1
+        },
+        {
+          "path": "crates/shape-vm/src/compiler/helpers.rs",
+          "count": 26
+        },
+        {
+          "path": "crates/shape-vm/src/compiler/helpers_reference.rs",
+          "count": 1
+        },
+        {
+          "path": "crates/shape-vm/src/compiler/mir_schema_threading.rs",
+          "count": 2
+        },
+        {
+          "path": "crates/shape-vm/src/compiler/mod.rs",
+          "count": 2
+        },
+        {
+          "path": "crates/shape-vm/src/compiler/monomorphization/type_resolution.rs",
+          "count": 1
+        },
+        {
+          "path": "crates/shape-vm/src/compiler/patterns/destructure.rs",
+          "count": 7
+        },
+        {
+          "path": "crates/shape-vm/src/compiler/post_inference_verify.rs",
+          "count": 46
+        },
+        {
+          "path": "crates/shape-vm/src/compiler/statements.rs",
+          "count": 2
+        },
+        {
+          "path": "crates/shape-vm/src/compiler/template_specialization/pseudo_tuple.rs",
+          "count": 1
+        },
+        {
+          "path": "crates/shape-vm/src/executor/builtins/special_ops.rs",
+          "count": 1
+        },
+        {
+          "path": "crates/shape-vm/src/executor/control_flow/foreign_marshal.rs",
+          "count": 1
+        },
+        {
+          "path": "crates/shape-vm/src/executor/objects/array_basic.rs",
+          "count": 1
+        },
+        {
+          "path": "crates/shape-vm/src/executor/objects/object_creation.rs",
+          "count": 1
+        },
+        {
+          "path": "crates/shape-vm/src/executor/resume.rs",
+          "count": 10
+        },
+        {
+          "path": "crates/shape-vm/src/executor/state_builtins/core.rs",
+          "count": 7
+        },
+        {
+          "path": "crates/shape-vm/src/executor/tests/mod.rs",
+          "count": 1
+        },
+        {
+          "path": "crates/shape-vm/src/executor/typed_object_ops.rs",
+          "count": 13
+        },
+        {
+          "path": "crates/shape-vm/src/executor/vm_impl/modules.rs",
+          "count": 1
+        },
+        {
+          "path": "crates/shape-vm/src/type_tracking.rs",
+          "count": 5
+        }
+      ]
+    },
+    {
+      "id": "raw-generated-name-minting",
+      "category": "annotation routes",
+      "description": "Sites minting a raw `__`-prefixed generated name via `format!`. R14 lists raw generated names as an old authority class; ADR-011 requires stable structural identities instead of rendered names.",
+      "scope": [
+        "crates",
+        "bin",
+        "tools",
+        "extensions"
+      ],
+      "exclude": [],
+      "pattern": "format!\\(\"__",
+      "count": 65,
+      "owner_count": 33,
+      "owners": [
+        {
+          "path": "crates/shape-ast/src/transform/desugar.rs",
+          "count": 1
+        },
+        {
+          "path": "crates/shape-jit/src/mir_compiler/mod.rs",
+          "count": 1
+        },
+        {
+          "path": "crates/shape-runtime/src/module_loader/mod.rs",
+          "count": 2
+        },
+        {
+          "path": "crates/shape-runtime/src/type_schema/registry.rs",
+          "count": 2
+        },
+        {
+          "path": "crates/shape-runtime/src/type_schema/schema.rs",
+          "count": 1
+        },
+        {
+          "path": "crates/shape-vm/src/compiler/compiler_impl_initialization.rs",
+          "count": 1
+        },
+        {
+          "path": "crates/shape-vm/src/compiler/compiler_impl_reference_model.rs",
+          "count": 1
+        },
+        {
+          "path": "crates/shape-vm/src/compiler/comptime.rs",
+          "count": 1
+        },
+        {
+          "path": "crates/shape-vm/src/compiler/comptime_builtins.rs",
+          "count": 4
+        },
+        {
+          "path": "crates/shape-vm/src/compiler/expressions/advanced.rs",
+          "count": 1
+        },
+        {
+          "path": "crates/shape-vm/src/compiler/expressions/binary_ops.rs",
+          "count": 1
+        },
+        {
+          "path": "crates/shape-vm/src/compiler/expressions/closures.rs",
+          "count": 1
+        },
+        {
+          "path": "crates/shape-vm/src/compiler/expressions/collections.rs",
+          "count": 2
+        },
+        {
+          "path": "crates/shape-vm/src/compiler/expressions/function_calls.rs",
+          "count": 5
+        },
+        {
+          "path": "crates/shape-vm/src/compiler/expressions/type_ops.rs",
+          "count": 1
+        },
+        {
+          "path": "crates/shape-vm/src/compiler/functions.rs",
+          "count": 3
+        },
+        {
+          "path": "crates/shape-vm/src/compiler/functions_foreign.rs",
+          "count": 1
+        },
+        {
+          "path": "crates/shape-vm/src/compiler/helpers.rs",
+          "count": 1
+        },
+        {
+          "path": "crates/shape-vm/src/compiler/helpers_reference.rs",
+          "count": 1
+        },
+        {
+          "path": "crates/shape-vm/src/compiler/loops.rs",
+          "count": 6
+        },
+        {
+          "path": "crates/shape-vm/src/compiler/monomorphization/substitution.rs",
+          "count": 3
+        },
+        {
+          "path": "crates/shape-vm/src/compiler/patterns/binding.rs",
+          "count": 2
+        },
+        {
+          "path": "crates/shape-vm/src/compiler/patterns/checking.rs",
+          "count": 1
+        },
+        {
+          "path": "crates/shape-vm/src/compiler/patterns/destructure.rs",
+          "count": 5
+        },
+        {
+          "path": "crates/shape-vm/src/compiler/statements.rs",
+          "count": 4
+        },
+        {
+          "path": "crates/shape-vm/src/compiler/statements/graph_imports.rs",
+          "count": 2
+        },
+        {
+          "path": "crates/shape-vm/src/compiler/template_specialization/weave.rs",
+          "count": 1
+        },
+        {
+          "path": "crates/shape-vm/src/executor/builtins/object_ops.rs",
+          "count": 1
+        },
+        {
+          "path": "crates/shape-vm/src/executor/vm_impl/modules.rs",
+          "count": 2
+        },
+        {
+          "path": "crates/shape-vm/src/executor/vm_impl/schemas.rs",
+          "count": 2
+        },
+        {
+          "path": "crates/shape-vm/src/mir/lowering/mod.rs",
+          "count": 2
+        },
+        {
+          "path": "crates/shape-vm/src/type_tracking.rs",
+          "count": 2
+        },
+        {
+          "path": "extensions/typescript/src/runtime.rs",
+          "count": 1
+        }
+      ]
+    },
+    {
+      "id": "annotation-lowering-exceptions",
+      "category": "annotation/backend exceptions",
+      "description": "Annotation-specific lowering machinery in the bytecode compiler (template specialization weave, pseudo-pack, decision protocol). ADR-012 requires Annotation Elaboration to emit ordinary annotation-free typed Core/MIR, leaving no annotation-specific lowering path.",
+      "scope": [
+        "crates/shape-vm/src/compiler"
+      ],
+      "exclude": [],
+      "pattern": "HookDecision|pseudo_tuple|substitute_\\w*markers?|build_impl_shadow_call",
+      "count": 332,
+      "owner_count": 10,
+      "owners": [
+        {
+          "path": "crates/shape-vm/src/compiler/comptime_builtins.rs",
+          "count": 1
+        },
+        {
+          "path": "crates/shape-vm/src/compiler/comptime_fragments/checked_template.rs",
+          "count": 61
+        },
+        {
+          "path": "crates/shape-vm/src/compiler/expressions/function_calls.rs",
+          "count": 4
+        },
+        {
+          "path": "crates/shape-vm/src/compiler/monomorphization/cache.rs",
+          "count": 6
+        },
+        {
+          "path": "crates/shape-vm/src/compiler/statements/annotation_declarations/planner.rs",
+          "count": 2
+        },
+        {
+          "path": "crates/shape-vm/src/compiler/statements/annotation_declarations/sugar_lowering.rs",
+          "count": 13
+        },
+        {
+          "path": "crates/shape-vm/src/compiler/template_specialization/e4_s5_remote_tests.rs",
+          "count": 16
+        },
+        {
+          "path": "crates/shape-vm/src/compiler/template_specialization/mod.rs",
+          "count": 35
+        },
+        {
+          "path": "crates/shape-vm/src/compiler/template_specialization/pseudo_tuple.rs",
+          "count": 170
+        },
+        {
+          "path": "crates/shape-vm/src/compiler/template_specialization/weave.rs",
+          "count": 24
+        }
+      ]
+    },
+    {
+      "id": "backend-annotation-recognizers",
+      "category": "annotation/backend exceptions",
+      "description": "Annotation-mechanism names reachable inside the VM executor and the JIT — the backend recognizers CLAUDE.md forbids. This set is already near zero and most of its remaining weight is the `no_legacy_annotation_weave` sentinel that enforces the absence; the ratchet pins it there.",
+      "scope": [
+        "crates/shape-vm/src/executor",
+        "crates/shape-jit/src"
+      ],
+      "exclude": [],
+      "pattern": "HookDecision|annotation_weave|AnnotationDescriptor|ComptimeTarget|pseudo_tuple",
+      "count": 12,
+      "owner_count": 3,
+      "owners": [
+        {
+          "path": "crates/shape-vm/src/executor/tests/mod.rs",
+          "count": 1
+        },
+        {
+          "path": "crates/shape-vm/src/executor/tests/no_legacy_annotation_weave.rs",
+          "count": 10
+        },
+        {
+          "path": "crates/shape-vm/src/executor/typed_object_ops.rs",
+          "count": 1
+        }
+      ]
+    }
+  ]
+}
