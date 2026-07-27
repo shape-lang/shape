@@ -2,13 +2,16 @@
 
 ## Status
 
-Accepted (2026-05-08)
+Partially superseded by ADR-006 (2026-05-08)
 
 Supersedes the implicit "wrap heap data in `HeapValue`" pattern present in
 the v1 typed-runtime path. Companion to the strict-typing plan
 (`~/.claude/plans/stop-native-vs-tagged-tax.md`); the strict-typing plan
 removes the *dynamic* dispatch path, this ADR specifies how the *typed*
 path is shaped on the way through.
+
+ADR-006 preserves this ADR's single-discriminator discipline but supersedes
+its physical carrier examples and current implementation guidance.
 
 ## Context
 

@@ -129,8 +129,16 @@ of contents.
 
 ## ADR cross-references
 
+Full status and supersession map: [Architecture Decision Records](adr/README.md).
+
 Rules in this index that reference ADRs:
 
+- **ADR-003** (`docs/adr/003-method-registry.md`): one resolved method
+  descriptor and callable lifecycle contract; dense `MethodId` values are
+  local relocation handles, not semantic identities.
+- **ADR-004** (`docs/adr/004-native-c-interop.md`): native C declarations,
+  exact layout, explicit typed conversion relationships, and resolved foreign
+  signatures.
 - **ADR-005** (`docs/adr/005-typed-slot-construction.md`): single-discriminator
   discipline, `String` exception, typed slot storage, uniform VM↔JIT slot ABI.
   ADR-005 §3 is partially superseded by ADR-006 (corrected layout).
@@ -138,6 +146,19 @@ Rules in this index that reference ADRs:
   memory model. `let` / `let mut` / `var`, refcount-on-escape,
   `HeapValue::TypedArray(Arc<TypedArrayData>)`, LSDS error system, PVL audit,
   PES. **All Phase 1 implementation work derives from ADR-006.**
+- **ADR-009** (`docs/adr/009-strictly-typed-comptime-and-annotations.md`):
+  strictly typed staged programming, exact annotations, checked generation,
+  and shared compiler/LSP semantics.
+- **ADR-010** (`docs/adr/010-verified-region-teardown-and-callable-lifecycle.md`):
+  the one late lifecycle/teardown freeze and execution authority.
+- **ADR-011** (`docs/adr/011-resolved-semantic-identity-and-typed-elaboration.md`):
+  resolved definition identity, typed semantic-program ordering, and the line
+  between explicit compiler primitives and forbidden compiler magic.
+- **ADR-012** (`docs/adr/012-verified-annotation-elaboration-and-callable-transforms.md`):
+  one two-stage annotation-elaboration seam, canonical ordered exact
+  applications, effective-contract freeze before dependent checking,
+  `ArgumentPack<Sig>`/`Next<Sig>` Callable Transforms, and annotation-free
+  typed Core/MIR for both VM and JIT.
 
 When an entry's "Key rules" cite an ADR section, the ADR text is binding;
 the index summary is for orientation.

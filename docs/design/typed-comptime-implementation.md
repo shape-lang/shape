@@ -2,6 +2,9 @@
 
 Status: program spec (2026-07-12). Baseline: `4d70508b` (Wave-46 typed-comptime
 first tracers). Canonical decision: `docs/adr/009-strictly-typed-comptime-and-annotations.md`.
+Architecture corrections:
+`docs/adr/011-resolved-semantic-identity-and-typed-elaboration.md` and
+`docs/adr/012-verified-annotation-elaboration-and-callable-transforms.md`.
 Canonical design: `docs/design/typed-comptime.md` + `docs/design/typed-comptime/`
 (Decisions 47-95). Implemented truth and gap list:
 `docs/cluster-audits/wave46-typed-comptime-first-tracers.md`. Legacy-path
@@ -11,6 +14,14 @@ This spec covers only the remaining work. It does not reopen accepted design
 questions. Tickets are tracked as GitHub issues labeled `adr-009` (map:
 shape-lang/shape#1, tickets #2-#23), with native blocked-by dependencies
 mirroring §6.
+
+Architecture correction (2026-07-25): E4's shipped behavior remains evidence,
+but its spelling-recognized `HookDecision`, pseudo-tuple, marker substitution,
+and annotation-specific JIT path are replacement debt. E6 must not deepen
+`__ComptimeTarget`; stdlib migration starts from exact descriptors and the one
+two-stage annotation-elaboration seam. Contract elaboration freezes annotation
+effects/outcomes before dependent checking; body/plan elaboration follows the
+effective-contract freeze.
 
 ## 1. Scope
 
@@ -213,13 +224,17 @@ directive protocol and spelling-selected parameters (U01, U06, plus the typed
 replace ItemFragment sentinels and body/module source reparsing (U03, U07).
 E3 hygienic symbols replace synthetic names, `__original__`/wrapper/target
 aliases; delete the parallel static extend collector (U10, U11, U12). E4
-`HookPlan<Sig, State>`-typed hook carriers replace `Any` state/args/result and
-shape-inspection control flow (U13). E5 typed reflection deletion: legacy
-`type_info`, string-keyed rewriting, `ComptimeTarget` and the string-backed
-descriptor schemas (U02, U04, U05) — the highest-fan-in class, deleted last
-among descriptors. E6 stdlib migration (`serde/derive`, `serde/serialize`,
-`llm/tools`, `@prompt` via `CheckedTemplate`) + `string_lit` deletion (U08,
-U14).
+lands resolved ordered applied annotations, the contract/body operations of the
+one `AnnotationElaboration` module, `PreparedAnnotationContract`,
+`CheckedAnnotationPlan`, real `ArgumentPack<Sig>`/`Next<Sig>` Callable
+Transforms, and annotation-free typed Core/MIR; then deletes the E4
+spelling/AST/pseudo-tuple/marker/backend paths together with U13. E5 deletes
+legacy `type_info`, string-keyed rewriting, `ComptimeTarget`, and the
+string-backed descriptor schemas (U02, U04, U05), replacing consumers with
+exact typed descriptors. E6 migrates `serde/derive`, `serde/serialize`,
+`llm/tools`, and `@prompt` directly over those exact descriptors and the
+checked elaboration seam, then deletes `string_lit` (U08, U14). E6 may not add
+fields or accessors to `ComptimeTarget`.
 
 **Stage 7 — book.** F1 full comptime/annotation book-chapter refresh with
 gate-runnable VM+JIT examples for every enabled behavior, run against the full
@@ -247,9 +262,9 @@ book truth-gate universe (not the curated subset).
 | E1 | Typed rewrite-plan directives; delete JSON directive protocol (U01/U06/U02-carriers) | B6, C2 |
 | E2 | `CheckedItem`/`CheckedModule`; delete ItemFragment + source reparsing (U03/U07) | C2, D1 |
 | E3 | Hygienic symbols; delete synthetic names/aliases + parallel extend collector (U10-U12) | D1 |
-| E4 | `HookPlan<Sig, State>` typed hook carriers; delete `Any` hook shapes (U13) | B6, C3 |
-| E5 | Delete legacy reflection: `type_info`, string-keyed rewriting, `ComptimeTarget`/string schemas (U02/U04/U05) | B2, B5, B7, E1 |
-| E6 | Stdlib migration + `string_lit` deletion (U08/U14) | E1, E2, E4, E5 |
+| E4 | Resolved ordered applied annotations + two-stage `AnnotationElaboration` + Callable Transforms; freeze effective contracts before callers, then delete spelling/AST/pseudo-tuple/marker/backend hook paths and `Any` hook shapes (U13) | B6, C3, ADR-011, ADR-012 |
+| E5 | Delete legacy reflection: `type_info`, string-keyed rewriting, `ComptimeTarget`/string schemas; replace with exact descriptors (U02/U04/U05) | B2, B5, B7, E1, ADR-011 |
+| E6 | Migrate stdlib directly to exact descriptors and checked elaboration; delete `string_lit` without extending `ComptimeTarget` (U08/U14) | E1, E2, E4, E5, ADR-012 |
 | F1 | Book and example enablement over the full truth-gate universe | E6 |
 
 Initially unblocked: A1, A3.

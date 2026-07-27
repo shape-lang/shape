@@ -2,6 +2,15 @@
 
 Scope: parser, AST, type system, MIR, bytecode compiler, comptime/annotations.
 
+Architecture note (2026-07-25): this index describes current code as well as
+target architecture. `ComptimeTarget`, name-keyed annotation registries,
+string-backed applied metadata, pseudo-argument carriers, spelling/AST
+classifiers, and annotation-specific VM/JIT paths are **legacy current** under
+ADR-011/ADR-012. New work must converge on resolved semantic identity, one
+two-stage `AnnotationElaboration` module, exact ordered typed
+targets/applications, effective-contract freeze before dependent checking, and
+annotation-free typed Core/MIR.
+
 ## 1. Parser & AST
 
 ### Pest grammar
@@ -487,6 +496,10 @@ Not found — possibly: there is no AST→source unparser in this scope. `Displa
 ---
 
 ## 5. Comptime / annotations
+
+The entries in this section inventory current implementation. They do not
+authorize extending `ComptimeTarget` or name-selected hook behavior; see
+ADR-009, ADR-011, and ADR-012.
 
 ### comptime { } blocks
 

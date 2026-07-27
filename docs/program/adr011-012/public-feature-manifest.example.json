@@ -1,0 +1,133 @@
+{
+  "$schema": "./public-feature-manifest.schema.json",
+  "manifest_version": 1,
+  "identity_migration": {
+    "kind": "initial"
+  },
+  "features": {
+    "annotations.checked-prompt": {
+      "public_name": "Checked prompt annotation",
+      "family": "annotations",
+      "status": "planned",
+      "status_basis": {
+        "classification": "never-current",
+        "evidence": [
+          {
+            "kind": "issue",
+            "reference": "shape-lang/shape#108"
+          }
+        ]
+      },
+      "authority": [
+        {
+          "kind": "adr",
+          "reference": "ADR-012"
+        },
+        {
+          "kind": "issue",
+          "reference": "shape-lang/shape#108"
+        }
+      ],
+      "owner": {
+        "repository": "shape-lang/shape",
+        "issue": 108,
+        "component": "typed annotation standard-library migrations"
+      },
+      "surfaces": [
+        "annotation",
+        "standard-library",
+        "compiler-diagnostic",
+        "lsp"
+      ],
+      "targets": [
+        "function"
+      ],
+      "required_modes": [],
+      "required_evidence_classes": [],
+      "required_semantic_dimensions": [
+        "user-model",
+        "syntax-or-callable-surface",
+        "types",
+        "effects",
+        "ownership",
+        "lifecycle",
+        "evaluator-outcomes",
+        "failure",
+        "cleanup",
+        "unsupported-use",
+        "compiler-diagnostics",
+        "lsp-diagnostics",
+        "compatibility"
+      ],
+      "distributed_semantics_required": false
+    },
+    "remote.execution-certainty": {
+      "public_name": "Remote execution certainty and recovery",
+      "family": "distributed-execution",
+      "status": "planned",
+      "status_basis": {
+        "classification": "never-current",
+        "evidence": [
+          {
+            "kind": "issue",
+            "reference": "shape-lang/shape#102"
+          }
+        ]
+      },
+      "authority": [
+        {
+          "kind": "adr",
+          "reference": "ADR-012"
+        },
+        {
+          "kind": "adr",
+          "reference": "ADR-014"
+        },
+        {
+          "kind": "adr",
+          "reference": "ADR-015"
+        },
+        {
+          "kind": "issue",
+          "reference": "shape-lang/shape#102"
+        }
+      ],
+      "owner": {
+        "repository": "shape-lang/shape",
+        "issue": 102,
+        "component": "remote dispatch and durable recovery"
+      },
+      "surfaces": [
+        "standard-library",
+        "execution-provider",
+        "snapshot-resume",
+        "operator-workflow"
+      ],
+      "targets": [
+        "callable",
+        "remote-receiver"
+      ],
+      "required_modes": [],
+      "required_evidence_classes": [],
+      "required_semantic_dimensions": [
+        "user-model",
+        "syntax-or-callable-surface",
+        "types",
+        "effects",
+        "permissions",
+        "ownership",
+        "lifecycle",
+        "evaluator-outcomes",
+        "failure",
+        "cancellation",
+        "cleanup",
+        "unsupported-use",
+        "compiler-diagnostics",
+        "lsp-diagnostics",
+        "compatibility",
+        "migration"
+      ],
+      "distributed_semantics_required": true
+    }
+  }
+}

@@ -2,7 +2,10 @@
 
 ## Status
 
-Accepted (2026-02-19)
+Superseded by ADR-006 (2026-05-08)
+
+This file remains the historical record of the NaN-boxing decision. ADR-006's
+typed, tag-free value and memory model is the current authority.
 
 ## Context
 

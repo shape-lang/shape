@@ -1,0 +1,566 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://shape-lang.org/schemas/public-feature-manifest.v1.schema.json",
+  "title": "Shape Public Feature Manifest",
+  "description": "The Shape-owned inventory of user-observable features and their documentation/evidence obligations. Entries point to semantic authority; they do not restate semantic contracts.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "manifest_version",
+    "identity_migration",
+    "features"
+  ],
+  "properties": {
+    "$schema": {
+      "type": "string"
+    },
+    "manifest_version": {
+      "const": 1
+    },
+    "identity_migration": {
+      "$ref": "#/$defs/identityMigration"
+    },
+    "features": {
+      "type": "object",
+      "description": "Canonical feature_id to obligation mapping.",
+      "minProperties": 1,
+      "propertyNames": {
+        "$ref": "#/$defs/featureId"
+      },
+      "additionalProperties": {
+        "$ref": "#/$defs/feature"
+      }
+    }
+  },
+  "$defs": {
+    "featureId": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9]*(?:[.-][a-z0-9]+)*$"
+    },
+    "stableId": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "authorityReference": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "reference"
+      ],
+      "properties": {
+        "kind": {
+          "enum": [
+            "adr",
+            "specification",
+            "issue",
+            "source"
+          ]
+        },
+        "reference": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "owner": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "repository"
+      ],
+      "properties": {
+        "repository": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$"
+        },
+        "issue": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "component": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "anyOf": [
+        {
+          "required": [
+            "issue"
+          ]
+        },
+        {
+          "required": [
+            "component"
+          ]
+        }
+      ]
+    },
+    "statusBasis": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "classification",
+        "evidence"
+      ],
+      "properties": {
+        "classification": {
+          "enum": [
+            "never-current",
+            "current-executable",
+            "deprecation-transition",
+            "removal-transition"
+          ]
+        },
+        "evidence": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/authorityReference"
+          }
+        }
+      }
+    },
+    "identityDisposition": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "action",
+        "authority"
+      ],
+      "properties": {
+        "action": {
+          "enum": [
+            "unchanged",
+            "replaced",
+            "removed"
+          ]
+        },
+        "new_ids": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/featureId"
+          }
+        },
+        "authority": {
+          "$ref": "#/$defs/authorityReference"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "action": {
+                "const": "removed"
+              }
+            }
+          },
+          "then": {
+            "not": {
+              "required": [
+                "new_ids"
+              ]
+            }
+          },
+          "else": {
+            "required": [
+              "new_ids"
+            ]
+          }
+        }
+      ]
+    },
+    "identityMigration": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind"
+          ],
+          "properties": {
+            "kind": {
+              "const": "initial"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "previous_manifest",
+            "feature_ids"
+          ],
+          "properties": {
+            "kind": {
+              "const": "schema-major"
+            },
+            "previous_manifest": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "schema_major",
+                "sha256"
+              ],
+              "properties": {
+                "schema_major": {
+                  "type": "integer",
+                  "minimum": 1
+                },
+                "sha256": {
+                  "$ref": "#/$defs/sha256"
+                }
+              }
+            },
+            "feature_ids": {
+              "type": "object",
+              "minProperties": 1,
+              "propertyNames": {
+                "$ref": "#/$defs/featureId"
+              },
+              "additionalProperties": {
+                "$ref": "#/$defs/identityDisposition"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "surface": {
+      "enum": [
+        "language-syntax",
+        "language-semantics",
+        "annotation",
+        "standard-library",
+        "compiler-diagnostic",
+        "lsp",
+        "cli",
+        "execution-provider",
+        "snapshot-resume",
+        "operator-workflow",
+        "foreign-target"
+      ]
+    },
+    "mode": {
+      "enum": [
+        "compile",
+        "vm",
+        "jit",
+        "lsp",
+        "cli",
+        "provider-loopback",
+        "provider-network",
+        "snapshot-resume",
+        "foreign-c",
+        "foreign-python",
+        "foreign-typescript",
+        "operator"
+      ]
+    },
+    "evidenceClass": {
+      "enum": [
+        "positive-execution",
+        "negative-rejection",
+        "structured-diagnostic",
+        "vm-jit-parity",
+        "native-execution",
+        "lsp-projection",
+        "cross-version-refusal",
+        "snapshot-resume",
+        "distributed-state-machine",
+        "crash-recovery",
+        "cleanup-ownership",
+        "operator-workflow",
+        "security-refusal",
+        "ceremony-budget"
+      ]
+    },
+    "semanticDimension": {
+      "enum": [
+        "user-model",
+        "syntax-or-callable-surface",
+        "types",
+        "effects",
+        "permissions",
+        "ownership",
+        "lifecycle",
+        "evaluator-outcomes",
+        "success",
+        "failure",
+        "cancellation",
+        "cleanup",
+        "unsupported-use",
+        "vm-jit",
+        "compiler-diagnostics",
+        "lsp-diagnostics",
+        "compatibility",
+        "migration",
+        "deprecation",
+        "script-tier"
+      ]
+    },
+    "tombstone": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "removed_in",
+        "reason",
+        "authority"
+      ],
+      "properties": {
+        "removed_in": {
+          "type": "string",
+          "minLength": 1
+        },
+        "reason": {
+          "type": "string",
+          "minLength": 1
+        },
+        "authority": {
+          "$ref": "#/$defs/authorityReference"
+        },
+        "replacement_feature_ids": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/featureId"
+          }
+        }
+      }
+    },
+    "feature": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "public_name",
+        "family",
+        "status",
+        "status_basis",
+        "authority",
+        "owner",
+        "surfaces",
+        "targets",
+        "required_modes",
+        "required_evidence_classes",
+        "required_semantic_dimensions",
+        "distributed_semantics_required"
+      ],
+      "properties": {
+        "public_name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "family": {
+          "$ref": "#/$defs/stableId"
+        },
+        "status": {
+          "enum": [
+            "planned",
+            "experimental",
+            "public",
+            "deprecated",
+            "removed"
+          ]
+        },
+        "status_basis": {
+          "$ref": "#/$defs/statusBasis"
+        },
+        "authority": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/authorityReference"
+          }
+        },
+        "owner": {
+          "$ref": "#/$defs/owner"
+        },
+        "surfaces": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/surface"
+          }
+        },
+        "targets": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/stableId"
+          }
+        },
+        "required_modes": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/mode"
+          }
+        },
+        "required_evidence_classes": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/evidenceClass"
+          }
+        },
+        "required_semantic_dimensions": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/semanticDimension"
+          }
+        },
+        "distributed_semantics_required": {
+          "type": "boolean",
+          "description": "When true, BookTruthGate requires coverage for every ADR-016 distributed semantic dimension in addition to required_semantic_dimensions."
+        },
+        "tombstone": {
+          "$ref": "#/$defs/tombstone"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "const": "planned"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "status_basis": {
+                "properties": {
+                  "classification": {
+                    "const": "never-current"
+                  }
+                }
+              },
+              "required_evidence_classes": {
+                "not": {
+                  "contains": {
+                    "enum": [
+                      "positive-execution",
+                      "vm-jit-parity",
+                      "native-execution"
+                    ]
+                  }
+                }
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "required_modes": {
+                "minItems": 1
+              },
+              "required_evidence_classes": {
+                "minItems": 1
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "enum": [
+                  "experimental",
+                  "public"
+                ]
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "status_basis": {
+                "properties": {
+                  "classification": {
+                    "const": "current-executable"
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "const": "deprecated"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "status_basis": {
+                "properties": {
+                  "classification": {
+                    "const": "deprecation-transition"
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "const": "removed"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "status_basis": {
+                "properties": {
+                  "classification": {
+                    "const": "removal-transition"
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "status"
+            ],
+            "properties": {
+              "status": {
+                "const": "removed"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "tombstone"
+            ]
+          },
+          "else": {
+            "not": {
+              "required": [
+                "tombstone"
+              ]
+            }
+          }
+        }
+      ]
+    }
+  }
+}

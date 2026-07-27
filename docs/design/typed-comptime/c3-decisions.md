@@ -1,6 +1,17 @@
 # C3 #14 — Program of record (2026-07-20, grill session; ALL rulings USER-RATIFIED)
 
-Binding for all C3 implementers/reviewers. Produced by a grill-with-docs
+## Status: historical implementation record
+
+Superseded in part by ADR-011 and ADR-012 (2026-07-25). C3-G1 through G3 remain
+architectural requirements: metaprogramming-first, sugar over the public API,
+and ordinary typed hook bodies. C3-G4 remains binding only for
+per-specialization checking and application-site diagnostics; its typed-tuple
+input and before-return protocol are superseded. C3-G9's
+specialization-resolved pseudo-tuple is migration history, not the target
+`ArgumentPack<Sig>`. C3-G14's clean deletion and remote acceptance obligation
+stand, but its endorsement of E4's `HookDecision` implementation does not.
+
+Historically binding for C3 implementers/reviewers. Produced by a grill-with-docs
 session over the phase-1 scout findings (scout workflow `wf_861a4911-cd7`,
 5 scouts + synthesis, findings restated in the AGENTS.md C3 row). The grill
 rulings SUPERSEDE the phase-1 draft decisions C3-D1..D8 where they conflict;
@@ -198,8 +209,9 @@ disposition 2026-07-20 (satisfies the scope-reclaim rule).
   **A′ — C3's capstone deletes EVERYTHING including remote.shape's current
   implementation; @remote goes DARK; the distributed e2e tests that ride it
   are #[ignore]'d pointing at #68 (they are E4's acceptance suite); E4 #20
-  re-implements @remote on the properly-designed typed HookDecision
-  protocol as its first acceptance consumer and closes #68.** Zero legacy
+  re-implements @remote on the then-ratified typed HookDecision protocol
+  (now superseded by ADR-012) as its first acceptance consumer and closes
+  #68.** Zero legacy
   survives C3; no rushed protocol design inside C3; the E4 fence stands.
   Consequence for the S2-F3 E4-blocked ctx pins: retired at the capstone
   with the same #68 pointer (they pinned legacy-surface E4 capabilities).

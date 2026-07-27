@@ -34,7 +34,7 @@ The repo is a monorepo with several top-level projects:
 | **shape-runtime** | `crates/shape-runtime/` | Bytecode compiler, builtin functions, method registry, type schemas, stdlib modules, capability tags |
 | **shape-vm** | `crates/shape-vm/` | Stack-based bytecode interpreter, typed opcodes, feedback vectors, resource limits, content-addressed bytecode, linker |
 | **shape-jit** | `crates/shape-jit/` | Cranelift JIT compiler (tiered: baseline @ 100 calls, optimizing @ 10k) |
-| **shape-wire** | `crates/shape-wire/` | Serialization (MessagePack) and QUIC transport, wire protocol v1 |
+| **shape-wire** | `crates/shape-wire/` | Serialization (MessagePack) and QUIC transport, wire protocol v2 |
 | **shape-abi-v1** | `crates/shape-abi-v1/` | Stable C ABI for native extensions, Permission enum (16 permissions), PermissionSet, ScopeConstraints |
 | **shape-macros** | `crates/shape-macros/` | Procedural macros for builtin introspection |
 | **shape-viz** | `crates/shape-viz/` | Visualization (split: shape-viz-core + shape-viz-native) |
@@ -200,10 +200,16 @@ Benchmark files (`shape/benchmarks/`) must NEVER be modified to improve compiler
 - **Flow-sensitive narrowing**: `if x != null { ... }` narrows `T?` to `T` in the then-branch
 
 ### Builtins & Intrinsics
-- **Intrinsics gated**: `__intrinsic_*`, `__json_*`, `__native_*` are gated by `allow_internal_builtins`. User code cannot call them — must use stdlib wrappers.
-- **`__into_*`/`__try_into_*` NOT gated**: Compiler generates these for type assertions (`x as int`), must remain accessible.
+- **Resolved intrinsic identity (ADR-011)**: intrinsic behavior is selected only by a resolved `IntrinsicId` from the canonical catalog, with its exact type/effect/ownership/stage contract validated. Prefixes such as `__intrinsic_*`, `__json_*`, and `__native_*` are presentation/hygiene, not authority. The current `allow_internal_builtins` and terminal-name gates are migration debt: do not add new behavior to them.
+- **Generated conversion calls**: compiler-generated `__into_*`/`__try_into_*` calls for type assertions must resolve to their registered intrinsic identities. Same-spelled local functions receive no privilege.
 - **Array methods via dispatch only**: `map`, `filter`, `reduce`, `slice`, `push`, `pop`, `first`, `last`, `zip`, `filled`, `forEach`, `find`, `findIndex`, `some`, `every` — only available via `.method()` dispatch, not as bare functions.
-- **`stdlib_function_names` must be set**: Any test/helper that calls `prepend_prelude_items()` MUST capture the returned `HashSet<String>` and set `compiler.stdlib_function_names`.
+- **Legacy test setup**: current tests/helpers that call `prepend_prelude_items()` still need its returned `stdlib_function_names` set until ADR-011 migration deletes that name-based authority. Do not extend the set or use it to authorize new semantics.
+
+### Semantic Elaboration & Annotations (ADR-011 / ADR-012)
+- Semantic order is stage-indexed: declaration discovery/generated headers → resolved typed base contracts → contract elaboration → effective-contract freeze → dependent checking → body/plan elaboration → annotation-free typed Core/MIR → semantic optimization/inlining with proof provenance → ADR-010 freeze/certificate → VM/JIT lowering. Post-freeze semantic changes invalidate the certificate; only bound realization substitutions remain legal. Raw AST shape and source spelling cannot select semantic behavior.
+- All annotation semantics pass through one `AnnotationElaboration` module. Its contract query fixes canonical application order and every effect/outcome/ownership/lifecycle contribution before callers check; its later body query returns a `CheckedAnnotationPlan`. Both produce the shared compiler/LSP facts, and neither grants execution authority.
+- Callable interception uses ordinary typed `ArgumentPack<Sig>` and affine `Next<Sig>` Callable Transforms. Do not extend spelling-recognized `HookDecision`, pseudo-tuple, marker-substitution, `__ComptimeTarget`, or annotation-specific backend paths.
+- `@remote` is stdlib composition that consumes `Next` into a verified `PortableContinuationArtifact`, separately obtains placement-bound `AdmittedExecution`, and uses the single Remote Dispatch contract. OutcomeUnknown retains an affine recovery obligation; it is never collapsed into an ordinary failure or `Result::Err`. The compiler must not recognize the annotation name.
 
 ### Testing Conventions
 - Always use **unit tests** (`#[cfg(test)]` modules inside source files). Never create standalone test files.
@@ -232,6 +238,11 @@ The strict-typing plan (`~/.claude/plans/stop-native-vs-tagged-tax.md`) deletes 
 - **`SlotKind::Dynamic` / `SlotKind::Unknown`** in compiled bytecode. Deleted from the enum.
 - **`exec_*_dynamic_fallback`** handlers. Deleted.
 - **Feature flags** around dynamic dispatch. The path doesn't exist; nothing to gate.
+- **Spelling- or AST-selected semantics.** No terminal-name switch, reserved source spelling, unspellable rendered name, source-origin flag, or AST constructor shape may select an intrinsic, annotation action, enum meaning, method contract, or capability.
+- **Fake typed annotation carriers.** No pseudo-tuple, homogeneous argument array, universal `ComptimeTarget`, string-backed applied annotation, magic hook object, or surface enum replaced before ordinary resolution/type checking.
+- **Annotation-specific lowering exceptions.** No marker-call substitution, raw implementation-ID injection, private decision tag, or VM/JIT annotation recognizer. Annotation Elaboration must emit ordinary annotation-free typed Core/MIR.
+- **Late public-contract mutation.** Annotation effects, outcomes, ownership, lifecycle requirements, and generated headers must enter contract/discovery fixed points before dependent checking. Body lowering may not patch a frozen signature.
+- **Remote artifact/authority or uncertainty collapse.** A portable continuation is not placement admission; dispatch requires separately minted single-attempt authority. `OutcomeUnknown` must retain escrow and an affine recovery obligation and cannot become an ordinary failure or `Result::Err`.
 
 ### Forbidden rationalizations
 
@@ -355,7 +366,7 @@ For comprehensive concept-to-location mapping see [`docs/codebase-index.md`](doc
 | MIR storage planning | `crates/shape-vm/src/mir/storage_planning.rs` |
 | Capability tags | `crates/shape-runtime/src/stdlib/capability_tags.rs` |
 | Permission enum (16 perms) | `crates/shape-abi-v1/src/lib.rs:996` |
-| `LanguageRuntimeVTable` (polyglot) | `crates/shape-abi-v1/src/lib.rs:722` |
+| `LanguageRuntimeVTable` (polyglot) | `crates/shape-abi-v1/src/lib.rs:742` |
 | Resource limits | `crates/shape-vm/src/resource_limits.rs` |
 | Content-addressed blobs | `crates/shape-vm/src/bytecode/content_addressed.rs` |
 | Linker | `crates/shape-vm/src/linker.rs` |
@@ -364,7 +375,7 @@ For comprehensive concept-to-location mapping see [`docs/codebase-index.md`](doc
 | Tier thresholds (T1@100, T2@10k) | `crates/shape-vm/src/tier.rs:17-87` |
 | Inline cache state machine | `crates/shape-vm/src/feedback.rs:9-128` |
 | Ed25519 signing | `crates/shape-runtime/src/crypto/signing.rs` |
-| Wire protocol v1 | `crates/shape-wire/src/lib.rs:51` |
+| Wire protocol v2 (v1 constant retained) | `crates/shape-wire/src/lib.rs:56-60` |
 | Runtime v2 spec | `docs/runtime-v2-spec.md` |
 | Value & memory model (canonical) | `docs/adr/006-value-and-memory-model.md` |
 | Codebase index | `docs/codebase-index.md` |

@@ -1,6 +1,7 @@
 # Strictly Typed Comptime
 
-Status: architecture accepted through ADR-009; implementation in vertical slices
+Status: architecture accepted through ADR-009, ADR-011, and ADR-012;
+implementation in replacement-oriented vertical slices
 
 Implementation program (remaining work, tickets, blocking edges):
 [typed-comptime-implementation.md](typed-comptime-implementation.md)
@@ -8,6 +9,13 @@ Implementation program (remaining work, tickets, blocking edges):
 This document defines Shape's target comptime model. Every target example is
 illustrative syntax until an ADR accepts the spelling and implementation proves
 it. Current examples are labeled separately and must have repository evidence.
+
+Architecture correction (2026-07-25): dated C3/E4/E6 mechanisms may describe
+CURRENT behavior but are not target authority where they rely on spelling,
+raw-AST recognition, pseudo-tuples, marker substitution, universal targets, or
+string-backed annotation metadata. ADR-011 defines resolved identity and typed
+semantic elaboration; ADR-012 defines the single annotation-elaboration seam
+and ordinary typed Callable Transform model.
 
 ## Hard Constraints
 
@@ -20,9 +28,13 @@ it. Current examples are labeled separately and must have repository evidence.
    and typed builders for computed structure.
 4. Installed output re-enters complete name, type, effect, ownership, borrow,
    exhaustiveness, and native-kind checking.
-5. Annotation specialization happens after the callable signature freezes.
-6. Runtime argument state remains compiler-internal. Comptime emits ordinary
-   typed wrapper parameters, direct calls, and finite checked rewrites.
+5. Annotation contract elaboration starts only after the base target identity,
+   parameters, and result are typed; its effects, outcomes, ownership, and
+   lifecycle contributions freeze before dependent callers check. Body/plan
+   elaboration follows that effective-contract freeze.
+6. Runtime arguments enter hooks only through real signature-indexed
+   `ArgumentPack<Sig>` values. Comptime emits ordinary typed Core/MIR, direct
+   calls, and finite checked rewrites.
 7. VM, JIT, transfer, cache, and snapshot paths consume the same hash-covered
    expansion and callable metadata.
 8. Display strings are diagnostics only and never reconstruct semantic state.
@@ -744,8 +756,12 @@ plus the `expansion_views.rs` in-file view/source-map suite and the
 `expansion_provenance.rs` rejection-matrix + deterministic-identity units;
 book-chapter examples land in stage F1 per the program spec.
 
-**CURRENT / VM+JIT - fully checked callable descriptors (Decisions 52 + 63,
-ticket ADR009-B6, 2026-07-13).** `reflect(TypeRef<callable>)` yields
+**CURRENT / VM+JIT - base callable descriptors (Decisions 52 + 63,
+ticket ADR009-B6, 2026-07-13).** This shipped descriptor freezes the base
+parameter/result structure needed by annotation contract elaboration. It is not
+ADR-012's final effective callable contract: effects, outcomes, ownership, and
+lifecycle contributions must be added and frozen before dependent checking.
+`reflect(TypeRef<callable>)` yields
 `FrozenType::Callable(FrozenCallable)` (catalog ordinal 6, pinned; no ordinal
 renumber) carrying the callable's ordered structural descriptor: one
 `ParamDescriptor` per parameter — value-type frozen identity, `optional` flag,
@@ -755,9 +771,9 @@ one-way SHA-256 identity string) — plus the return-type identity. The descript
 is reconstructed from the freeze's WIDENED composite memo
 (`semantic_freeze.rs` `CompositeMemoEntry { category, callable }`) rather than a
 parallel identity-keyed side-table, so category and structure are one write, one
-read, one lock (see `docs/defections.md`). Per Decision 52 (R3), a descriptor is
-issued only AFTER the signature freezes: a signature carrying an unresolved
-inference variable at any depth is the named freeze-boundary rejection — fired by
+read, one lock (see `docs/defections.md`). Per Decision 52 (R3), this descriptor
+is issued only after the base signature freezes: a signature carrying an
+unresolved inference variable at any depth is the named base-freeze rejection — fired by
 the single `annotation_has_unresolved_inference_variable` predicate BEFORE any
 user comptime hook runs, never a partial descriptor. Public surface:
 `callable.param(I)` (signature-indexed positional, computed indices accepted) and
@@ -954,7 +970,7 @@ examples exist.
 
 ### Legacy Semantic Paths To Remove
 
-The migration inventory identifies fourteen classes:
+The original migration inventory identifies fourteen classes:
 
 1. Parsed AST serialized to JSON and parsed back into directives.
 2. Source/JSON type reparsing.
@@ -973,11 +989,43 @@ The migration inventory identifies fourteen classes:
 13. Runtime hook `Any` carriers and shape inspection.
 14. Stdlib source generation and template-name matching.
 
+ADR-011/ADR-012 add nine correction classes discovered during implementation:
+
+15. Definition, intrinsic, enum, phase, or annotation behavior selected by
+    terminal spelling, unspellable rendering, source origin, or raw AST shape.
+16. Signature-indexed arguments represented as pseudo-tuples or homogeneous
+    arrays rather than a real `ArgumentPack<Sig>`.
+17. Annotation-specific marker calls, impl-shadow/raw-ID substitution, and
+    private decision representations used before ordinary typed Core/MIR.
+18. Universal `ComptimeTarget`, target-kind fields, or string-backed applied
+    annotation metadata.
+19. Independent compiler, LSP, VM, or JIT annotation interpretation outside
+    the one `AnnotationElaboration` facts and typed Core/MIR path.
+20. Annotation effects, outcomes, ownership, or lifecycle contributions added
+    after the effective callable contract or dependent callers have frozen.
+21. Observable annotation order derived from discovery, map/hash order, source
+    span identity, or an ambiguous generated insertion.
+22. Treating a portable continuation artifact as if it already carried
+    receiver admission, placement lease, or reusable execution authority.
+23. Collapsing `OutcomeUnknown` into ordinary runtime failure or `Result::Err`
+    without preserving escrow and its affine Recovery Obligation.
+
 ## Target Structure Index
 
 Each structure receives a positive and rejected example as its design is
 resolved. The decision documents below preserve the complete accepted language,
 examples, rejection requirements, and implementation implications.
+
+The long `CheckedTemplate` status row below records the shipped C3/E4 path.
+Its pseudo-tuple, `HookDecision`, and annotation-specific weave statements are
+**LEGACY CURRENT** under ADR-012. The `CheckedTemplate` carrier and
+per-specialization checking remain valid; the semantic consumer is the new
+`CheckedAnnotationPlan`/Callable Transform path.
+
+The `FrozenCallable` row records B6's shipped base parameter/result descriptor.
+It is input to annotation contract elaboration, not the final effective
+callable contract. ADR-012 requires effects, outcomes, ownership, and lifecycle
+contributions to freeze before dependent callers and final tooling facts.
 
 | Structure | Stage | Purpose | Status |
 |---|---|---|---|
@@ -1003,7 +1051,7 @@ examples, rejection requirements, and implementation implications.
 | `AssociatedConstDescriptor<Owner, C, T>` | comptime declaration | Typed associated constant, separate from fields | accepted; schema+model CURRENT via B5 S1 (registered + lift-walled); population depends on const generics (later slice) |
 | `FieldInitialization<Owner, F, T>` | comptime | Required or typed-default construction policy | accepted algebra; CURRENT sealed enum (`Required`/`Defaulted`) via B5 S1 — the freeze struct input carries no per-field default flag yet, so all fields are `Required` today (Dec 59 total records; `Defaulted` population is a later slice, see `docs/defections.md`) |
 | `DefaultInitializer<Owner, F, T, Effects>` | comptime code | Closed checked runtime default initializer | accepted |
-| `AnnotationDescriptor<A, Target, Args, Multiplicity>` | comptime | Typed applied annotation and target proof | accepted |
+| `AppliedAnnotation<A, Target, Args, Multiplicity>` | comptime | Resolved typed applied annotation, exact target proof, ConstLift argument product, and multiplicity | accepted via ADR-012 |
 | `CaptureDescriptor<Sig, I, T, Mode>` | comptime | Typed closure capture identity | accepted through Decision 95; compiler model + generated-only `FunctionExpr.captures` clause CURRENT on the C1 branch (supervisor gates pending) with four declared modes (`Move`, `Share`, `SharedBorrow`, `ExclusiveBorrow`), structural slot/lineage identity, exact `SemanticFreeze` capture types, and one declared plan driving layout/opcodes; borrow modes are named rejections until regions. Compiler-query hover/definition/references and descriptor-authoritative rename are committed; unavailable/conflicting evidence never falls through to name-based rename. C2 shipped the installation validator/chokepoint (CURRENT) that consumes this carrier; the public `CheckedBody` builder + `finish()` → E-track per the user-ratified D1 amendment 2026-07-17, tracked on #13/E1 |
 | `HygienicSymbol<T>` | comptime | Scope-safe generated binding identity | accepted |
 | `PatternBinder<T, Mode>` | comptime code | Hygienic projected binding with stable ownership mode | accepted |
@@ -1022,9 +1070,13 @@ examples, rejection requirements, and implementation implications.
 | `CheckedModule<Exports>` | comptime code | Typed module fragment | accepted |
 | `CheckedTemplate<Sig, Captures>` | comptime code | Typed placeholder/template binding and complete capture set | accepted through Decision 95; CURRENT / VM+JIT via ADR009-C3 (#14) for the annotation-runtime-hook producer — the carrier (`comptime_fragments/checked_template.rs`, typestate construction chokepoint, installs through the one C2 InstallTransaction) wraps ordinary typed Shape body fns + Sig-binding + declared captures, with PER-SPECIALIZATION checking at every `@application` site (C3-G4/G10: generic bodies instantiate per target through the C3-G9 `args` pseudo-tuple — `args[i]` resolves to the i-th typed param slot at specialization; concrete bodies match-or-error naming BOTH signatures; before/after exit-kind gates prove every value-producing exit against the bound protocol type). Public comptime API + sugar CURRENT (S2/S4): `install`/`before_hook`/`after_hook`/`capture` builtins, and the declarative `annotation name(config: int, ...) { before(args) / after(result) }` block lowers onto that API with ZERO private side-channels (C3-G2; typed config params mandatory — the untyped config surface is a named rejection). Config crosses only as ConstLift (S3: compositional liftable domain, heap-constant baking, evaluate-once-per-application, Dec-95 rule-6 lifted-constant identity → specialization hash with structural equality). Rejection matrix CURRENT (S5/S8a): [C0926] ambient capture (module/invocation-scope values never enter a template), generic targets withdrawn until #59 (C3-G8/G11), nested fns #62 (C3-G12), foreign targets #68 (S8a), hook-bearing non-function targets, [C0930] param-miss. ONE implementation: the S6 capstone deleted the legacy homogeneous-args weave entirely (`d2ad9c5f`; absence sentinel `crates/shape-vm/src/executor/tests/no_legacy_annotation_weave.rs`; @remote dark per C3-G14 A′ — E4 #20/#68 re-implements it on typed HookDecision). JIT evidence: `bin/shape-cli/tests/cli/jit_c3_carrier_native.rs` 11 CLI-subprocess cells — zero-fallback native for the per-param carrier, the API-installed weave, composite-config ConstLift, and the S4 sugar cells; named-expected-fallback pins with loud-flip semantics for the aggregate inline-Object chain (gap (b), issue #70) and async targets (VM-only `Await`). LSP CURRENT via the shared query surface (S8c): `BytecodeCompiler::hook_install_query()` display-safe projection (no parallel LSP table), application hover renders installed templates + specialized signatures + capture sets, body-fn hover renders the generic declaration view (`tools/shape-test/tests/lsp/typed_comptime.rs` p1–p4 + `hover_tests.rs` no-SOH machine pins). Book: `advanced/annotations.mdx` rewritten onto the typed surface, 16/16 fences pass the strict truth gate (8 `expected=` runnable examples incl. the flagship both-hooks typed-config fence, 6 `expected-fail` rejection fences, 2 `@json_schema` import rows) — shape-web branch `adr009-c3-annotations`. TARGET remains: the Dec-95 staging spellings (`hook.emit {}`, `body(captures){}`, `#ident`) = the E-track SECOND PRODUCER of this same carrier (dated user disposition 2026-07-20); ctx/HookDecision/failure-retry state + `@remote` + foreign-target hooks = E4 (#20/#68); generic-target re-arm #59; nested fns #62; template serialization (`#[serde(skip)]` inherited) tracked as a follow-up |
 | `RewritePlan<Target>` | comptime transform | Atomic identity-keyed target edits | accepted |
-| `HookPlan<Sig, State>` | runtime plan | Fully typed annotation lifecycle | accepted model; documentation integration pending |
+| `PreparedAnnotationContract<Target>` | semantic contract | Canonical ordered applications and all externally visible annotation effects/outcomes/ownership/lifecycle contributions before effective-contract freeze | accepted via ADR-012; target architecture, replacement migration pending |
+| `CheckedAnnotationPlan<Target>` | comptime semantic plan | Closed typed annotation composition; lowers to annotation-free typed Core/MIR and grants no execution authority | accepted via ADR-012; target architecture, replacement migration pending |
 
 ## Decision Documents
+
+- [ADR-011: Resolved Semantic Identity and Typed Elaboration](../adr/011-resolved-semantic-identity-and-typed-elaboration.md)
+- [ADR-012: Verified Annotation Elaboration and Callable Transforms](../adr/012-verified-annotation-elaboration-and-callable-transforms.md)
 
 - [Values, Types, And Evidence](typed-comptime/values-types-and-evidence.md): Decisions 47-54 and 94.
 - [Nominals And Members](typed-comptime/nominals-and-members.md): Decisions 55-60.

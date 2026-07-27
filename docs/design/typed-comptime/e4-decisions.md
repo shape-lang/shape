@@ -1,6 +1,28 @@
 # E4 #20 — Program of record (2026-07-22; D1–D7 + D-baseline USER-RATIFIED)
 
-Binding for all E4 implementers/reviewers. Produced by the phase-1 Opus scout
+## Status: historical implementation record
+
+Superseded for future architecture by ADR-011 and ADR-012 (2026-07-25).
+This file remains evidence of what E4 shipped and what its tests measured; it
+is no longer binding authority for new implementation.
+
+Specifically superseded: E4-D1's spelling-recognized `HookDecision` and
+`TemplateSig::PolymorphicDecision`; E4-D3's `__remote_*` marker substitution,
+homogeneous array pack, impl-shadow/raw-ID path, and annotation-specific
+`__call_raising` proof; E4-D4 wherever `on` creates target-registry authority;
+E4-D6's reserved-name recognizers; E4-D7's pre-typecheck constructor rewrite,
+compiler-private decision representation, and `ShortCircuitProof` path.
+
+Preserved as requirements/evidence: fail-loud behavior, exact result checking,
+the `before`/`after` sugar success-join rule for short-circuit, no `Any`,
+per-layer state, total lifecycle composition, the remote acceptance matrix, and
+the VM/JIT differential tests. A raw ADR-012 `around` early return remains
+ordinary source control flow.
+Those behaviors must be re-expressed through resolved identities, ordinary
+typed `ArgumentPack<Sig>`/`Next<Sig>` Callable Transforms, one
+`CheckedAnnotationPlan`, and annotation-free typed Core/MIR.
+
+Historically binding for E4 implementers/reviewers. Produced by the phase-1 Opus scout
 workflow (`wf_0c5616da`, 5 scouts + synthesis; findings in the AGENTS.md E4
 row) and ratified at the phase-1 pause. Authority stack: issue #20 **with the
 2026-07-22 charter-correction comment BINDING over the pre-C3 body**, #68

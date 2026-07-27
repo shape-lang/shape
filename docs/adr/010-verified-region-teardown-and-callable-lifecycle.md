@@ -8,6 +8,12 @@ Implementation is sequenced after ADR-009 stabilization. This ADR does not
 amend ADR-009; it defines the lifecycle and execution substrate on which later
 typed language and library features may rely.
 
+ADR-011 and ADR-012 (2026-07-25) clarify the semantic-identity and two-stage
+annotation-elaboration boundaries. Annotation contract contributions freeze
+before dependent callers are checked. A later checked annotation plan is still
+not execution authority; it must lower to ordinary typed executable MIR and
+pass this ADR's late freeze and admission.
+
 ## Context
 
 Strict typing is insufficient if an execution backend cannot prove how every
@@ -87,6 +93,14 @@ effect provenance. From this metadata the compiler derives an exhaustive
 not prescribe whether a backend uses branches, landing pads, exception tables,
 or another mechanism.
 
+ADR-012 contract elaboration first contributes effects, outcomes, ownership,
+and lifecycle requirements to the effective callable contract before dependent
+checking. After that contract freezes, annotation body/plan elaboration may
+prove that layers compose and emit their ordinary typed control-flow and
+cleanup structure. Neither stage can mint a `VerifiedRegionTeardownPlan` or
+authorize VM/JIT execution. The elaborated Core/MIR participates in the same
+whole-function analysis and late freeze as source-written code.
+
 There is one late `RegionTeardownFreezeBoundary`: after executable MIR shape and
 all borrow, move, escape, storage, carrier, effect, and transfer proofs are
 complete, but before bytecode or native lowering. At that boundary the compiler
@@ -161,6 +175,11 @@ its declared contract. `Carrier Release` is the distinct mandatory exactly-once
 representation retirement or deallocation through the exact carrier-correct
 operation. Finalization success never stands in for release, and finalization
 failure never skips release or later obligations.
+
+Annotation `around`, state, and cleanup constructs create ordinary typed
+regions, owners, effects, and finalization obligations in this sealed algebra.
+Annotations and remote providers cannot add teardown opcodes, side ledgers, or
+backend-only cleanup meanings.
 
 The invocation's primary `Completed`, `Failed`, or `Cancelled` outcome is fixed
 before terminal teardown. Only the evaluator/host boundary materializes the
@@ -324,6 +343,11 @@ Every callable has a versioned, hash-covered `CallableLifecycleABI` describing:
 - exhaustive evaluator outcomes; and
 - the effect contract.
 
+`ArgumentPack<Sig>`, `Next<Sig>`, failed-attempt capabilities, and exact return
+types from ADR-012 are indexed projections of this ABI. They cannot widen,
+erase, or reconstruct the contract from a name or a homogeneous runtime
+collection.
+
 Its stable lifecycle ABI hash is an exact type-level identity distinct
 from the exact function hash, implementation, plan, dependencies, and placement
 lease and remains exact. Higher-order compatibility keeps ownership, return,
@@ -407,6 +431,18 @@ uncertainty quarantines escrow and its affine recovery obligation; timeout or
 partition never resurrects moved owners.
 Direct local calls have no journal, serialization, or receipt cost.
 
+A `PortableContinuationArtifact<Sig>` may be produced from an exact resolved
+callable authority after its artifact, captures, callable lifecycle ABI,
+effects, permissions, and teardown-capability closure verify. Converting an
+affine `Next<Sig>` consumes its local-call authority; an ordinary callable
+follows its declared invocation mode. The result is portable evidence, not
+execution authority. A receiver separately validates it against a chosen
+placement, pins the required realization and
+`PlacementCapabilityLease`, and only then mints a non-serializable
+`AdmittedExecution<Sig, P>`. Dispatch consumes that single-attempt authority.
+Neither value is reconstructed from a function name, wrapper marker, raw
+function ID, or serialized local handle.
+
 ## Core and library boundary
 
 The core standardizes ownership regions, semantic outcomes, verification,
@@ -444,8 +480,10 @@ domain type, operation, scheduler policy, or teardown opcode to the core.
 
 ## Sequencing
 
-ADR-009 stabilization completes first. Work on this ADR must not change or
-reinterpret ADR-009 while that effort is in progress.
+ADR-009 plus the identity and annotation corrections in ADR-011/ADR-012
+complete upstream. Work on this ADR must not recreate their semantic
+elaboration inside teardown or a backend, and upstream annotation work must
+not claim this ADR's final execution authority.
 
 Issue #58 establishes the canonical first-class callable carrier and its exact
 lifecycle authority. Issue #56 may establish the general region-plan pipeline,

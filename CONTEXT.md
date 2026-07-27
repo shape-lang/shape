@@ -16,6 +16,64 @@ compatibility aliases, parallel legacy protocols, or migration shims unless an
 explicit external constraint is documented.
 _Avoid_: preserving accidental APIs, compatibility by default
 
+**Resolved Definition Identity**:
+The canonical compiler-issued identity of one declaration or intrinsic after
+ordinary name resolution. Imports and aliases preserve it; shadowing and local
+homonyms produce different identities. It is independent of spelling, source
+span, allocation address, and dense runtime table position, and is the only
+authority by which later semantic phases select definition-specific behavior.
+_Avoid_: terminal-name dispatch, unspellable-name authority, span as identity
+
+**Typed Semantic Program**:
+The stage-indexed resolved and checked program graph on which semantic
+elaboration operates. Every use names its Resolved Definition Identity and
+carries the exact facts frozen at that stage. Base declaration contracts become
+effective contracts only after contract elaboration; dependent bodies and call
+sites are then checked against those effective types, effects, ownership,
+lifecycle, and provenance facts. Raw parsed syntax may preserve source
+structure for diagnostics but cannot independently authorize behavior after
+resolution.
+_Avoid_: semantic AST recognizer, repair types during codegen
+
+**Semantic Elaboration**:
+The ordered family of operations that consumes stage-appropriate Typed Semantic
+Program facts and produces checked declarations, effective contracts,
+proof-carrying plans, or annotation-free typed Core/MIR. Declaration outputs
+re-enter discovery; contract contributions complete before effective-contract
+freeze and dependent checking; body/plan elaboration completes before
+optimization and backend lowering. Meaning enters only through resolved typed
+operations.
+_Avoid_: pre-resolution semantic rewrite, effect discovered after caller check
+
+**SemanticDb**:
+The incremental store for immutable source/configuration inputs, local interned
+handles, deterministic diagnostics, and pure semantic query results. It owns
+dependency recording and invalidation, never portable semantic identity,
+language fixed-point policy, `BytecodeCompiler`, or mutable backend state.
+_Avoid_: compiler session in Salsa, database-local ID in an artifact
+
+**DiscoveryEngine**:
+The explicit bounded declaration-and-contract fixed-point engine that consumes
+semantic queries and returns one immutable `DiscoverySnapshot`. It owns Shape's
+join, convergence, cycle, and provenance rules; generic query-cycle behavior or
+mutable bytecode emission cannot substitute for it.
+_Avoid_: Salsa cycle as language discovery, emitter-owned symbol publication
+
+**Compiler Primitive**:
+A small explicit language operation with a resolved nominal intrinsic identity
+and a complete type, effect, ownership, lifecycle, stage, tooling, and backend
+contract. Aliases preserve the operation and homonyms do not. One canonical
+catalog validates its declaration; optimization may erase its representation
+only after ordinary semantic checking.
+_Avoid_: context-flag builtin, library-name special case, backend-only primitive
+
+**Compiler Magic**:
+Forbidden behavior selected from source spelling, AST shape, source origin,
+unspellable rendering, hidden values, or a surface type that ordinary
+resolution and typed lowering never process. A private proof token around such
+a path does not turn it into a Compiler Primitive.
+_Avoid_: spelling-recognized enum, marker-call substitution, magic object shape
+
 **Strictly Typed Comptime**:
 Comptime reflection and generation operate only on typed descriptors, hygienic
 symbols, checked AST/item fragments, and compiler-validated transformations.
@@ -105,6 +163,13 @@ numeric suffixes. Private generated temporaries may use unspellable fresh
 identities.
 _Avoid_: `symbol(string)`, silent `Name2`, unversioned casing convention
 
+**GeneratedName**:
+Compiler-issued naming authority for a generated declaration, minted only from
+an explicit source binder, a hygienic identity, or a versioned Typed Name
+Policy. Validating, normalizing, or interning an independently supplied string
+does not create a `GeneratedName`.
+_Avoid_: raw generated name, validation as symbol authority
+
 **Comptime Effect**:
 A stage-specific effect describing external interaction by the comptime engine.
 Comptime is pure by default; filesystem/package resources, selected environment
@@ -161,61 +226,151 @@ lower those contributions; the annotation itself is not synonymous with
 comptime, and runtime hook execution is not comptime execution.
 _Avoid_: annotation equals macro, hook phase treated as comptime stage
 
+**Annotation Elaboration**:
+The one deep semantic module with two ordered queries. Contract elaboration
+consumes a resolved typed base target plus canonically ordered
+`AppliedAnnotation` values and produces either diagnostics or a
+`PreparedAnnotationContract`; its effects, outcomes, ownership, lifecycle, and
+generated headers enter the effective-contract fixed point before dependent
+checking. Body/plan elaboration then consumes the frozen effective target and
+checked bodies and produces either diagnostics or one `CheckedAnnotationPlan`.
+Both return shared `AnnotationFacts`; downstream compiler, LSP, VM, and JIT code
+never reinterpret annotation syntax or names.
+_Avoid_: planner spread across passes, LSP annotation revalidation
+
+**Prepared Annotation Contract**:
+The closed pre-freeze result of annotation contract elaboration. It binds exact
+application identity and order, selected clauses, typed ConstLift arguments,
+and every externally visible type, effect, failure, ownership, lifecycle, and
+generated-header contribution. It is an input to effective-contract freeze,
+not a hook plan or execution capability.
+_Avoid_: effects added during wrapper lowering, provisional public signature
+
+**ContractEffectSubsetEvidence**:
+Pre-body evidence that one closed stage- and catalog-branded contract effect row
+is a subset of another. It binds canonical row hashes, callable relationship,
+and effective-contract identity, but no MIR and no host authority.
+_Avoid_: unchecked body certified by its declaration, effect proof as grant
+
+**VerifiedEffectProof**:
+Post-optimization evidence that the actual closed effects of one
+`FinalMirIdentity` are permitted by its frozen effective contract. It and the
+structural `CapabilityProof` verify the same final outcome-explicit MIR before
+ADR-010 freezes it; neither proof grants host authority.
+_Avoid_: pre-optimization final proof, contract evidence reused as MIR evidence
+
+**Checked Annotation Plan**:
+A closed backend-neutral proof that all selected annotation clauses compose
+over a frozen effective target, signature, arguments, result, state, failure,
+effects, ownership, replay, and cleanup contracts. It lowers to ordinary
+annotation-free typed Core/MIR and is not execution authority. Semantic
+optimization/inlining may transform that MIR while preserving proof provenance;
+ADR-010's late region freeze and admission mint authority only after verifying
+the final composite. Any post-freeze semantic change invalidates the
+certificate.
+_Avoid_: partial hook plan, annotation plan as backend authority
+
+**Annotation Facts**:
+The single compiler/LSP projection produced across both Annotation Elaboration
+queries. It contains resolved application identities, exact targets, typed
+arguments, selected clauses, canonical total order, prepared/effective
+contracts, generated symbols, plan shape, effects, failures, diagnostics, and
+bidirectional source maps.
+_Avoid_: LSP target table, display-name annotation query
+
+**CheckedPromptTemplate**:
+A pre-freeze contract fact produced from one ConstLift string, the exact
+`NormalizedDeclaredContract<Sig>`, and resolved `ToPrompt` obligations. It
+stores parsed literal segments, exact parameter/implementation identities, and
+source maps. Post-freeze plans may consume it to render live typed arguments but
+cannot select new traits, add effects, or change the contract.
+_Avoid_: frozen-effective-contract cycle, display formatting as prompt typing
+
 **Hook Template**:
-Ordinary typed runtime Shape code attached by an annotation to one legal target
-join point and specialized during compilation. A nested `comptime {}` runs
-while that template is specialized and emits checked runtime fragments; only
-the emitted code remains for invocation. Templates cannot read runtime values
-from comptime or defer compiler work until the hook runs.
+Ordinary typed runtime Shape code contributed by one exact annotation clause
+and specialized during Annotation Elaboration. Callable interception uses an
+ordinary around-call template over `ArgumentPack<Sig>` and `Next<Sig>`;
+convenient before/after syntax is sugar over that core. A nested `comptime {}`
+runs while the template is specialized and emits checked runtime fragments;
+only the emitted code remains for invocation.
 _Avoid_: hook calling the comptime evaluator, runtime value captured by comptime
 
 ## Annotation Runtime
 
 **ArgumentPack**:
-A compiler-internal carrier parameterized by an annotated target function's
-signature. It preserves parameter order, types, passing modes, ownership, and
-authoritative kinds, and is not a homogeneous collection. It is not nameable,
-inspectable, iterable, constructible, or serializable by ordinary Shape code.
-Strictly typed comptime specialization generates ordinary wrapper parameters,
-direct calls, and finite checked rewrites over it.
+A real signature-indexed heterogeneous product parameterized by an exact
+callable signature. It preserves parameter order, types, passing modes,
+ownership, and authoritative runtime kinds. Typed hook code may pass it to
+`Next<Sig>` and project or rewrite members through `ParamDescriptor`; ordinary
+code cannot fabricate it from a dynamic collection, select members by string,
+or serialize it without per-member transfer evidence.
 _Avoid_: args array, `Array<_>`, argument list
 
-**HookDecision**:
-A typed result from a specialized annotation before-hook. `Proceed` carries
-same-layer state and selects the current arguments or one comptime-generated
-`RewritePlan`; `Return` carries a target-compatible result and the same state
-while explicitly skipping the target call. Effective arguments remain in the
-compiler-internal call ledger; field presence in an object does not determine
-annotation control flow.
-_Avoid_: hook result object, magic `{args, result, state}` object
+**Callable Transform**:
+An ordinary typed around-call template
+`fn(ArgumentPack<Sig>, Next<Sig>) -> ReturnOf<Sig> ! Effects` contributed by an
+annotation. Calling `Next` proceeds; returning without calling it
+short-circuits; code after the call is ordinary success transformation; lexical
+values provide typed per-invocation state. Before/after syntax may lower to this
+core but creates no separate decision protocol.
+_Avoid_: spelling-recognized HookDecision, compiler-private control enum
 
-**HookTarget**:
-A signature-indexed callable denoting the exact next-inner continuation in a
-stacked annotation chain. It includes every inner annotation and eventually the
-raw implementation; it is not a direct bypass to the unannotated body.
-_Avoid_: raw implementation target, annotation-chain bypass
+**Next Continuation**:
+The affine `Next<Sig>` capability denoting the exact next-inner continuation in
+a stacked annotation chain. It includes every inner annotation and eventually
+the implementation; it is not a direct bypass to an unannotated body. It may be
+invoked at most once, with no replay exception. Replay evidence may feed a Retry
+Intent; only evaluator-private Retry Commit re-enters with a fresh `Next`.
+_Avoid_: raw implementation target, wrapper recursion, unrestricted retry call
+
+**Portable Continuation Artifact**:
+A sealed hash-covered `PortableContinuationArtifact<Sig>` created from an exact
+resolved callable authority after its code, captures, effects, permissions,
+Callable Lifecycle ABI, and Teardown Capability Closure verify. Converting a
+Next Continuation consumes its affine local-call authority; an ordinary
+first-class callable follows its declared borrow/consume invocation mode. The
+artifact preserves that exact callable/next-inner chain for placement admission
+but carries no live placement lease or execution authority.
+_Avoid_: raw function ID, serializing Next, artifact as admitted execution
+
+**Admitted Execution**:
+A non-serializable linear `AdmittedExecution<Sig, P>` minted only after a
+receiver validates a Portable Continuation Artifact against exact placement
+`P`, binds the evaluator-issued `AttemptId` and `TransferId`, and pins the
+execution realization and Placement Capability Lease. Dispatch or explicit
+abort consumes it exactly once. Retransmission of the same attempt reuses its
+`TransferId`; a semantic retry requires replay evidence, fresh attempt and
+transfer identities, and new admission under the same Recovery Episode.
+_Avoid_: admission inferred from Next, cloneable remote call authority
 
 **Short-Circuit Unwind**:
-When a before hook returns `HookDecision::Return`, its result skips every
-deeper, unentered annotation layer and the body, then runs the returning
-layer's `after` hook followed by already-entered outer `after` hooks. Skipped
-layers run no hooks.
+When a Callable Transform returns an exact `ReturnOf<Sig>` without invoking its
+Next Continuation, the result skips every deeper, unentered annotation layer
+and the body. For `before`/`after` sugar, that value enters the returning
+layer's explicit typed success join and then each already-entered outer sugar
+layer's join, so their after clauses run once in normal success order. A raw
+`around` early return has ordinary source semantics and runs no code it skipped.
+Unentered layers run no hooks.
 _Avoid_: bypassing outer after hooks, running hooks for unentered layers
 
 **After Hook**:
-A success-only result transformation. Suspension preserves the entered hook
-chain for later resumption; `Failed`, `Cancelled`, and `Faulted` outcomes bypass
-pending `after` hooks because no completion value exists. Failure transformation
-belongs to `on_failure`; cleanup belongs to the evaluator-owned lifecycle scope.
+A success-only result transformation, normally ordinary typed code after a
+Next Continuation completes. Suspension preserves the entered transform chain
+for later resumption; `Failed`, `Cancelled`, and `Faulted` outcomes bypass
+pending after behavior because no completion value exists. Failure
+transformation belongs to `on_failure`; cleanup belongs to the evaluator-owned
+lifecycle scope. `before`/`after` sugar lowers both same-layer short-circuit and
+inner completion through one typed success join; raw `around` code remains
+ordinary control flow.
 _Avoid_: implicit finally hook, after hook as error handler
 
 **Failure Hook**:
 An explicit `on_failure` annotation phase that receives a structured
 `RuntimeFailure` while unwinding a failed next-inner execution. It is distinct
 from success-only `after`; it does not receive `EngineFault` and does not treat
-`Cancellation` as failure. It may explicitly recover with a valid `R`, retry
-the continuation, select a different remote placement, or propagate a
-structured failure through a compiler-validated decision.
+`Cancellation` as failure. It may explicitly recover with a valid `R`, propose
+one replay-evidenced Retry Intent (including a different remote placement), or
+propagate a structured failure.
 _Avoid_: overloading after, catching implementation faults
 
 **Failure Recovery**:
@@ -225,21 +380,13 @@ new signature-compatible pack, or by choosing another remote host; it is not a
 general source-level exception mechanism.
 _Avoid_: implicit retry, untyped fallback value
 
-**FailureDecision**:
-The three-variant algebraic result of `on_failure`: `Propagate` carries a
-structured failure outward, `Recover` supplies a signature-valid completion
-value, and `Retry` submits a sealed `InvocationAttempt` using the current
-argument state or a comptime-generated rewrite. Richer retry, fallback,
-failover, and circuit policies are typed Shape stdlib abstractions over this
-primitive, not additional compiler protocols.
-_Avoid_: general evaluator access, compiler-only recovery DSL
-
-**InvocationAttempt**:
-A sealed, signature-indexed retry plan tied to the failed next-inner
-continuation. It carries a validated internal argument state or checked rewrite,
-placement, delay, budget, state, and duplicate-safety authority; user code
-cannot invoke the continuation around those checks.
-_Avoid_: direct retry call, retry-anyway boolean
+**FailureDecision / InvocationAttempt (superseded)**:
+These names described an older user-submitted retry plan and are not current
+semantic types. Typed failure handling now produces one linear Failure Intent;
+its Retry Intent carries replay-safe data only. Cleanup and Retry Commit remain
+evaluator-private, and the commit creates exactly one new attempt and fresh
+`Next`.
+_Avoid_: implementing the superseded decision algebra, user-driven retry loop
 
 ## Typed Comptime Structures
 
@@ -410,14 +557,25 @@ ownership, failure, suspension, and cleanup requirements flow into the
 synthesized constructor, and omitted defaults run in declaration order.
 _Avoid_: self-dependent default, untyped default AST, hidden constructor effect
 
-**AnnotationDescriptor**:
-A comptime-only compiler-issued descriptor for one applied annotation, indexed
-by exact annotation identity, permitted target identity, typed argument pack,
-and declared multiplicity. Arguments are comptime expressions selected through
-hygienic parameter identities. Wrong targets and duplicate single-use
-applications fail before hooks run; runtime hook state is not annotation
-metadata.
+**AppliedAnnotation**:
+A comptime-only compiler-issued descriptor
+`AppliedAnnotation<A, Target, Args, Multiplicity>` for one applied annotation.
+`A` is its Resolved Definition Identity, `Target` is one exact permitted target,
+`Args` is a typed ConstLift product selected through hygienic parameter
+identities, and multiplicity is proven before elaboration. Each occurrence also
+carries a stable `ApplicationIdentity` and expansion provenance. Wrong targets
+and duplicate single-use applications fail before hooks run; runtime hook state
+is not annotation metadata.
 _Avoid_: annotation name string, `Array<Any>` arguments, magic annotation object
+
+**Annotation Application Order**:
+The canonical total outer-to-inner order for one target. Source applications
+use lexical order, first written outermost. A generated ordered batch must
+insert at `Outermost`, `Innermost`, `Before(exact_application)`, or
+`After(exact_application)`; ambiguous independent insertions and cycles are
+compile errors. Repeatable occurrences retain distinct Application Identities,
+and the total order is hash-covered and shared by compiler and LSP.
+_Avoid_: discovery-order tie-break, sort by annotation name, span as identity
 
 **Annotation Target Contract**:
 The complete finite set of typed target/phase handler clauses implemented by an
@@ -426,6 +584,14 @@ parallel target list, universal `ComptimeTarget`, implicit default handler, or
 silent no-op. An intentionally unchanged path returns typed `NoChange`, and an
 application with no matching clause fails compilation.
 _Avoid_: `targets: [...]` registry drift, target-kind branch, claimed support gap
+
+**CallableTargetAdapter**:
+The centralized typed proof that one exact callable target exposes the
+normalized lifecycle ABI, effects, outcomes, ownership, body visibility, and
+stub operations required by an annotation clause. Unsupported compositions
+reject structurally; an adapter cannot silently drop a clause or expose raw
+foreign source/ABI as a Shape body.
+_Avoid_: universal callable target, backend-specific support guess
 
 **Exact Annotation Target**:
 One concrete compiler-issued target descriptor accepted directly by a typed
@@ -440,7 +606,9 @@ _Avoid_: `AnnotationTarget`, target-kind enum dispatch, placeholder target
 **FrozenCallable**:
 A comptime-only sealed descriptor for one fully inferred callable signature,
 including ordered parameters, stable identities, types, passing modes, kinds,
-return type, effects, ownership constraints, and exact next-inner continuation.
+return type, frozen effective effects, ownership constraints, evaluator
+outcomes, and Callable Lifecycle ABI. It describes a callable contract and
+carries no invocation-specific Next Continuation.
 _Avoid_: provisional signature as final descriptor, rendered type string
 
 **ParamDescriptor**:
@@ -730,26 +898,83 @@ explicit idempotency contract, provider deduplication lease, or future purity
 proof. Evidence must cover every selected effect domain and argument change.
 _Avoid_: idempotent boolean, call ID as retry authority
 
+**Failure Intent**:
+The single linear choice produced by typed failure handling before teardown:
+propagate the failure, recover with an exact result, or propose one Retry
+Intent. It is not cleanup or re-entry authority.
+_Avoid_: failure handler as evaluator loop, cleanup token in user code
+
+**Retry Intent**:
+A linear request carrying an exact replay-safe argument pack, replay evidence,
+and any post-cleanup schedule for one proposed new attempt. Only the evaluator
+may turn it into a Retry Commit.
+_Avoid_: fresh Next in user code, multi-attempt retry request
+
+**Recovery Episode**:
+The initial attempt and every permitted retry that share one stable identity,
+attempt history, Recovery Budget, and final outcome.
+_Avoid_: provider-local retry loop, unrelated attempts sharing a budget
+
 **Recovery Budget**:
-The mandatory maximum-attempt and absolute-deadline bounds for one recovery
-episode. Discovery, connection, backoff, execution, and reply waiting consume
-the same parent-owned budget; hooks and providers may narrow but never extend
-it.
+The mandatory total-maximum-attempt and absolute-deadline bounds for one
+Recovery Episode. Discovery, connection, backoff, execution, and reply waiting
+consume the same parent-owned budget; hooks and providers may narrow but never
+extend it.
 _Avoid_: unbounded retry, per-provider deadline reset
 
+**Retry Commit**:
+The evaluator-private transition that consumes one Retry Intent, the exact
+failed attempt's Cleanup Complete evidence, replay evidence, and one attempt
+permit to authorize exactly one new attempt. It mints a fresh `AttemptId`; a
+remote re-entry also requires a fresh `TransferId` and new admission under the
+same Recovery Episode before the evaluator mints that attempt's `Next`.
+_Avoid_: retry decision before cleanup, user-minted re-entry authority
+
 **Retry Re-entry**:
-`FailureDecision::Retry` authorizes exactly one new attempt. If that attempt
-fails, the evaluator invokes the same layer's `on_failure` again with the
-effective pack, updated hook state and attempt history, remaining recovery
-budget, and evidence for the new failure.
+One Retry Commit authorizes exactly one new attempt and causes the evaluator to
+mint that attempt's single `Next`. If it fails, the same failure layer receives
+the updated pack, state, history, budget, and evidence.
 _Avoid_: user-managed evaluator loop, multi-attempt Retry variant
 
+**Cleanup Complete**:
+Linear evidence minted by the evaluator's teardown machinery that every
+activated layer of one exact failed attempt finished its cleanup. It is required
+for a Retry Commit; no new attempt can begin while earlier cleanup is unproven.
+_Avoid_: cleanup-by-convention, retry racing teardown
+
+**Durable Supervisor**:
+A sealed recovery owner that may accept a linear Recovery Obligation and take
+over settlement of its uncertain attempt. Only durable acceptance or a settled
+outcome releases the caller from that obligation.
+_Avoid_: retry policy as supervisor, in-memory acceptance, dropped obligation
+
+**Acceptance Outcome**:
+The exhaustive result of offering a Recovery Obligation to a Durable
+Supervisor: durably accepted with a receipt, refused with the obligation
+returned, or pending with the same transfer still linearly owned.
+_Avoid_: infallible handoff, ambiguous write treated as refusal
+
+**Transfer Receipt**:
+Durable evidence that a Recovery Obligation was accepted by a Durable
+Supervisor, binding the transfer identity, artifact identity, escrow
+inventory, and placement. It is retained in cleanup evidence and is the only
+artifact that may convert an uncertain outcome into a terminal one.
+_Avoid_: fire-and-forget handoff, log line as receipt
+
+**Recovery Journal**:
+The durable single-owner history of unresolved transfers, their inaccessible
+escrow inventories, supervisor acceptance, and settlement. Every transition is
+monotone and idempotent under the stable `TransferId` of one exact attempt's
+ownership transaction.
+_Avoid_: snapshot file as obligation log, parallel in-memory recovery authority
+
 **Hook State**:
-Invocation-local state private to one annotation layer. It flows from that
-layer's before hook to its later phases and is retained by a suspended
-continuation. It is not implicitly shared across layers, calls, or remote
-boundaries. Persistent annotation state is a separate store abstraction.
-_Avoid_: global annotation context, implicit persistent hook state
+Typed invocation-local lexical state private to one annotation layer's Callable
+Transform. It remains live around the Next Continuation and is retained by a
+suspended continuation. It is not implicitly shared across layers, calls, or
+remote boundaries. Persistent annotation state is a separate store
+abstraction.
+_Avoid_: global annotation context, Any state bag, implicit persistent hook state
 
 **Total Hook Scope**:
 The compiler-completed lifecycle for one entered annotation layer. It owns one
@@ -841,18 +1066,17 @@ _Avoid_: must-settle lint, best-effort transaction drop
 A typed must-handle result of explicitly consuming a `MustSettle` owner.
 `Settled(Proof)` carries sealed evidence satisfying its goal; `Incomplete`
 carries typed reason/evidence. When external ownership or outcome remains
-unresolved, `Incomplete` must carry a new affine recovery obligation.
+unresolved, `Incomplete` must carry a new linear Recovery Obligation.
 _Avoid_: settlement exception, discardable close result
 
 **Recovery Obligation**:
-A `MustSettle<RecoveryHandle, ResolutionGoal>` created when settlement leaves
-external state unresolved. It must be resolved, returned, or transferred to a
-durable supervisor; merely inspecting or logging its evidence does not consume
-the obligation.
+A linear handle to journaled recovery state created when settlement leaves
+external state unresolved. It must be resolved, returned, or durably
+transferred; merely inspecting or logging it does not consume the obligation.
 _Avoid_: outcome-unknown as handled error, detached recovery task
 
 **Obligation Transfer**:
-The affine handoff of a settlement or recovery obligation to a supervisor. The
+The linear handoff of a settlement or recovery obligation to a supervisor. The
 caller remains the owner until a typed acceptance receipt binds the obligation
 identity, settlement goal, provider/effect domain, durability scope, and new
 owner. Spawning work or emitting telemetry is not transfer.
@@ -934,6 +1158,14 @@ versions. Every JIT code version is a distinct quarantined realization until
 admitted; any covered change invalidates its cached verification without
 changing portable semantic identity.
 _Avoid_: reuse admission after codegen change, JIT version inherits trust
+
+**NativeExecutionWitness**:
+Structured runtime/JIT evidence binding an exact definition, final MIR and
+executable realization, native installation/tier-up, subsequent covered native
+dispatch, zero covered fallback/deoptimization, VM/native equality, and exact
+revision, binary, backend, toolchain, and witness schema. It comes from runtime
+authority, never parsed log prose or a successful “JIT mode” result.
+_Avoid_: interpreter fallback called native, inferred dispatch evidence
 
 **Teardown Admission Verification**:
 The independent fail-closed replay performed before a function artifact may
@@ -1098,7 +1330,9 @@ suspend. After Primary Outcome freeze and Scope Quiescence, it seals ordinary
 frame execution, structurally retires or guards every remaining exiting owner
 whose storage can survive the suspension, and transfers sole authority over
 their intact storage, cursor, evidence builder, and placement/quiescence
-witnesses to one affine teardown continuation. Only plan-declared typed
+witnesses to one linear teardown continuation. That continuation must be
+consumed by exactly-once teardown or transferred exactly once across another
+admitted suspension path; it cannot be discarded. Only plan-declared typed
 borrow-only finalizer views remain accessible; callbacks, cancellation,
 migration, and resumptive deoptimization cannot restore ordinary live locals.
 Finalization and Carrier Release still run in established semantic order, and
@@ -1146,13 +1380,21 @@ edge. Rare failure paths are part of the closure; capability absence may not be
 discovered after execution begins.
 _Avoid_: success-path-only admission, lazy teardown capability discovery
 
+**Admission Lease**:
+The expiring receiver-minted authority to cross Call Entry Commit once after
+placement admission. Entry consumes it to mint a frame-lifetime Placement
+Capability Lease; expiry before entry may support a rejection proof but never
+revokes an entered frame.
+_Avoid_: execution-duration timeout, expiry as isolation revocation
+
 **Placement Capability Lease**:
 The non-serializable receiver-minted frame-lifetime authority proving that one
 placement admitted and pinned the complete verified Teardown Capability Closure
-before execution began. Admission failure is DefinitelyNotExecuted. Same-host
-deoptimization retains the lease; cross-placement migration must mint a
-destination lease before transferring ownership. Cached empty closures erase,
-while provider-dependent frames retain only a pinned resolved-binding reference.
+before execution began. Call Entry Commit mints it by consuming an Admission
+Lease; same-host deoptimization retains it, and cross-placement migration must
+mint a destination lease before transferring ownership. Cached empty closures
+erase, while provider-dependent frames retain only a pinned resolved-binding
+reference.
 _Avoid_: capability lookup during unwind, migrate then validate, policy as lease
 
 **Equivalent Finalization Realization**:
@@ -1281,11 +1523,17 @@ _Avoid_: snapshotting a socket, defaulting cleanup state on restore
 
 **Transparent Placement**:
 An execution-placement policy that preserves a function's declared parameter
-and return types. `@remote` returns the target's declared `R`; transport,
-protocol, permission, and receiver failures leave through the VM's non-returning
-runtime failure channel rather than becoming an implicit `Result` value.
-Recoverable remote failure is requested explicitly with `remote::call` or
-an ordinary task spawned from it.
+and return types. `@remote` returns the target's declared `R`; its
+`Remote(ResolvedProviderIdentity)`/`Suspend` effects and exhaustive remote
+outcomes are added to the effective callable contract before callers check.
+Completion yields `R`;
+settled remote failure leaves through `Evaluation::Failed`, and confirmed
+cancellation through `Evaluation::Cancelled`. OutcomeUnknown retains
+inaccessible escrow and a linear Recovery Obligation: execution remains
+suspended/recovery-pending, or terminates only after a durable supervisor
+accepts that obligation and cleanup evidence records the transfer. Caller code
+never resumes from uncertainty with owners speculatively restored. Recoverable
+remote failure is requested explicitly with `remote::call`.
 _Avoid_: implicit remote Result, typed remote exception
 
 ## Evaluation
@@ -1311,8 +1559,10 @@ independently verified caller and callee Region Teardown Plans compose. It binds
 receiver invocation mode, exact parameter and capture types and carriers,
 Inline/Own/shared-borrow/exclusive-borrow boundary roles, owned or provenance-
 bearing reborrowed return disposition, exhaustive evaluator outcomes, and the
-effect contract. Slot layout, move-versus-clone lowering, inlining, and retain or
-release elision are not part of this ABI.
+effective contract. Annotation contract elaboration contributes its effects,
+outcomes, ownership, and lifecycle requirements before this ABI freezes and
+before callers check. Slot layout, move-versus-clone lowering, inlining, and
+retain or release elision are not part of this ABI.
 _Avoid_: callee plan as implicit call contract, pass flags without outcomes
 
 **Call Entry Commit**:
@@ -1492,34 +1742,40 @@ the canonical payload or content reference, ownership roles and ranks, exact
 lifecycle state, and a durable receiver recovery owner. That receipt lets the
 sender release its escrow carriers without semantic finalization; only a
 durable fenced `RejectedBeforeCommit` receipt proving that the same transfer can
-never commit permits restoration. Retries reuse the identical TransferId and
-payload. Owned results mirror the same recoverable escrow/acceptance transaction
-in reverse. Cross-placement continuation migration first durably prepares an
-inaccessible destination candidate, then fences the source, atomically activates
-the destination owners and continuation with their existing semantic ranks, and
-only then publishes its receipt. A crash between steps leaves either the source
-authoritative or a fenced-source recovery transaction able to activate the
-prepared candidate, never two live semantic owners. Direct local calls contain
-no transfer journal, serialization, or receipt machinery.
+never commit permits restoration. Transport retransmission of the same attempt
+reuses its identical `TransferId` and payload. A semantic retry stays in the
+same Recovery Episode but uses a fresh `AttemptId`, fresh `TransferId`, and new
+admission. Before Retry Commit, the prior attempt's inaccessible escrow and
+Recovery Obligation must be settled or atomically transferred to the new
+transaction; ownership is never duplicated. Owned results mirror the same
+recoverable escrow/acceptance transaction in reverse. Cross-placement
+continuation migration first durably prepares an inaccessible destination
+candidate, then fences the source, atomically activates the destination owners
+and continuation with their existing semantic ranks, and only then publishes
+its receipt. A crash between steps leaves either the source authoritative or a
+fenced-source recovery transaction able to activate the prepared candidate,
+never two live semantic owners. Direct local calls contain no transfer journal,
+serialization, or receipt machinery.
 _Avoid_: serialized pointer ownership, delivery acknowledgement transfers owner
 
 **Permanent Remote Ownership Uncertainty**:
 The fail-closed state when neither durable acceptance nor fenced pre-commit
 rejection can be established for a Remote Ownership Transaction. Timeout,
 partition, disconnect, missing response, or sender restart never restores moved
-owners. Escrow and its affine Recovery Obligation remain quarantined under a
+owners. Escrow and its linear Recovery Obligation remain quarantined under a
 durable supervisor by default; a host or provider may discharge them only
 through explicit typed revocation or loss/fault evidence, which never
 resurrects the sender's original owners. Receiver deduplication either commits
 the same TransferId once or replays its recorded receipt.
-_Avoid_: timeout rolls back ownership, retry moved value under fresh identity
+_Avoid_: timeout rolls back ownership, semantic retry reuses a TransferId
 
 **RemoteError**:
-The recoverable Shape value returned in the `Err` arm of an explicit remote
-call. It is a record containing an orthogonal `RemoteErrorCause` and
+A recoverable Shape value describing a settled remote failure or confirmed
+non-execution. It contains an orthogonal `RemoteErrorCause` and
 `ExecutionCertainty`; it is not a flat enum whose variant name implies retry
-safety.
-_Avoid_: implicit certainty, cause-times-certainty variant matrix
+safety. OutcomeUnknown is a distinct `RemoteUncertainty` carrying inaccessible
+escrow and a linear Recovery Obligation, never a bare `RemoteError`.
+_Avoid_: implicit certainty, outcome-unknown as ordinary error
 
 **RemoteErrorCause**:
 A typed enum describing why a remote call failed, including transport,
@@ -1527,27 +1783,59 @@ protocol, permission, receiver, resource, and timeout causes. Cause payloads
 remain typed and do not encode execution certainty.
 _Avoid_: unstructured remote message, retry policy from cause alone
 
+**RemoteUncertainty**:
+The typed OutcomeUnknown observation for an explicit remote call. It records
+the failure cause and attempt/transfer identity while inaccessible owned inputs
+remain in escrow, and it is inseparable from the linear Recovery Obligation
+that must be settled, returned, or durably transferred.
+_Avoid_: uncertainty bit without obligation, restoring escrow on timeout
+
+**RemoteCallOutcome**:
+The recoverable Shape algebra
+`Completed(R) | Failed(RemoteError) |
+Uncertain(RemoteUncertainty, RecoveryObligation)`. Only the uncertain variant
+owns unresolved external state. A task cancellation remains the distinct
+evaluator cancellation outcome rather than a fabricated Shape error value.
+_Avoid_: unconditional `Result<R, RemoteError>`, cancellation as remote error
+
+**RemoteOutcome**:
+The internal exhaustive result of Remote Dispatch:
+`Completed(R)`, settled `Failed`, confirmed `Cancelled`,
+`DefinitelyNotExecuted` with a rejection proof, or `OutcomeUnknown` with
+inaccessible escrow and a linear Recovery Obligation. Public remote surfaces
+are total projections of this algebra and may not discard a variant.
+_Avoid_: transport bool, outcome reconstructed from error text
+
 **Remote Dispatch**:
 The single internal execution pipeline shared by `@remote` and the async
 `remote::call`. It owns permission checks, serialization, content-addressed
 transfer, delivery classification, deadlines, cancellation, receiver execution,
-and response validation, and produces a structured `RemoteOutcome<R>`.
+and response validation. Its `RemoteOutcome<R>` distinguishes completion,
+settled failure, confirmed cancellation, DefinitelyNotExecuted with a rejection
+proof, and OutcomeUnknown carrying inaccessible escrow plus a linear Recovery
+Obligation.
 _Avoid_: separate raising and Result dispatch implementations
 
 **Remote Call Surface**:
 The ordinary variadic typed syntax of the single async recoverable primitive
 `remote::call`. The compiler validates arguments against the target signature
-and lowers them to `ArgumentPack<Sig>`; `await remote::call(...)` produces
-`Result<R, RemoteError>`, while ordinary `spawn`, scopes, races, and joins supply
-concurrency and cancellation.
+and lowers the resolved callable authority and arguments through the same
+`PortableContinuationArtifact<Sig>`/`ArgumentPack<Sig>` path;
+`await remote::call(...)` produces
+`RemoteCallOutcome<R> = Completed(R) | Failed(RemoteError) |
+Uncertain(RemoteUncertainty, RecoveryObligation)`. A `Result<R, RemoteError>`
+projection exists only for a restricted contract that proves uncertainty
+impossible or after an explicit settlement/obligation transfer. Ordinary
+`spawn`, scopes, races, and joins supply concurrency and cancellation.
 _Avoid_: user-built `_0` records, mandatory ArgumentPack at ordinary call sites
 
 **Remote Projection**:
 A thin boundary mapping from `RemoteOutcome<R>` to a public surface. The
-transparent projection completes with `R` or produces evaluator
-`Failed(RuntimeFailure::Remote)`; the recoverable projection completes with
-`Result<R, RemoteError>`.
-_Avoid_: duplicating dispatch semantics in each public API
+transparent projection completes with `R`, produces a settled evaluator
+failure/cancellation, or retains/transfers a linear Recovery Obligation. The
+recoverable projection completes with `RemoteCallOutcome<R>`. Neither may
+collapse OutcomeUnknown into an evidence-free failure or `Result::Err`.
+_Avoid_: duplicating dispatch semantics, discarding uncertainty evidence
 
 **Remoting Provider**:
 A nominal execution-provider capability that owns discovery, routing,
@@ -1690,18 +1978,102 @@ _Avoid_: restoring a live provider pointer, silent provider substitution
 
 **`@remote` Annotation**:
 An ordinary typed Shape annotation defined in the stdlib. The compiler knows
-the generic annotation protocol, signature-indexed hook types, and remote
-intrinsics, but does not special-case the `remote` annotation name. Annotation
-specialization happens at compile time; distributed execution happens at
-runtime through `Remote Dispatch`. Its core configuration is exactly one
-`Placement<P>` plus provider-neutral `RemoteCallOptions`; it has no string,
-host-list, raw destination, or provider-selection overload. It preserves the
-target's parameters and `R` while adding explicit `Remote<P>` and `Suspend`
-effects to the frozen callable signature.
+Annotation Elaboration, signature-indexed `ArgumentPack`/`Next` types, and
+resolved general remote primitives, but does not special-case the `remote`
+annotation name. Its Callable Transform consumes the exact next-inner
+`Next<Sig>` into a `PortableContinuationArtifact<Sig>`, admits that artifact at
+the chosen placement to obtain `AdmittedExecution<Sig, P>`, and dispatches it
+with `ArgumentPack<Sig>` through the single Remote Dispatch contract.
+Annotation contract elaboration adds explicit
+`Remote(ResolvedProviderIdentity)` and `Suspend` effects and exhaustive remote
+outcomes before the effective callable contract freezes; distributed execution
+happens at runtime. Its core configuration is exactly one `Placement<P>` plus
+provider-neutral `RemoteCallOptions`; it has no string, host-list, raw
+destination, or provider-selection overload. It preserves the target's
+parameters and `R`.
 _Avoid_: compiler-builtin `@remote`, source macro that implements networking
 
 **Remote Effect**:
-The callable effect `Remote<P>` identifying distributed execution through
-provider `P`. It composes with `Suspend`, cleanup, and other effect rows and
-cannot be erased by an annotation or higher-order conversion.
+The callable effect `Remote(ResolvedProviderIdentity)` identifying distributed
+execution through one exact resolved provider. It composes with `Suspend`,
+cleanup, and other effect rows and cannot be erased by an annotation or
+higher-order conversion.
 _Avoid_: hidden network effect, remote call in a pure synchronous context
+
+## Public Documentation
+
+**Public Feature**:
+Any user-observable language, standard-library, tooling, execution, or operator
+behavior recorded as planned, experimental, public, deprecated, or removed.
+Public/deprecated features require all required runnable modes; experimental
+features require declared supported modes plus negative limits; planned
+features are not presented as current; removed features retain migration or
+rejection evidence. Status moves forward only:
+planned→experimental→public→deprecated→removed, with reviewed forward shortcuts.
+Bootstrap status is evidence-derived; ambiguity blocks, and previously current
+or broken behavior cannot be demoted to planned.
+_Avoid_: implemented symbol as feature inventory, backward status demotion
+
+**Feature Documentation Obligation**:
+The requirement that a Public Feature's user model, contracts, outcomes,
+diagnostics, operations, and executable examples land with the feature itself.
+The feature cannot become current while that obligation remains open.
+_Avoid_: docs-later acceptance, capstone as documentation owner
+
+**Public Feature Manifest**:
+The Shape-owned complete inventory of Public Features and the semantic
+dimensions each one requires the Book to cover. It points to semantic authority
+without duplicating that authority. Its feature identities are permanent;
+identity changes use total tombstone/replacement mappings. Exact source
+revisions and mutable verification state live only in external pair evidence.
+_Avoid_: Book page list as feature denominator, manifest-local current SHA
+
+**Book Coverage Manifest**:
+The Book-owned mapping from every Public Feature to stable sections, executable
+examples, covered semantic dimensions, and justified illustrative material.
+Feature, section, and fence identities are never reused; schema-major changes
+carry complete total identity migration maps. It contains no current Shape or
+shape-web revision/hash; external candidate reports and attestation own those
+facts.
+_Avoid_: page count as coverage, self-referential last-verified revision
+
+**Manifest Expansion Wave**:
+A user-ratified, finite ticket owning exact committed inventory rows. The
+inventory remains open until all wave and capstone native edges match their
+ticket bodies and a tracker re-fetch proves complete one-owner coverage.
+_Avoid_: family name as ready ticket, all-remaining migration
+
+**Distributed Documentation Matrix**:
+The mandatory coverage of invocation, effects, admission, certainty, ownership,
+retry, recovery, cleanup, persistence, compatibility, security, observability,
+operations, and degraded modes for every applicable distributed feature.
+_Avoid_: remote happy-path guide as complete documentation
+
+**Book Truth Gate**:
+The cross-repository verifier that binds exact Shape and Book revisions, checks
+complete feature-to-coverage mapping, and executes every gated example in every
+declared mode. `BOOK-PAIR-PROMOTE` establishes it as the explicit prerequisite
+for #90 and later public-feature tickets.
+_Avoid_: curated snippet subset, uncommitted harness result, VM result relabeled JIT
+
+**Pair Candidate**:
+An immutable external record naming the exact Shape/shape-web revisions and
+evidence inputs both Book Truth Gate adapters must verify. It is not a
+reciprocal SHA file committed into either named revision.
+_Avoid_: moving counterpart branch, self-referential revision pin
+
+**Pair Attestation**:
+The signed, content-addressed external record binding one Pair Candidate to both
+adapter reports and their content identities. It is immutable evidence and has
+no promotion generation; source reverts form a new candidate pair.
+_Avoid_: mutable attestation, acceptance pointer embedded in source
+
+**Accepted Pair Transition**:
+The signed, content-addressed external record that monotonically selects one
+Pair Attestation as current. It names its generation, expected predecessor,
+selected attestation, promote/rollback action, actor, reason, policy, and nonce.
+Protected-pointer compare-and-swap and an append-only audit make it the sole
+current-pair authority. Rollback creates a higher-generation transition
+selecting an older valid attestation; repository branches remain staging and
+history.
+_Avoid_: backward generation, unaudited pointer rewind, source branch as pair authority

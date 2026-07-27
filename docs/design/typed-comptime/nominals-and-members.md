@@ -2,6 +2,11 @@
 
 [Back to the typed comptime overview](../typed-comptime.md) | [Previous: Values, Types, And Evidence](values-types-and-evidence.md) | [Next: Annotations And Hooks](annotations-and-hooks.md)
 
+> **Architecture correction (2026-07-25).** ADR-011 and ADR-012 make resolved
+> typed clauses the only annotation target authority. The examples below use
+> exact nominal targets; no parallel `targets` registry or universal type target
+> is implied.
+
 > **Implementation status (ADR009-B5, Dec 55-58): CURRENT / VM+JIT+LSP.**
 > The sealed `NominalShape` (`Struct`/`Enum`/`Newtype`/`Opaque`),
 > `FieldDescriptor<Owner, #f, T>` / `VariantDescriptor` /
@@ -89,10 +94,8 @@ context-dependent partial representation.
 
 ```shape
 annotation derive_json() {
-    targets: [type]
-
     comptime expand<T>(
-        target: TypeTarget<T>,
+        target: NominalTarget<T>,
         access: RepresentationAccess<T>,
         ctx: ComptimeContext,
     ) {

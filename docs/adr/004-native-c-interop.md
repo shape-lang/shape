@@ -4,6 +4,11 @@
 
 Accepted (2026-02-25)
 
+Clarified by ADR-006 and ADR-011 (2026-07-25): foreign names remain legitimate
+external linkage data, but Shape definitions, conversions, value carriers, and
+typed import contracts are selected by resolved identity and exact signature
+rather than naming convention.
+
 ## Context
 
 Shape currently relies on the `cffi` extension path for C library access. That
@@ -72,7 +77,8 @@ At call time:
 
 - args are marshaled directly to C ABI memory layout
 - call executes via prepared `Cif` + code pointer
-- return is decoded directly to `NanBoxed`
+- return is decoded directly to the exact ADR-006 typed
+  `KindedSlot`/native carrier declared by the resolved foreign signature
 - no msgpack bridge on native path
 
 ### 4.1 Out-parameter support in core
@@ -125,26 +131,30 @@ interop:
 - pointer-backed field access by offset; no implicit object materialization
 - explicit `to_object()` (or equivalent) for copy-on-demand conversion
 
-Companion object conversion is compiler-generated (no annotations) when naming
-matches one of:
+Companion object conversion is generated only from an explicit typed
+relationship between the exact C-layout type and exact Shape nominal type.
+Accepted surfaces include an explicit `derive`/representation declaration or
+ordinary resolved `From`/`Into` implementations; the final spelling is defined
+with that language surface. The compiler verifies compatible fields, types,
+ownership, and layout before issuing the conversion.
 
-- `type C FooC` + `type Foo`
-- `type C CFoo` + `type Foo`
-- `type C FooLayout` + `type Foo`
-
-For compatible field sets/types, the compiler auto-registers `From`/`Into` in
-both directions.
+Names such as `FooC`, `CFoo`, and `FooLayout` are presentation conventions
+only. They never auto-register behavior. Import aliases preserve an explicit
+conversion relationship, while a same-spelled local type gains none.
 
 ### 6.1 Arrow C import contract for `Table<T>`
 
 Core imports Arrow C pointers through:
 
 - `__native_table_from_arrow_c(schema_ptr, array_ptr) -> Result<Table<any>, AnyError>`
-- `__native_table_from_arrow_c_typed<T>(schema_ptr, array_ptr, type_name) -> Result<Table<T>, AnyError>`
-- `__native_table_bind_type<T>(table, type_name) -> Result<Table<T>, AnyError>`
+- `__native_table_from_arrow_c_typed<T>(schema_ptr, array_ptr, schema: ForeignSchema<T>) -> Result<Table<T>, AnyError>`
+- `__native_table_bind_type<T>(table, schema: ForeignSchema<T>) -> Result<Table<T>, AnyError>`
 
-The typed path validates runtime Arrow schema against the requested row type
-name and returns `Result::Err` on mismatch.
+The typed path validates the runtime Arrow schema against a compiler-issued
+exact schema/layout descriptor bound to resolved `T` and returns `Result::Err`
+on mismatch. A schema name may appear in diagnostics but is never the oracle.
+The `Table<any>` entry point is an explicitly erased dynamic surface and cannot
+be used as the implementation of the typed path.
 
 ### 7. `Vec<byte>` as canonical raw buffer
 

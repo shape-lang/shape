@@ -1,0 +1,408 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://shape-lang.org/schemas/adr011-012-program-manifest.v1.schema.json",
+  "title": "ADR-011–016 staged program manifest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "$schema", "manifest_version", "program_id", "status", "claims",
+    "authority_catalog", "publication", "standing_rules", "invariants",
+    "external_dependencies", "entries", "expansion_templates",
+    "conditional_edge_removals", "ratification_forks"
+  ],
+  "properties": {
+    "$schema": {"const": "./program-manifest.schema.json"},
+    "manifest_version": {"const": 1},
+    "program_id": {"const": "adr011-012"},
+    "status": {
+      "enum": [
+        "draft-awaiting-ratification", "ratified-unpublished", "published",
+        "implementing", "complete"
+      ]
+    },
+    "claims": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["tracker_published", "implementation_started", "evidence_complete"],
+      "properties": {
+        "tracker_published": {"type": "boolean"},
+        "implementation_started": {"type": "boolean"},
+        "evidence_complete": {"type": "boolean"}
+      }
+    },
+    "authority_catalog": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["adrs", "rulings"],
+      "properties": {
+        "adrs": {
+          "type": "array", "minItems": 6, "maxItems": 6, "uniqueItems": true,
+          "items": {"$ref": "#/$defs/adrRef"}
+        },
+        "rulings": {
+          "type": "array", "minItems": 20, "maxItems": 20, "uniqueItems": true,
+          "items": {"$ref": "#/$defs/rulingRef"}
+        }
+      }
+    },
+    "publication": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "stage", "publish_now_entry_count", "final_entry_count_formula",
+        "template_state", "ready_authority", "atomic_expansion_protocol"
+      ],
+      "properties": {
+        "stage": {"const": "bootstrap-and-inventory"},
+        "publish_now_entry_count": {"const": 89},
+        "final_entry_count_formula": {"const": "93+C+D+T+L+I+P+B"},
+        "template_state": {"const": "not-github-issues"},
+        "ready_authority": {"const": "complete-body-plus-native-blockers"},
+        "atomic_expansion_protocol": {
+          "type": "array", "minItems": 8, "uniqueItems": true,
+          "items": {"type": "string", "minLength": 1}
+        }
+      }
+    },
+    "standing_rules": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["public_behavior_book_gate", "native_execution_witness"],
+      "properties": {
+        "public_behavior_book_gate": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "enabled", "bootstrap_ticket_id", "explicit_blocked_entry_ids",
+            "dependency_mode", "same_slice_obligations", "gap_policy",
+            "pair_promotion_protocol", "status_lifecycle",
+            "identity_migration"
+          ],
+          "properties": {
+            "enabled": {"const": true},
+            "bootstrap_ticket_id": {"const": "BOOK-PAIR-PROMOTE"},
+            "explicit_blocked_entry_ids": {
+              "type": "array", "minItems": 1, "uniqueItems": true,
+              "items": {"$ref": "#/$defs/ticketRef"}
+            },
+            "dependency_mode": {"const": "explicit-native-bootstrap-blocker"},
+            "same_slice_obligations": {
+              "type": "array", "minItems": 1, "uniqueItems": true,
+              "items": {"type": "string", "minLength": 1}
+            },
+            "gap_policy": {"type": "string", "minLength": 1},
+            "pair_promotion_protocol": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "candidate_identity", "attestation_identity", "storage",
+                "source_manifests_carry_exact_revisions",
+                "exact_revision_authority", "transition_identity",
+                "attestation_owns_transition_generation",
+                "accepted_pair_pointer", "accepted_pair_authority",
+                "source_refs_are_pair_authority", "reciprocal_source_pins",
+                "rollback"
+              ],
+              "properties": {
+                "candidate_identity": {"const": "canonical-content-digest"},
+                "attestation_identity": {"const": "signed-content-digest"},
+                "storage": {"const": "protected-external-coordination-object"},
+                "source_manifests_carry_exact_revisions": {"const": false},
+                "exact_revision_authority": {"const": "external-candidate-reports-and-attestation"},
+                "transition_identity": {"const": "signed-monotone-cas-record"},
+                "attestation_owns_transition_generation": {"const": false},
+                "accepted_pair_pointer": {"const": "cas-to-signed-transition"},
+                "accepted_pair_authority": {"const": "selected-signed-transition"},
+                "source_refs_are_pair_authority": {"const": false},
+                "reciprocal_source_pins": {"const": false},
+                "rollback": {"const": "new-higher-generation-transition-selecting-prior-attestation"}
+              }
+            },
+            "status_lifecycle": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "ordered_states", "bootstrap_source", "backward_demotion",
+                "ambiguous_status", "broken_current", "material_restart"
+              ],
+              "properties": {
+                "ordered_states": {
+                  "type": "array", "minItems": 5, "maxItems": 5,
+                  "items": {"enum": ["planned", "experimental", "public", "deprecated", "removed"]}
+                },
+                "bootstrap_source": {"const": "mechanically-derived-source-book-release-authority"},
+                "backward_demotion": {"const": false},
+                "ambiguous_status": {"const": "blocking-status-audit-gap"},
+                "broken_current": {"const": "retain-status-and-owner-until-repair-or-forward-removal"},
+                "material_restart": {"const": "new-id-with-old-id-tombstone"}
+              }
+            },
+            "identity_migration": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "domains", "prior_identity", "total_dispositions",
+                "replacement_policy", "tombstones", "negative_mutations"
+              ],
+              "properties": {
+                "domains": {
+                  "type": "array", "minItems": 3, "maxItems": 3, "uniqueItems": true,
+                  "items": {"enum": ["feature", "section", "fence"]}
+                },
+                "prior_identity": {"const": "schema-and-content-digest"},
+                "total_dispositions": {"const": "unchanged-replaced-or-removed"},
+                "replacement_policy": {"const": "injective-unless-explicit-reviewed-merge"},
+                "tombstones": {"const": "required-for-all-three-domains"},
+                "negative_mutations": {"const": "omission-reuse-split-merge-and-old-coverage-reattachment"}
+              }
+            }
+          }
+        },
+        "native_execution_witness": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["enabled", "witness_ticket_id", "scope"],
+          "properties": {
+            "enabled": {"const": true},
+            "witness_ticket_id": {"const": "NATIVE-WITNESS"},
+            "scope": {"type": "string", "minLength": 1}
+          }
+        }
+      }
+    },
+    "invariants": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "expected_entry_count", "final_entry_count_formula", "initial_frontier",
+        "preserved_existing_issues", "authority_baseline_ticket",
+        "migration_inventory_tickets", "migration_guard_ticket",
+        "authority_close_ticket", "book_bootstrap_ticket", "program_capstone",
+        "effect_proof_ticket", "capability_proof_ticket",
+        "around_native_close_ticket", "artifact_codec_ticket",
+        "artifact_storage_adapter_ticket", "wire_v3_ticket",
+        "journal_core_ticket", "journal_dispatch_ready_ticket",
+        "journal_ops_ticket", "journal_capstone_ticket",
+        "remote_dispatch_ticket", "recovery_lifecycle_ticket",
+        "snapshot_v8_ticket", "stabilized_runtime_predecessors",
+        "intrinsic_inventory_ticket", "intrinsic_close_target",
+        "intrinsic_unrelated_non_blocker", "retry_identity"
+      ],
+      "properties": {
+        "expected_entry_count": {"const": 89},
+        "final_entry_count_formula": {"const": "93+C+D+T+L+I+P+B"},
+        "initial_frontier": {
+          "type": "array", "minItems": 1, "maxItems": 1,
+          "items": {"const": "AUTHORITY-BASELINE"}
+        },
+        "preserved_existing_issues": {
+          "type": "array", "minItems": 1, "maxItems": 1,
+          "items": {"const": "#93"}
+        },
+        "authority_baseline_ticket": {"const": "AUTHORITY-BASELINE"},
+        "migration_inventory_tickets": {
+          "type": "array", "minItems": 3, "maxItems": 3, "uniqueItems": true,
+          "items": {"$ref": "#/$defs/ticketRef"}
+        },
+        "migration_guard_ticket": {"const": "MIGRATION-GUARD"},
+        "authority_close_ticket": {"const": "#90"},
+        "book_bootstrap_ticket": {"const": "BOOK-PAIR-PROMOTE"},
+        "program_capstone": {"const": "#23"},
+        "effect_proof_ticket": {"const": "EFFECT-MIR-PROOF"},
+        "capability_proof_ticket": {"const": "CAPABILITY-PROOF-BASE"},
+        "around_native_close_ticket": {"const": "AROUND-NATIVE-CLOSE"},
+        "artifact_codec_ticket": {"const": "#101"},
+        "artifact_storage_adapter_ticket": {"const": "VERIFIED-ARTIFACT-PERSISTENCE"},
+        "wire_v3_ticket": {"const": "WIRE-V3-ENVELOPE"},
+        "journal_core_ticket": {"const": "JOURNAL-CORE"},
+        "journal_dispatch_ready_ticket": {"const": "JOURNAL-HARDENING"},
+        "journal_ops_ticket": {"const": "JOURNAL-OPS"},
+        "journal_capstone_ticket": {"const": "JOURNAL-CAPSTONE"},
+        "remote_dispatch_ticket": {"const": "#102"},
+        "recovery_lifecycle_ticket": {"const": "SUPERVISOR-RECOVERY-LIFECYCLE"},
+        "snapshot_v8_ticket": {"const": "#104"},
+        "stabilized_runtime_predecessors": {
+          "type": "array", "minItems": 5, "uniqueItems": true,
+          "items": {"$ref": "#/$defs/ticketRef"}
+        },
+        "intrinsic_inventory_ticket": {"const": "INTRINSIC-INVENTORY"},
+        "intrinsic_close_target": {"const": "#23"},
+        "intrinsic_unrelated_non_blocker": {"const": "#110"},
+        "retry_identity": {"$ref": "#/$defs/retryIdentity"}
+      }
+    },
+    "external_dependencies": {
+      "type": "array", "minItems": 2, "maxItems": 2, "uniqueItems": true,
+      "items": {"$ref": "#/$defs/externalDependency"}
+    },
+    "entries": {
+      "type": "array", "minItems": 89, "maxItems": 89,
+      "items": {"$ref": "#/$defs/entry"}
+    },
+    "expansion_templates": {
+      "type": "array", "minItems": 7, "maxItems": 7, "uniqueItems": true,
+      "items": {"$ref": "#/$defs/expansionTemplate"}
+    },
+    "conditional_edge_removals": {
+      "type": "array", "minItems": 5, "maxItems": 5, "uniqueItems": true,
+      "items": {"$ref": "#/$defs/edgeRemoval"}
+    },
+    "ratification_forks": {
+      "type": "array", "minItems": 1, "maxItems": 5, "uniqueItems": true,
+      "items": {"$ref": "#/$defs/ratificationFork"}
+    }
+  },
+  "$defs": {
+    "issueRef": {"type": "string", "pattern": "^#[1-9][0-9]*$"},
+    "symbolicRef": {"type": "string", "pattern": "^[A-Z][A-Z0-9]*(?:-[A-Z0-9]+)*$"},
+    "ticketRef": {
+      "oneOf": [{"$ref": "#/$defs/issueRef"}, {"$ref": "#/$defs/symbolicRef"}]
+    },
+    "adrRef": {"type": "string", "pattern": "^ADR-01[1-6]$"},
+    "rulingRef": {"type": "string", "pattern": "^R(?:[1-9]|1[0-9]|20)$"},
+    "authorityOwnership": {
+      "type": "object", "additionalProperties": false,
+      "required": ["adrs", "rulings"],
+      "properties": {
+        "adrs": {
+          "type": "array", "minItems": 1, "uniqueItems": true,
+          "items": {"$ref": "#/$defs/adrRef"}
+        },
+        "rulings": {
+          "type": "array", "minItems": 1, "uniqueItems": true,
+          "items": {"$ref": "#/$defs/rulingRef"}
+        }
+      }
+    },
+    "retryIdentity": {
+      "type": "object", "additionalProperties": false,
+      "required": [
+        "recovery_episode_ticket", "retry_commit_ticket",
+        "remote_dispatch_ticket", "authority", "same_recovery_episode",
+        "fresh_attempt_id_and_next_on_retry", "fresh_transfer_and_admission_on_retry",
+        "same_transfer_only_for_same_attempt_retransmission",
+        "prior_escrow_before_retry_commit"
+      ],
+      "properties": {
+        "recovery_episode_ticket": {"const": "#99"},
+        "retry_commit_ticket": {"const": "#100"},
+        "remote_dispatch_ticket": {"const": "#102"},
+        "authority": {"$ref": "#/$defs/authorityOwnership"},
+        "same_recovery_episode": {"const": true},
+        "fresh_attempt_id_and_next_on_retry": {"const": true},
+        "fresh_transfer_and_admission_on_retry": {"const": true},
+        "same_transfer_only_for_same_attempt_retransmission": {"const": true},
+        "prior_escrow_before_retry_commit": {"const": "settled-or-atomically-transferred"}
+      }
+    },
+    "entry": {
+      "type": "object", "additionalProperties": false,
+      "required": [
+        "ordinal", "id", "kind", "disposition", "title", "blocked_by",
+        "authority", "delivers"
+      ],
+      "properties": {
+        "ordinal": {"type": "integer", "minimum": 1, "maximum": 89},
+        "id": {"$ref": "#/$defs/ticketRef"},
+        "kind": {"enum": ["existing-issue", "new-ticket"]},
+        "disposition": {"enum": ["amend", "preserve", "new"]},
+        "title": {"type": "string", "minLength": 1},
+        "blocked_by": {
+          "type": "array", "uniqueItems": true,
+          "items": {"$ref": "#/$defs/ticketRef"}
+        },
+        "authority": {"$ref": "#/$defs/authorityOwnership"},
+        "delivers": {"type": "string", "minLength": 1}
+      }
+    },
+    "externalDependency": {
+      "type": "object", "additionalProperties": false,
+      "required": ["id", "role", "blocked_by"],
+      "properties": {
+        "id": {"$ref": "#/$defs/issueRef"},
+        "role": {"type": "string", "minLength": 1},
+        "blocked_by": {
+          "type": "array", "uniqueItems": true,
+          "items": {"$ref": "#/$defs/ticketRef"}
+        }
+      }
+    },
+    "expansionTemplate": {
+      "type": "object", "additionalProperties": false,
+      "required": [
+        "id", "issue_pattern", "count_variable", "inventory_ticket",
+        "capstone_ticket", "current_placeholder_targets", "state",
+        "partition_rule", "child_blocked_by_inventory",
+        "materialize_before_inventory_close"
+      ],
+      "properties": {
+        "id": {"$ref": "#/$defs/symbolicRef"},
+        "issue_pattern": {"type": "string", "pattern": "^[A-Z][A-Z0-9-]*-\\*$"},
+        "count_variable": {"enum": ["C", "D", "T", "L", "I", "P", "B"]},
+        "inventory_ticket": {"$ref": "#/$defs/ticketRef"},
+        "capstone_ticket": {"$ref": "#/$defs/ticketRef"},
+        "current_placeholder_targets": {
+          "type": "array", "minItems": 1, "uniqueItems": true,
+          "items": {"$ref": "#/$defs/ticketRef"}
+        },
+        "state": {"const": "not-a-github-issue"},
+        "partition_rule": {"type": "string", "minLength": 1},
+        "child_blocked_by_inventory": {"const": true},
+        "materialize_before_inventory_close": {"const": true}
+      }
+    },
+    "edge": {
+      "type": "object", "additionalProperties": false,
+      "required": ["blocker", "blocked"],
+      "properties": {
+        "blocker": {"$ref": "#/$defs/ticketRef"},
+        "blocked": {"$ref": "#/$defs/ticketRef"}
+      }
+    },
+    "edgeRemoval": {
+      "type": "object", "additionalProperties": false,
+      "required": [
+        "id", "transition", "remove_edges", "replacement_paths",
+        "retain_edges", "conditions"
+      ],
+      "properties": {
+        "id": {"$ref": "#/$defs/symbolicRef"},
+        "transition": {
+          "enum": [
+            "remove-on-publication-after-replacements",
+            "retain-until-future-supersession"
+          ]
+        },
+        "remove_edges": {
+          "type": "array", "minItems": 1, "uniqueItems": true,
+          "items": {"$ref": "#/$defs/edge"}
+        },
+        "replacement_paths": {
+          "type": "array", "uniqueItems": true,
+          "items": {
+            "type": "array", "minItems": 2,
+            "items": {"$ref": "#/$defs/ticketRef"}
+          }
+        },
+        "retain_edges": {
+          "type": "array", "uniqueItems": true,
+          "items": {"$ref": "#/$defs/edge"}
+        },
+        "conditions": {
+          "type": "array", "minItems": 1, "uniqueItems": true,
+          "items": {"type": "string", "minLength": 1}
+        }
+      }
+    },
+    "ratificationFork": {
+      "type": "object", "additionalProperties": false,
+      "required": ["id", "status", "question", "recommended"],
+      "properties": {
+        "id": {"$ref": "#/$defs/symbolicRef"},
+        "status": {"const": "awaiting-ratification"},
+        "question": {"type": "string", "minLength": 1},
+        "recommended": {"type": "string", "minLength": 1}
+      }
+    }
+  }
+}

@@ -4,6 +4,12 @@
 
 Accepted (2026-05-08)
 
+Clarified by ADR-003, ADR-011, and ADR-012 (2026-07-25) for resolved method
+identity, explicit identity classes, foreign signatures, and typed remote
+execution. The dated implementation amendments below remain historical
+evidence where those later ADRs supersede their name- or string-selected
+mechanisms.
+
 Supersedes ADR-005 in scope. ADR-005's "single-discriminator discipline"
 principle is preserved verbatim and extended; ADR-005's `from_typed_array(Arc<TypedArrayData>)`-
 style typed-pointer examples are corrected to match the actual `HeapValue`
@@ -6163,6 +6169,16 @@ Binding for Phase 2d onward.
 
 #### 2.7.27 Method-mutation semantics — `&mut self` opt-in with compile-time Arc-COW write-back (Item 4 ruling, W17-mutation-writeback, 2026-05-12)
 
+**Architecture correction (ADR-003 + ADR-011, 2026-07-25).** The observable
+`&mut self` and write-back semantics in this section remain required, but
+registration-name `MUT_SELF_*` sets and method-name predicates are superseded
+as semantic authority. Receiver mode, mutation/write-back disposition,
+ownership, effects, and result shape belong to the resolved method's exact
+callable lifecycle contract. Static call lowering consumes that resolved
+method identity and contract; a same-spelled method cannot opt in, and an alias
+cannot opt out. The PHF sets described below are migration history to delete,
+not a registry to extend.
+
 Phase 2d Item 4 (handover §1 Item 4) surfaced that `let s = HashSet();
 s.add("a"); s.size()` returns 0 — the post-W16 method-call dispatch is
 functional-shaped (handlers return a new `Arc<HashSetData>` after
@@ -6699,6 +6715,17 @@ Binding for Phase 2d onward.
 
 #### 2.7.28 Typed module-export polymorphic-payload protocol — `transport.*` / `remote.*` kind-threaded rebuild (W17-typed-module-exports, Phase 2c R8-W2, 2026-05-23)
 
+**Typed-remote boundary correction (ADR-012, 2026-07-25).** This section
+remains the legacy/dynamic module-export adapter for explicitly polymorphic
+`transport.*` and `remote.*` calls. Its heterogeneous `Array<_>` input and
+`JsonValue` projection are not a valid substrate for typed annotation
+execution. `@remote` and other exact typed calls use
+`PortableContinuationArtifact<Sig>`, placement-bound
+`AdmittedExecution<Sig, P>`, `ArgumentPack<Sig>`, `ReturnOf<Sig>`, a typed
+provider contract, and the single certainty-preserving Remote Dispatch outcome
+model. No typed annotation may erase to this dynamic protocol and claim type
+preservation.
+
 Phase 1.B-vm's strict-typing bulldozer left two module-export crates
 on `phase_2c_stub` bodies: `crates/shape-vm/src/executor/builtins/
 transport_builtins.rs` (9 exports — `tcp` / `memoized` / `send` /
@@ -6902,6 +6929,13 @@ no-tcpstream-fallback) added in-wave.
 Code touchpoints carry a `// ADR-006 §2.7.28 W17-typed-module-exports
 2026-05-23` marker comment for grep visibility.
 #### 2.7.29 Foreign-function-call marshal kind-threaded — `foreign_marshal::{marshal_args, unmarshal_result}` typed-Arc payload protocol + fail-safe FFI version-mismatch (W17-foreign-ffi, Phase 2c R8-W2, 2026-05-23)
+
+**Resolved-signature correction (ADR-004 + ADR-011, 2026-07-25).** The
+declared type remains the sole incoming oracle, but it is carried as an exact
+resolved `ForeignSignature<Sig>` or equivalent return/schema descriptor.
+`return_type` text is transitional presentation data and must not select a
+constructor. A registry-local schema handle is permitted only after admission
+binds it to the canonical type/schema identity.
 
 Phase 1.B-vm's strict-typing bulldozer deleted the
 `foreign_marshal::marshal_args` / `unmarshal_result` bodies at
@@ -7524,6 +7558,15 @@ The owning share keeps the referent alive past lexical frame-pop (refcount ≥ 1
 - **`SchemaId = u32`** — a **derived, registry-local intern handle**, kept for hot paths (bytecode operands, JIT field offsets, IC keys) unchanged. It is minted **only** by `TypeSchemaRegistry::intern_content(content_id) -> SchemaId` (the `by_content: HashMap<SchemaContentId, SchemaId>` table): identical content id → same handle (structural dedup), distinct → distinct dense handle, independent of registration order. This is the blessed `StringId`-family interning relationship — a cache/index of the one canonical id, **not** a second discriminator (ADR-005 §1 preserved: `HeapValue` is the value discriminator; `SchemaId` is layout metadata on `TypedObject`). No code path assigns a handle except `intern_content`.
 
 **2.7.31.3 Decision — identity model (named-nominal / anonymous-structural).** The content hash folds in a 1-byte scheme-version tag (`SCHEMA_CONTENT_SCHEME_V0`, design §M4), then:
+
+**Identity-class correction (ADR-011, 2026-07-25).** The nominal-versus-
+structural class is explicit compiler-issued semantic data. A nominal schema
+hashes its stable resolved definition identity plus its exact structure; a
+structural schema hashes its structure. Source type names and generated-name
+prefixes are presentation/provenance only and never determine the class. The
+name/prefix rules below document the M1 implementation being replaced; changing
+the canonical preimage requires the corresponding schema/Execution ABI
+version change and migration.
 
 - **Named / branded** types (`type Foo {…}`, enums) fold the type NAME into the hash → **NOMINAL** identity: `type A {x,y}` and `type B {x,y}` are DISTINCT.
 - **Anonymous** types (object-literal / inline / merged / ad-hoc predeclared, name-prefixed `__inline_obj_` / `__merged_` / `__predecl_`, detected by `schema_name_is_anonymous`) omit the name → **STRUCTURAL** identity: two anonymous `{x:int, y:int}` share one id anywhere.
