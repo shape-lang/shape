@@ -229,13 +229,31 @@ impl<'a, 'b> MirToIR<'a, 'b> {
     /// match, which the W12 fall-through (`shape-jit/src/executor.rs:
     /// 170-194`) routes to the bytecode interpreter — VM == JIT.
     ///
-    /// **Conservatism.** A function-wide scan is over-conservative: a
-    /// `Move(slot)` in an unreachable arm or strictly AFTER the push site
-    /// in execution order would still trigger the deopt. The
-    /// conservatism is binding-compliant for v0.3 — over-deopt costs JIT
-    /// throughput, never correctness. A precise data-flow check is v0.4
-    /// territory (alongside the deeper MIR-lowering fix that would not
-    /// emit `Move` from still-live `let`-source bindings at all).
+    /// **Reachability (#189).** The scan used to be function-wide, which
+    /// the original doc called out as over-conservative: a `Move(slot)`
+    /// strictly AFTER the push site still triggered the deopt. That
+    /// conservatism was not free — it is what blocked `arr.map(|x| ..)`
+    /// from ever reaching the JIT, because the map desugaring pushes into
+    /// a result accumulator and then Moves it out, so the Move is always
+    /// after every push.
+    ///
+    /// The refusal is UNCHANGED for the shape it exists to prevent. What
+    /// changed is the question asked: not "does a Move of this slot exist
+    /// anywhere in the function" but "can a Move of this slot REACH this
+    /// push". A Move that cannot reach the push cannot null the slot
+    /// before it, so refusing on it protects nothing.
+    ///
+    /// `push_at` is the push site's `(block, statement index)` from
+    /// `current_stmt_position`. A Move at point P refuses iff:
+    ///   * P is in the push's block at a strictly earlier statement index; or
+    ///   * the push's block is reachable through CFG edges from P's block
+    ///     successors — which includes the back-edge case, so a Move later
+    ///     in a LOOP body still refuses (it reaches the push on the next
+    ///     iteration).
+    ///
+    /// `push_at == None` refuses on any Move, i.e. exactly the old
+    /// function-wide behaviour. Fail-closed: an unknown program point
+    /// never becomes a licence to proceed.
     ///
     /// **Operand coverage.** Scans `Rvalue::Use` / `Rvalue::Clone`
     /// operands, `Rvalue::BinaryOp` / `Rvalue::UnaryOp` operands,
@@ -244,51 +262,134 @@ impl<'a, 'b> MirToIR<'a, 'b> {
     /// operands, and `TerminatorKind::Call` `func` + `args` operands +
     /// `TerminatorKind::SwitchBool` `operand`. Other terminators
     /// (`Goto` / `Return` / `Unreachable`) carry no operands.
-    pub(crate) fn mir_has_prior_move_of_slot(&self, slot: SlotId) -> bool {
-        use shape_vm::mir::types::{Operand, Rvalue, StatementKind, TerminatorKind};
-        let matches_slot = |op: &Operand| -> bool {
-            matches!(
-                op,
-                Operand::Move(Place::Local(s)) | Operand::MoveExplicit(Place::Local(s))
-                    if *s == slot
-            )
+    pub(crate) fn mir_has_prior_move_of_slot(
+        &self,
+        slot: SlotId,
+        push_at: Option<(shape_vm::mir::types::BasicBlockId, usize)>,
+    ) -> bool {
+        move_of_slot_can_reach(self.mir, slot, push_at)
+    }
+}
+
+/// The #189 reachability analysis behind
+/// [`MirToIR::mir_has_prior_move_of_slot`], as a pure function over the MIR so
+/// it can be tested against hand-built control-flow graphs.
+///
+/// That testability is the point, not tidiness. The shape this refusal exists
+/// to prevent — a `Move` of the receiver slot reaching a later `.push()` — is
+/// currently rejected by the move checker ([B0005] "cannot use this value
+/// after it was moved") before it can reach the JIT, so it cannot be
+/// expressed as a Shape program. Without a direct test the refusal's TRUE
+/// positive would be unproven, and a narrowing with only false-positive
+/// evidence is how a soundness guard quietly stops guarding.
+pub(crate) fn move_of_slot_can_reach(
+    mir: &shape_vm::mir::types::MirFunction,
+    slot: SlotId,
+    push_at: Option<(shape_vm::mir::types::BasicBlockId, usize)>,
+) -> bool {
+    use shape_vm::mir::types::{Operand, Rvalue, StatementKind, TerminatorKind};
+
+    // Blocks from which the push site is reachable, computed once.
+    // `None` push point => every block counts (old behaviour).
+    let reaches_push = |from_block: shape_vm::mir::types::BasicBlockId| -> bool {
+        let Some((push_block, _)) = push_at else {
+            return true;
         };
-        let rvalue_has_move = |rv: &Rvalue| -> bool {
-            match rv {
-                Rvalue::Use(op) | Rvalue::Clone(op) | Rvalue::UnaryOp(_, op) => matches_slot(op),
-                Rvalue::BinaryOp(_, lhs, rhs) => matches_slot(lhs) || matches_slot(rhs),
-                Rvalue::FuzzyComparison { lhs, rhs, .. } => matches_slot(lhs) || matches_slot(rhs),
-                Rvalue::Aggregate(ops) => ops.iter().any(&matches_slot),
-                Rvalue::Borrow(_, _) => false,
-                Rvalue::EnumTest { operand, .. }
-                | Rvalue::EnumPayload { operand, .. }
-                | Rvalue::TypePatternTest { operand, .. }
-                | Rvalue::EnumDiscriminantTest { operand, .. }
-                | Rvalue::PrimitiveCast { operand, .. }
-                | Rvalue::FormatValue { operand, .. } => matches_slot(operand),
+        let mut seen = std::collections::HashSet::new();
+        let mut queue = std::collections::VecDeque::new();
+        let successors = |b: shape_vm::mir::types::BasicBlockId| -> Vec<_> {
+            match mir.blocks.iter().find(|blk| blk.id == b) {
+                Some(blk) => match &blk.terminator.kind {
+                    TerminatorKind::Goto(n) => vec![*n],
+                    TerminatorKind::SwitchBool {
+                        true_bb, false_bb, ..
+                    } => vec![*true_bb, *false_bb],
+                    TerminatorKind::Call { next, .. } => vec![*next],
+                    TerminatorKind::Return | TerminatorKind::Unreachable => vec![],
+                },
+                None => vec![],
             }
         };
-        for block in &self.mir.blocks {
-            for stmt in &block.statements {
-                match &stmt.kind {
-                    StatementKind::Assign(_, rv) => {
-                        if rvalue_has_move(rv) {
-                            return true;
-                        }
+        for s in successors(from_block) {
+            queue.push_back(s);
+        }
+        while let Some(b) = queue.pop_front() {
+            if b == push_block {
+                return true;
+            }
+            if !seen.insert(b) {
+                continue;
+            }
+            for s in successors(b) {
+                queue.push_back(s);
+            }
+        }
+        false
+    };
+    let matches_slot = |op: &Operand| -> bool {
+        matches!(
+            op,
+            Operand::Move(Place::Local(s)) | Operand::MoveExplicit(Place::Local(s))
+                if *s == slot
+        )
+    };
+    let rvalue_has_move = |rv: &Rvalue| -> bool {
+        match rv {
+            Rvalue::Use(op) | Rvalue::Clone(op) | Rvalue::UnaryOp(_, op) => matches_slot(op),
+            Rvalue::BinaryOp(_, lhs, rhs) => matches_slot(lhs) || matches_slot(rhs),
+            Rvalue::FuzzyComparison { lhs, rhs, .. } => matches_slot(lhs) || matches_slot(rhs),
+            Rvalue::Aggregate(ops) => ops.iter().any(&matches_slot),
+            Rvalue::Borrow(_, _) => false,
+            Rvalue::EnumTest { operand, .. }
+            | Rvalue::EnumPayload { operand, .. }
+            | Rvalue::TypePatternTest { operand, .. }
+            | Rvalue::EnumDiscriminantTest { operand, .. }
+            | Rvalue::PrimitiveCast { operand, .. }
+            | Rvalue::FormatValue { operand, .. } => matches_slot(operand),
+        }
+    };
+    for block in &mir.blocks {
+        // A Move in THIS block reaches the push either by preceding it
+        // in statement order, or by going round the CFG back to it.
+        let same_block_push_idx = match push_at {
+            Some((push_block, idx)) if push_block == block.id => Some(idx),
+            _ => None,
+        };
+        let block_loops_back = reaches_push(block.id);
+
+        for (stmt_idx, stmt) in block.statements.iter().enumerate() {
+            let move_reaches_push = match same_block_push_idx {
+                // Same block: earlier statements reach directly; later
+                // ones only via a back-edge that returns here.
+                Some(push_idx) => stmt_idx < push_idx || block_loops_back,
+                None => block_loops_back,
+            };
+            if !move_reaches_push {
+                continue;
+            }
+            match &stmt.kind {
+                StatementKind::Assign(_, rv) => {
+                    if rvalue_has_move(rv) {
+                        return true;
                     }
-                    StatementKind::ArrayStore { operands, .. }
-                    | StatementKind::ObjectStore { operands, .. }
-                    | StatementKind::EnumStore { operands, .. }
-                    | StatementKind::ClosureCapture { operands, .. }
-                    | StatementKind::ModuleBindingStore { operands, .. }
-                    | StatementKind::TaskBoundary(operands, _) => {
-                        if operands.iter().any(&matches_slot) {
-                            return true;
-                        }
-                    }
-                    StatementKind::Drop(_) | StatementKind::Nop => {}
                 }
+                StatementKind::ArrayStore { operands, .. }
+                | StatementKind::ObjectStore { operands, .. }
+                | StatementKind::EnumStore { operands, .. }
+                | StatementKind::ClosureCapture { operands, .. }
+                | StatementKind::ModuleBindingStore { operands, .. }
+                | StatementKind::TaskBoundary(operands, _) => {
+                    if operands.iter().any(&matches_slot) {
+                        return true;
+                    }
+                }
+                StatementKind::Drop(_) | StatementKind::Nop => {}
             }
+        }
+
+        // A terminator operand is evaluated after every statement in
+        // its block, so it only reaches the push through a CFG edge.
+        if block_loops_back {
             match &block.terminator.kind {
                 TerminatorKind::Call { func, args, .. } => {
                     if matches_slot(func) || args.iter().any(&matches_slot) {
@@ -303,9 +404,11 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                 TerminatorKind::Goto(_) | TerminatorKind::Return | TerminatorKind::Unreachable => {}
             }
         }
-        false
     }
+    false
+}
 
+impl<'a, 'b> MirToIR<'a, 'b> {
     /// v0.3.3 move-semantics JIT-divergence surface-and-stop detector.
     ///
     /// Root cause: `compile_operand` (`ownership.rs:225`) lowers every
@@ -1070,7 +1173,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                 // semantics — VM does NOT clone-on-write, both aliases
                 // observe the in-place mutation).
                 if let Place::Local(recv_slot) = receiver {
-                    if self.mir_has_prior_move_of_slot(*recv_slot) {
+                    if self.mir_has_prior_move_of_slot(*recv_slot, self.current_stmt_position) {
                         return Err(format!(
                             "R8 W8 jit-aliased-cow-push SURFACE: typed-array \
                              `.push()` receiver slot {} has a prior \
@@ -1533,3 +1636,195 @@ impl<'a, 'b> MirToIR<'a, 'b> {
 // ═══════════════════════════════════════════════════════════════════════════
 // Tests
 // ═══════════════════════════════════════════════════════════════════════════
+
+#[cfg(test)]
+mod aliased_cow_push_reachability_tests {
+    use super::move_of_slot_can_reach;
+    use shape_ast::ast::Span;
+    use shape_vm::mir::types::{
+        BasicBlock, BasicBlockId, MirFunction, MirStatement, Operand, Place, Point, Rvalue, SlotId,
+        StatementKind, Terminator, TerminatorKind,
+    };
+
+    const RECEIVER: SlotId = SlotId(3);
+
+    fn move_stmt(slot: SlotId) -> MirStatement {
+        MirStatement {
+            kind: StatementKind::Assign(
+                Place::Local(SlotId(9)),
+                Rvalue::Use(Operand::Move(Place::Local(slot))),
+            ),
+            span: Span::default(),
+            point: Point(0),
+        }
+    }
+
+    fn nop() -> MirStatement {
+        MirStatement {
+            kind: StatementKind::Nop,
+            span: Span::default(),
+            point: Point(0),
+        }
+    }
+
+    fn block(id: u32, statements: Vec<MirStatement>, kind: TerminatorKind) -> BasicBlock {
+        BasicBlock {
+            id: BasicBlockId(id),
+            statements,
+            terminator: Terminator {
+                kind,
+                span: Span::default(),
+            },
+        }
+    }
+
+    fn func(blocks: Vec<BasicBlock>) -> MirFunction {
+        MirFunction {
+            name: "fixture".to_string(),
+            blocks,
+            num_locals: 16,
+            param_slots: vec![],
+            param_reference_kinds: vec![],
+            local_types: vec![],
+            span: Span::default(),
+            field_name_table: Default::default(),
+            local_struct_type_names: Default::default(),
+            local_typed_array_element_types: Default::default(),
+            local_declared_scalar_types: Default::default(),
+            binding_slots: Default::default(),
+            local_names: vec![],
+            var_binding_slots: Default::default(),
+        }
+    }
+
+    /// TRUE POSITIVE — the shape the refusal exists to prevent.
+    ///
+    /// This is the negative control for the #189 narrowing, and it lives at
+    /// the MIR level on purpose: the equivalent Shape program
+    /// (`let alias = data; data.push(4)`) is rejected by the move checker
+    /// ([B0005] "cannot use this value after it was moved") in BOTH modes, so
+    /// the true positive cannot be expressed as source today. A narrowing
+    /// justified only by the false positives it removes is how a soundness
+    /// guard quietly stops guarding — so the refusal is proven directly.
+    #[test]
+    fn a_move_before_the_push_in_the_same_block_still_refuses() {
+        let f = func(vec![block(
+            0,
+            vec![move_stmt(RECEIVER), nop()],
+            TerminatorKind::Return,
+        )]);
+        assert!(
+            move_of_slot_can_reach(&f, RECEIVER, Some((BasicBlockId(0), 1))),
+            "a Move that precedes the push nulls the receiver slot — the \
+             refusal must fire"
+        );
+    }
+
+    /// TRUE POSITIVE — the loop back-edge. The Move is textually AFTER the
+    /// push, but reaches it on the next iteration.
+    #[test]
+    fn a_move_after_the_push_in_a_loop_still_refuses() {
+        let f = func(vec![
+            block(0, vec![], TerminatorKind::Goto(BasicBlockId(1))),
+            block(
+                1,
+                vec![nop(), move_stmt(RECEIVER)],
+                TerminatorKind::SwitchBool {
+                    operand: Operand::Constant(shape_vm::mir::types::MirConstant::Bool(true)),
+                    true_bb: BasicBlockId(1),
+                    false_bb: BasicBlockId(2),
+                },
+            ),
+            block(2, vec![], TerminatorKind::Return),
+        ]);
+        assert!(
+            move_of_slot_can_reach(&f, RECEIVER, Some((BasicBlockId(1), 0))),
+            "the back-edge returns to the push, so the Move reaches it"
+        );
+    }
+
+    /// FALSE POSITIVE removed — the straight-line case that blocked
+    /// `arr.map(|x| ..)`: push first, Move afterwards, no path back.
+    #[test]
+    fn a_move_strictly_after_the_push_no_longer_refuses() {
+        let f = func(vec![block(
+            0,
+            vec![nop(), move_stmt(RECEIVER)],
+            TerminatorKind::Return,
+        )]);
+        assert!(
+            !move_of_slot_can_reach(&f, RECEIVER, Some((BasicBlockId(0), 0))),
+            "a Move that cannot reach the push cannot null the slot before \
+             it, so refusing on it protects nothing"
+        );
+    }
+
+    /// FALSE POSITIVE removed — a Move on a branch the push cannot be
+    /// reached from.
+    #[test]
+    fn a_move_in_an_unreachable_sibling_branch_no_longer_refuses() {
+        let f = func(vec![
+            block(
+                0,
+                vec![],
+                TerminatorKind::SwitchBool {
+                    operand: Operand::Constant(shape_vm::mir::types::MirConstant::Bool(true)),
+                    true_bb: BasicBlockId(1),
+                    false_bb: BasicBlockId(2),
+                },
+            ),
+            block(1, vec![nop()], TerminatorKind::Return),
+            block(2, vec![move_stmt(RECEIVER)], TerminatorKind::Return),
+        ]);
+        assert!(
+            !move_of_slot_can_reach(&f, RECEIVER, Some((BasicBlockId(1), 0))),
+            "block 2 is not reachable from block 1"
+        );
+    }
+
+    /// A Move in an EARLIER block that flows into the push still refuses.
+    #[test]
+    fn a_move_in_a_dominating_block_still_refuses() {
+        let f = func(vec![
+            block(
+                0,
+                vec![move_stmt(RECEIVER)],
+                TerminatorKind::Goto(BasicBlockId(1)),
+            ),
+            block(1, vec![nop()], TerminatorKind::Return),
+        ]);
+        assert!(move_of_slot_can_reach(
+            &f,
+            RECEIVER,
+            Some((BasicBlockId(1), 0))
+        ));
+    }
+
+    /// FAIL-CLOSED — an unknown program point refuses on any Move, which is
+    /// exactly the pre-#189 function-wide behaviour. An unknown position must
+    /// never become a licence to proceed.
+    #[test]
+    fn an_unknown_push_position_refuses_on_any_move() {
+        let f = func(vec![block(
+            0,
+            vec![nop(), move_stmt(RECEIVER)],
+            TerminatorKind::Return,
+        )]);
+        assert!(move_of_slot_can_reach(&f, RECEIVER, None));
+    }
+
+    /// And a function with no Move of the slot never refuses.
+    #[test]
+    fn no_move_of_the_receiver_never_refuses() {
+        let f = func(vec![block(
+            0,
+            vec![move_stmt(SlotId(7)), nop()],
+            TerminatorKind::Return,
+        )]);
+        assert!(!move_of_slot_can_reach(
+            &f,
+            RECEIVER,
+            Some((BasicBlockId(0), 1))
+        ));
+    }
+}

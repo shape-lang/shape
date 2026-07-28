@@ -1,0 +1,52 @@
+// #189 (PERF-HOF-CARRIER) reproducer, committed per R15.
+//
+// The `R8 W8 jit-aliased-cow-push` refusal protects against a real SEGFAULT:
+// MIR lowering emits `Operand::Move` for a `let` binding, the JIT nulls the
+// source slot after the read, and a later `.push()` on that slot dereferences
+// NULL. The refusal is UNCHANGED for that shape.
+//
+// What changed in #189 is the question it asks. It used to scan the WHOLE
+// function for any `Move` of the receiver slot, which its own doc-comment
+// called out as over-conservative — and that conservatism was not free. It is
+// what kept `arr.map(|x| ..)` out of the JIT entirely: the map desugaring
+// pushes into a result accumulator and then Moves it out, so a Move always
+// exists AFTER every push. It now asks whether a Move can REACH the push
+// (CFG reachability, back-edges included), because a Move that cannot reach
+// the push cannot null the slot before it.
+//
+// Measured at 26f10bb8 BEFORE the fix, every group below produced
+// `program_fallback: jit-compile-error — R8 W8 jit-aliased-cow-push SURFACE`
+// and ran entirely on the interpreter. After: no fallback, identical output.
+//
+// The true-positive control for the refusal is NOT here, because it cannot be
+// written as a Shape program: `let alias = data; data.push(4)` is rejected by
+// the move checker ([B0005] "cannot use this value after it was moved") in
+// both modes before it reaches the JIT. It is proven directly against
+// hand-built MIR in `mir_compiler::v2_array::aliased_cow_push_reachability_tests`
+// (`a_move_before_the_push_in_the_same_block_still_refuses` and
+// `a_move_after_the_push_in_a_loop_still_refuses`).
+//
+// This file's job is the VM==JIT anchor for the shapes the narrowing newly
+// admits.
+
+// (1) map: push into an accumulator, then move the accumulator out.
+let xs = [1.0, 2.0, 3.0]
+let doubled = xs.map(|x| x * 2.0)
+print(doubled)
+
+// (2) push first, alias afterwards — the Move is strictly after the push and
+//     no path returns to it.
+var after: Array<int> = [1, 2, 3]
+after.push(4)
+let alias_after = after
+print(alias_after)
+
+// (3) pushes in a loop, alias only once the loop has finished.
+var looped: Array<int> = [1, 2, 3]
+var i = 0
+while i < 3 {
+    looped.push(i)
+    i = i + 1
+}
+let alias_looped = looped
+print(alias_looped)
