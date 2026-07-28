@@ -6963,6 +6963,10 @@ impl BytecodeCompiler {
                         false,
                         var_decl.value.as_ref(),
                     );
+                    // ADR-017 §2 / R23: publish this declaration's storage
+                    // decision. Promotions seen later in the body update the
+                    // entry in place through `set_binding_storage_class`.
+                    self.record_binding_storage_decisions(var_decl, false);
                 } else {
                     // Inside function: create local variable
                     self.compile_destructure_pattern(&var_decl.pattern)?;
@@ -7149,6 +7153,10 @@ impl BytecodeCompiler {
                         true,
                         var_decl.value.as_ref(),
                     );
+                    // ADR-017 §2 / R23: publish this declaration's storage
+                    // decision. For a MIR-planned local the recorded class is
+                    // the plan's, which is fixed before the body compiles.
+                    self.record_binding_storage_decisions(var_decl, true);
 
                     // Track type annotation first (so drop tracking can resolve the type)
                     if let Some(name) = var_decl.pattern.as_identifier() {

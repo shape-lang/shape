@@ -214,6 +214,7 @@ impl BytecodeCompiler {
             mir_functions: HashMap::new(),
             mir_borrow_analyses: HashMap::new(),
             mir_storage_plans: HashMap::new(),
+            binding_storage_decisions: Default::default(),
             function_borrow_summaries: HashMap::new(),
             mir_span_to_point: HashMap::new(),
             mir_field_analyses: HashMap::new(),
