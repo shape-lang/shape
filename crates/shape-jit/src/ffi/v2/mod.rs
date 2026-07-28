@@ -1251,7 +1251,16 @@ pub extern "C" fn jit_v2_release(ptr: *const u8) {
             // Future: dispatch on kind for proper cleanup of nested resources.
             let kind = (*header).kind();
             let _ = kind; // TODO: dispatch cleanup based on kind
-            std::alloc::dealloc(
+            // PRE-EXISTING DEFECT (surfaced, not introduced, by the #194 seam):
+            // this frees an object of unknown size with an 8-byte layout. A
+            // `dealloc` whose layout does not match the allocation is UB, and
+            // every kind this path can see is larger than 8 bytes. Routing it
+            // through the seam does not fix it — the size is genuinely not
+            // known here, because this function never learned to dispatch on
+            // `kind`. Fixing it means giving the release path the size (or the
+            // kind dispatch the TODO above describes), which is a behaviour
+            // change outside this pure-refactor slice.
+            shape_value::v2::heap_alloc::dealloc_block(
                 ptr as *mut u8,
                 std::alloc::Layout::from_size_align(8, 8).unwrap(), // minimum — real size TBD
             );
@@ -1339,7 +1348,7 @@ pub extern "C" fn jit_v2_typed_object_release(ptr: *const u8) {
 pub extern "C" fn jit_v2_alloc_struct(size: u32, kind: u16) -> *mut u8 {
     let align = 8; // all v2 structs are 8-byte aligned
     let layout = std::alloc::Layout::from_size_align(size as usize, align).unwrap();
-    let ptr = unsafe { std::alloc::alloc_zeroed(layout) };
+    let ptr = shape_value::v2::heap_alloc::alloc_zeroed_block(layout);
     // Initialize the header
     unsafe {
         let header = ptr as *mut HeapHeader;
@@ -1553,7 +1562,12 @@ mod tests {
         jit_v2_field_store_f64(ptr, 8, 3.14);
         let val = jit_v2_field_load_f64(ptr, 8);
         assert!((val - 3.14).abs() < f64::EPSILON);
-        unsafe { std::alloc::dealloc(ptr, std::alloc::Layout::from_size_align(24, 8).unwrap()) };
+        unsafe {
+            shape_value::v2::heap_alloc::dealloc_block(
+                ptr,
+                std::alloc::Layout::from_size_align(24, 8).unwrap(),
+            )
+        };
     }
 
     #[test]
@@ -1561,7 +1575,12 @@ mod tests {
         let ptr = jit_v2_alloc_struct(24, HEAP_KIND_V2_STRUCT);
         jit_v2_field_store_i64(ptr, 8, -42);
         assert_eq!(jit_v2_field_load_i64(ptr, 8), -42);
-        unsafe { std::alloc::dealloc(ptr, std::alloc::Layout::from_size_align(24, 8).unwrap()) };
+        unsafe {
+            shape_value::v2::heap_alloc::dealloc_block(
+                ptr,
+                std::alloc::Layout::from_size_align(24, 8).unwrap(),
+            )
+        };
     }
 
     #[test]
@@ -1569,7 +1588,12 @@ mod tests {
         let ptr = jit_v2_alloc_struct(16, HEAP_KIND_V2_STRUCT);
         jit_v2_field_store_i32(ptr, 8, 999);
         assert_eq!(jit_v2_field_load_i32(ptr, 8), 999);
-        unsafe { std::alloc::dealloc(ptr, std::alloc::Layout::from_size_align(16, 8).unwrap()) };
+        unsafe {
+            shape_value::v2::heap_alloc::dealloc_block(
+                ptr,
+                std::alloc::Layout::from_size_align(16, 8).unwrap(),
+            )
+        };
     }
 
     #[test]
@@ -1579,7 +1603,10 @@ mod tests {
             let header = &*(ptr as *const HeapHeader);
             assert_eq!(header.kind(), HEAP_KIND_V2_STRUCT);
             assert_eq!(header.get_refcount(), 1);
-            std::alloc::dealloc(ptr, std::alloc::Layout::from_size_align(24, 8).unwrap());
+            shape_value::v2::heap_alloc::dealloc_block(
+                ptr,
+                std::alloc::Layout::from_size_align(24, 8).unwrap(),
+            );
         }
     }
 
@@ -1933,7 +1960,10 @@ mod tests {
             jit_v2_retain(ptr);
             assert_eq!(header.get_refcount(), 3);
             // Clean up manually (don't use jit_v2_release which would dealloc wrong size)
-            std::alloc::dealloc(ptr, std::alloc::Layout::from_size_align(24, 8).unwrap());
+            shape_value::v2::heap_alloc::dealloc_block(
+                ptr,
+                std::alloc::Layout::from_size_align(24, 8).unwrap(),
+            );
         }
     }
 }

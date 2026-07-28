@@ -29,14 +29,14 @@ impl StringObj {
     /// Allocate a new StringObj from a `&str`. Copies the bytes.
     pub fn new(s: &str) -> *mut Self {
         let layout = std::alloc::Layout::new::<Self>();
-        let ptr = unsafe { std::alloc::alloc(layout) as *mut Self };
+        let ptr = crate::v2::heap_alloc::alloc_block(layout) as *mut Self;
 
         // Allocate and copy string data
         let data = if s.is_empty() {
             std::ptr::null()
         } else {
             let data_layout = std::alloc::Layout::from_size_align(s.len(), 1).unwrap();
-            let data_ptr = unsafe { std::alloc::alloc(data_layout) };
+            let data_ptr = crate::v2::heap_alloc::alloc_block(data_layout);
             unsafe { std::ptr::copy_nonoverlapping(s.as_ptr(), data_ptr, s.len()) };
             data_ptr as *const u8
         };
@@ -91,10 +91,10 @@ impl StringObj {
             if (*ptr).len > 0 && !(*ptr).data.is_null() {
                 let data_layout =
                     std::alloc::Layout::from_size_align((*ptr).len as usize, 1).unwrap();
-                std::alloc::dealloc((*ptr).data as *mut u8, data_layout);
+                crate::v2::heap_alloc::dealloc_block((*ptr).data as *mut u8, data_layout);
             }
             let layout = std::alloc::Layout::new::<Self>();
-            std::alloc::dealloc(ptr as *mut u8, layout);
+            crate::v2::heap_alloc::dealloc_block(ptr as *mut u8, layout);
         }
     }
 

@@ -20,7 +20,8 @@
 //! The 8-byte header at offset 0 packs refcount + kind + padding so that
 //! the `data` pointer is naturally 8-byte aligned.
 
-use std::alloc::{Layout, alloc, dealloc};
+use shape_value::v2::heap_alloc::{alloc_block, dealloc_block};
+use std::alloc::Layout;
 use std::sync::atomic::{AtomicU32, Ordering};
 
 // ---------------------------------------------------------------------------
@@ -98,7 +99,7 @@ pub extern "C" fn jit_v2_string_alloc(data: *const u8, len: u32) -> *mut u8 {
     let layout = layout_for(byte_len);
 
     unsafe {
-        let ptr = alloc(layout);
+        let ptr = alloc_block(layout);
         if ptr.is_null() {
             // OOM — return null; caller must handle.
             return std::ptr::null_mut();
@@ -163,7 +164,7 @@ pub extern "C" fn jit_v2_string_concat(a: *mut u8, b: *mut u8) -> *mut u8 {
         let total = a_len + b_len;
 
         let layout = layout_for(total);
-        let ptr = alloc(layout);
+        let ptr = alloc_block(layout);
         if ptr.is_null() {
             return std::ptr::null_mut();
         }
@@ -262,7 +263,7 @@ pub extern "C" fn jit_v2_string_release(str_ptr: *mut u8) {
             std::sync::atomic::fence(Ordering::Acquire);
             let byte_len = obj.len as usize;
             let layout = layout_for(byte_len);
-            dealloc(str_ptr, layout);
+            dealloc_block(str_ptr, layout);
         }
     }
 }

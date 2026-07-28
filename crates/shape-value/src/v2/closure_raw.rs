@@ -272,11 +272,11 @@ pub unsafe fn alloc_typed_closure(
     let size = layout.total_heap_size();
     let alloc_layout = std::alloc::Layout::from_size_align(size, 8)
         .expect("TypedClosureHeader size/align must be valid (size ≥ 16, align = 8)");
-    // SAFETY: `Layout::from_size_align` returned Ok above, so the call is
-    // well-formed. `alloc_zeroed` is the JIT-shim-compatible allocator
-    // (matches `jit_v2_alloc_struct`'s allocator choice) so VM-allocated
-    // closures can be freed by JIT-generated release glue and vice versa.
-    let ptr = unsafe { std::alloc::alloc_zeroed(alloc_layout) };
+    // `alloc_zeroed_block` is the JIT-shim-compatible allocator (matches
+    // `jit_v2_alloc_struct`'s allocator choice — both route through the #194
+    // seam) so VM-allocated closures can be freed by JIT-generated release
+    // glue and vice versa.
+    let ptr = crate::v2::heap_alloc::alloc_zeroed_block(alloc_layout);
     if ptr.is_null() {
         std::alloc::handle_alloc_error(alloc_layout);
     }
@@ -601,9 +601,9 @@ pub unsafe fn dealloc_typed_closure_no_drop(ptr: *mut u8, layout: &ClosureLayout
     let size = layout.total_heap_size();
     let alloc_layout = std::alloc::Layout::from_size_align(size, 8)
         .expect("TypedClosureHeader size/align must be valid");
-    // SAFETY: caller upholds that `ptr` was allocated with `alloc_zeroed`
-    // using the matching size/align layout.
-    unsafe { std::alloc::dealloc(ptr, alloc_layout) };
+    // SAFETY: caller upholds that `ptr` was allocated through the seam with
+    // the matching size/align layout.
+    unsafe { crate::v2::heap_alloc::dealloc_block(ptr, alloc_layout) };
 }
 
 // ---------------------------------------------------------------------------

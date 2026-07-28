@@ -3,7 +3,8 @@
 //! This module provides AlignedVec, a vector type that guarantees memory alignment
 //! suitable for SIMD operations (AVX2: 32-byte alignment).
 
-use std::alloc::{Layout, alloc, dealloc, realloc};
+use crate::v2::heap_alloc::{alloc_block, dealloc_block, realloc_block};
+use std::alloc::Layout;
 use std::marker::PhantomData;
 use std::mem;
 use std::ops::{Deref, DerefMut};
@@ -41,13 +42,12 @@ impl<T> AlignedVec<T> {
 
         let layout = Self::layout_for_capacity(capacity).expect("Failed to create layout");
 
-        let ptr = unsafe {
-            let raw_ptr = alloc(layout);
-            if raw_ptr.is_null() {
-                std::alloc::handle_alloc_error(layout);
-            }
-            NonNull::new_unchecked(raw_ptr as *mut T)
-        };
+        let raw_ptr = alloc_block(layout);
+        if raw_ptr.is_null() {
+            std::alloc::handle_alloc_error(layout);
+        }
+        // SAFETY: null was just ruled out.
+        let ptr = unsafe { NonNull::new_unchecked(raw_ptr as *mut T) };
 
         AlignedVec {
             ptr,
@@ -165,24 +165,30 @@ impl<T> AlignedVec<T> {
         let new_layout = Self::layout_for_capacity(new_capacity).expect("Failed to create layout");
 
         let new_ptr = if self.capacity == 0 {
-            unsafe {
-                let raw_ptr = alloc(new_layout);
-                if raw_ptr.is_null() {
-                    std::alloc::handle_alloc_error(new_layout);
-                }
-                NonNull::new_unchecked(raw_ptr as *mut T)
+            let raw_ptr = alloc_block(new_layout);
+            if raw_ptr.is_null() {
+                std::alloc::handle_alloc_error(new_layout);
             }
+            // SAFETY: null was just ruled out.
+            unsafe { NonNull::new_unchecked(raw_ptr as *mut T) }
         } else {
             let old_layout =
                 Self::layout_for_capacity(self.capacity).expect("Failed to create old layout");
 
-            unsafe {
-                let raw_ptr = realloc(self.ptr.as_ptr() as *mut u8, old_layout, new_layout.size());
-                if raw_ptr.is_null() {
-                    std::alloc::handle_alloc_error(new_layout);
-                }
-                NonNull::new_unchecked(raw_ptr as *mut T)
+            // A ceiling breach here has no refusal channel — `resize_to_capacity`
+            // returns `()` and its callers assume the capacity was granted — so
+            // the breach is recorded by the seam and the growth proceeds, and
+            // the VM surfaces the breach at its next safepoint.
+            // SAFETY: `self.ptr` is a live block allocated through the seam with
+            // exactly `old_layout`.
+            let raw_ptr = unsafe {
+                realloc_block(self.ptr.as_ptr() as *mut u8, old_layout, new_layout.size())
+            };
+            if raw_ptr.is_null() {
+                std::alloc::handle_alloc_error(new_layout);
             }
+            // SAFETY: null was just ruled out.
+            unsafe { NonNull::new_unchecked(raw_ptr as *mut T) }
         };
 
         self.ptr = new_ptr;
@@ -241,7 +247,7 @@ impl<T> Drop for AlignedVec<T> {
                 // Deallocate memory
                 let layout =
                     Self::layout_for_capacity(self.capacity).expect("Failed to create layout");
-                dealloc(self.ptr.as_ptr() as *mut u8, layout);
+                dealloc_block(self.ptr.as_ptr() as *mut u8, layout);
             }
         }
     }

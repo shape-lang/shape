@@ -535,8 +535,7 @@ pub(crate) const NATIVE_CELL_LAYOUT: std::alloc::Layout =
 /// Allocate a fresh zeroed out-param cell. Returns its address, or `None` on
 /// allocation failure.
 pub(crate) fn native_cell_new() -> Option<usize> {
-    // SAFETY: NATIVE_CELL_LAYOUT is a valid non-zero-sized layout.
-    let ptr = unsafe { std::alloc::alloc_zeroed(NATIVE_CELL_LAYOUT) };
+    let ptr = shape_value::v2::heap_alloc::alloc_zeroed_block(NATIVE_CELL_LAYOUT);
     if ptr.is_null() {
         None
     } else {
@@ -566,7 +565,7 @@ pub(crate) unsafe fn native_cell_read(addr: usize) -> u64 {
 /// `addr` must be a live cell returned by [`native_cell_new`], freed exactly
 /// once.
 pub(crate) unsafe fn native_cell_free(addr: usize) {
-    unsafe { std::alloc::dealloc(addr as *mut u8, NATIVE_CELL_LAYOUT) };
+    unsafe { shape_value::v2::heap_alloc::dealloc_block(addr as *mut u8, NATIVE_CELL_LAYOUT) };
 }
 
 // ── Linked handle + link / invoke ────────────────────────────────────────────

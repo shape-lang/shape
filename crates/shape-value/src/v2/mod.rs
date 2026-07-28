@@ -5,6 +5,11 @@ pub mod closure_raw;
 pub mod concrete_type;
 pub mod decimal_obj;
 pub mod function_type_registry;
+/// The single allocation seam for typed heap carriers (#194, ADR-018 §4).
+/// Every raw block a carrier owns is handed out here, which is what makes the
+/// `alloc_budget` heap ceiling unbypassable and gives region allocation (#195)
+/// one place to land.
+pub mod heap_alloc;
 pub mod heap_element;
 pub mod heap_header;
 pub mod refcount;

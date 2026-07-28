@@ -105,7 +105,7 @@ impl VirtualMachine {
                 };
                 let layout = std::alloc::Layout::from_size_align(total_size, 8)
                     .map_err(|_| VMError::RuntimeError("invalid struct layout".into()))?;
-                let ptr = unsafe { std::alloc::alloc_zeroed(layout) };
+                let ptr = shape_value::v2::heap_alloc::alloc_zeroed_block(layout);
                 if ptr.is_null() {
                     return Err(VMError::RuntimeError("struct allocation failed".into()));
                 }

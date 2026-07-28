@@ -622,7 +622,11 @@ mod tests {
     /// Helper: allocate a fake struct with HeapHeader + field data, return pointer.
     unsafe fn alloc_test_struct(total_bytes: usize) -> *mut u8 {
         let layout = std::alloc::Layout::from_size_align(total_bytes, 8).unwrap();
-        let ptr = unsafe { std::alloc::alloc_zeroed(layout) };
+        // Allocated through the same seam production uses, so the fixture's
+        // allocator is paired with `jit_v2_struct_alloc`'s — a fixture that
+        // allocates from a different allocator than the code under test is the
+        // shape of the historical v2-raw SIGABRT family.
+        let ptr = shape_value::v2::heap_alloc::alloc_zeroed_block(layout);
         assert!(!ptr.is_null());
         ptr
     }
@@ -630,7 +634,7 @@ mod tests {
     /// Helper: free a test struct allocated by `alloc_test_struct`.
     unsafe fn free_test_struct(ptr: *mut u8, total_bytes: usize) {
         let layout = std::alloc::Layout::from_size_align(total_bytes, 8).unwrap();
-        unsafe { std::alloc::dealloc(ptr, layout) };
+        unsafe { shape_value::v2::heap_alloc::dealloc_block(ptr, layout) };
     }
 
     #[test]
