@@ -153,6 +153,7 @@ fn authority_reads_source_plan_without_hygienic_map_aliases() {
             inline_array_sizes: HashMap::new(),
             non_escaping_closure_slots: HashSet::new(),
             reference_escape_promotion_slots: HashSet::new(),
+            escape: Default::default(),
         },
     );
     compiler.current_function = Some(emission_id);

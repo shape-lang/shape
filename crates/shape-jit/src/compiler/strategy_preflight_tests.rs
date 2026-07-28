@@ -52,6 +52,7 @@ fn return_only_mir_data(
             inline_array_sizes: HashMap::new(),
             non_escaping_closure_slots: HashSet::new(),
             reference_escape_promotion_slots: HashSet::new(),
+            escape: Default::default(),
         },
         borrow_analysis: BorrowAnalysis::empty(),
     })

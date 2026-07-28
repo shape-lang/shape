@@ -10,6 +10,7 @@
 
 pub mod analysis;
 pub mod cfg;
+pub mod escape;
 pub mod field_analysis;
 pub mod liveness;
 pub mod lowering;
@@ -23,6 +24,9 @@ pub use analysis::{
     BorrowAnalysis, BorrowErrorCode, BorrowErrorKind, FunctionBorrowSummary, ReturnOwnershipMode,
 };
 pub use cfg::ControlFlowGraph;
+pub use escape::{
+    AllocKind, AllocSite, AllocationFacts, EscapeFacts, EscapeVector, InboundProof, OutboundEscape,
+};
 pub use field_analysis::FieldAnalysis;
 pub use liveness::LivenessResult;
 pub use storage_planning::StoragePlan;
