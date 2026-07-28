@@ -11,6 +11,7 @@
 //! [`shape_abi_v1::language_runtime_plugin!`] macro below.
 
 pub mod arrow_bridge;
+pub mod buffers;
 pub mod error_mapping;
 pub mod marshaling;
 pub mod runtime;
@@ -59,9 +60,11 @@ shape_abi_v1::language_runtime_plugin! {
         // once — which is what lets two `async fn python` calls overlap while
         // CPython has the GIL released across `time.sleep` and blocking IO.
         instance_concurrency: shape_abi_v1::INSTANCE_CONCURRENCY_SHARED,
-        // ADR-019 §2 (#199): optional-protocol block. Filled in with the buffer
-        // capability by the same ticket; null until then.
-        capabilities: ::std::ptr::null(),
+        // ADR-019 §2 (#199): the buffer-sharing capability. Python offers both
+        // modes over the buffer protocol, and — the part that decides whether
+        // the host offers sharing at all — real release accounting through
+        // PEP 3118's export count.
+        capabilities: buffers::python_capabilities(),
         free_buffer: runtime::python_free_buffer,
         drop: runtime::python_drop,
     }
