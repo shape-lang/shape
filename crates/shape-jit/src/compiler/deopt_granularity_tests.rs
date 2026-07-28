@@ -7,13 +7,13 @@
 //! the `MixedFunctionTable` that decides, per function, between a native
 //! pointer and an interpreter entry.
 //!
-//! What is asserted here is the JIT's dispatch DECISION, read from the
+//! Most of what is asserted here is the JIT's dispatch DECISION, read from the
 //! compiler's own output rather than parsed from log prose. Per R15 that is
-//! not a nativity claim: a `FunctionEntry::Native` entry proves the function
-//! was compiled and installed, not that a native frame executed. The
-//! execution-side assertion belongs to `NativeExecutionWitness` (#117) and is
-//! the one pending edit on this fixture — see
-//! `two_function_fixture_pending_native_execution_witness`.
+//! not a nativity claim on its own: a `FunctionEntry::Native` entry proves the
+//! function was compiled and installed, not that a native frame executed. The
+//! execution-side claim is made once, by
+//! `one_unsupported_construct_keeps_every_other_function_natively_dispatched`,
+//! through the `NativeExecutionWitness` collector (#117).
 
 #[cfg(feature = "deep-tests")]
 use crate::mixed_table::FunctionEntry;
@@ -81,9 +81,11 @@ fn function_index(program: &BytecodeProgram, name: &str) -> usize {
 /// The two-function fixture: one function holds the unsupported construct
 /// (`?`, an `Owner`-scoped residual), the other is ordinary hot arithmetic.
 ///
-/// Top-level calls BOTH, so the fixture exercises the call site as well as the
-/// classification: a direct call to the demoted `uses_try` must lower through
-/// the trampoline rather than costing top-level its own native code.
+/// Top-level deliberately calls only `hot_double`. A direct call to a
+/// non-compiled callee is still a whole-program bail (see the reverted
+/// attempt documented at `mir_compiler/terminators.rs`), so calling `uses_try`
+/// from top-level would deopt the program and this fixture would be measuring
+/// that bail instead of per-function granularity.
 const TWO_FUNCTION_FIXTURE: &str = r#"
 fn make_ok() -> Result<int, string> {
     return Ok(42)
@@ -103,7 +105,6 @@ for i in 0..200 {
     total = total + hot_double(i)
 }
 print(total)
-print(uses_try())
 "#;
 
 #[test]

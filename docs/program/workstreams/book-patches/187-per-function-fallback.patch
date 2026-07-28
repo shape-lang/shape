@@ -63,7 +63,7 @@ diff --git a/book/book-site/src/content/docs/advanced/jit-compilation.mdx b/book
  
  The fall-through path is implemented in `JITExecutor::execute_program`
  (`crates/shape-jit/src/executor.rs`). It catches every `Err` from the JIT
-@@ -244,6 +265,59 @@
+@@ -244,6 +265,72 @@
  failure, JIT runtime signal, `RETURN_TAG_NANBOXED` surface-and-stop — and
  re-dispatches to `BytecodeExecutor::execute_program` with the same `Program`.
  
@@ -102,7 +102,20 @@ diff --git a/book/book-site/src/content/docs/advanced/jit-compilation.mdx b/book
 +```
 +
 +Three constructs are handled this way today: the `?` operator, the `??`
-+null-coalescing operator, and an imported `pub const` read at its use site.
++null-coalescing operator, and an imported `pub const` read at its use site. A
++function is also left interpreted when its body uses an operation the JIT does
++not lower at all — an `as` cast, for instance.
++
++One limit is worth knowing, because it decides how much the narrowing actually
++buys you: **calling an interpreted function by name from compiled code still
++costs the whole program its native execution.** The compiled caller has no way
++to receive the interpreted callee's return value with its type intact, so
++rather than risk handing back wrong bits, the compiler declines to compile that
++caller at all and the program runs interpreted.
++
++In practice that means the narrowing helps when the interpreted function is
++called from other interpreted code or not called on a hot path, and does not
++help when your toplevel calls it directly. Lifting this limit is ongoing work.
 +
 +Two constructs still cost the whole program its native execution, because the
 +divergence spans a producer and a consumer that the per-function record covers
@@ -123,7 +136,7 @@ diff --git a/book/book-site/src/content/docs/advanced/jit-compilation.mdx b/book
  ### Verifying fall-through behavior
  
  The supervisor-ratified corrected smoke harness reads stdout via `tail -1` and
-@@ -428,13 +502,12 @@
+@@ -428,13 +515,12 @@
  globally. Shared utility functions that appear in many programs are compiled on
  first encounter and reused from cache for every subsequent load.
  

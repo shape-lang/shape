@@ -187,10 +187,17 @@
         "classification": "current-executable",
         "declared_limits": [
           {
-            "limit": "Narrowed granularity covers three constructs: `?`, `??`, and an imported `pub const` inlined at use. A function containing one of those runs interpreted while its siblings keep native code. Two further constructs — a direct call to an imported stdlib function, and a reference returned via the escape-to-refcount `PromotedCell` carrier — still cost the whole program its native execution, each for a recorded reason.",
+            "limit": "Narrowed granularity covers three residual constructs — `?`, `??`, and an imported `pub const` inlined at use — plus any function the JIT declines to lower at all (a VM-only opcode, an `as` cast). Such a function runs interpreted while its siblings keep native code. Two residuals still cost the whole program: a direct call to an imported stdlib function, and a reference returned via the escape-to-refcount `PromotedCell` carrier.",
             "authority": {
               "kind": "source",
               "reference": "crates/shape-vm/src/bytecode/jit_residual.rs `JitResidual::scope` and `JitResidual::program_scope_reason` — the scope table and, for every Program-scoped entry, why narrowing it to its owner would be unsound"
+            }
+          },
+          {
+            "limit": "A direct call BY NAME from compiled code to a function that was not compiled still costs the whole program its native execution. Lowering it through the trampoline was attempted under #187 and reverted: the indirect path stores the trampoline's raw u64 without converting it by the callee's return kind, which produced silent-wrong-output on two corpus programs (a `number` return printing 91747331608791740000 for 1.0; a `Result` return printing Ok(106498971113408) for Ok(42)). So the narrowing helps a demoted function called from interpreted code or off the hot path, and does not help when a compiled caller names it directly.",
+            "authority": {
+              "kind": "source",
+              "reference": "crates/shape-jit/src/mir_compiler/terminators.rs — the retained refusal and the reverted-attempt record, naming the two differential reproducers; the prerequisite is a kind-correct trampoline return handoff on the indirect path (PERF-HOF-CARRIER / PERF-CLOSURE-NATIVE)"
             }
           },
           {
@@ -223,6 +230,10 @@
           }
         ],
         "evidence": [
+          {
+            "kind": "source",
+            "reference": "crates/shape-jit/src/compiler/deopt_granularity_tests.rs::one_unsupported_construct_keeps_every_other_function_natively_dispatched — under a NativeExecutionWitness session (#117), `hot_double` is natively dispatched 200 times with zero interpreter dispatches and no program fallback, while `uses_try` carries a covered TryUnwrapResidual fallback; one program, both dispositions, from the runtime authority rather than log prose"
+          },
           {
             "kind": "source",
             "reference": "crates/shape-jit/src/compiler/deopt_granularity_tests.rs::one_unsupported_construct_keeps_every_other_function_native — a two-function program where one function uses `?`: that function's mixed-table entry is `Interpreted` and the sibling's is `Native`, in the same compiled program; passing at wave4-ergo under `--features deep-tests`"
@@ -281,6 +292,7 @@
       ],
       "required_evidence_classes": [
         "positive-execution",
+        "native-execution",
         "vm-jit-parity",
         "structured-diagnostic"
       ],

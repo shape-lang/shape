@@ -96,18 +96,24 @@ fn a_hot_function_produces_a_real_native_dispatch_count() {
 
 #[test]
 fn a_deopted_function_cannot_produce_a_native_dispatch_witness() {
-    // Tripwire 1, in its post-#187 form. The refused function must carry its
-    // exact reason and must never satisfy a native claim — and, now that deopt
-    // granularity is per-function, its sibling must KEEP its native code.
+    // Tripwire 1. Force the fallback and confirm no native claim survives for
+    // EITHER function, and that the refused one carries its exact reason.
     //
-    // This test was written against the pre-#187 behaviour, where a direct call
-    // to a non-compiled callee was a whole-program bail ("Route A
-    // surface-and-stop"), so `hot` lost its native code too and the assertions
-    // below read `program_fallback.is_some()` / `ProgramFellBack`. #187 made
-    // that call site lower through the trampoline instead of refusing, so the
-    // assertions are inverted here rather than relaxed: the program no longer
-    // leaves the native path at all, and `hot` is a real native claim with a
-    // dispatch count only running it can produce.
+    // #117 wrote this to flip when #187 landed per-function granularity, and
+    // #187 tried: making the direct call to the non-compiled `cold` lower
+    // through the trampoline does flip it, and `hot` becomes a real native
+    // claim with 200 dispatches. That change was REVERTED, because the
+    // indirect path stores the trampoline's raw `u64` without converting it by
+    // the callee's return kind, and the VM/JIT differential immediately caught
+    // two silent-wrong-output corpus programs — a `number`-returning callee
+    // printing `91747331608791740000` for `1.0`, and a `Result`-returning one
+    // printing `Ok(106498971113408)` for `Ok(42)`. An `int`-returning callee
+    // like `cold` survives only because raw i64 bits are the right bits.
+    //
+    // So this tripwire still reads the pre-flip way, and that is the truthful
+    // reading at HEAD rather than an unmet target. It flips when the indirect
+    // path gains a kind-correct return handoff (PERF-HOF-CARRIER /
+    // PERF-CLOSURE-NATIVE), not when someone deletes the refusal.
     let witness = jit_witness(TWO_FUNCTION_FIXTURE);
 
     // `cold` is refused with the exact opcode class, not a vague "not native".
@@ -127,24 +133,21 @@ fn a_deopted_function_cannot_produce_a_native_dispatch_witness() {
         "a refused function must never satisfy a native claim"
     );
 
-    // #187: `cold`'s refusal costs `cold` and nothing else. Top-level calls it
-    // directly, and that call now lowers through the trampoline rather than
-    // refusing, so the program never leaves the native path.
+    // Top-level calls `cold` directly, and a direct call to a non-compiled
+    // callee is still a whole-program bail, so `hot` does not stay native
+    // either. The witness must say so rather than reporting a native `hot` it
+    // cannot support.
     assert!(
-        witness.program_fallback.is_none(),
-        "one unsupported construct must not cost the whole program its native \
-         execution; got {:?}",
-        witness.program_fallback
+        witness.program_fallback.is_some(),
+        "the fixture must record why the program left the native path"
     );
-    let hot = assert_native_dispatch(&witness, "hot")
-        .expect("`hot` must stay native despite its sibling's refusal");
-    assert_eq!(
-        hot.native_dispatches, 200,
-        "the loop calls `hot` 200 times, so the native body must announce entry \
-         200 times — a count that cannot be produced without running it"
+    assert!(
+        matches!(
+            assert_native_dispatch(&witness, "hot"),
+            Err(WitnessAssertion::ProgramFellBack { .. })
+        ),
+        "with the whole program deopted, `hot` is not a native claim either"
     );
-    assert_eq!(hot.interpreter_dispatches, 0);
-    assert_eq!(hot.disposition, Disposition::NativeDispatched);
 }
 
 #[test]
