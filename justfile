@@ -245,6 +245,39 @@ regen-legacy-identity:
 check-public-features:
 	node scripts/check-adr011-012-public-feature-manifest.mjs --self-test
 
+# --- ADR-016 Book coverage manifest contract (#113) ---
+
+# The other half of the pair: the PublicFeatureManifest says what must be
+# explained, the BookCoverageManifest says where the Book explains it. This gate
+# owns the coverage-side version of the same failure — a fence's classification
+# fixes its obligations, so a hard example cannot be relabelled illustrative-only
+# to stop being executed; section and fence identities carry no line number or
+# ordinal position, so moving prose cannot read as removing a feature; every
+# published identity stays live or tombstoned; a fence identity is declared
+# exactly once; and the same forbidden revision/attestation/verification fields
+# are rejected in the schema as well as the manifest.
+#
+# It also asserts that the three enums shared with the PublicFeatureManifest
+# schema (mode, evidence class, semantic dimension) are identical. An obligation
+# one manifest can declare and the other cannot express is a coverage rule that
+# silently never applies.
+check-book-coverage:
+	node scripts/check-adr011-012-book-coverage-manifest.mjs --self-test
+
+# The ADR-016 §3 bidirectional join, which is BookTruthGate's acceptance rule
+# (§6): every non-removed public feature has an entry, every entry names a real
+# feature, and every required mode, evidence class and semantic dimension has an
+# owning section or fence.
+#
+# Against the committed pair this FAILS, and it is meant to: the Book documents
+# the pipe operator's syntax and success and nothing else, so seven declared
+# obligations have no owning material. That gap list is the work #116 does, and
+# this recipe is how it is measured rather than asserted. See
+# docs/program/adr011-012/book-coverage-manifest.md §7.
+check-book-coverage-gaps:
+	node scripts/check-adr011-012-book-coverage-manifest.mjs \
+		--public-features docs/program/adr011-012/public-feature-manifest.json
+
 # Phase 2d merge gate. Run before merging any sub-cluster branch into
 # bulldozer-strictly-typed. Exit-code-based (NOT grep -c) per handover §0.
 # See docs/cluster-audits/phase-2d-handover.md §0 + scripts/verify-merge.sh.

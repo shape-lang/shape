@@ -1,0 +1,975 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://shape-lang.org/schemas/book-coverage-manifest.v1.schema.json",
+  "title": "Shape Book Coverage Manifest",
+  "description": "The mapping from Shape public feature identities to stable Book sections, executable fences, evidence classes, semantic dimensions and diagnostic concept identities. It records where the Book satisfies each obligation declared by the PublicFeatureManifest; it does not restate semantic contracts, and it carries no exact source revision, counterpart hash, attestation digest or mutable verification state (ADR-016 §3, §7).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "manifest_version",
+    "public_feature_manifest",
+    "identity_migration",
+    "features",
+    "flagship_fence_ids",
+    "tombstones"
+  ],
+  "properties": {
+    "$schema": {
+      "type": "string"
+    },
+    "manifest_version": {
+      "description": "Schema major. Not pinned by const: a const would make the schema-major identityMigration branch unreachable, because previous_manifest.schema_major could never be lower than the only permitted current value. scripts/check-adr011-012-book-coverage-manifest.mjs pins the expected major for the committed manifest.",
+      "type": "integer",
+      "minimum": 1
+    },
+    "public_feature_manifest": {
+      "description": "The PublicFeatureManifest schema major this coverage manifest is written against. It is a schema major, not a revision or content hash: ADR-016 §3 keeps exact counterpart revisions in the external pair evidence.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_major"
+      ],
+      "properties": {
+        "schema_major": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    },
+    "identity_migration": {
+      "$ref": "#/$defs/identityMigration"
+    },
+    "features": {
+      "type": "object",
+      "description": "Canonical feature_id to Book coverage mapping. The gate rejects an unknown feature_id, a non-removed public feature with no entry, a removed feature that still has a live entry, and any required mode, evidence class or semantic dimension with no owning section or fence.",
+      "minProperties": 1,
+      "propertyNames": {
+        "$ref": "#/$defs/featureId"
+      },
+      "additionalProperties": {
+        "$ref": "#/$defs/featureCoverage"
+      }
+    },
+    "flagship_fence_ids": {
+      "description": "The designated flagship-fence set of ADR-016 §10, enumerated and ratcheted exactly like the illustrative-only set of §5. Every member must be a runnable-gated fence that declares a ceremony budget. Removing a member requires explicit review with a nonempty reason.",
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "$ref": "#/$defs/coverageId"
+      }
+    },
+    "tombstones": {
+      "$ref": "#/$defs/tombstones"
+    }
+  },
+  "$defs": {
+    "featureId": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9]*(?:[.-][a-z0-9]+)*$"
+    },
+    "stableId": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$"
+    },
+    "coverageId": {
+      "description": "A stable section or fence identity. ADR-016 §3 forbids line numbers and ordinal positions in these identities, so that moving prose does not read as removing and adding a feature. The negative pattern rejects a bare numeric segment and the l<n> / line<n> / position<n> / ordinal<n> spellings the current extractor mints.",
+      "allOf": [
+        {
+          "$ref": "#/$defs/stableId"
+        },
+        {
+          "not": {
+            "pattern": "(?:^|[._-])(?:[0-9]+|l[0-9]+|line[._-]?[0-9]+|position[._-]?[0-9]+|ordinal[._-]?[0-9]+)(?:$|[._-])"
+          }
+        }
+      ]
+    },
+    "conceptId": {
+      "description": "A stable diagnostic concept identity, owned by the diagnostic catalog rather than by the Book (ADR-016 §10). It follows the same permanence and tombstone rules as a feature identity.",
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9]*(?:[.-][a-z0-9]+)*$"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "citation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "reference"
+      ],
+      "properties": {
+        "kind": {
+          "enum": [
+            "adr",
+            "specification",
+            "issue",
+            "source"
+          ]
+        },
+        "reference": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "mode": {
+      "description": "Must stay identical to the PublicFeatureManifest schema's mode enum. The validator asserts that mechanically; the two manifests would otherwise drift into declaring obligations the other cannot express.",
+      "enum": [
+        "compile",
+        "vm",
+        "jit",
+        "lsp",
+        "cli",
+        "provider-loopback",
+        "provider-network",
+        "snapshot-resume",
+        "foreign-c",
+        "foreign-python",
+        "foreign-typescript",
+        "operator"
+      ]
+    },
+    "evidenceClass": {
+      "description": "Must stay identical to the PublicFeatureManifest schema's evidenceClass enum.",
+      "enum": [
+        "positive-execution",
+        "negative-rejection",
+        "structured-diagnostic",
+        "vm-jit-parity",
+        "native-execution",
+        "lsp-projection",
+        "cross-version-refusal",
+        "snapshot-resume",
+        "distributed-state-machine",
+        "crash-recovery",
+        "cleanup-ownership",
+        "operator-workflow",
+        "security-refusal",
+        "ceremony-budget"
+      ]
+    },
+    "semanticDimension": {
+      "description": "Must stay identical to the PublicFeatureManifest schema's semanticDimension enum.",
+      "enum": [
+        "user-model",
+        "syntax-or-callable-surface",
+        "types",
+        "effects",
+        "permissions",
+        "ownership",
+        "lifecycle",
+        "evaluator-outcomes",
+        "success",
+        "failure",
+        "cancellation",
+        "cleanup",
+        "unsupported-use",
+        "vm-jit",
+        "compiler-diagnostics",
+        "lsp-diagnostics",
+        "compatibility",
+        "migration",
+        "deprecation",
+        "script-tier"
+      ]
+    },
+    "distributedDimension": {
+      "description": "The ADR-016 §4 matrix, in table order. A feature whose PublicFeatureManifest row sets distributed_semantics_required must map every row.",
+      "enum": [
+        "invocation",
+        "effects-and-permissions",
+        "provider-lifecycle",
+        "discovery-and-admission",
+        "execution-certainty",
+        "ownership-transfer",
+        "retry",
+        "time-and-cancellation",
+        "recovery",
+        "cleanup",
+        "persistence",
+        "compatibility",
+        "security",
+        "observability",
+        "operations",
+        "degraded-modes"
+      ]
+    },
+    "section": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "page",
+        "anchor"
+      ],
+      "properties": {
+        "page": {
+          "description": "Doc-root-relative path of the owning .mdx, matching the extractor's `page` field. Not a revision: it names a file, not a version of one.",
+          "type": "string",
+          "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$)).+\\.mdx$"
+        },
+        "anchor": {
+          "$ref": "#/$defs/stableId"
+        },
+        "title": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "expectation": {
+      "description": "What a runnable-gated fence must produce. ADR-016 §5 requires negative examples to assert a structured diagnostic identity and essential typed payload rather than a mutable rendered sentence, and §5 requires a native claim to name the exact function or realization.",
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind"
+          ],
+          "properties": {
+            "kind": {
+              "const": "exit-success"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "value"
+          ],
+          "properties": {
+            "kind": {
+              "const": "stdout"
+            },
+            "value": {
+              "type": "string"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "value"
+          ],
+          "properties": {
+            "kind": {
+              "const": "value"
+            },
+            "value": true
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "diagnostic_id",
+            "essential_payload"
+          ],
+          "properties": {
+            "kind": {
+              "const": "structured-diagnostic"
+            },
+            "diagnostic_id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "concept_id": {
+              "$ref": "#/$defs/conceptId"
+            },
+            "essential_payload": {
+              "type": "object",
+              "minProperties": 1,
+              "additionalProperties": true
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "assertions"
+          ],
+          "properties": {
+            "kind": {
+              "const": "state-trace"
+            },
+            "assertions": {
+              "type": "array",
+              "minItems": 1,
+              "uniqueItems": true,
+              "items": {
+                "type": "string",
+                "minLength": 1
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "function_identity",
+            "result_oracle"
+          ],
+          "properties": {
+            "kind": {
+              "const": "native-execution"
+            },
+            "function_identity": {
+              "type": "string",
+              "minLength": 1
+            },
+            "result_oracle": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        }
+      ]
+    },
+    "illustrative": {
+      "description": "ADR-016 §5: an illustrative-only fence carries a nonempty reason and an issue or semantic-authority citation. An example is not illustrative merely because the implementation is broken.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "reason",
+        "citation"
+      ],
+      "properties": {
+        "reason": {
+          "type": "string",
+          "minLength": 1
+        },
+        "citation": {
+          "$ref": "#/$defs/citation"
+        }
+      }
+    },
+    "ceremonyBudget": {
+      "description": "ADR-016 §10. max_lines and max_explicit_annotations bound the documented user experience of a flagship fence; they never measure internal implementation size. The gate fails on exceedance. Tightening is ordinary; loosening or removing requires explicit review with a nonempty reason.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "max_lines",
+        "max_explicit_annotations"
+      ],
+      "properties": {
+        "max_lines": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "max_explicit_annotations": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "fence": {
+      "description": "One Shape code fence. The map key is the fence's stable explicit identity, which the Book fence declares in its info string; ADR-016 §5 fails extraction on an unclassified fence.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "section_id",
+        "classification"
+      ],
+      "properties": {
+        "section_id": {
+          "$ref": "#/$defs/coverageId"
+        },
+        "classification": {
+          "enum": [
+            "runnable-gated",
+            "illustrative-only"
+          ]
+        },
+        "evidence_role": {
+          "enum": [
+            "success",
+            "negative",
+            "diagnostic",
+            "compatibility",
+            "recovery",
+            "native"
+          ]
+        },
+        "declared_modes": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/mode"
+          }
+        },
+        "expectation": {
+          "$ref": "#/$defs/expectation"
+        },
+        "ceremony": {
+          "description": "ADR-016 §10: a fence satisfying the script-tier dimension declares `none`, and the gate verifies it against the compiler's structured ceremony count over the whole compiled fence unit. Only `none` is expressible: an unstated ceremony level is the absence of a claim, not a claim of some.",
+          "enum": [
+            "none"
+          ]
+        },
+        "budget": {
+          "$ref": "#/$defs/ceremonyBudget"
+        },
+        "illustrative": {
+          "$ref": "#/$defs/illustrative"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "required": [
+              "classification"
+            ],
+            "properties": {
+              "classification": {
+                "const": "runnable-gated"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "evidence_role",
+              "declared_modes",
+              "expectation"
+            ],
+            "not": {
+              "required": [
+                "illustrative"
+              ]
+            }
+          },
+          "else": {
+            "required": [
+              "illustrative"
+            ],
+            "not": {
+              "anyOf": [
+                {
+                  "required": [
+                    "evidence_role"
+                  ]
+                },
+                {
+                  "required": [
+                    "declared_modes"
+                  ]
+                },
+                {
+                  "required": [
+                    "expectation"
+                  ]
+                },
+                {
+                  "required": [
+                    "ceremony"
+                  ]
+                },
+                {
+                  "required": [
+                    "budget"
+                  ]
+                }
+              ]
+            }
+          }
+        },
+        {
+          "description": "A native evidence role is the one that requires ADR-016 §5 / R15 native evidence, so it must carry the native-execution expectation and a jit mode.",
+          "if": {
+            "required": [
+              "evidence_role"
+            ],
+            "properties": {
+              "evidence_role": {
+                "const": "native"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "expectation",
+              "declared_modes"
+            ],
+            "properties": {
+              "expectation": {
+                "properties": {
+                  "kind": {
+                    "const": "native-execution"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
+              },
+              "declared_modes": {
+                "contains": {
+                  "const": "jit"
+                }
+              }
+            }
+          }
+        }
+      ]
+    },
+    "coverageReferences": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "section_ids": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/coverageId"
+          }
+        },
+        "fence_ids": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/coverageId"
+          }
+        }
+      },
+      "anyOf": [
+        {
+          "required": [
+            "section_ids"
+          ]
+        },
+        {
+          "required": [
+            "fence_ids"
+          ]
+        }
+      ]
+    },
+    "featureCoverage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "sections",
+        "fences",
+        "mode_coverage",
+        "semantic_dimension_coverage",
+        "evidence_class_coverage",
+        "distributed_dimension_coverage"
+      ],
+      "properties": {
+        "sections": {
+          "type": "object",
+          "minProperties": 1,
+          "propertyNames": {
+            "$ref": "#/$defs/coverageId"
+          },
+          "additionalProperties": {
+            "$ref": "#/$defs/section"
+          }
+        },
+        "fences": {
+          "type": "object",
+          "minProperties": 1,
+          "propertyNames": {
+            "$ref": "#/$defs/coverageId"
+          },
+          "additionalProperties": {
+            "$ref": "#/$defs/fence"
+          }
+        },
+        "mode_coverage": {
+          "description": "Maps each PublicFeatureManifest required mode to the sections and runnable fences that document or execute it.",
+          "type": "object",
+          "propertyNames": {
+            "$ref": "#/$defs/mode"
+          },
+          "additionalProperties": {
+            "$ref": "#/$defs/coverageReferences"
+          }
+        },
+        "semantic_dimension_coverage": {
+          "type": "object",
+          "minProperties": 1,
+          "propertyNames": {
+            "$ref": "#/$defs/semanticDimension"
+          },
+          "additionalProperties": {
+            "$ref": "#/$defs/coverageReferences"
+          }
+        },
+        "evidence_class_coverage": {
+          "type": "object",
+          "propertyNames": {
+            "$ref": "#/$defs/evidenceClass"
+          },
+          "additionalProperties": {
+            "$ref": "#/$defs/coverageReferences"
+          }
+        },
+        "distributed_dimension_coverage": {
+          "type": "object",
+          "propertyNames": {
+            "$ref": "#/$defs/distributedDimension"
+          },
+          "additionalProperties": {
+            "$ref": "#/$defs/coverageReferences"
+          }
+        },
+        "concept_identity_coverage": {
+          "description": "ADR-016 §10: every diagnostic concept identity referenced by this feature's gated negative fences maps to the Book section that teaches it. An unmapped concept identity in gated evidence is a coverage failure.",
+          "type": "object",
+          "propertyNames": {
+            "$ref": "#/$defs/conceptId"
+          },
+          "additionalProperties": {
+            "$ref": "#/$defs/coverageReferences"
+          }
+        }
+      }
+    },
+    "coverageTombstone": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "reason",
+        "citation"
+      ],
+      "properties": {
+        "reason": {
+          "type": "string",
+          "minLength": 1
+        },
+        "citation": {
+          "$ref": "#/$defs/citation"
+        },
+        "replacement_ids": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/coverageId"
+          }
+        }
+      }
+    },
+    "featureTombstone": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "reason",
+        "citation"
+      ],
+      "properties": {
+        "reason": {
+          "type": "string",
+          "minLength": 1
+        },
+        "citation": {
+          "$ref": "#/$defs/citation"
+        },
+        "replacement_feature_ids": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/featureId"
+          }
+        }
+      }
+    },
+    "conceptTombstone": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "reason",
+        "citation"
+      ],
+      "properties": {
+        "reason": {
+          "type": "string",
+          "minLength": 1
+        },
+        "citation": {
+          "$ref": "#/$defs/citation"
+        },
+        "replacement_concept_ids": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/conceptId"
+          }
+        }
+      }
+    },
+    "tombstones": {
+      "description": "Permanent Book-side removals for every stable identity domain. A retired identity stays here forever, so \"was this identity ever used?\" is answered by the current manifest alone.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "feature_ids",
+        "section_ids",
+        "fence_ids",
+        "concept_ids"
+      ],
+      "properties": {
+        "feature_ids": {
+          "type": "object",
+          "propertyNames": {
+            "$ref": "#/$defs/featureId"
+          },
+          "additionalProperties": {
+            "$ref": "#/$defs/featureTombstone"
+          }
+        },
+        "section_ids": {
+          "type": "object",
+          "propertyNames": {
+            "$ref": "#/$defs/coverageId"
+          },
+          "additionalProperties": {
+            "$ref": "#/$defs/coverageTombstone"
+          }
+        },
+        "fence_ids": {
+          "type": "object",
+          "propertyNames": {
+            "$ref": "#/$defs/coverageId"
+          },
+          "additionalProperties": {
+            "$ref": "#/$defs/coverageTombstone"
+          }
+        },
+        "concept_ids": {
+          "type": "object",
+          "propertyNames": {
+            "$ref": "#/$defs/conceptId"
+          },
+          "additionalProperties": {
+            "$ref": "#/$defs/conceptTombstone"
+          }
+        }
+      }
+    },
+    "featureIdentityDisposition": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "action",
+        "citation"
+      ],
+      "properties": {
+        "action": {
+          "enum": [
+            "unchanged",
+            "replaced",
+            "removed"
+          ]
+        },
+        "new_ids": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/featureId"
+          }
+        },
+        "citation": {
+          "$ref": "#/$defs/citation"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "required": [
+              "action"
+            ],
+            "properties": {
+              "action": {
+                "const": "removed"
+              }
+            }
+          },
+          "then": {
+            "not": {
+              "required": [
+                "new_ids"
+              ]
+            }
+          },
+          "else": {
+            "required": [
+              "new_ids"
+            ]
+          }
+        }
+      ]
+    },
+    "coverageIdentityDisposition": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "action",
+        "citation"
+      ],
+      "properties": {
+        "action": {
+          "enum": [
+            "unchanged",
+            "replaced",
+            "removed"
+          ]
+        },
+        "new_ids": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/coverageId"
+          }
+        },
+        "citation": {
+          "$ref": "#/$defs/citation"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "required": [
+              "action"
+            ],
+            "properties": {
+              "action": {
+                "const": "removed"
+              }
+            }
+          },
+          "then": {
+            "not": {
+              "required": [
+                "new_ids"
+              ]
+            }
+          },
+          "else": {
+            "required": [
+              "new_ids"
+            ]
+          }
+        }
+      ]
+    },
+    "priorManifestIdentity": {
+      "description": "Content identity of the previous accepted coverage manifest. This is the manifest's own SHA-256, not a source revision and not a counterpart hash: ADR-016 §3 requires the prior identity for comparison while forbidding exact source or counterpart revisions inside a source manifest. It is the single exemption in the validator's forbidden-field scan, and it is declared in exactly one place so the exemption cannot be copied elsewhere.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_major",
+        "sha256"
+      ],
+      "properties": {
+        "schema_major": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "sha256": {
+          "$ref": "#/$defs/sha256"
+        }
+      }
+    },
+    "identityMigration": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind"
+          ],
+          "properties": {
+            "kind": {
+              "const": "initial"
+            }
+          }
+        },
+        {
+          "description": "An ordinary revision at the same schema major. It names the prior content identity but carries no identity migration map: identity changes within a major are expressed as ordinary tombstone entries.",
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "previous_manifest"
+          ],
+          "properties": {
+            "kind": {
+              "const": "revision"
+            },
+            "previous_manifest": {
+              "$ref": "#/$defs/priorManifestIdentity"
+            }
+          }
+        },
+        {
+          "description": "A schema-major change. ADR-016 §3 requires the map to be total over the prior feature, section and fence identity sets, so old reports and coverage cannot silently attach to new material.",
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "previous_manifest",
+            "feature_ids",
+            "section_ids",
+            "fence_ids"
+          ],
+          "properties": {
+            "kind": {
+              "const": "schema-major"
+            },
+            "previous_manifest": {
+              "$ref": "#/$defs/priorManifestIdentity"
+            },
+            "feature_ids": {
+              "type": "object",
+              "minProperties": 1,
+              "propertyNames": {
+                "$ref": "#/$defs/featureId"
+              },
+              "additionalProperties": {
+                "$ref": "#/$defs/featureIdentityDisposition"
+              }
+            },
+            "section_ids": {
+              "type": "object",
+              "minProperties": 1,
+              "propertyNames": {
+                "$ref": "#/$defs/coverageId"
+              },
+              "additionalProperties": {
+                "$ref": "#/$defs/coverageIdentityDisposition"
+              }
+            },
+            "fence_ids": {
+              "type": "object",
+              "minProperties": 1,
+              "propertyNames": {
+                "$ref": "#/$defs/coverageId"
+              },
+              "additionalProperties": {
+                "$ref": "#/$defs/coverageIdentityDisposition"
+              }
+            }
+          }
+        }
+      ]
+    }
+  }
+}
