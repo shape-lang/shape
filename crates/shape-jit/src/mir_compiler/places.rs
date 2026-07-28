@@ -9,6 +9,7 @@ use cranelift::codegen::ir::FuncRef;
 use cranelift::prelude::*;
 
 use super::MirToIR;
+use super::bounds_elision;
 // v2-boundary: inline array access still uses heap pointer layout. Per
 // ADR-006 §2.7.5 the JIT-FFI boundary owns its own constants; import the
 // `UNIFIED_PTR_MASK` mirror from `value_ffi` instead of reaching into the
@@ -716,28 +717,33 @@ impl<'a, 'b> MirToIR<'a, 'b> {
             .store(MemFlags::trusted(), val, elem_addr, 0);
     }
 
-    /// Resolve a `Place::Index` operand to a `(arr_slot, iv_slot)` pair if
-    /// both sides reduce to MIR locals. Used to consult
-    /// `MirToIR::bounds_elision`.
+    /// Is the `Place::Index` currently being lowered a site the bounds-elision
+    /// plan proved in-bounds?
     ///
-    /// Returns `None` for nested or non-trivial access shapes
-    /// (e.g. `arr.field[iv]`, `arr[expr+1]`, `arr[constant]`).
-    pub(crate) fn resolve_simple_index_pair(
+    /// The site key is the MIR statement position (`current_stmt_position`)
+    /// plus the structural shape of receiver and index, projected by the
+    /// analyzer's own `classify_access` so producer and consumer cannot
+    /// disagree about what a site is. `current_stmt_position` is `None` while
+    /// a terminator is lowered, so an index access inside a terminator operand
+    /// is never trusted.
+    pub(crate) fn index_access_is_trusted(
+        &self,
         base: &shape_vm::mir::types::Place,
         index_op: &shape_vm::mir::types::Operand,
-    ) -> Option<(shape_vm::mir::types::SlotId, shape_vm::mir::types::SlotId)> {
-        use shape_vm::mir::types::{Operand, Place};
-        let arr_slot = match base {
-            Place::Local(s) => *s,
-            _ => return None,
+    ) -> bool {
+        let Some((block, stmt)) = self.current_stmt_position else {
+            return false;
         };
-        let iv_slot = match index_op {
-            Operand::Copy(Place::Local(s))
-            | Operand::Move(Place::Local(s))
-            | Operand::MoveExplicit(Place::Local(s)) => *s,
-            _ => return None,
+        let Some((base_key, index_key)) = bounds_elision::classify_access(base, index_op) else {
+            return false;
         };
-        Some((arr_slot, iv_slot))
+        self.bounds_elision
+            .is_trusted_site(&bounds_elision::AccessSite {
+                block,
+                stmt,
+                base: base_key,
+                index: index_key,
+            })
     }
 
     // ── Inline typed-struct field access ──────────────────────────────
@@ -1151,12 +1157,20 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                 }
 
                 // v2 fast path: when the base local holds a v2 `Array<scalar>`
-                // pointer, use the inline `v2_array_get` helper.
+                // pointer, use the inline `v2_array_get` helper. This is the
+                // carrier every scalar `Array<T>` takes, so the elision plan is
+                // consulted here as well as on the legacy path below —
+                // otherwise no numeric kernel could ever elide.
                 if let Some(elem_kind) = self.v2_typed_array_elem_kind(base) {
+                    let trusted = self.index_access_is_trusted(base, operand);
                     let arr_ptr = self.read_place(base)?;
                     let raw_idx = self.compile_operand_raw(operand)?;
                     let idx_i32 = self.coerce_index_to_i32(raw_idx);
-                    let elem_val = self.v2_array_get(arr_ptr, idx_i32, elem_kind);
+                    let elem_val = if trusted {
+                        self.v2_array_get_unchecked(arr_ptr, idx_i32, elem_kind)
+                    } else {
+                        self.v2_array_get(arr_ptr, idx_i32, elem_kind)
+                    };
                     return Ok(elem_val);
                 }
 
@@ -1171,10 +1185,8 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                 // header that already enforces `0 <= iv < arr.length`, emit
                 // the unchecked variant. Default empty plan keeps every
                 // access on the checked path — no behaviour change.
-                if let Some((arr, iv)) = Self::resolve_simple_index_pair(base, operand) {
-                    if self.bounds_elision.is_trusted(arr, iv) {
-                        return Ok(self.inline_array_get_unchecked(base_val, index_val));
-                    }
+                if self.index_access_is_trusted(base, operand) {
+                    return Ok(self.inline_array_get_unchecked(base_val, index_val));
                 }
                 Ok(self.inline_array_get(base_val, index_val))
             }
@@ -1354,11 +1366,16 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                 // `*mut TypedArray<T>`, the index becomes an i32, and the
                 // value is coerced to the element's native type.
                 if let Some(elem_kind) = self.v2_typed_array_elem_kind(base) {
+                    let trusted = self.index_access_is_trusted(base, operand);
                     let arr_ptr = self.read_place(base)?;
                     let raw_idx = self.compile_operand_raw(operand)?;
                     let idx_i32 = self.coerce_index_to_i32(raw_idx);
                     let elem_val = self.coerce_to_v2_elem(val, elem_kind);
-                    self.v2_array_set(arr_ptr, idx_i32, elem_val, elem_kind);
+                    if trusted {
+                        self.v2_array_set_unchecked(arr_ptr, idx_i32, elem_val, elem_kind);
+                    } else {
+                        self.v2_array_set(arr_ptr, idx_i32, elem_val, elem_kind);
+                    }
                     return Ok(());
                 }
 
@@ -1369,11 +1386,9 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                 let base_val = self.read_place(base)?;
                 let index_val = self.compile_operand_raw(operand)?;
                 // Bounds-check elision: see the matching read-side path.
-                if let Some((arr, iv)) = Self::resolve_simple_index_pair(base, operand) {
-                    if self.bounds_elision.is_trusted(arr, iv) {
-                        self.inline_array_set_unchecked(base_val, index_val, val);
-                        return Ok(());
-                    }
+                if self.index_access_is_trusted(base, operand) {
+                    self.inline_array_set_unchecked(base_val, index_val, val);
+                    return Ok(());
                 }
                 self.inline_array_set(base_val, index_val, val);
                 Ok(())

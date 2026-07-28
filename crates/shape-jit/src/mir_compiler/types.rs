@@ -2023,6 +2023,24 @@ fn infer_operand_kind_with_projections(
     match operand {
         Operand::Constant(c) => infer_constant_kind(c),
         Operand::Copy(place) | Operand::Move(place) | Operand::MoveExplicit(place) => {
+            // `let n = arr.length` on a PROVEN typed-array receiver. The JIT
+            // already produces this shape (`read_place`'s `v2_array_len` +
+            // `sextend` to i64) and `place_native_kind` projects it at
+            // direct-use sites; without the same projection here the
+            // *hoisted* bound local (`let n = arr.length - k; while i < n`)
+            // keeps an unproven kind and deopts the whole function. Same
+            // receiver proof, same width. Checked before the name-keyed
+            // `field_kinds` table, and gated on the receiver being a typed
+            // array, so a user struct field spelled `length` cannot reach it.
+            if let (Place::Field(base, field_idx), Some(fnt), Some(cts)) =
+                (place, field_name_table, concrete_types)
+            {
+                if fnt.get(field_idx).is_some_and(|n| n == "length")
+                    && is_v2_typed_array_slot(cts, base.root_local().0).is_some()
+                {
+                    return Some(NativeKind::Int64);
+                }
+            }
             if let (Place::Field(_, field_idx), Some(fk), Some(fnt)) =
                 (place, field_kinds, field_name_table)
             {
