@@ -51,7 +51,9 @@ fn sole_comptime_for(input: &str) -> ComptimeForExpr {
 
 #[test]
 fn exists_type_captures_witness_list_and_inner() {
-    let ann = sole_type_alias("type SomeField<Owner> = exists<I, F> FieldDescriptor<Owner, I, F>;");
+    let ann = sole_type_alias(
+        "type SomeField<Owner> = exists<I, F> FieldDescriptor<Owner, I, F>;",
+    );
     match ann {
         TypeAnnotation::Existential { witnesses, inner } => {
             assert_eq!(witnesses, vec!["I".to_string(), "F".to_string()]);
@@ -108,7 +110,9 @@ fn exists_type_empty_witness_list_rejected() {
 
 #[test]
 fn comptime_for_some_captures_witnesses() {
-    let cf = sole_comptime_for("comptime for some<I, F> field in descriptors { let x = 1 }");
+    let cf = sole_comptime_for(
+        "comptime for some<I, F> field in descriptors { let x = 1 }",
+    );
     assert_eq!(cf.witnesses, vec!["I".to_string(), "F".to_string()]);
     assert_eq!(cf.variable, "field");
 }

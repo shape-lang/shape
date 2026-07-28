@@ -401,7 +401,8 @@ mod v2_typed_object_prop_tests {
     #[test]
     fn jit_get_prop_on_v2_typed_object_is_safe() {
         let mut reg = TypeSchemaRegistry::new_with_stdlib();
-        let schema_id = reg.register_type("PhaseBProp", vec![("x".to_string(), FieldType::F64)]);
+        let schema_id =
+            reg.register_type("PhaseBProp", vec![("x".to_string(), FieldType::F64)]);
         let _scope = SyncRegistryScope::enter(Arc::new(reg));
 
         let bits = jit_typed_object_alloc(schema_id as u32, 8);

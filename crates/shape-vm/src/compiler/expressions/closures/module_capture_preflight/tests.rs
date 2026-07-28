@@ -6,7 +6,9 @@ use shape_ast::error::ShapeError;
 use super::*;
 use crate::bytecode::{Function, OpCode};
 use crate::compiler::comptime_builtins::capture_plan::CaptureAccess;
-use crate::type_tracking::{BindingOwnershipClass, BindingSemantics, BindingStorageClass};
+use crate::type_tracking::{
+    BindingOwnershipClass, BindingSemantics, BindingStorageClass,
+};
 
 const MODULE_SLOT: u16 = 7;
 const BINDING_SPAN: Span = Span { start: 4, end: 8 };
@@ -148,7 +150,14 @@ fn canonical_shared_module_plan(compiler: &BytecodeCompiler) -> Vec<PlannedCaptu
     let captured = vec!["hits".to_string()];
     let mutated = HashSet::from(["hits".to_string()]);
     let plan = compiler
-        .plan_captures(&captured, &mutated, None, None, None, CLOSURE_SPAN)
+        .plan_captures(
+            &captured,
+            &mutated,
+            None,
+            None,
+            None,
+            CLOSURE_SPAN,
+        )
         .expect("canonical module capture plan");
     assert_eq!(plan.len(), 1);
     assert_eq!(plan[0].plan.access(), CaptureAccess::SharedCell);
@@ -238,19 +247,15 @@ fn active_callable_peek_declines_before_registry_layout_or_id_publication() {
         closure_parts("let worker = || { hits = hits + 1\n hits }");
     assert!(captures.is_none());
     let plan = canonical_shared_module_plan(&compiler);
-    assert!(
-        compiler
-            .preflight_callable_module_shared_captures(&plan, span)
-            .is_err()
-    );
+    assert!(compiler
+        .preflight_callable_module_shared_captures(&plan, span)
+        .is_err());
     let before = publication_state(&compiler);
     assert_pristine_closure_publication(&before);
 
-    assert!(
-        compiler
-            .mint_closure_type_id_peek(&params, &body, None, None, span)
-            .is_none()
-    );
+    assert!(compiler
+        .mint_closure_type_id_peek(&params, &body, None, None, span)
+        .is_none());
     assert_eq!(
         publication_state(&compiler),
         before,
@@ -265,7 +270,8 @@ fn generated_declared_share_plan_uses_the_same_structural_preflight() {
     // with a real parsed declared-share clause and compiler-issued generated
     // provenance, then feeds that exact plan to the provenance-free preflight.
     let compiler = active_callable("Job::read", BindingStorageClass::Direct, false);
-    let (_params, _body, captures, span) = closure_parts("let worker = |; share hits| hits");
+    let (_params, _body, captures, span) =
+        closure_parts("let worker = |; share hits| hits");
     let captures = captures.expect("generated fixture has a declared capture clause");
     let origin = compiler.generated_node_issuer.issue(
         shape_ast::ast::GeneratedExpansionFingerprint::from_components(17, 29),

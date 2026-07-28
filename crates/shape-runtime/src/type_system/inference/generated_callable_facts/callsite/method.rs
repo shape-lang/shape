@@ -10,8 +10,7 @@ use crate::type_system::{
 /// Compiler-qualified method declaration capability retained across the
 /// registration and expression-inference passes.
 #[derive(Debug, Clone)]
-pub(in crate::type_system::inference::generated_callable_facts) struct DeclaredMethodTypeParameters
-{
+pub(in crate::type_system::inference::generated_callable_facts) struct DeclaredMethodTypeParameters {
     pub(super) source_names: Vec<String>,
     pub(super) receiver: Vec<TypeVar>,
     pub(super) method: Vec<TypeVar>,
@@ -19,9 +18,7 @@ pub(in crate::type_system::inference::generated_callable_facts) struct DeclaredM
 
 /// Opaque identity of one immutable method declaration for one inference run.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
-pub(in crate::type_system::inference::generated_callable_facts) struct InferenceMethodDeclarationToken(
-    usize,
-);
+pub(in crate::type_system::inference::generated_callable_facts) struct InferenceMethodDeclarationToken(usize);
 
 impl InferenceMethodDeclarationToken {
     fn of(method: &MethodDef) -> Self {

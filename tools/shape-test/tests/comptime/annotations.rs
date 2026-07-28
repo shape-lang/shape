@@ -703,9 +703,7 @@ let w = Widget { id: 1 }
 print(w.signature_tag())
 "#;
     ShapeTest::new(code).expect_output("move-exclusive");
-    ShapeTest::new(code)
-        .with_jit()
-        .expect_output("move-exclusive");
+    ShapeTest::new(code).with_jit().expect_output("move-exclusive");
 }
 
 /// Companion: the handler iterates `callable.parameters` at comptime and gates
@@ -740,7 +738,5 @@ let g = Gadget { id: 7 }
 print(g.arity_tag())
 "#;
     ShapeTest::new(code).expect_output("three-params");
-    ShapeTest::new(code)
-        .with_jit()
-        .expect_output("three-params");
+    ShapeTest::new(code).with_jit().expect_output("three-params");
 }

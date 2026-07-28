@@ -106,11 +106,7 @@ pub(crate) fn read_option<'a>(
 /// payload at field 1). Shared by the Result/Option carriers here and by the
 /// snapshot-marker construction (design §4.1.3) — any enum whose variant
 /// carries at most one payload uses this exact layout.
-pub(crate) fn build_variant_object(
-    schema_id: u64,
-    variant: i64,
-    payload: KindedSlot,
-) -> KindedSlot {
+pub(crate) fn build_variant_object(schema_id: u64, variant: i64, payload: KindedSlot) -> KindedSlot {
     let payload_slot = payload.slot();
     let payload_kind = payload.kind();
     let payload_bits = payload_slot.raw();

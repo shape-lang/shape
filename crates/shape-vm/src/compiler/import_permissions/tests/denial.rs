@@ -45,8 +45,8 @@ fn install_compiled_annotation(
                 .iter()
                 .find(|handler| handler.handler_type == AnnotationHandlerType::ComptimePost)
                 .cloned(),
-            sugar_post_handler: None,
-            sugar_body_fns: Vec::new(),
+        sugar_post_handler: None,
+        sugar_body_fns: Vec::new(),
             allowed_targets: definition.allowed_targets.clone().unwrap_or_default(),
         },
     );
@@ -119,7 +119,11 @@ annotation read_text() on type {
 "#,
     );
     let mut compiler = BytecodeCompiler::new();
-    install_compiled_annotation(&mut compiler, "std::core::file::read_text", &definition);
+    install_compiled_annotation(
+        &mut compiler,
+        "std::core::file::read_text",
+        &definition,
+    );
     compiler.set_permission_set(Some(PermissionSet::pure()));
 
     let error = compiler

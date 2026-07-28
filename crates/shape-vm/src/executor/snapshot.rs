@@ -725,7 +725,9 @@ fn render_capture_barrier(e: &VMError) -> String {
     if let Some((_, message)) = raw.split_once("FUTURE_SNAPSHOT_BARRIER:") {
         return message.trim().to_string();
     }
-    if lower.contains("snapshot cannot capture future(") || lower.contains("pending-future state") {
+    if lower.contains("snapshot cannot capture future(")
+        || lower.contains("pending-future state")
+    {
         return "cannot checkpoint while a future is still pending: pending async work is \
                 not saved by this build. Await or cancel the future before checkpointing."
             .to_string();
@@ -919,7 +921,10 @@ impl super::VirtualMachine {
     /// return. No ValueWord, no `create_typed_enum_nb`: ordinary
     /// `build_variant_object` + `build_ok` over the program's registered
     /// enum schemas.
-    fn build_snapshot_hash_marker(&self, hex: String) -> Result<shape_value::KindedSlot, VMError> {
+    fn build_snapshot_hash_marker(
+        &self,
+        hex: String,
+    ) -> Result<shape_value::KindedSlot, VMError> {
         use super::result_option_carrier::{build_ok, build_variant_object};
         let schema = self.lookup_schema_by_name("Snapshot").ok_or_else(|| {
             VMError::RuntimeError(
@@ -943,7 +948,9 @@ impl super::VirtualMachine {
     /// dispatch loop. `Resumed` is a unit variant, so its payload slot is
     /// `KindedSlot::none()`. Same ordinary `build_variant_object` + `build_ok`
     /// path as the `Hash` marker — no ValueWord, no `create_typed_enum_nb`.
-    pub(crate) fn build_snapshot_resumed_marker(&self) -> Result<shape_value::KindedSlot, VMError> {
+    pub(crate) fn build_snapshot_resumed_marker(
+        &self,
+    ) -> Result<shape_value::KindedSlot, VMError> {
         use super::result_option_carrier::{build_ok, build_variant_object};
         let schema = self.lookup_schema_by_name("Snapshot").ok_or_else(|| {
             VMError::RuntimeError(
@@ -978,9 +985,7 @@ impl super::VirtualMachine {
             )
         })?;
         let variant_id = schema.variant_id(variant).ok_or_else(|| {
-            VMError::RuntimeError(format!(
-                "snapshot(): SnapshotError::{variant} variant missing"
-            ))
+            VMError::RuntimeError(format!("snapshot(): SnapshotError::{variant} variant missing"))
         })? as i64;
         let schema_id = schema.id as u64;
         let payload = shape_value::KindedSlot::from_string_arc(std::sync::Arc::new(detail));
@@ -1192,20 +1197,9 @@ mod tests {
         ];
         // Tokens that must never survive into a user-facing message.
         let forbidden = [
-            "ADR",
-            "SURFACE:",
-            "KL-4",
-            "HeapKind",
-            "NativeKind",
-            "Ptr(",
-            "SharedCell",
-            "serialize_reference",
-            "slot_to_serializable",
-            "VirtualMachine::snapshot",
-            "§2.7",
-            "wild-free",
-            "W17-snapshot",
-            "phase-2d-playbook",
+            "ADR", "SURFACE:", "KL-4", "HeapKind", "NativeKind", "Ptr(", "SharedCell",
+            "serialize_reference", "slot_to_serializable", "VirtualMachine::snapshot",
+            "§2.7", "wild-free", "W17-snapshot", "phase-2d-playbook",
         ];
         for raw in leaky {
             let rendered = render_capture_barrier(&VMError::NotImplemented(raw.to_string()));
@@ -1534,7 +1528,9 @@ mod tests {
             700,
             vec![ValueSlot::from_raw(123)].into_boxed_slice(),
             0,
-            Arc::<[NativeKind]>::from(vec![NativeKind::Ptr(HeapKind::Future)].into_boxed_slice()),
+            Arc::<[NativeKind]>::from(
+                vec![NativeKind::Ptr(HeapKind::Future)].into_boxed_slice(),
+            ),
         );
         vm.push_kinded(object as u64, NativeKind::Ptr(HeapKind::TypedObject))
             .expect("push typed object carrying Future handle");
@@ -2340,11 +2336,7 @@ mod tests {
             next_bits, rbits,
             "restored Node.next aliases the SAME restored node (identity preserved, no duplication)"
         );
-        assert_eq!(
-            unsafe { (*rptr).slots()[0].raw() },
-            77,
-            "scalar field survives"
-        );
+        assert_eq!(unsafe { (*rptr).slots()[0].raw() }, 77, "scalar field survives");
 
         // Re-snapshot re-derives the self-edge (a duplicated node would emit a
         // nested HeapNode body instead).

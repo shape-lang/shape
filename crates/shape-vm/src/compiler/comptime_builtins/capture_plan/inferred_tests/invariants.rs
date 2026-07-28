@@ -1,66 +1,67 @@
 use super::*;
 
-// ───────────────────────────────────────────────────────────────────
-// (c) SENTINEL — ONE PRODUCER. The single most load-bearing artifact of
-//     this ticket: it turns R2 from a code-review norm into a build
-//     failure. Mirrored in scripts/check-no-dynamic.sh.
-// ───────────────────────────────────────────────────────────────────
+    // ───────────────────────────────────────────────────────────────────
+    // (c) SENTINEL — ONE PRODUCER. The single most load-bearing artifact of
+    //     this ticket: it turns R2 from a code-review norm into a build
+    //     failure. Mirrored in scripts/check-no-dynamic.sh.
+    // ───────────────────────────────────────────────────────────────────
 
-fn walk_rs_files(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.is_dir() {
-            walk_rs_files(&path, out);
-        } else if path.extension().and_then(|e| e.to_str()) == Some("rs") {
-            out.push(path);
-        }
-    }
-}
-
-#[test]
-fn capture_kind_is_constructed_in_exactly_one_compiler_file() {
-    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/compiler");
-    let mut files = Vec::new();
-    walk_rs_files(&root, &mut files);
-    assert!(!files.is_empty(), "compiler source tree must be walkable");
-
-    let needles = [
-        "CaptureKind::Immutable",
-        "CaptureKind::OwnedMutable",
-        "CaptureKind::Shared",
-    ];
-    let mut offenders: Vec<String> = Vec::new();
-    for path in files {
-        if path.file_name().and_then(|f| f.to_str()) == Some("capture_plan.rs") {
-            continue;
-        }
-        let display = path.to_string_lossy();
-        if display.contains("/capture_plan/") && display.contains("tests") {
-            continue;
-        }
-        let Ok(text) = std::fs::read_to_string(&path) else {
-            continue;
+    fn walk_rs_files(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
         };
-        if needles.iter().any(|n| text.contains(n)) {
-            offenders.push(path.display().to_string());
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                walk_rs_files(&path, out);
+            } else if path.extension().and_then(|e| e.to_str()) == Some("rs") {
+                out.push(path);
+            }
         }
     }
-    assert!(
-        offenders.is_empty(),
-        "ADR-009 C1 K1 gate: `CaptureKind::<Variant>` may be named in exactly ONE \
+
+    #[test]
+    fn capture_kind_is_constructed_in_exactly_one_compiler_file() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/compiler");
+        let mut files = Vec::new();
+        walk_rs_files(&root, &mut files);
+        assert!(!files.is_empty(), "compiler source tree must be walkable");
+
+        let needles = [
+            "CaptureKind::Immutable",
+            "CaptureKind::OwnedMutable",
+            "CaptureKind::Shared",
+        ];
+        let mut offenders: Vec<String> = Vec::new();
+        for path in files {
+            if path.file_name().and_then(|f| f.to_str()) == Some("capture_plan.rs") {
+                continue;
+            }
+            let display = path.to_string_lossy();
+            if display.contains("/capture_plan/") && display.contains("tests") {
+                continue;
+            }
+            let Ok(text) = std::fs::read_to_string(&path) else {
+                continue;
+            };
+            if needles.iter().any(|n| text.contains(n)) {
+                offenders.push(path.display().to_string());
+            }
+        }
+        assert!(
+            offenders.is_empty(),
+            "ADR-009 C1 K1 gate: `CaptureKind::<Variant>` may be named in exactly ONE \
              bytecode-compiler file (comptime_builtins/capture_plan.rs). A second producer \
              is how the declared capture mode gets discarded while inference stays \
              authoritative — the defect that got C1 rejected. Offenders: {offenders:?}"
-    );
-}
+        );
+    }
 
 fn stamped_program(origin: &shape_ast::ast::GeneratedNodeOrigin) -> shape_ast::ast::Program {
-    let mut program =
-        shape_ast::parse_program("fn run() -> int { let base = 1; let f = || base; f() } run()")
-            .expect("fixture parses");
+    let mut program = shape_ast::parse_program(
+        "fn run() -> int { let base = 1; let f = || base; f() } run()",
+    )
+    .expect("fixture parses");
     let body = program
         .items
         .iter_mut()
@@ -169,10 +170,7 @@ run()
     let opcode_error = pack
         .validate_emitted_artifact(layout, function, &without_capture_ops)
         .expect_err("cell-backed descriptor requires its exact opcode family");
-    assert!(
-        opcode_error.contains("requires opcode family"),
-        "{opcode_error}"
-    );
+    assert!(opcode_error.contains("requires opcode family"), "{opcode_error}");
 
     let wrong_family = [crate::bytecode::Instruction::new(
         crate::bytecode::OpCode::LoadSharedCaptureI64,
@@ -271,13 +269,12 @@ outer()
     compiler.shared_locals.clear();
     compiler.boxed_locals.clear();
     compiler.owned_mutable_locals.clear();
-    let slot = compiler
-        .declare_local("plain")
-        .expect("declare slot-0 local");
+    let slot = compiler.declare_local("plain").expect("declare slot-0 local");
     assert_eq!(slot, 0, "the valid local must reuse the leaked ordinal");
-    compiler
-        .type_tracker
-        .set_local_binding_semantics(slot, BytecodeCompiler::owned_immutable_binding_semantics());
+    compiler.type_tracker.set_local_binding_semantics(
+        slot,
+        BytecodeCompiler::owned_immutable_binding_semantics(),
+    );
 
     let planned = compiler
         .plan_captures(

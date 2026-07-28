@@ -50,11 +50,7 @@ impl Environment {
     fn canonical_form(&self) -> String {
         let mut out = String::new();
         for field in IDENTITY_FIELDS {
-            let value = self
-                .fields
-                .get(*field)
-                .map(String::as_str)
-                .unwrap_or("<absent>");
+            let value = self.fields.get(*field).map(String::as_str).unwrap_or("<absent>");
             out.push_str(field);
             out.push('=');
             out.push_str(value);
@@ -209,8 +205,8 @@ pub fn load_average_1m() -> Option<f64> {
 
 /// sha256 of a file's contents, used for the shape binary and the manifest.
 pub fn file_sha256(path: &Path) -> Result<String> {
-    let bytes =
-        std::fs::read(path).with_context(|| format!("reading {} for hashing", path.display()))?;
+    let bytes = std::fs::read(path)
+        .with_context(|| format!("reading {} for hashing", path.display()))?;
     let mut hasher = Sha256::new();
     hasher.update(&bytes);
     Ok(format!("sha256:{:x}", hasher.finalize()))

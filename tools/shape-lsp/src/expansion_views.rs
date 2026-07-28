@@ -114,8 +114,8 @@ impl ExpansionView {
 /// Half-open-ish containment: `pos` within `[start, end]` by (line, column)
 /// ordering. Used for `source → virtual` anchor resolution.
 fn position_in_range(pos: Position, start: Position, end: Position) -> bool {
-    let at_or_after_start =
-        pos.line > start.line || (pos.line == start.line && pos.character >= start.character);
+    let at_or_after_start = pos.line > start.line
+        || (pos.line == start.line && pos.character >= start.character);
     let at_or_before_end =
         pos.line < end.line || (pos.line == end.line && pos.character <= end.character);
     at_or_after_start && at_or_before_end
@@ -161,11 +161,12 @@ pub(crate) fn render_expansion_view(
     let mut line_origins: Vec<Option<Position>> = Vec::new();
     let mut decl_anchors: Vec<DeclLineAnchor> = Vec::new();
 
-    let push_synthetic =
-        |lines: &mut Vec<String>, line_origins: &mut Vec<Option<Position>>, content: String| {
-            lines.push(content);
-            line_origins.push(None);
-        };
+    let push_synthetic = |lines: &mut Vec<String>,
+                          line_origins: &mut Vec<Option<Position>>,
+                          content: String| {
+        lines.push(content);
+        line_origins.push(None);
+    };
 
     push_synthetic(
         &mut lines,

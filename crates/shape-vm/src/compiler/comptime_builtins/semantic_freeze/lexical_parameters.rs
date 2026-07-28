@@ -106,7 +106,9 @@ mod tests {
             "a shadowed outer identity must not claim the effective source spelling"
         );
         assert_eq!(
-            overlay.lexical_parameters.names_for_identity(identities[1]),
+            overlay
+                .lexical_parameters
+                .names_for_identity(identities[1]),
             vec!["T"],
             "the effective inner identity retains its authored presentation"
         );

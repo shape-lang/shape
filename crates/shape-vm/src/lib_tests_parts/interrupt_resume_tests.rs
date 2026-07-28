@@ -94,16 +94,13 @@ acc
     let hash = store.resolve_hash(&snapshot_hex).expect("resolve hash");
     let (semantic, context, vm_hash, bytecode_hash) =
         engine.load_snapshot(&hash).expect("load_snapshot");
-    engine
-        .apply_snapshot(semantic, context)
-        .expect("apply_snapshot");
+    engine.apply_snapshot(semantic, context).expect("apply_snapshot");
 
     let vm_hash = vm_hash.expect("snapshot carries VM state");
     let bytecode_hash = bytecode_hash.expect("snapshot carries bytecode");
     let vm_snapshot: VmSnapshot = store.get_struct(&vm_hash).expect("get VmSnapshot");
-    let bytecode: crate::BytecodeProgram = store
-        .get_struct(&bytecode_hash)
-        .expect("get BytecodeProgram");
+    let bytecode: crate::BytecodeProgram =
+        store.get_struct(&bytecode_hash).expect("get BytecodeProgram");
 
     // Interrupt-origin snapshots carry the WF-3F origin stamp.
     assert!(

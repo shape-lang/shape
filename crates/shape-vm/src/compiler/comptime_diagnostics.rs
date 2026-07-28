@@ -327,8 +327,7 @@ mod tests {
     fn firewall_strips_every_p10_jargon_fragment() {
         // A representative internal executor dump carrying multiple jargon
         // fragments at once.
-        let dirty =
-            "op_transform SURFACE V3-S5 ckpt-5 REFUSED ON SIGHT per ADR-006 §2.7.7 (phase-2c)";
+        let dirty = "op_transform SURFACE V3-S5 ckpt-5 REFUSED ON SIGHT per ADR-006 §2.7.7 (phase-2c)";
         assert!(comptime_message_has_jargon(dirty));
         let clean = sanitize_comptime_internal(dirty);
         assert!(
@@ -336,10 +335,7 @@ mod tests {
             "firewall leaked jargon: {:?}",
             clean
         );
-        assert_eq!(
-            clean,
-            "this operation is not available in compile-time code"
-        );
+        assert_eq!(clean, "this operation is not available in compile-time code");
     }
 
     #[test]

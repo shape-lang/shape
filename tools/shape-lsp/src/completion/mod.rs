@@ -2512,10 +2512,11 @@ let x = 1
             .into_iter()
             .map(|c| c.label)
             .collect();
-        let expected: Vec<String> = shape_runtime::comptime_reflection::FROZEN_PRIMITIVE_VARIANTS
-            .iter()
-            .map(|v| v.name.to_string())
-            .collect();
+        let expected: Vec<String> =
+            shape_runtime::comptime_reflection::FROZEN_PRIMITIVE_VARIANTS
+                .iter()
+                .map(|v| v.name.to_string())
+                .collect();
         assert_eq!(labels, expected);
         assert!(!labels.iter().any(|l| l == "Unknown"));
         assert!(!labels.iter().any(|l| l == "Any"));
@@ -2664,12 +2665,7 @@ let x = 1
     /// each, so completion falls through cleanly with no fabricated variants.
     #[test]
     fn test_b7_element_descriptor_structs_have_no_enum_variant_completions() {
-        for struct_name in [
-            "TupleElement",
-            "RecordField",
-            "UnionMember",
-            "TypeParamDescriptor",
-        ] {
+        for struct_name in ["TupleElement", "RecordField", "UnionMember", "TypeParamDescriptor"] {
             assert!(
                 enum_variant_completions(struct_name, "", None).is_empty(),
                 "{struct_name} is an element struct payload — no enum-variant completion"

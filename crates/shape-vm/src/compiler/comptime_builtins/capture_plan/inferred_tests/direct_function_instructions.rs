@@ -20,11 +20,7 @@ run()
     let outer = c
         .closure_capture_packs
         .iter()
-        .find(|pack| {
-            pack.descriptors
-                .iter()
-                .any(|descriptor| descriptor.name == "base")
-        })
+        .find(|pack| pack.descriptors.iter().any(|descriptor| descriptor.name == "base"))
         .expect("outer base capture pack");
     let inner = c
         .closure_capture_packs

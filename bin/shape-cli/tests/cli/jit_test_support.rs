@@ -37,10 +37,7 @@ pub(super) fn run_workspace_fixture(mode: &str, suite: &str, fixture: &str) -> C
 pub(super) fn assert_fixture_has_no_top_level_comptime(fixture: &str) {
     let path = workspace_fixture_path("smokes-jit-closure", fixture);
     let source = std::fs::read_to_string(&path).unwrap_or_else(|error| {
-        panic!(
-            "{fixture}: failed to read fixture {}: {error}",
-            path.display()
-        )
+        panic!("{fixture}: failed to read fixture {}: {error}", path.display())
     });
     let program = shape_ast::parser::parse_program(&source)
         .unwrap_or_else(|error| panic!("{fixture}: failed to parse fixture: {error}"));

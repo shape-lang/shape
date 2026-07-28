@@ -349,7 +349,9 @@ unsafe fn try_call_user_method(
     let type_name = match unsafe { receiver_type_name(receiver_bits, receiver_kind, exec_ctx) } {
         Some(type_name) => type_name,
         None => {
-            if std::env::var_os("SHAPE_DEBUG_FIELD_STAMPS").is_some() && method_name == "summary" {
+            if std::env::var_os("SHAPE_DEBUG_FIELD_STAMPS").is_some()
+                && method_name == "summary"
+            {
                 eprintln!(
                     "[method-debug] no receiver type for method={} bits={} kind={:?}",
                     method_name, receiver_bits, receiver_kind
@@ -376,7 +378,9 @@ unsafe fn try_call_user_method(
     }) {
         Some(found) => found,
         None => {
-            if std::env::var_os("SHAPE_DEBUG_FIELD_STAMPS").is_some() && method_name == "summary" {
+            if std::env::var_os("SHAPE_DEBUG_FIELD_STAMPS").is_some()
+                && method_name == "summary"
+            {
                 eprintln!(
                     "[method-debug] method={} type={} candidates={:?} names_len={}",
                     method_name, type_name, candidates, ctx_ref.function_names_len
@@ -1294,7 +1298,9 @@ pub extern "C" fn jit_call_method(ctx: *mut JITContext, stack_count: usize) -> u
         // the §2.7.7 / Q9 parallel-kind track flows into
         // `receiver_type_name` so dispatch classifies on the producing
         // call's stamp, not on tag-bit decode.
-        if std::env::var_os("SHAPE_DEBUG_FIELD_STAMPS").is_some() && method_name == "summary" {
+        if std::env::var_os("SHAPE_DEBUG_FIELD_STAMPS").is_some()
+            && method_name == "summary"
+        {
             eprintln!(
                 "[method-debug] before ufcs method={} receiver_kind={:?} builtin_result={} tag_null={} will_try={}",
                 method_name,

@@ -377,7 +377,9 @@ type User { id: int }
 let reflected = comptime { reflect_repr(type_ref(User)) }
 "#,
     )
-    .expect_run_err_contains("reflect_repr expects exactly two arguments");
+    .expect_run_err_contains(
+        "reflect_repr expects exactly two arguments",
+    );
 }
 
 /// R7 (Dec 56): ordinary `reflect()` never substitutes a filtered or partial

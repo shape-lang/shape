@@ -86,8 +86,12 @@ impl BytecodeCompiler {
                         "closure {function_index}: invalid function instruction windows: {error}"
                     ))
                 })?;
-            pack.validate_emitted_artifact(registry_layout, function, direct_instructions)
-                .map_err(&internal_error)?;
+            pack.validate_emitted_artifact(
+                registry_layout,
+                function,
+                direct_instructions,
+            )
+            .map_err(&internal_error)?;
             layouts[usize::from(function_index)] = Some(Arc::new(rebuilt));
         }
 

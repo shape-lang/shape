@@ -26,16 +26,16 @@
 //! | Int8/Bool | I8            | 1            |
 
 use cranelift::prelude::*;
-use shape_value::HeapKind;
 use shape_value::v2::ConcreteType;
-use shape_vm::mir::Point;
+use shape_value::HeapKind;
 use shape_vm::mir::analysis::OwnershipDecision;
 use shape_vm::mir::types::{Operand, Place, SlotId};
+use shape_vm::mir::Point;
 use shape_vm::type_tracking::NativeKind;
 use std::collections::HashMap;
 
-use super::MirToIR;
 use super::types::is_v2_typed_array_slot;
+use super::MirToIR;
 
 // ── TypedArrayHeader field offsets ───────────────────────────────────────────
 
@@ -385,10 +385,10 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                     Operand::Move(place) | Operand::MoveExplicit(place) => {
                         let destructive_move = !self.place_is_known_copy_value(place)
                             && (matches!(op, Operand::MoveExplicit(_))
-                                || matches!(
-                                    stmt_ownership.unwrap_or(OwnershipDecision::Move),
-                                    OwnershipDecision::Move
-                                ));
+                            || matches!(
+                                stmt_ownership.unwrap_or(OwnershipDecision::Move),
+                                OwnershipDecision::Move
+                            ));
                         if destructive_move {
                             if let Place::Local(s) = place {
                                 moves.entry(*s).or_default().push((bi, si));

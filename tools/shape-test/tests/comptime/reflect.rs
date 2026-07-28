@@ -653,9 +653,11 @@ fn reflect_on_dyn_erased_spellings_is_the_named_bounded_erased_rejection() {
             "Walk + Swim",
         ),
     ] {
-        let source =
-            format!("{preamble}\nlet reflected = comptime {{ reflect(type_ref({spelling})) }}");
-        ShapeTest::new(&source).expect_run_err_contains("reflect: the Erased bound-set payload");
+        let source = format!(
+            "{preamble}\nlet reflected = comptime {{ reflect(type_ref({spelling})) }}"
+        );
+        ShapeTest::new(&source)
+            .expect_run_err_contains("reflect: the Erased bound-set payload");
     }
 }
 

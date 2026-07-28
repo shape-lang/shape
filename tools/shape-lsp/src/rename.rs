@@ -14,12 +14,12 @@ use tower_lsp_server::ls_types::{
 };
 
 mod generated;
-#[cfg(test)]
-pub(crate) use generated::generated_rename_from_compiler;
 pub use generated::{
     GENERATOR_CONTROLLED_NAME_RENAME_REPORT, GeneratedRename, GeneratorControlledRename,
     generated_rename,
 };
+#[cfg(test)]
+pub(crate) use generated::generated_rename_from_compiler;
 pub(crate) use generated::{GeneratedRenameRequest, generated_rename_request};
 
 /// Prepare for rename - check if the symbol at the position can be renamed

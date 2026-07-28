@@ -844,8 +844,8 @@ impl BytecodeCompiler {
         span: shape_ast::ast::Span,
         overlay: &FreezeOverlay,
     ) -> Result<()> {
-        use crate::compiler::comptime_builtins::existential::WITNESS_ESCAPES_SCOPE_DIAGNOSTIC;
         use crate::compiler::comptime_builtins::existential::require_existential_element;
+        use crate::compiler::comptime_builtins::existential::WITNESS_ESCAPES_SCOPE_DIAGNOSTIC;
         use shape_ast::ast::TypeAnnotation;
 
         // Row 6: the iterable's element type must be an existential descriptor
@@ -1004,12 +1004,12 @@ impl BytecodeCompiler {
             // executable unroll is the same runtime for-loop as the plain form,
             // so no parallel iteration path is emitted.
             if !cf.witnesses.is_empty() {
-                let freeze =
-                    self.comptime_freeze_overlay()
-                        .map_err(|e| ShapeError::SemanticError {
-                            message: e.to_string(),
-                            location: Some(self.span_to_source_location(span)),
-                        })?;
+                let freeze = self.comptime_freeze_overlay().map_err(|e| {
+                    ShapeError::SemanticError {
+                        message: e.to_string(),
+                        location: Some(self.span_to_source_location(span)),
+                    }
+                })?;
                 self.check_comptime_for_some_rejections(cf, span, &freeze)?;
             }
             let mut items = Vec::with_capacity(cf.body.len());

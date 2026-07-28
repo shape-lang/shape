@@ -451,27 +451,18 @@ fn lifecycle_handler_count(definition: &AnnotationDef) -> usize {
 }
 
 fn callable_name_is_vacant(compiler: &BytecodeCompiler, name: &str) -> bool {
-    !compiler
-        .program
-        .functions
-        .iter()
-        .any(|row| row.name == name)
+    !compiler.program.functions.iter().any(|row| row.name == name)
         && !compiler.function_defs.contains_key(name)
         && !compiler.foreign_function_defs.contains_key(name)
         && !compiler.module_builtin_functions.contains_key(name)
         && !compiler.function_arity_bounds.contains_key(name)
         && !compiler.function_const_params.contains_key(name)
-        && !compiler
-            .function_return_reference_summaries
-            .contains_key(name)
+        && !compiler.function_return_reference_summaries.contains_key(name)
         && !compiler.inferred_ref_params.contains_key(name)
         && !compiler.inferred_ref_mutates.contains_key(name)
         && !compiler.inferred_param_pass_modes.contains_key(name)
         && !compiler.blob_name_to_hash.contains_key(name)
-        && !compiler
-            .completed_blobs
-            .iter()
-            .any(|blob| blob.name == name)
+        && !compiler.completed_blobs.iter().any(|blob| blob.name == name)
         && !compiler
             .current_blob_builder
             .as_ref()
@@ -535,7 +526,8 @@ fn callable_registry_contains(compiler: &BytecodeCompiler, name: &str) -> bool {
 
 fn function_id_capacity_error() -> ShapeError {
     ShapeError::RuntimeError {
-        message: "Annotation handler installation exceeds the u16 function-id capacity".to_string(),
+        message: "Annotation handler installation exceeds the u16 function-id capacity"
+            .to_string(),
         location: None,
     }
 }

@@ -93,11 +93,9 @@ fn callable_unpromoted_module_shared_capture_is_c0912_before_publication() {
             )));
             assert!(message.contains("Value [storage=Direct]"));
             assert!(message.contains("shared-module promotion witness is absent"));
-            assert!(
-                message.contains(
-                    "callable 'run' cannot introduce module storage or promotion effects"
-                )
-            );
+            assert!(message.contains(
+                "callable 'run' cannot introduce module storage or promotion effects"
+            ));
             let location = location.expect("module declaration is the diagnostic anchor");
             assert_eq!(location.file.as_deref(), Some("capture_preflight.shape"));
             assert_eq!(location.line, 1);
@@ -111,7 +109,8 @@ fn callable_unpromoted_module_shared_capture_is_c0912_before_publication() {
         "the rejected callable must not change module binding semantics"
     );
     assert_eq!(
-        compiler.shared_module_bindings, baseline.shared_module_bindings,
+        compiler.shared_module_bindings,
+        baseline.shared_module_bindings,
         "no module promotion witness may be published"
     );
     assert_eq!(

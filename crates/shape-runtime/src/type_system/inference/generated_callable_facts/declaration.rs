@@ -31,7 +31,8 @@ fn declared_quantifiers(scheme: &TypeScheme) -> TypeResult<Vec<TypeVar>> {
         }
         if owner.is_some_and(|expected| expected != provenance.owner()) {
             return Err(TypeError::ConstraintViolation(
-                "generic scheme combines parameters from different declaration owners".to_string(),
+                "generic scheme combines parameters from different declaration owners"
+                    .to_string(),
             ));
         }
         owner = Some(provenance.owner());
@@ -49,9 +50,10 @@ fn declared_quantifiers(scheme: &TypeScheme) -> TypeResult<Vec<TypeVar>> {
 fn same_declared_quantifiers(expected: &[TypeVar], actual: &[TypeVar]) -> bool {
     expected.len() == actual.len()
         && expected.iter().zip(actual).all(|(expected, actual)| {
-            let (Some(expected), Some(actual)) =
-                (expected.declared_provenance(), actual.declared_provenance())
-            else {
+            let (Some(expected), Some(actual)) = (
+                expected.declared_provenance(),
+                actual.declared_provenance(),
+            ) else {
                 return false;
             };
             expected.owner() == actual.owner()

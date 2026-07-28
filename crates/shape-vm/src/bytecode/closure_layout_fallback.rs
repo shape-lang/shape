@@ -4,9 +4,9 @@ use thiserror::Error;
 
 use super::{FunctionBlob, FunctionHash, Program};
 use crate::type_tracking::NativeKind;
-use shape_value::HeapKind;
-use shape_value::v2::ConcreteType;
 use shape_value::v2::closure_layout::{CaptureKind, ClosureLayout};
+use shape_value::v2::ConcreteType;
+use shape_value::HeapKind;
 
 /// Why a transferred closure blob cannot be materialized without compiler-only
 /// layout side tables.

@@ -190,14 +190,16 @@ impl BytecodeProgram {
         })
     }
 
-    fn program_window(&self, function_index: usize) -> Result<Range<usize>, FunctionWindowError> {
-        let function =
-            self.functions
-                .get(function_index)
-                .ok_or(FunctionWindowError::MissingFunction {
-                    function_index,
-                    function_count: self.functions.len(),
-                })?;
+    fn program_window(
+        &self,
+        function_index: usize,
+    ) -> Result<Range<usize>, FunctionWindowError> {
+        let function = self.functions.get(function_index).ok_or(
+            FunctionWindowError::MissingFunction {
+                function_index,
+                function_count: self.functions.len(),
+            },
+        )?;
         checked_window(function_index, function, self.instructions.len())
     }
 }
@@ -207,14 +209,13 @@ fn checked_window(
     function: &Function,
     instruction_count: usize,
 ) -> Result<Range<usize>, FunctionWindowError> {
-    let end = function
-        .entry_point
-        .checked_add(function.body_length)
-        .ok_or(FunctionWindowError::EndOverflow {
+    let end = function.entry_point.checked_add(function.body_length).ok_or(
+        FunctionWindowError::EndOverflow {
             function_index,
             entry_point: function.entry_point,
             body_length: function.body_length,
-        })?;
+        },
+    )?;
     let window = function.entry_point..end;
     if window.start > instruction_count || window.end > instruction_count {
         return Err(FunctionWindowError::OutOfBounds {
@@ -405,19 +406,13 @@ mod tests {
         let target_out_of_bounds = program(4, &[(3, 2)]);
         assert!(matches!(
             target_out_of_bounds.direct_function_instructions(0),
-            Err(FunctionWindowError::OutOfBounds {
-                function_index: 0,
-                ..
-            })
+            Err(FunctionWindowError::OutOfBounds { function_index: 0, .. })
         ));
 
         let other_out_of_bounds = program(4, &[(0, 2), (5, 0)]);
         assert!(matches!(
             other_out_of_bounds.direct_function_instructions(0),
-            Err(FunctionWindowError::OutOfBounds {
-                function_index: 1,
-                ..
-            })
+            Err(FunctionWindowError::OutOfBounds { function_index: 1, .. })
         ));
     }
 

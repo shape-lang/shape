@@ -9,9 +9,9 @@ use std::collections::HashMap;
 use rayon::prelude::*;
 
 use crate::bytecode::{
-    BytecodeProgram, Constant, DebugInfo, Function, FunctionBlob, FunctionHash, Instruction,
-    LinkedFunction, LinkedProgram, Operand, Program, SourceMap, TransferredClosureLayoutError,
-    remap_closure_function_layouts,
+    remap_closure_function_layouts, BytecodeProgram, Constant, DebugInfo, Function, FunctionBlob,
+    FunctionHash, Instruction, LinkedFunction, LinkedProgram, Operand, Program, SourceMap,
+    TransferredClosureLayoutError,
 };
 use shape_abi_v1::PermissionSet;
 use shape_value::{FunctionId, StringId};

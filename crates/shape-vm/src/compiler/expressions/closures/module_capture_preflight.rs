@@ -3,10 +3,10 @@
 use shape_ast::ast::Span;
 use shape_ast::error::{Result, ShapeError};
 
-use crate::compiler::BytecodeCompiler;
 use crate::compiler::comptime_builtins::capture_plan::{
     CaptureAccess, CaptureTarget, PlannedCapture,
 };
+use crate::compiler::BytecodeCompiler;
 use crate::type_tracking::BindingStorageClass;
 
 impl BytecodeCompiler {

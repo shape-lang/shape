@@ -31,7 +31,9 @@ impl BytecodeCompiler {
 
         for item in &qualified_items {
             match item {
-                Item::Function(function, _) => self.register_imported_function_header(function)?,
+                Item::Function(function, _) => {
+                    self.register_imported_function_header(function)?
+                }
                 Item::Export(export, _) => {
                     if let ExportItem::Function(function) = &export.item {
                         self.register_imported_function_header(function)?;

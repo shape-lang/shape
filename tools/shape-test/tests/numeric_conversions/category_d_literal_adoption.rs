@@ -219,8 +219,7 @@ fn d_out_of_range_reassign_u16_rejected() {
 /// The `/ 2.0` makes the corruption numerically loud (a true f64 `5.0` → 2.5).
 #[test]
 fn d_call_arg_int_literal_is_true_f64() {
-    ShapeTest::new("fn takes_num(x: number) -> number { x }\ntakes_num(5) / 2.0")
-        .expect_number(2.5);
+    ShapeTest::new("fn takes_num(x: number) -> number { x }\ntakes_num(5) / 2.0").expect_number(2.5);
 }
 
 /// The call-arg adopted value read back directly is `5.0`, not a tiny

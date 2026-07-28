@@ -28,14 +28,12 @@ annotation nested() {{
             .compiled_annotations
             .get("nested")
             .expect("carrier published");
-        let handler_id = usize::from(
-            match kind {
-                "metadata" => carrier.metadata_handler,
-                "on_define" => carrier.on_define_handler,
-                _ => unreachable!(),
-            }
-            .expect("handler id"),
-        );
+        let handler_id = usize::from(match kind {
+            "metadata" => carrier.metadata_handler,
+            "on_define" => carrier.on_define_handler,
+            _ => unreachable!(),
+        }
+        .expect("handler id"));
         let handler_name = format!("nested___{suffix}");
         assert_eq!(compiler.program.functions[handler_id].name, handler_name);
         assert!(
@@ -76,11 +74,9 @@ fn bare_and_qualified_callable_collisions_refuse_before_installation() {
             .expect("occupy callable name");
         let definition = parse("annotation blocked() { metadata(target) { 1 } }");
         let items = if let Some(module) = module_path {
-            vec![
-                compiler
-                    .qualify_module_item(&definition.items[0], module)
-                    .expect("definition qualifies"),
-            ]
+            vec![compiler
+                .qualify_module_item(&definition.items[0], module)
+                .expect("definition qualifies")]
         } else {
             vec![definition.items[0].clone()]
         };
@@ -125,12 +121,7 @@ fn root_imported_callable_alias_blocks_handler_name_but_type_alias_does_not() {
             assert!(compiler.program.compiled_annotations.is_empty());
         } else {
             result.expect("a type-only imported alias is a separate namespace");
-            assert!(
-                compiler
-                    .program
-                    .compiled_annotations
-                    .contains_key("blocked")
-            );
+            assert!(compiler.program.compiled_annotations.contains_key("blocked"));
         }
     }
 }

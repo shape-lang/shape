@@ -22,8 +22,12 @@ impl BindingKey {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ReferenceClass {
     Value,
-    SharedReference { referent: Option<ConcreteType> },
-    ExclusiveReference { referent: Option<ConcreteType> },
+    SharedReference {
+        referent: Option<ConcreteType>,
+    },
+    ExclusiveReference {
+        referent: Option<ConcreteType>,
+    },
 }
 
 impl ReferenceClass {
@@ -34,7 +38,9 @@ impl ReferenceClass {
             Self::SharedReference {
                 referent: Some(referent),
             } => format!("SharedReference<{referent:?}>"),
-            Self::ExclusiveReference { referent: None } => "ExclusiveReference<?>".to_string(),
+            Self::ExclusiveReference { referent: None } => {
+                "ExclusiveReference<?>".to_string()
+            }
             Self::ExclusiveReference {
                 referent: Some(referent),
             } => format!("ExclusiveReference<{referent:?}>"),

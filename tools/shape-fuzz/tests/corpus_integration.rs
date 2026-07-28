@@ -137,10 +137,7 @@ fn corpus_inventory_matches_audit_5_3_expected_layout() {
     // grows by 1 (c15_array_trait_object) → 55.
     // W88C Result/Option differential seeds add 4 patterns entries
     // (m09_result_err through m12_result_context_bangbang) → 59.
-    assert_eq!(
-        total, 59,
-        "current corpus inventory requires 59 hand-seeded total"
-    );
+    assert_eq!(total, 59, "current corpus inventory requires 59 hand-seeded total");
 
     // Audit §4.1 baseline negative-corpus inventory: a10 + c09 + c10 = 3
     // entries. W13.3 corpus surfaced 2 NEW divergence classes during the

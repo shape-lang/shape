@@ -55,28 +55,28 @@
 use shape_runtime::json_value::JsonValue;
 use shape_runtime::marshal::{register_typed_fn_1, register_typed_fn_2, register_typed_fn_3_raw};
 use shape_runtime::module_exports::{ModuleExports, RemoteDispatcher};
-use shape_runtime::snapshot::{SerializableVMValue, SnapshotStore, slot_to_serializable};
+use shape_runtime::snapshot::{slot_to_serializable, SerializableVMValue, SnapshotStore};
 use shape_runtime::typed_module_exports::{ConcreteReturn, ConcreteType, TypedReturn};
 use shape_value::heap_value::HeapValue;
 use shape_value::v2::closure_raw::typed_closure_function_id;
 use shape_value::{HeapKind, KindedSlot, NativeKind};
-use shape_wire::WireValue;
-use shape_wire::transport::Transport;
 use shape_wire::transport::factory::TransportKind;
 use shape_wire::transport::framing::{decode_framed, encode_framed};
 use shape_wire::transport::tcp::MAX_PAYLOAD_SIZE;
+use shape_wire::transport::Transport;
+use shape_wire::WireValue;
 use std::io::{Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpStream as TokioTcpStream;
 
 use crate::remote::{
-    RemoteCallError, RemoteCallId, RemoteCallRequest, RemoteCallResponse, RemoteCancelRequest,
-    RemoteErrorKind, WireMessage, build_call_request_by_id, build_closure_call_request,
-    call_with_resupply,
+    build_call_request_by_id, build_closure_call_request, call_with_resupply, RemoteCallError,
+    RemoteCallId, RemoteCallRequest, RemoteCallResponse, RemoteCancelRequest, RemoteErrorKind,
+    WireMessage,
 };
 
 use super::transport_provider;
@@ -172,10 +172,10 @@ fn serialize_arg_pack(
             }
             // A lone non-aggregate carrier is one positional argument.
             _ => {
-                return Ok(vec![
-                    slot_to_serializable(pack.raw(), pack.kind(), store)
-                        .map_err(|e| format!("remote::call: failed to serialize arguments: {e}"))?,
-                ]);
+                return Ok(vec![slot_to_serializable(pack.raw(), pack.kind(), store)
+                    .map_err(|e| {
+                    format!("remote::call: failed to serialize arguments: {e}")
+                })?]);
             }
         }
     }
@@ -217,7 +217,7 @@ fn serialize_typed_array_pack(
 ) -> Result<Vec<SerializableVMValue>, String> {
     use shape_value::v2::string_obj::StringObj;
     use shape_value::v2::typed_array::{
-        ELEM_TYPE_STRING, ELEM_TYPE_TYPED_ARRAY, TypedArray, TypedArrayElem, read_elem_type,
+        read_elem_type, TypedArray, TypedArrayElem, ELEM_TYPE_STRING, ELEM_TYPE_TYPED_ARRAY,
     };
 
     let ptr = bits as *const u8;
@@ -258,7 +258,9 @@ fn serialize_typed_array_pack(
                 .iter()
                 .map(|p| {
                     slot_to_serializable(*p as u64, NativeKind::Ptr(HeapKind::TypedArray), store)
-                        .map_err(|e| format!("remote::call: failed to serialize argument: {e}"))
+                        .map_err(|e| {
+                            format!("remote::call: failed to serialize argument: {e}")
+                        })
                 })
                 .collect()
         }
@@ -591,9 +593,9 @@ fn string_slot(s: String) -> KindedSlot {
 /// carrier (each element a fresh `StringObj`), mirroring the marshal-layer
 /// `ConcreteReturn::ArrayString` producer.
 fn array_string_slot(items: Vec<String>) -> KindedSlot {
-    use shape_value::ValueSlot;
     use shape_value::v2::string_obj::StringObj;
-    use shape_value::v2::typed_array::{ELEM_TYPE_STRING, TypedArray, stamp_elem_type};
+    use shape_value::v2::typed_array::{stamp_elem_type, TypedArray, ELEM_TYPE_STRING};
+    use shape_value::ValueSlot;
     let arr = TypedArray::<*const StringObj>::with_capacity(items.len() as u32);
     unsafe {
         stamp_elem_type(arr as *mut u8, ELEM_TYPE_STRING);
@@ -619,8 +621,8 @@ fn build_enum_variant_arc(
     variant_id: i64,
     payloads: Vec<KindedSlot>,
 ) -> Arc<HeapValue> {
-    use shape_value::ValueSlot;
     use shape_value::heap_value::{TypedObjectPtr, TypedObjectStorage};
+    use shape_value::ValueSlot;
 
     let mut slots: Vec<ValueSlot> = Vec::with_capacity(1 + payloads.len());
     let mut field_kinds: Vec<NativeKind> = Vec::with_capacity(1 + payloads.len());
@@ -792,7 +794,8 @@ async fn remote_call_result_for_request_async(
 
     match request.function_blobs.as_mut() {
         Some(existing) => {
-            let have: std::collections::HashSet<_> = existing.iter().map(|(h, _)| *h).collect();
+            let have: std::collections::HashSet<_> =
+                existing.iter().map(|(h, _)| *h).collect();
             for (h, b) in resupply {
                 if !have.contains(&h) {
                     existing.push((h, b));
@@ -866,7 +869,10 @@ fn remote_call_response_to_typed_return(
 
 fn short_function_hash(hash: &crate::bytecode::FunctionHash) -> String {
     let b = &hash.0;
-    format!("{:02x}{:02x}{:02x}{:02x}...", b[0], b[1], b[2], b[3])
+    format!(
+        "{:02x}{:02x}{:02x}{:02x}...",
+        b[0], b[1], b[2], b[3]
+    )
 }
 
 impl RemoteDispatcher for ProgramRemoteDispatcher<'_, '_> {
@@ -961,8 +967,10 @@ impl RemoteDispatcher for ProgramRemoteDispatcher<'_, '_> {
                 abort,
             },
         );
-        vm.task_scheduler
-            .set_pending_async_cancellation_hook(task_id, remote_cancel_hook(cancel_addr, call_id));
+        vm.task_scheduler.set_pending_async_cancellation_hook(
+            task_id,
+            remote_cancel_hook(cancel_addr, call_id),
+        );
         vm.track_future_in_active_async_scope(task_id);
         Ok(task_id)
     }
@@ -1036,7 +1044,10 @@ async fn send_cancel_best_effort_async(addr: String, call_id: RemoteCallId) {
     let _ = wire_send_best_effort_async(&addr, msg).await;
 }
 
-fn remote_cancel_hook(addr: String, call_id: RemoteCallId) -> Box<dyn FnOnce() + Send + 'static> {
+fn remote_cancel_hook(
+    addr: String,
+    call_id: RemoteCallId,
+) -> Box<dyn FnOnce() + Send + 'static> {
     Box::new(move || {
         crate::executor::async_runtime::shared_runtime()
             .spawn(send_cancel_best_effort_async(addr, call_id));
@@ -1179,7 +1190,8 @@ async fn wire_roundtrip_async(
         RemoteDestination::Tcp(destination) => tcp_roundtrip_async(destination, &mp).await?,
         RemoteDestination::Tls(destination) => tls_roundtrip_async(&destination, &mp).await?,
     };
-    shape_wire::decode_message(&response_bytes).map_err(|e| format!("remote: decode error: {}", e))
+    shape_wire::decode_message(&response_bytes)
+        .map_err(|e| format!("remote: decode error: {}", e))
 }
 
 async fn wire_send_best_effort_async(
@@ -1190,9 +1202,9 @@ async fn wire_send_best_effort_async(
         shape_wire::encode_message(&msg).map_err(|e| format!("remote: encode error: {}", e))?;
     match parse_remote_destination(addr)? {
         RemoteDestination::Tcp(destination) => tcp_send_oneway_async(destination, &mp).await,
-        RemoteDestination::Tls(destination) => {
-            tls_roundtrip_async(&destination, &mp).await.map(|_| ())
-        }
+        RemoteDestination::Tls(destination) => tls_roundtrip_async(&destination, &mp)
+            .await
+            .map(|_| ()),
     }
 }
 
@@ -1323,16 +1335,18 @@ async fn tls_roundtrip_async(
     .map_err(|e| format!("remote: TLS connect to '{}': {}", destination.addr, e))?;
 
     let connector = tokio_rustls::TlsConnector::from(config);
-    let mut stream =
-        tokio::time::timeout(Duration::from_secs(30), connector.connect(server_name, tcp))
-            .await
-            .map_err(|_| {
-                format!(
-                    "remote: TLS handshake with '{}': timed out",
-                    destination.addr
-                )
-            })?
-            .map_err(|e| format!("remote: TLS handshake with '{}': {}", destination.addr, e))?;
+    let mut stream = tokio::time::timeout(
+        Duration::from_secs(30),
+        connector.connect(server_name, tcp),
+    )
+    .await
+    .map_err(|_| {
+        format!(
+            "remote: TLS handshake with '{}': timed out",
+            destination.addr
+        )
+    })?
+    .map_err(|e| format!("remote: TLS handshake with '{}': {}", destination.addr, e))?;
 
     write_framed_async_stream(&mut stream, payload).await?;
     read_framed_async_stream(&mut stream).await
@@ -1907,8 +1921,8 @@ mod tests {
 
     #[test]
     fn serialize_arg_pack_flattens_gc_wrapped_typed_object_pack() {
-        use shape_value::ValueSlot;
         use shape_value::heap_value::TypedObjectStorage;
+        use shape_value::ValueSlot;
 
         let tmp = tempfile::tempdir().expect("tempdir");
         let store = SnapshotStore::new(tmp.path()).expect("snapshot store");
@@ -1938,7 +1952,7 @@ mod tests {
     #[test]
     fn serialize_typed_array_pack_preserves_nested_array_argument_arity() {
         use shape_value::v2::typed_array::{
-            ELEM_TYPE_I64, ELEM_TYPE_TYPED_ARRAY, TypedArray, TypedArrayElem, stamp_elem_type,
+            stamp_elem_type, TypedArray, TypedArrayElem, ELEM_TYPE_I64, ELEM_TYPE_TYPED_ARRAY,
         };
 
         let tmp = tempfile::tempdir().expect("tempdir");
@@ -1957,7 +1971,10 @@ mod tests {
             stamp_elem_type(outer as *mut u8, ELEM_TYPE_TYPED_ARRAY);
             // The fresh inner array's single ownership share transfers to the
             // outer heap-element array, which releases it through TypedArrayElem.
-            TypedArray::<*const TypedArrayElem>::push(outer, inner as *const TypedArrayElem);
+            TypedArray::<*const TypedArrayElem>::push(
+                outer,
+                inner as *const TypedArrayElem,
+            );
         }
         let pack = KindedSlot::from_typed_array_raw(outer as *mut u8);
 

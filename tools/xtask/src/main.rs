@@ -232,7 +232,9 @@ fn perf_suite_command(root: &Path, command: PerfSuiteCommand) -> Result<()> {
         PerfSuiteCommand::RecordEnvironment { node } => {
             perf_suite::record_environment_command(root, node.as_deref())
         }
-        PerfSuiteCommand::Compare { first, second } => perf_suite::compare_command(&first, &second),
+        PerfSuiteCommand::Compare { first, second } => {
+            perf_suite::compare_command(&first, &second)
+        }
     }
 }
 

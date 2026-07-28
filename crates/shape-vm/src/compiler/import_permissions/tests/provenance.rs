@@ -56,8 +56,10 @@ fn hybrid_bootstrap_authority_follows_the_winning_resolver_only() {
         PROBE_PATH,
         source("pub fn embedded_loser() -> int { 1 }"),
     );
-    extension
-        .register_extension_module(PROBE_PATH, source("pub fn extension_winner() -> int { 2 }"));
+    extension.register_extension_module(
+        PROBE_PATH,
+        source("pub fn extension_winner() -> int { 2 }"),
+    );
     let loaded = extension
         .load_module(PROBE_PATH)
         .expect("extension shadow resolves");
@@ -96,9 +98,7 @@ fn bundle_shadow_of_embedded_path_remains_untrusted() {
         PROBE_PATH.to_string(),
         source("pub fn bundle_winner() -> int { 3 }"),
     )]);
-    let loaded = loader
-        .load_module(PROBE_PATH)
-        .expect("bundle shadow resolves");
+    let loaded = loader.load_module(PROBE_PATH).expect("bundle shadow resolves");
     assert_eq!(loaded.artifact_origin(), ModuleArtifactOrigin::Bundle);
 
     let graph = build(&mut loader, false);

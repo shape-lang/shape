@@ -19,17 +19,18 @@ use crate::compiler::comptime_builtins::semantic_freeze::FreezeOverlay;
 
 use super::{FrozenTypeCategory, FrozenTypeIdentity};
 use shape_runtime::comptime_reflection::{
-    FIELD_INITIALIZATION_SCHEMA_NAME, FLOAT_WIDTH_SCHEMA_NAME, FieldInitialization,
-    FrozenPrimitive, INTEGER_WIDTH_SCHEMA_NAME, NOMINAL_SHAPE_SCHEMA_NAME, NominalShape,
-    PASSING_MODE_SCHEMA_NAME, PassingMode,
+    FIELD_INITIALIZATION_SCHEMA_NAME, FLOAT_WIDTH_SCHEMA_NAME, FieldInitialization, FrozenPrimitive,
+    INTEGER_WIDTH_SCHEMA_NAME, NOMINAL_SHAPE_SCHEMA_NAME, NominalShape, PASSING_MODE_SCHEMA_NAME,
+    PassingMode,
 };
 use shape_runtime::type_schema::builtin_schemas::{
     COMPTIME_ENUM_DESCRIPTOR_SCHEMA, COMPTIME_FIELD_DESCRIPTOR_SCHEMA,
     COMPTIME_FROZEN_CALLABLE_SCHEMA, COMPTIME_FROZEN_ERASED_SCHEMA, COMPTIME_FROZEN_NEVER_SCHEMA,
-    COMPTIME_FROZEN_NOMINAL_SCHEMA, COMPTIME_FROZEN_PARAM_DESCRIPTOR_SCHEMA,
-    COMPTIME_FROZEN_PARAMETER_SCHEMA, COMPTIME_FROZEN_PRIMITIVE_SCHEMA,
-    COMPTIME_FROZEN_RECORD_SCHEMA, COMPTIME_FROZEN_REFERENCE_SCHEMA, COMPTIME_FROZEN_TUPLE_SCHEMA,
-    COMPTIME_FROZEN_TYPE_SCHEMA, COMPTIME_FROZEN_UNION_SCHEMA, COMPTIME_NEWTYPE_DESCRIPTOR_SCHEMA,
+    COMPTIME_FROZEN_NOMINAL_SCHEMA, COMPTIME_FROZEN_PARAMETER_SCHEMA,
+    COMPTIME_FROZEN_PARAM_DESCRIPTOR_SCHEMA, COMPTIME_FROZEN_PRIMITIVE_SCHEMA,
+    COMPTIME_FROZEN_RECORD_SCHEMA,
+    COMPTIME_FROZEN_REFERENCE_SCHEMA, COMPTIME_FROZEN_TUPLE_SCHEMA, COMPTIME_FROZEN_TYPE_SCHEMA,
+    COMPTIME_FROZEN_UNION_SCHEMA, COMPTIME_NEWTYPE_DESCRIPTOR_SCHEMA,
     COMPTIME_OPAQUE_TYPE_DESCRIPTOR_SCHEMA, COMPTIME_RECORD_FIELD_SCHEMA,
     COMPTIME_STRUCT_DESCRIPTOR_SCHEMA, COMPTIME_TUPLE_ELEMENT_SCHEMA, COMPTIME_UNION_MEMBER_SCHEMA,
     COMPTIME_VARIANT_DESCRIPTOR_SCHEMA,
@@ -385,9 +386,7 @@ pub(crate) fn build_frozen_type_heap_value(
         FrozenPayloadDescriptor::Callable(descriptor) => {
             frozen_callable_descriptor_slot(&descriptor)?
         }
-        FrozenPayloadDescriptor::Nominal(descriptor) => {
-            frozen_nominal_descriptor_slot(&descriptor)?
-        }
+        FrozenPayloadDescriptor::Nominal(descriptor) => frozen_nominal_descriptor_slot(&descriptor)?,
         FrozenPayloadDescriptor::Tuple(descriptor) => frozen_tuple_descriptor_slot(&descriptor)?,
         FrozenPayloadDescriptor::Record(descriptor) => frozen_record_descriptor_slot(&descriptor)?,
         FrozenPayloadDescriptor::Reference(descriptor) => {
@@ -467,7 +466,9 @@ fn frozen_erased_descriptor_slot(bounds: &[FrozenErasedBound]) -> KindedSlot {
 /// `params` array (each a `ParamDescriptor` object) plus the return type's
 /// frozen identity halves. Typed descriptor data all the way down: identities
 /// and nested typed objects, never rendered type-name strings.
-fn frozen_callable_descriptor_slot(descriptor: &CallableDescriptor) -> Result<KindedSlot, String> {
+fn frozen_callable_descriptor_slot(
+    descriptor: &CallableDescriptor,
+) -> Result<KindedSlot, String> {
     let mut param_objs: Vec<KindedSlot> = Vec::with_capacity(descriptor.params.len());
     for param in &descriptor.params {
         param_objs.push(param_descriptor_slot(param)?);
@@ -532,7 +533,10 @@ fn frozen_nominal_descriptor_slot(descriptor: &NominalDescriptor) -> Result<Kind
 
 /// The `NominalShape` enum value: variant id from the catalog-generated schema
 /// (Dec 55), `__payload_0` = the shape's typed row descriptor object.
-fn nominal_shape_enum_slot(shape: NominalShape, payload: KindedSlot) -> Result<KindedSlot, String> {
+fn nominal_shape_enum_slot(
+    shape: NominalShape,
+    payload: KindedSlot,
+) -> Result<KindedSlot, String> {
     let variant = enum_variant_id(NOMINAL_SHAPE_SCHEMA_NAME, shape.variant_name())?;
     Ok(typed_object_for_named_schema(
         NOMINAL_SHAPE_SCHEMA_NAME,
@@ -804,10 +808,7 @@ fn frozen_parameter_descriptor_slot(descriptor: &TypeParamDescriptor) -> KindedS
                 "identity_high",
                 KindedSlot::from_int(descriptor.identity.high),
             ),
-            (
-                "identity_low",
-                KindedSlot::from_int(descriptor.identity.low),
-            ),
+            ("identity_low", KindedSlot::from_int(descriptor.identity.low)),
             (
                 "bounds",
                 KindedSlot::new(

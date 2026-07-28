@@ -20,10 +20,10 @@
 
 use crate::executor::{VMConfig, VirtualMachine};
 use shape_value::v2::closure_layout::{CaptureKind, ClosureLayout, SharedCell};
-use shape_value::v2::closure_raw::{OwnedClosureBlock, alloc_typed_closure, write_capture_raw_u64};
+use shape_value::v2::closure_raw::{alloc_typed_closure, write_capture_raw_u64, OwnedClosureBlock};
 use shape_value::v2::concrete_type::ConcreteType;
 use shape_value::v2::typed_array::{
-    CallableArrayElem, CallableArrayElemKind, ELEM_TYPE_CALLABLE, TypedArray, stamp_elem_type,
+    stamp_elem_type, CallableArrayElem, CallableArrayElemKind, TypedArray, ELEM_TYPE_CALLABLE,
 };
 use shape_value::{HeapKind, HeapValue, NativeKind, TypedObjectStorage, V2HeapHeader};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -70,10 +70,7 @@ unsafe fn build_closure_cycle() -> ClosureCycle {
 
         // D — SharedCell whose payload back-edges to A (one A share moves in).
         shape_value::v2::typed_array::retain_v2_typed_array(arr as *mut u8);
-        let cell_arc = Arc::new(SharedCell::new(
-            arr as u64,
-            NativeKind::Ptr(HeapKind::TypedArray),
-        ));
+        let cell_arc = Arc::new(SharedCell::new(arr as u64, NativeKind::Ptr(HeapKind::TypedArray)));
         let cell = Arc::into_raw(cell_arc); // D strong = 1
 
         // C — closure block with one Shared capture holding D.
@@ -183,11 +180,7 @@ fn sharedcell_rooted_module_cycle_reclaimed_at_teardown() {
             0,
             "B (closure value) reclaimed at teardown"
         );
-        assert_eq!(
-            weak_d.strong_count(),
-            0,
-            "D (SharedCell) reclaimed at teardown"
-        );
+        assert_eq!(weak_d.strong_count(), 0, "D (SharedCell) reclaimed at teardown");
         assert_eq!(
             shape_value::gc::candidate_buffer_len(),
             0,
@@ -315,10 +308,7 @@ fn still_reachable_cycle_not_prematurely_freed_at_teardown() {
         shape_value::v2::typed_array::release_v2_typed_array(c.arr as *mut u8);
         shape_value::gc::gc_buffer_possible_root(c.arr as *mut u8, HeapKind::TypedArray);
         let freed = shape_value::gc::collect_cycles();
-        assert_eq!(
-            freed, 4,
-            "cycle reclaimed after the external ref is dropped"
-        );
+        assert_eq!(freed, 4, "cycle reclaimed after the external ref is dropped");
         assert_eq!(weak_b.strong_count(), 0);
         assert_eq!(weak_d.strong_count(), 0);
 
@@ -337,10 +327,8 @@ unsafe fn mk_obj_with_witness(
     edge: *const TypedObjectStorage,
     witness: &Arc<String>,
 ) -> *mut TypedObjectStorage {
-    let kinds: Arc<[NativeKind]> = Arc::from(vec![
-        NativeKind::Ptr(HeapKind::TypedObject),
-        NativeKind::String,
-    ]);
+    let kinds: Arc<[NativeKind]> =
+        Arc::from(vec![NativeKind::Ptr(HeapKind::TypedObject), NativeKind::String]);
     TypedObjectStorage::_new(
         schema,
         vec![
@@ -381,11 +369,7 @@ fn cycle_members_skip_user_drop_at_teardown() {
         // A owns the witness (field1) + a heap edge to B (field0). B edges back
         // to A. A is the module root.
         let a = mk_obj_with_witness(301, std::ptr::null(), &witness); // A.rc = 1
-        assert_eq!(
-            Arc::strong_count(&witness),
-            2,
-            "A.field1 owns a witness share"
-        );
+        assert_eq!(Arc::strong_count(&witness), 2, "A.field1 owns a witness share");
         // B → A edge: create B with field0 = A, and account the edge's share on
         // A explicitly (mk_ref_obj stores the pointer but does not retain).
         let b = mk_ref_obj(302, a); // B.rc = 1 (its creation share)

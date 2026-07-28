@@ -164,12 +164,12 @@
 
 use crate::compiler::BytecodeCompiler;
 
-/// Slice 2 — the D6 async-drop-context install rejection (battery row 10b), the
-/// battery's one greenfield check. Wired at the generated-body compile site.
-mod async_drop_context;
 /// Slice 2 — the §4.2 validation-battery manifest (which check runs where for
 /// generated bodies, inside this transaction's span).
 pub(in crate::compiler) mod battery;
+/// Slice 2 — the D6 async-drop-context install rejection (battery row 10b), the
+/// battery's one greenfield check. Wired at the generated-body compile site.
+mod async_drop_context;
 /// Slice 4 — the D7 edit-transaction shape guards (`[C0924]` split/two-identity,
 /// `[C0925]` incomplete environment). Wired at the `replace body` commit seam as
 /// defense-in-depth (the failure branches are structurally unreachable today).

@@ -152,7 +152,8 @@ let bad = comptime {
 
 print(bad)
 "#;
-    ShapeTest::new(source).expect_run_err_contains("not a string key");
+    ShapeTest::new(source)
+        .expect_run_err_contains("not a string key");
 }
 
 /// R2 — a callable parameter modeled as the homogeneous top type `Array<Any>`
@@ -171,7 +172,8 @@ let bad = comptime {
 
 print(bad)
 "#;
-    ShapeTest::new(source).expect_run_err_contains("heterogeneous signature-indexed descriptors");
+    ShapeTest::new(source)
+        .expect_run_err_contains("heterogeneous signature-indexed descriptors");
 }
 
 /// R2 companion: lowercase `any` is the enabled Erased leaf, so a callable

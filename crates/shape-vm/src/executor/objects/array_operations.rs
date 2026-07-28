@@ -34,9 +34,10 @@
 use crate::bytecode::{Instruction, Operand};
 use crate::executor::VirtualMachine;
 use crate::executor::v2_handlers::v2_array_detect::{
-    self, ELEM_TYPE_BOOL, ELEM_TYPE_CALLABLE, ELEM_TYPE_CHAR, ELEM_TYPE_CONTENT, ELEM_TYPE_DECIMAL,
-    ELEM_TYPE_F32, ELEM_TYPE_F64, ELEM_TYPE_I8, ELEM_TYPE_I16, ELEM_TYPE_I32, ELEM_TYPE_I64,
-    ELEM_TYPE_STRING, ELEM_TYPE_U8, ELEM_TYPE_U16, ELEM_TYPE_U32, V2ElemType, V2TypedArrayView,
+    self, ELEM_TYPE_BOOL, ELEM_TYPE_CALLABLE, ELEM_TYPE_CHAR, ELEM_TYPE_CONTENT,
+    ELEM_TYPE_DECIMAL, ELEM_TYPE_F32, ELEM_TYPE_F64, ELEM_TYPE_I8, ELEM_TYPE_I16, ELEM_TYPE_I32,
+    ELEM_TYPE_I64, ELEM_TYPE_STRING, ELEM_TYPE_U8, ELEM_TYPE_U16, ELEM_TYPE_U32, V2ElemType,
+    V2TypedArrayView,
 };
 use crate::executor::vm_impl::stack::drop_with_kind;
 use shape_value::content::ContentNode;

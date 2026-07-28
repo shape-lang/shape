@@ -1482,11 +1482,7 @@ mod gc_barrier_wiring_tests {
         unsafe {
             Arc::increment_strong_count(bits as *const String); // rc = 2
             drop_with_kind(bits, NativeKind::String); // rc = 2 → 1, nonzero
-            assert_eq!(
-                gc::candidate_buffer_len(),
-                0,
-                "leaf String is not cycle-capable"
-            );
+            assert_eq!(gc::candidate_buffer_len(), 0, "leaf String is not cycle-capable");
             Arc::decrement_strong_count(bits as *const String); // rc = 1 → 0, freed
         }
         gc::clear_candidate_buffer();

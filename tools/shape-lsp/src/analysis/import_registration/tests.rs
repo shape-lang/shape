@@ -123,11 +123,7 @@ helper()
         Some(&ModuleCache::new()),
         None,
     );
-    assert_eq!(
-        diagnostics.len(),
-        1,
-        "root compiler must not run: {diagnostics:?}"
-    );
+    assert_eq!(diagnostics.len(), 1, "root compiler must not run: {diagnostics:?}");
     assert_eq!(
         diagnostics[0].message,
         "Cannot resolve module 'missing'. Verify the import path and declare dependencies in shape.toml when needed."

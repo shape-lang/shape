@@ -168,13 +168,14 @@ mod tests {
                 file_id: 0,
                 slot: 3,
             });
-        let different_expansion =
-            GeneratedCaptureBindingIdentity::from_binding_lineage(&CaptureBindingLineage::Local {
+        let different_expansion = GeneratedCaptureBindingIdentity::from_binding_lineage(
+            &CaptureBindingLineage::Local {
                 expansion_fingerprint: GeneratedExpansionFingerprint::from_components(2, 1),
                 binding_owner_path: GeneratedNodePath::decl_root("method:first"),
                 file_id: 0,
                 slot: 3,
-            });
+            },
+        );
         assert_ne!(first, second);
         assert_ne!(first, different_expansion);
         assert_eq!(first.expansion_fingerprint(), Some((1, 2)));

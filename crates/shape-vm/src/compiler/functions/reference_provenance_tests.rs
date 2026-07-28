@@ -51,8 +51,10 @@ fn original_flags_distinguish_inferred_and_explicit_reference_modes_by_slot() {
 fn missing_effective_mode_is_a_structural_error() {
     let params = [parameter(false, false), parameter(false, false)];
 
-    let _ =
-        BytecodeCompiler::inferred_reference_optimizations(&params, &[ParamPassMode::ByRefShared]);
+    let _ = BytecodeCompiler::inferred_reference_optimizations(
+        &params,
+        &[ParamPassMode::ByRefShared],
+    );
 }
 
 #[derive(Clone, Copy)]
@@ -168,7 +170,8 @@ fn compile_stamped_probe(
         Span::DUMMY,
         "probe".to_string(),
     );
-    let is_untyped_single = matches!(route, AnnotationRoute::SingleRuntime) && parameter == "value";
+    let is_untyped_single =
+        matches!(route, AnnotationRoute::SingleRuntime) && parameter == "value";
     let probe = program
         .items
         .iter_mut()
@@ -184,7 +187,10 @@ fn compile_stamped_probe(
             "single-runtime source parameter must remain untyped"
         );
         assert_eq!(
-            (original_param.is_reference, original_param.is_mut_reference),
+            (
+                original_param.is_reference,
+                original_param.is_mut_reference
+            ),
             (false, false),
             "single-runtime source parameter must not declare reference provenance"
         );
@@ -247,17 +253,15 @@ fn assert_inferred_reference_is_not_true_reference(
     assert_eq!(descriptors.len(), 1, "fixture has one value capture");
     assert_eq!(descriptors[0].declared, Some(CaptureMode::Move));
     assert_eq!(descriptors[0].ownership, Some(expected_capture.0));
-    assert_eq!(
-        capture_kind_spelling(descriptors[0].lowered),
-        expected_capture.1
-    );
+    assert_eq!(capture_kind_spelling(descriptors[0].lowered), expected_capture.1);
     assert_eq!(
         descriptors[0].storage,
         Some(BindingStorageClass::LocalMutablePtr),
         "inferred pass mode must preserve exact stack-resident non-reference storage evidence"
     );
     assert_eq!(
-        descriptors[0].access, expected_capture.2,
+        descriptors[0].access,
+        expected_capture.2,
         "inferred pass mode must preserve the route's exact capture access"
     );
     assert_route_artifacts(&compiler, route);
@@ -389,14 +393,8 @@ fn assert_route_artifacts(compiler: &BytecodeCompiler, route: AnnotationRoute) {
                     "refreshed probe must directly call its original-body shadow, got {body:?}"
                 ),
             };
-            assert!(
-                shadow.starts_with('\u{1}'),
-                "shadow identity must be hygienic"
-            );
-            assert_ne!(
-                shadow, "worker",
-                "replacement must not call the local closure"
-            );
+            assert!(shadow.starts_with('\u{1}'), "shadow identity must be hygienic");
+            assert_ne!(shadow, "worker", "replacement must not call the local closure");
             assert_eq!(shadow, &generated_body);
             assert!(compiler.function_defs.contains_key(shadow));
             let registered_shadow = compiler
@@ -441,24 +439,14 @@ fn assert_explicit_reference_is_c0902(
         "explicit reference control must use exact C0902: {error}"
     );
     let zero_closure_artifacts = (
-        compiler
-            .program
-            .functions
-            .iter()
-            .filter(|f| f.is_closure)
-            .count(),
+        compiler.program.functions.iter().filter(|f| f.is_closure).count(),
         compiler.closure_function_ids.len(),
         compiler.closure_capture_packs.len(),
         compiler.closure_type_ids.len(),
         compiler.function_type_ids.len(),
         compiler.closure_registry.len(),
         compiler.function_type_registry.len(),
-        compiler
-            .program
-            .closure_function_layouts
-            .iter()
-            .flatten()
-            .count(),
+        compiler.program.closure_function_layouts.iter().flatten().count(),
     );
     assert_eq!(
         zero_closure_artifacts,

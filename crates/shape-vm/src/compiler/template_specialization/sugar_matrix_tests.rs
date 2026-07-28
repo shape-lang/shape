@@ -39,12 +39,7 @@ use crate::executor::{VMConfig, VirtualMachine};
 /// Full production compile (parse → pre-pass → analyzer → pass-2 handler →
 /// install → weave); returns BOTH the result and the compiler so pins can
 /// assert the post-compile registry state (the S2b/S2c harness shape).
-fn compile_source(
-    src: &str,
-) -> (
-    shape_ast::error::Result<()>,
-    crate::compiler::BytecodeCompiler,
-) {
+fn compile_source(src: &str) -> (shape_ast::error::Result<()>, crate::compiler::BytecodeCompiler) {
     let program = shape_ast::parse_program(src).expect("fixture parses");
     let mut compiler = crate::compiler::BytecodeCompiler::new();
     let result = compiler.compile_in_place(&program);
@@ -119,10 +114,7 @@ victim_a(10) * 1000 + victim_b(10)
         vec![("factor".to_string(), "3".to_string())],
         "the config ARG value (not the param name) is the recorded capture literal"
     );
-    assert_eq!(
-        row_b.captures,
-        vec![("factor".to_string(), "5".to_string())]
-    );
+    assert_eq!(row_b.captures, vec![("factor".to_string(), "5".to_string())]);
     assert_ne!(
         row_a.function_index, row_b.function_index,
         "rule 6: structurally different config = DISTINCT baked specializations \
@@ -318,10 +310,7 @@ on_target(4) * 100 + off_target(4)
 "#;
     let (value, compiler) = top_level_i64(src);
     // on: (4+1)*10 = 50; off: 4*10 = 40.
-    assert_eq!(
-        value, 5040,
-        "only the enabled application hooks (both-on ⇒ 5050)"
-    );
+    assert_eq!(value, 5040, "only the enabled application hooks (both-on ⇒ 5050)");
     assert_eq!(
         compiler.hook_install_registry.len(),
         1,
@@ -558,11 +547,7 @@ victim_a(4) * 1000 + victim_b(4)
         value, 140_240,
         "each application's OWN typed config values drive its mutation through the sugar"
     );
-    assert_eq!(
-        compiler.hook_install_registry.len(),
-        2,
-        "both installs land"
-    );
+    assert_eq!(compiler.hook_install_registry.len(), 2, "both installs land");
     assert_eq!(
         compiler.hook_install_registry[0].captures,
         vec![
@@ -607,10 +592,7 @@ fn victim(a: int) -> int { return a }
 victim(4)
 "#;
     let (value, compiler) = top_level_i64(src);
-    assert_eq!(
-        value, 17,
-        "BOTH mixed-typed baked constants drive the mutation"
-    );
+    assert_eq!(value, 17, "BOTH mixed-typed baked constants drive the mutation");
     assert_eq!(compiler.hook_install_registry.len(), 1);
     let row = &compiler.hook_install_registry[0];
     assert_eq!(
@@ -796,10 +778,7 @@ fn v_c(a: int) -> int { return a + 3 }
 "#;
     let (value, compiler) = top_level_i64(src);
     // a: 10*4+1 = 41; b: 20*4+2 = 82; c: 30*9+3 = 273.
-    assert_eq!(
-        value, 41082273,
-        "all three targets execute their own config"
-    );
+    assert_eq!(value, 41082273, "all three targets execute their own config");
     assert_eq!(compiler.hook_install_registry.len(), 3);
     assert_eq!(
         compiler.hook_install_registry[0].function_index,
@@ -1312,11 +1291,7 @@ fn s4d_e1_sugar_and_handwritten_api_twin_agree_behaviorally() {
         "the sugar twin and the hand-written API twin execute IDENTICALLY \
          (both equal-config targets 140); the split control executes its own config (220)"
     );
-    assert_eq!(
-        compiler.hook_install_registry.len(),
-        3,
-        "one row per install"
-    );
+    assert_eq!(compiler.hook_install_registry.len(), 3, "one row per install");
 
     let api = row_for(&compiler, "victim_api");
     let sugar = row_for(&compiler, "victim_sugar");
@@ -1397,7 +1372,7 @@ fn s4d_e2_cfg_identity_suffix_is_byte_identical_across_both_paths() {
 #[test]
 fn s4d_e3_synthesized_handler_ast_is_public_api_only() {
     use crate::compiler::statements::annotation_declarations::sugar_lowering::{
-        SugarLowering, lower_typed_config_declarative_hooks,
+        lower_typed_config_declarative_hooks, SugarLowering,
     };
     use shape_ast::ast::{AnnotationHandlerType, BlockItem, Expr, Item, Literal};
 
@@ -1440,20 +1415,13 @@ annotation retry(times: int, tag: string) on function {
 
     let config_params = ["times", "tag"];
     let minted_names: Vec<&str> = body_fns.iter().map(|f| f.name.as_str()).collect();
-    assert_eq!(
-        minted_names.len(),
-        2,
-        "one minted body fn per declarative hook"
-    );
+    assert_eq!(minted_names.len(), 2, "one minted body fn per declarative hook");
 
     // Whitelist walk. Every `match` arm below names an ALLOWED node; every
     // else-branch panics — nothing outside the four public spellings can
     // survive the walk.
     let Expr::Block(block, _) = &post_handler.body else {
-        panic!(
-            "the synthesized body is a block, got {:?}",
-            post_handler.body
-        );
+        panic!("the synthesized body is a block, got {:?}", post_handler.body);
     };
     assert_eq!(
         block.items.len(),
@@ -1488,36 +1456,23 @@ annotation retry(times: int, tag: string) on function {
             ..
         } = &args[0]
         else {
-            panic!(
-                "install's argument must be a hook-builtin call: {:?}",
-                args[0]
-            );
+            panic!("install's argument must be a hook-builtin call: {:?}", args[0]);
         };
         assert_eq!(
             hook_name, expected_hooks[index],
             "hooks lower in declaration order"
         );
         assert!(const_args.is_empty() && named_args.is_empty());
-        assert_eq!(
-            hook_args.len(),
-            2,
-            "hook builtin takes (fn_ident, captures)"
-        );
+        assert_eq!(hook_args.len(), 2, "hook builtin takes (fn_ident, captures)");
         let Expr::Identifier(fn_ident, _) = &hook_args[0] else {
-            panic!(
-                "the hook's template must be a bare identifier: {:?}",
-                hook_args[0]
-            );
+            panic!("the hook's template must be a bare identifier: {:?}", hook_args[0]);
         };
         assert_eq!(
             fn_ident, minted_names[index],
             "the identifier names THIS hook's minted body fn"
         );
         let Expr::Array(captures, _) = &hook_args[1] else {
-            panic!(
-                "the captures argument must be an array literal: {:?}",
-                hook_args[1]
-            );
+            panic!("the captures argument must be an array literal: {:?}", hook_args[1]);
         };
         assert_eq!(
             captures.len(),
@@ -1540,10 +1495,7 @@ annotation retry(times: int, tag: string) on function {
             assert!(const_args.is_empty() && named_args.is_empty());
             assert_eq!(capture_args.len(), 2);
             let Expr::Literal(Literal::String(literal_name), _) = &capture_args[0] else {
-                panic!(
-                    "capture's first arg must be a string literal: {:?}",
-                    capture_args[0]
-                );
+                panic!("capture's first arg must be a string literal: {:?}", capture_args[0]);
             };
             let Expr::Identifier(value_ident, _) = &capture_args[1] else {
                 panic!(

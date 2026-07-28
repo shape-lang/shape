@@ -77,15 +77,9 @@ fn set_param_type_on_an_undeclared_param_is_c0930_not_a_silent_skip() {
     .expect_err("an undeclared param spelling is a hard error, not a silent skip");
     let msg = err.to_string();
     assert!(msg.contains("[C0930]"), "got: {msg}");
-    assert!(
-        msg.contains("set param type"),
-        "names the directive kind: {msg}"
-    );
+    assert!(msg.contains("set param type"), "names the directive kind: {msg}");
     assert!(msg.contains("ghost"), "names the missing spelling: {msg}");
-    assert!(
-        msg.contains("real"),
-        "lists the frozen callable's params: {msg}"
-    );
+    assert!(msg.contains("real"), "lists the frozen callable's params: {msg}");
     // Fail-closed: the real param was left untouched.
     assert_eq!(fd.params[0].type_annotation, None);
 }
@@ -111,10 +105,7 @@ fn set_param_value_on_an_undeclared_param_is_c0930() {
     .expect_err("an undeclared param spelling is a hard error for the value arm too");
     let msg = err.to_string();
     assert!(msg.contains("[C0930]"), "got: {msg}");
-    assert!(
-        msg.contains("set param value"),
-        "names the directive kind: {msg}"
-    );
+    assert!(msg.contains("set param value"), "names the directive kind: {msg}");
     assert!(msg.contains("ghost"), "names the missing spelling: {msg}");
 }
 
@@ -138,10 +129,7 @@ fn resolve_param_id_without_annotation_context_is_still_c0930() {
         "no annotation clause when context is absent: {msg}"
     );
     assert!(msg.contains("ghost"), "names the missing spelling: {msg}");
-    assert!(
-        msg.contains("real"),
-        "lists the frozen callable's params: {msg}"
-    );
+    assert!(msg.contains("real"), "lists the frozen callable's params: {msg}");
 }
 
 // --- imported-annotation-handler hazard (end to end) -----------------------
@@ -238,13 +226,7 @@ fn probe(real: int) -> int { 0 }
         .apply_function_comptime_signature_directives_for_analysis(&mut program)
         .expect_err("an imported handler's param-miss directive must surface C0930, not vanish");
     let msg = error.to_string();
-    assert!(
-        msg.contains("[C0930]"),
-        "imported-handler miss must be C0930: {msg}"
-    );
+    assert!(msg.contains("[C0930]"), "imported-handler miss must be C0930: {msg}");
     assert!(msg.contains("ghost"), "names the missing spelling: {msg}");
-    assert!(
-        msg.contains("real"),
-        "lists the frozen callable's params: {msg}"
-    );
+    assert!(msg.contains("real"), "lists the frozen callable's params: {msg}");
 }

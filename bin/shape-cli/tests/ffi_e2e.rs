@@ -193,7 +193,8 @@ fn extern_c_string_aggregate_arg() {
 /// to completion, exit 0.
 #[test]
 fn extern_c_declaration_is_never_fatal() {
-    let program = "extern \"C\" fn nope(x: int) -> int from \"c\" as \"definitely_missing_symbol_xyz\"\n\
+    let program =
+        "extern \"C\" fn nope(x: int) -> int from \"c\" as \"definitely_missing_symbol_xyz\"\n\
          print(\"DECLARED_OK\")\n";
     let run = run_shape(program, "vm", None);
     assert_eq!(
@@ -202,11 +203,7 @@ fn extern_c_declaration_is_never_fatal() {
         "declaring-without-calling must be non-fatal; stderr={}",
         run.stderr
     );
-    assert!(
-        run.stdout.contains("DECLARED_OK"),
-        "stdout={:?}",
-        run.stdout
-    );
+    assert!(run.stdout.contains("DECLARED_OK"), "stdout={:?}", run.stdout);
 }
 
 /// Error channel, extern-C link failure (§4.2 / §4.5 class 3): CALLING an
@@ -214,7 +211,8 @@ fn extern_c_declaration_is_never_fatal() {
 /// the library, and the symbol — not a silent null, not a panic.
 #[test]
 fn extern_c_missing_symbol_is_structured_error() {
-    let program = "extern \"C\" fn nope(x: int) -> int from \"c\" as \"definitely_missing_symbol_xyz\"\n\
+    let program =
+        "extern \"C\" fn nope(x: int) -> int from \"c\" as \"definitely_missing_symbol_xyz\"\n\
          print(nope(1))\n";
     let run = run_shape(program, "vm", None);
     assert_ne!(
@@ -288,9 +286,7 @@ fn python_exception_becomes_catchable_err() {
         run.stderr
     );
     assert!(
-        run.stdout.contains("ERR=")
-            && run.stdout.contains("ValueError")
-            && run.stdout.contains("boom"),
+        run.stdout.contains("ERR=") && run.stdout.contains("ValueError") && run.stdout.contains("boom"),
         "Err payload should carry the foreign exception; stdout={:?}",
         run.stdout
     );

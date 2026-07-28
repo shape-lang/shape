@@ -63,7 +63,8 @@ impl BytecodeCompiler {
                 result?;
             }
             for item in &root_program.items {
-                if pass == crate::compiler::statements::SemanticFreezePredeclarePass::TypesAndTraits
+                if pass
+                    == crate::compiler::statements::SemanticFreezePredeclarePass::TypesAndTraits
                 {
                     self.predeclare_item_struct_schemas(item);
                 }
@@ -111,9 +112,9 @@ impl BytecodeCompiler {
             };
             let leave = self.leave_graph_permission_owner(permission_owner);
             match (compilation, permission_completion, leave) {
-                (Err(error), _, _) | (Ok(()), Err(error), _) | (Ok(()), Ok(()), Err(error)) => {
-                    return Err(error);
-                }
+                (Err(error), _, _)
+                | (Ok(()), Err(error), _)
+                | (Ok(()), Ok(()), Err(error)) => return Err(error),
                 (Ok(()), Ok(()), Ok(())) => {}
             }
         }

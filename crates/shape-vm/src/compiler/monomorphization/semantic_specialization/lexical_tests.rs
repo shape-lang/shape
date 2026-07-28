@@ -48,7 +48,8 @@ fn exact_lexical_inline_inherits_closed_outer_evidence_and_parameter_scopes() {
         .install_semantic_freeze()
         .expect("fixture must install SemanticFreeze");
 
-    let string_request = compiler.semantic_specialization_request("string_identity", string_span);
+    let string_request =
+        compiler.semantic_specialization_request("string_identity", string_span);
     let SemanticSpecializationRequest::Exact(string_exact) = &string_request else {
         panic!("string call must preserve exact string evidence")
     };

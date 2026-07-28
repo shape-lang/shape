@@ -20,7 +20,9 @@ mod diagnostic;
 mod model;
 mod transaction;
 
-pub(crate) use model::{BindingKey, ReferenceClass, ReferenceFlowPredecessor, ReferenceFlowState};
+pub(crate) use model::{
+    BindingKey, ReferenceClass, ReferenceFlowPredecessor, ReferenceFlowState,
+};
 use model::{ReferenceFlowConflict, ReferenceFlowEvidence};
 
 impl BytecodeCompiler {
@@ -63,13 +65,17 @@ impl BytecodeCompiler {
     /// slot was not introduced by the inferred pass-by-reference optimization.
     /// Absence means the binding currently carries an owned value; callers
     /// must not turn that absence into `ReferenceClass::Value` evidence.
-    pub(crate) fn current_true_reference_class(&self, key: BindingKey) -> Option<ReferenceClass> {
+    pub(crate) fn current_true_reference_class(
+        &self,
+        key: BindingKey,
+    ) -> Option<ReferenceClass> {
         if let Some(class) = self.first_class_reference_class(key) {
             return Some(class);
         }
         match key {
             BindingKey::Local(slot)
-                if self.ref_locals.contains(&slot) && !self.inferred_ref_locals.contains(&slot) =>
+                if self.ref_locals.contains(&slot)
+                    && !self.inferred_ref_locals.contains(&slot) =>
             {
                 if self.exclusive_ref_locals.contains(&slot) {
                     Some(ReferenceClass::ExclusiveReference { referent: None })
@@ -192,7 +198,9 @@ impl BytecodeCompiler {
         // Reset those current-only keys before reinstalling the saved state.
         for key in current_only {
             let storage = match key {
-                BindingKey::Local(slot) => self.default_binding_storage_class_for_slot(slot, true),
+                BindingKey::Local(slot) => {
+                    self.default_binding_storage_class_for_slot(slot, true)
+                }
                 BindingKey::ModuleBinding(slot) => {
                     self.default_binding_storage_class_for_slot(slot, false)
                 }
@@ -261,14 +269,20 @@ impl BytecodeCompiler {
         Ok(Some(first.state.clone()))
     }
 
-    pub(crate) fn set_reference_flow_class(&mut self, key: BindingKey, class: ReferenceClass) {
+    pub(crate) fn set_reference_flow_class(
+        &mut self,
+        key: BindingKey,
+        class: ReferenceClass,
+    ) {
         self.remove_reference_flow_evidence(key);
         self.install_reference_flow_class(key, class.clone());
         let storage = if class.is_reference() {
             BindingStorageClass::Reference
         } else {
             match key {
-                BindingKey::Local(slot) => self.default_binding_storage_class_for_slot(slot, true),
+                BindingKey::Local(slot) => {
+                    self.default_binding_storage_class_for_slot(slot, true)
+                }
                 BindingKey::ModuleBinding(slot) => {
                     self.default_binding_storage_class_for_slot(slot, false)
                 }
@@ -284,7 +298,9 @@ impl BytecodeCompiler {
     ) {
         let is_reference = match key {
             BindingKey::Local(slot) => self.reference_value_locals.contains(&slot),
-            BindingKey::ModuleBinding(slot) => self.reference_value_module_bindings.contains(&slot),
+            BindingKey::ModuleBinding(slot) => {
+                self.reference_value_module_bindings.contains(&slot)
+            }
         };
         debug_assert!(
             is_reference || referent.is_none(),
@@ -380,9 +396,9 @@ impl BytecodeCompiler {
             BindingKey::Local(slot) => self
                 .type_tracker
                 .set_local_binding_storage_class(slot, storage),
-            BindingKey::ModuleBinding(slot) => {
-                self.type_tracker.set_binding_storage_class(slot, storage)
-            }
+            BindingKey::ModuleBinding(slot) => self
+                .type_tracker
+                .set_binding_storage_class(slot, storage),
         }
     }
 }

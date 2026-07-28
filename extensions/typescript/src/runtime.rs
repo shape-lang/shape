@@ -706,10 +706,7 @@ mod contract_wire_tests {
 
         let stub = runtime.stub_document();
         assert!(!stub.is_empty(), "a delivered contract must produce a stub");
-        assert!(
-            stub.contains("add"),
-            "the stub declares the function: {stub}"
-        );
+        assert!(stub.contains("add"), "the stub declares the function: {stub}");
     }
 
     #[test]

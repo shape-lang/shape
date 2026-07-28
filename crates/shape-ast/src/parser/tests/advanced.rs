@@ -2042,17 +2042,12 @@ fn nested_fn_annotations_are_carried_through_the_desugar() {
         panic!("expected outer fn item");
     };
     let crate::ast::Statement::VariableDecl(decl, _) = &outer.body[0] else {
-        panic!(
-            "expected the nested fn to desugar to a VariableDecl, got {:?}",
-            outer.body[0]
-        );
+        panic!("expected the nested fn to desugar to a VariableDecl, got {:?}", outer.body[0]);
     };
     let Some(crate::ast::Expr::FunctionExpr { annotations, .. }) = &decl.value else {
         panic!("expected a FunctionExpr initializer");
     };
-    let annotations = annotations
-        .as_deref()
-        .expect("annotations must be carried, not dropped");
+    let annotations = annotations.as_deref().expect("annotations must be carried, not dropped");
     assert_eq!(annotations.len(), 1);
     assert_eq!(annotations[0].name, "retry");
     assert_eq!(annotations[0].args.len(), 1);
@@ -2068,8 +2063,5 @@ fn closure_literal_carries_no_nested_fn_annotations() {
     let Some(crate::ast::Expr::FunctionExpr { annotations, .. }) = &decl.value else {
         panic!("expected a FunctionExpr initializer");
     };
-    assert!(
-        annotations.is_none(),
-        "closure literals never carry annotations"
-    );
+    assert!(annotations.is_none(), "closure literals never carry annotations");
 }

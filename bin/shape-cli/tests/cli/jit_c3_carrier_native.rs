@@ -231,12 +231,7 @@ fn c3_api_installed_hooks_aggregate_is_a_named_expected_fallback() {
     let vm = run_workspace_fixture("vm", "smokes-jit-closure", fixture);
     let jit = run_workspace_fixture("jit", "smokes-jit-closure", fixture);
 
-    assert_eq!(
-        vm.exit_code,
-        Some(0),
-        "{fixture}: VM must exit 0; stderr={}",
-        vm.stderr
-    );
+    assert_eq!(vm.exit_code, Some(0), "{fixture}: VM must exit 0; stderr={}", vm.stderr);
     assert_eq!(
         jit.exit_code,
         Some(0),

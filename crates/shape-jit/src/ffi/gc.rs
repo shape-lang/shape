@@ -165,9 +165,8 @@ mod gc_barrier_tests {
 
             // Drop both external roots (decrement-to-nonzero ⇒ buffered Purple).
             for obj in [a, b] {
-                let surv =
-                    gc_decrement_precheck(obj as u64, NativeKind::Ptr(HeapKind::TypedObject))
-                        .expect("survivor after external drop");
+                let surv = gc_decrement_precheck(obj as u64, NativeKind::Ptr(HeapKind::TypedObject))
+                    .expect("survivor after external drop");
                 v2_release(&(*obj).header);
                 gc_buffer_possible_root(surv.0, surv.1);
             }

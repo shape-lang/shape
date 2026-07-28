@@ -24,8 +24,8 @@
 
 use crate::bytecode::{NativeAbiSpec, NativeStructLayoutEntry};
 use libffi::middle::{Arg, Cif, CodePtr, Type};
-use libloading::Library;
 use shape_runtime::native_resolution::NativeResolutionSet;
+use libloading::Library;
 use shape_value::{KindedSlot, NativeKind, ValueSlot};
 use std::collections::HashMap;
 use std::ffi::{CStr, CString, c_char, c_void};
@@ -838,7 +838,10 @@ pub fn invoke_linked_function(
     debug_assert_eq!(
         native_kind_for_ctype(&linked.signature.ret),
         match linked.signature.ret {
-            CType::Void | CType::NullableCString | CType::CSlice(_) | CType::CMutSlice(_) => None,
+            CType::Void
+            | CType::NullableCString
+            | CType::CSlice(_)
+            | CType::CMutSlice(_) => None,
             _ => Some(result.kind()),
         },
         "native return kind must equal native_kind_for_ctype()"
@@ -906,10 +909,7 @@ mod tests {
             package_key: None,
             ..spec.clone()
         };
-        assert_eq!(
-            resolve_library_target(&spec_unknown, Some(&set), None),
-            "nope"
-        );
+        assert_eq!(resolve_library_target(&spec_unknown, Some(&set), None), "nope");
 
         // Well-known system aliases still map to the platform soname.
         let spec_libc = NativeAbiSpec {

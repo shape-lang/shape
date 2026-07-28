@@ -1,7 +1,7 @@
 use crate::bytecode::OpCode;
 use crate::compiler::helpers::{
-    owned_mutable_typed_load_opcode, owned_mutable_typed_store_opcode, shared_typed_load_opcode,
-    shared_typed_store_opcode,
+    owned_mutable_typed_load_opcode, owned_mutable_typed_store_opcode,
+    shared_typed_load_opcode, shared_typed_store_opcode,
 };
 use shape_value::v2::struct_layout::FieldKind;
 
@@ -81,7 +81,10 @@ mod tests {
         );
         assert_eq!(
             exact_opcodes_for_access(CaptureAccess::SharedCell, FieldKind::U64),
-            Some([OpCode::LoadSharedCaptureU64, OpCode::StoreSharedCaptureU64,]),
+            Some([
+                OpCode::LoadSharedCaptureU64,
+                OpCode::StoreSharedCaptureU64,
+            ]),
         );
     }
 }

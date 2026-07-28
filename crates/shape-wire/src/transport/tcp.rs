@@ -66,9 +66,11 @@ impl Transport for TcpTransport {
             });
         }
 
-        let mut stream =
-            TcpStream::connect_timeout(&resolve_socket_addr(destination)?, self.connect_timeout)
-                .map_err(|e| TransportError::ConnectionFailed(format!("{}: {}", destination, e)))?;
+        let mut stream = TcpStream::connect_timeout(
+            &resolve_socket_addr(destination)?,
+            self.connect_timeout,
+        )
+        .map_err(|e| TransportError::ConnectionFailed(format!("{}: {}", destination, e)))?;
 
         stream.set_read_timeout(self.read_timeout).ok();
         stream.set_write_timeout(Some(self.connect_timeout)).ok();
@@ -78,9 +80,11 @@ impl Transport for TcpTransport {
     }
 
     fn connect(&self, destination: &str) -> Result<Box<dyn Connection>, TransportError> {
-        let stream =
-            TcpStream::connect_timeout(&resolve_socket_addr(destination)?, self.connect_timeout)
-                .map_err(|e| TransportError::ConnectionFailed(format!("{}: {}", destination, e)))?;
+        let stream = TcpStream::connect_timeout(
+            &resolve_socket_addr(destination)?,
+            self.connect_timeout,
+        )
+        .map_err(|e| TransportError::ConnectionFailed(format!("{}: {}", destination, e)))?;
 
         Ok(Box::new(TcpConnection {
             stream,

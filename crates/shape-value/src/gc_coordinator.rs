@@ -454,8 +454,7 @@ mod tests {
 
         // Initiator on its own thread so its handle deregisters on exit (keeps
         // the coordinator clean for the next test).
-        let progresses: Vec<Arc<AtomicU64>> =
-            workers.iter().map(|w| Arc::clone(&w.progress)).collect();
+        let progresses: Vec<Arc<AtomicU64>> = workers.iter().map(|w| Arc::clone(&w.progress)).collect();
         let collect_calls = Arc::new(AtomicUsize::new(0));
         let cc = Arc::clone(&collect_calls);
         let init = thread::spawn(move || {
@@ -470,36 +469,20 @@ mod tests {
                 // Under the stop every OTHER mutator is parked.
                 assert_eq!(parked_count(), N, "all N workers parked under the stop");
                 // Workers are frozen: progress does not advance while stopped.
-                let before: Vec<u64> = progresses
-                    .iter()
-                    .map(|p| p.load(Ordering::Relaxed))
-                    .collect();
+                let before: Vec<u64> = progresses.iter().map(|p| p.load(Ordering::Relaxed)).collect();
                 thread::sleep(Duration::from_millis(30));
-                let after: Vec<u64> = progresses
-                    .iter()
-                    .map(|p| p.load(Ordering::Relaxed))
-                    .collect();
+                let after: Vec<u64> = progresses.iter().map(|p| p.load(Ordering::Relaxed)).collect();
                 assert_eq!(before, after, "workers make no progress while stopped");
                 4242 // sentinel freed-count
             })
         });
 
         let freed = init.join().unwrap();
-        assert_eq!(
-            freed, 4242,
-            "collect return propagates through the rendezvous"
-        );
-        assert_eq!(
-            collect_calls.load(Ordering::SeqCst),
-            1,
-            "collected exactly once"
-        );
+        assert_eq!(freed, 4242, "collect return propagates through the rendezvous");
+        assert_eq!(collect_calls.load(Ordering::SeqCst), 1, "collected exactly once");
 
         // After resume the workers advance again.
-        let snap: Vec<u64> = workers
-            .iter()
-            .map(|w| w.progress.load(Ordering::Relaxed))
-            .collect();
+        let snap: Vec<u64> = workers.iter().map(|w| w.progress.load(Ordering::Relaxed)).collect();
         assert!(
             wait_until(Duration::from_secs(5), || {
                 workers
@@ -530,11 +513,7 @@ mod tests {
                 7 // sentinel
             })
         });
-        assert_eq!(
-            init.join().unwrap(),
-            7,
-            "lone thread collects without waiting"
-        );
+        assert_eq!(init.join().unwrap(), 7, "lone thread collects without waiting");
 
         test_reset();
     }
@@ -582,10 +561,7 @@ mod tests {
 
         let freed = init.join().unwrap();
         deserter.join().unwrap();
-        assert_eq!(
-            freed, 99,
-            "barrier completed and collected despite the exit"
-        );
+        assert_eq!(freed, 99, "barrier completed and collected despite the exit");
 
         stop_and_join(coop);
         test_reset();
@@ -686,11 +662,7 @@ mod tests {
 
         let freed = init.join().unwrap();
         assert_eq!(freed, 0, "aborted collection returns 0");
-        assert_eq!(
-            collect_calls.load(Ordering::SeqCst),
-            0,
-            "collect did not run"
-        );
+        assert_eq!(collect_calls.load(Ordering::SeqCst), 0, "collect did not run");
         assert!(!stop_requested(), "abort cleared the stop flag");
 
         quit.store(true, Ordering::Relaxed);
@@ -740,11 +712,7 @@ mod tests {
             collect_under_stop_bounded(
                 move || {
                     cc.fetch_add(1, Ordering::SeqCst);
-                    assert_eq!(
-                        parked_count(),
-                        1,
-                        "the safe-region thread is counted parked"
-                    );
+                    assert_eq!(parked_count(), 1, "the safe-region thread is counted parked");
                     3
                 },
                 Duration::from_millis(250),
@@ -752,10 +720,7 @@ mod tests {
         });
 
         let freed = init.join().unwrap();
-        assert_eq!(
-            freed, 3,
-            "safe region let the barrier complete — collect ran"
-        );
+        assert_eq!(freed, 3, "safe region let the barrier complete — collect ran");
         assert_eq!(collect_calls.load(Ordering::SeqCst), 1);
 
         release.store(true, Ordering::Relaxed);

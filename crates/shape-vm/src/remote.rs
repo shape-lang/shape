@@ -239,7 +239,10 @@ impl RemoteCallError {
 
     /// Construct a `MissingModuleFunction` error carrying the hashes the
     /// sender must resupply (distributed §4.3-4).
-    pub fn missing_module_function(message: impl Into<String>, missing: Vec<FunctionHash>) -> Self {
+    pub fn missing_module_function(
+        message: impl Into<String>,
+        missing: Vec<FunctionHash>,
+    ) -> Self {
         Self {
             message: message.into(),
             kind: RemoteErrorKind::MissingModuleFunction,
@@ -309,7 +312,10 @@ pub fn transport_error_shape_variant(err: &shape_wire::transport::TransportError
 /// (e.g. `3fa2b1c0…`), mirroring the design's §4.9 sample messages.
 fn short_hash(hash: &FunctionHash) -> String {
     let b = &hash.0;
-    format!("{:02x}{:02x}{:02x}{:02x}…", b[0], b[1], b[2], b[3])
+    format!(
+        "{:02x}{:02x}{:02x}{:02x}…",
+        b[0], b[1], b[2], b[3]
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -845,12 +851,7 @@ pub fn execute_remote_call(
     // gate; a dynamic foreign call on such a server has no runtime to link and
     // fails cleanly regardless. Pass an empty scope; the receiver-strict flag
     // (set inside `run_remote_call`) still refuses any dynamic foreign call.
-    match execute_inner(
-        request,
-        store,
-        granted,
-        &shape_abi_v1::ScopeConstraints::none(),
-    ) {
+    match execute_inner(request, store, granted, &shape_abi_v1::ScopeConstraints::none()) {
         Ok(value) => RemoteCallResponse { result: Ok(value) },
         Err(err) => RemoteCallResponse { result: Err(err) },
     }
@@ -1103,7 +1104,8 @@ fn run_remote_call(
             vm.load_linked_program_with_permissions(linked, granted)
                 .map_err(|e| match e {
                     crate::executor::PermissionError::InsufficientPermissions {
-                        missing, ..
+                        missing,
+                        ..
                     } => {
                         let names: Vec<&str> = missing.iter().map(|p| p.name()).collect();
                         RemoteCallError::new(
@@ -1249,12 +1251,16 @@ fn run_remote_call(
     // Step 4: pick per-arg expected kinds from the callee's frame
     // descriptor. ADR-006 §2.7.5.1: a present FunctionBlob has every
     // slot's NativeKind proven — no Unknown placeholder.
-    let function = vm.program.functions.get(func_id as usize).ok_or_else(|| {
-        RemoteCallError::new(
-            RemoteErrorKind::FunctionNotFound,
-            format!("function_id {} out of range", func_id),
-        )
-    })?;
+    let function = vm
+        .program
+        .functions
+        .get(func_id as usize)
+        .ok_or_else(|| {
+            RemoteCallError::new(
+                RemoteErrorKind::FunctionNotFound,
+                format!("function_id {} out of range", func_id),
+            )
+        })?;
 
     let arity = function.arity as usize;
     if request.arguments.len() != arity {
@@ -1648,11 +1654,7 @@ fn rebuild_immutable_closure_layout(
         })
         .collect();
     let kinds = vec![CaptureKind::Immutable; capture_native_kinds.len()];
-    ClosureLayout::from_capture_types_with_native_kinds(
-        &capture_types,
-        &kinds,
-        capture_native_kinds,
-    )
+    ClosureLayout::from_capture_types_with_native_kinds(&capture_types, &kinds, capture_native_kinds)
 }
 
 fn finish_remote_closure_call(
@@ -3800,11 +3802,7 @@ mod tests {
 
     /// Build a receiver request whose entry blob is `entry`, carrying `program`
     /// as the content-addressed payload.
-    fn mk_ca_request(
-        program: BytecodeProgram,
-        entry: FunctionHash,
-        name: &str,
-    ) -> RemoteCallRequest {
+    fn mk_ca_request(program: BytecodeProgram, entry: FunctionHash, name: &str) -> RemoteCallRequest {
         RemoteCallRequest {
             call_id: None,
             program,
@@ -3934,12 +3932,7 @@ mod tests {
         let resp = execute_remote_call(request, &temp_store(), &PermissionSet::pure());
         match resp.result {
             Err(e) => {
-                assert_eq!(
-                    e.kind,
-                    RemoteErrorKind::MissingModuleFunction,
-                    "msg={}",
-                    e.message
-                );
+                assert_eq!(e.kind, RemoteErrorKind::MissingModuleFunction, "msg={}", e.message);
                 let missing = e
                     .missing_blobs
                     .expect("MissingModuleFunction populates missing_blobs");
@@ -4179,11 +4172,7 @@ mod tests {
             .as_mut()
             .expect("content-addressed request carries blobs");
         blobs.retain(|(h, _)| *h == entry_hash);
-        assert_eq!(
-            blobs.len(),
-            1,
-            "only the entry blob remains after stripping"
-        );
+        assert_eq!(blobs.len(), 1, "only the entry blob remains after stripping");
 
         let store = temp_store();
         let granted = PermissionSet::pure();
@@ -4213,7 +4202,10 @@ mod tests {
         let resp = call_with_resupply(&program, request, |_req| {
             call_count += 1;
             RemoteCallResponse {
-                result: Err(RemoteCallError::new(RemoteErrorKind::RuntimeError, "boom")),
+                result: Err(RemoteCallError::new(
+                    RemoteErrorKind::RuntimeError,
+                    "boom",
+                )),
             }
         });
         assert_eq!(call_count, 1, "no retry for a non-missing-blob failure");

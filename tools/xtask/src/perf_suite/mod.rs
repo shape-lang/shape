@@ -404,10 +404,7 @@ pub fn run_suite(repo_root: &Path, opts: &RunOptions) -> Result<Report> {
         };
 
         if workload.category == "startup" {
-            startup_floor.insert(
-                "shape".to_string(),
-                primary(&shape_outcome.timing, &statistic),
-            );
+            startup_floor.insert("shape".to_string(), primary(&shape_outcome.timing, &statistic));
             if let Some(reference) = &reference_outcome {
                 startup_floor.insert(
                     manifest.reference.runtime.clone(),
@@ -492,12 +489,7 @@ pub fn run_suite(repo_root: &Path, opts: &RunOptions) -> Result<Report> {
         pinned_environment_identity: manifest.environment.identity.clone(),
         environment,
         integrity: IntegrityState {
-            status: if violations.is_empty() {
-                "ok"
-            } else {
-                "violated"
-            }
-            .to_string(),
+            status: if violations.is_empty() { "ok" } else { "violated" }.to_string(),
             covered_files: covered.len(),
             violations,
         },
@@ -550,15 +542,9 @@ pub fn print_summary(report: &Report) {
             ""
         }
     );
-    println!(
-        "  shape binary        {}",
-        report.revision.shape_binary_sha256
-    );
+    println!("  shape binary        {}", report.revision.shape_binary_sha256);
     println!("  environment         {}", report.environment_identity);
-    println!(
-        "  pinned environment  {}",
-        report.pinned_environment_identity
-    );
+    println!("  pinned environment  {}", report.pinned_environment_identity);
     println!(
         "  integrity           {} ({} covered files)",
         report.integrity.status, report.integrity.covered_files

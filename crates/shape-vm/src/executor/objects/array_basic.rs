@@ -38,11 +38,11 @@
 //! on sight.
 
 use crate::executor::VirtualMachine;
-use crate::executor::result_option_carrier::build_some;
 use crate::executor::v2_handlers::v2_array_detect::{
     V2TypedArrayView, as_v2_typed_array, clone_array, pop_element, push_element, read_element,
     reverse_array, write_element,
 };
+use crate::executor::result_option_carrier::build_some;
 use shape_runtime::context::ExecutionContext;
 use shape_value::v2::heap_header::HEAP_KIND_V2_TYPED_ARRAY;
 use shape_value::v2::typed_array::{ELEM_TYPE_TYPED_OBJECT, TypedArray};

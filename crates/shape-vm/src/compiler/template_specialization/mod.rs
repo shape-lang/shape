@@ -74,12 +74,12 @@
 //! signatures — never `handler.span`, never a mangled mono-key name.
 
 pub(in crate::compiler) mod const_lift;
-#[cfg(test)]
-mod e4_s5_remote_tests;
 pub(in crate::compiler) mod install_registry;
 pub(in crate::compiler) mod pseudo_tuple;
 #[cfg(test)]
 mod sugar_matrix_tests;
+#[cfg(test)]
+mod e4_s5_remote_tests;
 pub(in crate::compiler) mod weave;
 
 use shape_ast::ast::{FunctionDef, Span, TypeAnnotation};
@@ -416,9 +416,7 @@ impl BytecodeCompiler {
             }
             None => {
                 let def = self.function_defs.get(body_fn).cloned();
-                let module = body_fn
-                    .rsplit_once("::")
-                    .map(|(module, _)| module.to_string());
+                let module = body_fn.rsplit_once("::").map(|(module, _)| module.to_string());
                 let origin = if body_fn.starts_with('\u{1}') {
                     // Defensive only: a hygienic body fn outside every
                     // compiled annotation — never render the SOH name.
@@ -705,17 +703,13 @@ impl BytecodeCompiler {
         // or compile this def — its `Return` exits are `HookDecision::Return`
         // nodes (not the carrier), so it is not a standalone-compilable fn; the
         // weave lowers it after the impl shadow exists.
-        let original_def = self
-            .function_defs
-            .get(template.body_fn())
-            .cloned()
-            .ok_or_else(|| {
-                self.template_application_error(
-                    template,
-                    target,
-                    "internal error: the decision hook's template body fn has no recorded AST",
-                )
-            })?;
+        let original_def = self.function_defs.get(template.body_fn()).cloned().ok_or_else(|| {
+            self.template_application_error(
+                template,
+                target,
+                "internal error: the decision hook's template body fn has no recorded AST",
+            )
+        })?;
         let subs = std::collections::HashMap::from([(
             type_param.to_string(),
             ConcreteType::Tuple(param_concretes),
@@ -765,13 +759,16 @@ impl BytecodeCompiler {
         // capture parameters and prepend one `let mut {name} = {value}` prologue
         // per capture (the S3b HEAP-CONSTANT BAKE, `const_lift::bake_captures_into_def`).
         if !captures.is_empty() {
-            let capture_params = const_lift::declared_capture_params_from_tail(
-                &prepared_def,
-                &captures,
-            )
-            .map_err(|error| {
-                self.template_application_error(template, target, &shape_error_message(error))
-            })?;
+            let capture_params =
+                const_lift::declared_capture_params_from_tail(&prepared_def, &captures).map_err(
+                    |error| {
+                        self.template_application_error(
+                            template,
+                            target,
+                            &shape_error_message(error),
+                        )
+                    },
+                )?;
             const_lift::bake_captures_into_def(&mut prepared_def, &captures, &capture_params)
                 .map_err(|error| {
                     self.template_application_error(template, target, &shape_error_message(error))
@@ -902,17 +899,15 @@ impl BytecodeCompiler {
         let def = match self.function_defs.get(body_fn) {
             Some(def) => def.clone(),
             None => {
-                let sugar = self
-                    .program
-                    .compiled_annotations
-                    .iter()
-                    .find_map(|(_, compiled)| {
+                let sugar = self.program.compiled_annotations.iter().find_map(
+                    |(_, compiled)| {
                         compiled
                             .sugar_body_fns
                             .iter()
                             .find(|def| def.name == body_fn)
                             .cloned()
-                    });
+                    },
+                );
                 match sugar {
                     Some(def) => def,
                     None => return Ok(()),
@@ -1309,17 +1304,17 @@ impl BytecodeCompiler {
             self.local_binding_spans = saved_local_binding_spans;
             minted_result?;
         }
-        let index =
-            self.find_function(template.body_fn())
-                .ok_or_else(|| ShapeError::RuntimeError {
-                    message: format!(
-                        "internal error: template body fn `{}` is not registered in the current \
+        let index = self
+            .find_function(template.body_fn())
+            .ok_or_else(|| ShapeError::RuntimeError {
+                message: format!(
+                    "internal error: template body fn `{}` is not registered in the current \
                      compilation (a CheckedTemplate is compiler-session-local; its body fn must \
                      be registered before specialization)",
-                        template.body_fn()
-                    ),
-                    location: None,
-                })?;
+                    template.body_fn()
+                ),
+                location: None,
+            })?;
         u16::try_from(index).map_err(|_| ShapeError::RuntimeError {
             message: format!(
                 "internal error: function index {index} for template body fn `{}` exceeds the \
@@ -1400,20 +1395,17 @@ fn template_param_annotation<'sig>(
     index: usize,
     compiler: &BytecodeCompiler,
 ) -> Result<&'sig TypeAnnotation> {
-    signature.params()[index]
-        .type_annotation
-        .as_ref()
-        .ok_or_else(|| {
-            compiler.template_application_error(
-                template,
-                target,
-                &format!(
-                    "parameter {} of the template has no declared type annotation; a concrete \
+    signature.params()[index].type_annotation.as_ref().ok_or_else(|| {
+        compiler.template_application_error(
+            template,
+            target,
+            &format!(
+                "parameter {} of the template has no declared type annotation; a concrete \
                  template body annotates every parameter explicitly",
-                    index + 1
-                ),
-            )
-        })
+                index + 1
+            ),
+        )
+    })
 }
 
 /// Extract the inner detail text of a monomorphization-ride failure so the
@@ -1674,10 +1666,7 @@ mod tests {
             Some(MutationCarrier::Single { annotation }) => {
                 assert_eq!(type_annotation_to_string(annotation), "int");
             }
-            other => panic!(
-                "expected the Single mutation carrier, got {:?}",
-                other.is_some()
-            ),
+            other => panic!("expected the Single mutation carrier, got {:?}", other.is_some()),
         }
     }
 
@@ -1692,10 +1681,7 @@ mod tests {
 
         let handler = specialize(&mut fx.compiler, &template, &target)
             .expect("matching concrete after specializes");
-        assert!(
-            handler.carrier().is_none(),
-            "after handlers carry no mutation carrier"
-        );
+        assert!(handler.carrier().is_none(), "after handlers carry no mutation carrier");
         let expected_index = fx.compiler.find_function("post").expect("post registered");
         assert_eq!(handler.function_index() as usize, expected_index);
     }
@@ -1759,10 +1745,9 @@ mod tests {
             2,
         );
         assert!(
-            err.to_string().contains(
-                "declare the template polymorphic over the args pseudo-tuple \
-                           (fn t<Args>(args: Args) -> Args)"
-            ),
+            err.to_string()
+                .contains("declare the template polymorphic over the args pseudo-tuple \
+                           (fn t<Args>(args: Args) -> Args)"),
             "rejection must carry the polymorphic positive twin: {err}"
         );
     }
@@ -1874,10 +1859,7 @@ mod tests {
         let handler = specialize(&mut fx.compiler, &template, &target)
             .expect("an observer before specializes on a zero-param target");
         assert!(handler.is_observer(), "the observer flag drives the weave");
-        assert!(
-            handler.carrier().is_none(),
-            "observers carry no mutation carrier"
-        );
+        assert!(handler.carrier().is_none(), "observers carry no mutation carrier");
         let expected_index = fx.compiler.find_function("note").expect("note registered");
         assert_eq!(handler.function_index() as usize, expected_index);
     }
@@ -1945,10 +1927,7 @@ mod tests {
         let template = template(&fx, TemplateHookKind::Before, "tmpl");
         let target = target_for(&fx, "target_fn", None);
 
-        assert!(
-            fx.compiler.install_journal.is_none(),
-            "control: no journal open"
-        );
+        assert!(fx.compiler.install_journal.is_none(), "control: no journal open");
         let err = fx
             .compiler
             .specialize_template(&template, &[], &target)
@@ -2102,10 +2081,7 @@ mod tests {
             message.contains("`stripped`"),
             "rejection must name the user-spelled target, never a mangled name: {message}"
         );
-        assert!(
-            location.is_some(),
-            "rejection must anchor at the application site"
-        );
+        assert!(location.is_some(), "rejection must anchor at the application site");
     }
 
     // =====================================================================
@@ -2223,18 +2199,10 @@ mod tests {
 
         let result = execute_specialized(&fx.compiler, index, vec![int_arg(3), number_arg(4.5)]);
         let slots = aggregate_slots(&result);
-        assert_eq!(
-            slots.len(),
-            2,
-            "the aggregate carries one slot per target parameter"
-        );
+        assert_eq!(slots.len(), 2, "the aggregate carries one slot per target parameter");
         assert_eq!(slots[0].0, NativeKind::Int64, "a0 is the typed int slot");
         assert_eq!(slots[0].1 as i64, 4, "a0 must carry the mutated int");
-        assert_eq!(
-            slots[1].0,
-            NativeKind::Float64,
-            "a1 is the typed number slot"
-        );
+        assert_eq!(slots[1].0, NativeKind::Float64, "a1 is the typed number slot");
         assert_eq!(
             f64::from_bits(slots[1].1),
             4.5,
@@ -2265,7 +2233,8 @@ mod tests {
             other => panic!("expected the Single carrier, got {:?}", other),
         }
 
-        let result = execute_specialized(&fx.compiler, handler.function_index(), vec![int_arg(3)]);
+        let result =
+            execute_specialized(&fx.compiler, handler.function_index(), vec![int_arg(3)]);
         assert_eq!(
             result.as_i64(),
             Some(9),
@@ -2297,7 +2266,8 @@ mod tests {
         let slots = aggregate_slots(&result);
         assert_eq!(slots[0].0, NativeKind::Int64);
         assert_eq!(
-            slots[0].1 as i64, 5,
+            slots[0].1 as i64,
+            5,
             "a0 = 3 + args.length proves length resolved to the constant 2"
         );
         assert_clean_specialization_state(&fx.compiler);
@@ -2363,8 +2333,8 @@ mod tests {
         let template = template(&fx, TemplateHookKind::Before, "tmpl");
 
         let target_one = target_for(&fx, "target_one", None);
-        let first =
-            specialize(&mut fx.compiler, &template, &target_one).expect("first target specializes");
+        let first = specialize(&mut fx.compiler, &template, &target_one)
+            .expect("first target specializes");
         assert_eq!(fx.compiler.monomorphization_cache.legacy_len(), 1);
         assert!(
             fx.compiler.program.functions[first.function_index() as usize]
@@ -2460,11 +2430,7 @@ mod tests {
         );
         let def_a = registered_specialized_def(&fx.compiler, first.function_index());
         let def_b = registered_specialized_def(&fx.compiler, second.function_index());
-        assert_eq!(
-            def_a.params.len(),
-            2,
-            "target_a's handler binds its 2 typed params"
-        );
+        assert_eq!(def_a.params.len(), 2, "target_a's handler binds its 2 typed params");
         assert_eq!(
             def_b.params.len(),
             3,
@@ -2632,10 +2598,7 @@ mod tests {
             vec![int_arg(3), number_arg(4.5)],
         );
         let slots = aggregate_slots(&result);
-        assert_eq!(
-            slots[0].1 as i64, 4,
-            "the re-specialized handler executes correctly"
-        );
+        assert_eq!(slots[0].1 as i64, 4, "the re-specialized handler executes correctly");
         assert_clean_specialization_state(&fx.compiler);
     }
 
@@ -2710,10 +2673,7 @@ mod tests {
     // the boundary against the Sig segments is unambiguous).
     #[test]
     fn template_suffix_zero_captures_is_byte_stable_and_cfg_headed_otherwise() {
-        let sig = [ConcreteType::Tuple(vec![
-            ConcreteType::I64,
-            ConcreteType::F64,
-        ])];
+        let sig = [ConcreteType::Tuple(vec![ConcreteType::I64, ConcreteType::F64])];
         let bare = template_specialization_key_suffix(&sig, &[]);
         assert_eq!(
             bare,
@@ -2735,16 +2695,15 @@ mod tests {
     #[test]
     fn template_suffix_config_segment_injectivity_refuters() {
         let sig = [ConcreteType::I64];
-        let suffix =
-            |captures: &[(String, LiftedConst)]| template_specialization_key_suffix(&sig, captures);
+        let suffix = |captures: &[(String, LiftedConst)]| {
+            template_specialization_key_suffix(&sig, captures)
+        };
 
         // Some(5) vs 5 — control: the naive payload-unwrap rendering (the
         // REAL segment producer applied to the unwrapped payload) collides.
         let five = LiftedConst::Int(5);
         let some5 = LiftedConst::Some(Box::new(five.clone()));
-        let LiftedConst::Some(payload) = &some5 else {
-            unreachable!()
-        };
+        let LiftedConst::Some(payload) = &some5 else { unreachable!() };
         assert_eq!(
             structural_key_segment(payload),
             structural_key_segment(&five),
@@ -2817,11 +2776,7 @@ mod tests {
             "the baked specialization is a separate def, never the body fn itself"
         );
         let def = registered_specialized_def(&fx.compiler, handler.function_index());
-        assert_eq!(
-            def.params.len(),
-            1,
-            "the capture param is stripped (arity == Sig arity)"
-        );
+        assert_eq!(def.params.len(), 1, "the capture param is stripped (arity == Sig arity)");
         assert!(
             def.name.contains("::cfg#1::i:3"),
             "the baked symbol carries the rule-6 config segment: {}",
@@ -2829,11 +2784,7 @@ mod tests {
         );
 
         let baked = execute_specialized(&fx.compiler, handler.function_index(), vec![int_arg(5)]);
-        assert_eq!(
-            baked.as_i64(),
-            Some(15),
-            "5 * baked factor 3 (only the Sig arg passed)"
-        );
+        assert_eq!(baked.as_i64(), Some(15), "5 * baked factor 3 (only the Sig arg passed)");
         // The ordinary module fn is untouched: still registered under its
         // own name with BOTH parameters (identity-proof — the unit fixture
         // registers but does not definition-compile concrete bodies, the S1
@@ -2843,11 +2794,7 @@ mod tests {
             .function_defs
             .get("tmpl")
             .expect("the ordinary def stays registered");
-        assert_eq!(
-            ordinary_def.params.len(),
-            2,
-            "the ordinary def keeps its capture param"
-        );
+        assert_eq!(ordinary_def.params.len(), 2, "the ordinary def keeps its capture param");
         assert_clean_specialization_state(&fx.compiler);
     }
 
@@ -2924,7 +2871,8 @@ mod tests {
             "the baked symbol carries the config segment: {}",
             def.name
         );
-        let result = execute_specialized(&fx.compiler, handler.function_index(), vec![int_arg(10)]);
+        let result =
+            execute_specialized(&fx.compiler, handler.function_index(), vec![int_arg(10)]);
         assert_eq!(result.as_i64(), Some(13), "10 + baked offset 3");
         assert_clean_specialization_state(&fx.compiler);
     }
@@ -3023,12 +2971,9 @@ mod tests {
             "the empty array keys its own config segment: {}",
             def.name
         );
-        let result = execute_specialized(&fx.compiler, handler.function_index(), vec![int_arg(1)]);
-        assert_eq!(
-            result.as_i64(),
-            Some(10),
-            "1*10 + len([]) — the baked empty array executes"
-        );
+        let result =
+            execute_specialized(&fx.compiler, handler.function_index(), vec![int_arg(1)]);
+        assert_eq!(result.as_i64(), Some(10), "1*10 + len([]) — the baked empty array executes");
         assert_clean_specialization_state(&fx.compiler);
     }
 
@@ -3072,12 +3017,9 @@ mod tests {
             first_index,
             "the re-run re-registers at the freed watermark index"
         );
-        let result = execute_specialized(&fx.compiler, handler.function_index(), vec![int_arg(10)]);
-        assert_eq!(
-            result.as_i64(),
-            Some(30),
-            "the re-baked handler executes correctly"
-        );
+        let result =
+            execute_specialized(&fx.compiler, handler.function_index(), vec![int_arg(10)]);
+        assert_eq!(result.as_i64(), Some(30), "the re-baked handler executes correctly");
         assert_clean_specialization_state(&fx.compiler);
     }
 
@@ -3274,12 +3216,9 @@ mod tests {
         let target = target_for(&fx, "target_fn", None);
         let handler = specialize(&mut fx.compiler, &template, &target)
             .expect("the hoisted-local twin specializes");
-        let result = execute_specialized(&fx.compiler, handler.function_index(), vec![int_arg(10)]);
-        assert_eq!(
-            result.as_i64(),
-            Some(12),
-            "10 + 2 through the hoisted local"
-        );
+        let result =
+            execute_specialized(&fx.compiler, handler.function_index(), vec![int_arg(10)]);
+        assert_eq!(result.as_i64(), Some(12), "10 + 2 through the hoisted local");
     }
 
     // ── Fix round 1, F2: capture-clause entries classify against the OUTER

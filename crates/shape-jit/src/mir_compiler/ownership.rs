@@ -215,14 +215,9 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                 None
             }
             StatementKind::ModuleBindingStore { operands, .. }
-            | StatementKind::TaskBoundary(operands, _) => self.apply_move_read_operands_effects(
-                block,
-                stmt_idx,
-                Some(stmt.point),
-                None,
-                operands,
-                moved,
-            ),
+            | StatementKind::TaskBoundary(operands, _) => {
+                self.apply_move_read_operands_effects(block, stmt_idx, Some(stmt.point), None, operands, moved)
+            }
             StatementKind::Drop(_) | StatementKind::Nop => None,
         }
     }
@@ -240,19 +235,19 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                 destination,
                 ..
             } => {
-                if let Some(reason) =
-                    self.apply_move_read_operand_effect(block, usize::MAX, None, None, func, moved)
-                {
-                    return Some(reason);
-                }
-                if let Some(reason) = self.apply_move_read_operands_effects(
+                if let Some(reason) = self.apply_move_read_operand_effect(
                     block,
                     usize::MAX,
                     None,
                     None,
-                    args,
+                    func,
                     moved,
                 ) {
+                    return Some(reason);
+                }
+                if let Some(reason) =
+                    self.apply_move_read_operands_effects(block, usize::MAX, None, None, args, moved)
+                {
                     return Some(reason);
                 }
                 if let Place::Local(slot) = destination {
@@ -260,9 +255,14 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                 }
                 None
             }
-            TerminatorKind::SwitchBool { operand, .. } => {
-                self.apply_move_read_operand_effect(block, usize::MAX, None, None, operand, moved)
-            }
+            TerminatorKind::SwitchBool { operand, .. } => self.apply_move_read_operand_effect(
+                block,
+                usize::MAX,
+                None,
+                None,
+                operand,
+                moved,
+            ),
             TerminatorKind::Goto(_) | TerminatorKind::Return | TerminatorKind::Unreachable => None,
         }
     }
@@ -277,27 +277,16 @@ impl<'a, 'b> MirToIR<'a, 'b> {
         moved: &mut HashSet<SlotId>,
     ) -> Option<String> {
         match rvalue {
-            Rvalue::Use(op) | Rvalue::Clone(op) | Rvalue::UnaryOp(_, op) => self
-                .apply_move_read_operand_effect(block, stmt_idx, point, ownership_src, op, moved),
+            Rvalue::Use(op) | Rvalue::Clone(op) | Rvalue::UnaryOp(_, op) => {
+                self.apply_move_read_operand_effect(block, stmt_idx, point, ownership_src, op, moved)
+            }
             Rvalue::BinaryOp(_, lhs, rhs) | Rvalue::FuzzyComparison { lhs, rhs, .. } => {
-                if let Some(reason) = self.apply_move_read_operand_effect(
-                    block,
-                    stmt_idx,
-                    point,
-                    ownership_src,
-                    lhs,
-                    moved,
-                ) {
+                if let Some(reason) =
+                    self.apply_move_read_operand_effect(block, stmt_idx, point, ownership_src, lhs, moved)
+                {
                     return Some(reason);
                 }
-                self.apply_move_read_operand_effect(
-                    block,
-                    stmt_idx,
-                    point,
-                    ownership_src,
-                    rhs,
-                    moved,
-                )
+                self.apply_move_read_operand_effect(block, stmt_idx, point, ownership_src, rhs, moved)
             }
             Rvalue::Aggregate(operands) => self.apply_move_read_operands_effects(
                 block,

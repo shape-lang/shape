@@ -106,8 +106,10 @@ fn extern_fn_returning_struct_concept() {
 /// value round-trips (pure compile+run, no `.so` needed).
 #[test]
 fn ptr_int_reinterpret_round_trips() {
-    ShapeTest::new("let a: int = 42\nlet p: ptr = a as ptr\nlet back: int = p as int\nprint(back)")
-        .expect_output("42");
+    ShapeTest::new(
+        "let a: int = 42\nlet p: ptr = a as ptr\nlet back: int = p as int\nprint(back)",
+    )
+    .expect_output("42");
 }
 
 /// A non-negative integer literal losslessly adopts a `ptr` context — this is

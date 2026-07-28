@@ -752,7 +752,9 @@ impl TypedObjectOps for super::VirtualMachine {
         #[cfg(miri)]
         let storage_ptr: *mut shape_value::heap_value::TypedObjectStorage =
             match receiver.miri_provenance() {
-                shape_value::heap_value::MiriSlotProvenance::TypedObject(ptr) if !ptr.is_null() => {
+                shape_value::heap_value::MiriSlotProvenance::TypedObject(ptr)
+                    if !ptr.is_null() =>
+                {
                     ptr as *mut shape_value::heap_value::TypedObjectStorage
                 }
                 other => {
@@ -834,7 +836,13 @@ impl super::VirtualMachine {
                     idx, field_count
                 )));
             }
-            return write_field_at_idx(storage, idx, field_type_tag, value, &self.builtin_schemas);
+            return write_field_at_idx(
+                storage,
+                idx,
+                field_type_tag,
+                value,
+                &self.builtin_schemas,
+            );
         }
 
         // Schema-mismatch path: name-based lookup via IC + megamorphic
@@ -922,7 +930,13 @@ impl super::VirtualMachine {
                     src_field_idx,
                     tag,
                 );
-                return write_field_at_idx(storage, src_idx, tag, value, &self.builtin_schemas);
+                return write_field_at_idx(
+                    storage,
+                    src_idx,
+                    tag,
+                    value,
+                    &self.builtin_schemas,
+                );
             }
         }
 
@@ -1192,8 +1206,8 @@ unsafe fn update_option_field_kind_metadata(
 mod tests {
     use super::*;
     use crate::bytecode::{Instruction, OpCode};
-    use crate::executor::result_option_carrier::{build_none, build_some, read_option};
     use crate::executor::{VMConfig, VirtualMachine};
+    use crate::executor::result_option_carrier::{build_none, build_some, read_option};
     use shape_runtime::type_schema::{FieldType, TypeSchema};
     use shape_value::heap_value::TypedObjectStorage;
     use std::sync::Arc;

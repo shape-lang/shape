@@ -157,8 +157,8 @@ mod tests {
 mod gc_barrier_tests {
     use super::*;
     use shape_value::HeapKind;
-    use shape_value::gc;
     use shape_value::heap_value::TypedObjectStorage;
+    use shape_value::gc;
     use shape_value::native_kind::NativeKind;
     use shape_value::slot::ValueSlot;
     use shape_value::v2::heap_element::HeapElement;

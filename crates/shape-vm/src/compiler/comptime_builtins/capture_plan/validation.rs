@@ -186,8 +186,8 @@ impl CapturePack {
                 descriptor.access,
                 descriptor.capture_type.to_field_kind(),
             );
-            let expected_family =
-                expected_opcodes.and_then(|opcodes| artifact::cell_capture_family(opcodes[0]));
+            let expected_family = expected_opcodes
+                .and_then(|opcodes| artifact::cell_capture_family(opcodes[0]));
             if opcode_families[index] != expected_family {
                 return Err(format!(
                     "closure {} capture {} ('{}'): {:?} requires opcode family {:?}, emitted {:?}",

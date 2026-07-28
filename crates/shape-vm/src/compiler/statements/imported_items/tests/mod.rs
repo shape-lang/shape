@@ -87,11 +87,9 @@ let invalid_module_binding = 2
     let error = compiler
         .register_imported_items("pkg::support", &dependency.items)
         .expect_err("whole-module qualification cannot be swallowed");
-    assert!(
-        error
-            .to_string()
-            .contains("module-level variable declarations currently require `const`")
-    );
+    assert!(error
+        .to_string()
+        .contains("module-level variable declarations currently require `const`"));
     assert_eq!(compiler.program.functions.len(), before);
     assert!(compiler.program.compiled_annotations.is_empty());
 }
