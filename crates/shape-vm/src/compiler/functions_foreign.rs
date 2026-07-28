@@ -1491,6 +1491,65 @@ mod ffi_permission_tests {
             "expected a native link failure past the language gate, got: {msg}"
         );
     }
+
+    // ----------------------------------------------------------------------
+    // ADR-019 §4 / #198 — the declared-environment pre-entry gate.
+    // ----------------------------------------------------------------------
+
+    #[test]
+    fn a_refused_foreign_environment_stops_the_call_before_the_runtime_lookup() {
+        let (mut vm, _) = python_vm();
+        vm.set_foreign_environment_refusals(std::collections::HashMap::from([(
+            "python".to_string(),
+            "[C0936] the `python` environment declares the root `/nope/.venv`, which is not a \
+             directory on this host."
+                .to_string(),
+        )]));
+        let err = vm
+            .invoke_foreign_kinded(0, &[])
+            .expect_err("a declared-but-unprovidable environment must refuse");
+        let msg = format!("{err:?}");
+        assert!(msg.contains("[C0936]"), "got: {msg}");
+        assert!(msg.contains("padd"), "the refusal names the call: {msg}");
+        // The ordering is the point: this VM has no python runtime registered
+        // either, so a gate that ran AFTER the lookup would produce the
+        // extension-absence message instead.
+        assert!(
+            !msg.contains("no extension provides language"),
+            "the environment gate must precede the runtime lookup: {msg}"
+        );
+    }
+
+    #[test]
+    fn an_unrefused_language_reaches_the_runtime_lookup() {
+        // The differential: same VM, refusal recorded for a DIFFERENT language.
+        // Nothing about `fn python` changes, which is what says the gate reads
+        // the language rather than merely the presence of the map.
+        let (mut vm, _) = python_vm();
+        vm.set_foreign_environment_refusals(std::collections::HashMap::from([(
+            "typescript".to_string(),
+            "[C0936] typescript is not provided here".to_string(),
+        )]));
+        let err = vm
+            .invoke_foreign_kinded(0, &[])
+            .expect_err("no runtime registered → link-now failure past the gate");
+        let msg = format!("{err:?}");
+        assert!(!msg.contains("[C0936]"), "got: {msg}");
+        assert!(
+            msg.contains("no extension provides language"),
+            "expected the ordinary runtime-lookup failure, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn no_declared_environment_refuses_nothing() {
+        // The default a project without `[foreign.*]` produces.
+        let (mut vm, _) = python_vm();
+        vm.set_foreign_environment_refusals(std::collections::HashMap::new());
+        let err = vm.invoke_foreign_kinded(0, &[]).expect_err("no runtime");
+        let msg = format!("{err:?}");
+        assert!(!msg.contains("[C0936]"), "got: {msg}");
+    }
 }
 
 #[cfg(test)]

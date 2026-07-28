@@ -748,6 +748,10 @@ impl BytecodeExecutor {
                 .map(std::sync::Arc::new),
             self.root_package_key.clone(),
         );
+        // ADR-019 §4 / #198: the same threading for declared foreign
+        // environments this host could not provide, so link-now refuses before
+        // a `fn python` body is compiled against an unpinned interpreter.
+        vm.set_foreign_environment_refusals(self.foreign_environment_refusals.clone());
         for ext in &self.extensions {
             vm.register_extension(ext.clone());
         }

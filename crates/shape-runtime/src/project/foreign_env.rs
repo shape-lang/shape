@@ -618,6 +618,120 @@ pub fn resolve_foreign_environment(
 }
 
 // ============================================================================
+// Binding: what the host resolved, for the two consumers that need it
+// ============================================================================
+
+/// The key under which an extension receives its declared environment at
+/// `init`.
+///
+/// The host hands every extension the whole map and each picks out its own
+/// language: an extension's language id is not known until after `init`
+/// returns, so per-extension targeting is not available at the moment the
+/// config is built.
+pub const FOREIGN_ENVIRONMENTS_CONFIG_KEY: &str = "shape_foreign_environments";
+
+/// One declared language's environment, as this host resolved it.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ForeignEnvironmentBinding {
+    /// Declared, resolved, and present on this host.
+    Provided {
+        digest: ForeignEnvironmentDigest,
+        /// The declared environment root, resolved against the project root.
+        /// `None` when the declaration named no root (the base interpreter).
+        root: Option<PathBuf>,
+        /// Absolute search paths for the extension to add, in declared order.
+        search_paths: Vec<PathBuf>,
+    },
+    /// Declared and NOT providable. The rendered `[C0936]` message; the host
+    /// refuses with it before any foreign code runs.
+    Refused(String),
+}
+
+/// Resolve and provision-check every declared foreign environment.
+///
+/// Undeclared languages are simply absent from the result. That is deliberate
+/// and is the boundary this slice draws: `[foreign.<lang>]` is how a project
+/// *pins* an environment, and a project that pins none runs foreign bodies
+/// against the base interpreter with no search path added — which is what
+/// deleting the sniffer leaves, and is truthful. ADR-019 §4's stricter reading
+/// (an undeclared environment refuses outright) is a release/remote admission
+/// rule and belongs to #160 / #167, which own the artifact and admission
+/// surfaces; [`ForeignEnvironmentError::Undeclared`] exists for them.
+pub fn bind_declared_environments(
+    project_root: &Path,
+    foreign: &BTreeMap<String, ForeignEnvironmentSection>,
+) -> BTreeMap<String, ForeignEnvironmentBinding> {
+    let mut bindings = BTreeMap::new();
+    for language in foreign.keys() {
+        let binding = match resolve_foreign_environment(project_root, foreign, language) {
+            Err(err) => ForeignEnvironmentBinding::Refused(err.to_string()),
+            Ok(digest) => match digest.check_provided(project_root) {
+                Err(err) => ForeignEnvironmentBinding::Refused(err.to_string()),
+                Ok(search_paths) => ForeignEnvironmentBinding::Provided {
+                    root: digest.declared_root().map(|r| project_root.join(r)),
+                    digest,
+                    search_paths,
+                },
+            },
+        };
+        bindings.insert(language.clone(), binding);
+    }
+    bindings
+}
+
+/// The `init` config an extension receives, carrying only the environments
+/// this host actually provided.
+///
+/// A refused language contributes nothing: there is no half-environment to
+/// activate, and the refusal is the host's to report — an extension that was
+/// handed a broken environment and asked to complain about it would be the
+/// silent-fallback shape wearing a different hat.
+pub fn extension_environment_config(
+    bindings: &BTreeMap<String, ForeignEnvironmentBinding>,
+) -> serde_json::Value {
+    let mut map = serde_json::Map::new();
+    for (language, binding) in bindings {
+        let ForeignEnvironmentBinding::Provided {
+            digest,
+            root,
+            search_paths,
+        } = binding
+        else {
+            continue;
+        };
+        map.insert(
+            language.clone(),
+            serde_json::json!({
+                "runtime": digest.runtime_id(),
+                "version": digest.runtime_version(),
+                "digest": digest.to_hex(),
+                "root": root.as_ref().map(|p| p.display().to_string()),
+                "search_paths": search_paths
+                    .iter()
+                    .map(|p| p.display().to_string())
+                    .collect::<Vec<_>>(),
+            }),
+        );
+    }
+    serde_json::Value::Object(map)
+}
+
+/// The per-language refusals, for the host's pre-entry gate.
+pub fn environment_refusals(
+    bindings: &BTreeMap<String, ForeignEnvironmentBinding>,
+) -> BTreeMap<String, String> {
+    bindings
+        .iter()
+        .filter_map(|(language, binding)| match binding {
+            ForeignEnvironmentBinding::Refused(message) => {
+                Some((language.clone(), message.clone()))
+            }
+            ForeignEnvironmentBinding::Provided { .. } => None,
+        })
+        .collect()
+}
+
+// ============================================================================
 // Canonical pre-image writer
 // ============================================================================
 
@@ -1140,6 +1254,66 @@ mod tests {
             digest.check_provided(dir.path()).expect("ok").is_empty(),
             "absent root is a declaration of the base interpreter, not a licence to search"
         );
+    }
+
+    // --- binding -------------------------------------------------------------
+
+    #[test]
+    fn a_provided_environment_binds_and_reaches_the_extension_config() {
+        let dir = temp_project(&[
+            (
+                "python.lock",
+                "version = 1\nlanguage = \"python\"\n[packages.numpy]\nversion = \"1.26.4\"\n",
+            ),
+            (".venv/lib/python3.11/site-packages/marker.txt", ""),
+        ]);
+        let mut sec = section("cpython", "3.11.7");
+        sec.root = Some(".venv".to_string());
+        let bindings = bind_declared_environments(dir.path(), &foreign_map(sec));
+        assert!(matches!(
+            bindings.get("python"),
+            Some(ForeignEnvironmentBinding::Provided { .. })
+        ));
+        assert!(environment_refusals(&bindings).is_empty());
+
+        let config = extension_environment_config(&bindings);
+        let python = config.get("python").expect("python is in the config");
+        assert_eq!(python.get("runtime").unwrap(), "cpython");
+        assert_eq!(python.get("version").unwrap(), "3.11.7");
+        let paths = python.get("search_paths").unwrap().as_array().unwrap();
+        assert_eq!(paths.len(), 1);
+        assert!(
+            paths[0].as_str().unwrap().ends_with("site-packages"),
+            "got: {paths:?}"
+        );
+    }
+
+    #[test]
+    fn a_refused_environment_reaches_the_gate_and_not_the_extension() {
+        // Declared root absent: the extension must be told nothing (there is no
+        // half-environment to activate) and the host must hold the refusal.
+        let dir = temp_project(&[("python.lock", "version = 1\nlanguage = \"python\"\n")]);
+        let mut sec = section("cpython", "3.11.7");
+        sec.root = Some(".venv".to_string());
+        let bindings = bind_declared_environments(dir.path(), &foreign_map(sec));
+
+        let refusals = environment_refusals(&bindings);
+        let message = refusals.get("python").expect("refused");
+        assert!(message.contains("[C0936]"), "got: {message}");
+
+        let config = extension_environment_config(&bindings);
+        assert!(
+            config.get("python").is_none(),
+            "a refused environment must not be handed to the extension in any form"
+        );
+    }
+
+    #[test]
+    fn an_undeclared_language_binds_to_nothing() {
+        let dir = temp_project(&[]);
+        let bindings = bind_declared_environments(dir.path(), &BTreeMap::new());
+        assert!(bindings.is_empty());
+        assert!(environment_refusals(&bindings).is_empty());
     }
 
     #[test]

@@ -12,6 +12,7 @@
 
 pub mod arrow_bridge;
 pub mod buffers;
+pub mod environment;
 pub mod error_mapping;
 pub mod marshaling;
 pub mod runtime;

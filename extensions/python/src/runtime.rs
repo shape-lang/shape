@@ -6,6 +6,8 @@
 //! When the `pyo3` feature is enabled, this uses pyo3 to embed CPython.
 //! Without it, all operations return stub errors.
 
+#[cfg(feature = "pyo3")]
+use crate::environment::DeclaredEnvironment;
 use crate::error_mapping;
 use crate::marshaling;
 use shape_abi_v1::{LanguageRuntimeLspConfig, PluginError};
@@ -102,17 +104,36 @@ pub struct PythonRuntime {
 impl PythonRuntime {
     /// Initialize a new Python runtime.
     ///
-    /// `_config_msgpack` is the MessagePack-encoded configuration from the
-    /// host. Currently unused -- reserved for future settings like
-    /// virtualenv path, Python version constraints, etc.
-    pub fn new(_config_msgpack: &[u8]) -> Result<Self, String> {
+    /// `config_msgpack` is the MessagePack-encoded configuration from the host.
+    /// The only key this runtime reads is
+    /// `shape_foreign_environments.python` — the environment the project
+    /// DECLARED in `[foreign.python]` and the host verified is present
+    /// (ADR-019 §4 / #198).
+    ///
+    /// # What was deleted here, and why it cannot come back
+    ///
+    /// This constructor used to call `activate_virtualenv()`, which searched
+    /// the host — `pyrightconfig.json`, then `./.venv`, then `./venv`, then
+    /// `$VIRTUAL_ENV` — and activated the first hit. Nothing in the Shape
+    /// program asked for that environment, nothing recorded which one was
+    /// found, and the compiler's content hash claimed a determinism it did not
+    /// have: the same source imported different packages on two machines, or on
+    /// one machine run from two directories.
+    ///
+    /// The replacement is not a narrower search. There is NO search: this
+    /// function adds exactly the paths the host computed from the declared
+    /// runtime version and handed over, and adds nothing when the host handed
+    /// over nothing. A stray `.venv` beside the program, or a `$VIRTUAL_ENV`
+    /// inherited from the shell, has no effect at all — proven by
+    /// `an_ambient_venv_does_not_reach_sys_path`.
+    pub fn new(config_msgpack: &[u8]) -> Result<Self, String> {
         #[cfg(feature = "pyo3")]
         {
-            // Activate virtualenv if one is detected. This mirrors what
-            // `source .venv/bin/activate` does: update sys.prefix and add
-            // site-packages so that `import <pkg>` works for venv packages.
-            Self::activate_virtualenv();
+            let declared = DeclaredEnvironment::from_config(config_msgpack);
+            declared.activate()?;
         }
+        #[cfg(not(feature = "pyo3"))]
+        let _ = config_msgpack;
 
         Ok(PythonRuntime {
             functions: RwLock::new(HashMap::new()),
@@ -120,88 +141,6 @@ impl PythonRuntime {
             stub_document: RwLock::new(String::new()),
             last_retained: std::sync::atomic::AtomicU64::new(u64::MAX),
         })
-    }
-
-    /// Detect and activate a Python virtualenv.
-    ///
-    /// Mirrors Pyright's discovery order so the runtime resolves the same
-    /// environment as the language server:
-    /// 1. `pyrightconfig.json` `venvPath` + `venv` in the working directory
-    /// 2. `.venv/` in the working directory
-    /// 3. `venv/` in the working directory
-    /// 4. `VIRTUAL_ENV` environment variable
-    ///
-    /// When found, adds the venv's site-packages to `sys.path` and updates
-    /// `sys.prefix` so that `import <pkg>` works for venv-installed packages.
-    #[cfg(feature = "pyo3")]
-    fn activate_virtualenv() {
-        use pyo3::prelude::*;
-
-        let cwd = std::env::current_dir().ok();
-
-        // 1. Check pyrightconfig.json for venvPath + venv
-        let from_pyright_config = cwd.as_ref().and_then(|cwd| {
-            let config_path = cwd.join("pyrightconfig.json");
-            let contents = std::fs::read_to_string(&config_path).ok()?;
-            let config: serde_json::Value = serde_json::from_str(&contents).ok()?;
-            let venv_path = config.get("venvPath")?.as_str()?;
-            let venv_name = config.get("venv")?.as_str()?;
-            let base = if std::path::Path::new(venv_path).is_absolute() {
-                std::path::PathBuf::from(venv_path)
-            } else {
-                cwd.join(venv_path)
-            };
-            let candidate = base.join(venv_name);
-            candidate.is_dir().then_some(candidate)
-        });
-
-        // 2-3. Check .venv/ and venv/ in working directory
-        let from_local_dir = || -> Option<std::path::PathBuf> {
-            let cwd = cwd.as_ref()?;
-            for name in &[".venv", "venv"] {
-                let candidate = cwd.join(name);
-                if candidate.is_dir() {
-                    return Some(candidate);
-                }
-            }
-            None
-        };
-
-        // 4. VIRTUAL_ENV environment variable
-        let from_env = || -> Option<std::path::PathBuf> {
-            let path = std::path::PathBuf::from(std::env::var("VIRTUAL_ENV").ok()?);
-            path.is_dir().then_some(path)
-        };
-
-        let venv = from_pyright_config
-            .or_else(from_local_dir)
-            .or_else(from_env);
-
-        let Some(venv) = venv else { return };
-        let venv_str = venv.display().to_string();
-
-        Python::attach(|py| {
-            let code = format!(
-                concat!(
-                    "import sys, site, os\n",
-                    "venv = \"{venv}\"\n",
-                    "sys.prefix = venv\n",
-                    "sys.exec_prefix = venv\n",
-                    "lib_dir = os.path.join(venv, \"lib\")\n",
-                    "if os.path.isdir(lib_dir):\n",
-                    "    for entry in os.listdir(lib_dir):\n",
-                    "        sp = os.path.join(lib_dir, entry, \"site-packages\")\n",
-                    "        if os.path.isdir(sp):\n",
-                    "            site.addsitedir(sp)\n",
-                    "            break\n",
-                ),
-                venv = venv_str,
-            );
-
-            if let Err(e) = py.run(&std::ffi::CString::new(code).unwrap(), None, None) {
-                eprintln!("shape-ext-python: failed to activate venv: {e}");
-            }
-        });
     }
 
     /// Accept the declared Shape contract and generate the `.pyi` stub for it.

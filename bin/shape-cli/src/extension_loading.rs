@@ -164,14 +164,58 @@ pub fn collect_startup_specs(
         });
     }
 
-    merge_specs_by_precedence(vec![
+    let mut specs = merge_specs_by_precedence(vec![
         cli_specs,
         extension_dir_specs,
         frontmatter_specs,
         project_specs,
         config_file_specs,
         global_dir_specs,
-    ])
+    ]);
+    attach_declared_foreign_environments(&mut specs, project);
+    specs
+}
+
+/// Hand every extension the environments the project declared and this host
+/// provided (ADR-019 §4 / #198).
+///
+/// Every extension, not just the one that will run each language: an
+/// extension's language id is only knowable after `init`, and `init` is where
+/// the config arrives. Each language runtime picks out its own entry and
+/// ignores the rest.
+///
+/// A declared environment the host could NOT provide contributes nothing here.
+/// The refusal is the host's — `module_loading` installs it as a link-now gate
+/// — because an extension handed a broken environment and asked to complain
+/// about it is the silent-fallback shape wearing a different hat.
+fn attach_declared_foreign_environments(
+    specs: &mut [ExtensionSpec],
+    project: Option<&ProjectRoot>,
+) {
+    let Some(project) = project else { return };
+    if project.config.foreign.is_empty() {
+        return;
+    }
+    let bindings = shape_runtime::project::bind_declared_environments(
+        &project.root_path,
+        &project.config.foreign,
+    );
+    let environments = shape_runtime::project::extension_environment_config(&bindings);
+    if environments
+        .as_object()
+        .map(|m| m.is_empty())
+        .unwrap_or(true)
+    {
+        return;
+    }
+    for spec in specs {
+        if let serde_json::Value::Object(map) = &mut spec.config {
+            map.insert(
+                shape_runtime::project::FOREIGN_ENVIRONMENTS_CONFIG_KEY.to_string(),
+                environments.clone(),
+            );
+        }
+    }
 }
 
 pub fn load_specs(

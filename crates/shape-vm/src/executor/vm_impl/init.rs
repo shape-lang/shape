@@ -62,6 +62,7 @@ impl VirtualMachine {
             task_scheduler: task_scheduler::TaskScheduler::new(),
             foreign_fn_handles: Vec::new(),
             language_runtimes: HashMap::new(),
+            foreign_environment_refusals: HashMap::new(),
             foreign_async_offloads: Default::default(),
             foreign_offload_contracts: HashMap::new(),
             registered_foreign_contracts: std::collections::HashSet::new(),
@@ -149,6 +150,17 @@ impl VirtualMachine {
         >,
     ) {
         self.language_runtimes = runtimes;
+    }
+
+    /// Install the per-language foreign-environment refusals (ADR-019 §4 /
+    /// #198).
+    ///
+    /// Threaded exactly like the language-runtime registry above, and consulted
+    /// by `ensure_foreign_linked` before it looks a runtime up: a declared
+    /// environment this host cannot provide must stop the call before the body
+    /// compiles, not after it imports the wrong package.
+    pub fn set_foreign_environment_refusals(&mut self, refusals: HashMap<String, String>) {
+        self.foreign_environment_refusals = refusals;
     }
 
     /// The interface stub document (`.pyi`, `.d.ts`) an extension generated for

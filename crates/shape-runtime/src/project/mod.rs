@@ -19,9 +19,10 @@ pub mod sandbox;
 // Re-export all public items at the module root to preserve the existing API.
 pub use dependency_spec::*;
 pub use foreign_env::{
-    ForeignCheckerPin, ForeignEnvironmentDigest, ForeignEnvironmentError,
-    ForeignEnvironmentSection, ForeignLockfile, LockedModule, LockedPackage,
-    resolve_foreign_environment,
+    FOREIGN_ENVIRONMENTS_CONFIG_KEY, ForeignCheckerPin, ForeignEnvironmentBinding,
+    ForeignEnvironmentDigest, ForeignEnvironmentError, ForeignEnvironmentSection, ForeignLockfile,
+    LockedModule, LockedPackage, bind_declared_environments, environment_refusals,
+    extension_environment_config, resolve_foreign_environment,
 };
 pub use permissions::*;
 pub use project_config::*;

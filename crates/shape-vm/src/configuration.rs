@@ -29,6 +29,12 @@ pub struct BytecodeExecutor {
         Option<shape_runtime::native_resolution::NativeResolutionSet>,
     /// Root package identity for the currently configured execution context.
     pub(crate) root_package_key: Option<String>,
+    /// Per-language foreign-environment refusals for the current execution
+    /// context (ADR-019 §4 / #198), threaded into every VM this executor
+    /// builds. Derived from the project's `[foreign.<language>]` tables the
+    /// same way `native_resolution_context` is derived from
+    /// `[native-dependencies]`.
+    pub(crate) foreign_environment_refusals: HashMap<String, String>,
     /// Module loader for resolving file-based imports.
     /// When set, imports that don't match virtual modules are resolved via the loader.
     pub(crate) module_loader: Option<shape_runtime::module_loader::ModuleLoader>,
@@ -82,6 +88,7 @@ impl BytecodeExecutor {
             dependency_paths: HashMap::new(),
             native_resolution_context: None,
             root_package_key: None,
+            foreign_environment_refusals: HashMap::new(),
             module_loader: None,
             permission_set: None,
             allow_internal_builtins: false,
@@ -237,6 +244,20 @@ impl BytecodeExecutor {
     pub fn clear_native_resolution_context(&mut self) {
         self.native_resolution_context = None;
         self.root_package_key = None;
+    }
+
+    /// Install the per-language foreign-environment refusals for the current
+    /// execution context (ADR-019 §4 / #198).
+    ///
+    /// An empty map — the default, and what a project with no
+    /// `[foreign.<language>]` tables produces — refuses nothing.
+    pub fn set_foreign_environment_refusals(&mut self, refusals: HashMap<String, String>) {
+        self.foreign_environment_refusals = refusals;
+    }
+
+    /// The configured foreign-environment refusals, if any.
+    pub fn foreign_environment_refusals(&self) -> &HashMap<String, String> {
+        &self.foreign_environment_refusals
     }
 
     /// Set the permission set for compile-time capability checking.

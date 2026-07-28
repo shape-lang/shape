@@ -472,6 +472,17 @@ pub struct VirtualMachine {
         std::sync::Arc<shape_runtime::plugins::language_runtime::PluginLanguageRuntime>,
     >,
 
+    /// Per-language pre-entry refusals for declared foreign environments
+    /// (ADR-019 §4 / #198): language id → the rendered `[C0936]` message.
+    ///
+    /// Populated from `shape.toml`'s `[foreign.<language>]` tables when the
+    /// host could not provide a declared environment. `ensure_foreign_linked`
+    /// consults it before it looks a runtime up, so a `fn python` in a project
+    /// whose declared virtualenv is absent fails *before* the body compiles,
+    /// rather than running against whatever the host happens to have — which is
+    /// the behaviour this ticket deleted.
+    pub(crate) foreign_environment_refusals: HashMap<String, String>,
+
     /// Languages whose declared contract has already been delivered through the
     /// extension stub channel (ADR-019 §1 / #196). Delivery is idempotent on
     /// the extension side; this memo keeps the payload build off the per-call
