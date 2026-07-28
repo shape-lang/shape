@@ -69,6 +69,13 @@ jobs:
       - name: ADR-016 public feature manifest (#112) — forward-only, no reused identity
         run: node scripts/check-adr011-012-public-feature-manifest.mjs --self-test
 
+      # ADR-016 §3 / §5 / §10 / R19 (#113). The coverage half of the same pair:
+      # a fence cannot be reclassified out of execution, a section or fence
+      # identity cannot be reused or dropped, and the three enums shared with the
+      # public manifest cannot drift apart.
+      - name: ADR-016 Book coverage manifest (#113) — no reclassified fence, no reused identity
+        run: node scripts/check-adr011-012-book-coverage-manifest.mjs --self-test
+
   # Foreign-call (FFI) end-to-end tier. The `rust` job above runs
   # `cargo test --workspace --all-targets`, which exercises the always-on
   # extern-C sentinels in `bin/shape-cli/tests/ffi_e2e.rs` but NOT the

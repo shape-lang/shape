@@ -1,0 +1,99 @@
+{
+  "$schema": "./book-coverage-manifest.schema.json",
+  "manifest_version": 1,
+  "public_feature_manifest": {
+    "schema_major": 1
+  },
+  "identity_migration": {
+    "kind": "initial"
+  },
+  "features": {
+    "language.pipe-operator": {
+      "sections": {
+        "language.pipe-operator.overview": {
+          "page": "fundamentals/operators.mdx",
+          "anchor": "pipe",
+          "title": "Pipe (|>)"
+        }
+      },
+      "fences": {
+        "language.pipe-operator.chain": {
+          "section_id": "language.pipe-operator.overview",
+          "classification": "runnable-gated",
+          "evidence_role": "success",
+          "declared_modes": [
+            "compile",
+            "vm",
+            "jit"
+          ],
+          "expectation": {
+            "kind": "stdout",
+            "value": "11\n"
+          }
+        }
+      },
+      "mode_coverage": {
+        "compile": {
+          "fence_ids": [
+            "language.pipe-operator.chain"
+          ]
+        },
+        "vm": {
+          "fence_ids": [
+            "language.pipe-operator.chain"
+          ]
+        },
+        "jit": {
+          "fence_ids": [
+            "language.pipe-operator.chain"
+          ]
+        }
+      },
+      "semantic_dimension_coverage": {
+        "user-model": {
+          "section_ids": [
+            "language.pipe-operator.overview"
+          ]
+        },
+        "syntax-or-callable-surface": {
+          "section_ids": [
+            "language.pipe-operator.overview"
+          ],
+          "fence_ids": [
+            "language.pipe-operator.chain"
+          ]
+        },
+        "success": {
+          "fence_ids": [
+            "language.pipe-operator.chain"
+          ]
+        },
+        "vm-jit": {
+          "fence_ids": [
+            "language.pipe-operator.chain"
+          ]
+        }
+      },
+      "evidence_class_coverage": {
+        "positive-execution": {
+          "fence_ids": [
+            "language.pipe-operator.chain"
+          ]
+        },
+        "vm-jit-parity": {
+          "fence_ids": [
+            "language.pipe-operator.chain"
+          ]
+        }
+      },
+      "distributed_dimension_coverage": {}
+    }
+  },
+  "flagship_fence_ids": [],
+  "tombstones": {
+    "feature_ids": {},
+    "section_ids": {},
+    "fence_ids": {},
+    "concept_ids": {}
+  }
+}

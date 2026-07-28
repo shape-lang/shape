@@ -642,6 +642,31 @@ fi
 echo
 
 # -----------------------------------------------------------------------------
+# CHECK 18 — ADR-016 Book coverage manifest contract (#113, R19)
+# -----------------------------------------------------------------------------
+# The coverage half of the pair CHECK 17 opens. A fence's classification is
+# derived from the fields it carries, so a hard example cannot be relabelled
+# illustrative-only to stop being executed; section and fence identities carry no
+# line number or ordinal position, so moving prose cannot read as removing and
+# adding a feature; every published identity stays live or tombstoned, and a
+# tombstone is frozen; a fence identity is declared exactly once, because a fence
+# is one physical block. The same revision/attestation/verification fields CHECK
+# 17 forbids are rejected here in the schema as well as the manifest, and the
+# three enums shared with the PublicFeatureManifest schema must be identical —
+# an obligation one manifest declares and the other cannot express is a rule that
+# silently never applies. --self-test runs the forced negatives, each of which
+# also asserts its unmutated positive control is accepted.
+echo "=== CHECK 18: Book coverage manifest contract (ADR-016) ==="
+if node scripts/check-adr011-012-book-coverage-manifest.mjs --self-test; then
+  record_pass "book coverage manifest"
+  echo "  -> clean"
+else
+  record_fail "book coverage manifest" "a fence was reclassified, an identity was reused or dropped, an enum drifted from the public manifest, pair-evidence state entered the manifest, or a tripwire stopped firing"
+  echo "  -> FAILED (reclassified fence, reused/dropped identity, enum drift, pair-evidence state, or a dead tripwire)"
+fi
+echo
+
+# -----------------------------------------------------------------------------
 # REPORT
 # -----------------------------------------------------------------------------
 echo "=== SUMMARY ==="
