@@ -9,8 +9,8 @@
   },
   "counts": {
     "pages": 102,
-    "sections": 1374,
-    "fences_all_languages": 977,
+    "sections": 1376,
+    "fences_all_languages": 982,
     "fences_by_language": {
       "(none)": 52,
       "bash": 69,
@@ -19,15 +19,16 @@
       "lua": 3,
       "python": 1,
       "rust": 37,
-      "shape": 767,
+      "sh": 2,
+      "shape": 770,
       "text": 17,
       "toml": 14,
       "typescript": 1,
       "vim": 3
     },
-    "shape_fences": 767,
-    "shape_runnable_gated_candidates": 385,
-    "shape_illustrative_only_candidates": 382,
+    "shape_fences": 770,
+    "shape_runnable_gated_candidates": 386,
+    "shape_illustrative_only_candidates": 384,
     "shape_deferred": 0,
     "shape_with_expected_value": 21,
     "shape_with_expected_fail": 10,
@@ -36,11 +37,11 @@
   },
   "executed_subset_note": "shape_runnable_gated_candidates is the set book/book-site/scripts/run-book-truth-gate.mjs actually executes (it keeps runnable === true && !deferred). It is a subset of shape_fences, which is itself a subset of fences_all_languages. ADR-016 §6 rejects a percentage over a curated subset, so all three are reported and none is called the universe on its own.",
   "marker_counts": {
-    "missing-stable-identity": 767,
+    "missing-stable-identity": 770,
     "expectation-is-a-rendered-substring": 10,
-    "no-declared-expected-value": 354,
-    "no-illustrative-reason": 382,
-    "no-illustrative-citation": 382,
+    "no-declared-expected-value": 355,
+    "no-illustrative-reason": 384,
+    "no-illustrative-citation": 384,
     "no-owning-section": 11
   },
   "duplicate_declared_ids": [],
@@ -72,8 +73,8 @@
       "owner_hint": "#116 plus the R15 / PERF-CLOSURE-NATIVE witness lane"
     }
   ],
-  "sections_sha256": "c9f242793eb545a43e5e5056b35e35193f71a8f34a6ef3b614da43e3e6ce8094",
-  "fences_sha256": "46eafb6374b0a001a90e64eaee5cc9803def57f7903eeb35eed66020d401b0c5",
+  "sections_sha256": "e2170da69a092371ed5111a719d1cedab996bc5d4fe0b233f7edf59712e987ad",
+  "fences_sha256": "94a2e8be6f291c2b4fc0b3b633e1a03240a13b9d81dd9d5462a34ce4c76cb76a",
   "sections": [
     {
       "page": "advanced/annotations.mdx",
@@ -9376,6 +9377,20 @@
       "anchor": "lsp",
       "title": "LSP",
       "depth": 2,
+      "markers": []
+    },
+    {
+      "page": "tooling/projects.mdx",
+      "anchor": "checking-and-applying-fixes",
+      "title": "Checking, and Applying Fixes",
+      "depth": 2,
+      "markers": []
+    },
+    {
+      "page": "tooling/projects.mdx",
+      "anchor": "what---fix-will-and-will-not-do",
+      "title": "What --fix will and will not do",
+      "depth": 3,
       "markers": []
     },
     {
@@ -28579,6 +28594,100 @@
       "expectation_kind": null,
       "body_lines": 9,
       "markers": []
+    },
+    {
+      "harness_id": null,
+      "page": "tooling/projects.mdx",
+      "slice": "E",
+      "fence_position": 2,
+      "language": "sh",
+      "declared_id": null,
+      "section_anchor": "checking-and-applying-fixes",
+      "section_title": "Checking, and Applying Fixes",
+      "classification_candidate": "not-a-shape-fence",
+      "runnable_flag": null,
+      "declared_modes": [],
+      "expectation_kind": null,
+      "body_lines": 3,
+      "markers": []
+    },
+    {
+      "harness_id": "E__tooling__projects__0__L166.shape",
+      "page": "tooling/projects.mdx",
+      "slice": "E",
+      "fence_position": 3,
+      "language": "shape",
+      "declared_id": null,
+      "section_anchor": "checking-and-applying-fixes",
+      "section_title": "Checking, and Applying Fixes",
+      "classification_candidate": "illustrative-only",
+      "runnable_flag": "false",
+      "declared_modes": [],
+      "expectation_kind": null,
+      "body_lines": 7,
+      "markers": [
+        "no-illustrative-reason",
+        "no-illustrative-citation",
+        "missing-stable-identity"
+      ]
+    },
+    {
+      "harness_id": null,
+      "page": "tooling/projects.mdx",
+      "slice": "E",
+      "fence_position": 4,
+      "language": "sh",
+      "declared_id": null,
+      "section_anchor": "checking-and-applying-fixes",
+      "section_title": "Checking, and Applying Fixes",
+      "classification_candidate": "not-a-shape-fence",
+      "runnable_flag": null,
+      "declared_modes": [],
+      "expectation_kind": null,
+      "body_lines": 4,
+      "markers": []
+    },
+    {
+      "harness_id": "E__tooling__projects__1__L189.shape",
+      "page": "tooling/projects.mdx",
+      "slice": "E",
+      "fence_position": 5,
+      "language": "shape",
+      "declared_id": null,
+      "section_anchor": "checking-and-applying-fixes",
+      "section_title": "Checking, and Applying Fixes",
+      "classification_candidate": "illustrative-only",
+      "runnable_flag": "false",
+      "declared_modes": [],
+      "expectation_kind": null,
+      "body_lines": 5,
+      "markers": [
+        "no-illustrative-reason",
+        "no-illustrative-citation",
+        "missing-stable-identity"
+      ]
+    },
+    {
+      "harness_id": "E__tooling__projects__2__L199.shape",
+      "page": "tooling/projects.mdx",
+      "slice": "E",
+      "fence_position": 6,
+      "language": "shape",
+      "declared_id": null,
+      "section_anchor": "checking-and-applying-fixes",
+      "section_title": "Checking, and Applying Fixes",
+      "classification_candidate": "runnable-gated",
+      "runnable_flag": null,
+      "declared_modes": [
+        "vm",
+        "jit"
+      ],
+      "expectation_kind": "exit-success-and-vm-jit-equality",
+      "body_lines": 11,
+      "markers": [
+        "no-declared-expected-value",
+        "missing-stable-identity"
+      ]
     },
     {
       "harness_id": null,
