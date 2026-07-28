@@ -204,6 +204,12 @@ struct HintContext<'a> {
     /// bytecode compile, and a request that emits no storage-class hint
     /// (every `let`-only document with the toggle off) must not pay it.
     binding_storage: Option<Option<shape_vm::compiler::BindingStorageTable>>,
+    /// Module context for the storage-decision query. An imported document
+    /// needs the same registration the semantic-diagnostics path performs, or
+    /// it has no query authority and shows no storage class.
+    file_path: Option<&'a std::path::Path>,
+    module_cache: Option<&'a crate::module_cache::ModuleCache>,
+    workspace_root: Option<&'a std::path::Path>,
 }
 
 impl<'a> HintContext<'a> {
@@ -304,6 +310,9 @@ impl<'a> HintContext<'a> {
         config: &'a InlayHintConfig,
         type_map: HashMap<String, String>,
         function_types: HashMap<String, FunctionTypeInfo>,
+        file_path: Option<&'a std::path::Path>,
+        module_cache: Option<&'a crate::module_cache::ModuleCache>,
+        workspace_root: Option<&'a std::path::Path>,
     ) -> Self {
         Self {
             text,
@@ -315,6 +324,9 @@ impl<'a> HintContext<'a> {
             function_types,
             chain_hint_offsets: std::collections::HashSet::new(),
             binding_storage: None,
+            file_path,
+            module_cache,
+            workspace_root,
         }
     }
 
@@ -328,6 +340,9 @@ impl<'a> HintContext<'a> {
             self.binding_storage = Some(crate::binding_storage::binding_storage_decisions(
                 self.program,
                 self.text,
+                self.file_path,
+                self.module_cache,
+                self.workspace_root,
             ));
         }
         self.binding_storage
@@ -945,7 +960,7 @@ pub fn get_inlay_hints(
     config: &InlayHintConfig,
     _cached_program: Option<&Program>,
 ) -> Vec<InlayHint> {
-    get_inlay_hints_with_context(text, range, config, _cached_program, None, None)
+    get_inlay_hints_with_context(text, range, config, _cached_program, None, None, None)
 }
 
 /// Get inlay hints with optional file/workspace context for extension-aware inference.
@@ -956,6 +971,7 @@ pub fn get_inlay_hints_with_context(
     _cached_program: Option<&Program>,
     current_file: Option<&std::path::Path>,
     workspace_root: Option<&std::path::Path>,
+    module_cache: Option<&crate::module_cache::ModuleCache>,
 ) -> Vec<InlayHint> {
     // Parse the current document; never use cached AST spans for hint placement.
     let program = match parse_program(text) {
@@ -977,7 +993,17 @@ pub fn get_inlay_hints_with_context(
     };
     let function_types = infer_function_signatures(&program);
 
-    let mut ctx = HintContext::new(text, &program, range, config, type_map, function_types);
+    let mut ctx = HintContext::new(
+        text,
+        &program,
+        range,
+        config,
+        type_map,
+        function_types,
+        current_file,
+        module_cache,
+        workspace_root,
+    );
 
     // Use the Visitor trait for exhaustive AST traversal
     walk_program(&mut ctx, &program);
@@ -1828,8 +1854,9 @@ let r = xs.filter(|x| x > 0).reverse().sort()
         for (label, code) in cases {
             let program = shape_ast::parser::parse_program(code)
                 .unwrap_or_else(|e| panic!("{label}: fixture must parse: {e:?}"));
-            let table = crate::binding_storage::binding_storage_decisions(&program, code)
-                .unwrap_or_else(|| panic!("{label}: fixture must compile"));
+            let table =
+                crate::binding_storage::binding_storage_decisions(&program, code, None, None, None)
+                    .unwrap_or_else(|| panic!("{label}: fixture must compile"));
             assert!(
                 !table.decisions().is_empty(),
                 "{label}: the compiler decided nothing, so this case proves nothing"

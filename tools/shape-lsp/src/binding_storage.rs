@@ -20,19 +20,27 @@ use shape_vm::compiler::BindingStorageTable;
 /// The compiler's per-binding storage decisions for `program`, or `None` when
 /// this document carries no query authority.
 ///
-/// A document with imports needs the module context the diagnostics path
-/// builds, which inlay hints do not have; gating there keeps the hint from
-/// reporting decisions made in a different module environment from the one the
-/// user's diagnostics come from. A compile that fails outright decided
-/// nothing worth showing.
-pub fn binding_storage_decisions(program: &Program, text: &str) -> Option<BindingStorageTable> {
-    if program
+/// A document with imports is registered against the same module context the
+/// semantic-diagnostics path uses, so the classes shown come from the module
+/// environment the user's diagnostics come from. Without that context an
+/// imported document has no authority and answers `None` rather than
+/// reporting decisions made in a different environment. A compile that fails
+/// outright decided nothing worth showing.
+pub fn binding_storage_decisions(
+    program: &Program,
+    text: &str,
+    file_path: Option<&std::path::Path>,
+    module_cache: Option<&crate::module_cache::ModuleCache>,
+    workspace_root: Option<&std::path::Path>,
+) -> Option<BindingStorageTable> {
+    let has_imports = program
         .items
         .iter()
-        .any(|item| matches!(item, Item::Import(..)))
-    {
+        .any(|item| matches!(item, Item::Import(..)));
+    if has_imports && (file_path.is_none() || module_cache.is_none()) {
         return None;
     }
+
     #[cfg(test)]
     COMPILE_COUNT.with(|count| count.set(count.get() + 1));
 
@@ -40,6 +48,20 @@ pub fn binding_storage_decisions(program: &Program, text: &str) -> Option<Bindin
     compiler.set_type_diagnostic_mode(shape_vm::compiler::TypeDiagnosticMode::RecoverAll);
     compiler.set_compile_diagnostic_mode(shape_vm::compiler::CompileDiagnosticMode::RecoverAll);
     compiler.set_source(text);
+    if let (Some(file_path), Some(module_cache)) = (file_path, module_cache) {
+        let registration = crate::analysis::validate_imports_and_register_items(
+            program,
+            text,
+            file_path,
+            module_cache,
+            workspace_root,
+            &mut compiler,
+        )
+        .ok()?;
+        if !registration.is_ready() {
+            return None;
+        }
+    }
     compiler.compile_in_place(program).ok()?;
     Some(compiler.binding_storage_query().clone())
 }
@@ -80,7 +102,7 @@ mod tests {
 
     fn decisions_for(src: &str) -> BindingStorageTable {
         let program = parse_program(src).expect("fixture parses");
-        binding_storage_decisions(&program, src).expect("fixture compiles")
+        binding_storage_decisions(&program, src, None, None, None).expect("fixture compiles")
     }
 
     fn class_of(table: &BindingStorageTable, name: &str) -> Option<BindingStorageClass> {
@@ -142,8 +164,9 @@ mod tests {
             "the fixture must actually contain an import"
         );
         assert!(
-            binding_storage_decisions(&program, src).is_none(),
-            "an imported document must not answer from a different module environment"
+            binding_storage_decisions(&program, src, None, None, None).is_none(),
+            "without module context an imported document must not answer from a \
+             different module environment"
         );
     }
 
@@ -154,6 +177,61 @@ mod tests {
         assert!(
             !tooltip.to_lowercase().contains("approx"),
             "the hint is the compiler's decision, not an approximation: {tooltip}"
+        );
+    }
+
+    /// An imported document is the common real-world case. Given the module
+    /// context the semantic-diagnostics path uses, it answers — showing
+    /// nothing there would have made the hint absent on most real files,
+    /// which is a coverage regression against the AST-only heuristic #181
+    /// retired.
+    ///
+    /// The document still has to compile. A query session that CALLS an
+    /// imported function does not — registration reports ready, then
+    /// `compile_in_place` fails with "Undefined function", the same boundary
+    /// `generated_symbols::compiler_queries` sits behind (its tests cover
+    /// imported annotations and types, not called functions). Such a
+    /// document gets no storage hint, which is the designed "no authority"
+    /// outcome rather than a guess, but it is a real coverage limit and not
+    /// something this ticket fixed.
+    #[test]
+    fn an_imported_document_answers_when_given_module_context() {
+        let directory = tempfile::tempdir().expect("module directory");
+        std::fs::write(
+            directory.path().join("shape.toml"),
+            "[modules]\npaths = []\n",
+        )
+        .expect("write project manifest");
+        std::fs::write(
+            directory.path().join("support.shape"),
+            "pub type Widget { id: int }\n",
+        )
+        .expect("write dependency");
+        let file_path = directory.path().join("main.shape");
+        let src = "from support use { Widget }\nfn f() -> int {\n    var a = 0\n    a = a + 1\n    a\n}\nlet r = f()\n";
+        let program = parse_program(src).expect("fixture parses");
+        let cache = crate::module_cache::ModuleCache::new();
+
+        assert!(
+            binding_storage_decisions(&program, src, None, None, None).is_none(),
+            "without context the same document has no authority"
+        );
+        let table = binding_storage_decisions(
+            &program,
+            src,
+            Some(&file_path),
+            Some(&cache),
+            Some(directory.path()),
+        )
+        .expect("with module context the imported document compiles");
+        assert!(
+            class_of(&table, "a").is_some(),
+            "the `var` in an imported document must still get a decision; got {:?}",
+            table
+                .decisions()
+                .iter()
+                .map(|d| d.name.as_str())
+                .collect::<Vec<_>>()
         );
     }
 
