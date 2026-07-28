@@ -21,7 +21,7 @@
     ]
   },
   "step": "docs/design/typed-comptime/adr011-012-execution-rulings.md — ten required steps, step 4",
-  "source_revision": "7854eb4e20647a483870340d822d8c875b0090f8",
+  "source_revision": "c825daca5cda73b725033c88fac765e3f1c26bf1",
   "regenerate_with": "node scripts/generate-adr011-012-legacy-baselines.mjs --ticket 135",
   "check_with": "node scripts/check-adr011-012-legacy-baselines.mjs --ticket 135",
   "direction_rule": "Monotonic non-increasing. A set count may fall (migration progress) and may never rise. A new owner path is growth even when the total is unchanged, because it is a new surface carrying old authority.",
@@ -31,7 +31,7 @@
   ],
   "total_count": 487,
   "total_count_note": "Sum of the set counts. Sets may deliberately overlap (a narrowly scoped set can re-count sites a broader set already counts), so this is a ratchet aggregate for reporting movement — never a count of distinct legacy sites.",
-  "sets_sha256": "f4a71c719fc3c8e30811deabf9b08a71dc632b1d819a5ee3037f34349bfaf4c3",
+  "sets_sha256": "42c9fac15ef76e56531015b94d742c537b8df139541543ebc497947e98991023",
   "sets": [
     {
       "id": "lsp-parallel-validators",
@@ -298,7 +298,9 @@
       ],
       "exclude": [
         "docs/program/adr011-012/baselines/**",
-        "docs/program/adr011-012/legacy-identity-manifest.json"
+        "docs/program/adr011-012/legacy-identity-manifest.json",
+        "docs/program/adr011-012/public-feature-candidates.json",
+        "docs/program/adr011-012/book-fence-inventory.json"
       ],
       "pattern": "HookDecision|__ComptimeTarget|\\bstring_lit\\b|pseudo-tuple|pseudo_tuple|marker substitution",
       "count": 237,

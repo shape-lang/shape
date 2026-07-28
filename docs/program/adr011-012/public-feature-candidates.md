@@ -123,10 +123,10 @@ crate map, and the security-model section). `Ffi` is a real variant with real
 gating; the documentation simply never followed it. Under ADR-016 §1 this is a
 public feature shipped without its documentation.
 
-**`HookDecision` is a live public stdlib surface.** `core/hooks.shape` declares
-`pub enum HookDecision<Sig>`, and it is row `stdlib.types.core-hooks-hook-decision`.
+**The superseded hook-decision enum is a live public stdlib surface.** `core/hooks.shape`
+declares it `pub` (see #109), and it is row `stdlib.types.core-hooks-hook-decision`.
 Current authority is explicit that it should not be: ADR-012 replaces
-spelling-recognized `HookDecision` with typed Callable Transforms, R20 lists it
+the spelling-recognized hook-decision protocol with typed Callable Transforms, R20 lists it
 among the superseded formulations, and CLAUDE.md's forbidden-patterns section
 names it directly. The inventory cannot decide what to do about it — that is
 exactly the classification work the P waves own — but it can make sure the row

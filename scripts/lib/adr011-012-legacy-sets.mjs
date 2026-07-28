@@ -209,6 +209,12 @@ const TOOLING_SETS = [
     exclude: [
       "docs/program/adr011-012/baselines/**",
       "docs/program/adr011-012/legacy-identity-manifest.json",
+      // #114/#115 (2026-07-28): the candidate and fence inventories are
+      // SCANNER OUTPUT recording that legacy surfaces exist (a HookDecision
+      // stdlib row; book fences naming deleted builtins) — measurement, not
+      // authority. Their hand-written .md decisions docs remain counted.
+      "docs/program/adr011-012/public-feature-candidates.json",
+      "docs/program/adr011-012/book-fence-inventory.json",
     ],
     pattern: "HookDecision|__ComptimeTarget|\\bstring_lit\\b|pseudo-tuple|pseudo_tuple|marker substitution",
   },
