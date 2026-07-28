@@ -236,6 +236,12 @@ fn extern_c_missing_symbol_is_structured_error() {
 
 /// Happy path scalar: `fn python` returns `Result<int>` (the dynamic-language
 /// Result mandate, §3.6), the call evaluates to `Ok(7)`. Runs vm ≡ jit.
+///
+/// Also #202 tripwire (2), the `op_await` pass-through differential: `await` on
+/// a SYNCHRONOUS foreign call yields the same value as not awaiting it. Only an
+/// `async` declaration produces a future, so `await` here has nothing to
+/// resolve and passes the value through — folded into this fixture rather than
+/// given its own, so the two results are compared on one call in one process.
 #[test]
 #[ignore = "needs built python extension + CPython; run via `just test-ffi`"]
 fn python_scalar_ok_vm_jit() {
@@ -243,8 +249,17 @@ fn python_scalar_ok_vm_jit() {
     let program = "fn python add(a: int, b: int) -> Result<int> {\n\
                    \x20   return a + b\n\
                    }\n\
-                   match add(3, 4) { Ok(v) => print(f\"RESULT={v}\"), Err(e) => print(f\"ERR={e}\") }\n";
+                   match add(3, 4) { Ok(v) => print(f\"RESULT={v}\"), Err(e) => print(f\"ERR={e}\") }\n\
+                   match await add(3, 4) { Ok(v) => print(f\"AWAITED={v}\"), Err(e) => print(f\"ERR={e}\") }\n";
     assert_vm_jit_stdout(program, Some(&ext), "RESULT=7");
+    let run = run_shape(program, "vm", Some(&ext));
+    assert!(
+        run.stdout.contains("AWAITED=7"),
+        "#202 tripwire (2): `await` on a sync foreign call must pass the value \
+         through unchanged; stdout={:?} stderr={}",
+        run.stdout,
+        run.stderr
+    );
 }
 
 /// Container argument: an `Array<int>` marshals across the boundary as a list
