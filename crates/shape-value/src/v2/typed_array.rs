@@ -15,6 +15,39 @@
 //!  16       4   len (element count)
 //!  20       4   cap (allocated capacity)
 //! ```
+//!
+//! ## Why the header and the buffer are two allocations (#194)
+//!
+//! #194 set out to collapse these into one block — header at `ptr`, elements
+//! inline at `ptr + 24`, one `malloc` instead of two. It is not sound for a
+//! GROWABLE array, and the reason is worth writing down so it is not
+//! rediscovered by the next attempt.
+//!
+//! A combined block cannot grow in place. `realloc` may move the block, and
+//! the block's address IS the heap object's identity — refcounted slots, GC
+//! side tables and JIT-held registers all name the array by that pointer. So
+//! growth would have to spill the elements to a fresh out-of-line buffer,
+//! leaving the struct where it is.
+//!
+//! Spilling is what breaks. While the elements are inline the block's size is
+//! `24 + cap * size_of::<T>()`, recoverable from `cap`. After a spill, `cap`
+//! describes the NEW buffer and the ORIGINAL inline capacity — the number the
+//! free path needs to hand `dealloc` a matching `Layout` — is gone. There is
+//! nowhere to keep it: the 24 bytes are fully occupied (refcount 0..4, kind
+//! 4..6, flags 6, the element-type stamp in `_pad` at 7, `data` 8..16, `len`
+//! 16..20, `cap` 20..24), and widening the struct is exactly the layout change
+//! the JIT's fixed-offset loads forbid. The element-type-erased free paths
+//! (`release_v2_typed_array`, `free_v2_typed_array_memory_only`) make it
+//! worse: they reconstruct the buffer layout from `(cap, elem_type)` alone,
+//! with no access to `T`.
+//!
+//! One block, growable, stable identity, and a recoverable free layout are
+//! over-determined; something has to give. The collapse becomes available for
+//! arrays PROVEN not to grow — which is what PERF-ESCAPE (#193) and PERF-ARENA
+//! (#195) are for, and where the single-block constructor belongs. Note the
+//! immutable carriers already do this: `jit_v2_string_alloc` allocates a
+//! `StringObj` header with its bytes trailing in the same block, precisely
+//! because a string never grows.
 
 use super::heap_alloc::{alloc_block, dealloc_block, try_alloc_block, try_realloc_block};
 use super::heap_header::{HEAP_KIND_V2_TYPED_ARRAY, HeapHeader};
