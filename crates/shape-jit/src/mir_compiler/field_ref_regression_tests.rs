@@ -15,7 +15,8 @@
 //! in `crates/shape-vm/src/executor/variables/mod.rs`.
 //!
 //! Pre-fix, the JIT had NO `RefTarget`-aware deref. `MakeFieldRef`
-//! appeared only in `optimizer/escape_analysis.rs` bookkeeping; the
+//! appeared only in the escape-analysis bookkeeping of the dead
+//! `optimizer/` module (deleted by #192, ADR-018 §6); the
 //! `mir_compiler` `Rvalue::Borrow` handler routed every non-ref-param
 //! borrow — `Place::Field` projections included — through the
 //! per-function stack-cell path. That path:

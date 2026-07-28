@@ -48,11 +48,10 @@ pub mod loop_analysis;
 pub mod mir_compiler;
 pub mod mixed_table;
 mod numeric_compiler;
-// Optimization-plan analysis passes (escape analysis, LICM, HOF inlining,
-// vectorization, loop lowering, typed MIR, call-path, table-queryable). These
-// are phased WIP infra wired up ahead of their drive sites; dead_code expected.
-#[allow(dead_code)]
-mod optimizer;
+// `mod optimizer` was deleted by #192 (ADR-018 §6, wire-or-delete): all
+// thirteen components had zero non-test callers. The per-component
+// dispositions, and the evidence a future re-derivation owes for each, are in
+// docs/program/workstreams/192-dead-opt-dispositions.md.
 pub mod osr_compiler;
 pub mod worker;
 // #117 / R15: execution-level tripwires for the NativeExecutionWitness. Gated

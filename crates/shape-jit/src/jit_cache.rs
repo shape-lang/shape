@@ -12,8 +12,6 @@
 use shape_vm::bytecode::FunctionHash;
 use std::collections::HashMap;
 
-use crate::optimizer::Tier2CacheKey;
-
 /// Extended cache entry with dependency tracking.
 #[derive(Debug, Clone)]
 pub struct CacheEntry {
@@ -25,11 +23,9 @@ pub struct CacheEntry {
     pub schema_version: u32,
     /// Feedback epoch at compilation time (for speculation invalidation).
     pub feedback_epoch: u32,
-    /// Hashes of functions this compiled code depends on (e.g., inlined callees).
+    /// Hashes of functions this compiled code depends on (e.g., inlined
+    /// callees). `invalidate_by_dependency` walks this set.
     pub dependencies: Vec<FunctionHash>,
-    /// Tier 2 cache key, present when this entry was produced by the
-    /// optimizing compiler with cross-function inlining.
-    pub tier2_key: Option<Tier2CacheKey>,
 }
 
 // SAFETY: CacheEntry contains a raw pointer produced by Cranelift.
@@ -101,7 +97,6 @@ impl JitCodeCache {
                 schema_version: 0,
                 feedback_epoch: 0,
                 dependencies: Vec::new(),
-                tier2_key: None,
             },
         );
     }
@@ -281,7 +276,6 @@ mod tests {
             schema_version: 1,
             feedback_epoch: 1,
             dependencies: deps,
-            tier2_key: None,
         }
     }
 
@@ -378,7 +372,6 @@ mod tests {
             schema_version: 42,
             feedback_epoch: 7,
             dependencies: vec![dep],
-            tier2_key: None,
         });
 
         let entry = cache.get_entry(&hash).unwrap();
@@ -396,42 +389,6 @@ mod tests {
     }
 
     #[test]
-    fn test_tier2_cache_key_stored_in_entry() {
-        let mut cache = JitCodeCache::new();
-        let root = FunctionHash([0x10; 32]);
-        let inlined_callee = FunctionHash([0x20; 32]);
-
-        let key = Tier2CacheKey::with_versions(
-            root.0,
-            vec![inlined_callee.0],
-            1, // compiler_version
-            5, // schema_version
-            3, // feedback_epoch
-        );
-
-        cache.insert_entry(CacheEntry {
-            code_ptr: 0x8000 as *const u8,
-            function_hash: root,
-            schema_version: 5,
-            feedback_epoch: 3,
-            dependencies: vec![inlined_callee],
-            tier2_key: Some(key.clone()),
-        });
-
-        let entry = cache.get_entry(&root).unwrap();
-        let stored_key = entry.tier2_key.as_ref().unwrap();
-        assert_eq!(stored_key.root_hash, root.0);
-        assert_eq!(stored_key.inlined_hashes, vec![inlined_callee.0]);
-        assert_eq!(stored_key.schema_version, 5);
-        assert_eq!(stored_key.feedback_epoch, 3);
-        assert_eq!(stored_key.compiler_version, 1);
-
-        // Verify combined_hash includes version metadata.
-        let key_no_versions = Tier2CacheKey::new(root.0, vec![inlined_callee.0], 1);
-        assert_ne!(stored_key.combined_hash(), key_no_versions.combined_hash());
-    }
-
-    #[test]
     fn test_invalidate_with_tier2_entries() {
         // Tier 2 entry with inlined callee: invalidating the callee
         // removes the tier 2 entry.
@@ -439,15 +396,12 @@ mod tests {
         let callee = FunctionHash([0x01; 32]);
         let optimized = FunctionHash([0x02; 32]);
 
-        let key = Tier2CacheKey::with_versions(optimized.0, vec![callee.0], 1, 0, 0);
-
         cache.insert_entry(CacheEntry {
             code_ptr: 0x1000 as *const u8,
             function_hash: callee,
             schema_version: 0,
             feedback_epoch: 0,
             dependencies: vec![],
-            tier2_key: None,
         });
         cache.insert_entry(CacheEntry {
             code_ptr: 0x2000 as *const u8,
@@ -455,7 +409,6 @@ mod tests {
             schema_version: 0,
             feedback_epoch: 0,
             dependencies: vec![callee],
-            tier2_key: Some(key),
         });
 
         let invalidated = cache.invalidate_by_dependency(&callee);
