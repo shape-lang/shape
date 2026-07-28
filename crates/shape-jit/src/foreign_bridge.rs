@@ -5,7 +5,7 @@ use shape_runtime::type_schema::TypeSchemaRegistry;
 use shape_value::KindedSlot;
 use shape_vm::bytecode::BytecodeProgram;
 use shape_vm::executor::{
-    foreign_marshal,
+    foreign_contract, foreign_marshal,
     native_abi::{self, NativeLinkedFunction},
 };
 use std::collections::HashMap;
@@ -54,6 +54,12 @@ pub(crate) fn link_foreign_functions_for_jit(
 
     let mut entries = Vec::with_capacity(program.foreign_functions.len());
     let mut native_library_cache: HashMap<String, Arc<libloading::Library>> = HashMap::new();
+    // ADR-019 §1 / #196 — the JIT links foreign functions on its own path, so
+    // it delivers the declared contract through the same chokepoint the VM's
+    // link-now path uses. Without this the two tiers would hand the extension
+    // different (or no) contracts and generate different stubs for one program.
+    let mut registered_contracts: std::collections::HashSet<String> =
+        std::collections::HashSet::new();
 
     for entry in &program.foreign_functions {
         if let Some(native_spec) = &entry.native_abi {
@@ -92,6 +98,14 @@ pub(crate) fn link_foreign_functions_for_jit(
                 entry.language, entry.language, entry.language
             ));
         };
+
+        foreign_contract::register_contract_once(
+            &entry.language,
+            &runtime,
+            &program.foreign_functions,
+            &program.type_schema_registry,
+            &mut registered_contracts,
+        )?;
 
         let dynamic_errors = runtime.has_dynamic_errors();
         let compiled = runtime
@@ -185,15 +199,14 @@ impl JitForeignBridgeState {
         // dynamic-language runtimes reach here; `Dynamic`-error runtimes are
         // refused above (WF-2A stage 4 rewrites this whole bridge to delegate
         // to `VirtualMachine::invoke_foreign_kinded`).
-        let builtin = shape_runtime::type_schema::builtin_schemas::resolve_builtin_schema_ids(
-            &self.schemas,
-        )
-        .ok_or_else(|| {
-            format!(
-                "Foreign function '{}': builtin Result/Option schemas not registered",
-                entry.name
-            )
-        })?;
+        let builtin =
+            shape_runtime::type_schema::builtin_schemas::resolve_builtin_schema_ids(&self.schemas)
+                .ok_or_else(|| {
+                    format!(
+                        "Foreign function '{}': builtin Result/Option schemas not registered",
+                        entry.name
+                    )
+                })?;
         foreign_marshal::unmarshal_result(
             &result_msgpack,
             return_type,

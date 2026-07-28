@@ -2,6 +2,7 @@
 //!
 //! Handles: Jump, JumpIfFalse, JumpIfTrue, Call, CallValue, CallForeign, Return, ReturnValue
 
+pub mod foreign_contract;
 pub mod foreign_marshal;
 pub mod jit_abi;
 pub mod native_abi;
@@ -945,7 +946,8 @@ impl VirtualMachine {
                         ))
                     })?;
                     if foreign_idx >= self.foreign_fn_handles.len() {
-                        self.foreign_fn_handles.resize_with(foreign_idx + 1, || None);
+                        self.foreign_fn_handles
+                            .resize_with(foreign_idx + 1, || None);
                     }
                     self.foreign_fn_handles[foreign_idx] =
                         Some(ForeignFunctionHandle::Native(std::sync::Arc::new(linked)));
@@ -975,6 +977,30 @@ impl VirtualMachine {
                             entry.is_async,
                         )
                     };
+                    // ADR-019 §1 / #196 — deliver this language's declared
+                    // contract through the stub channel BEFORE the first
+                    // compile, so the extension has the types its stub
+                    // describes and its checker will need. Once per (VM,
+                    // language); the returned stub document is kept on the VM
+                    // for the compile-time foreign checker (POLY-FOREIGN-CHECK)
+                    // and the LSP to read.
+                    //
+                    // A registration failure is a real failure: the extension
+                    // said it has a stub channel and then refused the contract.
+                    // Degrading silently here would put us back where this
+                    // ticket started, with a channel nobody exercises.
+                    let stub = foreign_contract::register_contract_once(
+                        &language,
+                        &runtime,
+                        &self.program.foreign_functions,
+                        &self.program.type_schema_registry,
+                        &mut self.registered_foreign_contracts,
+                    )
+                    .map_err(VMError::RuntimeError)?;
+                    if let Some(stub) = stub {
+                        self.foreign_stub_documents.insert(language.clone(), stub);
+                    }
+
                     // `runtime.compile` carries the extension's compile-error
                     // text verbatim (it contains the foreign-language syntax
                     // error). Note: Python defers syntax checking to invoke, so
@@ -995,7 +1021,8 @@ impl VirtualMachine {
                             ))
                         })?;
                     if foreign_idx >= self.foreign_fn_handles.len() {
-                        self.foreign_fn_handles.resize_with(foreign_idx + 1, || None);
+                        self.foreign_fn_handles
+                            .resize_with(foreign_idx + 1, || None);
                     }
                     self.foreign_fn_handles[foreign_idx] =
                         Some(ForeignFunctionHandle::Runtime { runtime, compiled });
@@ -1046,7 +1073,9 @@ impl VirtualMachine {
                 let guarded = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     let args_bytes =
                         foreign_marshal::marshal_args_typed(args, &param_types, schemas)?;
-                    let outcome = runtime.invoke(&compiled, &args_bytes).map_err(|e| e.to_string());
+                    let outcome = runtime
+                        .invoke(&compiled, &args_bytes)
+                        .map_err(|e| e.to_string());
                     foreign_marshal::wrap_dynamic_result(
                         outcome,
                         &name,

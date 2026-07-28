@@ -17,6 +17,11 @@ deep-tests = []
 # rather than growing a parallel copy of it. shape-diagnostics is a leaf
 # crate (serde only), so this stays acyclic.
 shape-diagnostics = { workspace = true }
+# The foreign marshaling table (ADR-019 §1 / #196). `shape-abi-v1` is a
+# dependency-free leaf crate, and it is the only crate the compiler, the
+# marshal layer and the language-runtime extensions can all see — so the
+# declaration-site check reads the table from there instead of restating it.
+shape-abi-v1 = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 chrono = { workspace = true }

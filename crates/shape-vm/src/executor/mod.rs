@@ -55,6 +55,7 @@ mod tests;
 
 // Re-export async types for external use
 pub use async_ops::{AsyncExecutionResult, SuspensionInfo, WaitType};
+pub use control_flow::foreign_contract;
 pub use control_flow::foreign_marshal;
 pub use control_flow::native_abi;
 pub use task_scheduler::{TaskScheduler, TaskStatus};
@@ -465,13 +466,26 @@ pub struct VirtualMachine {
         std::sync::Arc<shape_runtime::plugins::language_runtime::PluginLanguageRuntime>,
     >,
 
+    /// Languages whose declared contract has already been delivered through the
+    /// extension stub channel (ADR-019 §1 / #196). Delivery is idempotent on
+    /// the extension side; this memo keeps the payload build off the per-call
+    /// path.
+    pub(crate) registered_foreign_contracts: std::collections::HashSet<String>,
+
+    /// Interface stub documents (`.pyi`, `.d.ts`) each language's extension
+    /// generated for the contract delivered above, keyed by language id.
+    ///
+    /// Read through [`VirtualMachine::foreign_stub_document`]. The compile-time
+    /// foreign checker (POLY-FOREIGN-CHECK) and the LSP's foreign virtual
+    /// documents are the consumers; the VM only holds them.
+    pub(crate) foreign_stub_documents: HashMap<String, String>,
+
     /// Per-VM `dlopen` cache for `extern C` native libraries, keyed by the
     /// declared library alias/path. Moved out of the deleted eager-link loop
     /// (ffi-rebuild §4.2) so repeated links to one library share a single
     /// `dlopen`. Each `Arc<Library>` keep-alive is also held by every
     /// `NativeLinkedFunction` that resolved a symbol from it.
-    pub(crate) native_library_cache:
-        HashMap<String, std::sync::Arc<libloading::Library>>,
+    pub(crate) native_library_cache: HashMap<String, std::sync::Arc<libloading::Library>>,
 
     /// Resolved package-scoped `[native-dependencies]` map for the current
     /// host (ffi-rebuild §4.11 / WF-2A). Threaded from the `BytecodeExecutor`'s
