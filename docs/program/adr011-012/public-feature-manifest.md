@@ -152,7 +152,7 @@ forbidden-field scan. It is declared in exactly one place
 Chosen because its evidence is unambiguous in the sense ADR-016 §2 demands, and
 because it exercises the whole obligation surface rather than a corner of it: it
 has a grammar rule, a bytecode-compiler meaning, a separate MIR lowering that
-the JIT consumes, a type-inference rule, and LSP behaviour.
+the JIT consumes, and LSP behaviour.
 
 Status is `public` and not something more cautious because §2 makes bootstrap
 status evidence-derived, and forbids demoting a currently-current feature: "A
@@ -167,6 +167,33 @@ executed at wave2-spine and pass —
 `5.0 |> double |> add_one`, asserts 11.0) and
 `pipe_call_does_not_default_unproven_numeric_specialization` (asserts
 `"oops" |> add_one` is a compile error, not a coerced call).
+
+**One authority citation was wrong and was corrected** (second commit). The row
+originally cited `crates/shape-runtime/src/type_system/inference/operators.rs`
+`BinaryOp::Pipe` as fixing how the piped type flows. That arm is a stub: it
+returns `self.fresh_type_var()` under a "For now" comment. Pipe type checking is
+real, but it happens on the bytecode-compiler path, which rewrites `a |> f(x)`
+into `f(a, x)` and then checks an ordinary call — which is why
+`pipe_call_does_not_default_unproven_numeric_specialization` correctly rejects
+`"oops" |> add_one`. The citation now names the LSP arm
+(`tools/shape-lsp/src/type_inference.rs`), which performs the rewrite for real.
+
+That stub is **pre-existing debt outside #112's scope**, but worth naming: Shape
+has two type paths for pipes and only one is implemented. Nothing user-visible
+depends on the stubbed one today, so it is not a `declared_limit` — declared
+limits are user-facing, and users get correct type checking.
+
+Two nearby surfaces were checked and are not limits either. The grammar comment
+in `shape.pest` advertises a placeholder form (`data |> custom_fn(_, extra_arg)`);
+there is no placeholder AST variant and `_` would parse as an ordinary
+identifier, so the comment is stale rather than a promise, and the Book documents
+the operator without it. The Book's existing `runnable=true` fence in
+`fundamentals/operators.mdx` (`5 |> double |> inc` → 11) already matches the
+executed test, which de-risks the coverage side of this row for #113.
+
+The correction is a separate commit rather than an amendment: the first commit
+was already published in the close relay, and a gated hash is corrected
+append-only.
 
 `jit` is a declared required mode. The MIR path (`lower_pipe_expr`) is real, so
 the obligation is honest; if the Book gate later finds VM/JIT divergence, that is
