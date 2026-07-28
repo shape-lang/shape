@@ -83,6 +83,48 @@ A monotonic global cache would produce a constant positive slope. The measured
 slope is 9.2 KB/test and the curve flattens. Over the whole suite this is ~30 MB
 — real but three orders of magnitude away from the incident.
 
+### Per-module attribution, and why the residual slope is not retention
+
+Running each top-level module as its own slice (`--test-threads=1`) localises
+the whole residual to `executor::`:
+
+| module | tests | peak | slope |
+|---|---:|---:|---:|
+| `compiler::` | 1,753 | 97 MB | **−1,203 B/test** (releases) |
+| `executor::` | 1,148 | 92 MB | **+12,764 B/test** |
+| `mir::` / `bytecode::` / `tier::` / `feature_tests::` | 10–21 | 13–66 MB | too few samples |
+
+Two controls then establish that even this residual is not retention.
+
+**Control 1 — order independence.** The 1,256 `executor::` tests run from an
+explicit `--exact` list, forward and reversed:
+
+```
+executor fwd  peak=93 MB  slope=13736 B/test   (26.5s)
+executor rev  peak=93 MB  slope=13147 B/test   (19.3s)
+```
+
+Identical. The slope is not an artifact of heavier tests sorting later.
+
+**Control 2 — warm heap.** The *same* 1,256 tests, measured inside the full
+suite, where ~1,800 compiler tests have already run and freed their heap:
+
+```
+executor standalone (cold heap):      slope = +13736 B/test, peak  93 MB
+executor within full run (warm heap): slope =  -1448 B/test, peak 110 MB
+```
+
+The slope **inverts**. That is the signature of an allocator ramping to its
+working-set high-water mark, not of a leak: once the process already holds a
+heap, executor tests reuse memory freed by the compiler tests and RSS stops
+growing. This is the strongest single piece of evidence against the
+accumulation hypothesis, and it is why the full-suite peak sits at 113–124 MB
+rather than climbing.
+
+Consequence for the tripwire: the **peak** bound is the meaningful guard. The
+slope bound is a secondary signal that partly measures allocator warm-up, and
+should not be read as a leak rate.
+
 ### Confirmed — build-phase link fan-out
 
 `cargo test -p shape-test --no-run` after touching `tools/shape-test/src/lib.rs`
@@ -101,6 +143,35 @@ t=6.3  procs=161  tree=28.4 GB  top=ld/859MB      <-- +18 GB in one second
 The transition at t=5.2s is the whole defect: 5 processes become 157 as every
 test binary starts linking at once. Individual `ld` processes peak at ~1.7 GB;
 test binaries are ~230 MB each with full debuginfo (16 GB of `target/debug/deps`).
+
+### Corroborating live incident, 2026-07-28
+
+The measured runs in the table above are themselves the incident: a cold
+`cargo test -p shape-test --no-run` at default `jobs = nproc = 32`, issued from
+this worktree during Phase-1 prep, throttled the host. Independently observed
+from outside the run: **~49 GiB held in concurrent linker chains**
+(cc → collect2 → ld), one workspace-sized `ld` measured at **1.42 GiB live**,
+memory-pressure avg10 **99%**, host load **121**.
+
+That external 1.42 GiB/link figure and this investigation's 1.86 GB/job slope
+were arrived at separately and agree, which is what makes the extrapolation to
+~59 GB at `jobs = 32` trustworthy rather than a single-source estimate. Note the
+two figures measure different things and should not be conflated: 1.42 GiB is
+one `ld`'s live RSS, 1.86 GB is the per-job cost of the whole chain (rustc +
+cc + collect2 + ld) amortised across a build.
+
+**Reproducing the build-phase table is itself the hazard.** Anyone re-measuring
+it must do so under `scripts/rss-tree-profile.sh` with a cap well under free
+memory, and must not run it concurrently with any other cargo invocation.
+
+### Operational rules now binding on this workspace
+
+1. Never build all of shape-test at once. Build exactly the one target needed:
+   `cargo test -p shape-test --test <name> --no-run`.
+2. One cargo invocation at a time, per worktree and across worktrees.
+3. `.cargo/config.toml`'s `[build] jobs` bound is not optional and must not be
+   removed; the first build after it lands is a cold-ish rebuild and will be
+   slow at `jobs = 8`. That is the intended trade.
 
 ## Interventions measured
 
