@@ -49,10 +49,18 @@ use std::sync::Arc;
 ///
 /// # Contract
 ///
-/// - **Synchronous.** When `dispose` returns, the owning runtime has been told
-///   to release the object. ADR-019 §3 fixes this for v1 so that a Shape scope
-///   exit is a real release point rather than a hint; an implementation that
-///   must reach another thread blocks until that thread has taken the request.
+/// - **Non-suspending and unconditional.** `dispose` runs to completion at the
+///   drop point; it never awaits, never retries, and never declines. This is
+///   ADR-019 §3's "synchronous" for v1 — a disposer that could suspend is a
+///   later design under ADR-010 §6's finalization contract.
+///
+///   When the owning instance is bound to another thread, the release itself
+///   necessarily runs there — that thread is the only one allowed to enter the
+///   runtime — and `dispose` hands the request over rather than waiting for it.
+///   Waiting would block a Shape scope exit for the length of whatever
+///   unrelated foreign call that thread is inside, turning an ordinary drop
+///   into an unbounded pause. Such an implementation owes delivery: the request
+///   must be queued somewhere that is drained before the owning thread exits.
 /// - **Infallible.** There is no way to report a disposal failure from `Drop`,
 ///   and inventing one would make teardown partial. An implementation that
 ///   cannot reach its instance — because the owning worker is already gone, and

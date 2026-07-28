@@ -11,7 +11,12 @@ mod comparison;
 mod control_flow;
 pub(crate) mod dispatch;
 mod exceptions;
-pub(crate) mod foreign_async;
+// ADR-019 §5 (#202) + §3 (#200): `pub` rather than `pub(crate)` because the
+// foreign-reference mint seam below hands out an owner naming a worker in
+// this pool, and #163 / #164 are its out-of-module consumers.
+pub mod foreign_async;
+/// Minting foreign references and routing their disposal (ADR-019 §3 / #200).
+pub mod foreign_ref;
 pub(crate) mod ic_fast_paths;
 mod jit_ops;
 mod logical;
