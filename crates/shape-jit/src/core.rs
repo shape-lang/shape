@@ -682,20 +682,6 @@ mod tests {
         );
     }
 
-    /// Regression test: jit_array_info FFI returns correct data_ptr and length.
-    ///
-    /// IGNORED (W11): test exercises deleted `JitArray::from_vec` /
-    /// `jit_array_info` API. Body retained behind `cfg(any())` for archival
-    /// reference; kinded-FFI replacement deferred to ADR-006 §2.7.4
-    /// Phase 2c snapshot/FFI rebuild session.
-    #[test]
-    #[ignore = "W11/§2.7.4: deleted JitArray/jit_array_info API; kinded-FFI rebuild deferred"]
-    fn test_jit_array_info_ffi() {
-        // Body archived: referenced deleted `JitArray::{from_vec, heap_box,
-        // heap_drop, len}` and `crate::ffi::array::jit_array_info`. The
-        // kinded-FFI replacement is part of the §2.7.4 Phase 2c rebuild.
-    }
-
     #[test]
     #[ignore = "v2: tests deleted BytecodeToIR path; covered by mir_compiler::integration_tests"]
     fn test_jit_width_aware_u8_add_wraps() {
