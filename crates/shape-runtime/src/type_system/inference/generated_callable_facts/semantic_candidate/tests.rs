@@ -12,6 +12,7 @@ fn annotation_callable(optional: bool, parameter: TypeAnnotation) -> TypeAnnotat
             type_annotation: parameter,
         }],
         returns: Box::new(TypeAnnotation::Basic("string".to_string())),
+        effects: None,
     }
 }
 

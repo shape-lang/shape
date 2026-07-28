@@ -760,24 +760,20 @@ fn runtime_completion_hides_uniform_application_builtins() {
 
 #[test]
 fn type_constructor_hover_explains_constructor_capability() {
-    ShapeTest::new(
-        "let c = comptime { type_constructor(Option) }\n",
-    )
-    .at(pos(0, 22))
-    .expect_hover_contains("type_constructor(C) -> TypeConstructorRef<C>")
-    .expect_hover_contains("nominal type head")
-    .expect_hover_contains("Only valid inside comptime blocks");
+    ShapeTest::new("let c = comptime { type_constructor(Option) }\n")
+        .at(pos(0, 22))
+        .expect_hover_contains("type_constructor(C) -> TypeConstructorRef<C>")
+        .expect_hover_contains("nominal type head")
+        .expect_hover_contains("Only valid inside comptime blocks");
 }
 
 #[test]
 fn const_arg_hover_explains_const_application() {
-    ShapeTest::new(
-        "let a = comptime { const_arg(5) }\n",
-    )
-    .at(pos(0, 22))
-    .expect_hover_contains("const_arg(N) -> ConstArg")
-    .expect_hover_contains("checked const argument")
-    .expect_hover_contains("const-generic");
+    ShapeTest::new("let a = comptime { const_arg(5) }\n")
+        .at(pos(0, 22))
+        .expect_hover_contains("const_arg(N) -> ConstArg")
+        .expect_hover_contains("checked const argument")
+        .expect_hover_contains("const-generic");
 }
 
 #[test]

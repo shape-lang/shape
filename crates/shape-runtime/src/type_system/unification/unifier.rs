@@ -162,7 +162,11 @@ impl Unifier {
                     .collect(),
             ),
 
-            TypeAnnotation::Function { params, returns } => TypeAnnotation::Function {
+            TypeAnnotation::Function {
+                params,
+                returns,
+                effects,
+            } => TypeAnnotation::Function {
                 params: params
                     .iter()
                     .map(|param| shape_ast::ast::FunctionParam {
@@ -172,6 +176,7 @@ impl Unifier {
                     })
                     .collect(),
                 returns: Box::new(self.apply_to_annotation(returns)),
+                effects: effects.clone(),
             },
 
             TypeAnnotation::Union(types) => TypeAnnotation::Union(
@@ -263,7 +268,9 @@ fn annotation_occurs(var: &TypeVar, ann: &TypeAnnotation) -> bool {
         TypeAnnotation::Object(fields) => fields
             .iter()
             .any(|f| annotation_occurs(var, &f.type_annotation)),
-        TypeAnnotation::Function { params, returns } => {
+        TypeAnnotation::Function {
+            params, returns, ..
+        } => {
             params
                 .iter()
                 .any(|p| annotation_occurs(var, &p.type_annotation))

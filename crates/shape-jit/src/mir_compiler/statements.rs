@@ -43,8 +43,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
     }
 
     fn object_store_field_is_option(&self, schema_id: u32, field_idx: usize, name: &str) -> bool {
-        self.field_option_slots.contains(&(schema_id, field_idx))
-            || self.field_name_is_option(name)
+        self.field_option_slots.contains(&(schema_id, field_idx)) || self.field_name_is_option(name)
     }
 
     fn emit_schema_option_none_value(&mut self) -> Value {
@@ -516,13 +515,11 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                 // bypasses that route, fail closed instead of reaching the
                 // retired `jit_v2_make_option_none` producer.
                 if matches!(variant_tag, shape_vm::mir::types::VariantTag::None_) {
-                    return Err(
-                        "EnumStore: SURFACE — stale Option::None path reached \
+                    return Err("EnumStore: SURFACE — stale Option::None path reached \
                          after schema-backed __Option routing. Refusing retired \
                          jit_v2_make_option_none producer. ADR-006 §2.7.5 / \
                          Wave-19B."
-                            .to_string(),
-                    );
+                        .to_string());
                 }
 
                 // Stale Ok / Err single-payload branch. W88A should surface
@@ -569,13 +566,11 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                     shape_vm::mir::types::VariantTag::Ok => self.ffi.v2_make_result_ok,
                     shape_vm::mir::types::VariantTag::Err => self.ffi.v2_make_result_err,
                     shape_vm::mir::types::VariantTag::Some_ => {
-                        return Err(
-                            "EnumStore: SURFACE — stale Option::Some path reached \
+                        return Err("EnumStore: SURFACE — stale Option::Some path reached \
                              after schema-backed __Option routing. Refusing retired \
                              jit_v2_make_option_some producer. ADR-006 §2.7.5 / \
                              Wave-19B."
-                                .to_string(),
-                        );
+                            .to_string());
                     }
                     shape_vm::mir::types::VariantTag::None_ => unreachable!("handled above"),
                 };
@@ -1721,7 +1716,7 @@ mod phase_h1_tests {
         CaptureKind, ClosureLayout, HEAP_CLOSURE_HEADER_SIZE, STACK_CLOSURE_HEADER_SIZE,
     };
     use shape_value::v2::concrete_type::ConcreteType;
-    use shape_value::v2::heap_header::{HeapHeader, HEAP_KIND_V2_CLOSURE};
+    use shape_value::v2::heap_header::{HEAP_KIND_V2_CLOSURE, HeapHeader};
     use shape_value::v2::struct_layout::FieldKind;
 
     // Test-local helper: immutable-only layout.

@@ -2,8 +2,8 @@
 mod support;
 
 use std::net::{TcpListener, TcpStream};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 use support::*;
@@ -178,12 +178,7 @@ await run()
     );
 }
 
-fn race_cancels_slow_loser_for(
-    addr: &str,
-    server: &ServeNode,
-    env_prefix: &str,
-    context: &str,
-) {
+fn race_cancels_slow_loser_for(addr: &str, server: &ServeNode, env_prefix: &str, context: &str) {
     let env = IsolatedEnv::new(env_prefix);
     let awaited_elapsed = awaited_slow_remote_elapsed(addr, &env);
     let program = r#"use std::core::remote
@@ -282,8 +277,7 @@ await run()
     let label = format!("{context} remote::call_async queued cancellation client");
     assert_success(&run, &label);
     assert!(
-        run.stdout.contains("FIRST_REMOTE_DONE=1")
-            && run.stdout.contains("QUEUED_SCOPE_RESULT=77"),
+        run.stdout.contains("FIRST_REMOTE_DONE=1") && run.stdout.contains("QUEUED_SCOPE_RESULT=77"),
         "{context}: first call should complete while queued scoped call is cancelled; stdout={:?} stderr={}",
         run.stdout,
         run.stderr
@@ -338,8 +332,7 @@ await run()
     std::thread::sleep(Duration::from_millis(150));
     let serve_log = serve_stderr(server);
     assert!(
-        serve_log.contains("outcome=AlreadyRunning")
-            && serve_log.contains("not preemptible"),
+        serve_log.contains("outcome=AlreadyRunning") && serve_log.contains("not preemptible"),
         "{context}: running receiver call must report honest non-preemptibility; serve stderr:\n{serve_log}"
     );
 }

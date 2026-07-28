@@ -640,8 +640,9 @@ impl BytecodeCompiler {
             return Some(annotation.clone());
         }
 
-        let shape_runtime::type_system::Type::Function { params, .. } =
-            self.inference_facts.function_signature(semantic_owner_key)?
+        let shape_runtime::type_system::Type::Function { params, .. } = self
+            .inference_facts
+            .function_signature(semantic_owner_key)?
         else {
             return None;
         };
@@ -670,7 +671,9 @@ impl BytecodeCompiler {
             TypeAnnotation::Object(fields) => fields.iter().any(|field| {
                 Self::destructure_context_annotation_is_unknown(&field.type_annotation)
             }),
-            TypeAnnotation::Function { params, returns } => {
+            TypeAnnotation::Function {
+                params, returns, ..
+            } => {
                 params.iter().any(|param| {
                     Self::destructure_context_annotation_is_unknown(&param.type_annotation)
                 }) || Self::destructure_context_annotation_is_unknown(returns)
@@ -696,11 +699,7 @@ impl BytecodeCompiler {
         self.last_expr_type_info = None;
 
         let Some(annotation) =
-            self.param_annotation_for_destructure_context(
-                semantic_owner_key,
-                param_idx,
-                param,
-            )
+            self.param_annotation_for_destructure_context(semantic_owner_key, param_idx, param)
         else {
             return;
         };
@@ -887,8 +886,7 @@ impl BytecodeCompiler {
             |compiler| compiler.compile_function_inner(func_def, generated_origin),
         );
         self.current_function_saw_drop_obligated_local = saved_saw_drop_obligated_local;
-        self.inherited_capture_parameter_evidence =
-            saved_inherited_capture_parameter_evidence;
+        self.inherited_capture_parameter_evidence = saved_inherited_capture_parameter_evidence;
         self.deferring_uninstantiated_template_body = saved_deferring_template;
         result
     }
@@ -908,10 +906,8 @@ impl BytecodeCompiler {
         // modes rewrite the cloned parameter flags. This slot-aligned value is
         // the only authority for distinguishing an inferred reference
         // optimization from an explicit shared/exclusive reference parameter.
-        let inferred_reference_optimizations = Self::inferred_reference_optimizations(
-            &func_def.params,
-            &effective_pass_modes,
-        );
+        let inferred_reference_optimizations =
+            Self::inferred_reference_optimizations(&func_def.params, &effective_pass_modes);
         for (idx, param) in effective_def.params.iter_mut().enumerate() {
             let effective_mode = effective_pass_modes
                 .get(idx)
@@ -1112,7 +1108,9 @@ impl BytecodeCompiler {
         // successfully AND carries authenticated generated provenance reaches a
         // rejection, which rides the driver-level install transaction's atomic
         // no-publish.
-        let effective_origin = replacement_body_origin.as_ref().or(generated_origin.as_ref());
+        let effective_origin = replacement_body_origin
+            .as_ref()
+            .or(generated_origin.as_ref());
         self.reject_generated_drop_obligated_across_suspension(
             &effective_def,
             effective_origin,
@@ -1877,11 +1875,7 @@ impl BytecodeCompiler {
                 });
 
             if param.pattern.as_identifier().is_none() {
-                self.seed_param_destructure_context(
-                    &semantic_owner_key,
-                    idx,
-                    param,
-                );
+                self.seed_param_destructure_context(&semantic_owner_key, idx, param);
             }
 
             // Load parameter value from its slot
@@ -2165,8 +2159,8 @@ impl BytecodeCompiler {
                     self.exclusive_ref_locals.insert(idx as u16);
                 }
             }
-            let was_inferred = inferred_reference_optimizations[idx]
-                .is_some_and(ParamPassMode::is_reference);
+            let was_inferred =
+                inferred_reference_optimizations[idx].is_some_and(ParamPassMode::is_reference);
             if was_inferred {
                 self.inferred_ref_locals.insert(idx as u16);
             }
@@ -2488,8 +2482,7 @@ impl BytecodeCompiler {
         self.boxed_locals = saved_boxed_locals;
         self.shared_locals = saved_shared_locals;
         self.shared_drop_locals = saved_shared_drop_locals;
-        self.inherited_capture_parameter_evidence =
-            saved_inherited_capture_parameter_evidence;
+        self.inherited_capture_parameter_evidence = saved_inherited_capture_parameter_evidence;
         self.closure_escape_drop_skip_locals = saved_closure_escape_drop_skip_locals;
         self.closure_binding_capture_drop_locals = saved_closure_binding_capture_drop_locals;
         self.closure_capture_drop_locals = saved_closure_capture_drop_locals;

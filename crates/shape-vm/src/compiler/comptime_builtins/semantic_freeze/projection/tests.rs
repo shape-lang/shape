@@ -30,6 +30,7 @@ fn lossy_unknown_detector_is_recursive_across_every_named_leaf_form() {
                 }]),
             }],
             returns: Box::new(TypeAnnotation::Basic("int".to_string())),
+            effects: None,
         })),
     ];
     assert!(cases.iter().all(annotation_has_lossy_unknown_sentinel));
@@ -39,14 +40,13 @@ fn lossy_unknown_detector_is_recursive_across_every_named_leaf_form() {
 fn partial_inference_inputs_refuse_through_stable_freeze_boundaries() {
     let compiler = BytecodeCompiler::new();
     let overlay = overlay_for_tests(&compiler);
-    let nested_unknown = TypeAnnotation::Array(Box::new(TypeAnnotation::Object(vec![
-        ObjectTypeField {
+    let nested_unknown =
+        TypeAnnotation::Array(Box::new(TypeAnnotation::Object(vec![ObjectTypeField {
             name: "value".to_string(),
             optional: false,
             type_annotation: unknown(),
             annotations: Vec::new(),
-        },
-    ])));
+        }])));
     let unknown_error = overlay
         .canonicalize_type_projection(&nested_unknown)
         .expect_err("nested unknown must not enter the freeze");
@@ -92,6 +92,7 @@ fn resolved_callable_and_container_use_the_existing_freeze_projection() {
             type_annotation: TypeAnnotation::Basic("int".to_string()),
         }],
         returns: Box::new(TypeAnnotation::Basic("string".to_string())),
+        effects: None,
     };
     let callable_projection = overlay
         .canonicalize_type_projection(&callable)

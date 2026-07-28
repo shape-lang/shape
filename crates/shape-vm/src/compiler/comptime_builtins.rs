@@ -29,7 +29,9 @@ use super::comptime_fragments::CheckedItem;
 // `before_hook`/`after_hook` are PRODUCERS of the S1 `CheckedTemplate`
 // carrier through its typestate chokepoint (never a second carrier), and
 // `capture` lifts declared capture values through the S2 ConstLift seam.
-use super::comptime_fragments::checked_template::{CheckedTemplate, CheckedTemplateBuilder, TemplateHookKind};
+use super::comptime_fragments::checked_template::{
+    CheckedTemplate, CheckedTemplateBuilder, TemplateHookKind,
+};
 use super::template_specialization::const_lift::{self, LiftedConst};
 use std::cell::RefCell;
 use std::collections::HashSet;
@@ -894,6 +896,7 @@ pub(crate) fn reconstruct_type_annotation(
             Ok(TypeAnnotation::Function {
                 params,
                 returns: Box::new(returns),
+                effects: None,
             })
         }
         // Post-CKPT-1 this arm is the residual DEFENSIVE case only: an applied
@@ -1012,7 +1015,10 @@ fn is_valid_generated_function_name(name: &str) -> bool {
 /// DIRECTLY. No `literal_kind` discriminator, no parallel sentinel fields: the
 /// slot's runtime kind selects the literal. (Slice 5 deleted the
 /// `__ComptimeItemFragment` sentinel encode/decode this superseded.)
-fn literal_expr_from_slot(slot: &KindedSlot, builtin_name: &str) -> Result<shape_ast::ast::Expr, String> {
+fn literal_expr_from_slot(
+    slot: &KindedSlot,
+    builtin_name: &str,
+) -> Result<shape_ast::ast::Expr, String> {
     use shape_ast::ast::{Expr, Literal, Span};
 
     let literal = if let Some(value) = slot.as_str() {
@@ -1077,6 +1083,7 @@ fn build_function_item(
             annotations: Vec::new(),
             is_async: false,
             is_comptime: false,
+            effect_row: None,
         },
         Span::default(),
     ))
@@ -1087,7 +1094,10 @@ fn build_function_item(
 /// (`comptime_target.rs`): kind witness + non-null + element-type stamp guard,
 /// then `TypedArray::as_slice` over `*const StringObj`. Used by `extend_method`
 /// to read the template's literal segments and self-field splices.
-fn read_comptime_string_array_slot(slot: &KindedSlot, arg_name: &str) -> Result<Vec<String>, String> {
+fn read_comptime_string_array_slot(
+    slot: &KindedSlot,
+    arg_name: &str,
+) -> Result<Vec<String>, String> {
     if slot.kind() != NativeKind::Ptr(HeapKind::TypedArray) {
         return Err(format!(
             "extend_method expects {arg_name} as an Array<string>, got {:?}",
@@ -1111,7 +1121,9 @@ fn read_comptime_string_array_slot(slot: &KindedSlot, arg_name: &str) -> Result<
         let mut out = Vec::with_capacity(slice.len());
         for &elem in slice {
             if elem.is_null() {
-                return Err(format!("extend_method received a null string in {arg_name}"));
+                return Err(format!(
+                    "extend_method received a null string in {arg_name}"
+                ));
             }
             out.push(StringObj::as_str(elem).to_string());
         }
@@ -1410,7 +1422,9 @@ fn build_extend_method_item(
         value.push_str(field);
         value.push('}');
     }
-    value.push_str(&escape_fstring_literal_segment(&segments[field_splices.len()]));
+    value.push_str(&escape_fstring_literal_segment(
+        &segments[field_splices.len()],
+    ));
 
     let body_expr = Expr::Literal(
         Literal::FormattedString {
@@ -2724,9 +2738,13 @@ fn register_frozen_reflection_builtins(module: &mut ModuleExports, freeze: Arc<F
         ),
         move |slots, _ctx| {
             let identity_part = |index: usize| {
-                slots.get(index).and_then(KindedSlot::as_i64).ok_or_else(|| {
-                    "internal RepresentationAccess mint identity transport is invalid".to_string()
-                })
+                slots
+                    .get(index)
+                    .and_then(KindedSlot::as_i64)
+                    .ok_or_else(|| {
+                        "internal RepresentationAccess mint identity transport is invalid"
+                            .to_string()
+                    })
             };
             let identity = FrozenTypeIdentity {
                 high: identity_part(0)?,
@@ -2775,9 +2793,12 @@ fn register_frozen_reflection_builtins(module: &mut ModuleExports, freeze: Arc<F
         ConcreteType::OpaqueTypedObject(type_constructor_ref_schema.to_string()),
         move |slots, _ctx| {
             let identity_part = |index: usize| {
-                slots.get(index).and_then(KindedSlot::as_i64).ok_or_else(|| {
-                    "internal type_constructor identity transport is invalid".to_string()
-                })
+                slots
+                    .get(index)
+                    .and_then(KindedSlot::as_i64)
+                    .ok_or_else(|| {
+                        "internal type_constructor identity transport is invalid".to_string()
+                    })
             };
             let identity = FrozenTypeIdentity {
                 high: identity_part(0)?,
@@ -2806,7 +2827,8 @@ fn register_frozen_reflection_builtins(module: &mut ModuleExports, freeze: Arc<F
             ..Default::default()
         }],
         ConcreteType::OpaqueTypedObject(
-            shape_runtime::type_schema::builtin_schemas::COMPTIME_FROZEN_TYPE_REF_SCHEMA.to_string(),
+            shape_runtime::type_schema::builtin_schemas::COMPTIME_FROZEN_TYPE_REF_SCHEMA
+                .to_string(),
         ),
         move |slots, _ctx| {
             let value = slots
@@ -2850,8 +2872,7 @@ fn register_frozen_reflection_builtins(module: &mut ModuleExports, freeze: Arc<F
             let args = slots
                 .get(1)
                 .ok_or_else(|| "apply expects an argument array".to_string())?;
-            let carrier =
-                type_reflection::apply_to_constructor(receiver, args, &freeze_for_apply)?;
+            let carrier = type_reflection::apply_to_constructor(receiver, args, &freeze_for_apply)?;
             Ok(TypedReturn::Concrete(ConcreteReturn::OpaqueTypedObject(
                 Arc::new(carrier),
             )))
@@ -2889,9 +2910,9 @@ fn register_frozen_reflection_builtins(module: &mut ModuleExports, freeze: Arc<F
                 .get(1)
                 .ok_or_else(|| "refine expects a TypeConstructorRef argument".to_string())?;
             match type_reflection::refine_application(applied, constructor)? {
-                Some(carrier) => Ok(TypedReturn::Some(ConcreteReturn::OpaqueTypedObject(Arc::new(
-                    carrier,
-                )))),
+                Some(carrier) => Ok(TypedReturn::Some(ConcreteReturn::OpaqueTypedObject(
+                    Arc::new(carrier),
+                ))),
                 None => Ok(TypedReturn::None),
             }
         },
@@ -2919,7 +2940,8 @@ fn register_frozen_reflection_builtins(module: &mut ModuleExports, freeze: Arc<F
             },
         ],
         ConcreteType::OpaqueTypedObject(
-            shape_runtime::type_schema::builtin_schemas::COMPTIME_FROZEN_TYPE_REF_SCHEMA.to_string(),
+            shape_runtime::type_schema::builtin_schemas::COMPTIME_FROZEN_TYPE_REF_SCHEMA
+                .to_string(),
         ),
         move |slots, _ctx| {
             let applied = slots
@@ -2929,11 +2951,8 @@ fn register_frozen_reflection_builtins(module: &mut ModuleExports, freeze: Arc<F
                 .get(1)
                 .and_then(KindedSlot::as_i64)
                 .ok_or_else(|| "type_argument expects an integer index".to_string())?;
-            let carrier = type_reflection::applied_type_argument(
-                applied,
-                index,
-                &freeze_for_type_argument,
-            )?;
+            let carrier =
+                type_reflection::applied_type_argument(applied, index, &freeze_for_type_argument)?;
             Ok(TypedReturn::Concrete(ConcreteReturn::OpaqueTypedObject(
                 Arc::new(carrier),
             )))
@@ -3068,7 +3087,10 @@ mod e2_d9_closure_free_tripwire {
             "a closure-free literal producer emits a single-statement body"
         );
         assert!(
-            matches!(&func_def.body[0], Statement::Expression(Expr::Literal(..), _)),
+            matches!(
+                &func_def.body[0],
+                Statement::Expression(Expr::Literal(..), _)
+            ),
             "the typed module producer's body is a bare literal — NO closure. If this flips, \
              a closure-capable producer landed: write the module C0911 closure-capture pin \
              FIRST (E2-D9 flip condition), do not relax this pin. Got: {:?}",
@@ -3136,9 +3158,7 @@ mod extend_method_producer_tests {
         let shape_ast::ast::Item::Extend(extend, _) = &item else {
             unreachable!("checked above");
         };
-        assert!(
-            matches!(&extend.type_name, shape_ast::ast::TypeName::Simple(n) if n == "User")
-        );
+        assert!(matches!(&extend.type_name, shape_ast::ast::TypeName::Simple(n) if n == "User"));
         assert_eq!(extend.methods[0].name, "to_json");
     }
 
@@ -3239,7 +3259,10 @@ mod extend_method_producer_tests {
             &semantic_freeze::overlay_for_tests(&crate::compiler::BytecodeCompiler::new()),
         )
         .expect("valid int literal body assembles");
-        assert!(matches!(extend_method_literal_body(&item), Literal::Int(42)));
+        assert!(matches!(
+            extend_method_literal_body(&item),
+            Literal::Int(42)
+        ));
         let shape_ast::ast::Item::Extend(extend, _) = &item else {
             unreachable!("checked in helper");
         };
@@ -3272,7 +3295,10 @@ mod extend_method_producer_tests {
             &semantic_freeze::overlay_for_tests(&crate::compiler::BytecodeCompiler::new()),
         )
         .expect("valid bool literal body assembles");
-        assert!(matches!(extend_method_literal_body(&item), Literal::Bool(true)));
+        assert!(matches!(
+            extend_method_literal_body(&item),
+            Literal::Bool(true)
+        ));
     }
 
     #[test]
@@ -3371,7 +3397,10 @@ mod replace_body_carrier_tests {
         );
         let resolved = comptime_replace_body_at(0).expect("live in this run");
         assert_eq!(resolved, body_b, "index 0 resolves to THIS run's body");
-        assert_ne!(resolved, body_a, "no stale body leaks across the per-run clear");
+        assert_ne!(
+            resolved, body_a,
+            "no stale body leaks across the per-run clear"
+        );
     }
 }
 
@@ -3472,7 +3501,10 @@ mod e1_extend_carrier_tests {
         );
         let resolved = comptime_extend_statement_at(0).expect("live in this run");
         assert_eq!(resolved, b, "index 0 resolves to THIS run's extend");
-        assert_ne!(resolved, a, "no stale extend leaks across the per-run clear");
+        assert_ne!(
+            resolved, a,
+            "no stale extend leaks across the per-run clear"
+        );
     }
 
     #[test]
@@ -3550,7 +3582,10 @@ mod hook_template_store_tests {
         clear_comptime_hook_templates();
         assert_eq!(push_comptime_hook_template(a), 0);
         assert_eq!(
-            comptime_hook_template_at(0).expect("live").template.body_fn(),
+            comptime_hook_template_at(0)
+                .expect("live")
+                .template
+                .body_fn(),
             "ta"
         );
         // Reads clone: the store stays intact until the next per-run clear —
@@ -3560,7 +3595,10 @@ mod hook_template_store_tests {
         clear_comptime_hook_templates();
         assert_eq!(push_comptime_hook_template(b), 0, "index restarts per run");
         assert_eq!(
-            comptime_hook_template_at(0).expect("live").template.body_fn(),
+            comptime_hook_template_at(0)
+                .expect("live")
+                .template
+                .body_fn(),
             "tb",
             "index 0 resolves to THIS run's template"
         );
@@ -4342,7 +4380,8 @@ mod e1_s5_reconstruction {
         };
 
         // {x: int, y: string} — identity + both member ids frozen to pre-CKPT-3.
-        let xy = TypeAnnotation::Object(vec![field("x", false, "int"), field("y", false, "string")]);
+        let xy =
+            TypeAnnotation::Object(vec![field("x", false, "int"), field("y", false, "string")]);
         let xy_id = overlay
             .canonicalize_type(&xy)
             .expect("{x:int,y:string} canonicalizes");
@@ -4354,8 +4393,18 @@ mod e1_s5_reconstruction {
         assert_eq!(
             members(&overlay, xy_id),
             vec![
-                ("x".to_string(), 5117747860848310177, 1031105497090630829, false),
-                ("y".to_string(), -9035473693977959263, 304561787195158326, false),
+                (
+                    "x".to_string(),
+                    5117747860848310177,
+                    1031105497090630829,
+                    false
+                ),
+                (
+                    "y".to_string(),
+                    -9035473693977959263,
+                    304561787195158326,
+                    false
+                ),
             ],
             "member identities + byte-sort order (x before y) must be byte-identical to pre-CKPT-3"
         );
@@ -4377,7 +4426,12 @@ mod e1_s5_reconstruction {
         );
         assert_eq!(
             members(&overlay, x_opt_id),
-            vec![("x".to_string(), 7472345934218968096, -929543014868829712, true)],
+            vec![(
+                "x".to_string(),
+                7472345934218968096,
+                -929543014868829712,
+                true
+            )],
             "the optional field's member id must be byte-identical to pre-CKPT-3"
         );
     }
@@ -4402,7 +4456,9 @@ mod e1_s5_reconstruction {
             field("x", false, b("int")),
             field("y", false, b("string")),
         ]);
-        let xy_id = overlay.canonicalize_type(&xy).expect("{x:int,y:string} canonicalizes");
+        let xy_id = overlay
+            .canonicalize_type(&xy)
+            .expect("{x:int,y:string} canonicalizes");
         assert_eq!(
             reconstruct_type_annotation(&overlay, xy_id).expect("record spells via CKPT-3 arm"),
             TypeAnnotation::Object(vec![
@@ -4414,7 +4470,9 @@ mod e1_s5_reconstruction {
 
         // {x?: int} preserves the optional `?`.
         let x_opt = TypeAnnotation::Object(vec![field("x", true, b("int"))]);
-        let x_opt_id = overlay.canonicalize_type(&x_opt).expect("{x?:int} canonicalizes");
+        let x_opt_id = overlay
+            .canonicalize_type(&x_opt)
+            .expect("{x?:int} canonicalizes");
         let spelled =
             reconstruct_type_annotation(&overlay, x_opt_id).expect("optional record spells");
         assert_eq!(
@@ -4571,12 +4629,12 @@ mod e1_s5_reconstruction {
 // run under the default gate).
 #[cfg(test)]
 mod e1_s5_route_proof {
+    use super::FrozenTypeIdentity;
     use super::reconstruct_type_annotation;
     use super::semantic_freeze::overlay_for_tests;
     use super::type_annotation_from_string_or_type_ref_slot;
-    use super::FrozenTypeIdentity;
-    use crate::compiler::comptime_target::build_type_ref_descriptor;
     use crate::compiler::BytecodeCompiler;
+    use crate::compiler::comptime_target::build_type_ref_descriptor;
     use shape_ast::ast::TypeAnnotation;
     use shape_ast::error::ShapeError;
 
@@ -4809,12 +4867,11 @@ mod e1_s5_route_proof {
             .expect("Array<Option<int>> canonicalizes + interns its composite payload subtree")
             .identity();
         let slot = build_type_ref_descriptor("###unparseable###", None, Some(identity));
-        let resolved = type_annotation_from_string_or_type_ref_slot(
-            &slot,
-            "__emit_set_return_type",
-            &overlay,
-        )
-        .expect("a stamped applied-generic ref resolves via identity, past the garbage source");
+        let resolved =
+            type_annotation_from_string_or_type_ref_slot(&slot, "__emit_set_return_type", &overlay)
+                .expect(
+                    "a stamped applied-generic ref resolves via identity, past the garbage source",
+                );
         assert_eq!(
             resolved,
             TypeAnnotation::Generic {
@@ -5206,7 +5263,11 @@ mod freeze_handle_module_tests {
         let int_identity = overlay
             .identity_of("int")
             .expect("int is frozen in every unit");
-        let module = create_comptime_builtins_module(Default::default(), Default::default(), Arc::clone(&overlay));
+        let module = create_comptime_builtins_module(
+            Default::default(),
+            Default::default(),
+            Arc::clone(&overlay),
+        );
         let ctx = test_ctx();
 
         let reflect = module
@@ -5262,7 +5323,11 @@ mod freeze_handle_module_tests {
         let nominal_identity = overlay
             .identity_of("Array")
             .expect("Array is frozen as a builtin nominal");
-        let module = create_comptime_builtins_module(Default::default(), Default::default(), Arc::clone(&overlay));
+        let module = create_comptime_builtins_module(
+            Default::default(),
+            Default::default(),
+            Arc::clone(&overlay),
+        );
         let ctx = test_ctx();
 
         let reflect = module
@@ -5282,7 +5347,11 @@ mod freeze_handle_module_tests {
     #[test]
     fn reflect_intrinsic_rejects_non_type_ref_args_and_unknown_identities() {
         let overlay = semantic_freeze::overlay_for_tests(&crate::compiler::BytecodeCompiler::new());
-        let module = create_comptime_builtins_module(Default::default(), Default::default(), Arc::clone(&overlay));
+        let module = create_comptime_builtins_module(
+            Default::default(),
+            Default::default(),
+            Arc::clone(&overlay),
+        );
         let ctx = test_ctx();
         let reflect = module
             .typed_exports()

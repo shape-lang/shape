@@ -192,6 +192,7 @@ fn freeze_exact_callable(
     let Type::Function {
         params: inferred_params,
         returns: _,
+        ..
     } = candidate.ty()
     else {
         return Err(CallableSemanticIssue::new(

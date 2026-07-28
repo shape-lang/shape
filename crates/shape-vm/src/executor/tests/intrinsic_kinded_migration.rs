@@ -14,7 +14,7 @@
 //!   * `distributions.dist_uniform` (`__intrinsic_dist_uniform`)
 //!   * DateTime property access (`dt.year`, … — kinded GetProp)
 
-use super::test_utils::{eval_with_prelude, eval_typed_i64};
+use super::test_utils::{eval_typed_i64, eval_with_prelude};
 use crate::executor::v2_handlers::v2_array_detect::{
     V2ElemType, V2TypedArrayView, as_v2_typed_array, read_element,
 };

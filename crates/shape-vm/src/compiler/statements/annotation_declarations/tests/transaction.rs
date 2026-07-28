@@ -68,7 +68,12 @@ annotation z_bad() { metadata(target) { missing_handler_value } }
     assert_eq!(cache.stats().insertions, 0);
     assert_eq!(cache.memory_size(), 0);
     assert!(compiler.program.compiled_annotations.is_empty());
-    assert!(compiler.completed_blobs.iter().any(|blob| blob.name == "a_good___metadata"));
+    assert!(
+        compiler
+            .completed_blobs
+            .iter()
+            .any(|blob| blob.name == "a_good___metadata")
+    );
     let fingerprint = poison_fingerprint(&compiler);
     assert_eq!(
         compiler
@@ -246,8 +251,12 @@ fn compiler_with_preexisting_blob() -> BytecodeCompiler {
     let Item::Function(function, _) = &baseline.items[0] else {
         panic!("baseline function")
     };
-    compiler.register_function(function).expect("register baseline");
-    compiler.compile_function(function).expect("compile baseline");
+    compiler
+        .register_function(function)
+        .expect("register baseline");
+    compiler
+        .compile_function(function)
+        .expect("compile baseline");
     assert!(!compiler.completed_blobs.is_empty());
     compiler
 }
@@ -260,7 +269,11 @@ fn blob_file_count(path: &std::path::Path) -> usize {
             if entry.is_dir() {
                 blob_file_count(&entry)
             } else {
-                usize::from(entry.extension().is_some_and(|extension| extension == "blob"))
+                usize::from(
+                    entry
+                        .extension()
+                        .is_some_and(|extension| extension == "blob"),
+                )
             }
         })
         .sum()
@@ -354,7 +367,10 @@ fn sorted_keys<V>(map: &std::collections::HashMap<String, V>) -> Vec<String> {
 fn sorted_hashes(
     map: &std::collections::HashMap<String, crate::bytecode::FunctionHash>,
 ) -> Vec<(String, crate::bytecode::FunctionHash)> {
-    let mut entries = map.iter().map(|(name, hash)| (name.clone(), *hash)).collect::<Vec<_>>();
+    let mut entries = map
+        .iter()
+        .map(|(name, hash)| (name.clone(), *hash))
+        .collect::<Vec<_>>();
     entries.sort_by(|left, right| left.0.cmp(&right.0));
     entries
 }

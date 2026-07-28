@@ -545,6 +545,7 @@ impl TypeInferenceEngine {
             Type::Concrete(TypeAnnotation::Function {
                 params: expected_param_anns,
                 returns,
+                ..
             }) => {
                 let param_types: Vec<Type> = expected_param_anns
                     .iter()

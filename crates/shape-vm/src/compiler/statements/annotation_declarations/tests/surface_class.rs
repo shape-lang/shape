@@ -40,8 +40,7 @@ fn compile_ok(source: &str) {
 #[test]
 fn untyped_config_param_rejects_at_declaration_with_the_exact_sentence() {
     // Fires with ZERO applications in the program — declaration-site.
-    let message =
-        compile_err("annotation warmup(period) { comptime post(target, ctx) { 1 } }");
+    let message = compile_err("annotation warmup(period) { comptime post(target, ctx) { 1 } }");
     assert!(
         message.contains(
             "annotation `warmup` declares config parameter `period` without a type; \
@@ -57,13 +56,10 @@ fn untyped_config_param_rejects_at_declaration_with_the_exact_sentence() {
 fn untyped_config_rejection_names_the_first_untyped_of_a_mixed_definition() {
     // The former R2 "mixed typed/untyped" refinement folds into the ONE
     // untyped-config rejection: `label` (the first untyped param) is named.
-    let message = compile_err(
-        "annotation partial(times: int, label) { comptime post(target, ctx) { 1 } }",
-    );
+    let message =
+        compile_err("annotation partial(times: int, label) { comptime post(target, ctx) { 1 } }");
     assert!(
-        message.contains(
-            "annotation `partial` declares config parameter `label` without a type"
-        ),
+        message.contains("annotation `partial` declares config parameter `label` without a type"),
         "the first untyped param must be named, got: {message}"
     );
 }
@@ -176,8 +172,7 @@ fn r1_positive_twins_every_liftable_spelling_compiles() {
 
 #[test]
 fn r3_before_with_legacy_params_rejects_with_the_exact_sentence() {
-    let message =
-        compile_err("annotation typedcfg(times: int) { before(args, ctx) { args } }");
+    let message = compile_err("annotation typedcfg(times: int) { before(args, ctx) { args } }");
     assert!(
         message.contains(
             "annotation `typedcfg`'s `before` handler declares (args, ctx); \
@@ -190,13 +185,10 @@ fn r3_before_with_legacy_params_rejects_with_the_exact_sentence() {
 
 #[test]
 fn r3_after_with_legacy_params_rejects_with_the_exact_sentence() {
-    let message = compile_err(
-        "annotation typedcfg(times: int) { after(args, result, ctx) { result } }",
-    );
+    let message =
+        compile_err("annotation typedcfg(times: int) { after(args, result, ctx) { result } }");
     assert!(
-        message.contains(
-            "`after` handler declares (args, result, ctx); declarative hooks are"
-        ),
+        message.contains("`after` handler declares (args, result, ctx); declarative hooks are"),
         "R3 must fire naming the after shape, got: {message}"
     );
 }
@@ -304,9 +296,7 @@ fn lifecycle_typed_config_definition_now_compiles_with_typed_params() {
             .on_define_handler
             .is_some()
     );
-    compile_ok(
-        "annotation typedcfg2(times: int) { metadata(target) { { version: times } } }",
-    );
+    compile_ok("annotation typedcfg2(times: int) { metadata(target) { { version: times } } }");
     // Mixed hook + lifecycle, both handler orders.
     compile_ok(
         "annotation typedcfg3(times: int) on function {\n\

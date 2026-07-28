@@ -790,6 +790,7 @@ fn comptime_builtin_forwarders() -> Vec<Item> {
                     where_clause: None,
                     is_async: false,
                     is_comptime: false,
+                    effect_row: None,
                 },
                 Span::DUMMY,
             )
@@ -849,10 +850,9 @@ fn frozen_type_payload_model_items() -> Vec<Item> {
     };
     use shape_runtime::comptime_reflection::{
         FIELD_INITIALIZATION_SCHEMA_NAME, FLOAT_WIDTH_SCHEMA_NAME, FROZEN_PRIMITIVE_VARIANTS,
-        FROZEN_TYPE_ENABLED_PAYLOAD_CATEGORIES, FROZEN_TYPE_PAYLOAD_ENUM_NAME,
-        FieldInitialization, FloatWidth, INTEGER_WIDTH_SCHEMA_NAME, IntegerWidth,
-        NOMINAL_SHAPE_SCHEMA_NAME, NominalShape, PASSING_MODE_SCHEMA_NAME, PassingMode,
-        frozen_type_enabled_payload_type_name,
+        FROZEN_TYPE_ENABLED_PAYLOAD_CATEGORIES, FROZEN_TYPE_PAYLOAD_ENUM_NAME, FieldInitialization,
+        FloatWidth, INTEGER_WIDTH_SCHEMA_NAME, IntegerWidth, NOMINAL_SHAPE_SCHEMA_NAME,
+        NominalShape, PASSING_MODE_SCHEMA_NAME, PassingMode, frozen_type_enabled_payload_type_name,
     };
     // ADR-009 B7: the composite payloads' typed element-row model names.
     use shape_runtime::comptime_reflection::{
@@ -2103,8 +2103,7 @@ fn rewrite_template_hook_body_args_expr(
                     };
                     let index = super::comptime_builtins::push_comptime_template_body_fn(def);
                     let ident_span = *ident_span;
-                    args[0] =
-                        Expr::Literal(shape_ast::ast::Literal::Int(index as i64), ident_span);
+                    args[0] = Expr::Literal(shape_ast::ast::Literal::Int(index as i64), ident_span);
                 }
                 other => {
                     return Err(ShapeError::SemanticError {
@@ -2172,7 +2171,9 @@ fn rewrite_template_hook_body_args_expr(
                 rewrite_template_hook_body_args_expr(a, lookup, locals)?;
             }
         }
-        Expr::PropertyAccess { object, .. } => rewrite_template_hook_body_args_expr(object, lookup, locals)?,
+        Expr::PropertyAccess { object, .. } => {
+            rewrite_template_hook_body_args_expr(object, lookup, locals)?
+        }
         Expr::IndexAccess {
             object,
             index,
@@ -2189,7 +2190,9 @@ fn rewrite_template_hook_body_args_expr(
             rewrite_template_hook_body_args_expr(left, lookup, locals)?;
             rewrite_template_hook_body_args_expr(right, lookup, locals)?;
         }
-        Expr::UnaryOp { operand, .. } => rewrite_template_hook_body_args_expr(operand, lookup, locals)?,
+        Expr::UnaryOp { operand, .. } => {
+            rewrite_template_hook_body_args_expr(operand, lookup, locals)?
+        }
         Expr::Conditional {
             condition,
             then_expr,
@@ -2219,8 +2222,12 @@ fn rewrite_template_hook_body_args_expr(
         Expr::Object(entries, _) => {
             for entry in entries.iter_mut() {
                 match entry {
-                    shape_ast::ast::ObjectEntry::Field { value, .. } => rewrite_template_hook_body_args_expr(value, lookup, locals)?,
-                    shape_ast::ast::ObjectEntry::Spread(e) => rewrite_template_hook_body_args_expr(e, lookup, locals)?,
+                    shape_ast::ast::ObjectEntry::Field { value, .. } => {
+                        rewrite_template_hook_body_args_expr(value, lookup, locals)?
+                    }
+                    shape_ast::ast::ObjectEntry::Spread(e) => {
+                        rewrite_template_hook_body_args_expr(e, lookup, locals)?
+                    }
                 }
             }
         }
@@ -2230,7 +2237,9 @@ fn rewrite_template_hook_body_args_expr(
                     shape_ast::ast::BlockItem::Statement(s) => {
                         rewrite_template_hook_body_args_stmt(s, lookup, locals)?;
                     }
-                    shape_ast::ast::BlockItem::Expression(e) => rewrite_template_hook_body_args_expr(e, lookup, locals)?,
+                    shape_ast::ast::BlockItem::Expression(e) => {
+                        rewrite_template_hook_body_args_expr(e, lookup, locals)?
+                    }
                     shape_ast::ast::BlockItem::VariableDecl(decl) => {
                         if let Some(init) = &mut decl.value {
                             rewrite_template_hook_body_args_expr(init, lookup, locals)?;
@@ -2247,8 +2256,12 @@ fn rewrite_template_hook_body_args_expr(
         | Expr::Await(inner, _)
         | Expr::Spread(inner, _)
         | Expr::AsyncScope(inner, _)
-        | Expr::Reference { expr: inner, .. } => rewrite_template_hook_body_args_expr(inner, lookup, locals)?,
-        Expr::Return(Some(inner), _) | Expr::Break(Some(inner), _) => rewrite_template_hook_body_args_expr(inner, lookup, locals)?,
+        | Expr::Reference { expr: inner, .. } => {
+            rewrite_template_hook_body_args_expr(inner, lookup, locals)?
+        }
+        Expr::Return(Some(inner), _) | Expr::Break(Some(inner), _) => {
+            rewrite_template_hook_body_args_expr(inner, lookup, locals)?
+        }
         Expr::For(for_expr, _) => {
             rewrite_template_hook_body_args_expr(&mut for_expr.iterable, lookup, locals)?;
             rewrite_template_hook_body_args_expr(&mut for_expr.body, lookup, locals)?;
@@ -2264,7 +2277,9 @@ fn rewrite_template_hook_body_args_expr(
                 rewrite_template_hook_body_args_expr(else_branch, lookup, locals)?;
             }
         }
-        Expr::Loop(loop_expr, _) => rewrite_template_hook_body_args_expr(&mut loop_expr.body, lookup, locals)?,
+        Expr::Loop(loop_expr, _) => {
+            rewrite_template_hook_body_args_expr(&mut loop_expr.body, lookup, locals)?
+        }
         Expr::Range { start, end, .. } => {
             if let Some(s) = start {
                 rewrite_template_hook_body_args_expr(s, lookup, locals)?;
@@ -2337,8 +2352,18 @@ mod template_hook_body_rewrite_tests {
         // unspellable arity-1 nocapture forwarder (structural transport — an
         // empty array has no element to prove a type from).
         match stmt {
-            Statement::Expression(Expr::FunctionCall { ref name, ref args, .. }, _)
-            | Statement::Return(Some(Expr::FunctionCall { ref name, ref args, .. }), _) => {
+            Statement::Expression(
+                Expr::FunctionCall {
+                    ref name, ref args, ..
+                },
+                _,
+            )
+            | Statement::Return(
+                Some(Expr::FunctionCall {
+                    ref name, ref args, ..
+                }),
+                _,
+            ) => {
                 assert_eq!(name, BEFORE_HOOK_NOCAPTURE_FORWARDER);
                 assert_eq!(args.len(), 1, "the empty captures array was dropped");
             }
@@ -2356,8 +2381,18 @@ mod template_hook_body_rewrite_tests {
         let lookup = |name: &str| (name == "my_hook").then(|| fixture_def("my_hook"));
         rewrite_template_hook_body_args(&mut stmt, &lookup).expect("rewrite passes");
         match stmt {
-            Statement::Expression(Expr::FunctionCall { ref name, ref args, .. }, _)
-            | Statement::Return(Some(Expr::FunctionCall { ref name, ref args, .. }), _) => {
+            Statement::Expression(
+                Expr::FunctionCall {
+                    ref name, ref args, ..
+                },
+                _,
+            )
+            | Statement::Return(
+                Some(Expr::FunctionCall {
+                    ref name, ref args, ..
+                }),
+                _,
+            ) => {
                 assert_eq!(name, "before_hook");
                 assert_eq!(args.len(), 2);
             }
@@ -2464,8 +2499,7 @@ mod template_hook_body_rewrite_tests {
             .body;
         let mut stmt = expr.into_iter().next().expect("one body statement");
         let lookup = |name: &str| (name == "h").then(|| fixture_def("h"));
-        rewrite_template_hook_body_args(&mut stmt, &lookup)
-            .expect("nested call position rewrites");
+        rewrite_template_hook_body_args(&mut stmt, &lookup).expect("nested call position rewrites");
         let rendered = format!("{stmt:?}");
         assert!(
             rendered.contains("Int(0)") && !rendered.contains("Identifier(\"h\""),
@@ -2563,6 +2597,7 @@ pub(crate) fn execute_comptime_with_context(
         where_clause: None,
         is_async: false,
         is_comptime: false,
+        effect_row: None,
     };
 
     let mut items = comptime_builtin_forwarders();
@@ -3282,6 +3317,7 @@ pub(crate) fn execute_comptime_with_annotation_handler(
         where_clause: None,
         is_async: false,
         is_comptime: false,
+        effect_row: None,
     };
 
     let mut items = comptime_builtin_forwarders();

@@ -103,6 +103,7 @@ fn callable(parameter: FunctionParam) -> TypeAnnotation {
     TypeAnnotation::Function {
         params: vec![parameter],
         returns: Box::new(TypeAnnotation::Basic("int".to_string())),
+        effects: None,
     }
 }
 

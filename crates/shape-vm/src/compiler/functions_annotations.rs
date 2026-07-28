@@ -528,7 +528,12 @@ impl BytecodeCompiler {
             Expr::PropertyAccess { object, .. } => {
                 Self::collect_config_arg_value_names(object, names);
             }
-            Expr::MethodCall { receiver, args, named_args, .. } => {
+            Expr::MethodCall {
+                receiver,
+                args,
+                named_args,
+                ..
+            } => {
                 Self::collect_config_arg_value_names(receiver, names);
                 for arg in args {
                     Self::collect_config_arg_value_names(arg, names);
@@ -537,8 +542,18 @@ impl BytecodeCompiler {
                     Self::collect_config_arg_value_names(value, names);
                 }
             }
-            Expr::FunctionCall { const_args, args, named_args, .. }
-            | Expr::QualifiedFunctionCall { const_args, args, named_args, .. } => {
+            Expr::FunctionCall {
+                const_args,
+                args,
+                named_args,
+                ..
+            }
+            | Expr::QualifiedFunctionCall {
+                const_args,
+                args,
+                named_args,
+                ..
+            } => {
                 for arg in const_args {
                     Self::collect_config_arg_value_names(arg, names);
                 }
@@ -831,9 +846,7 @@ impl BytecodeCompiler {
                 .value
                 .as_ref()
                 .and_then(Self::hook_constructor_hint_in_expr),
-            Statement::Assignment(assign, _) => {
-                Self::hook_constructor_hint_in_expr(&assign.value)
-            }
+            Statement::Assignment(assign, _) => Self::hook_constructor_hint_in_expr(&assign.value),
             Statement::If(if_stmt, _) => if_stmt
                 .then_body
                 .iter()
@@ -881,11 +894,7 @@ impl BytecodeCompiler {
                         Some(parent) => Self::qualify_module_symbol(parent, &module.name),
                         None => module.name.clone(),
                     };
-                    Self::collect_pre_pass_ast_function_defs(
-                        &module.items,
-                        Some(&nested),
-                        table,
-                    );
+                    Self::collect_pre_pass_ast_function_defs(&module.items, Some(&nested), table);
                 }
                 _ => {}
             }
@@ -1213,7 +1222,9 @@ impl BytecodeCompiler {
             TypeAnnotation::Object(fields) => fields
                 .iter()
                 .any(|field| Self::annotation_type_is_unknown(&field.type_annotation)),
-            TypeAnnotation::Function { params, returns } => {
+            TypeAnnotation::Function {
+                params, returns, ..
+            } => {
                 params
                     .iter()
                     .any(|param| Self::annotation_type_is_unknown(&param.type_annotation))
@@ -2824,22 +2835,21 @@ impl BytecodeCompiler {
                         // S4c: entry-minted sugar body fns resolve FIRST.
                         let function_defs = &self.function_defs;
                         let sugar_body_fns = &entry.sugar_body_fns;
-                        let template_body_fn_lookup =
-                            move |name: &str| -> Option<FunctionDef> {
-                                sugar_body_fns
-                                    .iter()
-                                    .find(|def| def.name == name)
-                                    .cloned()
-                                    .or_else(|| function_defs.get(name).cloned())
-                                    .or_else(|| {
-                                        function_defs
-                                            .get(&Self::qualify_module_symbol(
-                                                handler_module_path,
-                                                name,
-                                            ))
-                                            .cloned()
-                                    })
-                            };
+                        let template_body_fn_lookup = move |name: &str| -> Option<FunctionDef> {
+                            sugar_body_fns
+                                .iter()
+                                .find(|def| def.name == name)
+                                .cloned()
+                                .or_else(|| function_defs.get(name).cloned())
+                                .or_else(|| {
+                                    function_defs
+                                        .get(&Self::qualify_module_symbol(
+                                            handler_module_path,
+                                            name,
+                                        ))
+                                        .cloned()
+                                })
+                        };
                         // ADR-009 C3 #14 (slice 5, S5a) — the [C0931]
                         // Dec-65 config-arg pre-check: Err BEFORE execution
                         // so the pre-pass-limitation swallow below cannot
@@ -2936,8 +2946,7 @@ impl BytecodeCompiler {
                             } = &directive
                             {
                                 if let Some(func_def) = disc_target.function_def() {
-                                    let const_free =
-                                        !func_def.params.iter().any(|p| p.is_const);
+                                    let const_free = !func_def.params.iter().any(|p| p.is_const);
                                     // Slice-3 scope: top-level function targets only.
                                     // A module-NESTED function target would need
                                     // module-path-aware targeting of the analysis
@@ -2946,8 +2955,7 @@ impl BytecodeCompiler {
                                     // stays a pass-2 concern for now — no regression
                                     // (its C0911 quarantine is the pre-existing
                                     // state), just not-yet-materialized.
-                                    let top_level =
-                                        disc_target.lexical_module_path().is_none();
+                                    let top_level = disc_target.lexical_module_path().is_none();
                                     // Materialize ONLY closure-bearing replacements:
                                     // pre-analysis materialization exists to publish
                                     // a replacement closure's structural inference
@@ -2959,8 +2967,11 @@ impl BytecodeCompiler {
                                     // "legacy route untouched" control). Same walk
                                     // the stamping uses, so detection and stamping
                                     // agree.
-                                    let carries_closure = !shape_ast::transform::
-                                        generated_closure_source_paths(body, &[])
+                                    let carries_closure =
+                                        !shape_ast::transform::generated_closure_source_paths(
+                                            body,
+                                            &[],
+                                        )
                                         .is_empty();
                                     // Record ONE edit per target: a second
                                     // `replace body` on the same function is the
@@ -2973,10 +2984,7 @@ impl BytecodeCompiler {
                                         .pending_replace_body_analysis
                                         .iter()
                                         .any(|edit| edit.target_name() == func_def.name);
-                                    if const_free
-                                        && top_level
-                                        && carries_closure
-                                        && !already_edited
+                                    if const_free && top_level && carries_closure && !already_edited
                                     {
                                         let checked = self.build_checked_replace_body(
                                             func_def,
@@ -3766,7 +3774,9 @@ impl BytecodeCompiler {
                 other => stamped.push(other),
             }
         }
-        Ok(super::comptime_fragments::CheckedModule::new(stamped, exports))
+        Ok(super::comptime_fragments::CheckedModule::new(
+            stamped, exports,
+        ))
     }
 
     /// ADR-009 E2 #18 (slice 3): build the typed `CheckedReplaceBody` for a
@@ -3846,6 +3856,7 @@ impl BytecodeCompiler {
             where_clause: target.where_clause.clone(),
             is_async: target.is_async,
             is_comptime: target.is_comptime,
+            effect_row: None,
         };
 
         // Reserve the shadow's hygienic identity, JOURNALED through the open
@@ -5046,6 +5057,7 @@ fn main() -> int { generated_flag() }
             let span = match tp {
                 shape_ast::ast::TypeParam::Type { span, .. } => *span,
                 shape_ast::ast::TypeParam::Const { span, .. } => *span,
+                shape_ast::ast::TypeParam::Effect { span, .. } => *span,
             };
             assert_eq!(
                 span,

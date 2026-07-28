@@ -283,6 +283,7 @@ fn closure_use_spans(closure: &GeneratedClosureSourcePath, name: &str) -> Vec<Sp
         annotations: Vec::new(),
         is_async: false,
         is_comptime: false,
+        effect_row: None,
     };
     let outer_vars = [name.to_string()];
     let analysis = EnvironmentAnalyzer::analyze_function_captures(&function, &outer_vars);

@@ -96,6 +96,7 @@ fn semantic_conversion_refuses_tyvar_annotations_at_every_depth() {
                 type_annotation: marker.clone(),
             }],
             returns: Box::new(TypeAnnotation::Basic("int".to_string())),
+            effects: None,
         },
         TypeAnnotation::Union(vec![marker.clone()]),
         TypeAnnotation::Intersection(vec![marker.clone()]),

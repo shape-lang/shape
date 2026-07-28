@@ -324,13 +324,9 @@ f(3)
         Some(CaptureTarget::ModuleBinding(_))
     ));
     assert!(!c.shared_module_bindings.is_empty());
-    assert!(c
-        .program
-        .instructions
-        .iter()
-        .any(|instruction| {
-            instruction.opcode == crate::bytecode::OpCode::AllocSharedModuleBinding
-        }));
+    assert!(c.program.instructions.iter().any(|instruction| {
+        instruction.opcode == crate::bytecode::OpCode::AllocSharedModuleBinding
+    }));
 }
 
 #[test]

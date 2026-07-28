@@ -295,6 +295,7 @@ fn collect_function_expr_capture_operands(
         where_clause: None,
         is_async: false,
         is_comptime: false,
+        effect_row: None,
     };
 
     let mut captured_vars =

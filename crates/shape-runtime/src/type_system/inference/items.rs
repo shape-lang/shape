@@ -1368,7 +1368,11 @@ impl TypeInferenceEngine {
                     .map(Self::type_from_annotation_preserving_tyvars)
                     .collect(),
             },
-            TypeAnnotation::Function { params, returns } => Type::Function {
+            TypeAnnotation::Function {
+                params,
+                returns,
+                effects,
+            } => Type::Function {
                 params: params
                     .iter()
                     .map(|param| {
@@ -1376,7 +1380,14 @@ impl TypeInferenceEngine {
                     })
                     .collect(),
                 returns: Box::new(Self::type_from_annotation_preserving_tyvars(returns)),
-                effects: EffectRow::Unproven,
+                // ADR-014 §8.1: the declared row is a component of the type.
+                // An unresolvable atom name would be a purity-relevant lie, so
+                // a bad row degrades to the proof gap rather than to `{}`.
+                effects: crate::type_system::effects::resolve_optional_row_annotation(
+                    effects.as_ref(),
+                    crate::type_system::effects::EffectStage::Runtime,
+                )
+                .unwrap_or(EffectRow::Unproven),
             },
             other => Type::Concrete(other.clone()),
         }
@@ -1475,7 +1486,9 @@ impl TypeInferenceEngine {
                     args: resolved_args,
                 }
             }
-            TypeAnnotation::Function { params, returns } => {
+            TypeAnnotation::Function {
+                params, returns, ..
+            } => {
                 let param_types: Vec<_> = params
                     .iter()
                     .map(|p| self.resolve_type_annotation(&p.type_annotation))
@@ -1836,6 +1849,7 @@ impl TypeInferenceEngine {
             is_async: method.is_async,
             is_comptime: false,
             where_clause: None,
+            effect_row: None,
         })
     }
 
@@ -1907,7 +1921,11 @@ impl TypeInferenceEngine {
                     })
                     .collect(),
             ),
-            TypeAnnotation::Function { params, returns } => TypeAnnotation::Function {
+            TypeAnnotation::Function {
+                params,
+                returns,
+                effects,
+            } => TypeAnnotation::Function {
                 params: params
                     .into_iter()
                     .map(|mut param| {
@@ -1924,6 +1942,10 @@ impl TypeInferenceEngine {
                     self_ann,
                     trait_type_args,
                 )),
+                // ADR-014 §8.1: an impl's actual row must be a subset of the
+                // trait's declared row. Substituting `Self` does not change
+                // either, so the annotation's row is preserved verbatim.
+                effects: effects.clone(),
             },
             TypeAnnotation::Union(items) => TypeAnnotation::Union(
                 items

@@ -369,7 +369,9 @@ pub fn annotation_contains_reserved_type_var_carrier(annotation: &TypeAnnotation
         TypeAnnotation::Object(fields) => {
             fields.iter().any(|field| contains(&field.type_annotation))
         }
-        TypeAnnotation::Function { params, returns } => {
+        TypeAnnotation::Function {
+            params, returns, ..
+        } => {
             params
                 .iter()
                 .any(|parameter| contains(&parameter.type_annotation))

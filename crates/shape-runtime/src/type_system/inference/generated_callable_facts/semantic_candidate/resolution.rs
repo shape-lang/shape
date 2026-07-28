@@ -47,7 +47,9 @@ fn annotation_is_semantically_resolved(annotation: &TypeAnnotation, allow_declar
         TypeAnnotation::Object(fields) => fields.iter().all(|field| {
             annotation_is_semantically_resolved(&field.type_annotation, allow_declared)
         }),
-        TypeAnnotation::Function { params, returns } => {
+        TypeAnnotation::Function {
+            params, returns, ..
+        } => {
             params.iter().all(|param| {
                 annotation_is_semantically_resolved(&param.type_annotation, allow_declared)
             }) && annotation_is_semantically_resolved(returns, allow_declared)

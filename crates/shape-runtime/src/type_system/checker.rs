@@ -587,7 +587,9 @@ impl TypeChecker {
             TypeAnnotation::Object(fields) => fields
                 .iter()
                 .any(|field| self.references_type(&field.type_annotation, name)),
-            TypeAnnotation::Function { params, returns } => {
+            TypeAnnotation::Function {
+                params, returns, ..
+            } => {
                 params
                     .iter()
                     .any(|param| self.references_type(&param.type_annotation, name))

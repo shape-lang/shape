@@ -54,8 +54,8 @@ fn install_compiled_annotation(
                 .iter()
                 .find(|handler| handler.handler_type == AnnotationHandlerType::ComptimePost)
                 .cloned(),
-        sugar_post_handler: None,
-        sugar_body_fns: Vec::new(),
+            sugar_post_handler: None,
+            sugar_body_fns: Vec::new(),
             allowed_targets: definition.allowed_targets.clone().unwrap_or_default(),
         },
     );
@@ -192,11 +192,7 @@ pub annotation same() on type {
         );
         let mut compiler = BytecodeCompiler::new();
         compiler
-            .compile_with_graph_and_prelude_in_place(
-                &root,
-                std::sync::Arc::new(graph),
-                &[],
-            )
+            .compile_with_graph_and_prelude_in_place(&root, std::sync::Arc::new(graph), &[])
             .expect("the local tombstone prevents both remote handlers from running");
         assert!(
             compiler.imported_annotations.get("same").is_none(),
@@ -209,11 +205,9 @@ pub annotation same() on type {
                 .keys()
                 .map(String::as_str)
                 .collect::<std::collections::BTreeSet<_>>(),
-            std::collections::BTreeSet::from([
-                "pkg::explicit::same",
-                "same",
-                "std::prelude::same",
-            ]),
+            std::collections::BTreeSet::from(
+                ["pkg::explicit::same", "same", "std::prelude::same",]
+            ),
             "all three exact declaration carriers must survive without alias publication"
         );
         assert_eq!(

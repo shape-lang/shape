@@ -71,6 +71,7 @@ use crate::compiler::{BindingConcreteFact, BindingConcreteFactSource};
 use shape_ast::Spanned;
 use shape_ast::ast::{Expr, Span, Statement, TypeAnnotation};
 use shape_runtime::type_system::Type;
+use shape_runtime::type_system::effects::EffectRow;
 use shape_value::v2::ConcreteType;
 use shape_value::v2::concrete_type::ClosureTypeId;
 use std::collections::HashMap;
@@ -1164,6 +1165,7 @@ fn resolve_with_closure_return_inference(
         let Some(TypeAnnotation::Function {
             params: cparam_anns,
             returns: ret_ann,
+            ..
         }) = param.type_annotation.as_ref()
         else {
             continue;
@@ -1511,7 +1513,9 @@ fn annotation_mentions_any(annotation: &TypeAnnotation, generics: &[&str]) -> bo
         TypeAnnotation::Generic { args, .. } => {
             args.iter().any(|a| annotation_mentions_any(a, generics))
         }
-        TypeAnnotation::Function { params, returns } => {
+        TypeAnnotation::Function {
+            params, returns, ..
+        } => {
             params
                 .iter()
                 .any(|p| annotation_mentions_any(&p.type_annotation, generics))
@@ -1561,7 +1565,9 @@ fn inference_type_contains_unresolved_vars(ty: &Type) -> bool {
             inference_type_contains_unresolved_vars(&base)
                 || args.iter().any(inference_type_contains_unresolved_vars)
         }
-        Type::Function { params, returns } => {
+        Type::Function {
+            params, returns, ..
+        } => {
             params.iter().any(inference_type_contains_unresolved_vars)
                 || inference_type_contains_unresolved_vars(&returns)
         }
@@ -1763,10 +1769,13 @@ fn unify_annotation_with_inference_type(
                 }
             }
         }
-        TypeAnnotation::Function { params, returns } => match actual {
+        TypeAnnotation::Function {
+            params, returns, ..
+        } => match actual {
             Type::Function {
                 params: actual_params,
                 returns: actual_returns,
+                ..
             } if actual_params.len() == params.len() => {
                 params
                     .iter()
@@ -1791,6 +1800,7 @@ fn unify_annotation_with_inference_type(
             Type::Concrete(TypeAnnotation::Function {
                 params: actual_params,
                 returns: actual_returns,
+                ..
             }) if actual_params.len() == params.len() => {
                 params
                     .iter()
@@ -1942,10 +1952,7 @@ fn unify_annotation_with_concrete(
                 .all(|(ann, ct)| unify_annotation_with_concrete(ann, ct, generics, bindings)),
             _ => !items.iter().any(|t| annotation_mentions_any(t, generics)),
         },
-        TypeAnnotation::Function {
-            params: _,
-            returns: _,
-        } => {
+        TypeAnnotation::Function { .. } => {
             // Phase 1 represents closures as opaque
             // `ConcreteType::Closure(_)` / `ConcreteType::Function(_)` —
             // there's no nested type info to peel apart. We therefore can't
@@ -3959,6 +3966,7 @@ mod tests {
                 })
                 .collect(),
             returns: Box::new(returns),
+            effects: None,
         }
     }
 
@@ -4045,6 +4053,7 @@ mod tests {
             annotations: Vec::new(),
             is_async: false,
             is_comptime: false,
+            effect_row: None,
         }
     }
 
@@ -4091,6 +4100,7 @@ mod tests {
         Type::Function {
             params,
             returns: Box::new(returns),
+            effects: EffectRow::Unproven,
         }
     }
 
@@ -4179,6 +4189,7 @@ mod tests {
             Type::Function {
                 params: vec![fact_generic("Array", vec![fact_basic("int")])],
                 returns: Box::new(fact_basic("void")),
+                effects: EffectRow::Unproven,
             },
         );
         install_inference_facts(&mut compiler, top_level_types, HashMap::new());

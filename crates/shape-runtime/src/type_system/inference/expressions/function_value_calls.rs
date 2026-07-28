@@ -37,6 +37,7 @@ impl TypeInferenceEngine {
             Type::Concrete(TypeAnnotation::Function {
                 params: concrete_params,
                 returns: concrete_returns,
+                ..
             }) => {
                 let params = concrete_params
                     .iter()

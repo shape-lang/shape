@@ -89,8 +89,7 @@ pub(crate) fn canonical_primitive_spelling(primitive: FrozenPrimitive) -> Option
 /// rejection, in the same Any-erasure family as the B3
 /// `WITNESS_ERASED_TO_ANY_DIAGNOSTIC` (lowercase `any` stays the enabled Erased
 /// leaf; only capital `Any` is refused).
-pub(crate) const CALLABLE_PARAM_ERASED_TO_ANY_DIAGNOSTIC: &str =
-    "a callable's parameters are heterogeneous signature-indexed descriptors, not a \
+pub(crate) const CALLABLE_PARAM_ERASED_TO_ANY_DIAGNOSTIC: &str = "a callable's parameters are heterogeneous signature-indexed descriptors, not a \
      homogeneous Any collection: a parameter cannot be typed with the compiler-internal \
      Any top type (use a concrete per-position type; lowercase `any` is the enabled \
      Erased leaf)";
@@ -219,8 +218,7 @@ pub(crate) struct FrozenTypeIndex {
     /// answers the complete `FrozenNominal` from here; an un-applied generic
     /// head or an unsubstituted applied form has NO entry and is a named
     /// rejection. Symmetric with [`Self::frozen_callable_descriptors`].
-    pub(crate) frozen_nominal_descriptors:
-        HashMap<FrozenTypeIdentity, payloads::NominalDescriptor>,
+    pub(crate) frozen_nominal_descriptors: HashMap<FrozenTypeIdentity, payloads::NominalDescriptor>,
     /// ADR-009 E5 CKPT-2 (A8-OUT): the static builtin-nominal declaration-shape
     /// template per builtin generic HEAD identity (`Array`, `Option`, `Result`,
     /// …). NOT a per-type freeze fact — it is STATIC builtin data, populated in
@@ -420,12 +418,14 @@ impl FrozenTypeIndex {
                     // A3 rejection.
                     Err(payloads::unapplied_generic_head_rejection())
                 } else if let Some(descriptor) =
-                    self.base_applied_nominals.get(&identity).and_then(|applied| {
-                        self.substituted_applied_nominal(
-                            applied.head_identity,
-                            &applied.arg_identities,
-                        )
-                    })
+                    self.base_applied_nominals
+                        .get(&identity)
+                        .and_then(|applied| {
+                            self.substituted_applied_nominal(
+                                applied.head_identity,
+                                &applied.arg_identities,
+                            )
+                        })
                 {
                     // ADR-009 E5 CKPT-2 (F2): a BASE-interned alias-of-applied
                     // (`type Ints = Array<int>`, `type PageOfInt = Page<int>`)
@@ -1238,7 +1238,9 @@ fn canonicalize_resolved(
             Ok(canonical)
         }
         TypeAnnotation::Object(fields) => canonical_record(fields, scope),
-        TypeAnnotation::Function { params, returns } => {
+        TypeAnnotation::Function {
+            params, returns, ..
+        } => {
             // The canonical descriptor embeds each parameter's FULL annotation
             // identity (the `reference:&h` wrapper included, so a borrowed
             // parameter is identity-distinct from a by-value one) plus `?` —
@@ -1451,8 +1453,7 @@ fn canonicalize_resolved(
                 // otherwise mint a witness-less "existential" — reject it
                 // rather than form a meaningless identity.
                 return Err(
-                    "existential descriptor package must bind at least one witness"
-                        .to_string(),
+                    "existential descriptor package must bind at least one witness".to_string(),
                 );
             }
             if super::existential::annotation_erases_witness_to_any(inner) {
@@ -1598,18 +1599,20 @@ fn canonical_record(
     let record_identity = canonical.identity;
     let record_fields = entries
         .iter()
-        .map(|(name, optional, type_identity)| payloads::RecordFieldDescriptor {
-            member: record_member_identity(record_identity, name),
-            type_identity: *type_identity,
-            optional: *optional,
-            // ADR-009 E5 CKPT-3: preserve the plain field name as a
-            // SPELL/REFLECT-ONLY freeze fact. `name` is NOT threaded into the
-            // identity descriptor string (`rendered`, above) NOR into
-            // `record_member_identity` — both stay byte-identical (the CKPT-0
-            // binding invariant). It is read only when spelling the record back
-            // (`reconstruct_type_annotation`) or reflecting its fields.
-            name: name.to_string(),
-        })
+        .map(
+            |(name, optional, type_identity)| payloads::RecordFieldDescriptor {
+                member: record_member_identity(record_identity, name),
+                type_identity: *type_identity,
+                optional: *optional,
+                // ADR-009 E5 CKPT-3: preserve the plain field name as a
+                // SPELL/REFLECT-ONLY freeze fact. `name` is NOT threaded into the
+                // identity descriptor string (`rendered`, above) NOR into
+                // `record_member_identity` — both stay byte-identical (the CKPT-0
+                // binding invariant). It is read only when spelling the record back
+                // (`reconstruct_type_annotation`) or reflecting its fields.
+                name: name.to_string(),
+            },
+        )
         .collect();
     canonical.record = Some(payloads::RecordDescriptor {
         fields: record_fields,
@@ -1957,8 +1960,9 @@ fn reserved_storage<'a>(
     let storage = slot
         .as_typed_object_storage()
         .ok_or_else(|| format!("received a null {label} value"))?;
-    let schema = shape_runtime::type_schema::lookup_schema_by_id_public(storage.schema_id as u32)
-        .ok_or_else(|| format!("could not resolve {label} schema id {}", storage.schema_id))?;
+    let schema =
+        shape_runtime::type_schema::lookup_schema_by_id_public(storage.schema_id as u32)
+            .ok_or_else(|| format!("could not resolve {label} schema id {}", storage.schema_id))?;
     if schema.name != expected_schema {
         return Err(format!(
             "expected {label}, got '{}' — only the compiler issues {label} values",
@@ -2002,9 +2006,11 @@ pub(crate) fn build_type_constructor_ref_heap_value(
     freeze: &FreezeOverlay,
 ) -> Result<HeapValue, String> {
     if head_identity == FrozenTypeIdentity::INVALID {
-        return Err("type_constructor received an unknown semantic type identity: the name is \
+        return Err(
+            "type_constructor received an unknown semantic type identity: the name is \
                     not a frozen nominal type constructor in this compilation unit"
-            .to_string());
+                .to_string(),
+        );
     }
     let category = freeze.category_of(head_identity)?;
     if category != FrozenTypeCategory::Nominal {
@@ -2074,8 +2080,10 @@ pub(crate) fn build_representation_access_slot(
     freeze: &FreezeOverlay,
 ) -> Result<KindedSlot, String> {
     if identity == FrozenTypeIdentity::INVALID {
-        return Err("RepresentationAccess cannot be minted for an unknown semantic type identity"
-            .to_string());
+        return Err(
+            "RepresentationAccess cannot be minted for an unknown semantic type identity"
+                .to_string(),
+        );
     }
     // Re-validate the identity is one the freeze actually issued: `category_of`
     // errors on an identity the freeze never minted, so a fabricated identity
@@ -2094,7 +2102,9 @@ pub(crate) fn build_representation_access_slot(
 /// (schema-name-checked). A slot that is not a genuine compiler-issued
 /// `RepresentationAccess` — a bare int/bool, a `FrozenType`, an arbitrary object
 /// — is the named R6 authority rejection.
-fn representation_access_identity_from_ref(slot: &KindedSlot) -> Result<FrozenTypeIdentity, String> {
+fn representation_access_identity_from_ref(
+    slot: &KindedSlot,
+) -> Result<FrozenTypeIdentity, String> {
     let (schema, storage) = reserved_storage(
         slot,
         COMPTIME_REPRESENTATION_ACCESS_SCHEMA,
@@ -2140,8 +2150,11 @@ pub(crate) fn frozen_type_from_repr_ref(
 fn arg_identity_from_storage(storage: &TypedObjectStorage) -> Result<FrozenTypeIdentity, String> {
     let schema = shape_runtime::type_schema::lookup_schema_by_id_public(storage.schema_id as u32)
         .ok_or_else(|| {
-            format!("could not resolve apply-argument schema id {}", storage.schema_id)
-        })?;
+        format!(
+            "could not resolve apply-argument schema id {}",
+            storage.schema_id
+        )
+    })?;
     if schema.name != COMPTIME_FROZEN_TYPE_REF_SCHEMA {
         return Err(format!(
             "apply arguments must be checked type_ref / const_arg values, got '{}' — untyped \
@@ -2205,7 +2218,8 @@ fn read_arg_identity_array(slot: &KindedSlot) -> Result<Vec<FrozenTypeIdentity>,
         let mut out = Vec::with_capacity((len / 2) as usize);
         let mut i = 0;
         while i < len {
-            let high = TypedArray::get(ptr, i).ok_or("AppliedType arg identity read out of range")?;
+            let high =
+                TypedArray::get(ptr, i).ok_or("AppliedType arg identity read out of range")?;
             let low =
                 TypedArray::get(ptr, i + 1).ok_or("AppliedType arg identity read out of range")?;
             out.push(FrozenTypeIdentity { high, low });
@@ -2292,9 +2306,11 @@ pub(crate) fn apply_to_constructor(
 
     // Decode the argument array element-by-element from borrowed storages.
     if args_array.kind() != NativeKind::Ptr(HeapKind::TypedArray) {
-        return Err("apply expects its arguments as a checked array of type_ref / const_arg \
+        return Err(
+            "apply expects its arguments as a checked array of type_ref / const_arg \
                     values"
-            .to_string());
+                .to_string(),
+        );
     }
     let array_ptr = args_array.raw() as *const TypedArray<*const TypedObjectStorage>;
     if array_ptr.is_null() {
@@ -2307,8 +2323,8 @@ pub(crate) fn apply_to_constructor(
     unsafe {
         let len = TypedArray::len(array_ptr);
         for i in 0..len {
-            let elem = TypedArray::get(array_ptr, i)
-                .ok_or("apply argument array read out of range")?;
+            let elem =
+                TypedArray::get(array_ptr, i).ok_or("apply argument array read out of range")?;
             if elem.is_null() {
                 return Err("apply received a null argument".to_string());
             }

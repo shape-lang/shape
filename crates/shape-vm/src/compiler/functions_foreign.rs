@@ -796,7 +796,9 @@ impl BytecodeCompiler {
                 args.iter().find_map(Self::deprecated_ctype_alias_in)
             }
             TypeAnnotation::Array(inner) => Self::deprecated_ctype_alias_in(inner),
-            TypeAnnotation::Function { params, returns } => params
+            TypeAnnotation::Function {
+                params, returns, ..
+            } => params
                 .iter()
                 .find_map(|p| Self::deprecated_ctype_alias_in(&p.type_annotation))
                 .or_else(|| Self::deprecated_ctype_alias_in(returns)),
@@ -927,7 +929,9 @@ impl BytecodeCompiler {
                     Some(format!("cmut<{inner}>"))
                 }
             }
-            TypeAnnotation::Function { params, returns } if !is_return => {
+            TypeAnnotation::Function {
+                params, returns, ..
+            } if !is_return => {
                 let mut callback_params = Vec::with_capacity(params.len());
                 for param in params {
                     callback_params.push(Self::native_ctype_from_annotation(

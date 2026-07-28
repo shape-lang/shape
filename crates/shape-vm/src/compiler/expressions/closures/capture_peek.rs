@@ -40,6 +40,7 @@ impl BytecodeCompiler {
             where_clause: None,
             is_async: false,
             is_comptime: false,
+            effect_row: None,
         };
 
         let outer_vars = self.collect_outer_scope_vars();

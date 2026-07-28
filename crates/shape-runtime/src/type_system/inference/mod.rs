@@ -4103,7 +4103,11 @@ impl TypeInferenceEngine {
                     .map(Self::callsite_type_from_annotation_preserving_tyvars)
                     .collect(),
             },
-            TypeAnnotation::Function { params, returns } => Type::Function {
+            TypeAnnotation::Function {
+                params,
+                returns,
+                effects,
+            } => Type::Function {
                 params: params
                     .iter()
                     .map(|param| {
@@ -4115,7 +4119,14 @@ impl TypeInferenceEngine {
                 returns: Box::new(Self::callsite_type_from_annotation_preserving_tyvars(
                     returns,
                 )),
-                effects: EffectRow::Unproven,
+                // ADR-014 §8.1: the declared row is a component of the type.
+                // An unresolvable atom name would be a purity-relevant lie, so
+                // a bad row degrades to the proof gap rather than to `{}`.
+                effects: crate::type_system::effects::resolve_optional_row_annotation(
+                    effects.as_ref(),
+                    crate::type_system::effects::EffectStage::Runtime,
+                )
+                .unwrap_or(EffectRow::Unproven),
             },
             TypeAnnotation::Object(fields) => Type::Concrete(TypeAnnotation::Object(
                 fields
@@ -4230,7 +4241,11 @@ impl TypeInferenceEngine {
                     })
                     .collect(),
             ),
-            TypeAnnotation::Function { params, returns } => TypeAnnotation::Function {
+            TypeAnnotation::Function {
+                params,
+                returns,
+                effects,
+            } => TypeAnnotation::Function {
                 params: params
                     .iter()
                     .map(|p| shape_ast::ast::FunctionParam {
@@ -4246,6 +4261,9 @@ impl TypeInferenceEngine {
                     returns,
                     substitutions,
                 )),
+                // Type substitution does not touch effects; the declared row
+                // rides through and closes at instantiation (ADR-014 §8.3).
+                effects: effects.clone(),
             },
             TypeAnnotation::Union(members) => TypeAnnotation::Union(
                 members

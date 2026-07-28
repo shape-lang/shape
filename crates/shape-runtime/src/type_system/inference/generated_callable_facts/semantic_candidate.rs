@@ -133,7 +133,9 @@ impl RecursiveCallableShape {
         path: &mut Vec<SemanticTypePathSegment>,
     ) -> Result<(), String> {
         match annotation {
-            TypeAnnotation::Function { params, returns } => {
+            TypeAnnotation::Function {
+                params, returns, ..
+            } => {
                 let parameters = params
                     .iter()
                     .map(|parameter| SemanticCallableParameterShape {
@@ -288,7 +290,9 @@ impl RecursiveCallableShape {
         visited: &mut BTreeSet<Vec<SemanticTypePathSegment>>,
     ) -> Result<(), String> {
         match annotation {
-            TypeAnnotation::Function { params, returns } => {
+            TypeAnnotation::Function {
+                params, returns, ..
+            } => {
                 self.validate_callable(params.len(), path, visited)?;
                 for (index, parameter) in params.iter().enumerate() {
                     path.push(SemanticTypePathSegment::CallableParameter(index_u16(

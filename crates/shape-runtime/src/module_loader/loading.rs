@@ -148,6 +148,7 @@ fn function_stub_for_builtin(function: &BuiltinFunctionDecl) -> FunctionDef {
         annotations: vec![],
         is_async: false,
         is_comptime: false,
+        effect_row: None,
     }
 }
 
@@ -537,6 +538,7 @@ pub(super) fn process_export_with_scope(
                     annotations: function.annotations.clone(),
                     is_async: function.is_async,
                     is_comptime: false,
+                    effect_row: None,
                 })),
             );
         }

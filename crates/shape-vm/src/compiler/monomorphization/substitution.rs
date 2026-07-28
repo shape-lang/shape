@@ -247,7 +247,11 @@ pub fn substitute_type_annotation(
                 .collect(),
         ),
 
-        TypeAnnotation::Function { params, returns } => TypeAnnotation::Function {
+        TypeAnnotation::Function {
+            params,
+            returns,
+            effects,
+        } => TypeAnnotation::Function {
             params: params
                 .iter()
                 .map(|p| FunctionParam {
@@ -257,6 +261,8 @@ pub fn substitute_type_annotation(
                 })
                 .collect(),
             returns: Box::new(substitute_type_annotation(returns, subs)),
+            // Type substitution leaves the row alone (ADR-014 §8.3).
+            effects: effects.clone(),
         },
 
         TypeAnnotation::Union(items) => TypeAnnotation::Union(
@@ -3122,6 +3128,7 @@ mod tests {
             annotations: vec![],
             is_async: false,
             is_comptime: false,
+            effect_row: None,
         }
     }
 
@@ -3289,6 +3296,7 @@ mod tests {
                             type_annotation: ref_t("T"),
                         }],
                         returns: Box::new(ref_t("U")),
+                        effects: None,
                     },
                 ),
             ],
@@ -3301,6 +3309,7 @@ mod tests {
             annotations: vec![],
             is_async: false,
             is_comptime: false,
+            effect_row: None,
         };
 
         let mut subs = HashMap::new();
@@ -3320,7 +3329,9 @@ mod tests {
 
         // f: (number) -> string
         match &mono.params[1].type_annotation {
-            Some(TypeAnnotation::Function { params, returns }) => {
+            Some(TypeAnnotation::Function {
+                params, returns, ..
+            }) => {
                 assert_eq!(params.len(), 1);
                 assert_eq!(
                     params[0].type_annotation,
@@ -3379,6 +3390,7 @@ mod tests {
             annotations: vec![],
             is_async: false,
             is_comptime: false,
+            effect_row: None,
         };
 
         let mut subs = HashMap::new();
@@ -3461,6 +3473,7 @@ mod tests {
             annotations: vec![],
             is_async: false,
             is_comptime: false,
+            effect_row: None,
         }
     }
 
@@ -3572,6 +3585,7 @@ mod tests {
             annotations: vec![],
             is_async: false,
             is_comptime: false,
+            effect_row: None,
         };
 
         let mut type_subs: HashMap<String, ConcreteType> = HashMap::new();
@@ -3637,6 +3651,7 @@ mod tests {
             annotations: vec![],
             is_async: false,
             is_comptime: false,
+            effect_row: None,
         };
         // Closure: `|x| x + 1`
         let closure_body = vec![Statement::Expression(
@@ -3689,6 +3704,7 @@ mod tests {
             annotations: vec![],
             is_async: false,
             is_comptime: false,
+            effect_row: None,
         };
         super::inline_closure_body_into_specialization(&mut spec, "f", &[], &[], &[], &[]).unwrap();
         assert_eq!(spec.name, "original_name");
@@ -3715,6 +3731,7 @@ mod tests {
             annotations: vec![],
             is_async: false,
             is_comptime: false,
+            effect_row: None,
         };
         super::inline_closure_body_into_specialization(
             &mut spec,
@@ -3772,6 +3789,7 @@ mod tests {
             annotations: vec![],
             is_async: false,
             is_comptime: false,
+            effect_row: None,
         };
         super::inline_closure_body_into_specialization(&mut spec, "f", &[], &[], &[], &[]).unwrap();
         // The `println(...)` call should be intact — its name was not `f`.
@@ -3810,6 +3828,7 @@ mod tests {
             annotations: vec![],
             is_async: false,
             is_comptime: false,
+            effect_row: None,
         }
     }
 

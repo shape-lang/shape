@@ -15,6 +15,85 @@ use shape_ast::ast::types::TypeAnnotation;
 
 use crate::identity::{CanonicalDigest, DigestWriter};
 
+/// A declared effect row as published in a base contract (ADR-014 §8.3).
+///
+/// The §8.3 schema-versus-fact distinction lives here. A generic declared
+/// contract is a SCHEMA and may publish [`NormalizedEffectRow::Param`]
+/// binders, exactly as it publishes type binders. A closed row FACT may not:
+/// [`NormalizedEffectRow::is_closed_fact`] is the predicate that separates
+/// them, and ADR-010 §13 requires every fact to pass it.
+///
+/// Atom names are sorted at construction. Nothing here iterates an unordered
+/// container, so the rendered row and the digest are stable across runs.
+#[derive(Clone, PartialEq, Eq, Hash, Debug, PartialOrd, Ord)]
+pub enum NormalizedEffectRow {
+    /// A closed row: sorted, deduplicated canonical atom names. The empty
+    /// vector is the explicit purity claim `! {}`.
+    Closed(Vec<String>),
+    /// An `effect F` binder. Legal in a published schema, never in a fact.
+    Param(String),
+    /// The declaration spelled no row. Distinct from `Closed(vec![])`: it is
+    /// the absence of a claim, not a claim of purity.
+    Undeclared,
+}
+
+impl NormalizedEffectRow {
+    /// Normalize a surface clause. Atom names are sorted and deduplicated so
+    /// `! {NetConnect, FsRead}` and `! {FsRead, NetConnect}` publish the same
+    /// contract, as ADR-014 §1's canonical-set requirement demands.
+    pub fn from_annotation(annotation: Option<&shape_ast::ast::EffectRowAnnotation>) -> Self {
+        use shape_ast::ast::EffectRowAnnotation as Ann;
+        match annotation {
+            None => NormalizedEffectRow::Undeclared,
+            Some(Ann::Atoms { names, .. }) => {
+                let mut sorted: Vec<String> = names.clone();
+                sorted.sort();
+                sorted.dedup();
+                NormalizedEffectRow::Closed(sorted)
+            }
+            Some(Ann::Param { name, .. }) => NormalizedEffectRow::Param(name.clone()),
+        }
+    }
+
+    /// True iff this row may appear in a persisted closed-row FACT
+    /// (ADR-010 §13: open rows close before materialization).
+    pub fn is_closed_fact(&self) -> bool {
+        matches!(self, NormalizedEffectRow::Closed(_))
+    }
+
+    /// The binder this row references, if it is one.
+    pub fn unbound_parameter(&self) -> Option<&str> {
+        match self {
+            NormalizedEffectRow::Param(name) => Some(name),
+            _ => None,
+        }
+    }
+
+    pub fn render(&self) -> String {
+        match self {
+            NormalizedEffectRow::Closed(atoms) => format!(" ! {{{}}}", atoms.join(", ")),
+            NormalizedEffectRow::Param(name) => format!(" ! {name}"),
+            NormalizedEffectRow::Undeclared => String::new(),
+        }
+    }
+}
+
+impl CanonicalDigest for NormalizedEffectRow {
+    fn write_canonical(&self, writer: &mut DigestWriter) {
+        match self {
+            NormalizedEffectRow::Closed(atoms) => {
+                writer.u8(40);
+                writer.seq(atoms);
+            }
+            NormalizedEffectRow::Param(name) => {
+                writer.u8(41);
+                writer.str(name);
+            }
+            NormalizedEffectRow::Undeclared => writer.u8(42),
+        }
+    }
+}
+
 /// A canonicalized type as published in a base contract.
 #[derive(Clone, PartialEq, Eq, Hash, Debug, PartialOrd, Ord)]
 pub enum NormalizedType {
@@ -37,6 +116,10 @@ pub enum NormalizedType {
     Function {
         params: Vec<NormalizedType>,
         result: Box<NormalizedType>,
+        /// ADR-014 §8.1: the declared effect row is part of the contract, so
+        /// it is part of the normalized form and covered by the digest. Two
+        /// callables that differ only in row publish different contracts.
+        effects: NormalizedEffectRow,
     },
     Reference {
         mutable: bool,
@@ -99,14 +182,19 @@ impl NormalizedType {
                 .map(NormalizedType::render)
                 .collect::<Vec<_>>()
                 .join(" + "),
-            NormalizedType::Function { params, result } => format!(
-                "({}) => {}",
+            NormalizedType::Function {
+                params,
+                result,
+                effects,
+            } => format!(
+                "({}) => {}{}",
                 params
                     .iter()
                     .map(NormalizedType::render)
                     .collect::<Vec<_>>()
                     .join(", "),
-                result.render()
+                result.render(),
+                effects.render()
             ),
             NormalizedType::Reference { mutable, inner } => {
                 if *mutable {
@@ -161,7 +249,11 @@ fn normalize(annotation: &TypeAnnotation) -> NormalizedType {
             normalized.sort();
             NormalizedType::Object(normalized)
         }
-        TypeAnnotation::Function { params, returns } => NormalizedType::Function {
+        TypeAnnotation::Function {
+            params,
+            returns,
+            effects,
+        } => NormalizedType::Function {
             params: params
                 .iter()
                 .map(|param| {
@@ -174,6 +266,7 @@ fn normalize(annotation: &TypeAnnotation) -> NormalizedType {
                 })
                 .collect(),
             result: Box::new(normalize(returns)),
+            effects: NormalizedEffectRow::from_annotation(effects.as_ref()),
         },
         TypeAnnotation::Union(items) => {
             let mut normalized: Vec<NormalizedType> = items.iter().map(normalize).collect();
@@ -276,10 +369,15 @@ impl CanonicalDigest for NormalizedType {
                 writer.u8(15);
                 writer.seq(items);
             }
-            NormalizedType::Function { params, result } => {
+            NormalizedType::Function {
+                params,
+                result,
+                effects,
+            } => {
                 writer.u8(16);
                 writer.seq(params);
                 writer.nested(result.as_ref());
+                writer.nested(effects);
             }
             NormalizedType::Reference { mutable, inner } => {
                 writer.u8(17);

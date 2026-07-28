@@ -74,9 +74,8 @@ pub fn pure() -> int { 7 }
 
     for source in sources {
         let (root, graph) = dependency_graph(source);
-        let compiler = BytecodeCompiler::new().with_extensions(vec![
-            shape_runtime::stdlib::file::create_file_module(),
-        ]);
+        let compiler = BytecodeCompiler::new()
+            .with_extensions(vec![shape_runtime::stdlib::file::create_file_module()]);
         assert!(
             compiler.permission_set.is_none(),
             "fixture must exercise the default unbound policy"
@@ -105,7 +104,10 @@ pub fn pure() -> int { 7 }
                 blob.name
             );
         }
-        assert!(carrier.instructions.is_empty(), "carrier code must be empty");
+        assert!(
+            carrier.instructions.is_empty(),
+            "carrier code must be empty"
+        );
         assert!(carrier.constants.is_empty());
         assert!(carrier.strings.is_empty());
 

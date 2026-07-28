@@ -66,8 +66,7 @@ pub(crate) mod comptime_builtins;
 // and to list them for workspace symbols. Consumed via
 // `BytecodeCompiler::generated_symbol_query()`.
 pub use comptime_builtins::capture_plan::{
-    CaptureSiteRole, GENERATED_CAPTURE_ARTIFACT_CONFLICT_CODE,
-    GeneratedCaptureBindingIdentity,
+    CaptureSiteRole, GENERATED_CAPTURE_ARTIFACT_CONFLICT_CODE, GeneratedCaptureBindingIdentity,
     GeneratedCaptureDescriptorView, GeneratedCaptureOccurrenceIdentity, GeneratedCapturePosition,
     GeneratedCaptureQuery, GeneratedCaptureQueryIssue, GeneratedCaptureSemanticType,
     GeneratedCaptureSite, GeneratedCaptureSlot, GeneratedCaptureSourceMap,
@@ -88,14 +87,13 @@ pub use binding_storage_view::{BindingStorageDecision, BindingStorageTable};
 // projection (`BytecodeCompiler::hook_install_query`), never a text scan
 // and never a hand-written parallel table.
 pub use template_specialization::install_registry::HookInstallView;
-pub(crate) mod comptime_concrete;
-pub(crate) mod comptime_diagnostics;
-pub(crate) mod comptime_target;
-mod control_flow;
 mod body_analysis_authority;
 mod checked_body;
+pub(crate) mod comptime_concrete;
+pub(crate) mod comptime_diagnostics;
 mod comptime_fragments;
-mod template_specialization;
+pub(crate) mod comptime_target;
+mod control_flow;
 mod expressions;
 mod functions;
 mod functions_annotations;
@@ -120,6 +118,7 @@ pub(crate) mod post_inference_verify;
 mod reference_flow;
 mod statements;
 pub mod string_interpolation;
+mod template_specialization;
 mod trait_object_emission;
 
 /// Loop compilation context
@@ -1116,8 +1115,7 @@ pub struct BytecodeCompiler {
     /// Imported annotations: local_name -> ImportedAnnotationSymbol
     pub(crate) imported_annotations: HashMap<String, ImportedAnnotationSymbol>,
     /// Opaque evidence that annotation declaration installation completed.
-    annotation_declarations:
-        statements::annotation_declarations::AnnotationDeclarationState,
+    annotation_declarations: statements::annotation_declarations::AnnotationDeclarationState,
     /// R8 W8 Cluster A (2026-05-24): imported `pub const NAME = expr`
     /// initializers, keyed by the local binding name (alias-respecting).
     /// At identifier-load time, references to these names compile to an

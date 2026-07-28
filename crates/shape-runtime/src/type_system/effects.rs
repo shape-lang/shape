@@ -491,6 +491,29 @@ impl EffectRow {
             EffectRow::Unproven => "<underived>".to_string(),
         }
     }
+
+    /// Project back to a surface annotation, for round-tripping a type
+    /// through `TypeAnnotation`. A proof gap has no honest spelling, so it
+    /// projects to `None` — the same thing the source would have said by
+    /// omitting the clause — rather than to `! {}`.
+    pub fn to_annotation(&self) -> Option<shape_ast::ast::EffectRowAnnotation> {
+        use shape_ast::ast::EffectRowAnnotation as Ann;
+        match self {
+            EffectRow::Closed(row) => Some(Ann::Atoms {
+                names: row
+                    .canonical_atom_names()
+                    .into_iter()
+                    .map(str::to_string)
+                    .collect(),
+                span: Default::default(),
+            }),
+            EffectRow::Param(param) => Some(Ann::Param {
+                name: param.name().to_string(),
+                span: Default::default(),
+            }),
+            EffectRow::Unproven => None,
+        }
+    }
 }
 
 impl fmt::Display for EffectRow {
@@ -543,6 +566,61 @@ impl EffectSubstitution {
     /// Deterministic iteration: `BTreeMap` ordered by binder name.
     pub fn iter(&self) -> impl Iterator<Item = (&EffectParamRef, &ClosedEffectRow)> {
         self.bindings.iter()
+    }
+}
+
+/// Resolve a surface `!` clause into a row (ADR-014 §8.3).
+///
+/// Atom sets resolve against the closed catalog and an unrecognized name is
+/// an error, never an opaque carried atom — §1 has no open string effects.
+/// A binder reference resolves to [`EffectRow::Param`]; whether that binder is
+/// actually in scope is a separate check made where the scope is known
+/// ([`validate_binders_in_scope`]), because this function is called from
+/// conversions that do not carry a generic environment.
+pub fn resolve_row_annotation(
+    annotation: &shape_ast::ast::EffectRowAnnotation,
+    stage: EffectStage,
+) -> Result<EffectRow, EffectRowError> {
+    use shape_ast::ast::EffectRowAnnotation as Ann;
+    match annotation {
+        Ann::Atoms { names, .. } => {
+            let mut row = ClosedEffectRow::pure(stage);
+            for name in names {
+                let atom = EffectAtom::from_source_name(name)
+                    .ok_or_else(|| EffectRowError::UnknownAtom { name: name.clone() })?;
+                row.insert(atom)?;
+            }
+            Ok(EffectRow::Closed(row))
+        }
+        Ann::Param { name, .. } => Ok(EffectRow::param(name.clone())),
+    }
+}
+
+/// Resolve an optional clause. `None` means the source declared no row, which
+/// is a proof gap and NOT a purity claim — the distinction ADR-014 §8.2 draws
+/// between an omitted row and `! {}`.
+pub fn resolve_optional_row_annotation(
+    annotation: Option<&shape_ast::ast::EffectRowAnnotation>,
+    stage: EffectStage,
+) -> Result<EffectRow, EffectRowError> {
+    match annotation {
+        Some(ann) => resolve_row_annotation(ann, stage),
+        None => Ok(EffectRow::Unproven),
+    }
+}
+
+/// Check that every binder a row references is declared by an `effect` binder
+/// in scope. Returns the offending name if not.
+pub fn validate_binders_in_scope(row: &EffectRow, in_scope: &[String]) -> Result<(), String> {
+    match row {
+        EffectRow::Param(param) => {
+            if in_scope.iter().any(|name| name == param.name()) {
+                Ok(())
+            } else {
+                Err(param.name().to_string())
+            }
+        }
+        _ => Ok(()),
     }
 }
 

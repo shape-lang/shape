@@ -425,7 +425,10 @@ impl BytecodeCompiler {
     ) -> Option<shape_runtime::type_system::Type> {
         use shape_runtime::type_system::Type;
         let canonical = callable_ty.canonicalize();
-        let Type::Function { params, returns } = canonical else {
+        let Type::Function {
+            params, returns, ..
+        } = canonical
+        else {
             return None;
         };
         if let Some(expected) = arg_count
@@ -531,7 +534,9 @@ impl BytecodeCompiler {
             Type::Generic { base, args } => {
                 Self::type_contains_unknown(base) || args.iter().any(Self::type_contains_unknown)
             }
-            Type::Function { params, returns } => {
+            Type::Function {
+                params, returns, ..
+            } => {
                 params.iter().any(Self::type_contains_unknown)
                     || Self::type_contains_unknown(returns)
             }
@@ -555,7 +560,9 @@ impl BytecodeCompiler {
             TypeAnnotation::Object(fields) => fields
                 .iter()
                 .any(|field| Self::annotation_contains_unknown(&field.type_annotation)),
-            TypeAnnotation::Function { params, returns } => {
+            TypeAnnotation::Function {
+                params, returns, ..
+            } => {
                 params
                     .iter()
                     .any(|param| Self::annotation_contains_unknown(&param.type_annotation))

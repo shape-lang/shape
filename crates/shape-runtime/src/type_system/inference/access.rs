@@ -455,7 +455,11 @@ impl TypeInferenceEngine {
                     })
                     .collect(),
             ),
-            TypeAnnotation::Function { params, returns } => TypeAnnotation::Function {
+            TypeAnnotation::Function {
+                params,
+                returns,
+                effects,
+            } => TypeAnnotation::Function {
                 params: params
                     .iter()
                     .map(|param| shape_ast::ast::FunctionParam {
@@ -470,6 +474,7 @@ impl TypeInferenceEngine {
                 returns: Box::new(Self::substitute_type_params_in_annotation(
                     returns, bindings,
                 )),
+                effects: effects.clone(),
             },
             TypeAnnotation::Union(types) => TypeAnnotation::Union(
                 types
@@ -1685,6 +1690,7 @@ impl TypeInferenceEngine {
             Type::Concrete(TypeAnnotation::Function {
                 params: concrete_params,
                 returns: concrete_returns,
+                ..
             }) => {
                 // Decode tyvar markers back into real Variables so call-arg
                 // substitution can resolve them — e.g. a closure-valued object field

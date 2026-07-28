@@ -55,7 +55,7 @@ use std::marker::PhantomData;
 use shape_ast::ast::{CaptureClause, FunctionDef, TypeAnnotation, TypeParam};
 use shape_ast::error::{Result, ShapeError};
 
-use super::checked_body::{validate_capture_clause, BodySignature, Missing, Present};
+use super::checked_body::{BodySignature, Missing, Present, validate_capture_clause};
 use crate::compiler::template_specialization::const_lift;
 use crate::compiler::template_specialization::pseudo_tuple::validate_pseudo_tuple_uses;
 
@@ -582,7 +582,9 @@ fn classify_template_sig(
     let param = &func.params[0];
     let param_name = match param.simple_name() {
         Some(name)
-            if !param.is_const && !param.is_reference && !param.is_out
+            if !param.is_const
+                && !param.is_reference
+                && !param.is_out
                 && param.default_value.is_none() =>
         {
             name
@@ -860,8 +862,7 @@ mod tests {
     // annotation. The `{ args }` tail is the Proceed shorthand.
     #[test]
     fn before_hookdecision_return_classifies_as_polymorphic_decision() {
-        let func =
-            fn_def("fn my_decide<Args>(args: Args) -> HookDecision<Args> { args }");
+        let func = fn_def("fn my_decide<Args>(args: Args) -> HookDecision<Args> { args }");
         let template = CheckedTemplateBuilder::new(TemplateHookKind::Before)
             .body_fn(&func)
             .expect("decision before form classifies")
@@ -907,9 +908,8 @@ mod tests {
     // no-State remedy, never a silent no-op.
     #[test]
     fn before_hookdecision_state_form_surfaces_and_stops() {
-        let func = fn_def(
-            "fn my_decide<Args>(args: Args) -> HookDecision<Args, RetryState> { args }",
-        );
+        let func =
+            fn_def("fn my_decide<Args>(args: Args) -> HookDecision<Args, RetryState> { args }");
         let err = CheckedTemplateBuilder::new(TemplateHookKind::Before)
             .body_fn(&func)
             .expect("type-param shape passes body_fn()")
@@ -931,8 +931,7 @@ mod tests {
     // the body's own type parameter) is malformed for a decision hook.
     #[test]
     fn before_hookdecision_over_concrete_arg_is_malformed() {
-        let func =
-            fn_def("fn my_decide<Args>(args: Args) -> HookDecision<int> { args }");
+        let func = fn_def("fn my_decide<Args>(args: Args) -> HookDecision<int> { args }");
         let err = CheckedTemplateBuilder::new(TemplateHookKind::Before)
             .body_fn(&func)
             .expect("type-param shape passes body_fn()")
@@ -1235,7 +1234,10 @@ fn t<R>(result: R) -> R {
             .expect("polymorphic + trailing capture finishes");
         assert_eq!(template.arity(), 1);
         assert_eq!(template.capture_params().len(), 1);
-        assert!(matches!(template.sig(), TemplateSig::PolymorphicArgs { .. }));
+        assert!(matches!(
+            template.sig(),
+            TemplateSig::PolymorphicArgs { .. }
+        ));
     }
 
     // NEGATIVE: a bare-T trailing capture parameter is a named rejection —
@@ -1292,10 +1294,7 @@ fn t<R>(result: R) -> R {
         expect_reject_with_captures(
             TemplateHookKind::Before,
             "fn t(x: int) -> int { return x }",
-            vec![
-                entry(CaptureMode::Move, "a"),
-                entry(CaptureMode::Move, "b"),
-            ],
+            vec![entry(CaptureMode::Move, "a"), entry(CaptureMode::Move, "b")],
             "declares 1 value parameter(s) but 2 capture(s) are declared",
         );
     }
@@ -1338,11 +1337,14 @@ fn t<R>(result: R) -> R {
             "names the domain violation: {message}"
         );
         assert!(
-            message.contains("is a function type, and functions are never liftable (C3-G5 / Dec-95)"),
+            message
+                .contains("is a function type, and functions are never liftable (C3-G5 / Dec-95)"),
             "names the never-liftable functions class: {message}"
         );
         assert!(
-            message.contains(crate::compiler::template_specialization::const_lift::CONST_LIFT_DOMAIN_SENTENCE),
+            message.contains(
+                crate::compiler::template_specialization::const_lift::CONST_LIFT_DOMAIN_SENTENCE
+            ),
             "carries the closed-domain sentence: {message}"
         );
         assert!(

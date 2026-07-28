@@ -45,11 +45,7 @@ impl VirtualMachine {
     /// tearing down the VM.
     ///
     /// [`drop_errors`]: VirtualMachine::drop_errors
-    pub(crate) fn record_contained_drop_error(
-        &mut self,
-        type_name: Option<&str>,
-        err: &VMError,
-    ) {
+    pub(crate) fn record_contained_drop_error(&mut self, type_name: Option<&str>, err: &VMError) {
         let msg = match type_name {
             Some(tn) => format!("drop() for `{tn}` failed and was contained: {err}"),
             None => format!("drop() failed and was contained: {err}"),

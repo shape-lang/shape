@@ -377,7 +377,9 @@ impl<'a> TokenCollector<'a> {
                     Self::collect_type_annotation_identifiers(&field.type_annotation, out);
                 }
             }
-            TypeAnnotation::Function { params, returns } => {
+            TypeAnnotation::Function {
+                params, returns, ..
+            } => {
                 for param in params {
                     Self::collect_type_annotation_identifiers(&param.type_annotation, out);
                 }

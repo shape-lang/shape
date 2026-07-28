@@ -824,10 +824,12 @@ impl ConstraintSolver {
                 TypeAnnotation::Function {
                     params: p1,
                     returns: r1,
+                    ..
                 },
                 TypeAnnotation::Function {
                     params: p2,
                     returns: r2,
+                    ..
                 },
             ) => {
                 if p1.len() != p2.len() {
@@ -1467,6 +1469,7 @@ impl ConstraintSolver {
                     Type::Concrete(TypeAnnotation::Function {
                         params: actual_params,
                         returns: actual_returns,
+                        ..
                     }) => {
                         // Check parameter count matches
                         if expected_params.len() != actual_params.len() {
@@ -1742,10 +1745,12 @@ impl ConstraintSolver {
                 Type::Concrete(TypeAnnotation::Function {
                     params: p1,
                     returns: r1,
+                    ..
                 }),
                 Type::Concrete(TypeAnnotation::Function {
                     params: p2,
                     returns: r2,
+                    ..
                 }),
             ) => {
                 // Check parameter count
@@ -2007,6 +2012,7 @@ mod tests {
                 type_annotation: TypeAnnotation::Basic("int".to_string()),
             }],
             returns: Box::new(TypeAnnotation::Basic("int".to_string())),
+            effects: None,
         });
         // SB-2: the two Function encodings now FOLD to the single canonical
         // `Type::Function` carrier (exactly as the 4 Array encodings fold), so
@@ -2032,6 +2038,7 @@ mod tests {
                 type_annotation: TypeAnnotation::Basic("int".to_string()),
             }],
             returns: Box::new(TypeAnnotation::Basic("number".to_string())),
+            effects: None,
         });
         assert!(
             !solver.probe_equal(&fn_inference, &fn_concrete_ret_number),
@@ -2097,6 +2104,7 @@ mod tests {
                     type_annotation: TypeAnnotation::Basic("int".to_string()),
                 }],
                 returns: Box::new(TypeAnnotation::Basic(ret.to_string())),
+                effects: None,
             })
         };
         let inference_fn = |ret: Type| Type::function(vec![int()], ret);
@@ -2116,6 +2124,7 @@ mod tests {
 
         // Nested function (a (int)->int parameter) folds recursively.
         let concrete_hof = Type::Concrete(TypeAnnotation::Function {
+            effects: None,
             params: vec![FunctionParam {
                 name: None,
                 optional: false,
@@ -2126,6 +2135,7 @@ mod tests {
                         type_annotation: TypeAnnotation::Basic("int".to_string()),
                     }],
                     returns: Box::new(TypeAnnotation::Basic("int".to_string())),
+                    effects: None,
                 },
             }],
             returns: Box::new(TypeAnnotation::Basic("int".to_string())),
@@ -2551,6 +2561,7 @@ mod tests {
                 type_annotation: TypeAnnotation::Basic("number".to_string()),
             }],
             returns: Box::new(TypeAnnotation::Basic("string".to_string())),
+            effects: None,
         });
 
         let mut constraints = vec![(

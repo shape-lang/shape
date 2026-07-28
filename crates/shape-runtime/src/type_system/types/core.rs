@@ -349,13 +349,24 @@ impl Type {
                 ))),
                 args: args.iter().map(Self::canonicalize_annotation).collect(),
             },
-            TypeAnnotation::Function { params, returns } => Type::Function {
+            TypeAnnotation::Function {
+                params,
+                returns,
+                effects,
+            } => Type::Function {
                 params: params
                     .iter()
                     .map(|p| Self::canonicalize_annotation(&p.type_annotation))
                     .collect(),
                 returns: Box::new(Self::canonicalize_annotation(returns)),
-                effects: EffectRow::Unproven,
+                // ADR-014 §8.1: the declared row is a component of the type.
+                // An unresolvable atom name would be a purity-relevant lie, so
+                // a bad row degrades to the proof gap rather than to `{}`.
+                effects: crate::type_system::effects::resolve_optional_row_annotation(
+                    effects.as_ref(),
+                    crate::type_system::effects::EffectStage::Runtime,
+                )
+                .unwrap_or(EffectRow::Unproven),
             },
             other => Type::Concrete(other.clone()),
         }
@@ -386,7 +397,9 @@ impl Type {
             }
             Type::Constrained { .. } => None, // Cannot convert constrained type
             Type::Function {
-                params, returns, ..
+                params,
+                returns,
+                effects,
             } => {
                 let param_anns: Vec<_> = params
                     .iter()
@@ -404,6 +417,10 @@ impl Type {
                 Some(TypeAnnotation::Function {
                     params: param_anns,
                     returns: Box::new(ret_ann),
+                    // `to_annotation` renders a row only when one was proved;
+                    // a binder or a proof gap has no surface spelling that
+                    // would be honest here.
+                    effects: effects.to_annotation(),
                 })
             }
         }

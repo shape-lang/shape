@@ -119,7 +119,8 @@ pub(in crate::compiler) fn lower_typed_config_declarative_hooks(
             AnnotationHandlerType::OnDefine | AnnotationHandlerType::Metadata => continue,
             AnnotationHandlerType::Before | AnnotationHandlerType::After => {
                 validate_typed_surface_hook_params(definition, handler)?;
-                let minted = mint_hook_body_fn(compiler, definition, handler, index, &config_params);
+                let minted =
+                    mint_hook_body_fn(compiler, definition, handler, index, &config_params);
                 install_items.push(BlockItem::Expression(install_call_expr(
                     handler,
                     &minted.name,
@@ -331,8 +332,8 @@ fn validate_typed_surface_hook_params(
     definition: &AnnotationDef,
     handler: &AnnotationHandler,
 ) -> Result<(), SugarLoweringRejection> {
-    let magic_single = handler.params.len() == 1
-        && matches!(handler.params[0].name.as_str(), "fn" | "ctx");
+    let magic_single =
+        handler.params.len() == 1 && matches!(handler.params[0].name.as_str(), "fn" | "ctx");
     if handler.params.len() > 1 || magic_single || handler.params.iter().any(|p| p.is_variadic) {
         return Err(SugarLoweringRejection {
             message: format!(
@@ -400,7 +401,8 @@ fn mint_hook_body_fn(
     config_params: &[(String, TypeAnnotation)],
 ) -> FunctionDef {
     let nonce = stable_hook_nonce(&definition.name, &handler.handler_type, handler_index);
-    let fn_name = compiler.mint_hygienic_fn_name_stable(HygienicRole::AnnotationSugarHookBody, nonce);
+    let fn_name =
+        compiler.mint_hygienic_fn_name_stable(HygienicRole::AnnotationSugarHookBody, nonce);
 
     let mut params: Vec<FunctionParameter> = Vec::with_capacity(1 + config_params.len());
     let (type_params, return_type) = if let Some(sig_param) = handler.params.first() {
@@ -408,8 +410,8 @@ fn mint_hook_body_fn(
         // (before) / `fn <minted><R>(result: R, <config>) -> R` (after). The
         // pseudo-tuple face keys on the DECLARED param name, so the user's
         // spelling (`args` / `result` / any identifier) addresses it verbatim.
-        let type_param_name = compiler
-            .mint_hygienic_fn_name_stable(HygienicRole::AnnotationSugarTypeParam, nonce);
+        let type_param_name =
+            compiler.mint_hygienic_fn_name_stable(HygienicRole::AnnotationSugarTypeParam, nonce);
         params.push(FunctionParameter {
             pattern: DestructurePattern::Identifier(sig_param.name.clone(), handler.span),
             is_const: false,
@@ -475,6 +477,7 @@ fn mint_hook_body_fn(
         annotations: Vec::new(),
         is_async: false,
         is_comptime: false,
+        effect_row: None,
     }
 }
 
@@ -495,7 +498,9 @@ fn minted_hook_decision_return(
 ) -> Option<TypeAnnotation> {
     let extra_args: Vec<TypeAnnotation> = match declared {
         TypeAnnotation::Basic(name) if name == "HookDecision" => Vec::new(),
-        TypeAnnotation::Reference(path) if !path.is_qualified() && path.name() == "HookDecision" => {
+        TypeAnnotation::Reference(path)
+            if !path.is_qualified() && path.name() == "HookDecision" =>
+        {
             Vec::new()
         }
         TypeAnnotation::Generic { name, args }

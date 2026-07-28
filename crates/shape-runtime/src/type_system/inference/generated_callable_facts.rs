@@ -203,6 +203,7 @@ impl TypeInferenceEngine {
             where_clause: None,
             is_async: false,
             is_comptime: false,
+            effect_row: None,
         };
         let outer_names = self.env.visible_binding_names();
         let analysis = EnvironmentAnalyzer::analyze_function_captures(&function, &outer_names);

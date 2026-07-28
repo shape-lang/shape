@@ -391,8 +391,11 @@ impl ComptimeTarget {
             .collect();
         // E1 slice-5 R2+H1: parallel AST vec, LOCKSTEP with `params` (same
         // `func.params` iteration order/length).
-        let param_type_asts: Vec<Option<TypeAnnotation>> =
-            func.params.iter().map(|p| p.type_annotation.clone()).collect();
+        let param_type_asts: Vec<Option<TypeAnnotation>> = func
+            .params
+            .iter()
+            .map(|p| p.type_annotation.clone())
+            .collect();
 
         let return_type = func.return_type.as_ref().map(type_annotation_to_string);
         let return_type_ast = func.return_type.clone();
@@ -624,8 +627,10 @@ impl ComptimeTarget {
             .iter()
             .enumerate()
             .map(|(idx, (pname, ptype, is_const))| {
-                let identity =
-                    stamp_for(overlay, self.param_type_asts.get(idx).and_then(|a| a.as_ref()));
+                let identity = stamp_for(
+                    overlay,
+                    self.param_type_asts.get(idx).and_then(|a| a.as_ref()),
+                );
                 typed_object_for_named_schema(
                     "__ComptimeParamDescriptor",
                     &[
@@ -719,7 +724,9 @@ pub(crate) fn type_annotation_to_string(ta: &TypeAnnotation) -> String {
             .map(type_annotation_to_string)
             .collect::<Vec<_>>()
             .join(" & "),
-        TypeAnnotation::Function { params, returns } => {
+        TypeAnnotation::Function {
+            params, returns, ..
+        } => {
             let params_str = params
                 .iter()
                 .map(|p| type_annotation_to_string(&p.type_annotation))
@@ -764,7 +771,11 @@ pub(crate) fn type_annotation_to_string(ta: &TypeAnnotation) -> String {
         TypeAnnotation::Dyn(traits) => format!("dyn {}", traits.join(" + ")),
         // ADR-009 B3 (S1): existential descriptor package type.
         TypeAnnotation::Existential { witnesses, inner } => {
-            format!("exists<{}> {}", witnesses.join(", "), type_annotation_to_string(inner))
+            format!(
+                "exists<{}> {}",
+                witnesses.join(", "),
+                type_annotation_to_string(inner)
+            )
         }
     }
 }
@@ -798,6 +809,7 @@ mod tests {
             is_async: false,
             is_comptime: false,
             where_clause: None,
+            effect_row: None,
         };
 
         let target = ComptimeTarget::from_function(&func);
@@ -1079,6 +1091,7 @@ mod tests {
             is_async: false,
             is_comptime: false,
             where_clause: None,
+            effect_row: None,
         };
 
         let target = ComptimeTarget::from_function(&func);

@@ -90,8 +90,7 @@ use crate::compiler::comptime_fragments::checked_template::CheckedTemplate;
 /// The closed-domain sentence (C3-G5), carried VERBATIM by every ConstLift
 /// rejection producer — the lift arms, the declaration-site check, and the
 /// `checked_template` finish()-time wiring all embed this one constant.
-pub(in crate::compiler) const CONST_LIFT_DOMAIN_SENTENCE: &str =
-    "the ConstLift domain is int, number, bool, and string values, plus arrays, homogeneous \
+pub(in crate::compiler) const CONST_LIFT_DOMAIN_SENTENCE: &str = "the ConstLift domain is int, number, bool, and string values, plus arrays, homogeneous \
      tuples, and Option of liftable values, recursively (unit has no literal form and is not \
      liftable; a None/null value lifts only against an Option-typed capture parameter)";
 
@@ -169,7 +168,9 @@ impl LiftedConst {
     /// `Option<T>` / `Option<_>`.
     pub(in crate::compiler) fn shape_type_name(&self) -> String {
         match self {
-            LiftedConst::Int(_) | LiftedConst::Number(_) | LiftedConst::Bool(_)
+            LiftedConst::Int(_)
+            | LiftedConst::Number(_)
+            | LiftedConst::Bool(_)
             | LiftedConst::String(_) => self
                 .scalar_type_name()
                 .expect("scalar arm has a scalar name")
@@ -218,7 +219,9 @@ impl LiftedConst {
     ///   S2 posture; the user spells `Some(x)`).
     pub(in crate::compiler) fn matches_annotation(&self, annotation: &TypeAnnotation) -> bool {
         match self {
-            LiftedConst::Int(_) | LiftedConst::Number(_) | LiftedConst::Bool(_)
+            LiftedConst::Int(_)
+            | LiftedConst::Number(_)
+            | LiftedConst::Bool(_)
             | LiftedConst::String(_) => {
                 let name = match annotation {
                     TypeAnnotation::Basic(name) => name.as_str(),
@@ -228,9 +231,7 @@ impl LiftedConst {
                 self.scalar_type_name() == Some(name)
             }
             LiftedConst::Array(elems) => match annotation {
-                TypeAnnotation::Array(inner) => {
-                    elems.iter().all(|e| e.matches_annotation(inner))
-                }
+                TypeAnnotation::Array(inner) => elems.iter().all(|e| e.matches_annotation(inner)),
                 TypeAnnotation::Generic { name, args }
                     if name.as_str() == "Array" && args.len() == 1 =>
                 {
@@ -266,7 +267,11 @@ impl LiftedConst {
             LiftedConst::String(value) => format!("{value:?}"),
             LiftedConst::Array(elems) => format!(
                 "[{}]",
-                elems.iter().map(|e| e.render()).collect::<Vec<_>>().join(", ")
+                elems
+                    .iter()
+                    .map(|e| e.render())
+                    .collect::<Vec<_>>()
+                    .join(", ")
             ),
             LiftedConst::Some(inner) => format!("Some({})", inner.render()),
             LiftedConst::None => "None".to_string(),
@@ -436,7 +441,10 @@ pub(in crate::compiler) fn lift_value(
             // satisfied with zero retains).
             let data: &OptionData = unsafe { &*(bits as *const OptionData) };
             if data.is_some {
-                Ok(LiftedConst::Some(Box::new(lift_value(name, &data.payload)?)))
+                Ok(LiftedConst::Some(Box::new(lift_value(
+                    name,
+                    &data.payload,
+                )?)))
             } else {
                 Ok(LiftedConst::None)
             }
@@ -601,10 +609,7 @@ fn lift_typed_array(name: &str, array: *const u8) -> Result<LiftedConst, String>
 /// and recursed. Returns `Ok(None)` when the object is not an `__Option`
 /// carrier; a malformed carrier is a LOUD out-of-domain rejection, never a
 /// guess.
-fn lift_option_typed_object(
-    name: &str,
-    value: &KindedSlot,
-) -> Result<Option<LiftedConst>, String> {
+fn lift_option_typed_object(name: &str, value: &KindedSlot) -> Result<Option<LiftedConst>, String> {
     use shape_runtime::type_schema::builtin_schemas::{
         OPTION_PAYLOAD, OPTION_VARIANT, OPTION_VARIANT_NONE, OPTION_VARIANT_SOME,
     };
@@ -640,7 +645,9 @@ fn lift_option_typed_object(
             storage.heap_mask,
             OPTION_PAYLOAD,
         );
-        return Ok(Some(LiftedConst::Some(Box::new(lift_value(name, &payload)?))));
+        return Ok(Some(LiftedConst::Some(Box::new(lift_value(
+            name, &payload,
+        )?))));
     }
     Err(out_of_domain_message(
         name,
@@ -658,8 +665,7 @@ fn lift_option_typed_object(
 /// object is an ordinary struct (which takes the out-of-domain arm).
 fn compiler_descriptor_schema_name(value: &KindedSlot) -> Option<String> {
     let storage = value.as_typed_object_storage()?;
-    let schema =
-        shape_runtime::type_schema::lookup_schema_by_id_public(storage.schema_id as u32)?;
+    let schema = shape_runtime::type_schema::lookup_schema_by_id_public(storage.schema_id as u32)?;
     let is_index_handle = matches!(
         schema.name.as_str(),
         "__CheckedTemplate" | "__CaptureBinding" | "__CheckedItem"
@@ -690,19 +696,14 @@ pub(in crate::compiler) fn annotation_within_lift_domain(
     if let Some(inner) = annotation.option_inner() {
         return annotation_within_lift_domain(inner);
     }
-    let is_scalar_name =
-        |name: &str| matches!(name, "int" | "number" | "bool" | "string");
+    let is_scalar_name = |name: &str| matches!(name, "int" | "number" | "bool" | "string");
     match annotation {
         TypeAnnotation::Basic(name) if is_scalar_name(name) => Ok(()),
-        TypeAnnotation::Reference(path)
-            if !path.is_qualified() && is_scalar_name(path.name()) =>
-        {
+        TypeAnnotation::Reference(path) if !path.is_qualified() && is_scalar_name(path.name()) => {
             Ok(())
         }
         TypeAnnotation::Array(inner) => annotation_within_lift_domain(inner),
-        TypeAnnotation::Generic { name, args }
-            if name.as_str() == "Array" && args.len() == 1 =>
-        {
+        TypeAnnotation::Generic { name, args } if name.as_str() == "Array" && args.len() == 1 => {
             annotation_within_lift_domain(&args[0])
         }
         TypeAnnotation::Tuple(elems) => {
@@ -785,8 +786,7 @@ pub(in crate::compiler) fn capture_values_in_delivery_order(
 ) -> Result<Vec<(String, LiftedConst)>, ShapeError> {
     let mut ordered = Vec::with_capacity(template.capture_params().len());
     for (param_name, _annotation) in template.capture_params() {
-        let Some((_, lifted)) = capture_values.iter().find(|(name, _)| name == param_name)
-        else {
+        let Some((_, lifted)) = capture_values.iter().find(|(name, _)| name == param_name) else {
             return Err(ShapeError::RuntimeError {
                 message: format!(
                     "internal error: no capture value for trailing parameter `{param_name}` \
@@ -876,8 +876,8 @@ pub(in crate::compiler) fn bake_captures_into_def(
     values: &[(String, LiftedConst)],
     capture_params: &[(String, TypeAnnotation)],
 ) -> Result<(), ShapeError> {
-    use shape_ast::ast::program::{OwnershipModifier, VarKind, VariableDecl};
     use shape_ast::ast::patterns::DestructurePattern;
+    use shape_ast::ast::program::{OwnershipModifier, VarKind, VariableDecl};
     use shape_ast::ast::statements::Statement;
 
     let internal = |message: String| ShapeError::RuntimeError {
@@ -1082,10 +1082,7 @@ mod tests {
         );
         assert_eq!(
             lift_value("c", &number_array_slot(&[1.5, -0.0])).expect("number array lifts"),
-            LiftedConst::Array(vec![
-                LiftedConst::Number(1.5),
-                LiftedConst::Number(-0.0)
-            ])
+            LiftedConst::Array(vec![LiftedConst::Number(1.5), LiftedConst::Number(-0.0)])
         );
         assert_eq!(
             lift_value("c", &bool_array_slot(&[true, false])).expect("bool array lifts"),
@@ -1103,8 +1100,7 @@ mod tests {
     #[test]
     fn lift_value_lifts_nested_arrays() {
         assert_eq!(
-            lift_value("c", &nested_int_array_slot(&[&[1, 2], &[3]]))
-                .expect("nested array lifts"),
+            lift_value("c", &nested_int_array_slot(&[&[1, 2], &[3]])).expect("nested array lifts"),
             LiftedConst::Array(vec![
                 LiftedConst::Array(vec![LiftedConst::Int(1), LiftedConst::Int(2)]),
                 LiftedConst::Array(vec![LiftedConst::Int(3)]),
@@ -1147,9 +1143,15 @@ mod tests {
     #[test]
     fn out_of_domain_kinds_reject_naming_the_kind_and_the_closed_domain() {
         for (slot, kind_fragment) in [
-            (KindedSlot::new(ValueSlot::from_raw(7), NativeKind::Int32), "kind Int32"),
+            (
+                KindedSlot::new(ValueSlot::from_raw(7), NativeKind::Int32),
+                "kind Int32",
+            ),
             (zero_bits(NativeKind::Char), "kind Char"),
-            (zero_bits(NativeKind::Ptr(HeapKind::HashMap)), "kind Ptr(HashMap)"),
+            (
+                zero_bits(NativeKind::Ptr(HeapKind::HashMap)),
+                "kind Ptr(HashMap)",
+            ),
         ] {
             let err = lift_value("cfg", &slot).expect_err("out-of-domain kind rejects");
             assert_eq!(
@@ -1173,8 +1175,14 @@ mod tests {
                 KindedSlot::new(ValueSlot::from_raw(3), NativeKind::UInt64),
                 "kind UInt64",
             ),
-            (zero_bits(NativeKind::Ptr(HeapKind::Closure)), "kind Ptr(Closure)"),
-            (zero_bits(NativeKind::Ptr(HeapKind::ModuleFn)), "kind Ptr(ModuleFn)"),
+            (
+                zero_bits(NativeKind::Ptr(HeapKind::Closure)),
+                "kind Ptr(Closure)",
+            ),
+            (
+                zero_bits(NativeKind::Ptr(HeapKind::ModuleFn)),
+                "kind Ptr(ModuleFn)",
+            ),
         ] {
             let err = lift_value("cfg", &slot).expect_err("function values reject");
             assert_eq!(
@@ -1199,8 +1207,14 @@ mod tests {
             err.contains("holds a reference value (kind Ptr(Reference)), which is never liftable"),
             "names the reference class: {err}"
         );
-        assert!(err.contains(CONST_LIFT_DOMAIN_SENTENCE), "carries the domain: {err}");
-        assert!(err.contains("pass a liftable capture value"), "positive twin: {err}");
+        assert!(
+            err.contains(CONST_LIFT_DOMAIN_SENTENCE),
+            "carries the domain: {err}"
+        );
+        assert!(
+            err.contains("pass a liftable capture value"),
+            "positive twin: {err}"
+        );
     }
 
     #[test]
@@ -1223,7 +1237,10 @@ mod tests {
                 err.contains("never liftable (C3-G5 / Dec-95)"),
                 "names the ruling for {kind:?}: {err}"
             );
-            assert!(err.contains(CONST_LIFT_DOMAIN_SENTENCE), "domain for {kind:?}: {err}");
+            assert!(
+                err.contains(CONST_LIFT_DOMAIN_SENTENCE),
+                "domain for {kind:?}: {err}"
+            );
         }
     }
 
@@ -1236,11 +1253,11 @@ mod tests {
     #[test]
     fn runtime_option_typed_object_carrier_lifts_some_and_none() {
         use crate::executor::result_option_carrier::build_variant_object;
+        use shape_runtime::type_schema::SyncRegistryScope;
         use shape_runtime::type_schema::builtin_schemas::{
             OPTION_VARIANT_NONE, OPTION_VARIANT_SOME, register_builtin_schemas,
         };
         use shape_runtime::type_schema::registry::TypeSchemaRegistry;
-        use shape_runtime::type_schema::SyncRegistryScope;
 
         let mut registry = TypeSchemaRegistry::new_with_stdlib();
         let ids = register_builtin_schemas(&mut registry);
@@ -1256,11 +1273,7 @@ mod tests {
             LiftedConst::Some(Box::new(LiftedConst::Int(5)))
         );
 
-        let none = build_variant_object(
-            ids.option as u64,
-            OPTION_VARIANT_NONE,
-            KindedSlot::none(),
-        );
+        let none = build_variant_object(ids.option as u64, OPTION_VARIANT_NONE, KindedSlot::none());
         assert_eq!(
             lift_value("cfg", &none).expect("the runtime None carrier lifts"),
             LiftedConst::None
@@ -1302,7 +1315,10 @@ mod tests {
             err.contains("never liftable (C3-G5 / Dec-95)"),
             "names the ruling: {err}"
         );
-        assert!(err.contains(CONST_LIFT_DOMAIN_SENTENCE), "carries the domain: {err}");
+        assert!(
+            err.contains(CONST_LIFT_DOMAIN_SENTENCE),
+            "carries the domain: {err}"
+        );
 
         let capture_handle = typed_object_for_named_schema(
             "__CaptureBinding",
@@ -1331,7 +1347,10 @@ mod tests {
             err.contains("holds a function value (kind Ptr(TypedArray) with callable elements)"),
             "names the class through the element stamp: {err}"
         );
-        assert!(err.contains(CONST_LIFT_DOMAIN_SENTENCE), "carries the domain: {err}");
+        assert!(
+            err.contains(CONST_LIFT_DOMAIN_SENTENCE),
+            "carries the domain: {err}"
+        );
     }
 
     #[test]
@@ -1354,7 +1373,10 @@ mod tests {
         // …and from inside an Option payload.
         let inside_some = lift_value("cfg", &some_slot(KindedSlot::from_number(f64::NAN)))
             .expect_err("non-finite Some payload rejects");
-        assert!(inside_some.contains("non-finite"), "names finiteness: {inside_some}");
+        assert!(
+            inside_some.contains("non-finite"),
+            "names finiteness: {inside_some}"
+        );
     }
 
     #[test]
@@ -1373,7 +1395,10 @@ mod tests {
             )),
             "names the element stamp: {err}"
         );
-        assert!(err.contains(CONST_LIFT_DOMAIN_SENTENCE), "carries the domain: {err}");
+        assert!(
+            err.contains(CONST_LIFT_DOMAIN_SENTENCE),
+            "carries the domain: {err}"
+        );
     }
 
     // ── compositional matches_annotation ───────────────────────────────────
@@ -1392,7 +1417,8 @@ mod tests {
         assert!(!LiftedConst::Int(1).matches_annotation(&string_ann()));
         assert!(LiftedConst::String("x".into()).matches_annotation(&string_ann()));
         assert!(
-            !LiftedConst::Bool(true).matches_annotation(&TypeAnnotation::Array(Box::new(int_ann()))),
+            !LiftedConst::Bool(true)
+                .matches_annotation(&TypeAnnotation::Array(Box::new(int_ann()))),
             "a composite annotation never matches a scalar constant"
         );
     }
@@ -1448,9 +1474,7 @@ mod tests {
     fn option_annotations_match_some_and_none_compositionally() {
         let opt_int = TypeAnnotation::option(int_ann());
         assert!(LiftedConst::None.matches_annotation(&opt_int));
-        assert!(
-            LiftedConst::Some(Box::new(LiftedConst::Int(5))).matches_annotation(&opt_int)
-        );
+        assert!(LiftedConst::Some(Box::new(LiftedConst::Int(5))).matches_annotation(&opt_int));
         assert!(
             !LiftedConst::Some(Box::new(LiftedConst::String("x".into())))
                 .matches_annotation(&opt_int),
@@ -1470,10 +1494,9 @@ mod tests {
         let opt_int = TypeAnnotation::option(int_ann());
         assert!(!LiftedConst::Int(5).matches_annotation(&opt_int));
         assert!(
-            !LiftedConst::Array(vec![LiftedConst::Int(5)])
-                .matches_annotation(&TypeAnnotation::option(TypeAnnotation::Array(Box::new(
-                    int_ann()
-                )))),
+            !LiftedConst::Array(vec![LiftedConst::Int(5)]).matches_annotation(
+                &TypeAnnotation::option(TypeAnnotation::Array(Box::new(int_ann())))
+            ),
             "composites are not implicitly wrapped either"
         );
     }
@@ -1510,6 +1533,7 @@ mod tests {
         let ann = TypeAnnotation::Function {
             params: Vec::new(),
             returns: Box::new(int_ann()),
+            effects: None,
         };
         let err = annotation_within_lift_domain(&ann).expect_err("function types reject");
         assert!(
@@ -1541,8 +1565,8 @@ mod tests {
             },
             TypeAnnotation::Object(Vec::new()),
         ] {
-            let err = annotation_within_lift_domain(&ann)
-                .expect_err("out-of-domain annotations reject");
+            let err =
+                annotation_within_lift_domain(&ann).expect_err("out-of-domain annotations reject");
             assert!(err.contains("is not a liftable type"), "for {ann:?}: {err}");
         }
         // The rejection recurses out of composite positions.
@@ -1673,7 +1697,10 @@ mod tests {
     #[test]
     fn segment_forms_are_tagged_and_prefixed() {
         assert_eq!(seg(&LiftedConst::Int(9)), "i:9");
-        assert_eq!(seg(&LiftedConst::Number(1.5)), format!("n:{:016x}", 1.5f64.to_bits()));
+        assert_eq!(
+            seg(&LiftedConst::Number(1.5)),
+            format!("n:{:016x}", 1.5f64.to_bits())
+        );
         assert_eq!(seg(&LiftedConst::Bool(true)), "b:t");
         assert_eq!(seg(&LiftedConst::Bool(false)), "b:f");
         assert_eq!(seg(&LiftedConst::String("ab".to_string())), "s:2:ab");
@@ -1685,7 +1712,10 @@ mod tests {
             "a:2:[i:1::i:2]"
         );
         assert_eq!(seg(&LiftedConst::None), "o:n");
-        assert_eq!(seg(&LiftedConst::Some(Box::new(LiftedConst::Int(5)))), "o:s:i:5");
+        assert_eq!(
+            seg(&LiftedConst::Some(Box::new(LiftedConst::Int(5)))),
+            "o:s:i:5"
+        );
         // Byte-length prefix counts BYTES, not chars.
         assert_eq!(seg(&LiftedConst::String("日".to_string())), "s:3:日");
     }
@@ -1716,7 +1746,11 @@ mod tests {
             }
         };
         assert_eq!(flat(&a), flat(&b), "control: the flat join must collide");
-        assert_ne!(seg(&a), seg(&b), "netstring segments must distinguish the pair");
+        assert_ne!(
+            seg(&a),
+            seg(&b),
+            "netstring segments must distinguish the pair"
+        );
     }
 
     #[test]
@@ -1775,8 +1809,16 @@ mod tests {
             flat_leaves(v, &mut leaves);
             leaves.join("_")
         };
-        assert_eq!(flat(&a), flat(&b), "control: the flat leaf join must collide");
-        assert_ne!(seg(&a), seg(&b), "count-prefixed segments must distinguish the pair");
+        assert_eq!(
+            flat(&a),
+            flat(&b),
+            "control: the flat leaf join must collide"
+        );
+        assert_ne!(
+            seg(&a),
+            seg(&b),
+            "count-prefixed segments must distinguish the pair"
+        );
     }
 
     #[test]
@@ -1805,7 +1847,11 @@ mod tests {
                 other => seg(other),
             }
         };
-        assert_eq!(flat(&embedded), flat(&honest), "control: the delimiter join must collide");
+        assert_eq!(
+            flat(&embedded),
+            flat(&honest),
+            "control: the delimiter join must collide"
+        );
         assert_ne!(
             seg(&embedded),
             seg(&honest),
@@ -1854,7 +1900,11 @@ mod tests {
             naive_unwrap(&five),
             "control: the payload-unwrap rendering must collide"
         );
-        assert_ne!(seg(&some5), seg(&five), "the Option tag must distinguish the pair");
+        assert_ne!(
+            seg(&some5),
+            seg(&five),
+            "the Option tag must distinguish the pair"
+        );
     }
 
     #[test]
@@ -1900,7 +1950,10 @@ mod tests {
         // deleted S2 "lands with S3 ConstLift" landing sentence).
         let err = lift_capture_value("cfg", &zero_bits(NativeKind::Ptr(HeapKind::HashMap)))
             .expect_err("out-of-domain kinds reject through the delegation");
-        assert!(err.contains(CONST_LIFT_DOMAIN_SENTENCE), "the S3 domain: {err}");
+        assert!(
+            err.contains(CONST_LIFT_DOMAIN_SENTENCE),
+            "the S3 domain: {err}"
+        );
         assert!(
             !err.contains("lands with S3 ConstLift"),
             "the S2 landing sentence is deleted: {err}"
@@ -1946,7 +1999,10 @@ mod tests {
         )
         .expect_err("int value against string annotation must reject");
         assert!(err.contains("holds a int value"), "names the value: {err}");
-        assert!(err.contains("annotated `string`"), "names the declared type: {err}");
+        assert!(
+            err.contains("annotated `string`"),
+            "names the declared type: {err}"
+        );
         assert!(
             err.contains("pass a `string` value"),
             "carries the positive twin: {err}"
@@ -1969,14 +2025,20 @@ mod tests {
             err.contains("holds a Array<int> value"),
             "names the composite value type: {err}"
         );
-        assert!(err.contains("annotated `int`"), "names the declared type: {err}");
+        assert!(
+            err.contains("annotated `int`"),
+            "names the declared type: {err}"
+        );
     }
 
     #[test]
     fn missing_value_is_an_internal_error_never_silent() {
         let err = validate_capture_value_types("t", &[int_param("cfg")], &[])
             .expect_err("a bypassed bijection must fail loudly");
-        assert!(err.contains("internal error"), "internal-error-shaped: {err}");
+        assert!(
+            err.contains("internal error"),
+            "internal-error-shaped: {err}"
+        );
     }
 
     // ── the S3b bake (replaces the deleted CaptureBindingPlan /
@@ -2025,7 +2087,9 @@ mod tests {
         (
             decl.is_mut,
             name.as_str(),
-            decl.type_annotation.as_ref().expect("prologue lets are annotated"),
+            decl.type_annotation
+                .as_ref()
+                .expect("prologue lets are annotated"),
             decl.value.as_ref().expect("prologue lets are initialized"),
         )
     }
@@ -2069,15 +2133,16 @@ mod tests {
 
     #[test]
     fn bake_strips_capture_params_and_prepends_prologue_in_delivery_order() {
-        let mut def = def_of(
-            "fn t(x: int, factor: int, tag: string) -> int { return x + factor }",
-        );
+        let mut def = def_of("fn t(x: int, factor: int, tag: string) -> int { return x + factor }");
         let capture_params = vec![
             (
                 "factor".to_string(),
                 TypeAnnotation::Basic("int".to_string()),
             ),
-            ("tag".to_string(), TypeAnnotation::Basic("string".to_string())),
+            (
+                "tag".to_string(),
+                TypeAnnotation::Basic("string".to_string()),
+            ),
         ];
         // Values arrive in REVERSE binding order — the bake matches by name;
         // prologue order is capture_params (delivery) order.
@@ -2095,7 +2160,10 @@ mod tests {
         // `let mut` per the parameter-assignability probe (params are
         // assignable, so the replacement local must be too).
         let (is_mut, name, annotation, value) = prologue_let(&def.body[0]);
-        assert!(is_mut, "capture locals match parameter assignability (let mut)");
+        assert!(
+            is_mut,
+            "capture locals match parameter assignability (let mut)"
+        );
         assert_eq!(name, "factor");
         assert!(matches!(annotation, TypeAnnotation::Basic(n) if n == "int"));
         assert!(matches!(value, Expr::Literal(Literal::Int(3), _)));
@@ -2117,9 +2185,7 @@ mod tests {
 
     #[test]
     fn bake_projects_composite_values_as_array_and_option_exprs() {
-        let mut def = def_of(
-            "fn t(x: int, cfg: Array<int>, opt: Option<int>) -> int { return x }",
-        );
+        let mut def = def_of("fn t(x: int, cfg: Array<int>, opt: Option<int>) -> int { return x }");
         let capture_params = vec![
             (
                 "cfg".to_string(),

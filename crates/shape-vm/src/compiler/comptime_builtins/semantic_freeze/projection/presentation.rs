@@ -53,7 +53,9 @@ fn render(
                 .collect::<Result<Vec<_>, String>>()?;
             Ok(format!("{{{}}}", rendered.join(", ")))
         }
-        TypeAnnotation::Function { params, returns } => {
+        TypeAnnotation::Function {
+            params, returns, ..
+        } => {
             let params = params
                 .iter()
                 .map(|parameter| {

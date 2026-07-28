@@ -251,10 +251,12 @@ fn project_annotation(
             TypeAnnotation::Function {
                 params: pattern_params,
                 returns: pattern_returns,
+                ..
             },
             TypeAnnotation::Function {
                 params: actual_params,
                 returns: actual_returns,
+                ..
             },
         ) if pattern_params.len() == actual_params.len() => {
             for (index, (pattern, actual)) in pattern_params.iter().zip(actual_params).enumerate() {
@@ -348,7 +350,9 @@ fn annotation_mentions(annotation: &TypeAnnotation, target: &TypeVar) -> bool {
         TypeAnnotation::Object(fields) => fields
             .iter()
             .any(|field| annotation_mentions(&field.type_annotation, target)),
-        TypeAnnotation::Function { params, returns } => {
+        TypeAnnotation::Function {
+            params, returns, ..
+        } => {
             params
                 .iter()
                 .any(|param| annotation_mentions(&param.type_annotation, target))

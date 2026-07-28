@@ -934,6 +934,7 @@ impl ModuleLoader {
                         name_span: shape_ast::ast::Span::default(),
                         declaring_module_path: None,
                         doc_comment: None,
+                        effect_row: None,
                         params: vec![],
                         body: vec![],
                         return_type: None,

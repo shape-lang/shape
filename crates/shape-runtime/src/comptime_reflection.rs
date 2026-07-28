@@ -222,8 +222,10 @@ pub const FLOAT_WIDTH_SCHEMA_NAME: &str = "FloatWidth";
 /// `const_arg` against a [`ParamKind::Const`] position). A shared runtime
 /// catalog sibling of [`FrozenTypeCategory`] / [`IntegerWidth`] /
 /// [`FloatWidth`] — one variant list, no second hand-written kind enum
-/// anywhere; the exact-two cardinality is the entire type-vs-const model
-/// (Dec 54, "type/const parameter kinds").
+/// anywhere. Dec 54 sealed this at type-vs-const; ADR-014 §8.3 adds the
+/// effect binder as a third declared-parameter kind, which is exactly the
+/// "a new kind forces every consumer to update" path this catalog exists to
+/// make mechanical.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ParamKind {
     /// A type-level parameter (`<T>`, `<T: Bound>`) — the position accepts a
@@ -232,12 +234,18 @@ pub enum ParamKind {
     /// A value-level const generic parameter (`<const N: int>`) — the
     /// position accepts a checked `const_arg` argument.
     Const,
+    /// An effect binder (`<effect F>`, ADR-014 §8.3) — the position accepts a
+    /// closed effect row of the declaration's stage and catalog version, and
+    /// nothing else. It is deliberately NOT folded into `Type`: a row is not
+    /// a type argument, and letting one satisfy a type position would let a
+    /// frozen constructor claim evidence it does not have.
+    Effect,
 }
 
 impl ParamKind {
-    /// Exhaustive catalog (exactly two members — the whole type-vs-const
-    /// model). Exhaustive so a new kind forces every consumer to update.
-    pub const ALL: [Self; 2] = [Self::Type, Self::Const];
+    /// Exhaustive catalog. Exhaustive so a new kind forces every consumer to
+    /// update.
+    pub const ALL: [Self; 3] = [Self::Type, Self::Const, Self::Effect];
 
     /// Catalog variant name (drives the `ParamKind` descriptor-schema
     /// registration and LSP completion, following the [`IntegerWidth`]
@@ -246,6 +254,7 @@ impl ParamKind {
         match self {
             Self::Type => "Type",
             Self::Const => "Const",
+            Self::Effect => "Effect",
         }
     }
 }
@@ -1285,10 +1294,10 @@ mod tests {
     /// and completes through the shared `reflection_enum_variant_names` surface
     /// with no second variant list.
     #[test]
-    fn param_kind_catalog_is_exactly_type_and_const() {
+    fn param_kind_catalog_is_type_const_and_effect() {
         assert_eq!(
             ParamKind::ALL.map(ParamKind::variant_name),
-            ["Type", "Const"]
+            ["Type", "Const", "Effect"]
         );
         assert_eq!(PARAM_KIND_SCHEMA_NAME, "ParamKind");
         assert_eq!(

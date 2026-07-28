@@ -372,7 +372,9 @@ impl StdlibMetadata {
                     .join(", ");
                 format!("{{ {} }}", inner)
             }
-            TypeAnnotation::Function { params, returns } => {
+            TypeAnnotation::Function {
+                params, returns, ..
+            } => {
                 let param_list = params
                     .iter()
                     .map(|p| {

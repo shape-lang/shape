@@ -259,9 +259,7 @@ pub(crate) mod suite {
         ///   remove-the-entry instruction so the flip is loud, not silent.
         fn guarded(
             self,
-            run: impl FnOnce(
-                shape_test::shape_test::ShapeTest,
-            ) -> shape_test::shape_test::ShapeTest,
+            run: impl FnOnce(shape_test::shape_test::ShapeTest) -> shape_test::shape_test::ShapeTest,
         ) -> Self {
             let Self { source, inner } = self;
             let pinned = KNOWN_JIT_DIVERGENT.iter().find(|d| d.source == source);

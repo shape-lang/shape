@@ -15,6 +15,7 @@ fn callable_declaration() -> FunctionDef {
         where_clause: None,
         is_async: false,
         is_comptime: false,
+        effect_row: None,
     }
 }
 

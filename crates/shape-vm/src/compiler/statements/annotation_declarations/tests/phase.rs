@@ -20,7 +20,10 @@ pub annotation exported() on type { }
         .keys()
         .map(String::as_str)
         .collect::<std::collections::BTreeSet<_>>();
-    assert_eq!(names, std::collections::BTreeSet::from(["direct", "exported"]));
+    assert_eq!(
+        names,
+        std::collections::BTreeSet::from(["direct", "exported"])
+    );
 }
 
 #[test]

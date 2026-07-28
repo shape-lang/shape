@@ -56,8 +56,8 @@ mod no_json_comptime_protocol;
 // dark window (#68). Needle literals live inside the sentinel, assembled
 // from fragments; this comment names the targets by role so it does not
 // itself trip the scan.
-mod no_legacy_annotation_weave;
 mod declared_capture_teardown;
+mod no_legacy_annotation_weave;
 // GC Phase 4 — end-of-program teardown sweep (Finding #82). Reclaims
 // module-scope closure-capture cycles at VM teardown; memory-only.
 #[cfg(feature = "gc")]

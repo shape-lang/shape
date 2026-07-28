@@ -1713,6 +1713,7 @@ fn test_type_name_for_various_types() {
     let func_type = Type::Concrete(shape_ast::ast::TypeAnnotation::Function {
         params: vec![],
         returns: Box::new(shape_ast::ast::TypeAnnotation::Basic("void".to_string())),
+        effects: None,
     });
     assert_eq!(engine.type_name_for_union(&func_type), "function");
 }
@@ -1965,7 +1966,8 @@ fn test_function_type_is_function_variant() {
 
     let code = r#"
             fn add(a: number, b: number) -> number {
-                return a + b
+                return a + b,
+                effects: EffectRow::Unproven,
             }
         "#;
 
@@ -3444,7 +3446,9 @@ fn u40_is_function_int_int_to_int(ty: &Type) -> bool {
         } if params.len() == 2 => {
             u40_is_int(&params[0]) && u40_is_int(&params[1]) && u40_is_int(&returns)
         }
-        Type::Concrete(TypeAnnotation::Function { params, returns }) if params.len() == 2 => {
+        Type::Concrete(TypeAnnotation::Function {
+            params, returns, ..
+        }) if params.len() == 2 => {
             let p0 = Type::Concrete(params[0].type_annotation.clone());
             let p1 = Type::Concrete(params[1].type_annotation.clone());
             let ret = Type::Concrete(*returns);

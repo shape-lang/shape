@@ -348,7 +348,9 @@ fn format_type_annotation(ta: &TypeAnnotation) -> String {
             .map(format_type_annotation)
             .collect::<Vec<_>>()
             .join(" + "),
-        TypeAnnotation::Function { params, returns } => {
+        TypeAnnotation::Function {
+            params, returns, ..
+        } => {
             let params = params
                 .iter()
                 .map(|p| format_type_annotation(&p.type_annotation))
@@ -378,7 +380,11 @@ fn format_type_annotation(ta: &TypeAnnotation) -> String {
         ),
         // ADR-009 B3 (S1): existential descriptor package type.
         TypeAnnotation::Existential { witnesses, inner } => {
-            format!("exists<{}> {}", witnesses.join(", "), format_type_annotation(inner))
+            format!(
+                "exists<{}> {}",
+                witnesses.join(", "),
+                format_type_annotation(inner)
+            )
         }
     }
 }

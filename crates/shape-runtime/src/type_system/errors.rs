@@ -276,7 +276,9 @@ fn format_annotation(ann: &TypeAnnotation) -> String {
                 .join(", ");
             format!("{{ {} }}", rendered)
         }
-        TypeAnnotation::Function { params, returns } => format!(
+        TypeAnnotation::Function {
+            params, returns, ..
+        } => format!(
             "({}) -> {}",
             params
                 .iter()

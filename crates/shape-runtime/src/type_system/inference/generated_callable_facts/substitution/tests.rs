@@ -10,6 +10,7 @@ fn callable(optional: bool) -> TypeAnnotation {
             type_annotation: TypeAnnotation::Basic("int".to_string()),
         }],
         returns: Box::new(TypeAnnotation::Basic("string".to_string())),
+        effects: None,
     }
 }
 

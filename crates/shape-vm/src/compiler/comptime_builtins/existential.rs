@@ -68,13 +68,13 @@ pub(crate) fn annotation_erases_witness_to_any(annotation: &TypeAnnotation) -> b
         }
         TypeAnnotation::Tuple(items)
         | TypeAnnotation::Union(items)
-        | TypeAnnotation::Intersection(items) => {
-            items.iter().any(annotation_erases_witness_to_any)
-        }
+        | TypeAnnotation::Intersection(items) => items.iter().any(annotation_erases_witness_to_any),
         TypeAnnotation::Object(fields) => fields
             .iter()
             .any(|field| annotation_erases_witness_to_any(&field.type_annotation)),
-        TypeAnnotation::Function { params, returns } => {
+        TypeAnnotation::Function {
+            params, returns, ..
+        } => {
             params
                 .iter()
                 .any(|param| annotation_erases_witness_to_any(&param.type_annotation))
@@ -218,10 +218,7 @@ mod tests {
         let arity1_id = overlay
             .canonicalize_type(&arity1)
             .expect("existential must canonicalize");
-        assert_ne!(
-            first, arity1_id,
-            "witness arity is descriptor-significant"
-        );
+        assert_ne!(first, arity1_id, "witness arity is descriptor-significant");
     }
 
     /// RED (b): a witness slot spelled compiler-internal `Any` erases the

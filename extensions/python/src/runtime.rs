@@ -858,7 +858,11 @@ mod module_setup_tests {
             1,
             "a second declaration starts with its own module state"
         );
-        assert_eq!(invoke_int(&runtime, first), 3, "and the first is undisturbed");
+        assert_eq!(
+            invoke_int(&runtime, first),
+            3,
+            "and the first is undisturbed"
+        );
     }
 
     /// Disposal takes the handle's module with it — otherwise a long-running
@@ -881,7 +885,10 @@ mod module_setup_tests {
                     .unwrap_or(false)
             })
         };
-        assert!(registered(&module_name), "the module is registered while live");
+        assert!(
+            registered(&module_name),
+            "the module is registered while live"
+        );
         runtime.dispose_function(handle);
         assert!(
             !registered(&module_name),
@@ -977,7 +984,10 @@ mod contract_wire_tests {
 
         let stub = runtime.stub_document();
         assert!(!stub.is_empty(), "a delivered contract must produce a stub");
-        assert!(stub.contains("add"), "the stub declares the function: {stub}");
+        assert!(
+            stub.contains("add"),
+            "the stub declares the function: {stub}"
+        );
     }
 
     #[test]

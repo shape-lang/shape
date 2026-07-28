@@ -5,9 +5,7 @@ use shape_ast::error::Result;
 
 use crate::compiler::BytecodeCompiler;
 
-use super::{
-    BindingKey, ReferenceFlowConflict, ReferenceFlowEvidence, ReferenceFlowState,
-};
+use super::{BindingKey, ReferenceFlowConflict, ReferenceFlowEvidence, ReferenceFlowState};
 
 impl BytecodeCompiler {
     /// Compile one callable under an exact reference-flow transaction.
@@ -30,14 +28,8 @@ impl BytecodeCompiler {
         let outcome = compile(self);
         let transition_error = if outcome.is_ok() {
             let current_flow = self.reference_flow_snapshot();
-            self.callable_module_transition_conflict(
-                callable_name,
-                &saved_flow,
-                &current_flow,
-            )
-            .map(|conflict| {
-                self.reference_flow_conflict_error(conflict, Some(callable_span))
-            })
+            self.callable_module_transition_conflict(callable_name, &saved_flow, &current_flow)
+                .map(|conflict| self.reference_flow_conflict_error(conflict, Some(callable_span)))
         } else {
             None
         };

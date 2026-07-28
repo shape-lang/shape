@@ -9,10 +9,8 @@ type ClosureParts = (
 
 fn closure_parts(source: &str) -> ClosureParts {
     let program = shape_ast::parse_program(source).expect("peek fixture parses");
-    let shape_ast::ast::Item::Statement(
-        shape_ast::ast::Statement::VariableDecl(decl, _),
-        _,
-    ) = program.items.into_iter().next().expect("one declaration")
+    let shape_ast::ast::Item::Statement(shape_ast::ast::Statement::VariableDecl(decl, _), _) =
+        program.items.into_iter().next().expect("one declaration")
     else {
         panic!("fixture must be a variable declaration");
     };
