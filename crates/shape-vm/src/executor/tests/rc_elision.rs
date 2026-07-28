@@ -788,3 +788,90 @@ mod measured {
         );
     }
 }
+
+// ── The 2026-06-21 `var` auto-clone ruling is untouched ──────────────
+//
+// `compute_ownership_decisions` (solver.rs) encodes that ruling as: a `var`
+// destination whose source is STILL LIVE after the bind gets `DeepClone`
+// (`NonCopy`) or `Clone` (`Unknown`) so both bindings stay valid and
+// independent. Both arms already yield `Move` when the source is dead after
+// the bind — "the move-when-dead half of the smart default", in the solver's
+// own words.
+//
+// This pass's precondition is exactly that dead-after half: one whole-local
+// read, nothing live afterwards. Both predicates are `liveness.is_live_after`
+// on the same source slot at the same program point, in opposite directions,
+// so the two cannot both hold — the elision and the pin are complementary
+// halves of one rule rather than competing ones, and the pin needs no
+// amendment. `emit_load_local_owned` consults `DeepClone` before the elision,
+// but that ordering is belt-and-braces rather than load-bearing: the overlap
+// it would arbitrate cannot arise. What the tests below guard is the boundary
+// itself — that a still-live source keeps its independent copy, and that the
+// `Unknown` arm's scalar-safety concern stays covered now that this pass
+// admits `Unknown`.
+
+/// A still-live `var` source keeps its copy-on-write semantics: the copy is
+/// independent, both bindings remain valid, and the pass changes nothing. The
+/// value assertion is the load-bearing half — `data` staying at length 3 is
+/// what a shallow share would break.
+#[test]
+fn a_still_live_var_source_keeps_its_copy_on_write_semantics() {
+    let source = r#"
+fn f() -> int {
+    var data = [1, 2, 3]
+    var copy = data
+    copy.push(99)
+    return data.len() * 100 + copy.len()
+}
+let r = f()
+r
+"#;
+    let (on, off) = compile_both(source);
+    let ops_on: Vec<OpCode> = on.instructions.iter().map(|i| i.opcode).collect();
+    let ops_off: Vec<OpCode> = off.instructions.iter().map(|i| i.opcode).collect();
+    assert_eq!(
+        ops_on, ops_off,
+        "the pass must not touch a bind whose source is still live"
+    );
+
+    let (on_v, off_v) = eval_both(source);
+    assert_eq!(
+        on_v.as_i64(),
+        Some(304),
+        "`data` must stay length 3 and `copy` must be an independent length 4 — \
+         a shallow share would report 404"
+    );
+    assert_eq!(on_v.as_i64(), off_v.as_i64());
+}
+
+/// The solver's `Unknown` arm exists for scalar safety: an identifier-sourced
+/// bind is typed `Unknown` whether it holds a heap value or an `int`. This pass
+/// admits `Unknown`, so the scalar case needs its own guard — and it has two:
+/// the read must be dead afterwards (nothing can observe the cleared slot), and
+/// `slot_is_heap_backed_owned` excludes inline-scalar storage hints, so a scalar
+/// never reaches the move in the first place.
+#[test]
+fn a_scalar_binding_is_never_moved() {
+    let source = r#"
+fn f() -> int {
+    var i = 7
+    let j = i
+    var k = j
+    return k
+}
+let r = f()
+r
+"#;
+    let (on, off) = compile_both(source);
+    assert_eq!(
+        opcode_count(&on, OpCode::LoadLocalMove),
+        0,
+        "no scalar binding may take the ownership move path"
+    );
+    let ops_on: Vec<OpCode> = on.instructions.iter().map(|i| i.opcode).collect();
+    let ops_off: Vec<OpCode> = off.instructions.iter().map(|i| i.opcode).collect();
+    assert_eq!(ops_on, ops_off);
+    assert_same_i64(source);
+    let (on_v, _) = eval_both(source);
+    assert_eq!(on_v.as_i64(), Some(7));
+}
