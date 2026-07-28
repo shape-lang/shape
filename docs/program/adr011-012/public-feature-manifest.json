@@ -45,7 +45,7 @@
         },
         {
           "kind": "source",
-          "reference": "crates/shape-runtime/src/type_system/inference/operators.rs `BinaryOp::Pipe` arm — the piped value's type flows into the callee's first parameter"
+          "reference": "tools/shape-lsp/src/type_inference.rs `BinaryOp::Pipe` arm — the same rewrite drives the type the LSP projects for a piped expression"
         }
       ],
       "owner": {
