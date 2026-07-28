@@ -125,7 +125,7 @@ fn effect_binders_parse_in_a_generic_parameter_list() {
         .expect("callback parameter lost its annotation");
     match param_ty {
         TypeAnnotation::Function { effects, .. } => {
-            match effects.as_ref().expect("callback row was dropped") {
+            match effects.as_deref().expect("callback row was dropped") {
                 EffectRowAnnotation::Param { name, .. } => assert_eq!(name, "F"),
                 other => panic!("expected binder `F` on the callback type, got {other:?}"),
             }
@@ -300,7 +300,7 @@ fn the_clause_binds_to_the_nearest_arrow() {
     );
     match func.return_type.as_ref().expect("return type dropped") {
         TypeAnnotation::Function { effects, .. } => {
-            let row = effects.as_ref().expect("inner row was dropped");
+            let row = effects.as_deref().expect("inner row was dropped");
             assert_eq!(atom_names(row), vec!["FsRead".to_string()]);
         }
         other => panic!("expected a function return type, got {other:?}"),

@@ -149,6 +149,47 @@ impl ConstraintSolver {
         &self.effect_substitution
     }
 
+    /// Check an inferred callable type against a declared boundary type
+    /// (ADR-014 §8.2: boundaries declare, interiors infer).
+    ///
+    /// This is a direct entry point rather than a trip through [`Self::solve`]
+    /// because `solve` defers a failing constraint and retries it, and a
+    /// deferred failure surfaces as `UnsolvedConstraints` — which would lose
+    /// the inferred row that #180's materialization fix needs in the payload.
+    /// Boundary checking wants the structured error at the point of failure.
+    ///
+    /// Rows on nested function-typed parameters are checked contravariantly,
+    /// matching §8.1's nesting rule.
+    pub fn check_declared_boundary(&mut self, inferred: &Type, declared: &Type) -> TypeResult<()> {
+        match (inferred, declared) {
+            (
+                Type::Function {
+                    params: inferred_params,
+                    returns: inferred_returns,
+                    effects: inferred_row,
+                },
+                Type::Function {
+                    params: declared_params,
+                    returns: declared_returns,
+                    effects: declared_row,
+                },
+            ) => {
+                self.check_row_subsumption(inferred_row, declared_row, "declared boundary")?;
+                if inferred_params.len() == declared_params.len() {
+                    for (inferred_param, declared_param) in
+                        inferred_params.iter().zip(declared_params.iter())
+                    {
+                        // Contravariant: the DECLARED parameter must fit the
+                        // callback the interior actually invokes.
+                        self.check_declared_boundary(declared_param, inferred_param)?;
+                    }
+                }
+                self.check_declared_boundary(inferred_returns, declared_returns)
+            }
+            _ => Ok(()),
+        }
+    }
+
     /// Decide ADR-014 §8.1 subsumption for one row pair, recording any binder
     /// that closes as a result.
     ///

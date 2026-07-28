@@ -4123,7 +4123,7 @@ impl TypeInferenceEngine {
                 // An unresolvable atom name would be a purity-relevant lie, so
                 // a bad row degrades to the proof gap rather than to `{}`.
                 effects: crate::type_system::effects::resolve_optional_row_annotation(
-                    effects.as_ref(),
+                    effects.as_deref(),
                     crate::type_system::effects::EffectStage::Runtime,
                 )
                 .unwrap_or(EffectRow::Unproven),

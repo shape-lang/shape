@@ -269,7 +269,7 @@ pub fn parse_function_type(pair: Pair<Rule>) -> Result<TypeAnnotation> {
                 return_type = Some(parse_type_annotation(inner)?);
             }
             Rule::effect_clause => {
-                effects = Some(parse_effect_clause(inner)?);
+                effects = Some(Box::new(parse_effect_clause(inner)?));
             }
             _ => {}
         }

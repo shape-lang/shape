@@ -46,8 +46,12 @@ pub enum TypeAnnotation {
         /// `None` means the source declared no row — NOT that the type is
         /// pure. `! {}` is the explicit purity claim and parses as
         /// `Some(Atoms { names: [] })`.
+        ///
+        /// Boxed: `TypeAnnotation` is embedded by value in `Expr`, which has
+        /// a guarded parser stack budget (`layout_tests`). An inline row
+        /// pushes `Expr` over it.
         #[serde(default)]
-        effects: Option<EffectRowAnnotation>,
+        effects: Option<Box<EffectRowAnnotation>>,
     },
     /// Union type: T1 | T2 | T3 (discriminated union - value is ONE of the types)
     Union(Vec<TypeAnnotation>),

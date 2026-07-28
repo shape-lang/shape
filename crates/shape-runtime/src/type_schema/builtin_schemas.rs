@@ -1044,12 +1044,13 @@ mod tests {
         assert!(applied.get_field("head_identity_high").is_some());
         assert!(applied.get_field("arg_identities").is_some());
 
-        // ParamKind is a two-variant enum (Type | Const).
+        // ParamKind: Type | Const | Effect (ADR-014 §8.3 added the binder).
         let param_kind = registry
             .get(crate::comptime_reflection::PARAM_KIND_SCHEMA_NAME)
             .unwrap();
         assert!(param_kind.variant_id("Type").is_some());
         assert!(param_kind.variant_id("Const").is_some());
+        assert!(param_kind.variant_id("Effect").is_some());
 
         // ADR-009 B6 (Stage 2, Dec 63): the callable signature descriptor
         // carriers + the PassingMode mode axis.

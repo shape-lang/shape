@@ -318,11 +318,17 @@ impl Type {
                 args: args.iter().map(|a| a.canonicalize()).collect(),
             },
             Type::Function {
-                params, returns, ..
+                params,
+                returns,
+                effects,
             } => Type::Function {
                 params: params.iter().map(|p| p.canonicalize()).collect(),
                 returns: Box::new(returns.canonicalize()),
-                effects: EffectRow::Unproven,
+                // The row is part of type identity (ADR-014 §8.1), so
+                // canonicalization must carry it. Dropping it here would make
+                // two function types that differ only in row compare equal
+                // through `probe_equal`.
+                effects: effects.clone(),
             },
         }
     }
@@ -363,7 +369,7 @@ impl Type {
                 // An unresolvable atom name would be a purity-relevant lie, so
                 // a bad row degrades to the proof gap rather than to `{}`.
                 effects: crate::type_system::effects::resolve_optional_row_annotation(
-                    effects.as_ref(),
+                    effects.as_deref(),
                     crate::type_system::effects::EffectStage::Runtime,
                 )
                 .unwrap_or(EffectRow::Unproven),
@@ -420,7 +426,7 @@ impl Type {
                     // `to_annotation` renders a row only when one was proved;
                     // a binder or a proof gap has no surface spelling that
                     // would be honest here.
-                    effects: effects.to_annotation(),
+                    effects: effects.to_annotation().map(Box::new),
                 })
             }
         }

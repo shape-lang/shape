@@ -266,7 +266,7 @@ fn normalize(annotation: &TypeAnnotation) -> NormalizedType {
                 })
                 .collect(),
             result: Box::new(normalize(returns)),
-            effects: NormalizedEffectRow::from_annotation(effects.as_ref()),
+            effects: NormalizedEffectRow::from_annotation(effects.as_deref()),
         },
         TypeAnnotation::Union(items) => {
             let mut normalized: Vec<NormalizedType> = items.iter().map(normalize).collect();
@@ -462,5 +462,127 @@ mod tests {
             NormalizedType::Array(Box::new(NormalizedType::Int)).canonical_digest("test");
         assert_ne!(int, number);
         assert_ne!(int, array_of_int);
+    }
+}
+
+#[cfg(test)]
+mod effect_row_contract_tests {
+    //! Tracer case (c) at the layer where it actually matters (issue #178,
+    //! ADR-014 §8.3, ADR-010 §13): the PUBLISHED contract.
+    //!
+    //! The acceptance criterion asks for proof on the persisted
+    //! representation, not merely for the absence of errors during checking.
+    //! `NormalizedType` is that representation — it is what a base contract
+    //! publishes and what the canonical digest covers — so these assertions
+    //! read the published row itself.
+
+    use super::*;
+    use shape_ast::ast::{EffectRowAnnotation, FunctionParam, TypeAnnotation};
+
+    fn callback(row: Option<EffectRowAnnotation>) -> TypeAnnotation {
+        TypeAnnotation::Function {
+            params: vec![],
+            returns: Box::new(TypeAnnotation::Basic("int".to_string())),
+            effects: row.map(Box::new),
+        }
+    }
+
+    fn atoms(names: &[&str]) -> Option<EffectRowAnnotation> {
+        Some(EffectRowAnnotation::Atoms {
+            names: names.iter().map(|n| n.to_string()).collect(),
+            span: Default::default(),
+        })
+    }
+
+    fn binder(name: &str) -> Option<EffectRowAnnotation> {
+        Some(EffectRowAnnotation::Param {
+            name: name.to_string(),
+            span: Default::default(),
+        })
+    }
+
+    fn published_row(annotation: &TypeAnnotation) -> NormalizedEffectRow {
+        match normalize(annotation) {
+            NormalizedType::Function { effects, .. } => effects,
+            other => panic!("expected a normalized function type, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_generic_schema_may_publish_an_unclosed_binder() {
+        // `fn apply<T, effect F>(f: fn() -> T ! F)` — the generic
+        // DEFINITION's contract is a schema, and §8.3 lets it persist with
+        // its binders exactly as it persists type binders.
+        let row = published_row(&callback(binder("F")));
+        assert_eq!(row.unbound_parameter(), Some("F"));
+        assert!(row.is_closed_fact() == false);
+    }
+
+    #[test]
+    fn no_unbound_effect_parameter_survives_into_a_closed_row_fact() {
+        // THE ACCEPTANCE ASSERTION. Every row a FACT may carry must pass
+        // `is_closed_fact`, and the binder form is the one that must not.
+        let schema = published_row(&callback(binder("F")));
+        let instantiated = published_row(&callback(atoms(&["FsRead"])));
+        let pure = published_row(&callback(atoms(&[])));
+
+        assert!(
+            !schema.is_closed_fact(),
+            "an unbound binder must never qualify as a closed row fact"
+        );
+        assert!(instantiated.is_closed_fact());
+        assert!(pure.is_closed_fact());
+
+        // And the closed forms carry no residual parameter at all.
+        assert_eq!(instantiated.unbound_parameter(), None);
+        assert_eq!(pure.unbound_parameter(), None);
+    }
+
+    #[test]
+    fn an_undeclared_row_is_not_a_purity_claim() {
+        let undeclared = published_row(&callback(None));
+        let explicit_pure = published_row(&callback(atoms(&[])));
+        assert_ne!(undeclared, explicit_pure);
+        assert!(!undeclared.is_closed_fact());
+        assert_eq!(explicit_pure, NormalizedEffectRow::Closed(vec![]));
+    }
+
+    #[test]
+    fn the_row_participates_in_the_published_contract_digest() {
+        // ADR-014 §8.1: two callables differing ONLY in row are different
+        // types, so they must not publish the same contract identity.
+        let fs_read = normalize(&callback(atoms(&["FsRead"])));
+        let net = normalize(&callback(atoms(&["NetConnect"])));
+        let pure = normalize(&callback(atoms(&[])));
+        let undeclared = normalize(&callback(None));
+
+        let d = |t: &NormalizedType| t.canonical_digest("test");
+        assert_ne!(d(&fs_read), d(&net));
+        assert_ne!(d(&fs_read), d(&pure));
+        assert_ne!(d(&pure), d(&undeclared));
+    }
+
+    #[test]
+    fn atom_order_does_not_change_the_published_contract() {
+        // #205: the published row is a canonical SET. Two spellings of the
+        // same row must digest and render identically, or contract identity
+        // would depend on how the author happened to type it.
+        let forward = normalize(&callback(atoms(&["FsRead", "NetConnect"])));
+        let backward = normalize(&callback(atoms(&["NetConnect", "FsRead"])));
+        assert_eq!(forward, backward);
+        assert_eq!(
+            forward.canonical_digest("test"),
+            backward.canonical_digest("test")
+        );
+        assert_eq!(forward.render(), "() => int ! {FsRead, NetConnect}");
+    }
+
+    #[test]
+    fn a_repeated_atom_is_deduplicated_before_publication() {
+        let repeated = published_row(&callback(atoms(&["FsRead", "FsRead"])));
+        assert_eq!(
+            repeated,
+            NormalizedEffectRow::Closed(vec!["FsRead".to_string()])
+        );
     }
 }

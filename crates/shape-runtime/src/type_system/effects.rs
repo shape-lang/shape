@@ -33,6 +33,10 @@
 //! payload sorts atom names explicitly before emitting. No unordered
 //! container reaches a diagnostic, a rendered row, or a persisted fact.
 
+pub mod derivation;
+#[cfg(test)]
+mod tracer;
+
 use std::collections::BTreeSet;
 use std::fmt;
 

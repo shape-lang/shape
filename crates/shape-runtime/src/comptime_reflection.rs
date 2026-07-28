@@ -1302,7 +1302,7 @@ mod tests {
         assert_eq!(PARAM_KIND_SCHEMA_NAME, "ParamKind");
         assert_eq!(
             reflection_enum_variant_names(PARAM_KIND_SCHEMA_NAME),
-            Some(vec!["Type", "Const"])
+            Some(vec!["Type", "Const", "Effect"])
         );
     }
 

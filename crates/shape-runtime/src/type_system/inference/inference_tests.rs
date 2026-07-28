@@ -1966,8 +1966,7 @@ fn test_function_type_is_function_variant() {
 
     let code = r#"
             fn add(a: number, b: number) -> number {
-                return a + b,
-                effects: EffectRow::Unproven,
+                return a + b
             }
         "#;
 
