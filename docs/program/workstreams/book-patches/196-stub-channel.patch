@@ -1,0 +1,523 @@
+diff -ru a/book/book-site/src/content/docs/tooling/polyglot.mdx b/book/book-site/src/content/docs/tooling/polyglot.mdx
+--- a/book/book-site/src/content/docs/tooling/polyglot.mdx	2026-07-28 07:49:18.303300962 +0200
++++ b/book/book-site/src/content/docs/tooling/polyglot.mdx	2026-07-28 07:51:11.490199284 +0200
+@@ -29,43 +29,102 @@
+ 
+ 1. The parser captures the foreign body as raw text (braces, strings, and nested blocks are tracked for correct boundary detection).
+ 2. The body is **dedented** automatically, stripping common leading whitespace so Python's indentation sensitivity works correctly even though the block is nested inside Shape code.
+-3. At compile time, the language runtime extension pre-compiles the body and surfaces syntax errors early.
+-4. At call time, Shape marshals arguments to native objects, invokes the compiled function, and marshals the return value back.
++3. The declared parameter and return types are classified against the marshaling table. A type with no projection is rejected here, at the declaration (`[C0933]`).
++4. At compile time, Shape hands the extension the program's declared contract, then the body itself. How much the extension can check at this point is its own business — the TypeScript extension evaluates the wrapper function in V8 right away, so a syntax error surfaces at compile, while the Python extension builds its wrapper module on the first call, so a Python syntax error surfaces at first invoke.
++5. At call time, Shape marshals arguments to native objects, invokes the compiled function, and marshals the return value back.
+ 
+ ## Type Marshaling
+ 
+-Shape values are converted to native types at the language boundary and back on return.
++Values cross as MessagePack, and the set of Shape types that have a projection
++is **closed**. It is one table for every language runtime: the host classifies
++the declared Shape type once, and each extension renders that classification
++into its own language. Neither side parses the other's type spellings.
++
++| Shape declared type | Python | TypeScript | Crosses |
++|---|---|---|---|
++| `int` (also `i64`) | `int` | `ShapeInt` (an alias for `number`) | both ways |
++| `number` (also `float`, `f64`) | `float` | `number` | both ways |
++| `bool` | `bool` | `boolean` | both ways |
++| `string` (also `str`) | `str` | `string` | both ways |
++| `none` (also `()`) | `None` | `null` | both ways — but a `none` parameter carries nothing |
++| `Array<T>` / `Vec<T>`, `T` a scalar above | `list[T]` | `T[]` | both ways |
++| `HashMap<string, V>`, `V` a scalar other than `none` | `dict[str, V]` | `Record<string, V>` | **into the foreign function only** |
++| `Option<T>` / `T?` | `T` or `None` | `T` or `null` | wherever `T` does |
++| object type — a named `type`, or an inline `{ a: int }` | `TypedDict` | `interface` | see [Returning Structured Data](#returning-structured-data) |
++
++Two asymmetries are worth stating plainly, because they are not typos:
++
++- **`HashMap` goes in, not out.** There is an outbound projection and no inbound
++  one, so a map is a legal parameter and a rejected return type. Return an
++  object type instead — those project in both directions.
++- **Only scalars ride inside a container.** `Array<int>` crosses;
++  `Array<Measurement>` and `Array<Array<number>>` do not. Send the columns as
++  parallel scalar arrays, or pass one object per call.
++
++The return annotation may wrap the crossable type in exactly one `Result<...>`
++— that wrapper is the runtime's error channel and is stripped before the type
++is classified. A nested `Result`, or a `Result` in parameter position, has no
++projection.
++
++### Types that do not cross: `[C0933]`
++
++A declared parameter or return type outside that table is a **compile error at
++the declaration**. It used to compile and then fail on the first call, deep in
++the marshal layer, with an internal stage number — and only on the code path
++that reached it. The table is knowable at the declaration, so the diagnostic
++lives there:
+ 
+-### Shape to Python
++```shape runnable=false
++type Measurement {
++    timestamp: string,
++    value: number,
++    sensor_id: string,
++}
+ 
+-| Shape Type | Python Type | Strategy |
+-|------------|-------------|----------|
+-| `number` | `float` | Direct copy |
+-| `int` | `int` | Direct copy |
+-| `bool` | `bool` | Direct copy |
+-| `string` | `str` | UTF-8 via MessagePack |
+-| `none` | `None` | Sentinel |
+-| `Vec<T>` | `list[T]` | Recursive element marshaling |
+-| `DataTable` | `pd.DataFrame` | Planned: Arrow IPC zero-copy bridge (not yet implemented; see [DataTable Bridge](#datatable-bridge-status)) |
+-| `Option<T>` | `Optional[T]` | `None` or marshaled value |
+-| Struct types | `TypedDict` | Schema-driven field mapping (runtime path validates dicts against the declared object type; `.pyi` stub generation emits `TypedDict` declarations for editor support) |
+-| `HashMap<K,V>` | `dict[K,V]` | Recursive key/value marshaling |
+-
+-### Python to Shape
+-
+-| Python Type | Shape Type | Strategy |
+-|-------------|------------|----------|
+-| `float` | `number` | Direct copy |
+-| `int` | `int` (i64) or `number` | Range check (Python `int` outside `i64` range → `number`) |
+-| `str` | `string` | UTF-8 via MessagePack |
+-| `bool` | `bool` | Direct copy |
+-| `None` | `none` | Sentinel |
+-| `list` | `Vec` | Recursive, element type from return annotation |
+-| `dict` | Struct type | Schema-guided: validates keys, constructs TypedObject |
+-| `pd.DataFrame` | `DataTable` | Planned: Arrow IPC zero-copy bridge (not yet implemented; see [DataTable Bridge](#datatable-bridge-status)) |
+-| `np.ndarray` (1D) | `Vec<number>` | Marshalled via `.tolist()` — numpy arrays are converted to Python lists first, then to `Vec<number>` (not zero-copy) |
++fn python outlier_ratio(readings: Vec<Measurement>, z_threshold: number) -> Result<number> {
++    ...
++}
++```
+ 
+-Closures and function objects cannot cross the language boundary (compile-time error).
++```
++error[RUNTIME]: Bytecode compilation failed: Semantic error: [C0933] `fn python
++outlier_ratio`: parameter 'readings' is declared `Array<Measurement>`, which
++cannot cross the foreign boundary — `Measurement` is unusable because only
++scalar elements cross inside a container: Array<int>, Array<number>,
++Array<bool>, Array<string>. Values cross as MessagePack, so the declared type
++must be one the marshaling table projects (ADR-019 §1).
++  --> src/sensors.shape:7:25
++     |
++ 7 | fn python outlier_ratio(readings: Vec<Measurement>, z_threshold: number) -> Result<number> {
++     |                         ^~~~~~~~
++   |
++   = help: only `Array<int>`, `Array<number>`, `Array<bool>` and `Array<string>`
++     cross. Send `Measurement`'s fields as parallel scalar arrays, or declare an
++     object type and pass one value per call.
++```
++
++Every rejection carries a fix hint naming a concrete rewrite that keeps the
++call. The distinct reasons a type lands here:
++
++| Reason | Example | What to do |
++|---|---|---|
++| No wire projection at all | `DataTable`, `DateTime`, `decimal`, `bigint`, `char`, `Set`, `Range`, `Content`, `ptr` | Pass it as a `string` (or `int` / `number` if it is numeric) and rebuild it in the foreign body |
++| Non-scalar element in a container | `Array<Measurement>`, `Array<Array<number>>`, `HashMap<string, Point>` | Parallel scalar arrays, or one object per call |
++| Map key that is not `string` | `HashMap<int, number>` | Declare `HashMap<string, V>` — MessagePack map keys cross as strings |
++| A constructor with no foreign form | tuples, function types, unions, `&T`, `dyn Trait` | Declare an object type with the fields you need |
++| Mapped, but not in this direction | `HashMap<string, int>` as a return type | Return an object type |
++| Wrong generic arity | `Option<A, B>` | Check the type arguments |
++
++Because function types have no foreign form, **closures and function objects
++cannot cross the language boundary** — that is one of the `[C0933]` cases, not
++a separate rule.
++
++The language server reports the same `[C0933]` at the same span, so the editor
++and `shape run` cannot disagree about whether a signature is expressible.
++
++`extern "C"` declarations are **not** covered by this table. They marshal
++through libffi against C types (`ptr`, `i32`, `cslice`, …), which is a
++different table with its own checks.
+ 
+ ## Parameters and Return Types
+ 
+@@ -78,46 +137,62 @@
+     sensor_id: string,
+ }
+ 
+-fn python outlier_ratio(readings: Vec<Measurement>, z_threshold: number) -> Result<number> {
+-    values = [r['value'] for r in readings]
++fn python outlier_ratio(values: Vec<number>, z_threshold: number) -> Result<number> {
+     mean = sum(values) / len(values)
+     std = (sum((v - mean) ** 2 for v in values) / len(values)) ** 0.5
+     outliers = [v for v in values if abs(v - mean) > z_threshold * std]
+     return len(outliers) / len(values)
+ }
++
++fn python describe(reading: Measurement) -> Result<string> {
++    return f"{reading['sensor_id']}={reading['value']}"
++}
+ ```
+ 
+-Shape struct types like `Measurement` are exported as Python `TypedDict` classes, so `r['value']` autocompletes in your editor.
++Note the split: the batch of readings crosses as a scalar array
++(`Vec<number>`), and the named type `Measurement` crosses **one value per
++call**. `Vec<Measurement>` is a `[C0933]` compile error — see
++[Types that do not cross](#types-that-do-not-cross-c0933).
++
++Shape struct types like `Measurement` are exported as Python `TypedDict`
++classes, so `reading['value']` autocompletes in your editor. Subscripting is
++not a stylistic choice: a Shape object crosses as a MessagePack map and arrives
++in the Python body as a plain `dict`, so `reading.value` would fail at runtime.
+ 
+ ## Returning Structured Data
+ 
+-A Python function can return a list of dicts to populate a `Table<T>`:
++A foreign function returns **one object per call**, and today the working form
++is an inline object type in the return annotation:
+ 
+ ```shape runnable=false
+-type Element {
+-    symbol: string,
+-    atomic_number: int,
+-    atomic_mass: number,
+-}
+-
+-fn python periodic_subset(min_z: int, max_z: int) -> Result<Vec<Element>> {
+-    elements = [
+-        {"symbol": "H",  "atomic_number": 1,  "atomic_mass": 1.008},
+-        {"symbol": "He", "atomic_number": 2,  "atomic_mass": 4.003},
+-        {"symbol": "Li", "atomic_number": 3,  "atomic_mass": 6.941},
+-        {"symbol": "Be", "atomic_number": 4,  "atomic_mass": 9.012},
+-        {"symbol": "B",  "atomic_number": 5,  "atomic_mass": 10.81},
+-        {"symbol": "C",  "atomic_number": 6,  "atomic_mass": 12.01},
+-        {"symbol": "N",  "atomic_number": 7,  "atomic_mass": 14.01},
+-        {"symbol": "O",  "atomic_number": 8,  "atomic_mass": 16.00},
+-    ]
+-    return [e for e in elements if min_z <= e["atomic_number"] <= max_z]
+-}
+-
+-let light_elements = periodic_subset(1, 4)?
+-```
+-
+-Each dict in the returned list is validated against the `Element` schema, and the result can be used as a typed collection in Shape.
++fn python element_at(z: int) -> Result<{symbol: string, atomic_number: int, atomic_mass: number}> {
++    elements = {
++        1: {"symbol": "H",  "atomic_number": 1, "atomic_mass": 1.008},
++        2: {"symbol": "He", "atomic_number": 2, "atomic_mass": 4.003},
++        6: {"symbol": "C",  "atomic_number": 6, "atomic_mass": 12.01},
++    }
++    return elements[z]
++}
++
++let carbon = element_at(6)?
++print(carbon.symbol)       // "C"
++print(carbon.atomic_mass)  // 12.01
++```
++
++The returned dict is validated against the declared fields on the way back:
++missing fields or type mismatches produce a `MARSHAL_ERROR`, and the result is
++an ordinary Shape object with dot access.
++
++Two limits apply here, and both are real:
++
++- **A list of objects does not cross.** `Result<Vec<Element>>` is a `[C0933]`
++  compile error (non-scalar element). Return the columns as parallel scalar
++  arrays, or call once per row.
++- **A *named* type in return position is not wired up yet.** It passes
++  `[C0933]` — a named type is a legal object type — and then fails on the first
++  call with `Not implemented: foreign_marshal: object-typed return (Element)
++  lacks a registered schema_id`. Named types work fine as **parameters**; for
++  returns, declare the object inline as above.
+ 
+ ## Async Foreign Functions
+ 
+@@ -296,7 +371,13 @@
+ - **Completions**: Type `pd.` inside a Python block and get pandas autocomplete
+ - **Diagnostics**: Python syntax errors appear at the correct Shape file position
+ - **Hover**: Hover over `pd.DataFrame` and see the Python docstring
+-- **Type stubs**: Shape struct types are exported as `.pyi` stubs so pyright understands your parameter types
++- **Type stubs**: on the first foreign link for a language, the host classifies
++  the whole program's declared foreign contract and hands it to the extension,
++  which renders an interface stub document — a `.pyi` for Python, a `.d.ts` for
++  TypeScript. The document is held **in memory** by the VM that produced it
++  (`VirtualMachine::foreign_stub_document`). Materializing it on disk, where
++  pyright or `tsserver` would pick it up on its own, is POLY-FOREIGN-CHECK
++  (**#197**)
+ 
+ The LSP creates a virtual Python document for each foreign block, wrapping the body in a typed `def` with proper imports. This gives the child language server full type context without any extra configuration.
+ 
+@@ -320,7 +401,8 @@
+ | VTable Function | Purpose |
+ |-----------------|---------|
+ | `init` | Initialize the language interpreter |
+-| `register_types` | Receive Shape type schemas for stub generation |
++| `register_types` | Receive the program's declared foreign contract, already classified against the marshaling table. The extension never parses a Shape type spelling. A payload whose contract version it does not know must be refused, not guessed at — a misread contract yields a confidently wrong stub |
++| `generate_stubs` | Return the interface stub document rendered from the contract most recently delivered. Optional: an extension built before the stub channel existed leaves the slot empty, and the contract is still delivered |
+ | `compile` | Pre-compile a function body, returning a handle |
+ | `invoke` | Call a compiled function with marshaled arguments |
+ | `dispose_function` | Release a compiled function handle |
+@@ -331,7 +413,14 @@
+ | `error_model` | Whether the runtime is `Dynamic` (every call can fail — return types are automatically wrapped in `Result<T>`) or `Static` (compile-time type safety; runtime errors not expected). Defaults to `Dynamic` when zero-initialized. |
+ | `get_shape_source` | Returns a bundled `.shape` module source registered under the extension's own namespace (e.g. `python`, `typescript`) — **not** under `std::*`. This is how `import { eval } from typescript` becomes importable. Optional; set to `None` if the extension has no bundled namespace. |
+ 
+-Lifecycle: `init` &rarr; `register_types` &rarr; `compile` (per function) &rarr; `invoke` (per call) &rarr; `dispose_function` &rarr; `drop`.
++Lifecycle: `init` &rarr; `register_types` + `generate_stubs` &rarr; `compile` (per function) &rarr; `invoke` (per call) &rarr; `dispose_function` &rarr; `drop`.
++
++The contract is delivered once per (VM, language), **before** the first
++`compile` for that language, so the extension has the declared types its stub
++describes before it sees a body. The interpreter and the JIT go through the
++same chokepoint, so the two tiers cannot deliver different contracts. A
++registration failure is a real failure, not a degrade: an extension that
++advertises a stub channel and then refuses the contract stops the run.
+ 
+ `error_model` and `get_shape_source` are read by the host during extension registration; they are not part of the per-call dispatch path.
+ 
+@@ -363,13 +452,17 @@
+ 
+ `DataTable` ↔ `pd.DataFrame` marshalling is **planned but not yet implemented**.
+ The intent is to use Arrow IPC for zero-copy bridging between Shape's columnar
+-`DataTable` and pandas DataFrames (or pyarrow RecordBatches). Both directions
+-currently return an error at the bridge boundary — see
+-`extensions/python/src/arrow_bridge.rs` (`datatable_to_python_ipc` and
+-`python_ipc_to_datatable` are stubs).
+-
+-For tabular interchange today, transfer the data as `Vec<T>` of struct rows;
+-that path goes through the standard list/dict marshalling and works end-to-end.
++`DataTable` and pandas DataFrames (or pyarrow RecordBatches). The Arrow bridge
++itself is a pair of stubs — see `extensions/python/src/arrow_bridge.rs`
++(`datatable_to_python_ipc` and `python_ipc_to_datatable`) — and until it lands,
++`DataTable` has no wire projection, so a declaration mentioning it is refused
++at compile time with `[C0933]` rather than failing at the bridge on the first
++call.
++
++For tabular interchange today, send the columns as parallel scalar arrays
++(`Vec<number>`, `Vec<string>`, …) and rebuild the frame inside the foreign
++body. A `Vec<T>` of struct rows does **not** work: only scalars cross inside a
++container.
+ 
+ ## Notes
+ 
+diff -ru a/book/book-site/src/content/docs/tooling/python-extension.mdx b/book/book-site/src/content/docs/tooling/python-extension.mdx
+--- a/book/book-site/src/content/docs/tooling/python-extension.mdx	2026-07-28 07:49:18.305300978 +0200
++++ b/book/book-site/src/content/docs/tooling/python-extension.mdx	2026-07-28 07:52:37.621880498 +0200
+@@ -100,8 +100,15 @@
+ | `string` | `str` | both | |
+ | `bool` | `bool` | both | Python `bool` is **not** coerced to `int` |
+ | `none` | `None` | both | |
+-| `Vec<T>` | `list[T]` | both | Each element validated recursively against `T` |
++| `Vec<T>` | `list[T]` | both | `T` must be a scalar — `Vec<SomeType>` does not cross |
++| `HashMap<string, V>` | `dict[str, V]` | in only | `V` must be a scalar other than `none`; there is no inbound projection |
+ | `{f: T, ...}` | `dict` | both | Declared fields validated; produces a TypedObject on return |
++| a named `type` | `dict` | in | Works as a parameter; as a return type see [Returning Structured Data](/tooling/polyglot/#returning-structured-data) |
++
++A declared type outside this set is a compile error at the declaration
++(`[C0933]`), not a failure on the first call. The full table, the rejection and
++its fix hints live in
++[Polyglot Functions :: Type Marshaling](/tooling/polyglot/#type-marshaling).
+ 
+ **Coercion rules:**
+ 
+@@ -154,9 +161,15 @@
+ }
+ 
+ let joke = fetch_joke("https://example.com/joke")?
+-print(joke.punch_line)  // works — mapped from wire key "punch line"
++print(joke.punch_line)  // mapped from wire key "punch line"
+ ```
+ 
++A caveat on that example: a **named** type in *return* position compiles and
++then fails on the first call with
++`Not implemented: foreign_marshal: object-typed return (JokeResponse) lacks a
++registered schema_id`. Named types work as parameters; for returns, declare the
++object inline — which is the next form, and the one that works today.
++
+ #### Inline object types
+ 
+ ```shape runnable=false
+@@ -170,6 +183,97 @@
+ 
+ `@alias` also works for Arrow/DataTable column binding — use it anywhere the external name differs from the Shape field name. It replaces the older `@column` annotation.
+ 
++### Generated `.pyi` Stubs
++
++On the first `fn python` link in a program, the host classifies the program's
++whole declared foreign contract and hands it to the extension, which renders a
++`.pyi` document describing it:
++
++```python
++# Generated by the Shape Python runtime extension — do not edit.
++# Interface stubs for the declared Shape contract (ADR-019 §1).
++from __future__ import annotations
++
++from typing import TypedDict
++
++class Candle(TypedDict):
++    open: float
++    label: str
++
++def analyze(c: Candle) -> float: ...
++```
++
++Shape objects render as **`TypedDict`s, not dataclasses**, and that is a
++correctness choice rather than a stylistic one. A Shape object crosses as a
++MessagePack map and arrives in the body as a plain `dict`, so the body accesses
++`c["open"]`. A `@dataclass` stub would type-check `c.open` — code that fails at
++runtime.
++
++The rest of the rendering follows the marshaling table: `int` → `int`,
++`number` → `float`, `bool` → `bool`, `string` → `str`, `none` → `None`,
++`Array<T>` → `list[T]`, `HashMap<string, V>` → `dict[str, V]`, and `Option<T>`
++→ `T | None`.
++
++Two cases are worth knowing:
++
++- An **inline** object type gets a generated class — `_ShapeObject1`,
++  `_ShapeObject2` — declared before the function that uses it, one class per
++  distinct field shape however often it appears.
++- A type the host could **not** export field-by-field, because one of its
++  fields has a type with no wire form, is emitted as
++  `class Name(TypedDict, total=False)` carrying a `# fields not exported`
++  comment. An empty `TypedDict` would silently type-check away real field
++  accesses, so the stub says so instead.
++
++The contract payload is versioned, and a payload written by a host speaking a
++version the extension does not know is refused rather than guessed at: a
++misread contract yields a confidently wrong stub, which is worse than no stub.
++
++**The stub document is in memory only.** It lives on the VM that produced it
++(`VirtualMachine::foreign_stub_document("python")`); nothing writes a `.pyi` to
++disk, and pyright does not read one. On-disk materialization is
++POLY-FOREIGN-CHECK (**#197**).
++
++### Module State and Namespacing
++
++Each `fn python` declaration gets its **own** Python module. The wrapper is
++compiled on the first call to that function and then kept — with its module
++dict — for the rest of the run, so module-level state persists across calls of
++the same function, the way a Python module's state does:
++
++```shape runnable=false
++fn python next_id() -> Result<int> {
++    global counter
++    try:
++        counter
++    except NameError:
++        counter = 0
++    counter = counter + 1
++    return counter
++}
++
++// 1, then 2, then 3 — the module dict survives between calls
++print(next_id()?)
++print(next_id()?)
++print(next_id()?)
++```
++
++Two consequences of "its own module", both fixed in #196:
++
++- **Declarations do not share globals.** Each wrapper is registered in
++  `sys.modules` under a name unique to its handle
++  (`shape_foreign_<function>_<id>`). Previously every `fn python` in a program
++  executed into one fixed `__shape__` entry, because `PyModule::from_code`
++  reuses an existing `sys.modules` entry of the same name — so two functions
++  defining the same module-level name clobbered each other.
++- **The module is compiled once, not per call.** Before, the wrapper source was
++  recompiled and a fresh module built on *every* invocation, which is why
++  module-level state could not survive and why the compile cost was paid per
++  call.
++
++Disposing a function handle removes its module from `sys.modules`, so a
++long-running host does not leak one entry per compiled foreign function.
++
+ ### Error Model
+ 
+ With `Result<T>` return types, two error codes distinguish failure sources:
+diff -ru a/book/book-site/src/content/docs/tooling/typescript-extension.mdx b/book/book-site/src/content/docs/tooling/typescript-extension.mdx
+--- a/book/book-site/src/content/docs/tooling/typescript-extension.mdx	2026-07-28 07:49:18.309301010 +0200
++++ b/book/book-site/src/content/docs/tooling/typescript-extension.mdx	2026-07-28 07:53:05.631101642 +0200
+@@ -112,13 +112,20 @@
+ 
+ | Shape type | TypeScript type | Direction | Notes |
+ |---|---|---|---|
+-| `int` | `number` | both | Integer values fitting in i32 are passed as V8 `Integer`; larger values via `Number` (f64) |
++| `int` | `number` | both | Integer values fitting in i32 are passed as V8 `Integer`; larger values via `Number` (f64). Generated stubs spell it `ShapeInt` — see [Generated `.d.ts` Stubs](#generated-dts-stubs) |
+ | `number` / `float` | `number` | both | IEEE-754 double precision |
+ | `string` | `string` | both | UTF-8 |
+ | `bool` | `boolean` | both | |
+ | `none` | `null` | both | `null` and `undefined` both marshal to `none` |
+-| `Vec<T>` | `Array<T>` | both | Each element validated recursively against `T` |
++| `Vec<T>` | `Array<T>` | both | `T` must be a scalar — `Vec<SomeType>` does not cross |
++| `HashMap<string, V>` | `Record<string, V>` | in only | `V` must be a scalar other than `none`; there is no inbound projection |
+ | `{f: T, ...}` | `object` | both | Declared fields validated; produces a TypedObject on return |
++| a named `type` | `object` | in | Works as a parameter; as a return type see [Returning Structured Data](/tooling/polyglot/#returning-structured-data) |
++
++A declared type outside this set is a compile error at the declaration
++(`[C0933]`), not a failure on the first call. The full table, the rejection and
++its fix hints live in
++[Polyglot Functions :: Type Marshaling](/tooling/polyglot/#type-marshaling).
+ 
+ **Coercion rules:**
+ 
+@@ -151,6 +158,67 @@
+ The returned object must contain all declared fields with the correct types.
+ Missing fields or type mismatches produce a `MARSHAL_ERROR`.
+ 
++### Generated `.d.ts` Stubs
++
++On the first `fn typescript` link in a program, the host classifies the
++program's whole declared foreign contract and hands it to the extension, which
++renders a `.d.ts` document describing it:
++
++```typescript
++// Generated by the Shape TypeScript runtime extension — do not edit.
++// Interface declarations for the declared Shape contract (ADR-019 §1).
++
++/** Shape `int` (i64). Structurally a `number`: values beyond 2^53 lose
++ *  precision crossing the boundary. */
++type ShapeInt = number;
++
++interface Candle {
++  open: number;
++  label?: string;
++}
++
++declare function analyze(c: Candle): number;
++```
++
++#### `ShapeInt`
++
++Shape separates `int` (i64) from `number` (f64); TypeScript has a single
++numeric type. Rendering both as `number` would erase a distinction the
++declaration made and leave the stub unable to describe the contract it was
++generated from, so `int` renders as the emitted alias `ShapeInt` and `number`
++renders as `number`.
++
++The alias is structurally `number`, so `tsc` will not enforce integrality — it
++is there to keep the declaration readable and to put the range caveat where an
++author will see it. That caveat is real: an `int` beyond 2^53 cannot be
++represented exactly as a JavaScript number and loses precision crossing the
++boundary.
++
++The rest of the rendering follows the marshaling table: `bool` → `boolean`,
++`string` → `string`, `none` → `null` (MessagePack nil arrives as `null`, never
++`undefined`), `Array<T>` → `T[]`, `HashMap<string, V>` →
++`Record<string, V>`, and `Option<T>` → `T | null`.
++
++Two cases are worth knowing:
++
++- An **inline** object type gets a generated interface — `ShapeObject1`,
++  `ShapeObject2` — declared before the function that uses it, one interface per
++  distinct field shape however often it appears.
++- A type the host could **not** export field-by-field, because one of its
++  fields has a type with no wire form, is emitted with an
++  `[key: string]: unknown` index signature and a comment saying so. An empty
++  interface in TypeScript accepts anything, which would be a lie about the
++  contract.
++
++The contract payload is versioned, and a payload written by a host speaking a
++version the extension does not know is refused rather than guessed at: a
++misread contract yields a confidently wrong stub, which is worse than no stub.
++
++**The stub document is in memory only.** It lives on the VM that produced it
++(`VirtualMachine::foreign_stub_document("typescript")`); nothing writes a
++`.d.ts` to disk, and `tsserver` does not read one. On-disk materialization is
++POLY-FOREIGN-CHECK (**#197**).
++
+ ### Error Model
+ 
+ With `Result<T>` return types, two error codes distinguish failure sources:
