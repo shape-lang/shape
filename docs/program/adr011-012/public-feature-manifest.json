@@ -83,6 +83,101 @@
         "compiler-diagnostics"
       ],
       "distributed_semantics_required": false
+    },
+    "cli.check-fix": {
+      "public_name": "shape check --fix",
+      "family": "cli-diagnostics",
+      "status": "experimental",
+      "status_basis": {
+        "classification": "current-executable",
+        "declared_limits": [
+          {
+            "limit": "Applies only fixes an emitting diagnostic actually carries. At this revision exactly one diagnostic emits a machine-applicable fix (non-exhaustive match), so `--fix` repairs that and nothing else; on any other failing program it applies zero fixes and says so.",
+            "authority": {
+              "kind": "source",
+              "reference": "crates/shape-runtime/src/type_system/checker.rs `machine_applicable_fixes` — the single funnel; its arms enumerate every diagnostic that carries a fix"
+            }
+          },
+          {
+            "limit": "The effect-row and declared-contract fix producers are implemented and tested but unreachable from user input: neither ADR-014 §8.2 boundary diagnostic has a production emitter yet, so `--fix` never offers them. They become reachable with EFFECT-CONTRACT and the contract-discovery slice, with no change to the CLI.",
+            "authority": {
+              "kind": "issue",
+              "reference": "shape-lang/shape#143 (EFFECT-CONTRACT) owns the declaration-vs-body walk and the production boundary check that emit the row diagnostic; measured 2026-07-28 under #180 — `ConstraintSolver::check_declared_boundary` has no production caller"
+            }
+          },
+          {
+            "limit": "Rewrites the single checked entry file in place, with no backup and no diff preview. A project checked through `shape.toml` fixes its entry file only, not the modules it imports.",
+            "authority": {
+              "kind": "source",
+              "reference": "bin/shape-cli/src/commands/check_cmd.rs `apply_proved_fixes` — writes `path`, the file `run_check` read"
+            }
+          }
+        ],
+        "evidence": [
+          {
+            "kind": "source",
+            "reference": "bin/shape-cli/src/commands/check_cmd.rs::tests::applying_the_fix_rewrites_the_file_and_it_then_checks_clean — writes a non-exhaustive-match program to disk, applies the proved fix, reads the file back and re-checks it clean through the real compiler; passing at wave3-ergo"
+          },
+          {
+            "kind": "source",
+            "reference": "bin/shape-cli/src/commands/check_cmd.rs::tests::a_stale_plan_is_skipped_and_nothing_is_written — a plan proved against a different revision applies zero fixes and leaves the file byte-identical, rather than editing at stale offsets; passing at wave3-ergo"
+          },
+          {
+            "kind": "source",
+            "reference": "bin/shape-cli/src/commands/check_cmd.rs::tests::check_binds_proved_fixes_to_the_source_it_checked — `check` compiles with `set_source_with_file`, so the diagnostic it produces carries a plan bound to the text it checked; fails if that wiring is removed; passing at wave3-ergo"
+          },
+          {
+            "kind": "source",
+            "reference": "crates/shape-diagnostics/src/lib.rs::tests::stale_plan_is_rejected_not_misapplied — the shared `EditPlan::apply` authority the CLI applies through refuses a moved revision"
+          }
+        ]
+      },
+      "authority": [
+        {
+          "kind": "adr",
+          "reference": "ADR-017 §4 — boundary ceremony has machine-applicable fixes; fixes are single-sourced at the diagnostic emitter and consumers apply them verbatim"
+        },
+        {
+          "kind": "issue",
+          "reference": "shape-lang/shape#180 (ERGO-CONTRACT-FIXIT) — the slice that added `--fix` and closed the #179 residual that left `check` unable to bind a fix"
+        },
+        {
+          "kind": "source",
+          "reference": "bin/shape-cli/src/cli_args.rs `Commands::Check { fix }` — the surface: `shape check --fix [path]`"
+        },
+        {
+          "kind": "source",
+          "reference": "crates/shape-diagnostics/src/lib.rs `EditPlan::apply` — the single authority for turning structured edits into text, shared with the LSP's `TextEdit` projection"
+        }
+      ],
+      "owner": {
+        "repository": "shape-lang/shape",
+        "component": "CLI diagnostics — shape-cli check command, shape-diagnostics edit plans, type-checker fix producers"
+      },
+      "surfaces": [
+        "cli",
+        "compiler-diagnostic"
+      ],
+      "targets": [
+        "source-file"
+      ],
+      "required_modes": [
+        "compile",
+        "cli"
+      ],
+      "required_evidence_classes": [
+        "negative-rejection",
+        "structured-diagnostic"
+      ],
+      "required_semantic_dimensions": [
+        "user-model",
+        "syntax-or-callable-surface",
+        "success",
+        "failure",
+        "unsupported-use",
+        "compiler-diagnostics"
+      ],
+      "distributed_semantics_required": false
     }
   }
 }

@@ -231,9 +231,12 @@ impl ConstraintSolver {
                 expected,
                 excess,
             } => Err(TypeError::EffectRowExceedsBoundary {
-                inferred: actual.render(),
-                declared: expected.render(),
+                inferred: actual,
+                declared: expected,
                 excess: excess.into_iter().map(str::to_string).collect(),
+                // The algebra has no spans. The checking site attaches one
+                // through `TypeError::with_declared_row_site`.
+                site: None,
             }),
             RowSubsumption::UnboundActual(param) => Err(TypeError::UnboundEffectParameter {
                 parameter: param.name().to_string(),

@@ -3,11 +3,51 @@
 //! Defines error types for type inference and type checking,
 //! with detailed error messages for better developer experience.
 
-use super::effects::EffectRow;
+use super::effects::{ClosedEffectRow, EffectRow};
 use super::{Type, TypeVar};
-use shape_ast::ast::TypeAnnotation;
+use shape_ast::ast::{Span, TypeAnnotation};
 
 pub type TypeResult<T> = Result<T, TypeError>;
+
+/// Where a boundary's declared effect row is written in source, so a
+/// materialization fix (ADR-017 §4) knows what to edit.
+///
+/// Two shapes, because ADR-014 §8.2 draws exactly two cases: the boundary
+/// wrote a row that turned out too narrow (replace the clause), or it wrote
+/// none at all (insert one). The insertion point is recorded either way, so a
+/// site is usable whichever case the checking moment turns out to be.
+///
+/// This is provenance the *checking site* supplies — the row algebra in
+/// [`super::effects`] and `ConstraintSolver::check_declared_boundary` stay
+/// span-free, and a boundary check that has no AST in hand simply attaches no
+/// site.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeclaredRowSite {
+    /// Span of the written `! {...}` clause, including the `!`. `None` when
+    /// the boundary declared no row.
+    pub clause: Option<Span>,
+    /// Byte offset at which a clause belongs when none is written — after the
+    /// return type of the signature that owns the boundary.
+    pub insert_at: usize,
+}
+
+impl DeclaredRowSite {
+    /// A boundary that wrote a row: the fix replaces `clause`.
+    pub fn written(clause: Span) -> Self {
+        DeclaredRowSite {
+            insert_at: clause.start,
+            clause: Some(clause),
+        }
+    }
+
+    /// A boundary that wrote none: the fix inserts at `insert_at`.
+    pub fn omitted(insert_at: usize) -> Self {
+        DeclaredRowSite {
+            clause: None,
+            insert_at,
+        }
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, thiserror::Error)]
 pub enum TypeError {
@@ -50,15 +90,27 @@ pub enum TypeError {
     /// ADR-014 §8.1: a callable's effect row exceeds the row its boundary
     /// declares. `excess` is the sorted list of atoms the boundary does not
     /// permit — the payload #180's materialization fix consumes.
+    ///
+    /// `inferred` and `declared` are the rows themselves, not renderings of
+    /// them. The materialization fix (ADR-017 §4) writes source from
+    /// `inferred`, and its test asserts against this value; a fix built from a
+    /// rendered string would be a second authority on what the row is. The
+    /// message renders on demand.
     #[error(
-        "effect row {inferred} exceeds the declared row {declared}; \
+        "effect row {} exceeds the declared row {}; \
          the boundary does not permit {}",
+        .inferred.render(),
+        .declared.render(),
         .excess.join(", ")
     )]
     EffectRowExceedsBoundary {
-        inferred: String,
-        declared: String,
+        inferred: ClosedEffectRow,
+        declared: ClosedEffectRow,
         excess: Vec<String>,
+        /// Where the rejected boundary writes (or omits) its row. `None` when
+        /// the checking site did not record one — the diagnostic still reports,
+        /// it just carries no machine-applicable edit.
+        site: Option<DeclaredRowSite>,
     },
 
     /// ADR-010 §13: an effect parameter reached a checking, freezing, or
@@ -184,6 +236,24 @@ pub enum TypeError {
         trait_is_comptime: bool,
         impl_is_comptime: bool,
     },
+}
+
+impl TypeError {
+    /// Record where the rejected boundary writes its row.
+    ///
+    /// The row algebra decides *whether* a boundary is violated; only the
+    /// checking site knows *where* the violated boundary is written. Splitting
+    /// it this way is what lets `ConstraintSolver::check_declared_boundary`
+    /// stay span-free while the fix funnel still receives an editable site.
+    ///
+    /// A no-op on any other variant, so a checking site may attach a site
+    /// unconditionally.
+    pub fn with_declared_row_site(mut self, at: DeclaredRowSite) -> Self {
+        if let TypeError::EffectRowExceedsBoundary { site, .. } = &mut self {
+            *site = Some(at);
+        }
+        self
+    }
 }
 
 fn format_unsolved_constraints(constraints: &[(Type, Type)]) -> String {

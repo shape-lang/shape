@@ -334,6 +334,11 @@ pub enum Commands {
         /// (`extern C` libraries dlopen + symbol-resolve). Executes nothing.
         #[arg(long)]
         link: bool,
+        /// Apply the machine-applicable fixes the compiler proved, rewriting
+        /// the checked file in place (ADR-017 §4). Fixes proved against a
+        /// different revision of the file are refused, never misapplied.
+        #[arg(long)]
+        fix: bool,
     },
 
     /// Start the Shape execution server (in-process VM, replaces wire-serve)

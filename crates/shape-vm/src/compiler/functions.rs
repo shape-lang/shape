@@ -671,7 +671,9 @@ impl BytecodeCompiler {
             TypeAnnotation::Object(fields) => fields.iter().any(|field| {
                 Self::destructure_context_annotation_is_unknown(&field.type_annotation)
             }),
-            TypeAnnotation::Function { params, returns, .. } => {
+            TypeAnnotation::Function {
+                params, returns, ..
+            } => {
                 params.iter().any(|param| {
                     Self::destructure_context_annotation_is_unknown(&param.type_annotation)
                 }) || Self::destructure_context_annotation_is_unknown(returns)
@@ -6506,11 +6508,20 @@ mod effect_row_declaration_guard_tests {
     //! foreign declarations rather than ship a contract that lies.
     //!
     //! What the rejection does NOT take away, stated honestly: rows in TYPE
-    //! position are untouched and really are checked. A callback parameter
-    //! typed `fn() -> int ! {FsRead}` flows through the subset judgment
-    //! against whatever closure is passed. Only the declaration-position claim
-    //! is refused, because only that one had no checker. The
-    //! `..._still_compiles` differentials below pin that line.
+    //! position are untouched and remain writable. The row is a component of
+    //! the type there, and the subset judgment that decides it exists
+    //! (`ConstraintSolver::check_declared_boundary`).
+    //!
+    //! It is not *enforced* at this revision, and an earlier version of this
+    //! comment said it was. Measured 2026-07-28 under #180: no production
+    //! checking path calls that seam, so passing a `! {FsRead}` function value
+    //! where `! {}` is declared compiles silently. The declaration position is
+    //! refused and the type position is not because the gaps differ in kind —
+    //! a declaration row claims something about a body nothing derives, while
+    //! a type row is a caller constraint whose decision procedure is already
+    //! correct and merely uncalled. The `..._still_compiles` differentials
+    //! below pin that the type position stays ACCEPTED; they do not, and did
+    //! not, prove it is checked.
     //!
     //! **TRANSITIONAL — this whole module is #143's flip-to-green control.**
     //! When EFFECT-CONTRACT (issue #143) lands the body walk, the
@@ -6642,7 +6653,10 @@ mod effect_row_declaration_guard_tests {
     fn the_diagnostic_names_the_owning_lane_and_says_it_is_transitional() {
         // A rejection that does not say when it goes away reads as a refusal.
         let message = compile_err(r#"fn f() -> int ! {} { return 1 }"#);
-        assert!(message.contains("#143"), "must name the owning lane: {message}");
+        assert!(
+            message.contains("#143"),
+            "must name the owning lane: {message}"
+        );
         assert!(
             message.contains("transitional"),
             "must say it is transitional: {message}"
