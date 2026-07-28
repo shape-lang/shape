@@ -47,18 +47,61 @@
 
 use super::alloc_budget::{self, AllocBudgetExceeded};
 use std::alloc::Layout;
-use std::cell::Cell;
 
-thread_local! {
-    /// Count of blocks handed out by this seam on the current thread.
-    static ALLOC_COUNT: Cell<u64> = const { Cell::new(0) };
-    /// Count of blocks returned to the allocator through this seam.
-    static DEALLOC_COUNT: Cell<u64> = const { Cell::new(0) };
-    /// Count of in-place growth attempts (`realloc`) through this seam. A
-    /// `realloc` is neither a fresh block nor a freed one, so it is counted
-    /// separately rather than folded into either total.
-    static REALLOC_COUNT: Cell<u64> = const { Cell::new(0) };
+/// Seam counters, compiled only where something reads them.
+///
+/// A thread-local increment per allocation and per free sounds free and is
+/// not: unconditional counters cost ~8% on the charter's `alloc_tree` workload
+/// and ~5% on `alloc_object_graph`, measured before/after on the committed
+/// suite. Instrumentation that expensive does not belong in a shipped build,
+/// and #194 is meant to be a pure refactor — so the counters compile away
+/// unless a test or the `alloc-stats` feature asks for them, leaving the
+/// production path carrying only the ceiling check the ticket requires.
+#[cfg(any(test, feature = "alloc-stats"))]
+mod counters {
+    use std::cell::Cell;
+
+    thread_local! {
+        /// Count of blocks handed out by this seam on the current thread.
+        pub(super) static ALLOC_COUNT: Cell<u64> = const { Cell::new(0) };
+        /// Count of blocks returned to the allocator through this seam.
+        pub(super) static DEALLOC_COUNT: Cell<u64> = const { Cell::new(0) };
+        /// Count of in-place growth attempts (`realloc`) through this seam. A
+        /// `realloc` is neither a fresh block nor a freed one, so it is counted
+        /// separately rather than folded into either total.
+        pub(super) static REALLOC_COUNT: Cell<u64> = const { Cell::new(0) };
+    }
 }
+
+#[cfg(any(test, feature = "alloc-stats"))]
+#[inline]
+fn note_alloc() {
+    counters::ALLOC_COUNT.with(|c| c.set(c.get() + 1));
+}
+
+#[cfg(not(any(test, feature = "alloc-stats")))]
+#[inline(always)]
+fn note_alloc() {}
+
+#[cfg(any(test, feature = "alloc-stats"))]
+#[inline]
+fn note_dealloc() {
+    counters::DEALLOC_COUNT.with(|c| c.set(c.get() + 1));
+}
+
+#[cfg(not(any(test, feature = "alloc-stats")))]
+#[inline(always)]
+fn note_dealloc() {}
+
+#[cfg(any(test, feature = "alloc-stats"))]
+#[inline]
+fn note_realloc() {
+    counters::REALLOC_COUNT.with(|c| c.set(c.get() + 1));
+}
+
+#[cfg(not(any(test, feature = "alloc-stats")))]
+#[inline(always)]
+fn note_realloc() {}
 
 /// Seam-observed allocation counters for the current thread.
 ///
@@ -70,6 +113,7 @@ thread_local! {
 ///
 /// They deliberately do NOT count Rust-side `Vec`/`String`/`Box` traffic —
 /// only the raw typed-carrier blocks this seam hands out.
+#[cfg(any(test, feature = "alloc-stats"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AllocCounts {
     /// Blocks allocated (fresh allocations, zeroed or not).
@@ -80,6 +124,7 @@ pub struct AllocCounts {
     pub reallocs: u64,
 }
 
+#[cfg(any(test, feature = "alloc-stats"))]
 impl AllocCounts {
     /// Blocks allocated but not yet freed, as observed by this seam. Saturates
     /// at zero rather than underflowing when a block allocated before a
@@ -90,20 +135,22 @@ impl AllocCounts {
 }
 
 /// Read the current thread's seam counters.
+#[cfg(any(test, feature = "alloc-stats"))]
 pub fn counts() -> AllocCounts {
     AllocCounts {
-        allocs: ALLOC_COUNT.with(|c| c.get()),
-        deallocs: DEALLOC_COUNT.with(|c| c.get()),
-        reallocs: REALLOC_COUNT.with(|c| c.get()),
+        allocs: counters::ALLOC_COUNT.with(|c| c.get()),
+        deallocs: counters::DEALLOC_COUNT.with(|c| c.get()),
+        reallocs: counters::REALLOC_COUNT.with(|c| c.get()),
     }
 }
 
 /// Zero the current thread's seam counters. Intended for tests that want to
 /// measure one operation.
+#[cfg(any(test, feature = "alloc-stats"))]
 pub fn reset_counts() {
-    ALLOC_COUNT.with(|c| c.set(0));
-    DEALLOC_COUNT.with(|c| c.set(0));
-    REALLOC_COUNT.with(|c| c.set(0));
+    counters::ALLOC_COUNT.with(|c| c.set(0));
+    counters::DEALLOC_COUNT.with(|c| c.set(0));
+    counters::REALLOC_COUNT.with(|c| c.set(0));
 }
 
 /// Consult the per-buffer heap ceiling for a block of `layout`, recording a
@@ -149,7 +196,7 @@ fn meter(layout: Layout) -> Result<(), AllocBudgetExceeded> {
 #[inline]
 pub fn alloc_block(layout: Layout) -> *mut u8 {
     let _ = meter(layout);
-    ALLOC_COUNT.with(|c| c.set(c.get() + 1));
+    note_alloc();
     // SAFETY: `Layout` is non-zero-sized by the caller's construction; the
     // zero-size case is the caller's to avoid, as it was with a direct call.
     unsafe { std::alloc::alloc(layout) }
@@ -159,7 +206,7 @@ pub fn alloc_block(layout: Layout) -> *mut u8 {
 #[inline]
 pub fn alloc_zeroed_block(layout: Layout) -> *mut u8 {
     let _ = meter(layout);
-    ALLOC_COUNT.with(|c| c.set(c.get() + 1));
+    note_alloc();
     // SAFETY: as [`alloc_block`].
     unsafe { std::alloc::alloc_zeroed(layout) }
 }
@@ -173,7 +220,7 @@ pub fn alloc_zeroed_block(layout: Layout) -> *mut u8 {
 #[inline]
 pub fn try_alloc_block(layout: Layout) -> Result<*mut u8, AllocBudgetExceeded> {
     meter(layout)?;
-    ALLOC_COUNT.with(|c| c.set(c.get() + 1));
+    note_alloc();
     // SAFETY: as [`alloc_block`].
     Ok(unsafe { std::alloc::alloc(layout) })
 }
@@ -199,7 +246,7 @@ pub unsafe fn try_realloc_block(
     // absolute per-buffer ceiling, not a cumulative budget, so the new size is
     // the quantity under test and no credit is owed on free.
     meter(unsafe { Layout::from_size_align_unchecked(new_size, old_layout.align()) })?;
-    REALLOC_COUNT.with(|c| c.set(c.get() + 1));
+    note_realloc();
     // SAFETY: forwarded from this function's contract.
     Ok(unsafe { std::alloc::realloc(ptr, old_layout, new_size) })
 }
@@ -216,7 +263,7 @@ pub unsafe fn try_realloc_block(
 #[inline]
 pub unsafe fn realloc_block(ptr: *mut u8, old_layout: Layout, new_size: usize) -> *mut u8 {
     let _ = meter(unsafe { Layout::from_size_align_unchecked(new_size, old_layout.align()) });
-    REALLOC_COUNT.with(|c| c.set(c.get() + 1));
+    note_realloc();
     // SAFETY: forwarded from this function's contract.
     unsafe { std::alloc::realloc(ptr, old_layout, new_size) }
 }
@@ -228,7 +275,7 @@ pub unsafe fn realloc_block(ptr: *mut u8, old_layout: Layout, new_size: usize) -
 /// `layout`. A layout mismatch is UB — the seam does not and cannot check it.
 #[inline]
 pub unsafe fn dealloc_block(ptr: *mut u8, layout: Layout) {
-    DEALLOC_COUNT.with(|c| c.set(c.get() + 1));
+    note_dealloc();
     // SAFETY: forwarded from this function's contract.
     unsafe { std::alloc::dealloc(ptr, layout) }
 }
@@ -250,7 +297,6 @@ pub unsafe fn dealloc_block(ptr: *mut u8, layout: Layout) {
 #[cfg(test)]
 mod alloc_differential {
     use super::*;
-    use crate::v2::alloc_budget::BudgetGuard;
     use crate::v2::decimal_obj::DecimalObj;
     use crate::v2::string_obj::StringObj;
     use crate::v2::typed_array::TypedArray;

@@ -30,3 +30,10 @@ default = []
 # Phase 0 lands metadata + accessors only (no collector, no barriers, no Drop
 # change).
 gc = []
+# Allocation-seam counters (#194). Default OFF: the counters are test
+# instrumentation, and a thread-local increment on every allocation and free is
+# measurable on allocation-heavy workloads (~8% on the charter's alloc_tree
+# when they were unconditional). Always on inside shape-value's own `cfg(test)`
+# build, so the seam's differential tests need no feature flag; this feature is
+# for measuring allocation counts from another crate.
+alloc-stats = []
