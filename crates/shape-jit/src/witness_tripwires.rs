@@ -255,8 +255,13 @@ fn a_capturing_closure_body_is_natively_dispatched() {
     );
 
     for closure in &closures {
-        let unit = assert_native_dispatch(&witness, &closure.function_identity)
-            .unwrap_or_else(|e| panic!("{} must be a native claim: {e:?}", closure.function_identity));
+        let unit =
+            assert_native_dispatch(&witness, &closure.function_identity).unwrap_or_else(|e| {
+                panic!(
+                    "{} must be a native claim: {e:?}",
+                    closure.function_identity
+                )
+            });
         assert!(
             unit.native_dispatches > 0,
             "{} announced no native entry — installation alone is not a nativity \

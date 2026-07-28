@@ -1421,10 +1421,85 @@ fn future_return_metadata() -> FrameReturnMetadata {
 /// Resolved concrete types provide the ABI kind for scalars and structs;
 /// a head-only fallback preserves Option/Result wrapper metadata even
 /// when generic arguments are not fully resolvable.
+/// #188 stage 1: can this function's body be PROVEN to return the heap-closure
+/// carrier?
+///
+/// A `TypeAnnotation::Function` return type does NOT determine the runtime
+/// carrier on its own, and the carrier difference is memory-safety relevant.
+/// A slot stamped `NativeKind::Ptr(HeapKind::Closure)` gets `arc_closure_release`
+/// on reassignment (`mir_compiler/ownership.rs`), which is an unconditional
+/// `Arc::decrement_strong_count::<HeapValue>` with no bit-shape check. Two
+/// different things can sit in a function-typed slot:
+///
+///   * `Arc::into_raw(Arc<HeapValue::ClosureRaw>)` — what the VM's
+///     `op_make_closure` always pushes (single push site,
+///     `control_flow/mod.rs`), and what `emit_heap_closure` +
+///     `jit_finalize_heap_closure` produce in the JIT; and
+///   * `box_function(fn_id)` — the JIT-internal NaN-box `compile_constant`
+///     emits for a `MirConstant::Function` operand, i.e. a NAMED function
+///     reference. Arc-decrementing that pattern scribbles on unrelated memory.
+///
+/// So `fn pick() -> (int) => int { return some_named_fn }` must NOT be stamped,
+/// while `fn mk(k: int) -> (int) => int { return |x: int| x * k }` can be:
+/// `compile_statement`'s return arm sets `emit_make_closure_heap_next` when the
+/// returned expression is a closure LITERAL, which forces
+/// `Operand::ClosureAlloc { escapes: true }` and therefore the heap Arc carrier
+/// on both tiers.
+///
+/// The proof is deliberately narrow, because being wrong here is a
+/// use-after-free rather than a mis-optimization: the body must consist ONLY
+/// of `return <closure literal>` statements, and there must be at least one.
+///
+/// Nothing else is admitted — not even a leading `let`. An earlier draft
+/// allowed `VariableDecl` / `Assignment` / `Expression` statements on the
+/// reasoning that they cannot contain a `Return` of THIS function. That was
+/// wrong, and the regression test
+/// `a_closure_returned_from_inside_a_branch_is_not_stamped` caught it: `if c {
+/// return some_named_fn }` in statement position parses as
+/// `Statement::Expression(Expr::If(..))`, so a nested return of a NAMED
+/// function hid inside an allowed statement and the function was stamped on a
+/// false proof. Any expression can carry a block, so no statement carrying an
+/// expression can be waved through by a walker that does not descend into
+/// expressions.
+///
+/// Widening this needs a real recursive return-walker over both statements and
+/// block-bearing expressions — not a longer allow-list.
+fn body_provably_returns_heap_closure(body: &[shape_ast::ast::Statement]) -> bool {
+    use shape_ast::ast::{Expr, Statement};
+
+    !body.is_empty()
+        && body
+            .iter()
+            .all(|stmt| matches!(stmt, Statement::Return(Some(Expr::FunctionExpr { .. }), _)))
+}
+
 fn classify_type_annotation_metadata(
     compiler: &BytecodeCompiler,
     return_type: &shape_ast::ast::TypeAnnotation,
+    heap_closure_carrier_proven: bool,
 ) -> FrameReturnMetadata {
+    // #188 stage 1: a declared function-type return. The ABI carrier for a
+    // closure value is `Ptr(HeapKind::Closure)` — the same kind
+    // `native_kind_from_concrete_type` already maps `ConcreteType::Closure` /
+    // `ConcreteType::Function` to, and the same kind function-typed PARAMETER
+    // slots already carry. Without this arm the annotation fell through to
+    // `FrameReturnMetadata::unknown()`, so the JIT's W36 named-function
+    // callgraph had no return-kind proof for `mk` in
+    // `let f = mk(3)` and refused the whole program
+    // (`SYN__first-class-closure-return.shape`).
+    //
+    // Gated on a PROVEN carrier, never on the annotation alone — see
+    // `body_provably_returns_heap_closure` for why the annotation cannot
+    // decide this and why being wrong is a use-after-free.
+    if matches!(return_type, shape_ast::ast::TypeAnnotation::Function { .. }) {
+        if heap_closure_carrier_proven {
+            return FrameReturnMetadata {
+                return_kind: Some(shape_value::NativeKind::Ptr(shape_value::HeapKind::Closure)),
+                wrapper: FrameReturnWrapper::Plain,
+            };
+        }
+        return FrameReturnMetadata::unknown();
+    }
     // `Future<T>` is an inline scheduler-id ABI carrier, not a v2
     // `ConcreteType`. Its declaration is still sufficient proof to stamp the
     // exact return carrier consumed by the remote host boundary.
@@ -3885,8 +3960,14 @@ impl BytecodeCompiler {
         // captured by `TypeAnnotation::as_simple_name()`). (2)
         // registered concrete return type fallback.
         let return_metadata = func_def
-            .and_then(|fd| fd.return_type.as_ref())
-            .map(|ann| classify_type_annotation_metadata(self, ann))
+            .and_then(|fd| {
+                fd.return_type
+                    .as_ref()
+                    .map(|ann| (ann, body_provably_returns_heap_closure(&fd.body)))
+            })
+            .map(|(ann, carrier_proven)| {
+                classify_type_annotation_metadata(self, ann, carrier_proven)
+            })
             .or_else(|| {
                 // U4-5b: classify the Result/Option discriminator off the
                 // recorded return `ConcreteType` — no return-NAME string head
@@ -8484,6 +8565,113 @@ mod frame_return_metadata_tests {
     use crate::type_tracking::FrameReturnWrapper;
     use shape_value::{HeapKind, NativeKind};
 
+    // ── #188 stage 1: returned-closure carrier proof ────────────────────
+    //
+    // The stamp is memory-safety relevant, not just an optimization: a slot
+    // labelled `Ptr(HeapKind::Closure)` is Arc-decremented unconditionally by
+    // `arc_closure_release`. These pin the boundary of what the compiler is
+    // willing to prove, so a future widening has to move the boundary
+    // deliberately rather than by accident.
+
+    #[test]
+    fn a_returned_closure_literal_stamps_the_heap_closure_carrier() {
+        let program = compile(
+            "fn mk(k: int) -> (int) => int { return |x: int| x * k }\nlet f = mk(3)\nprint(f(2))",
+        );
+        let frame = frame_for(&program, "mk");
+        assert_eq!(
+            frame.return_kind,
+            Some(NativeKind::Ptr(HeapKind::Closure)),
+            "`return <closure literal>` sets `emit_make_closure_heap_next`, which \
+             forces `ClosureAlloc {{ escapes: true }}` and therefore the heap Arc \
+             carrier — the one shape `arc_closure_release` may decrement"
+        );
+        assert_eq!(frame.return_wrapper, FrameReturnWrapper::Plain);
+    }
+
+    #[test]
+    fn a_returned_named_function_is_not_stamped() {
+        // THE soundness case. `triple` lowers to a `MirConstant::Function`
+        // operand, which the JIT emits as a `box_function(fn_id)` NaN-box —
+        // NOT an `Arc<HeapValue>`. Stamping `Ptr(HeapKind::Closure)` here
+        // would let `arc_closure_release` decrement a refcount that does not
+        // exist at `bits - 16`.
+        let program = compile(
+            "fn triple(x: int) -> int { return x * 3 }\n\
+             fn pick() -> (int) => int { return triple }\n\
+             let f = pick()\nprint(f(2))",
+        );
+        assert_eq!(
+            return_kind_of(&program, "pick"),
+            None,
+            "the annotation alone does not determine the carrier; an unproven \
+             body must keep the JIT's W36 refusal rather than take a guess"
+        );
+    }
+
+    #[test]
+    fn a_returned_parameter_is_not_stamped() {
+        // The carrier is whatever the caller passed in — unprovable here.
+        let program = compile(
+            "fn passthru(g: (int) => int) -> (int) => int { return g }\n\
+             let base = |x: int| x * 3\n\
+             let f = passthru(base)\nprint(f(2))",
+        );
+        assert_eq!(return_kind_of(&program, "passthru"), None);
+    }
+
+    #[test]
+    fn a_closure_returned_from_inside_a_branch_is_not_stamped() {
+        // The walker only sees the body's top-level statement list, so any
+        // compound statement is refused outright. Without that refusal a
+        // `return some_named_fn` nested in the other arm would be invisible
+        // and the function would be stamped on a false proof.
+        let program = compile(
+            "fn triple(x: int) -> int { return x * 3 }\n\
+             fn pick(c: bool) -> (int) => int {\n\
+                 if c { return triple }\n\
+                 return |x: int| x * 2\n\
+             }\n\
+             let f = pick(false)\nprint(f(2))",
+        );
+        assert_eq!(
+            return_kind_of(&program, "pick"),
+            None,
+            "a nested return is not walked, so nothing is proven and nothing \
+             may be stamped"
+        );
+    }
+
+    #[test]
+    fn body_proof_helper_refuses_every_unproven_shape() {
+        use shape_ast::ast::{Expr, Span, Statement};
+        // Direct unit coverage of the predicate, independent of compilation.
+        let closure = || Expr::FunctionExpr {
+            params: vec![],
+            body: vec![],
+            return_type: None,
+            generated_origin: None,
+            captures: None,
+            annotations: None,
+            span: Span::default(),
+        };
+        // Proven: a single `return <closure literal>`.
+        assert!(super::body_provably_returns_heap_closure(&[
+            Statement::Return(Some(closure()), Span::default())
+        ]));
+        // No return at all proves nothing.
+        assert!(!super::body_provably_returns_heap_closure(&[]));
+        // A bare `return` proves nothing.
+        assert!(!super::body_provably_returns_heap_closure(&[
+            Statement::Return(None, Span::default())
+        ]));
+        // A trailing expression statement is an unproven implicit tail.
+        assert!(!super::body_provably_returns_heap_closure(&[
+            Statement::Return(Some(closure()), Span::default()),
+            Statement::Expression(closure(), Span::default()),
+        ]));
+    }
+
     fn compile(source: &str) -> crate::bytecode::BytecodeProgram {
         let program = shape_ast::parser::parse_program(source).expect("parse");
         BytecodeCompiler::new()
@@ -8506,6 +8694,22 @@ mod frame_return_metadata_tests {
         func.frame_descriptor
             .as_ref()
             .unwrap_or_else(|| panic!("compiled function {name} carries no frame descriptor"))
+    }
+
+    /// #188 stage 1: the unproven cases must end with NO stamped return kind,
+    /// and a function with nothing else to describe carries no descriptor at
+    /// all — so the assertion has to tolerate an absent descriptor rather than
+    /// demand one like `frame_for` does.
+    fn return_kind_of(
+        program: &crate::bytecode::BytecodeProgram,
+        name: &str,
+    ) -> Option<NativeKind> {
+        let func = program
+            .functions
+            .iter()
+            .find(|func| func.name == name)
+            .unwrap_or_else(|| panic!("no compiled function is registered under the name {name}"));
+        func.frame_descriptor.as_ref().and_then(|fd| fd.return_kind)
     }
 
     #[test]
