@@ -227,6 +227,78 @@ runtime identity and version, resolved package set, and lockfile hash.
 - TypeScript gains a lockfile-backed module loader; an unresolvable import is
   a compile-stage diagnostic through §1, not a runtime V8 error.
 
+#### 4.1 Implementation amendment — declaration, refusal, and the staged join (#198, 2026-07-28)
+
+§4's design is implemented as written, with five decisions it leaves open and
+two places where this slice delivers less than its text. Each is recorded here
+rather than deferred, because each is a point where a plausible alternative
+would quietly reintroduce what §4 deletes.
+
+**The surface is `[foreign.<language>]`, a typed table.** Runtime identity,
+version, environment root, lockfile path, and the §1 checker pin. A named
+manifest field rather than an entry in the extension-section catch-all, so the
+toolchain can read a project's declared environment whether or not the
+extension that will run it is loaded — a compile-stage fact must not depend on
+a runtime's presence. Lockfiles are per-language TOML, `BTreeMap`-keyed
+throughout, and serialize canonically.
+
+**The lock hash is over the parsed document, not the file bytes.** A lockfile
+that was reformatted or had its tables reordered resolves to the same
+environment, and a digest that moved for it would put every content-addressed
+artifact at a formatter's mercy — the opposite of §4's "same source plus same
+lockfiles yields the same digest on every host".
+
+**The resolved set enters the digest only through the lock hash.** §4 lists
+"resolved package set, and lockfile hash" as separate contributions. Writing
+both into the pre-image would leave "which one decides?" open the first time
+they could disagree, so the pre-image carries the lock hash and the value
+carries the resolved set for diagnostics. One authority per fact.
+
+**The declared root does NOT enter the digest.** Where an environment sits on
+this host is not what the environment IS: two checkouts at different paths must
+produce the same artifact. The root is a provisioning input, consumed by
+`check_provided` — the single place host inspection is legal, and one that can
+only fail, never substitute.
+
+**Search paths are constructed from the declared version, not discovered.**
+`lib/python3.11/site-packages` follows from `runtime = "cpython"` and
+`version = "3.11.7"`. This is why deleting the sniffer costs no capability:
+the layout was always derivable from facts the manifest now states, and
+guessing them was the sniffer's entire job. A root whose layout disagrees with
+the declared version is a refusal, not a search.
+
+**Refusal is `[C0936]`, and its scope is narrower than §4's text.** §4 reads
+as though an undeclared environment refuses outright. This slice refuses a
+DECLARED environment that cannot be provided, at link-now, before the foreign
+body is compiled — and leaves an undeclared language running against the base
+interpreter with no search path added, which is exactly what deleting the
+sniffer leaves and is truthful. Requiring a declaration before any `fn python`
+may run is a release/artifact rule and belongs to #160 and #167 with the rest
+of admission; the `Undeclared` refusal variant exists for them.
+
+**The content-hash join is staged, not landed.** §4 is explicit that joining
+the digest breaks every existing foreign function's hash and that the break is
+versioned with the artifact-persistence lane. So the `\0env\0` run exists in
+`compute_content_hash`, gated on an `env_digest` field that no compiler path
+sets; #160 wires it in one line. Two obligations transfer with it: the
+bytecode-format version bump, and enriching `LinkError::MissingForeignEntry`
+to name the two environment digests, so a receiver's refusal reads as an
+environment disagreement rather than a bare missing hash.
+
+**The TypeScript loader is narrower than "a module loader".** It resolves from
+the declared lockfile's module table and nothing else — no `node_modules`
+walk, no registry, no network — and verifies `integrity` when the lock declares
+it. Three exclusions are deliberate: turning a `package.json` into a lockfile
+is a resolver and a separate program; vendored sources load as JavaScript
+because this runtime embeds V8 and not tsc, with a `.ts` path refused at
+resolve time naming pre-transpilation as the remedy; and a top-level `import`
+statement in a fence remains a syntax error because a foreign body is compiled
+as a function body, so the spelling that reaches the loader is dynamic
+`import()`. §4's "an unresolvable import is a compile-stage diagnostic through
+§1" is therefore not yet true — the refusal is at the import — and becomes
+true when POLY-FOREIGN-CHECK runs tsc over the fence with the same lock in
+hand.
+
 ### 5. Foreign async is truthful: transitional rejection, then offload parity
 
 Compiling an async declaration to a VM-thread-blocking call misrepresents
