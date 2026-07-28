@@ -8,6 +8,7 @@
 
 pub mod analysis;
 pub mod annotation_discovery;
+pub mod binding_storage;
 pub mod call_hierarchy;
 pub mod code_actions;
 pub mod code_lens;
