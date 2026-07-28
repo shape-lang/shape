@@ -458,6 +458,19 @@ impl<'a> ValueFormatter<'a> {
                 let _ = bits;
                 "<filter_expr>".to_string()
             }
+            HeapKind::ForeignRef => {
+                // ADR-019 §3 / #200: printing a foreign reference must not
+                // reach into the foreign runtime — that would make `print` an
+                // unannounced `Ffi` operation. The origin facts travel on the
+                // carrier, so the rendering can say what the value is without
+                // calling anything.
+                //
+                // SAFETY: bits = `Arc::into_raw(Arc<ForeignRefData>)` per the
+                // `KindedSlot::from_foreign_ref` construction contract.
+                // Borrow only; the slot keeps its share.
+                let r = unsafe { &*(bits as *const shape_value::ForeignRefData) };
+                format!("<{} {}>", r.origin().language, r.origin().foreign_type)
+            }
             HeapKind::Reference => {
                 // ADR-006 §2.7.13 / Q14 (Wave 8 W8-T26, 2026-05-10):
                 // Reference values are within-program data emitted by the

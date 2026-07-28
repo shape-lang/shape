@@ -439,6 +439,7 @@ fn typed_object_field_eq(a_bits: u64, b_bits: u64, kind: NativeKind) -> bool {
             | HeapKind::NativeView
             | HeapKind::HashMap
             | HeapKind::FilterExpr
+            | HeapKind::ForeignRef
             | HeapKind::Reference
             | HeapKind::SharedCell
             | HeapKind::HashSet
@@ -636,6 +637,7 @@ fn heap_ptr_is_null(bits: u64, heap_kind: HeapKind) -> bool {
         | HeapKind::Char
         | HeapKind::HashMap
         | HeapKind::FilterExpr
+        | HeapKind::ForeignRef
         | HeapKind::Reference
         | HeapKind::SharedCell
         | HeapKind::HashSet
@@ -746,6 +748,8 @@ fn kind_type_name(kind: NativeKind) -> &'static str {
         // FilterExpr discriminator labels query-DSL Arc<FilterNode>
         // payloads emitted by `executor/logical/mod.rs`.
         NativeKind::Ptr(HeapKind::FilterExpr) => "filter_expr",
+        // ADR-019 §3 / #200: the opaque foreign-reference carrier.
+        NativeKind::Ptr(HeapKind::ForeignRef) => "foreign_ref",
         // ADR-006 §2.7.13 / Q14 (Wave 8 W8-T26): Reference carriers
         // (`Arc<RefTarget>`) emitted by the `MakeRef` family.
         NativeKind::Ptr(HeapKind::Reference) => "ref",

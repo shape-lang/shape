@@ -443,6 +443,7 @@ fn heap_slot_to_msgpack(
         | HeapKind::NativeView
         | HeapKind::HashMap
         | HeapKind::FilterExpr
+        | HeapKind::ForeignRef
         | HeapKind::Reference
         | HeapKind::SharedCell
         | HeapKind::HashSet

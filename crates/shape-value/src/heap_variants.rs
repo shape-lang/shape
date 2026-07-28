@@ -397,6 +397,24 @@ macro_rules! define_heap_types {
             // `HeapValue::MatrixSlice(Arc<MatrixSliceData>)` arm for the
             // ADR-005 §1 / ADR-006 §2.3 symmetry property).
             MatrixSlice, // 35  (Round 18 S3 W12-matrix-floatslice-heapkind-exit, 2026-05-13)
+            // ADR-006 §2.7.32 / Q26 amendment (ADR-019 §3, POLY-FOREIGN-REF
+            // #200, 2026-07-28): the opaque foreign-reference carrier. Slot
+            // bits are `Arc::into_raw(Arc<ForeignRefData>) as u64`; the
+            // payload binds an extension-minted handle, its origin facts, and
+            // the disposal authority that returns the object to its owning
+            // runtime when the last share is retired.
+            //
+            // Pure-discriminator variant — no corresponding `HeapValue` arm,
+            // exactly the §2.7.9 `FilterExpr` shape: `as_heap_value()` is
+            // unsound on ForeignRef-labelled bits, and every retain/release is
+            // `Arc::{increment,decrement}_strong_count::<ForeignRefData>`
+            // through the kind label. A `HeapValue` arm would be actively
+            // wrong here rather than merely unused: there is nothing for a
+            // Shape-side pattern match to observe (the object's representation
+            // lives in another runtime), and materializing one would invite a
+            // `HeapValue`-shaped clone path around the share accounting the
+            // disposer depends on.
+            ForeignRef, // 36  (ADR-019 §3 POLY-FOREIGN-REF, 2026-07-28)
         }
         }
 

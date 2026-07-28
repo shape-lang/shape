@@ -475,6 +475,11 @@ pub struct FFIFuncRefs {
     pub(crate) arc_lazy_retain: FuncRef,
     pub(crate) arc_lazy_release: FuncRef,
 
+    // ADR-019 §3 / #200 — the opaque foreign-reference carrier. Standard
+    // `Arc<ForeignRefData>` layout; bodies in `ffi/v2/collection_arc.rs`.
+    pub(crate) arc_foreign_ref_retain: FuncRef,
+    pub(crate) arc_foreign_ref_release: FuncRef,
+
     // ADR-006 §2.7.5 — `Arc<String>` strict-typed carrier retain/release
     // (W12-jit-string-carrier-unification, Phase 3 cluster-0 Round 12 T2/T3,
     // 2026-05-13). The §2.7.5 `NativeKind::String` slot carries

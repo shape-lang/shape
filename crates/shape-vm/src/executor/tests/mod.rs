@@ -29,6 +29,10 @@ mod channel_ops;
 mod content_array_parity;
 mod decimal_ops;
 mod deque_ops;
+// ADR-019 §3 / #200 — the opaque foreign-reference carrier's VM-side share
+// accounting, observed through a disposer that records what it was asked to
+// release (ADR-006 §2.7.32 / Q26).
+mod foreign_ref_carrier;
 mod intrinsic_kinded_migration;
 mod io_integration;
 mod jit_abi_tests;

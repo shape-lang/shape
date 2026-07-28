@@ -17,6 +17,8 @@ pub mod aligned_vec;
 pub mod content;
 pub mod context;
 pub mod datatable;
+/// The opaque foreign-reference carrier (ADR-019 §3 / #200; ADR-006 §2.7.32).
+pub mod foreign_ref;
 /// GC cycle-collection metadata + accessors (Phase 0). Gated behind the
 /// default-off `gc` Cargo feature; feature-off is a strict no-op.
 #[cfg(feature = "gc")]
@@ -68,6 +70,7 @@ pub use content::{
 };
 pub use context::{ErrorLocation, LocatedVMError, VMError};
 pub use datatable::{ColumnPtrs, DataTable, DataTableBuilder};
+pub use foreign_ref::{ForeignRefData, ForeignRefDisposer, ForeignRefOrigin};
 pub use heap_header::{FLAG_MARKED, FLAG_PINNED, FLAG_READONLY, HeapHeader};
 // V3-S5 ckpt-4 (2026-05-15): `TypedArrayData` removed from re-exports.
 // The enum was deleted at ckpt-1 (heap_value.rs); this re-export was

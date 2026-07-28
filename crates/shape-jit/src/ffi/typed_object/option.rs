@@ -54,6 +54,7 @@ fn payload_field_owns_heap_share(bits: u64, kind: NativeKind) -> bool {
             | HeapKind::NativeView
             | HeapKind::HashMap
             | HeapKind::FilterExpr
+            | HeapKind::ForeignRef
             | HeapKind::Reference
             | HeapKind::SharedCell
             | HeapKind::HashSet

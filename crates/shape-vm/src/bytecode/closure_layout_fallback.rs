@@ -198,6 +198,7 @@ fn representative_capture_type(
             | HeapKind::Char
             | HeapKind::HashMap
             | HeapKind::FilterExpr
+            | HeapKind::ForeignRef
             | HeapKind::HashSet
             | HeapKind::Iterator
             | HeapKind::Deque

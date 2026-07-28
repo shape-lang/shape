@@ -28,7 +28,8 @@ use super::super::*;
 #[cfg(miri)]
 use shape_value::heap_value::MiriSlotProvenance;
 use shape_value::{
-    FilterNode, IteratorState, KindedSlot, NativeKind, RefTarget, VMError, ValueSlot,
+    FilterNode, ForeignRefData, IteratorState, KindedSlot, NativeKind, RefTarget, VMError,
+    ValueSlot,
     heap_value::{
         AtomicData, ChannelData, DequeData, HashSetData, HeapKind, HeapValue, IoHandleData,
         LazyData, MatrixData, MatrixSliceData, MutexData, NativeViewData, PriorityQueueData,
@@ -446,6 +447,16 @@ pub(crate) fn clone_with_kind(bits: u64, kind: NativeKind) {
                 HeapKind::FilterExpr => {
                     Arc::increment_strong_count(bits as *const FilterNode);
                 }
+                // ADR-006 §2.7.32 / Q26 (ADR-019 §3 POLY-FOREIGN-REF #200,
+                // 2026-07-28): the foreign-call return path pushes
+                // `Arc::into_raw(Arc<ForeignRefData>) as u64` with kind
+                // `NativeKind::Ptr(HeapKind::ForeignRef)`. Retain-on-read
+                // duplicates the share at the matching `Arc<ForeignRefData>`
+                // shape; `as_heap_value()` on these bits is undefined per
+                // the §2.7.9 pure-discriminator rule.
+                HeapKind::ForeignRef => {
+                    Arc::increment_strong_count(bits as *const ForeignRefData);
+                }
                 // Wave 8 W8-T26 (ADR-006 §2.7.13 / Q14, 2026-05-10):
                 // Reference-value carrier — slot bits are
                 // `Arc::into_raw(Arc<RefTarget>) as u64` directly (mirror
@@ -816,6 +827,16 @@ pub(crate) fn drop_with_kind(bits: u64, kind: NativeKind) {
                 // layout, undefined behavior at the share retire site.
                 HeapKind::FilterExpr => {
                     Arc::decrement_strong_count(bits as *const FilterNode);
+                }
+                // ADR-006 §2.7.32 / Q26 (ADR-019 §3 POLY-FOREIGN-REF #200,
+                // 2026-07-28): mirror of the `clone_with_kind` ForeignRef
+                // arm. Retires one `Arc<ForeignRefData>` share; retiring the
+                // last one runs the disposer, which is the lexical-teardown
+                // point at which the foreign object is released (ADR-010's
+                // mandatory exact carrier release). A wrong-type decrement
+                // here would both corrupt the Arc and lose the disposal.
+                HeapKind::ForeignRef => {
+                    Arc::decrement_strong_count(bits as *const ForeignRefData);
                 }
                 // Wave 8 W8-T26 (ADR-006 §2.7.13 / Q14, 2026-05-10):
                 // mirror of the `clone_with_kind` Reference arm. Retires

@@ -1127,7 +1127,10 @@ pub fn slot_extract_content(
         | HeapKind::Lazy
         | HeapKind::ModuleFn
         | HeapKind::Matrix
-        | HeapKind::MatrixSlice => None,
+        | HeapKind::MatrixSlice
+        // ADR-019 §3 / #200: a foreign reference has no renderable content —
+        // the object is in another runtime and Shape cannot inspect it.
+        | HeapKind::ForeignRef => None,
     };
     let Some(node) = node else {
         return (None, None, None);

@@ -865,6 +865,7 @@ fn element_to_string(slot: &KindedSlot) -> Result<String, VMError> {
             | HeapKind::Char
             | HeapKind::HashMap
             | HeapKind::FilterExpr
+            | HeapKind::ForeignRef
             | HeapKind::Reference
             | HeapKind::SharedCell
             | HeapKind::HashSet

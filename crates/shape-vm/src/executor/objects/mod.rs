@@ -767,6 +767,7 @@ impl VirtualMachine {
                 | HeapKind::Char
                 | HeapKind::HashMap
                 | HeapKind::FilterExpr
+                | HeapKind::ForeignRef
                 | HeapKind::Reference
                 | HeapKind::SharedCell
                 | HeapKind::HashSet
@@ -942,6 +943,7 @@ impl VirtualMachine {
                 | HeapKind::Reference
                 | HeapKind::SharedCell
                 | HeapKind::FilterExpr
+                | HeapKind::ForeignRef
                 | HeapKind::TraitObject
                 | HeapKind::IoHandle
                 | HeapKind::TaskGroup

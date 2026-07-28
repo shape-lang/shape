@@ -1948,6 +1948,30 @@ fn slot_heap_to_serializable(
              not snapshot-restorable — clean-refuse by design (ADR-006 §2.7.5.1)"
                 .to_string(),
         ),
+        // ADR-019 §3 / #200 (POLY-FOREIGN-REF): foreign state is
+        // `STATE_MODEL_STATEFUL_OPAQUE`. A snapshot containing a live foreign
+        // reference refuses — never a silent skip, never a fabricated
+        // restoration — and the refusal NAMES the value and its origin,
+        // because "some foreign object" is not actionable: the user has to
+        // know which handle to release or restructure around. The origin
+        // facts travel on the carrier precisely so they are available here,
+        // where no VM or extension context is in scope.
+        HeapKind::ForeignRef => {
+            // SAFETY: bits = `Arc::into_raw(Arc<ForeignRefData>)` per the
+            // `KindedSlot::from_foreign_ref` construction contract. Borrow
+            // only — the slot keeps its share.
+            let r = unsafe { &*(bits as *const shape_value::ForeignRefData) };
+            let origin = r.origin();
+            Err(format!(
+                "snapshot cannot capture {} (handle {}): foreign runtime state \
+                 is opaque to Shape (STATE_MODEL_STATEFUL_OPAQUE), so it can be \
+                 neither serialized nor truthfully restored. Convert it to Shape \
+                 values before checkpointing, or keep the reference out of the \
+                 captured scope — clean-refuse by design (ADR-019 §3)",
+                origin.describe(),
+                r.handle(),
+            ))
+        }
         HeapKind::SharedCell => serialize_shared_cell_with_provenance(
             bits,
             #[cfg(miri)]

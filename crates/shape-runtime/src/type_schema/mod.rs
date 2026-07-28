@@ -384,7 +384,11 @@ fn build_typed_object_with_schema(
                 | HeapKind::Atomic
                 | HeapKind::Lazy
                 | HeapKind::Matrix
-                | HeapKind::MatrixSlice => true,
+                | HeapKind::MatrixSlice
+                // ADR-019 §3 / #200: a foreign reference is a pointer slot
+                // owning one `Arc<ForeignRefData>` share, so it retains and
+                // releases like every other heap carrier here.
+                | HeapKind::ForeignRef => true,
             },
             _ => false,
         };

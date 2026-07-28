@@ -70,6 +70,7 @@ fn heap_ptr_element_type_info(heap_kind: HeapKind) -> (types::Type, i64) {
         | HeapKind::Char
         | HeapKind::HashMap
         | HeapKind::FilterExpr
+        | HeapKind::ForeignRef
         | HeapKind::Reference
         | HeapKind::SharedCell
         | HeapKind::HashSet

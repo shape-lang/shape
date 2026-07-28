@@ -101,6 +101,7 @@ fn json_payload_field_owns_heap_share(bits: u64, kind: shape_value::NativeKind) 
             | HeapKind::NativeView
             | HeapKind::HashMap
             | HeapKind::FilterExpr
+            | HeapKind::ForeignRef
             | HeapKind::Reference
             | HeapKind::SharedCell
             | HeapKind::HashSet
