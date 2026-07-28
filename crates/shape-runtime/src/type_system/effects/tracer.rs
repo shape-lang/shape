@@ -111,13 +111,26 @@ mod tests {
                 inferred,
                 declared,
                 excess,
+                site,
             } => {
                 // The payload #180's materialization fix consumes: what the
                 // interior actually does, what the boundary allows, and the
-                // exact atoms to add. Not a bare "type mismatch".
-                assert_eq!(inferred, "{FsRead, NetConnect}");
-                assert_eq!(declared, "{FsRead}");
+                // exact atoms to add. Not a bare "type mismatch" — and the
+                // rows are the rows, so the fix writes a proved value rather
+                // than re-parsing a rendering (#180).
+                assert_eq!(
+                    inferred,
+                    ClosedEffectRow::from_atoms(EffectStage::Runtime, [FS_READ, NET_CONNECT])
+                        .unwrap()
+                );
+                assert_eq!(
+                    declared,
+                    ClosedEffectRow::from_atoms(EffectStage::Runtime, [FS_READ]).unwrap()
+                );
                 assert_eq!(excess, vec!["NetConnect".to_string()]);
+                // The row algebra has no spans; the checking site attaches the
+                // editable site, and this one is the algebra called directly.
+                assert_eq!(site, None);
             }
             other => panic!("expected a structured effect-row diagnostic, got {other:?}"),
         }
@@ -136,7 +149,7 @@ mod tests {
             match solver.check_declared_boundary(ty, &declared).unwrap_err() {
                 TypeError::EffectRowExceedsBoundary {
                     inferred, excess, ..
-                } => (inferred, excess),
+                } => (inferred.render(), excess),
                 other => panic!("unexpected {other:?}"),
             }
         };

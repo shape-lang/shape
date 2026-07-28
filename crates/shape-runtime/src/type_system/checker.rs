@@ -653,6 +653,27 @@ impl TypeChecker {
                 })
                 .into_iter()
                 .collect(),
+
+            // ADR-014 §8.2 / ADR-017 §4: the boundary declared a row the
+            // interior exceeds. `inferred` is the row itself, so the fix
+            // writes the proved row rather than re-deriving one; `site` is the
+            // checking moment's provenance and is absent when the site did not
+            // record where the boundary is written.
+            //
+            // This arm is the whole seam between the diagnostic and the fix.
+            // When #143's declaration-vs-body walk starts emitting this error
+            // for a function DECLARATION, it attaches a `DeclaredRowSite` the
+            // same way a type-position check does, and the fix appears with no
+            // change here — the arm keys on the error, not on which kind of
+            // boundary raised it.
+            TypeError::EffectRowExceedsBoundary {
+                inferred,
+                site: Some(site),
+                ..
+            } => super::fixes::effect_row_fix(source, site, inferred)
+                .into_iter()
+                .collect(),
+
             _ => Vec::new(),
         }
     }
