@@ -367,229 +367,84 @@ impl JITExecutor {
             });
         }
 
-        // R8 W8 Cluster A imported-const ident-eval SURFACE
-        // (v0.3 divergence-elimination per supervisor 2026-05-25 path (i),
-        // ADR-006 §2.7.14): Refuse to JIT-compile programs whose bytecode
-        // was emitted via the Cluster A `compile_expr_identifier`
-        // inlined-at-use intercept for imported `pub const` bindings.
-        // The inlined `PushConst(<value>)` bytecode is correct, but the
-        // JIT direct-identifier-eval lowering of this shape fires
-        // `jit_print_*` FFI with zero-init bits — silent-wrong-output
-        // VM=2 / JIT=0 on `print(IMPORTED_CONST)` bare. Whole-program
-        // deopt to the bytecode interpreter is the binding-compliant
-        // surface-and-stop (the interpreter evaluates the inlined
-        // PushConst correctly). Mirrors R8 W7 G.5 V2-verifier deopt
-        // immediately above + R8 W8 aliased-CoW
-        // `mir_has_prior_move_of_slot` precedent.
-        // Root-cause fix in JIT identifier-eval lowering is v0.4 per
-        // `docs/v0.3-close-summary.md` §5.16 JIT-lowering followup
-        // workstream.
-        if bytecode.has_imported_const_inline {
+        // ADR-018 §2 / #187 — residual constructs are refused per owner.
+        //
+        // Five constructs have a diagnosed VM/JIT divergence and must never
+        // run native: the `?` operator, `??`, imported `pub const` inlined at
+        // use, direct calls to imported stdlib functions (the W17
+        // marshal-return arms), and references returned via the §2.7.30
+        // escape→RC `PromotedCell` carrier. Each is recorded against its
+        // enclosing function by `BytecodeCompiler::record_jit_residual`.
+        //
+        // The correctness rationale is unchanged: a residual-bearing owner
+        // NEVER runs native. What changed is the blast radius. An
+        // `Owner`-scoped residual in a FUNCTION demotes that function to an
+        // `Interpreted` entry in `compile_program_selective`, and its siblings
+        // keep their native code. Three cases still cost the whole program:
+        //
+        //   (a) the residual is `Program`-scoped — `JitResidual::scope`
+        //       records which, and `program_scope_reason` records why
+        //       narrowing it to its owner would be unsound. These are the
+        //       recorded floor of the #187 shrink-only ratchet;
+        //   (b) the residual is in TOP-LEVEL code, which is the program entry
+        //       the JIT compiles as `main` — there is no smaller unit to
+        //       demote under whole-program compilation;
+        //   (c) the program arrived through the linker or a deserialize,
+        //       which renumbers functions and drops the attribution. Without
+        //       attribution the JIT cannot tell which function is unsound, so
+        //       narrowing the refusal would be a guess.
+        //
+        // Each residual names its own root cause in `JitResidual::reason`;
+        // removing one is what shrinks the #187 whole-program-bail baseline.
+        if let Some(residual) = bytecode.jit_residuals.program_scoped().next() {
             return Err(shape_runtime::error::ShapeError::RuntimeError {
-                message: "R8 W8 Cluster A imported-const ident-eval SURFACE \
-                          (ADR-006 §2.7.14): the program uses imported `pub const` \
-                          identifiers whose values were inlined-at-use as \
-                          `PushConst(<value>)` bytecode by `compile_expr_identifier`. \
-                          The JIT direct-identifier-eval lowering of this shape \
-                          produces silent-wrong-output (zero-init bits at the print \
-                          FFI dispatch); whole-program deopting to the bytecode \
-                          interpreter via this `[jit-fallback]` path preserves \
-                          VM == JIT semantics. Tracked via \
-                          `docs/v0.3-close-summary.md` §5.16 (v0.4 / planned: JIT \
-                          identifier-eval lowering root-cause fix)"
+                message: format!(
+                    "ADR-018 §2 whole-program JIT residual `{}`: the program \
+                     contains {}. This residual cannot be narrowed to its \
+                     enclosing function because {}. The program deopts to the \
+                     bytecode interpreter via this `[jit-fallback]` path, which \
+                     executes the construct soundly. Recorded in the #187 \
+                     whole-program-bail baseline; removing the named hazard is \
+                     what shrinks the ratchet.",
+                    residual.stable_id(),
+                    residual.reason(),
+                    residual.program_scope_reason().unwrap_or("(unrecorded)"),
+                ),
+                location: None,
+            });
+        }
+        if bytecode.has_unattributed_jit_residual() {
+            return Err(shape_runtime::error::ShapeError::RuntimeError {
+                message: "ADR-018 §2 unattributed JIT residual: the program \
+                          contains a construct the JIT cannot lower soundly, but \
+                          it arrived through the linker or a deserialize, which \
+                          renumbers function blobs and drops the per-function \
+                          attribution. Without attribution the JIT cannot tell \
+                          which function is unsound, so the whole program deopts \
+                          to the bytecode interpreter via this `[jit-fallback]` \
+                          path — the conservative direction, preserving \
+                          VM == JIT semantics."
                     .to_string(),
                 location: None,
             });
         }
-
-        // R8 W9 B1 W17-marshal-return JIT surface-and-stop
-        // (v0.3 divergence-elimination per supervisor 2026-05-25 ruling,
-        // ADR-006 §2.7.14): Refuse to JIT-compile programs whose
-        // bytecode contains direct calls to imported stdlib functions
-        // (callee resolved via `resolve_scoped_module_binding_name` at
-        // `compile_expr_function_call` — see
-        // `crates/shape-vm/src/compiler/expressions/function_calls.rs`).
-        // Such calls flow through `op_call_value` whose VM-side
-        // ModuleFn dispatch arm in
-        // `crates/shape-vm/src/executor/call_convention.rs:999` cleanly
-        // routes through `invoke_module_fn_id_stub` +
-        // `project_typed_return` and surfaces the W17-marshal-return-arms
-        // catch-all at
-        // `crates/shape-vm/src/executor/vm_impl/modules.rs:74` when the
-        // stdlib body returns a `ConcreteReturn` arm without a typed-slot
-        // projection (`Bytes` / `ArrayHeapValue` /
-        // `HashMapStringHeapValue` / etc.).
-        //
-        // The JIT-side `jit_call_value` ModuleFn arm at
-        // `crates/shape-jit/src/ffi/control/mod.rs:704-715` instead
-        // returns `TAG_NULL` silently (`-1407374883553280` NaN-box null
-        // pattern) with only a `tracing::debug!` line — swallowing the
-        // surface and producing silent-wrong-output VM=ec1 SURFACE /
-        // JIT=ec0 garbage on `print(serialize([1.0,2.0,3.0]).len())`.
-        //
-        // Whole-program deopt to the bytecode interpreter is the
-        // binding-compliant surface-and-stop (mirrors R8 W7 G.5
-        // V2-verifier deopt + R8 W8 imported-const-inline deopt
-        // immediately above + R8 W8 aliased-CoW
-        // `mir_has_prior_move_of_slot` precedent). Root-cause fix in
-        // JIT ModuleFn dispatch (`dispatch_module_fn_call` `todo!()` +
-        // §2.7.10/Q11 kinded handler ABI rebuild) is v0.4 per
-        // `docs/v0.3-close-summary.md` §5.16 JIT-lowering followup
-        // workstream — third member of the bundle alongside Cluster A
-        // imported-const-inline + aliased-CoW.
-        if bytecode.has_w17_marshal_residual {
+        if bytecode.jit_residuals.top_level_is_residual_bearing() {
+            let reasons: Vec<&str> = bytecode
+                .jit_residuals
+                .top_level()
+                .map(|r| r.reason())
+                .collect();
             return Err(shape_runtime::error::ShapeError::RuntimeError {
-                message: "R8 W9 B1 W17-marshal-return-arms SURFACE (ADR-006 \
-                          §2.7.14): the program contains direct calls to imported \
-                          stdlib functions (callee resolved via \
-                          `resolve_scoped_module_binding_name`). The JIT-side \
-                          `jit_call_value` ModuleFn dispatch arm at \
-                          `ffi/control/mod.rs:704-715` returns TAG_NULL silently, \
-                          swallowing the W17-marshal-return-arms surface that \
-                          VM-side `invoke_module_fn_id_stub` + \
-                          `project_typed_return` would clean-surface on (e.g. \
-                          `state.serialize` returning Array<int>/Bytes hits the \
-                          catch-all at `vm_impl/modules.rs:74`). Whole-program \
-                          deopting to the bytecode interpreter via this \
-                          `[jit-fallback]` path preserves VM == JIT semantics. \
-                          Tracked via `docs/v0.3-close-summary.md` §5.16 (v0.4 / \
-                          planned: JIT ModuleFn dispatch root-cause fix at \
-                          `dispatch_module_fn_call` todo!() + §2.7.10/Q11 kinded \
-                          handler ABI rebuild)"
-                    .to_string(),
-                location: None,
-            });
-        }
-
-        // c4-4B TryUnwrap (`?` operator) SURFACE (v0.3.3 divergence-elimination
-        // per supervisor 2026-05-28 ratification, ADR-006 §2.7.14): Refuse to
-        // JIT-compile programs containing the `?` operator (`OpCode::TryUnwrap`
-        // emitted by `compile_expr_try_operator` at
-        // `crates/shape-vm/src/compiler/expressions/advanced.rs:40`).
-        //
-        // Background: `?` lowers in MIR (`mir/lowering/expr.rs:2594`) as a
-        // transparent `Expr::TryOperator(expr, _) => copy`, which discards
-        // the unwrap-or-early-return semantics. The bytecode compiler's
-        // parallel type tracker stamps the UNWRAPPED success type onto the
-        // binding slot via `stamp_unwrapped_success_type`, so a downstream
-        // `let val = f()?; return val` records `val` with the success
-        // `NativeKind` (`Int64` for `Result<int,_>`). The JIT-emitted code
-        // calls `f()` via the trampoline
-        // (`dispatch_call_via_trampoline_vm` at
-        // `crates/shape-jit/src/ffi/control/mod.rs:832`), stores the
-        // trampoline's `u64` (a heap `Arc<ResultData>` pointer) into the
-        // `val` slot, and at `TerminatorKind::Return` the I64-wide arm in
-        // `crates/shape-jit/src/mir_compiler/terminators.rs:1801-1813`
-        // stamps `RETURN_TAG_I64` because the slot kind is `Int64` —
-        // silent-wrong-output `VM=42, JIT=Integer(137_900_062_693_984)`
-        // (pointer bits as a raw int) per
-        // `regression::jit::jit_trampoline_result_callvalue`.
-        //
-        // The string twin `jit_trampoline_string_callvalue` passes by
-        // falling through to `RETURN_TAG_NANBOXED` and SURFACING + deopting
-        // at `executor.rs:802-812` because its slot kind is heap-bearing
-        // and the I64-arm `raw_int` predicate fires false. The Result-twin
-        // breaks because the static slot-kind classification is `Int64`
-        // (the SUCCESS type) while the runtime payload is heap-Result bits.
-        //
-        // Whole-program deopt to the bytecode interpreter is the
-        // binding-compliant surface-and-stop (the interpreter executes
-        // `op_try_unwrap` soundly through `read_result` / `read_option` /
-        // `return_value_inner` per `crates/shape-vm/src/executor/exceptions/
-        // mod.rs:658`). Mirrors R8 W7 G.5 V2-verifier + R8 W8
-        // imported-const-inline + R8 W9 B1 W17-marshal-return surface-and-
-        // stop precedents immediately above. This SURFACE-and-deopt IS the
-        // ratified v0.3.3 fix shape per audit doc
-        // `docs/cluster-audits/v0.3.3/04-pointer-as-float-leak.md` §4B
-        // (FN-REG-CORRECTNESS / RELEASE-BLOCKING sub-cluster).
-        if bytecode.has_try_unwrap_residual {
-            return Err(shape_runtime::error::ShapeError::RuntimeError {
-                message: "c4-4B TryUnwrap (`?` operator) SURFACE (ADR-006 §2.7.14): \
-                          the program contains an `OpCode::TryUnwrap` (the `?` \
-                          operator) whose unwrap-or-early-return semantics MIR \
-                          collapses to a transparent copy at \
-                          `mir/lowering/expr.rs:2594`. The JIT-emitted code calls \
-                          the inner expression via the trampoline \
-                          (`dispatch_call_via_trampoline_vm`), stores the \
-                          trampoline's heap-Result/Option `u64` into a slot whose \
-                          parallel-kind tracker records the SUCCESS type's \
-                          NativeKind (e.g. `Int64` for `Result<int,_>`), and the \
-                          I64-wide arm of `TerminatorKind::Return` at \
-                          `mir_compiler/terminators.rs:1801-1813` stamps \
-                          `RETURN_TAG_I64` on pointer bits — silent-wrong-output \
-                          `VM=42, JIT=Integer(137_900_062_693_984)` per \
-                          `regression::jit::jit_trampoline_result_callvalue`. \
-                          Whole-program deopting to the bytecode interpreter via \
-                          this `[jit-fallback]` path preserves VM == JIT semantics \
-                          (`op_try_unwrap` at `executor/exceptions/mod.rs:658` \
-                          executes the unwrap soundly through `read_result` / \
-                          `read_option` / `return_value_inner`). Tracked per \
-                          supervisor 2026-05-28 c4-4B ratification + \
-                          `docs/cluster-audits/v0.3.3/04-pointer-as-float-leak.md` \
-                          §4B (Sub-cluster 4B FN-REG-CORRECTNESS / RELEASE-BLOCKING; \
-                          this SURFACE-deopt is the ratified v0.3.3 fix shape)"
-                    .to_string(),
-                location: None,
-            });
-        }
-
-        // ADR-006 §2.7.30 (GapA value-position auto-deref) SURFACE: the program
-        // value-derefs a reference returned via the reference-escape→RC
-        // `PromotedCell` carrier (`fn make() -> &int { let x = 5; return &x }`
-        // then `print(make())` / `make() + 1`). The VM resolves the returned
-        // reference through the owning `Arc<SharedCell>` share
-        // (`read_ref_target` PromotedCell arm at `executor/variables/mod.rs`),
-        // reading the live referent. The JIT models references ONLY as
-        // per-function stack-cell / typed-field addresses (`mir_compiler/
-        // rvalues.rs` Borrow path / `places.rs` `emit_typed_field_address`) — it
-        // has NO PromotedCell lowering, so its `DerefLoad` reads the raw
-        // reference pointer instead of the referent: silent-wrong-output
-        // (`VM=5`, `JIT=<stack-pointer>`) observed at module scope. Whole-program
-        // deopt to the (correct) interpreter preserves VM == JIT semantics. Same
-        // surface-and-stop shape as the W17-marshal / c4-4B TryUnwrap deopts
-        // above; root-cause JIT PromotedCell lowering is a v0.4 JIT-lowering
-        // followup.
-        if bytecode.has_reference_escape_promotion {
-            return Err(shape_runtime::error::ShapeError::RuntimeError {
-                message: "ADR-006 §2.7.30 reference-escape-promotion SURFACE: the \
-                          program value-derefs a reference returned via the \
-                          escape→RC `PromotedCell` carrier (`fn f() -> &T { … return \
-                          &local }` consumed in value position). The JIT has no \
-                          PromotedCell deref lowering (it models refs as \
-                          per-function stack-cell / typed-field addresses only) and \
-                          would read the raw reference pointer instead of the \
-                          referent. Whole-program deopting to the bytecode \
-                          interpreter via this `[jit-fallback]` path preserves \
-                          VM == JIT semantics (the VM `read_ref_target` PromotedCell \
-                          arm reads the live referent through the owning \
-                          `Arc<SharedCell>` share)."
-                    .to_string(),
-                location: None,
-            });
-        }
-
-        // v0.3.3 book-gate `??` SURFACE: the bytecode VM unwraps an
-        // `Option<T>` left operand of `a ?? b` (`Some(v) -> v`) via the
-        // `CoalesceProbe` opcode (`executor/exceptions/mod.rs::
-        // op_coalesce_probe`), but the JIT MIR lowering
-        // (`mir/lowering/expr.rs::lower_null_coalesce`) models `??` as a
-        // `BinOp::Eq` against `MirConstant::None`, which does NOT
-        // recognise/unwrap the `Arc<OptionData>` carrier — it would leak
-        // the whole `Some(v)` wrapper, diverging from the VM. The JIT has
-        // no Option-unwrap lowering (the sibling `?` operator deopts via
-        // `has_try_unwrap_residual` for the same reason). Whole-program
-        // deopt to the (correct) interpreter preserves VM == JIT semantics.
-        if bytecode.has_null_coalesce_residual {
-            return Err(shape_runtime::error::ShapeError::RuntimeError {
-                message: "v0.3.3 `??` null-coalesce SURFACE: the program contains a \
-                          null-coalescing operator (`a ?? b`). The bytecode VM unwraps \
-                          an `Option<T>` left operand `Some(v) -> v` via the \
-                          `CoalesceProbe` opcode; the JIT MIR lowering models `??` as \
-                          `Eq` against `None` with no `Arc<OptionData>` unwrap and \
-                          would leak the `Some(v)` wrapper. Whole-program deopting to \
-                          the bytecode interpreter via this `[jit-fallback]` path \
-                          preserves VM == JIT semantics."
-                    .to_string(),
+                message: format!(
+                    "ADR-018 §2 top-level JIT residual: top-level code contains \
+                     {}. Top-level code is the program entry the JIT compiles as \
+                     `main`, so there is no smaller unit to demote — the program \
+                     deopts to the bytecode interpreter via this `[jit-fallback]` \
+                     path, which executes the construct soundly. Functions \
+                     carrying the same constructs are demoted individually and \
+                     do not cost their siblings native execution.",
+                    reasons.join("; and ")
+                ),
                 location: None,
             });
         }

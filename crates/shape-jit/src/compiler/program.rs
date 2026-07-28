@@ -218,6 +218,12 @@ impl JITCompiler {
                 has_try_unwrap_residual: program.has_try_unwrap_residual,
                 has_reference_escape_promotion: program.has_reference_escape_promotion,
                 has_null_coalesce_residual: program.has_null_coalesce_residual,
+                // `functions` above is deliberately empty — this sub-program is
+                // one rebased function body, so the parent's function-index
+                // attribution does not apply here. The caller already refused
+                // to compile any residual-bearing function, so an empty map is
+                // the accurate statement about THIS body.
+                jit_residuals: Default::default(),
             };
 
             // MirToIR is the ONLY JIT compilation path (Phase 4: BytecodeToIR removed).
@@ -597,6 +603,41 @@ impl JITCompiler {
             //     `StoreSharedModuleBinding`) — per-module side-table,
             //     separate lowering (A.1C.3 follow-up).
             jit_compatible.push(bytecode_ok || mir_ok);
+        }
+
+        // Phase 1a-bis (ADR-018 §2 / #187): demote functions carrying a
+        // residual construct — `?`, `??`, an inlined imported `pub const`, a
+        // direct imported-stdlib call, or a §2.7.30 escape-promoted reference
+        // return. Each has a diagnosed VM/JIT divergence, so its owner never
+        // runs native. Before #187 the JIT refused the ENTIRE program on any
+        // of them; the refusal is unchanged in strength and narrowed in scope
+        // to the function that actually holds the construct. Top-level
+        // residuals are still whole-program (`JITExecutor::execute_with_jit`)
+        // because top-level IS the entry the JIT compiles as `main`.
+        //
+        // The demoted function gets a null `function_table` slot and an
+        // `Interpreted` entry below, so every call to it routes through
+        // `dispatch_call_via_trampoline_vm` into the bytecode interpreter —
+        // the same interpreter the whole-program deopt used to reach.
+        //
+        // `Program`-scoped residuals never reach here: `execute_with_jit`
+        // refuses the whole program before compiling. Demoting only their
+        // owner would be unsound for the reason each one records.
+        for idx in 0..program.functions.len() {
+            if !program.jit_residuals.function_is_residual_bearing(idx) {
+                continue;
+            }
+            jit_compatible[idx] = false;
+            for residual in program.jit_residuals.for_function(idx) {
+                tracing::info!(
+                    target: "shape_jit::fallback",
+                    function = %program.functions[idx].name,
+                    function_index = idx,
+                    residual = residual.stable_id(),
+                    reason = residual.reason(),
+                    "jit-deopt-function: interpreted, siblings keep native code",
+                );
+            }
         }
 
         // Phase 1b: Preflight main code (non-stdlib, non-function-body instructions).

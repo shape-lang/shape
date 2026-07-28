@@ -117,13 +117,17 @@ impl BytecodeCompiler {
         // `crates/shape-jit/src/mir_compiler/terminators.rs:1801-1813`
         // (Return I64-wide arm) as `RETURN_TAG_I64` stamped onto a heap
         // pointer — silent-wrong-output VM=42, JIT=137_900_062_693_984 per
-        // `regression::jit::jit_trampoline_result_callvalue`. Whole-program
-        // deopt mirrors the R8 W7 G.5 V2-verifier + R8 W8 imported-const-
-        // inline + R8 W9 B1 W17-marshal-return surface-and-stop pattern.
-        // Per supervisor 2026-05-28 c4-4B ratification (audit doc
+        // `regression::jit::jit_trampoline_result_callvalue`. The refusal
+        // mirrors the R8 W7 G.5 V2-verifier + R8 W8 imported-const-inline +
+        // R8 W9 B1 W17-marshal-return surface-and-stop pattern. Per
+        // supervisor 2026-05-28 c4-4B ratification (audit doc
         // `docs/cluster-audits/v0.3.3/04-pointer-as-float-leak.md` §4B
         // Sub-cluster — FN-REG-CORRECTNESS / RELEASE-BLOCKING).
-        self.program.has_try_unwrap_residual = true;
+        //
+        // ADR-018 §2 / #187: the refusal is attributed to the function
+        // holding the `?`, which is where the mismatch is emitted — the
+        // caller's `let val = f()?` slot. Sibling functions keep native code.
+        self.record_jit_residual(crate::bytecode::JitResidual::TryUnwrap);
         Ok(())
     }
 

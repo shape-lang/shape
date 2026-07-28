@@ -331,6 +331,10 @@ fn build_sub_program(program: &BytecodeProgram, start: usize, end: usize) -> Byt
         has_try_unwrap_residual: program.has_try_unwrap_residual,
         has_reference_escape_promotion: program.has_reference_escape_promotion,
         has_null_coalesce_residual: program.has_null_coalesce_residual,
+        // `functions` above is empty and the instructions are rebased to 0, so
+        // the parent's function-index attribution does not carry over. The
+        // summary flags above remain the conservative statement.
+        jit_residuals: Default::default(),
     }
 }
 

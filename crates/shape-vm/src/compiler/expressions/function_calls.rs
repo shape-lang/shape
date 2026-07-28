@@ -1200,7 +1200,7 @@ impl BytecodeCompiler {
         // pulls in `std::core::remote::__call` during stdlib bootstrap
         // even though main never invokes it).
         if self.module_scope_stack.is_empty() {
-            self.program.has_w17_marshal_residual = true;
+            self.record_jit_residual(crate::bytecode::JitResidual::ModuleFnMarshalReturn);
         }
         let binding_name =
             self.ensure_hidden_native_module_binding(&builtin_decl.source_module_path);
@@ -1916,7 +1916,7 @@ impl BytecodeCompiler {
             if self.resolve_scoped_module_binding_name(name).is_some()
                 && self.module_scope_stack.is_empty()
             {
-                self.program.has_w17_marshal_residual = true;
+                self.record_jit_residual(crate::bytecode::JitResidual::ModuleFnMarshalReturn);
             }
             let expected_param_modes = if let Some(local_idx) = self.resolve_local(name) {
                 self.local_callable_pass_modes.get(&local_idx).cloned()
@@ -2036,9 +2036,9 @@ impl BytecodeCompiler {
                 // The returned reference rides the §2.7.30 escape-promote
                 // `PromotedCell` carrier, which the JIT has no lowering for (it
                 // models refs as per-function stack-cell/field addresses only and
-                // would read the raw reference pointer). Force whole-program JIT
-                // deopt to the interpreter, which resolves the referent soundly.
-                self.program.has_reference_escape_promotion = true;
+                // would read the raw reference pointer). Force the owner to deopt
+                // to the interpreter, which resolves the referent soundly.
+                self.record_jit_residual(crate::bytecode::JitResidual::ReferenceEscapePromotion);
             } else {
                 self.clear_last_expr_reference_result();
             }
@@ -2743,8 +2743,9 @@ impl BytecodeCompiler {
                 // ADR-006 §2.7.30 (GapA): `-> &T` callee returns a reference value;
                 // value position reads THROUGH it (no param-reborrow summary).
                 self.set_last_expr_reference_result(borrow_mode, true);
-                // JIT has no §2.7.30 PromotedCell lowering — deopt to interpreter.
-                self.program.has_reference_escape_promotion = true;
+                // JIT has no §2.7.30 PromotedCell lowering — deopt the owner to
+                // the interpreter.
+                self.record_jit_residual(crate::bytecode::JitResidual::ReferenceEscapePromotion);
             } else {
                 self.clear_last_expr_reference_result();
             }
@@ -5965,7 +5966,7 @@ impl BytecodeCompiler {
         if self.is_native_module_export(namespace_name, method)
             && self.module_scope_stack.is_empty()
         {
-            self.program.has_w17_marshal_residual = true;
+            self.record_jit_residual(crate::bytecode::JitResidual::ModuleFnMarshalReturn);
         }
 
         // D5 (WF-3E over-wire enforcement): derive the CURRENT blob's

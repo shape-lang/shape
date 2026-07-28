@@ -1701,10 +1701,10 @@ impl BytecodeCompiler {
                 self.emit(Instruction::simple(OpCode::CoalesceProbe));
                 if lhs_is_option_carrier {
                     // JIT MIR has no Option-unwrap lowering for `??`; deopt
-                    // the whole program to the (correct) interpreter so
+                    // this function to the (correct) interpreter so
                     // VM == JIT. Same surface-and-stop shape as the `?`
-                    // operator's `has_try_unwrap_residual` flag.
-                    self.program.has_null_coalesce_residual = true;
+                    // operator's `JitResidual::TryUnwrap`.
+                    self.record_jit_residual(crate::bytecode::JitResidual::NullCoalesce);
                 }
                 let use_lhs_jump = self.emit_jump(OpCode::JumpIfFalse, 0);
                 // LHS was absent — pop the placeholder, compile RHS

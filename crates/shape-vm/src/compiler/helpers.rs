@@ -1954,6 +1954,36 @@ pub(crate) fn clean_comptime_message(e: &ShapeError) -> String {
 }
 
 impl BytecodeCompiler {
+    /// Record a construct the JIT cannot lower soundly against the function
+    /// currently being compiled (ADR-018 §2 / #187).
+    ///
+    /// This is the single writer for both `BytecodeProgram::jit_residuals` and
+    /// the five `has_*_residual` summary flags, so the per-owner attribution
+    /// and the program-level summary cannot drift. Ownership comes from
+    /// `current_function` — the same `Option<usize>` function-index convention
+    /// `monomorphized_method_call_sites` uses, where `None` means top-level
+    /// (module) code.
+    ///
+    /// Attribution decides WHO deopts, never WHETHER the unsound lowering is
+    /// refused: a residual-bearing owner never runs native.
+    pub(crate) fn record_jit_residual(&mut self, residual: crate::bytecode::JitResidual) {
+        use crate::bytecode::JitResidual;
+
+        self.program
+            .jit_residuals
+            .record(self.current_function, residual);
+
+        match residual {
+            JitResidual::TryUnwrap => self.program.has_try_unwrap_residual = true,
+            JitResidual::NullCoalesce => self.program.has_null_coalesce_residual = true,
+            JitResidual::ImportedConstInline => self.program.has_imported_const_inline = true,
+            JitResidual::ModuleFnMarshalReturn => self.program.has_w17_marshal_residual = true,
+            JitResidual::ReferenceEscapePromotion => {
+                self.program.has_reference_escape_promotion = true
+            }
+        }
+    }
+
     /// Resolve a ConcreteType type_tag from compiler state for the receiver.
     /// Returns 0xFF when the type cannot be determined.
     pub(crate) fn resolve_type_tag(
