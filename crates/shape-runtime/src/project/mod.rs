@@ -5,17 +5,24 @@
 //!
 //! This module is split into submodules for maintainability:
 //! - [`dependency_spec`] — dependency specification types and native dependency handling
+//! - [`foreign_env`] — declared, locked, content-addressed foreign environments
 //! - [`permissions`] — permission-related types and logic
 //! - [`sandbox`] — sandbox configuration and parsing helpers
 //! - [`project_config`] — project configuration parsing and discovery
 
 pub mod dependency_spec;
+pub mod foreign_env;
 pub mod permissions;
 pub mod project_config;
 pub mod sandbox;
 
 // Re-export all public items at the module root to preserve the existing API.
 pub use dependency_spec::*;
+pub use foreign_env::{
+    ForeignCheckerPin, ForeignEnvironmentDigest, ForeignEnvironmentError,
+    ForeignEnvironmentSection, ForeignLockfile, LockedModule, LockedPackage,
+    resolve_foreign_environment,
+};
 pub use permissions::*;
 pub use project_config::*;
 pub use sandbox::SandboxSection;
@@ -662,6 +669,76 @@ libm = "libm.so.6"
             .native_dependencies()
             .expect("native deps should parse");
         assert!(deps.contains_key("libm"));
+    }
+
+    // --- `[foreign.<language>]` (ADR-019 §4 / #198) -------------------------
+
+    #[test]
+    fn foreign_section_parses_into_its_own_field() {
+        let toml_str = r#"
+[project]
+name = "polyglot"
+version = "1.0.0"
+
+[foreign.python]
+runtime = "cpython"
+version = "3.11.7"
+root = ".venv"
+
+[foreign.python.checker]
+name = "pyright"
+version = "1.1.350"
+settings = { strict = true }
+"#;
+        let config: ShapeProject = parse_shape_project_toml(toml_str).unwrap();
+        let python = config.foreign.get("python").expect("declared");
+        assert_eq!(python.runtime, "cpython");
+        assert_eq!(python.version, "3.11.7");
+        assert_eq!(python.root.as_deref(), Some(".venv"));
+        assert_eq!(python.checker.as_ref().unwrap().name, "pyright");
+        // Not swept into the extension catch-all, so it is readable whether or
+        // not the extension that will run it is loaded, and an unclaimed-section
+        // error never fires for it.
+        assert!(!config.extension_sections.contains_key("foreign"));
+        let errors = config.validate_with_claimed_sections(&std::collections::HashSet::new());
+        assert!(errors.is_empty(), "got: {errors:?}");
+    }
+
+    #[test]
+    fn foreign_section_without_a_version_pin_is_a_validation_error() {
+        let toml_str = r#"
+[project]
+name = "polyglot"
+version = "1.0.0"
+
+[foreign.python]
+runtime = "cpython"
+version = ""
+"#;
+        let config: ShapeProject = parse_shape_project_toml(toml_str).unwrap();
+        let errors = config.validate();
+        assert!(
+            errors.iter().any(|e| e.contains("foreign.python.version")),
+            "a pin that does not pin is worse than none; got: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn a_misspelled_foreign_key_is_refused() {
+        let toml_str = r#"
+[project]
+name = "polyglot"
+version = "1.0.0"
+
+[foreign.python]
+runtime = "cpython"
+version = "3.11.7"
+rooot = ".venv"
+"#;
+        assert!(
+            parse_shape_project_toml(toml_str).is_err(),
+            "a typo in an environment declaration must not read as an absent field"
+        );
     }
 
     #[test]
