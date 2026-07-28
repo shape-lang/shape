@@ -25,6 +25,9 @@ pub(crate) mod test_utils;
 
 // Phase 1.1 & 1.2: Critical execution tests for recently merged features
 mod auto_drop;
+// ADR-019 §2 (#199): the `shared` call path, against a fake extension that
+// really reads and writes the views.
+mod buffer_views;
 mod channel_ops;
 mod content_array_parity;
 mod decimal_ops;

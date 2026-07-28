@@ -48,7 +48,7 @@
 #![allow(clippy::approx_constant)] // arbitrary test floats; not math constants
 use crate::executor::result_option_carrier::{build_err, build_ok, build_some};
 use rmpv::Value as Rmp;
-use shape_abi_v1::foreign_types::{ForeignDirection, ForeignScalar, ForeignType};
+use shape_abi_v1::foreign_types::{BufferShare, ForeignDirection, ForeignScalar, ForeignType};
 use shape_runtime::type_schema::{BuiltinSchemaIds, FieldType, TypeSchema, TypeSchemaRegistry};
 use shape_value::heap_value::{HashMapKindedRef, HeapKind, HeapValue, TypedObjectPtr};
 use shape_value::v2::string_obj::StringObj;
@@ -1114,6 +1114,232 @@ fn msgpack_type_name(val: &Rmp) -> &'static str {
 // kept available for the heap-slot dispatch path even when current
 // arms don't all consume them.
 fn _unused_imports_keepalive(_hv: &HeapValue, _tp: &TypedObjectPtr) {}
+
+// ============================================================================
+// Zero-copy buffer views (ADR-019 §2 / #199)
+// ============================================================================
+
+/// One host buffer selected for export, before the ABI view is built.
+///
+/// Kept separate from `shape_abi_v1::ForeignBufferView` so the aliasing and
+/// element checks run against something with a name and a parameter attached,
+/// and only a validated set is ever turned into raw pointers.
+pub(crate) struct PlannedView {
+    /// Argument position this view stands in for.
+    pub arg_index: usize,
+    /// Declared parameter name, for the diagnostics.
+    pub param_name: String,
+    /// The declared share mode.
+    pub share: BufferShare,
+    /// `BUFFER_ELEM_*` code for the element type.
+    pub elem_type: u32,
+    /// Base address of the first element.
+    pub data: *mut std::ffi::c_void,
+    /// Element count.
+    pub len: u64,
+}
+
+/// Decide which arguments cross as views, and refuse anything that cannot.
+///
+/// ADR-019 §2 / #199. Runs on the interpreter thread with the caller's slots
+/// still holding a share of every array, which is what keeps the memory alive
+/// across the call: the pin is the caller's own reference, not a separate
+/// mechanism that could get out of step with it.
+///
+/// Every refusal here happens BEFORE any pointer reaches foreign code.
+pub(crate) fn plan_views(
+    args: &[KindedSlot],
+    param_names: &[String],
+    param_types: &[String],
+    param_shares: &[BufferShare],
+    function: &str,
+    language: &str,
+) -> Result<Vec<PlannedView>, VMError> {
+    let mut planned: Vec<PlannedView> = Vec::new();
+
+    for (i, arg) in args.iter().enumerate() {
+        let share = param_shares.get(i).copied().unwrap_or_default();
+        if !share.is_shared() {
+            continue;
+        }
+        let name = param_names
+            .get(i)
+            .map(|s| s.as_str())
+            .unwrap_or("<unnamed>")
+            .to_string();
+        let declared = param_types.get(i).map(|s| s.as_str()).unwrap_or("");
+
+        // The declaration check ([C0935]) already proved the declared type is a
+        // shareable array, so a mismatch here means the program was linked from
+        // bytecode the current compiler would refuse.
+        let elem = match ForeignType::classify(declared, ForeignDirection::Argument) {
+            Ok(ForeignType::Array(elem)) => elem,
+            _ => {
+                return Err(VMError::NotImplemented(format!(
+                    "foreign function '{function}' ({language}): parameter '{name}' is \
+                     declared shared but its type '{declared}' is not a shareable array. \
+                     The declaration check ([C0935]) refuses this signature, so reaching \
+                     here means the bytecode predates that check."
+                )));
+            }
+        };
+        let Some(elem_type) = elem.buffer_elem() else {
+            return Err(VMError::NotImplemented(format!(
+                "foreign function '{function}' ({language}): parameter '{name}' is declared \
+                 shared over '{declared}', whose element type has no shareable buffer \
+                 ([C0935] refuses this signature)."
+            )));
+        };
+
+        if arg.kind() != NativeKind::Ptr(HeapKind::TypedArray) {
+            return Err(VMError::RuntimeError(format!(
+                "foreign function '{function}' ({language}): parameter '{name}' is declared \
+                 shared, which exports the argument's own buffer, but the value passed is \
+                 not a native array ({:?}). Only a contiguous `Array<int>` / \
+                 `Array<number>` has a buffer to export.",
+                arg.kind()
+            )));
+        }
+
+        let bits = arg.raw();
+        // An empty or absent array exports a zero-length view rather than a
+        // null one: foreign code that iterates it does nothing, which is what
+        // an empty array means, and no pointer into host memory is handed out.
+        let (data, len) = if bits == 0 {
+            (std::ptr::null_mut(), 0u64)
+        } else {
+            let ptr = bits as *const TypedArray<i64>;
+            // `data` and `len` sit at element-independent offsets in the
+            // 24-byte header, so reading them through one monomorphization is
+            // correct for every element type.
+            let len = unsafe { TypedArray::<i64>::len(ptr) } as u64;
+            let data = unsafe { (*ptr).data } as *mut std::ffi::c_void;
+            if len == 0 {
+                (std::ptr::null_mut(), 0)
+            } else {
+                (data, len)
+            }
+        };
+
+        planned.push(PlannedView {
+            arg_index: i,
+            param_name: name,
+            share,
+            elem_type,
+            data,
+            len,
+        });
+    }
+
+    // ADR-006 exclusivity, checked where it is checkable. A `shared mut` view is
+    // an exclusive borrow, so the same buffer must not appear twice in one call
+    // — as two mutable views, or as one mutable and one immutable. Shape's
+    // borrow solver does not see through a foreign call's argument list, so the
+    // aliasing that would break the guarantee is caught here, by address, before
+    // anything is exported.
+    for (a, first) in planned.iter().enumerate() {
+        for second in planned.iter().skip(a + 1) {
+            if first.data.is_null() || first.data != second.data {
+                continue;
+            }
+            if !first.share.is_mutable() && !second.share.is_mutable() {
+                // Two immutable views of one buffer is an ordinary shared
+                // borrow, and ADR-006 permits any number of those.
+                continue;
+            }
+            return Err(VMError::RuntimeError(format!(
+                "foreign function '{function}' ({language}): parameters '{}' and '{}' were \
+                 passed the same array, and at least one of them is declared `shared mut`. \
+                 A mutable view is an exclusive borrow (ADR-006), so foreign code would \
+                 hold two references to memory it may write through one of them. Pass \
+                 separate arrays, or declare both `shared`.",
+                first.param_name, second.param_name
+            )));
+        }
+    }
+
+    if planned.len() > shape_abi_v1::MAX_SHARED_VIEWS {
+        return Err(VMError::RuntimeError(format!(
+            "foreign function '{function}' ({language}): {} shared parameters exceeds the \
+             {} the release accounting can report on.",
+            planned.len(),
+            shape_abi_v1::MAX_SHARED_VIEWS
+        )));
+    }
+
+    Ok(planned)
+}
+
+/// Serialize the arguments that still cross by copy, writing nil at each
+/// position a view stands in for.
+///
+/// The array keeps its full arity so the extension binds parameters
+/// positionally exactly as it always has; the view table says which positions
+/// to overwrite.
+pub fn marshal_args_with_views(
+    args: &[KindedSlot],
+    param_types: &[String],
+    shared_positions: &[usize],
+    schemas: &TypeSchemaRegistry,
+) -> Result<Vec<u8>, VMError> {
+    let mut values = Vec::with_capacity(args.len());
+    for (i, arg) in args.iter().enumerate() {
+        if shared_positions.contains(&i) {
+            values.push(Rmp::Nil);
+            continue;
+        }
+        let declared = param_types.get(i).map(|s| s.as_str()).unwrap_or("");
+        values.push(kinded_slot_to_msgpack_typed(arg, declared, schemas)?);
+    }
+    let arr = Rmp::Array(values);
+    let mut buf = Vec::new();
+    rmpv::encode::write_value(&mut buf, &arr).map_err(|e| {
+        VMError::RuntimeError(format!("Failed to marshal foreign function args: {}", e))
+    })?;
+    Ok(buf)
+}
+
+/// The structured boundary failure for views foreign code did not release
+/// (ADR-019 §2 / #199).
+///
+/// This is the corruption class the ticket exists to close, caught rather than
+/// suffered: a body that stashed a view — `numpy.asarray(xs)` appended to a
+/// module global needs no vtable re-entry to do it — would otherwise be holding
+/// a pointer into memory the host is about to reclaim, and the next allocation
+/// that lands there would corrupt it from an ordinary-looking Shape source file.
+pub(crate) fn retained_view_error(
+    retained: u64,
+    planned: &[PlannedView],
+    function: &str,
+    language: &str,
+) -> VMError {
+    let names: Vec<&str> = planned
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| retained & (1u64 << i) != 0)
+        .map(|(_, v)| v.param_name.as_str())
+        .collect();
+    let listed = if names.is_empty() {
+        "an unidentified view".to_string()
+    } else {
+        names
+            .iter()
+            .map(|n| format!("'{n}'"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    VMError::RuntimeError(format!(
+        "foreign function '{function}' ({language}): the body still held a view of \
+         {listed} when it returned. A shared view is valid only for the duration of the \
+         call — the host reclaims the buffer immediately after — so keeping one (in a \
+         module global, or inside an object the body returned or stored) would leave \
+         foreign code reading Shape memory that no longer belongs to it. The call is \
+         failed here rather than allowed to corrupt memory later. Copy what the body \
+         needs to keep: for a Python buffer that is `bytes(view)` or \
+         `numpy.array(view)` (which copies) instead of `numpy.asarray(view)` (which \
+         does not)."
+    ))
+}
 
 #[cfg(test)]
 mod tests {
