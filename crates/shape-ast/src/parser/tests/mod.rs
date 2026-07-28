@@ -9,6 +9,7 @@
 pub mod advanced;
 pub mod backtracking;
 pub mod control_flow;
+pub mod effect_rows;
 pub mod existential;
 pub mod grammar_coverage;
 #[cfg(feature = "deep-tests")]

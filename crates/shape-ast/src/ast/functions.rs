@@ -24,6 +24,10 @@ pub struct FunctionDef {
     pub type_params: Option<Vec<TypeParam>>,
     pub params: Vec<FunctionParameter>,
     pub return_type: Option<TypeAnnotation>,
+    /// ADR-014 §8.2: the row this boundary declares, if the source spelled a
+    /// `!` clause. `None` is "no declared row", not "pure".
+    #[serde(default)]
+    pub effect_row: Option<super::types::EffectRowAnnotation>,
     pub where_clause: Option<Vec<super::types::WherePredicate>>,
     pub body: Vec<Statement>,
     pub annotations: Vec<Annotation>,

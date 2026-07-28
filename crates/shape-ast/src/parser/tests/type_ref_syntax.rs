@@ -180,7 +180,9 @@ fn record_optional_field_marker_is_preserved() {
 fn callable_type_arg_carries_type_annotation() {
     let annotation = parse_type_syntax_arg("(int) -> bool");
     match annotation {
-        TypeAnnotation::Function { params, returns } => {
+        TypeAnnotation::Function {
+            params, returns, ..
+        } => {
             assert_eq!(params.len(), 1);
             assert_eq!(
                 params[0].type_annotation,

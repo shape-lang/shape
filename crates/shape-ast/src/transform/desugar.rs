@@ -313,7 +313,9 @@ fn desugar_expr(expr: &mut Expr) {
         // chain (`a?.b?.c`) nests left-to-right and composes with `??` for free.
         // Strictness falls out: a non-Option receiver fails the `Some`/`None`
         // arm type-check.
-        Expr::PropertyAccess { object, optional, .. } => {
+        Expr::PropertyAccess {
+            object, optional, ..
+        } => {
             desugar_expr(object);
             if *optional {
                 lower_optional_property_access(expr);

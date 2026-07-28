@@ -6,6 +6,27 @@ use super::span::Span;
 use super::type_path::TypePath;
 use serde::{Deserialize, Serialize};
 
+/// A surface effect row: the `!` clause of ADR-014 §8.3 (grill Q4a).
+///
+/// Atom names stay as written here. Resolution against the closed catalog —
+/// and rejection of unknown atoms — happens in the type system, which owns
+/// the catalog; the AST layer must not decide effect meaning.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum EffectRowAnnotation {
+    /// `! {FsRead, NetConnect}`, and `! {}` for explicit purity.
+    Atoms {
+        names: Vec<String>,
+        #[serde(default)]
+        span: Span,
+    },
+    /// `! F` — a reference to an `effect F` binder in scope.
+    Param {
+        name: String,
+        #[serde(default)]
+        span: Span,
+    },
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum TypeAnnotation {
     /// Basic types: number, string, bool, row, pattern, etc.
@@ -16,10 +37,17 @@ pub enum TypeAnnotation {
     Tuple(Vec<TypeAnnotation>),
     /// Object type: { field1: T1, field2?: T2 }
     Object(Vec<ObjectTypeField>),
-    /// Function type: (T1, T2) => T3
+    /// Function type: `(T1, T2) -> T3`, `fn(T1) -> T3 ! {FsRead}`
     Function {
         params: Vec<FunctionParam>,
         returns: Box<TypeAnnotation>,
+        /// ADR-014 §8.1: the declared effect row, if the source spelled one.
+        ///
+        /// `None` means the source declared no row — NOT that the type is
+        /// pure. `! {}` is the explicit purity claim and parses as
+        /// `Some(Atoms { names: [] })`.
+        #[serde(default)]
+        effects: Option<EffectRowAnnotation>,
     },
     /// Union type: T1 | T2 | T3 (discriminated union - value is ONE of the types)
     Union(Vec<TypeAnnotation>),
@@ -191,7 +219,11 @@ impl TypeAnnotation {
                 format!("{{{}}}", fields_str.join(", "))
             }
             TypeAnnotation::Existential { witnesses, inner } => {
-                format!("exists<{}> {}", witnesses.join(", "), inner.to_type_string())
+                format!(
+                    "exists<{}> {}",
+                    witnesses.join(", "),
+                    inner.to_type_string()
+                )
             }
             _ => "any".to_string(),
         }
@@ -258,29 +290,44 @@ pub enum TypeParam {
         /// Optional default value expression: `= 4`.
         default: Option<super::expressions::Expr>,
     },
+    /// An effect binder: `effect F` (ADR-014 §8.3).
+    ///
+    /// A schema binder mirroring a type binder. It substitutes to a closed
+    /// row at instantiation and never survives open into a persisted fact.
+    Effect {
+        name: String,
+        #[serde(default)]
+        span: Span,
+        #[serde(default)]
+        doc_comment: Option<DocComment>,
+    },
 }
 
 impl TypeParam {
     /// The parameter's declared name (`T` or `N`), common to both variants.
     pub fn name(&self) -> &str {
         match self {
-            TypeParam::Type { name, .. } | TypeParam::Const { name, .. } => name,
+            TypeParam::Type { name, .. }
+            | TypeParam::Const { name, .. }
+            | TypeParam::Effect { name, .. } => name,
         }
     }
 
     /// The parameter's source span, common to both variants.
     pub fn span(&self) -> &Span {
         match self {
-            TypeParam::Type { span, .. } | TypeParam::Const { span, .. } => span,
+            TypeParam::Type { span, .. }
+            | TypeParam::Const { span, .. }
+            | TypeParam::Effect { span, .. } => span,
         }
     }
 
     /// The parameter's attached doc comment, common to both variants.
     pub fn doc_comment(&self) -> Option<&DocComment> {
         match self {
-            TypeParam::Type { doc_comment, .. } | TypeParam::Const { doc_comment, .. } => {
-                doc_comment.as_ref()
-            }
+            TypeParam::Type { doc_comment, .. }
+            | TypeParam::Const { doc_comment, .. }
+            | TypeParam::Effect { doc_comment, .. } => doc_comment.as_ref(),
         }
     }
 
@@ -293,6 +340,10 @@ impl TypeParam {
             // TODO(B.3): const generics may eventually grow predicates
             // (e.g. `where N > 0`), but not in this phase.
             TypeParam::Const { .. } => &[],
+            // ADR-014 §8.3: effect binders instantiate only to closed rows of
+            // the same stage and catalog version. That is the whole bound;
+            // there is no trait-bound vocabulary over rows.
+            TypeParam::Effect { .. } => &[],
         }
     }
 
@@ -300,13 +351,18 @@ impl TypeParam {
     pub fn default_type(&self) -> Option<&TypeAnnotation> {
         match self {
             TypeParam::Type { default_type, .. } => default_type.as_ref(),
-            TypeParam::Const { .. } => None,
+            TypeParam::Const { .. } | TypeParam::Effect { .. } => None,
         }
     }
 
     /// True iff this is a const generic parameter.
     pub fn is_const(&self) -> bool {
         matches!(self, TypeParam::Const { .. })
+    }
+
+    /// True iff this is an effect binder (`effect F`).
+    pub fn is_effect(&self) -> bool {
+        matches!(self, TypeParam::Effect { .. })
     }
 
     /// Convenience constructor for a plain type parameter with no bounds

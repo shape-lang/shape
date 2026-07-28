@@ -171,9 +171,17 @@ documented_type_param_name = {
 }
 
 type_param_name = {
-    const_type_param
+    effect_type_param
+    | const_type_param
     | ident ~ (":" ~ trait_bound_list)? ~ ("=" ~ type_annotation)?
 }
+
+// Effect binder in a generic parameter list: `fn apply<T, effect F>(..)`.
+// ADR-014 §8.3 — a schema binder mirroring a type binder, not an open row.
+// `effect_keyword` is atomic with a trailing boundary check so a type
+// parameter merely NAMED `effectful` still parses as an ordinary type param.
+effect_type_param = { effect_keyword ~ ident }
+effect_keyword = @{ "effect" ~ !(ASCII_ALPHANUMERIC | "_") }
 
 // Const generic parameter: `const N: int` or `const N: int = 4`.
 // Surface syntax only in B.1; AST variant and resolver/monomorphization
@@ -191,7 +199,7 @@ trait_member_signature = {
     (ident | keyword) ~ "?"? ~ ":" ~ type_annotation
     // Method signature: `fn` keyword required + arrow return type (Rust-shaped).
     // Colon-as-return-type (TypeScript-shaped) is intentionally unsupported.
-    | "async"? ~ ("method" | "fn") ~ (ident | keyword) ~ "?"? ~ type_params? ~ "(" ~ function_params? ~ ")" ~ when_clause? ~ return_type?
+    | "async"? ~ ("method" | "fn") ~ (ident | keyword) ~ "?"? ~ type_params? ~ "(" ~ function_params? ~ ")" ~ when_clause? ~ return_type? ~ effect_clause?
     // Index signature
     | "[" ~ ident ~ ":" ~ ("string" | "number") ~ "]" ~ ":" ~ type_annotation
 }
@@ -281,7 +289,7 @@ documented_method_def = {
 }
 
 method_def = {
-    "async"? ~ ("method" | "fn") ~ method_name ~ type_params? ~ "(" ~ function_params? ~ ")" ~ when_clause? ~ return_type? ~ "{" ~ function_body ~ "}"
+    "async"? ~ ("method" | "fn") ~ method_name ~ type_params? ~ "(" ~ function_params? ~ ")" ~ when_clause? ~ return_type? ~ effect_clause? ~ "{" ~ function_body ~ "}"
 }
 
 // Method names allow `from` (keyword in import context) to be used as a method name
@@ -301,7 +309,7 @@ async_keyword = { "async" }
 foreign_function_def = {
     annotations? ~ async_keyword? ~ function_keyword
     ~ foreign_language_id ~ ident ~ type_params?
-    ~ "(" ~ function_params? ~ ")" ~ return_type?
+    ~ "(" ~ function_params? ~ ")" ~ return_type? ~ effect_clause?
     ~ "{" ~ foreign_body ~ "}"
 }
 
@@ -338,7 +346,7 @@ foreign_body_content = @{
 }
 
 function_def = {
-    annotations? ~ comptime_keyword? ~ async_keyword? ~ &function_keyword ~ function_keyword ~ ident ~ type_params? ~ "(" ~ function_params? ~ ")" ~ return_type? ~ where_clause? ~ "{" ~ function_body ~ "}"
+    annotations? ~ comptime_keyword? ~ async_keyword? ~ &function_keyword ~ function_keyword ~ ident ~ type_params? ~ "(" ~ function_params? ~ ")" ~ return_type? ~ effect_clause? ~ where_clause? ~ "{" ~ function_body ~ "}"
 }
 
 // Declaration-only builtin intrinsic functions for std/core metadata.
@@ -535,7 +543,43 @@ statement_or_error = _{ statement | stmt_recovery }
 stmt_recovery = { (!stmt_sync_point ~ ANY)+ }
 stmt_sync_point = _{ stmt_sync_keyword | "}" | ";" | item_sync_point }
 stmt_sync_keyword = @{ ("let" | "var" | "const" | "return" | "if" | "while" | "for") ~ !(ASCII_ALPHANUMERIC | "_") }
-return_type = { "->" ~ type_annotation }
+return_type = { "->" ~ type_annotation ~ effect_clause? }
+
+// ===== Effect rows (ADR-014 §8, grill Q4a) =====
+//
+// The row clause after a return type:
+//
+//   fn read(p: string) -> string ! {FsRead}
+//   fn hash(s: string) -> int ! {}          // explicit purity
+//   fn apply<T, effect F>(f: fn() -> T ! F) -> T ! F
+//
+// COEXISTENCE WITH `!!` (error context) AND `!=`:
+//
+// No special machinery is required, and this was verified by removing the
+// candidates rather than assumed. A row begins with `{` or an identifier, so
+// neither `!!` nor `!=` can start one; `effect_clause?` therefore fails at
+// the row and PEG backtracks out of the optional, leaving the expression
+// grammar to resume at the operator. The negative lookahead below is
+// belt-and-braces for a future row spelling — it is NOT what makes `x as
+// fn(int) -> bool !! "ctx"` work today.
+//
+// THE REAL AMBIGUITY, recorded rather than hidden: a BARE BINDER row (`! F`)
+// after a function type in cast position is indistinguishable from a
+// following `!expr` statement, because Shape does not require statement
+// terminators and pest's implicit whitespace before the optional clause
+// spans newlines. PEG resolves it in favour of the row. It is not silent —
+// the binder name is resolved against the `effect` binders in scope and an
+// unknown one is rejected by name — but a `;` is the fix. See
+// `parser::tests::effect_rows`.
+//
+// The clause binds to the NEAREST enclosing arrow. A function returning an
+// effectful function type therefore parenthesizes the inner type:
+// `fn() -> (fn() -> int ! {FsRead}) ! {}`.
+effect_clause = { "!" ~ !("!" | "=") ~ effect_row_annotation }
+effect_row_annotation = { effect_atom_set | effect_param_use }
+effect_atom_set = { "{" ~ (effect_atom_name ~ ("," ~ effect_atom_name)*)? ~ ","? ~ "}" }
+effect_atom_name = @{ (ASCII_ALPHA | "_") ~ (ASCII_ALPHANUMERIC | "_")* }
+effect_param_use = @{ (ASCII_ALPHA | "_") ~ (ASCII_ALPHANUMERIC | "_")* }
 
 // ===== Function Expressions (Anonymous Functions) =====
 // Arrow function syntax (x => expr) has been removed.
@@ -998,7 +1042,7 @@ object_type_member = {
 // Both arrows are accepted in type position so the documented HOF parameter
 // form `(int) -> bool` parses as a binding/parameter type.
 function_type = {
-    "(" ~ type_param_list? ~ ")" ~ ("->" | "=>") ~ type_annotation
+    function_keyword? ~ "(" ~ type_param_list? ~ ")" ~ ("->" | "=>") ~ type_annotation ~ effect_clause?
 }
 
 type_param_list = { 
