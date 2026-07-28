@@ -5,9 +5,19 @@
 
 ## Headline
 
-**The ticket's premise is refuted. There is no meaningful per-test resource
-accumulation.** A single process runs the entire 3,583-test `shape-vm --lib`
-suite at `--test-threads=1` with a peak RSS of **113–121 MB**.
+**The ticket's premise is refuted as the cause of the incident. There is no
+per-test accumulation on the interpreter path.** A single process runs the
+entire 3,583-test `shape-vm --lib` suite at `--test-threads=1` with a peak RSS
+of **113–124 MB**.
+
+That statement is narrower than it looks, and the narrowing matters:
+`shape-vm` does not link `shape-jit`, so the anchor measurement is evidence
+about the interpreter only. On the JIT path there **is** a real, unbounded,
+leak-by-design (Cranelift `JITModule` pages are never freed), measured here at
++18 MB across 60 JIT-armed tests versus a matched control. It is bounded in
+practice only because `.with_jit()` is opt-in and rare — an accident, not a
+design. Detail in the JIT section, which corrects an earlier "ruled out"
+verdict in this same document.
 
 The ~60 GB OOM is a **build-phase** failure, not a test-run failure:
 `cargo test -p shape-test` links ~60 integration-test binaries, each a
@@ -62,26 +72,179 @@ VM lifecycles cost ~27 MB total.
 At default parallelism (32 threads) the same suite peaks at 1.17 GB in 8s —
 that is 32 concurrent VMs, i.e. concurrency, not accumulation.
 
-### Ruled out — JIT code pages
+There is also a mechanism, not just a curve. `VirtualMachine` has an explicit
+`impl Drop` (`crates/shape-vm/src/executor/mod.rs:703-880`) that releases shared
+module bindings, the live stack window, and module bindings by kind — and then,
+at `:857-878`, runs a **teardown cycle collection**:
 
-JIT-heavy targets show no elevated retention relative to interpreter-only ones:
+```rust
+#[cfg(feature = "gc")]
+{
+    shape_value::gc_coordinator::collect_under_stop(shape_value::gc::collect_cycles);
+    shape_value::gc::clear_candidate_buffer();
+}
+```
 
-| shape-test binary | tests | peak RSS |
-|---|---:|---:|
-| `numeric_conversions_jit` | 118 | 390 MB |
-| `jit` | 44 | 313 MB |
-| `operators` | 618 | 363 MB |
-| `control_flow` | 490 | 360 MB |
-| `snapshots_resume` | — | 180 MB |
+Its comment names exactly the case that would otherwise leak: a module-scope
+self-referential cycle "becomes unreachable only *here* … so the mid-run
+safepoint collector never observed it becoming garbage." The final
+`clear_candidate_buffer()` exists so a VM reusing the OS thread starts clean.
+So dropping a VM with live Arc cycles does **not** permanently leak them, given
+`gc` — which is default-on for shape-vm (`Cargo.toml:57`).
 
-`jit` (44 tests) retains *less* than `operators` (618 tests). If code pages
-leaked per JIT-compiled function, the JIT targets would dominate. They do not.
+Three residual surfaces remain, none large enough to matter here but worth
+naming rather than implying the path is spotless:
 
-### Ruled out — unbounded static caches / interners
+1. The candidate buffer is thread-local, so a cycle whose decrements happened on
+   a different thread than the dropping thread is not in it.
+2. `crates/shape-vm/src/executor/mod.rs:847-855` admits in-code that if
+   `module_bindings` outgrew `module_binding_kinds`, the tail is zeroed but not
+   released and "the corresponding strong-count share leaks". This is the only
+   VM-teardown path that concedes a leak; it is the best remaining candidate for
+   a small per-test residue, though the flat curve argues it rarely fires.
+3. With `gc` off the whole block is absent and cycles leak for the process
+   lifetime.
 
-A monotonic global cache would produce a constant positive slope. The measured
-slope is 9.2 KB/test and the curve flattens. Over the whole suite this is ~30 MB
-— real but three orders of magnitude away from the incident.
+**Split-feature hazard, recorded while we were here.** `gc` is default-ON for
+shape-vm but default-OFF for shape-jit (`crates/shape-jit/Cargo.toml:50`).
+shape-cli reconciles them (`default = ["jit","gc"]`, `gc = ["shape-vm/gc",
+"shape-jit?/gc"]`), but any build that is not shape-cli — e.g.
+`cargo test -p shape-jit` — gets a gc-on interpreter with a gc-OFF JIT, where
+`jit_write_barrier` compiles to a no-op. shape-vm's own manifest comment claimed
+"Default OFF" while line 57 had it ON; that contradiction is fixed in this
+branch.
+
+### JIT code pages — CONFIRMED live leak, but not the incident
+
+**This section previously said "ruled out". That was wrong, and its evidence was
+invalid.** It is corrected in place rather than quietly amended, because the
+original error is instructive.
+
+The original argument was: `jit` (44 tests) peaks at 313 MB while `operators`
+(618 tests) peaks at 363 MB, so JIT targets do not dominate. Both halves are
+broken:
+
+- **`shape-vm` does not depend on `shape-jit` at all.** Its `[dependencies]`
+  lists no `shape-jit` and no `cranelift-*`; `crates/shape-vm/Cargo.toml:67-70`
+  says so outright ("Cranelift codegen itself lives in the shape-jit crate;
+  shape-vm carries no cranelift deps"). `shape-vm/jit` being default-on gates
+  only OSR/tier-dispatch hooks. So the 3,583-test measurement that anchors this
+  document **cannot** observe a JIT page: zero occurrences, zero bytes. It is
+  evidence about the interpreter, and says nothing about the JIT either way.
+- **The `jit` shape-test target never turns the JIT on.** `ShapeTest` defaults
+  to `ExecMode::Vm`; the opt-in is `.with_jit()`, and
+  `grep -rc 'with_jit()' tools/shape-test/tests/jit/` returns **0** in all three
+  files. `tools/shape-test/tests/jit/correctness.rs:1-5` admits it: "we verify
+  correctness by running code through the interpreter and trusting the JIT must
+  match." The comparison was interpreter versus interpreter.
+
+The leak is real. One `JITModule` is built per `JITExecutor::execute_program`
+call (`crates/shape-jit/src/executor.rs:666`) and dropped at end of scope.
+Cranelift's `Memory::drop` deliberately leaks — it `mem::forget`s its
+allocations "to guarantee validity of function pointers". `JITModule::free_memory`
+exists in the crate and is **never called anywhere in this workspace**. The
+pages come from the Rust global allocator, page-rounded and `mprotect`ed, so
+they count against RSS permanently and the allocator can never reuse them.
+
+**Measured, with a matched control.** In `comptime`, the most JIT-dense target:
+60 tests drawn from modules that call `.with_jit()` against 60 from modules that
+do not — same binary, each cold in its own process, `--test-threads=1`:
+
+```
+60 tests from JIT-armed modules:  growth 68.6 MB, peak 77 MB
+60 tests from non-JIT modules:    growth 50.6 MB, peak 63 MB
+                                  delta  +18.0 MB growth, +14 MB peak
+```
+
+Equal counts and both cold, so the allocator warm-up that confounds unequal
+comparisons is held constant. The delta is an **upper bound** on the JIT's
+share: these tests run each program twice (the helpers are literally named
+`expect_vm_and_jit_output`), so the extra interpreter pass and the cache keys it
+mints are inside the +18 MB too. Order of magnitude: a few hundred KB per JIT
+execution, consistent with a page-rounded three-arena `JITModule` holding a
+full-stdlib compile.
+
+**Why it is still not the incident.** The arming surface is small and bounded:
+`.with_jit()` appears 68 times repo-wide across 10 shape-test targets
+(`annotations_comptime` 17, `comptime` 15, `type_aliases_unions` 9,
+`stdlib_statistics` 8, `arrays_vectors` 7, then single digits). Each target is
+its own process, so the leak cannot compound across targets. The worst observed
+whole-process peak among them is `comptime` at 79 MB.
+
+**It is a latent scaling risk, not a closed issue.** Three independent accidents
+mask it: shape-vm not linking shape-jit, `.with_jit()` being opt-in and rare,
+and the heavy in-crate shape-jit suites being `deep-tests`-gated. Any one of
+those changing — someone adding a broad JIT parity sweep, say — turns it into
+hundreds of KB per test of unbounded growth. The remedy already exists in the
+tree, unwired: `JitCodeCache` (`crates/shape-jit/src/jit_cache.rs:53`) is a
+content-hash-keyed native-pointer cache referenced by nothing outside its own
+file and test module. Wiring it, or holding one long-lived `JITCompiler`, is the
+known fix. It is also why ~118 stdlib functions are recompiled on every
+`execute_program` call: `compile_program_selective` walks all of
+`program.functions` with no cache lookup at any point.
+
+For contrast, `crates/shape-jit/src/jit_matrix.rs:59,79` is correctly balanced
+(`from_arc` leaks one strong reference, `Drop` reconstitutes it). Recorded so it
+is not re-flagged.
+
+### Reference: run-phase peaks by shape-test target
+
+Retained as baseline data. Read these as *interpreter* numbers unless the target
+appears in the `.with_jit()` list above.
+
+| shape-test binary | tests | peak RSS | arms JIT? |
+|---|---:|---:|---|
+| `numeric_conversions_jit` | 118 | 390 MB | 2 sites |
+| `operators` | 618 | 363 MB | no |
+| `control_flow` | 490 | 360 MB | no |
+| `lsp` | 507 | 336 MB | 1 site |
+| `jit` | 44 | 313 MB | **no** |
+| `async_concurrency` | — | 262 MB | no |
+| `snapshots_resume` | — | 180 MB | no |
+| `comptime` | 274 | 79 MB (serial) | 15 sites |
+
+### Static caches — unbounded by key, saturating on these suites
+
+The naive form of this verdict ("a monotonic cache would show a constant slope;
+ours flattens, so no unbounded cache") is too weak, because the caches that
+exist are not keyed by test.
+
+**The discriminator is key space, not test count.** Every process-global holder
+below is keyed by something whose distinct-value count is bounded by the
+suite's distinct *sources / types / field-name sets*, not by how many tests run.
+A suite that reuses fixtures saturates them; a workload that mints a **new key
+per test** (synthesized module sources, generated type names, generated field
+sets) makes the very same structures unbounded. So "flattens after ~1,500
+tests" is the signature of a finite key space filling up — which is consistent
+with the measurements and is *not* a guarantee for a different workload.
+
+The unbounded-by-key holders, ranked by bytes per key:
+
+| site | shape | key |
+|---|---|---|
+| `crates/shape-runtime/src/module_loader/mod.rs:54` | `PARSE_CACHE: OnceLock<Mutex<HashMap<String, Arc<Program>>>>`, insert-only, no eviction | **entire module source text** → entire parsed AST |
+| `crates/shape-runtime/src/type_schema/current.rs:69` | `DEFAULT_SCHEMA_REGISTRY: LazyLock<Arc<TypeSchemaRegistry>>`; grows via `RwLock` interiors `by_content`, `predeclared_cache`, `predeclared_by_id` in `type_schema/registry.rs` | distinct ordered field-name tuples |
+| `crates/shape-value/src/shape_graph_current.rs:106` | `DEFAULT_SHAPE_TABLE: LazyLock<Arc<ShapeTableHandle>>`; `shapes` Vec clones its parent's property Vec per push (O(k²) for a depth-k chain), plus a `transition_log` drained only if a JIT tier manager polls | distinct hidden-class transitions |
+| `crates/shape-jit/src/ffi/string.rs:176` | `intern_pool: OnceLock<Mutex<HashMap<String, Arc<String>>>>`, bumps a strong count per call and never releases | distinct string-literal content |
+
+The first three share a **fallback trap** worth flagging: `current_registry()`
+and `try_current_shape_table()` return the process-global default whenever no
+task-local scope is installed, and never return `None`. So every test that does
+not wrap execution in a scope writes into the one global object.
+
+Ruled out by contrast, so they are not re-flagged:
+`crates/shape-value/src/string_intern.rs:66` is hard-capped at
+`INTERN_CAP = 8192` entries of ≤32 bytes; the `phf` method-registry tables are
+compile-time immutable; `crates/shape-jit/src/jit_cache.rs` is dead code with no
+owner (it is *not* a live JIT code cache — see the JIT section, where wiring it
+is the proposed fix).
+
+One tripwire for a future reader: `OPTCHAIN_COUNTER`
+(`crates/shape-ast/src/transform/desugar.rs:15`) never resets, so desugared
+identifier names drift monotonically across programs in one process. It holds no
+memory itself, but it is exactly the shape of thing that could become an
+unbounded *key generator* for the schema and shape tables above if a desugared
+name ever reaches one of those keys.
 
 ### Real leaks that exist but are not this incident
 
@@ -100,31 +263,24 @@ sites: 7 in `crates/shape-jit/src/ffi_symbols/series/mod.rs`, 8 in
 not per test or per program, so a long-running JIT column-math workload leaks
 without bound. Tracked as **#208**.
 
-Why it does not show up in these measurements: the JIT tier thresholds
-(T1 @ 100 calls, T2 @ 10k) mean the large majority of unit tests never reach JIT
-compilation at all, and the series/intrinsic column API is a narrow path few
-tests touch. The suites do not exercise it at scale — which is exactly why a
-production-path leak can sit behind a flat RSS curve. The `jit` target's 313 MB
-against `operators`' 363 MB is evidence about *these suites*, not a clean bill
-of health for the JIT under sustained load.
+Why it does not show up in these measurements — and note this is a *different*
+reason from the one first written here. The initial explanation ("the T1 @ 100 /
+T2 @ 10k tier thresholds mean few tests JIT-compile") is wrong about the
+mechanism: those thresholds gate only the `JitCompilationBackend` worker path
+(`crates/shape-jit/src/worker.rs:19`). The `JITExecutor::execute_program` path
+is ahead-of-time whole-program compilation with **no threshold at all** — it
+fires on first execution. The real reasons the column leak stays invisible are
+that `shape-vm` does not link `shape-jit` (so the anchor measurement cannot
+reach it), that `.with_jit()` is opt-in and used in only 10 targets, and that
+the series/intrinsic column API is a narrow path few of those touch. It leaks
+per *call inside JIT-emitted code*, so its profile is bimodal: zero for almost
+every test, then unbounded for any test that runs a hot column loop. A bimodal
+leak cannot show up as a smooth per-test slope, which is exactly why a real
+production-path defect can sit behind a flat RSS curve.
 
-The correct contrast is `crates/shape-jit/src/jit_matrix.rs:59,79`, where
-`from_arc` leaks one strong reference and `Drop` reconstitutes it — balanced.
-
-**Second-order, bounded-growth statics** (none incident-relevant; worth a
-disposition when next touched):
-
-| site | shape | growth |
-|---|---|---|
-| `crates/shape-runtime/src/module_loader/mod.rs:54` | `PARSE_CACHE: OnceLock<Mutex<HashMap<String, Arc<Program>>>>` | insert-only; verified no remove/clear |
-| `crates/shape-jit/src/ffi/string.rs:175` | `intern_pool: OnceLock<Mutex<HashMap<String, Arc<String>>>>` | grows, bumps strong counts; documented as living for the program's lifetime |
-| `crates/shape-value/src/shape_graph_current.rs:106` | `DEFAULT_SHAPE_TABLE: LazyLock<Arc<ShapeTableHandle>>` | transition log drains only if the JIT tier manager polls |
-| `type_schema/registry.rs` schema-registry fallback surfaces | — | reported by the sweep; **not independently verified here** |
-
-A source-text-keyed parse cache and a string intern pool are precisely the
-shapes that would produce a constant positive slope. The measured slope is
-9.2 KB/test and *inverts* on a warm heap (next section), which bounds their
-real-world cost on these suites to noise.
+The static-cache inventory that used to be duplicated here now lives in
+"Static caches — unbounded by key" above, with the key-space framing that
+actually explains the flattening.
 
 ### Per-module attribution, and why the residual slope is not retention
 
@@ -276,9 +432,24 @@ noise while still failing loudly on a real regression.
 
 ## Open items
 
-- The residual 9.2 KB/test slope is small and flattening, but its source was not
-  chased to a named allocation. The tripwire now bounds it, so a regression
-  surfaces as a test failure rather than as growth nobody is watching.
+- The residual ~9 KB/test interpreter slope is explained as allocator warm-up
+  plus finite-key-space caches saturating, and it inverts on a warm heap. It was
+  not chased to a single named allocation; the tripwire bounds it either way.
+  The cheap next probe, if anyone wants the last word: sample
+  `TypeSchemaRegistry`'s `predeclared_by_id` / `by_content` lengths,
+  `ShapeTransitionTable::shape_count()` plus the transition-log length, and
+  `PARSE_CACHE`'s len at tests 100 / 1,000 / 3,000. That attributes the slope
+  directly and shows which key space is still climbing versus saturated.
+- **The tripwire does not cover the JIT.** It runs `shape-vm --lib`, which
+  cannot link shape-jit, so a JIT page-leak regression is invisible to it. A
+  second slice over a `.with_jit()`-dense target (`comptime` or
+  `annotations_comptime`) would close that gap. Not added here because its
+  bound would be set on a leak we already know is live and unfixed — the honest
+  order is fix `JitCodeCache` wiring first, then bound it.
+- The 60 GB incident was a build, but if a *runtime* OOM is ever observed, note
+  which binary it was: `tools/shape-test` links shape-jit and runs thousands of
+  Shape programs in one process, so the JIT page leak and the `box_column_result`
+  leak are both live candidates there in a way they are not in `shape-vm --lib`.
 - `mold`/`lld` are not installed on this host. Either would cut per-link RSS
   substantially and allow raising `jobs` back up; that is a toolchain/infra
   change, deliberately not made here.
