@@ -146,6 +146,7 @@ pub async fn run_script(
     snapshot_store_root: Option<PathBuf>,
     cli_limits: shape_vm::resource_limits::ResourceLimits,
     eager_link: bool,
+    native_witness: Option<PathBuf>,
 ) -> Result<()> {
     if let Some(script_path) = file.as_deref() {
         fs::metadata(script_path)
@@ -453,6 +454,7 @@ pub async fn run_script(
             execution_mode,
             interrupt_flag,
             &run_security,
+            native_witness.as_deref(),
         )
         .await
     };
@@ -1448,6 +1450,7 @@ async fn execute_file(
     execution_mode: ExecutionMode,
     interrupt_flag: Arc<AtomicU8>,
     run_security: &RunSecurity,
+    native_witness: Option<&Path>,
 ) -> Result<()> {
     // Add the script's directory to module search paths
     if let Some(parent) = path.parent() {
@@ -1495,6 +1498,20 @@ async fn execute_file(
         }
     }
 
+    // #117 / R15: start collecting native-execution evidence. This must happen
+    // BEFORE compilation, because the JIT decides whether to emit the
+    // native-entry announcement while it builds each function body. The session
+    // is thread-local and `run_engine` performs no `.await` around the actual
+    // execution, so activation, execution and collection all happen on one
+    // thread.
+    if native_witness.is_some() {
+        shape_vm::native_witness::activate(match execution_mode {
+            ExecutionMode::BytecodeVM => shape_vm::native_witness::WitnessMode::Vm,
+            #[cfg(feature = "jit")]
+            ExecutionMode::JIT => shape_vm::native_witness::WitnessMode::JitWholeProgram,
+        });
+    }
+
     // Execute the script
     let response =
         match run_engine(engine, source, execution_mode, interrupt_flag, run_security).await {
@@ -1524,9 +1541,18 @@ async fn execute_file(
                         print_shape_error(&err, runtime_error.as_ref());
                     }
                 }
+                // #117: a compile/runtime failure is still a run whose native
+                // evidence a consumer may need; emit before exiting.
+                if let Some(path) = native_witness {
+                    emit_native_witness(path);
+                }
                 std::process::exit(1);
             }
         };
+
+    if let Some(path) = native_witness {
+        emit_native_witness(path);
+    }
 
     // Print any messages
     for message in &response.messages {
@@ -1553,6 +1579,31 @@ async fn execute_file(
     }
 
     Ok(())
+}
+
+/// Write the collected `NativeExecutionWitness` (#117 / R15) to `path`, or to
+/// stdout when `path` is `-`.
+///
+/// Silence would defeat the purpose: if no session was collecting, or the write
+/// fails, say so on stderr rather than leaving a consumer to read a stale or
+/// missing file as evidence.
+fn emit_native_witness(path: &std::path::Path) {
+    let Some(witness) = shape_vm::native_witness::finish() else {
+        eprintln!(
+            "[native-witness] no witness was collected for this run; \
+             nothing written to {}",
+            path.display()
+        );
+        return;
+    };
+    let json = witness.to_canonical_json();
+    if path == std::path::Path::new("-") {
+        println!("{json}");
+        return;
+    }
+    if let Err(e) = std::fs::write(path, format!("{json}\n")) {
+        eprintln!("[native-witness] failed to write {}: {e}", path.display());
+    }
 }
 
 async fn run_engine(
