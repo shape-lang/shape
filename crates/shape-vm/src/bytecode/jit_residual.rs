@@ -200,7 +200,9 @@ impl JitResidualMap {
 
     /// Whether the function at `index` carries any residual.
     pub fn function_is_residual_bearing(&self, index: usize) -> bool {
-        self.entries.get(&Some(index)).is_some_and(|s| !s.is_empty())
+        self.entries
+            .get(&Some(index))
+            .is_some_and(|s| !s.is_empty())
     }
 
     /// Whether top-level code carries any residual — top-level IS the program

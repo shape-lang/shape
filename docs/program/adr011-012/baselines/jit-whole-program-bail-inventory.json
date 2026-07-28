@@ -27,12 +27,12 @@
   "excluded_from_hash": [
     "source_revision"
   ],
-  "source_revision": "068f1f2d2336ec64d1ddbcfbe10251f0d13f7006",
-  "site_count": 19,
+  "source_revision": "772009f5eadb3e256083e1461a886a1c5c324cf5",
+  "site_count": 21,
   "construct_site_count": 15,
-  "infra_site_count": 4,
+  "infra_site_count": 6,
   "program_scoped_residual_count": 2,
-  "inventory_sha256": "bb2fed387bb0e3cba118ff715ad410595a95c9a991143f4ddd5a423b223fc22f",
+  "inventory_sha256": "c40a80a6d3621c6e30fe22109ec7075dc860e716eae5a97553f817769691dcd2",
   "sites": [
     {
       "id": "function-body-module-binding",
@@ -98,6 +98,18 @@
       "id": "top-level-comptime-strategy-user-funcs",
       "category": "construct",
       "reason": "same as top-level-comptime-strategy, on the user-function-aware route",
+      "file": "crates/shape-jit/src/compiler/strategy.rs"
+    },
+    {
+      "id": "top-level-mir-lowering-strategy",
+      "category": "infra",
+      "reason": "a MIR-lowering refusal in TOP-LEVEL code; the same refusal inside a user function body is already per-function via `compile_failures`",
+      "file": "crates/shape-jit/src/compiler/strategy.rs"
+    },
+    {
+      "id": "top-level-mir-lowering-user-funcs",
+      "category": "infra",
+      "reason": "a MIR-lowering refusal in TOP-LEVEL code; the same refusal inside a user function body is already per-function via `compile_failures`",
       "file": "crates/shape-jit/src/compiler/strategy.rs"
     },
     {

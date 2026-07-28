@@ -147,7 +147,9 @@ impl FreezeOverlay {
                     self.memoize_composite_subtree(item);
                 }
             }
-            TypeAnnotation::Function { params, returns, .. } => {
+            TypeAnnotation::Function {
+                params, returns, ..
+            } => {
                 for param in params {
                     self.memoize_composite_subtree(&param.type_annotation);
                 }
@@ -293,9 +295,9 @@ impl FreezeOverlay {
                     })
                 }
             }
-            Type::Function { params, returns, .. } => {
-                self.semantic_callable_annotation(params, returns, shape, path)
-            }
+            Type::Function {
+                params, returns, ..
+            } => self.semantic_callable_annotation(params, returns, shape, path),
         }
     }
 
@@ -309,7 +311,9 @@ impl FreezeOverlay {
             return self.semantic_variable_annotation(&variable);
         }
         match annotation {
-            TypeAnnotation::Function { params, returns, .. } => {
+            TypeAnnotation::Function {
+                params, returns, ..
+            } => {
                 let parameter_types: Vec<Type> = params
                     .iter()
                     .map(|parameter| Type::Concrete(parameter.type_annotation.clone()))
@@ -554,7 +558,11 @@ pub(crate) fn annotation_has_lossy_unknown_sentinel(annotation: &TypeAnnotation)
         TypeAnnotation::Object(fields) => fields
             .iter()
             .any(|field| annotation_has_lossy_unknown_sentinel(&field.type_annotation)),
-        TypeAnnotation::Function { params, returns, effects: None } => {
+        TypeAnnotation::Function {
+            params,
+            returns,
+            effects: None,
+        } => {
             params
                 .iter()
                 .any(|param| annotation_has_lossy_unknown_sentinel(&param.type_annotation))

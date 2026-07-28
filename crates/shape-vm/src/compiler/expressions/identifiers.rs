@@ -230,9 +230,7 @@ impl BytecodeCompiler {
                 // identical shape + residual as the `-> &T` escape-promote deopt
                 // at `function_calls.rs`. JIT stack-cell-reference deref
                 // lowering is the root-cause v0.4 JIT-lowering followup.
-                self.record_jit_residual(
-                    crate::bytecode::JitResidual::ReferenceEscapePromotion,
-                );
+                self.record_jit_residual(crate::bytecode::JitResidual::ReferenceEscapePromotion);
             } else {
                 let source_loc = self.span_to_source_location(span);
                 self.check_read_allowed_in_current_context(

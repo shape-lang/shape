@@ -38,9 +38,19 @@ import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
 
-/// Files that may contain a whole-program bail. A refusal added anywhere else
-/// in the JIT compile path is invisible to this gate, so this list is part of
-/// the baseline's hashed content.
+/// Files that decide whether a PROGRAM is compiled. This list is part of the
+/// baseline's hashed content.
+///
+/// Coverage boundary, stated so the gate is not read as claiming more than it
+/// checks: MIR-lowering refusals live across roughly ten files under
+/// `crates/shape-jit/src/mir_compiler/` and are NOT scanned, because they are
+/// already per-function. One raised while lowering a user function body
+/// reaches `compile_program_selective`'s `compile_failures` list, which demotes
+/// that one function. The same refusal raised while lowering TOP-LEVEL code is
+/// whole-program, and it enters this inventory through the two
+/// `top-level-mir-lowering-*` sites in `strategy.rs` where `compile_body()?`
+/// propagates it. That `?` is why the refusal regex below does not find these
+/// on its own — they are declared rather than detected.
 export const BAIL_SOURCE_FILES = [
   "crates/shape-jit/src/executor.rs",
   "crates/shape-jit/src/compiler/strategy.rs",

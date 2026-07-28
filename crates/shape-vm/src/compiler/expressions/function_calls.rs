@@ -1590,7 +1590,10 @@ impl BytecodeCompiler {
             .type_tracker
             .get_object_field_contract(receiver_schema_id, field_name)?
             .clone();
-        let shape_ast::ast::TypeAnnotation::Function { params, returns, .. } = field_ann else {
+        let shape_ast::ast::TypeAnnotation::Function {
+            params, returns, ..
+        } = field_ann
+        else {
             return None;
         };
         if !params.is_empty() {

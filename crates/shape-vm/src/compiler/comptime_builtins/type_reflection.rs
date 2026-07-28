@@ -1237,7 +1237,9 @@ fn canonicalize_resolved(
             Ok(canonical)
         }
         TypeAnnotation::Object(fields) => canonical_record(fields, scope),
-        TypeAnnotation::Function { params, returns, .. } => {
+        TypeAnnotation::Function {
+            params, returns, ..
+        } => {
             // The canonical descriptor embeds each parameter's FULL annotation
             // identity (the `reference:&h` wrapper included, so a borrowed
             // parameter is identity-distinct from a by-value one) plus `?` —

@@ -1222,7 +1222,9 @@ impl BytecodeCompiler {
             TypeAnnotation::Object(fields) => fields
                 .iter()
                 .any(|field| Self::annotation_type_is_unknown(&field.type_annotation)),
-            TypeAnnotation::Function { params, returns, .. } => {
+            TypeAnnotation::Function {
+                params, returns, ..
+            } => {
                 params
                     .iter()
                     .any(|param| Self::annotation_type_is_unknown(&param.type_annotation))

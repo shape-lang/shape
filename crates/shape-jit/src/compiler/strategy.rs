@@ -183,6 +183,7 @@ impl JITCompiler {
                 // Session 1 Commit 3: allocate Arc<SharedCell>s for
                 // every SharedCow local slot before the body runs.
                 mir_compiler.initialize_shared_local_slots()?;
+                // WHOLE-PROGRAM-BAIL[infra]: top-level-mir-lowering-strategy — a MIR-lowering refusal in TOP-LEVEL code; the same refusal inside a user function body is already per-function via `compile_failures`
                 mir_compiler.compile_body()?;
             }
             builder.finalize();
@@ -345,6 +346,7 @@ impl JITCompiler {
                 // Session 1 Commit 3: allocate Arc<SharedCell>s for
                 // every SharedCow local slot before the body runs.
                 mir_compiler.initialize_shared_local_slots()?;
+                // WHOLE-PROGRAM-BAIL[infra]: top-level-mir-lowering-user-funcs — a MIR-lowering refusal in TOP-LEVEL code; the same refusal inside a user function body is already per-function via `compile_failures`
                 mir_compiler.compile_body()?;
                 tracing::debug!(
                     target: "shape_jit",

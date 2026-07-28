@@ -108,7 +108,9 @@ fn try_operator_is_attributed_to_its_enclosing_function_not_the_program() {
         "the `?` residual must be attributed to `uses_try`, which holds it"
     );
     assert!(
-        !bytecode.jit_residuals.function_is_residual_bearing(hot_double),
+        !bytecode
+            .jit_residuals
+            .function_is_residual_bearing(hot_double),
         "`hot_double` contains no residual construct and must carry no attribution"
     );
     assert!(

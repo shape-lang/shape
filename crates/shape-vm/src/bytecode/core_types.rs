@@ -879,12 +879,10 @@ impl BytecodeProgram {
         use crate::bytecode::JitResidual;
 
         let recorded = |kind: JitResidual| {
-            self.jit_residuals
-                .owners()
-                .any(|owner| match owner {
-                    None => self.jit_residuals.top_level().any(|r| r == kind),
-                    Some(idx) => self.jit_residuals.for_function(idx).any(|r| r == kind),
-                })
+            self.jit_residuals.owners().any(|owner| match owner {
+                None => self.jit_residuals.top_level().any(|r| r == kind),
+                Some(idx) => self.jit_residuals.for_function(idx).any(|r| r == kind),
+            })
         };
 
         recorded(JitResidual::TryUnwrap) == self.has_try_unwrap_residual

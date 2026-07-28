@@ -1568,11 +1568,15 @@ pub fn infer_function_signatures(program: &Program) -> HashMap<String, FunctionT
         };
 
         let (param_type_strings, return_type_string) = match ty {
-            Type::Function { params, returns, .. } => (
+            Type::Function {
+                params, returns, ..
+            } => (
                 params.iter().map(type_to_string).collect::<Vec<_>>(),
                 Some(type_to_string(returns)),
             ),
-            Type::Concrete(TypeAnnotation::Function { params, returns, .. }) => (
+            Type::Concrete(TypeAnnotation::Function {
+                params, returns, ..
+            }) => (
                 params
                     .iter()
                     .map(|p| {

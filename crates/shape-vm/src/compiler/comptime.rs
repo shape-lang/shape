@@ -2648,10 +2648,8 @@ pub(crate) fn execute_comptime_with_context(
         };
         site_time_impl_keys.insert(format!("{trait_name}::{type_name}"));
     }
-    let comptime_builtins = super::comptime_builtins::create_comptime_builtins_module(
-        site_time_impl_keys,
-        freeze,
-    );
+    let comptime_builtins =
+        super::comptime_builtins::create_comptime_builtins_module(site_time_impl_keys, freeze);
     compile_and_execute_comptime_program(
         &program,
         vec!["__comptime__".to_string()],
@@ -3345,10 +3343,8 @@ pub(crate) fn execute_comptime_with_annotation_handler(
     // the site-time key set for the Dec 52 ordering diagnostic is exactly
     // the live key snapshot (diagnostic-only; never evidence).
     let site_time_impl_keys = trait_impl_keys.clone();
-    let comptime_builtins = super::comptime_builtins::create_comptime_builtins_module(
-        site_time_impl_keys,
-        freeze,
-    );
+    let comptime_builtins =
+        super::comptime_builtins::create_comptime_builtins_module(site_time_impl_keys, freeze);
     compile_and_execute_comptime_program(
         &program,
         vec![
