@@ -892,6 +892,7 @@ pub(crate) fn reconstruct_type_annotation(
             Ok(TypeAnnotation::Function {
                 params,
                 returns: Box::new(returns),
+                effects: None,
             })
         }
         // Post-CKPT-1 this arm is the residual DEFENSIVE case only: an applied
@@ -1075,6 +1076,7 @@ fn build_function_item(
             annotations: Vec::new(),
             is_async: false,
             is_comptime: false,
+            effect_row: None,
         },
         Span::default(),
     ))

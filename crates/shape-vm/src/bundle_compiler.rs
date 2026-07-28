@@ -1739,7 +1739,9 @@ mod results_identical_differential {
                     let args: Vec<String> = args.iter().map(|a| self.render(a)).collect();
                     format!("{}<{}>", base, args.join(", "))
                 }
-                Type::Function { params, returns } => {
+                Type::Function {
+                    params, returns, ..
+                } => {
                     let params: Vec<String> = params.iter().map(|p| self.render(p)).collect();
                     let returns = self.render(returns);
                     format!("({}) => {}", params.join(", "), returns)

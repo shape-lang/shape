@@ -1,4 +1,5 @@
 use super::*;
+use crate::type_system::effects::EffectRow;
 
 #[test]
 fn test_fallible_scope_tracking() {
@@ -74,7 +75,9 @@ let s = foo("hi")
 
     let foo_type = types.get("foo").expect("foo should be inferred");
     match foo_type {
-        Type::Function { params, returns } => {
+        Type::Function {
+            params, returns, ..
+        } => {
             assert_eq!(params.len(), 1, "foo should have one parameter");
 
             let param_ann = params[0]
@@ -347,6 +350,7 @@ fn test_generic_zero_arg_callable_return_binds_named_annotation_proof() {
         Type::Function {
             params: vec![],
             returns: Box::new(Type::Variable(declared_t)),
+            effects: EffectRow::Unproven,
         },
     );
     let generic_params = TypeInferenceEngine::declared_parameter_tokens(&declaration)
@@ -355,10 +359,12 @@ fn test_generic_zero_arg_callable_return_binds_named_annotation_proof() {
     let instance = Type::Function {
         params: vec![],
         returns: Box::new(Type::Concrete(TypeAnnotation::Basic("number".into()))),
+        effects: EffectRow::Unproven,
     };
     let proven = Type::Function {
         params: vec![],
         returns: Box::new(Type::Concrete(TypeAnnotation::Reference("T".into()))),
+        effects: EffectRow::Unproven,
     };
 
     engine
@@ -380,10 +386,12 @@ fn test_generic_zero_arg_callable_return_rejects_conflicting_proof() {
     let instance = Type::Function {
         params: vec![],
         returns: Box::new(Type::Concrete(TypeAnnotation::Basic("number".into()))),
+        effects: EffectRow::Unproven,
     };
     let proven = Type::Function {
         params: vec![],
         returns: Box::new(Type::Variable(t)),
+        effects: EffectRow::Unproven,
     };
 
     let err = engine
@@ -714,7 +722,9 @@ fn wrap(err: AnyError) -> Result<int> {
 
     let wrap_type = types.get("wrap").expect("wrap should be inferred");
     match wrap_type {
-        Type::Function { params, returns } => {
+        Type::Function {
+            params, returns, ..
+        } => {
             assert_eq!(params.len(), 1);
             assert_eq!(
                 params[0],
@@ -982,7 +992,9 @@ let b = afunc(1)
 
     let afunc_type = types.get("afunc").expect("afunc should be inferred");
     match afunc_type {
-        Type::Function { params, returns } => {
+        Type::Function {
+            params, returns, ..
+        } => {
             assert_eq!(params.len(), 1);
             let param_ann = params[0].to_annotation().expect("param annotation");
             match param_ann {
@@ -1070,7 +1082,9 @@ let b = afunc(1)
 
     let afunc_type = types.get("afunc").expect("afunc should be inferred");
     match afunc_type {
-        Type::Function { params, returns } => {
+        Type::Function {
+            params, returns, ..
+        } => {
             assert_eq!(params.len(), 1);
             let param_ann = params[0].to_annotation().expect("param annotation");
             match param_ann {
@@ -1699,6 +1713,7 @@ fn test_type_name_for_various_types() {
     let func_type = Type::Concrete(shape_ast::ast::TypeAnnotation::Function {
         params: vec![],
         returns: Box::new(shape_ast::ast::TypeAnnotation::Basic("void".to_string())),
+        effects: None,
     });
     assert_eq!(engine.type_name_for_union(&func_type), "function");
 }
@@ -2079,7 +2094,10 @@ fn test_object_add_infers_intersection() {
 /// A helper that returns the `(param_name, return_name)` of a `Type::Function`
 /// whose param/return are both `Type::Concrete(Basic(_))`.
 fn fn_param_return_basic(ty: &Type) -> Option<(String, String)> {
-    let Type::Function { params, returns } = ty else {
+    let Type::Function {
+        params, returns, ..
+    } = ty
+    else {
         return None;
     };
     let p = match params.first()? {
@@ -2221,7 +2239,10 @@ fn test_loop_body_assignment_records_callsite() {
         assert!(errors.is_empty(), "inference should succeed: {:?}", errors);
 
         let dbl = types.get("dbl").expect("dbl should be inferred");
-        let Type::Function { params, returns } = dbl else {
+        let Type::Function {
+            params, returns, ..
+        } = dbl
+        else {
             panic!("dbl should be a function type, got {:?}", dbl);
         };
         assert!(
@@ -3419,10 +3440,14 @@ fn u40_is_hashmap_string_int(ty: &Type) -> bool {
 
 fn u40_is_function_int_int_to_int(ty: &Type) -> bool {
     match ty.canonicalize() {
-        Type::Function { params, returns } if params.len() == 2 => {
+        Type::Function {
+            params, returns, ..
+        } if params.len() == 2 => {
             u40_is_int(&params[0]) && u40_is_int(&params[1]) && u40_is_int(&returns)
         }
-        Type::Concrete(TypeAnnotation::Function { params, returns }) if params.len() == 2 => {
+        Type::Concrete(TypeAnnotation::Function {
+            params, returns, ..
+        }) if params.len() == 2 => {
             let p0 = Type::Concrete(params[0].type_annotation.clone());
             let p1 = Type::Concrete(params[1].type_annotation.clone());
             let ret = Type::Concrete(*returns);
@@ -3540,7 +3565,9 @@ let out = sum_pair([10, 20])
         "b should bind to int, got {:?}",
         facts.binding_type(b_span)
     );
-    let Type::Function { params, returns } = facts
+    let Type::Function {
+        params, returns, ..
+    } = facts
         .function_signature("sum_pair")
         .expect("sum_pair signature fact")
     else {
@@ -3590,7 +3617,9 @@ let out = distance({x: 3, y: 4})
         "y should bind to int, got {:?}",
         facts.binding_type(y_span)
     );
-    let Type::Function { params, returns } = facts
+    let Type::Function {
+        params, returns, ..
+    } = facts
         .function_signature("distance")
         .expect("distance signature fact")
     else {
@@ -3721,7 +3750,9 @@ fn inc(x: int) -> int {
         .function_signature("inc")
         .expect("facts should expose inc signature");
     match signature {
-        Type::Function { params, returns } => {
+        Type::Function {
+            params, returns, ..
+        } => {
             assert_eq!(params.len(), 1, "inc should have one parameter");
             assert!(u40_is_int(&params[0]), "inc param should be int");
             assert!(u40_is_int(returns), "inc return should be int");

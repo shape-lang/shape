@@ -24,6 +24,7 @@
 pub mod checker;
 pub mod checking;
 pub mod constraints;
+pub mod effects;
 pub mod environment;
 pub mod error_bridge;
 pub mod errors;
@@ -36,6 +37,11 @@ pub mod suggestions;
 pub mod types;
 pub mod unification;
 pub mod universal_error;
+
+pub use effects::{
+    ClosedEffectRow, EffectAtom, EffectCatalogVersion, EffectParamRef, EffectRow, EffectRowError,
+    EffectRowProofGap, EffectStage, EffectSubstitution, OperationalEffectId,
+};
 
 // Re-export from types module
 pub use types::{

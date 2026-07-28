@@ -70,9 +70,10 @@ pub use type_path::TypePath;
 
 // From types.rs
 pub use types::{
-    EnumDef, EnumMember, EnumMemberKind, EnumValue, ExtendStatement, FunctionParam, ImplBlock,
-    MethodDef, NativeLayoutBinding, ObjectTypeField, StructField, StructTypeDef, TraitDef,
-    TraitMember, TraitMemberSignature, TypeAliasDef, TypeAnnotation, TypeName, TypeParam,
+    EffectRowAnnotation, EnumDef, EnumMember, EnumMemberKind, EnumValue, ExtendStatement,
+    FunctionParam, ImplBlock, MethodDef, NativeLayoutBinding, ObjectTypeField, StructField,
+    StructTypeDef, TraitDef, TraitMember, TraitMemberSignature, TypeAliasDef, TypeAnnotation,
+    TypeName, TypeParam,
 };
 
 // From patterns.rs
@@ -98,6 +99,7 @@ pub use statements::{Block, ForInit, ForLoop, IfStatement, Statement, WhileLoop}
 pub use functions::{
     Annotation, AnnotationDef, AnnotationHandler, AnnotationHandlerParam, AnnotationHandlerType,
     AnnotationTargetKind, ForeignFunctionDef, FunctionDef, FunctionParameter, NativeAbiBinding,
+    UnenforcedEffectRowRejection,
 };
 
 // From modules.rs

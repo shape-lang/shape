@@ -151,6 +151,7 @@ fn substitute_function_def_forwards_the_stamp_into_the_specialization() {
         where_clause: None,
         is_async: false,
         is_comptime: false,
+        effect_row: None,
     };
     let mut subs = HashMap::new();
     subs.insert("T".to_string(), ConcreteType::I64);

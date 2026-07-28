@@ -39,7 +39,9 @@ pub fn annotation_to_string(ann: &TypeAnnotation) -> String {
                 .collect();
             format!("{{ {} }}", rendered.join(", "))
         }
-        TypeAnnotation::Function { params, returns } => {
+        TypeAnnotation::Function {
+            params, returns, ..
+        } => {
             let rendered_params: Vec<String> = params
                 .iter()
                 .map(|p| annotation_to_string(&p.type_annotation))
@@ -153,7 +155,9 @@ pub fn annotation_to_semantic(ann: &TypeAnnotation) -> SemanticType {
         }
         TypeAnnotation::Void => SemanticType::Void,
         TypeAnnotation::Never => SemanticType::Never,
-        TypeAnnotation::Function { params, returns } => {
+        TypeAnnotation::Function {
+            params, returns, ..
+        } => {
             let param_types: Vec<_> = params
                 .iter()
                 .map(|p| FunctionParam {
@@ -274,6 +278,10 @@ pub fn semantic_to_annotation(ty: &SemanticType) -> TypeAnnotation {
             TypeAnnotation::Function {
                 params,
                 returns: Box::new(semantic_to_annotation(&sig.return_type)),
+                // `SemanticType::Function` carries no row, so none is
+                // asserted here. Writing `Some(Atoms { names: [] })` would
+                // fabricate a purity claim out of a missing field.
+                effects: None,
             }
         }
         SemanticType::Struct { name, fields } => {

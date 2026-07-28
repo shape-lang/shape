@@ -69,10 +69,12 @@ pub fn annotations_equal(a: &TypeAnnotation, b: &TypeAnnotation) -> bool {
             TypeAnnotation::Function {
                 params: p1,
                 returns: r1,
+                ..
             },
             TypeAnnotation::Function {
                 params: p2,
                 returns: r2,
+                ..
             },
         ) => {
             if p1.len() != p2.len() {
@@ -167,6 +169,7 @@ mod tests {
                 type_annotation: TypeAnnotation::Basic("number".to_string()),
             }],
             returns: Box::new(TypeAnnotation::Basic("string".to_string())),
+            effects: None,
         };
         let func2 = TypeAnnotation::Function {
             params: vec![shape_ast::ast::FunctionParam {
@@ -175,6 +178,7 @@ mod tests {
                 type_annotation: TypeAnnotation::Basic("number".to_string()),
             }],
             returns: Box::new(TypeAnnotation::Basic("string".to_string())),
+            effects: None,
         };
 
         assert!(annotations_equal(&func1, &func2));

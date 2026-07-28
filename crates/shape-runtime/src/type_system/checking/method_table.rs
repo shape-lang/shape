@@ -39,6 +39,7 @@
 //! map alongside builtins. A universal receiver key (`__Any__`) is used
 //! for methods available on every value (e.g. `toString`, `toJSON`).
 
+use crate::type_system::effects::EffectRow;
 use crate::type_system::{BuiltinTypes, Type, TypeVar, tyvar_to_annotation};
 use shape_ast::ast::{ObjectTypeField, TypeAnnotation};
 use std::collections::HashMap;
@@ -1378,6 +1379,7 @@ impl MethodTable {
                     receiver_params,
                     method_vars,
                 )),
+                effects: EffectRow::Unproven,
             },
             TypeParamExpr::GenericContainer { name, args } => {
                 let resolved_args: Vec<Type> = args
@@ -1578,12 +1580,19 @@ impl MethodTable {
                     .map(|a| Self::freshen_oob_placeholder(a, var_gen))
                     .collect(),
             },
-            Type::Function { params, returns } => Type::Function {
+            Type::Function {
+                params,
+                returns,
+                effects,
+            } => Type::Function {
                 params: params
                     .into_iter()
                     .map(|p| Self::freshen_oob_placeholder(p, var_gen))
                     .collect(),
                 returns: Box::new(Self::freshen_oob_placeholder(*returns, var_gen)),
+                // Freshening rewrites type variables; it does not observe or
+                // change effects, so the row rides through unchanged.
+                effects,
             },
             Type::Constrained { .. } => ty,
         }

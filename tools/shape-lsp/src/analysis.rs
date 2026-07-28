@@ -568,3 +568,91 @@ print(outlier_ratio(readings, 1.5))
         );
     }
 }
+
+#[cfg(test)]
+mod effect_row_declaration_editor_parity {
+    //! ADR-014 §8.2 / R21 (#178) — the editor must refuse a
+    //! declaration-position effect clause exactly where `shape run` does.
+    //!
+    //! No dedicated `validate_*` function exists for this, and that is the
+    //! point. `docs/program/adr011-012/baselines/README.md` says a slice that
+    //! needs a site in a frozen set must either route the new surface through
+    //! the existing pipeline or carry explicit authority; R23 is retiring the
+    //! LSP's parallel validators precisely because each one is a second place
+    //! for the same semantics to live.
+    //!
+    //! A hand-written validator was built first and then DELETED after a probe
+    //! showed it was redundant: `[C0934]` is a compiler error, the editor
+    //! already compiles the document in `RecoverAll` mode, and
+    //! `error_to_diagnostic` already carries it. Routing through that path
+    //! means the editor's text IS the compiler's — not a copy that agrees
+    //! today — and `lsp-parallel-validators` does not grow.
+    //!
+    //! THESE TESTS ARE THE ONLY THING HOLDING THAT DECISION UP. Without them
+    //! the deletion rests on a one-off probe rather than a regression guard:
+    //! if the compile path ever stops surfacing `[C0934]`, the editor goes
+    //! silent on a program `shape run` rejects and nothing else would notice.
+    //!
+    //! TRANSITIONAL with the `[C0934]` producer: when #143 lands these flip to
+    //! assert that a body exceeding its declared row is reported in the editor
+    //! too.
+    use super::analyze_program_semantics;
+
+    fn diagnostics_for(source: &str) -> Vec<String> {
+        let program = shape_ast::parser::parse_program(source).expect("parse failed");
+        analyze_program_semantics(&program, source, None, None, None)
+            .into_iter()
+            .map(|d| d.message)
+            .collect()
+    }
+
+    #[test]
+    fn the_editor_reports_a_declaration_position_effect_row() {
+        let messages =
+            diagnostics_for("fn sneaky(path: string) -> string ! {} {\n    return path\n}\n");
+        assert!(
+            messages.iter().any(|m| m.contains("C0934")),
+            "the editor must not show a clean file for a program `shape run` rejects: {messages:?}"
+        );
+    }
+
+    #[test]
+    fn the_editor_reaches_module_nested_declarations() {
+        // The compiler's guard reaches `mod`-nested functions; if the editor
+        // did not, `mod` would be a silent hole back to the unenforced claim.
+        let messages = diagnostics_for(
+            "mod inner {\n    fn nested(p: string) -> string ! {} { return p }\n}\n",
+        );
+        assert!(
+            messages.iter().any(|m| m.contains("C0934")),
+            "expected C0934 inside `mod`: {messages:?}"
+        );
+    }
+
+    #[test]
+    fn the_editor_carries_the_compilers_fix_hint() {
+        // Single-sourcing: the remedy the author sees in the editor is the
+        // producer's, so it cannot drift from the CLI's.
+        let messages = diagnostics_for("fn f() -> int ! {} { return 1 }\n");
+        let c0934 = messages
+            .iter()
+            .find(|m| m.contains("C0934"))
+            .expect("expected a C0934 diagnostic");
+        assert!(
+            c0934.contains("delete the `! {}` clause"),
+            "the editor must carry the fix-it: {c0934}"
+        );
+    }
+
+    #[test]
+    fn the_editor_leaves_type_position_rows_alone() {
+        // The differential that survives #143's flip: TYPE-position rows are
+        // checked evidence and stay live, so they must not be flagged.
+        let messages =
+            diagnostics_for("fn hof(f: fn() -> int ! {FsRead}) -> int {\n    return f()\n}\n");
+        assert!(
+            !messages.iter().any(|m| m.contains("C0934")),
+            "a parameter-position row must not be flagged: {messages:?}"
+        );
+    }
+}

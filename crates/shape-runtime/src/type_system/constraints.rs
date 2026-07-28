@@ -31,6 +31,9 @@
 use super::checking::MethodTable;
 use super::unification::{Unifier, occurs_check};
 use super::*;
+use crate::type_system::effects::{
+    self, ClosedEffectRow, EffectParamRef, EffectRow, EffectSubstitution, RowSubsumption,
+};
 use shape_ast::ast::{ObjectTypeField, TypeAnnotation};
 use std::collections::{HashMap, HashSet};
 
@@ -116,6 +119,9 @@ pub struct ConstraintSolver {
     /// Lets the solver unify a nominal struct type (`Point`) with the
     /// structural object type that flows in (`{ x: number, y: number }`).
     struct_schemas: HashMap<String, Vec<ObjectTypeField>>,
+    /// ADR-014 §8.3: effect binders closed by this solve. A binder that never
+    /// gets an entry here is unbound, and `prove_closed` refuses it.
+    effect_substitution: EffectSubstitution,
 }
 
 impl Default for ConstraintSolver {
@@ -133,6 +139,109 @@ impl ConstraintSolver {
             method_table: None,
             trait_impls: HashSet::new(),
             struct_schemas: HashMap::new(),
+            effect_substitution: EffectSubstitution::new(),
+        }
+    }
+
+    /// The effect binders this solve closed (ADR-014 §8.3). Deterministically
+    /// ordered by binder name.
+    pub fn effect_substitution(&self) -> &EffectSubstitution {
+        &self.effect_substitution
+    }
+
+    /// Check an inferred callable type against a declared boundary type
+    /// (ADR-014 §8.2: boundaries declare, interiors infer).
+    ///
+    /// This is a direct entry point rather than a trip through [`Self::solve`]
+    /// because `solve` defers a failing constraint and retries it, and a
+    /// deferred failure surfaces as `UnsolvedConstraints` — which would lose
+    /// the inferred row that #180's materialization fix needs in the payload.
+    /// Boundary checking wants the structured error at the point of failure.
+    ///
+    /// Rows on nested function-typed parameters are checked contravariantly,
+    /// matching §8.1's nesting rule.
+    pub fn check_declared_boundary(&mut self, inferred: &Type, declared: &Type) -> TypeResult<()> {
+        match (inferred, declared) {
+            (
+                Type::Function {
+                    params: inferred_params,
+                    returns: inferred_returns,
+                    effects: inferred_row,
+                },
+                Type::Function {
+                    params: declared_params,
+                    returns: declared_returns,
+                    effects: declared_row,
+                },
+            ) => {
+                self.check_row_subsumption(inferred_row, declared_row, "declared boundary")?;
+                if inferred_params.len() == declared_params.len() {
+                    for (inferred_param, declared_param) in
+                        inferred_params.iter().zip(declared_params.iter())
+                    {
+                        // Contravariant: the DECLARED parameter must fit the
+                        // callback the interior actually invokes.
+                        self.check_declared_boundary(declared_param, inferred_param)?;
+                    }
+                }
+                self.check_declared_boundary(inferred_returns, declared_returns)
+            }
+            _ => Ok(()),
+        }
+    }
+
+    /// Decide ADR-014 §8.1 subsumption for one row pair, recording any binder
+    /// that closes as a result.
+    ///
+    /// `site` names the checking moment for the diagnostic; it is not a
+    /// behavioural switch.
+    fn check_row_subsumption(
+        &mut self,
+        actual: &EffectRow,
+        expected: &EffectRow,
+        site: &str,
+    ) -> TypeResult<()> {
+        if let Some((param, row)) = Self::row_subsumption_outcome(actual, expected, site)? {
+            self.effect_substitution.bind(param, row).map_err(|err| {
+                TypeError::IncomparableEffectRows {
+                    reason: err.to_string(),
+                }
+            })?;
+        }
+        Ok(())
+    }
+
+    /// The read-only half of the subsumption check. Returns the binder that
+    /// closes, if any, so the `&self` subtyping judgment and the `&mut self`
+    /// constraint solver share one decision procedure rather than two.
+    fn row_subsumption_outcome(
+        actual: &EffectRow,
+        expected: &EffectRow,
+        site: &str,
+    ) -> TypeResult<Option<(EffectParamRef, ClosedEffectRow)>> {
+        match effects::subsume(actual, expected) {
+            // `NoFact` is the underived case: this slice derived no row for at
+            // least one side, so there is nothing to prove or to violate. It is
+            // deliberately not a pass-by-default for a *known* row pair — those
+            // land in the arms below.
+            RowSubsumption::Holds | RowSubsumption::NoFact => Ok(None),
+            RowSubsumption::Binds { param, row } => Ok(Some((param, row))),
+            RowSubsumption::Exceeds {
+                actual,
+                expected,
+                excess,
+            } => Err(TypeError::EffectRowExceedsBoundary {
+                inferred: actual.render(),
+                declared: expected.render(),
+                excess: excess.into_iter().map(str::to_string).collect(),
+            }),
+            RowSubsumption::UnboundActual(param) => Err(TypeError::UnboundEffectParameter {
+                parameter: param.name().to_string(),
+                site: site.to_string(),
+            }),
+            RowSubsumption::Incomparable(err) => Err(TypeError::IncomparableEffectRows {
+                reason: err.to_string(),
+            }),
         }
     }
 
@@ -274,13 +383,18 @@ impl ConstraintSolver {
                 Type::Function {
                     params: p1,
                     returns: r1,
+                    effects: e1,
                 },
                 Type::Function {
                     params: p2,
                     returns: r2,
+                    effects: e2,
                 },
             ) => {
+                // ADR-014 §8.1: the row participates in type identity — two
+                // function types that differ only in row are different types.
                 p1.len() == p2.len()
+                    && effects::rows_structurally_equal(e1, e2)
                     && p1
                         .iter()
                         .zip(p2.iter())
@@ -441,15 +555,21 @@ impl ConstraintSolver {
                 Type::Function {
                     params: p1,
                     returns: r1,
+                    effects: e1,
                 },
                 Type::Function {
                     params: p2,
                     returns: r2,
+                    effects: e2,
                 },
             ) => {
                 if p1.len() != p2.len() {
                     return Err(TypeError::ArityMismatch(p1.len(), p2.len()));
                 }
+                // The row rides the same actual→expected direction as the
+                // parameters below: `t1` is the observed type, `t2` the
+                // declared shape it must fit (ADR-014 §8.1).
+                self.check_row_subsumption(e1, e2, "function-type constraint")?;
                 for (param1, param2) in p1.iter().zip(p2.iter()) {
                     // Parameter compatibility is checked from observed/actual to
                     // declared/expected shape so directional numeric widening
@@ -488,9 +608,9 @@ impl ConstraintSolver {
                 self.occurs_in(var, base) || args.iter().any(|arg| self.occurs_in(var, arg))
             }
             Type::Constrained { var: v, .. } => v == var,
-            Type::Function { params, returns } => {
-                params.iter().any(|p| self.occurs_in(var, p)) || self.occurs_in(var, returns)
-            }
+            Type::Function {
+                params, returns, ..
+            } => params.iter().any(|p| self.occurs_in(var, p)) || self.occurs_in(var, returns),
             // A `Concrete` annotation can still embed `tyvar` markers — an
             // object literal over an unresolved field var freezes to
             // `Object({f: <tyvar>})` (see `tyvar_to_annotation` in
@@ -745,10 +865,12 @@ impl ConstraintSolver {
                 TypeAnnotation::Function {
                     params: p1,
                     returns: r1,
+                    ..
                 },
                 TypeAnnotation::Function {
                     params: p2,
                     returns: r2,
+                    ..
                 },
             ) => {
                 if p1.len() != p2.len() {
@@ -1388,6 +1510,7 @@ impl ConstraintSolver {
                     Type::Concrete(TypeAnnotation::Function {
                         params: actual_params,
                         returns: actual_returns,
+                        ..
                     }) => {
                         // Check parameter count matches
                         if expected_params.len() != actual_params.len() {
@@ -1427,6 +1550,7 @@ impl ConstraintSolver {
                     Type::Function {
                         params: actual_params,
                         returns: actual_returns,
+                        ..
                     } => {
                         if expected_params.len() != actual_params.len() {
                             return Err(TypeError::ConstraintViolation(format!(
@@ -1662,10 +1786,12 @@ impl ConstraintSolver {
                 Type::Concrete(TypeAnnotation::Function {
                     params: p1,
                     returns: r1,
+                    ..
                 }),
                 Type::Concrete(TypeAnnotation::Function {
                     params: p2,
                     returns: r2,
+                    ..
                 }),
             ) => {
                 // Check parameter count
@@ -1703,12 +1829,23 @@ impl ConstraintSolver {
                 Type::Function {
                     params: p1,
                     returns: r1,
+                    effects: e1,
                 },
                 Type::Function {
                     params: p2,
                     returns: r2,
+                    effects: e2,
                 },
             ) => {
+                // ADR-014 §8.1: rows are covariant exactly where returns are.
+                // Nested parameter positions flip variance through the
+                // recursive `is_subtype` calls below, so this one covariant
+                // check at each level yields the §8.1 nesting rule.
+                // Subtyping is a query: a binder on the expected side is
+                // satisfied by any closed row by definition of instantiation,
+                // and the binding itself is recorded by the constraint solver,
+                // which is the path that actually instantiates.
+                Self::row_subsumption_outcome(e1, e2, "function subtyping")?;
                 if p1.len() != p2.len() {
                     return Err(TypeError::ConstraintViolation(format!(
                         "function parameter count mismatch: {} vs {}",
@@ -1907,6 +2044,7 @@ mod tests {
         let fn_inference = Type::Function {
             params: vec![int()],
             returns: Box::new(int()),
+            effects: EffectRow::Unproven,
         };
         let fn_concrete = Type::Concrete(TypeAnnotation::Function {
             params: vec![FunctionParam {
@@ -1915,6 +2053,7 @@ mod tests {
                 type_annotation: TypeAnnotation::Basic("int".to_string()),
             }],
             returns: Box::new(TypeAnnotation::Basic("int".to_string())),
+            effects: None,
         });
         // SB-2: the two Function encodings now FOLD to the single canonical
         // `Type::Function` carrier (exactly as the 4 Array encodings fold), so
@@ -1940,6 +2079,7 @@ mod tests {
                 type_annotation: TypeAnnotation::Basic("int".to_string()),
             }],
             returns: Box::new(TypeAnnotation::Basic("number".to_string())),
+            effects: None,
         });
         assert!(
             !solver.probe_equal(&fn_inference, &fn_concrete_ret_number),
@@ -1970,10 +2110,12 @@ mod tests {
         let f1 = Type::Function {
             params: vec![array_generic.clone()],
             returns: Box::new(int()),
+            effects: EffectRow::Unproven,
         };
         let f2 = Type::Function {
             params: vec![array_concrete.clone()],
             returns: Box::new(int()),
+            effects: EffectRow::Unproven,
         };
 
         let solver = ConstraintSolver::new();
@@ -2003,12 +2145,10 @@ mod tests {
                     type_annotation: TypeAnnotation::Basic("int".to_string()),
                 }],
                 returns: Box::new(TypeAnnotation::Basic(ret.to_string())),
+                effects: None,
             })
         };
-        let inference_fn = |ret: Type| Type::Function {
-            params: vec![int()],
-            returns: Box::new(ret),
-        };
+        let inference_fn = |ret: Type| Type::function(vec![int()], ret);
 
         // The Concrete(Function) encoding canonicalizes to Type::Function.
         assert_eq!(
@@ -2025,6 +2165,7 @@ mod tests {
 
         // Nested function (a (int)->int parameter) folds recursively.
         let concrete_hof = Type::Concrete(TypeAnnotation::Function {
+            effects: None,
             params: vec![FunctionParam {
                 name: None,
                 optional: false,
@@ -2035,6 +2176,7 @@ mod tests {
                         type_annotation: TypeAnnotation::Basic("int".to_string()),
                     }],
                     returns: Box::new(TypeAnnotation::Basic("int".to_string())),
+                    effects: None,
                 },
             }],
             returns: Box::new(TypeAnnotation::Basic("int".to_string())),
@@ -2043,6 +2185,7 @@ mod tests {
         let inference_hof = Type::Function {
             params: vec![inference_hof],
             returns: Box::new(int()),
+            effects: EffectRow::Unproven,
         };
         assert!(
             solver.probe_equal(&concrete_hof, &inference_hof),
@@ -2404,12 +2547,19 @@ mod tests {
         let ret = fresh_type(&mut tvgen);
         let func = BuiltinTypes::function(vec![param.clone()], ret.clone());
         match func {
-            Type::Function { params, returns } => {
+            Type::Function {
+                params,
+                returns,
+                effects,
+            } => {
                 assert_eq!(params.len(), 1);
                 assert_eq!(params[0], param);
                 assert_eq!(*returns, ret);
+                // `BuiltinTypes::function` derives no row: it must report a
+                // proof gap, never an implicit purity claim.
+                assert_eq!(effects, EffectRow::Unproven);
             }
-            _ => panic!("Expected Type::Function, got {:?}", func),
+            _ => panic!("Expected Type::Function, got {func:?}"),
         }
     }
 
@@ -2422,13 +2572,11 @@ mod tests {
         let t2 = fresh_var(&mut tvgen);
 
         let mut constraints = vec![(
-            Type::Function {
-                params: vec![Type::Variable(t1.clone())],
-                returns: Box::new(Type::Variable(t2.clone())),
-            },
+            Type::function(vec![Type::Variable(t1.clone())], Type::Variable(t2.clone())),
             Type::Function {
                 params: vec![BuiltinTypes::number()],
                 returns: Box::new(BuiltinTypes::string()),
+                effects: EffectRow::Unproven,
             },
         )];
 
@@ -2454,12 +2602,14 @@ mod tests {
                 type_annotation: TypeAnnotation::Basic("number".to_string()),
             }],
             returns: Box::new(TypeAnnotation::Basic("string".to_string())),
+            effects: None,
         });
 
         let mut constraints = vec![(
             Type::Function {
                 params: vec![Type::Variable(t1.clone())],
                 returns: Box::new(BuiltinTypes::string()),
+                effects: EffectRow::Unproven,
             },
             concrete_func,
         )];

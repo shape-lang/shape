@@ -4,6 +4,7 @@
 
 use super::{CheckMode, TypeInferenceEngine};
 use crate::type_system::checking::MethodTable;
+use crate::type_system::effects::EffectRow;
 use crate::type_system::exhaustiveness;
 use crate::type_system::*;
 use shape_ast::ast::{BinaryOp, Expr, JoinKind, Literal, Span, TypeAnnotation};
@@ -41,7 +42,9 @@ impl TypeInferenceEngine {
                     })
                     .collect(),
             ),
-            TypeAnnotation::Function { params, returns } => TypeAnnotation::Function {
+            TypeAnnotation::Function {
+                params, returns, ..
+            } => TypeAnnotation::Function {
                 params: params
                     .iter()
                     .cloned()
@@ -54,6 +57,7 @@ impl TypeInferenceEngine {
                     })
                     .collect(),
                 returns: Box::new(Self::substitute_trait_self_annotation(returns, self_ann)),
+                effects: None,
             },
             TypeAnnotation::Union(items) => TypeAnnotation::Union(
                 items
@@ -133,7 +137,9 @@ impl TypeInferenceEngine {
                     })
                     .collect(),
             },
-            TypeAnnotation::Function { params, returns } => Type::Function {
+            TypeAnnotation::Function {
+                params, returns, ..
+            } => Type::Function {
                 params: params
                     .iter()
                     .map(|param| {
@@ -149,6 +155,7 @@ impl TypeInferenceEngine {
                     self_ann,
                     generic_bindings,
                 )),
+                effects: EffectRow::Unproven,
             },
             _ => Type::Concrete(Self::substitute_trait_self_annotation(ann, self_ann)),
         }
@@ -916,7 +923,9 @@ impl TypeInferenceEngine {
                                     // Otherwise `obj.greet("World")` checks the arg against an
                                     // "unknown" param and rejects. Mirrors the Variable/
                                     // Constrained arms so call-site substitution resolves it.
-                                    Type::Function { params, returns } => {
+                                    Type::Function {
+                                        params, returns, ..
+                                    } => {
                                         let unifier = self.solver.unifier().clone();
                                         let conv = |t: &Type| -> TypeAnnotation {
                                             match &unifier.apply_substitutions(t) {
@@ -942,6 +951,7 @@ impl TypeInferenceEngine {
                                         TypeAnnotation::Function {
                                             params: param_anns,
                                             returns: Box::new(conv(returns)),
+                                            effects: None,
                                         }
                                     }
                                     // An array field whose element type is still
@@ -1285,12 +1295,13 @@ impl TypeInferenceEngine {
                 // Surface-1A LANG-W13-3-iife-closure-capture).
                 if method == "__call__" {
                     let func_shape = match &receiver_type {
-                        Type::Function { params, returns } => {
-                            Some((params.clone(), returns.as_ref().clone()))
-                        }
+                        Type::Function {
+                            params, returns, ..
+                        } => Some((params.clone(), returns.as_ref().clone())),
                         Type::Concrete(TypeAnnotation::Function {
                             params: concrete_params,
                             returns: concrete_returns,
+                            ..
                         }) => {
                             let params: Vec<Type> = concrete_params
                                 .iter()
@@ -1874,7 +1885,9 @@ impl TypeInferenceEngine {
                 if can_try_callable_field {
                     if let Ok(field_type) = self.infer_property_access(&receiver_type, method) {
                         match field_type {
-                            Type::Concrete(TypeAnnotation::Function { params, returns }) => {
+                            Type::Concrete(TypeAnnotation::Function {
+                                params, returns, ..
+                            }) => {
                                 let required_count = params.iter().filter(|p| !p.optional).count();
                                 if arg_types.len() < required_count
                                     || arg_types.len() > params.len()
@@ -1908,7 +1921,9 @@ impl TypeInferenceEngine {
                                 };
                                 return Ok(ret);
                             }
-                            Type::Function { params, returns } => {
+                            Type::Function {
+                                params, returns, ..
+                            } => {
                                 if params.len() != arg_types.len() {
                                     return Err(TypeError::ArityMismatch(
                                         params.len(),
@@ -3553,12 +3568,15 @@ impl TypeInferenceEngine {
                     }
                 }
             }
-            TypeAnnotation::Function { params, returns } => {
+            TypeAnnotation::Function {
+                params, returns, ..
+            } => {
                 let actual = actual.canonicalize();
                 match actual {
                     Type::Function {
                         params: actual_params,
                         returns: actual_returns,
+                        ..
                     } if actual_params.len() == params.len() => {
                         for (expected_param, actual_param) in
                             params.iter().zip(actual_params.iter())
@@ -3580,6 +3598,7 @@ impl TypeInferenceEngine {
                     Type::Concrete(TypeAnnotation::Function {
                         params: actual_params,
                         returns: actual_returns,
+                        ..
                     }) if actual_params.len() == params.len() => {
                         for (expected_param, actual_param) in
                             params.iter().zip(actual_params.iter())

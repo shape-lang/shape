@@ -1222,7 +1222,7 @@ impl BytecodeCompiler {
             TypeAnnotation::Object(fields) => fields
                 .iter()
                 .any(|field| Self::annotation_type_is_unknown(&field.type_annotation)),
-            TypeAnnotation::Function { params, returns } => {
+            TypeAnnotation::Function { params, returns, .. } => {
                 params
                     .iter()
                     .any(|param| Self::annotation_type_is_unknown(&param.type_annotation))
@@ -3854,6 +3854,7 @@ impl BytecodeCompiler {
             where_clause: target.where_clause.clone(),
             is_async: target.is_async,
             is_comptime: target.is_comptime,
+            effect_row: None,
         };
 
         // Reserve the shadow's hygienic identity, JOURNALED through the open
@@ -5054,6 +5055,7 @@ fn main() -> int { generated_flag() }
             let span = match tp {
                 shape_ast::ast::TypeParam::Type { span, .. } => *span,
                 shape_ast::ast::TypeParam::Const { span, .. } => *span,
+                shape_ast::ast::TypeParam::Effect { span, .. } => *span,
             };
             assert_eq!(
                 span,

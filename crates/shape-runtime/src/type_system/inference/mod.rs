@@ -61,6 +61,7 @@ use super::*;
 use shape_ast::ast::{ObjectTypeField, Program, Span, StructTypeDef, TypeAnnotation};
 use std::collections::HashMap;
 
+use crate::type_system::effects::EffectRow;
 use crate::type_system::semantic::{EnumVariant, SemanticType};
 use std::collections::HashSet;
 
@@ -568,7 +569,9 @@ impl TypeInferenceEngine {
             // A constrained variable is still a variable awaiting a binding.
             Type::Constrained { .. } => false,
             Type::Concrete(_) => true,
-            Type::Function { params, returns } => {
+            Type::Function {
+                params, returns, ..
+            } => {
                 params.iter().all(Self::type_is_fully_resolved)
                     && Self::type_is_fully_resolved(returns)
             }
@@ -1160,10 +1163,12 @@ impl TypeInferenceEngine {
                 Type::Function {
                     params: instance_params,
                     returns: instance_returns,
+                    ..
                 },
                 Type::Function {
                     params: proven_params,
                     returns: proven_returns,
+                    ..
                 },
             ) if instance_params.len() == proven_params.len() => {
                 for (instance_param, proven_param) in
@@ -1410,7 +1415,9 @@ impl TypeInferenceEngine {
                         .iter()
                         .any(|arg| Self::type_mentions_any_var(arg, vars))
             }
-            Type::Function { params, returns } => {
+            Type::Function {
+                params, returns, ..
+            } => {
                 params
                     .iter()
                     .any(|param| Self::type_mentions_any_var(param, vars))
@@ -1778,7 +1785,9 @@ impl TypeInferenceEngine {
                         .iter()
                         .any(|arg| self.type_contains_unresolved_vars(arg))
             }
-            Type::Function { params, returns } => {
+            Type::Function {
+                params, returns, ..
+            } => {
                 params
                     .iter()
                     .any(|param| self.type_contains_unresolved_vars(param))
@@ -1802,7 +1811,9 @@ impl TypeInferenceEngine {
                     self.collect_type_vars(arg, out);
                 }
             }
-            Type::Function { params, returns } => {
+            Type::Function {
+                params, returns, ..
+            } => {
                 for param in params {
                     self.collect_type_vars(param, out);
                 }
@@ -1838,7 +1849,9 @@ impl TypeInferenceEngine {
                 }
                 Ok(())
             }
-            Type::Function { params, returns } => {
+            Type::Function {
+                params, returns, ..
+            } => {
                 for param in params {
                     self.ensure_no_unresolved_generic_args(param)?;
                 }
@@ -2016,6 +2029,7 @@ impl TypeInferenceEngine {
         let Type::Function {
             params: head_params,
             returns: head_returns,
+            ..
         } = first
         else {
             return None;
@@ -2025,7 +2039,10 @@ impl TypeInferenceEngine {
         let head_return = head_returns.as_ref().clone();
 
         for ty in types.iter().skip(1) {
-            let Type::Function { params, returns } = ty else {
+            let Type::Function {
+                params, returns, ..
+            } = ty
+            else {
                 return None;
             };
             if params.len() != head_params.len() {
@@ -2041,6 +2058,7 @@ impl TypeInferenceEngine {
         Some(Type::Function {
             params: head_params,
             returns: Box::new(head_return),
+            effects: EffectRow::Unproven,
         })
     }
 
@@ -2481,7 +2499,10 @@ impl TypeInferenceEngine {
         // genuine `R` (int stays int, number stays number — no defaulting).
         let mut hof_return_constraints: Vec<(Type, Type)> = Vec::new();
         for (fn_name, &fn_param_idx) in &self.callable_return_from_fn_param {
-            let Some(Type::Function { params, returns }) = types.get(fn_name) else {
+            let Some(Type::Function {
+                params, returns, ..
+            }) = types.get(fn_name)
+            else {
                 continue;
             };
             let Type::Variable(_) = returns.as_ref() else {
@@ -2506,7 +2527,10 @@ impl TypeInferenceEngine {
             hof_return_constraints.push(((**returns).clone(), genuine));
         }
         for (fn_name, &fn_param_idx) in &self.callable_array_return_from_fn_param {
-            let Some(Type::Function { params, returns }) = types.get(fn_name) else {
+            let Some(Type::Function {
+                params, returns, ..
+            }) = types.get(fn_name)
+            else {
                 continue;
             };
             let Some(Type::Function {
@@ -3287,7 +3311,10 @@ impl TypeInferenceEngine {
             let mut changed = false;
 
             for (function_name, observed_by_param) in &callsites {
-                let Some(Type::Function { params, returns }) = types.get(function_name) else {
+                let Some(Type::Function {
+                    params, returns, ..
+                }) = types.get(function_name)
+                else {
                     continue;
                 };
                 // Clone out of `types` so the borrow ends before the
@@ -3398,6 +3425,7 @@ impl TypeInferenceEngine {
                 let new_type = Type::Function {
                     params: widened_params.clone(),
                     returns: Box::new(widened_return.clone()),
+                    effects: EffectRow::Unproven,
                 };
                 if types.get(function_name) != Some(&new_type) {
                     changed = true;
@@ -3535,7 +3563,10 @@ impl TypeInferenceEngine {
         let mut errors = Vec::new();
         let numeric_indices = self.callable_numeric_param_indices.clone();
         for (function_name, indices) in numeric_indices {
-            let Some(Type::Function { params, returns }) = types.get(&function_name) else {
+            let Some(Type::Function {
+                params, returns, ..
+            }) = types.get(&function_name)
+            else {
                 continue;
             };
             let mut new_params = params.clone();
@@ -3584,6 +3615,7 @@ impl TypeInferenceEngine {
                 Type::Function {
                     params: new_params,
                     returns: Box::new(new_return),
+                    effects: EffectRow::Unproven,
                 },
             );
         }
@@ -4071,7 +4103,11 @@ impl TypeInferenceEngine {
                     .map(Self::callsite_type_from_annotation_preserving_tyvars)
                     .collect(),
             },
-            TypeAnnotation::Function { params, returns } => Type::Function {
+            TypeAnnotation::Function {
+                params,
+                returns,
+                effects,
+            } => Type::Function {
                 params: params
                     .iter()
                     .map(|param| {
@@ -4083,6 +4119,14 @@ impl TypeInferenceEngine {
                 returns: Box::new(Self::callsite_type_from_annotation_preserving_tyvars(
                     returns,
                 )),
+                // ADR-014 §8.1: the declared row is a component of the type.
+                // An unresolvable atom name would be a purity-relevant lie, so
+                // a bad row degrades to the proof gap rather than to `{}`.
+                effects: crate::type_system::effects::resolve_optional_row_annotation(
+                    effects.as_deref(),
+                    crate::type_system::effects::EffectStage::Runtime,
+                )
+                .unwrap_or(EffectRow::Unproven),
             },
             TypeAnnotation::Object(fields) => Type::Concrete(TypeAnnotation::Object(
                 fields
@@ -4119,12 +4163,20 @@ impl TypeInferenceEngine {
                     var: var.clone(),
                     constraint: constraint.clone(),
                 }),
-            Type::Function { params, returns } => Type::Function {
+            Type::Function {
+                params,
+                returns,
+                effects,
+            } => Type::Function {
                 params: params
                     .iter()
                     .map(|param| Self::apply_substitutions_to_type(param, substitutions))
                     .collect(),
                 returns: Box::new(Self::apply_substitutions_to_type(returns, substitutions)),
+                // Type substitution does not bind effect parameters; those
+                // close through `EffectSubstitution` at instantiation
+                // (ADR-014 §8.3). The row is carried, never invented.
+                effects: effects.clone(),
             },
             // A concrete annotation can still embed `tyvar` markers — an
             // object literal `{min: lo}` over an unresolved parameter freezes
@@ -4189,7 +4241,11 @@ impl TypeInferenceEngine {
                     })
                     .collect(),
             ),
-            TypeAnnotation::Function { params, returns } => TypeAnnotation::Function {
+            TypeAnnotation::Function {
+                params,
+                returns,
+                effects,
+            } => TypeAnnotation::Function {
                 params: params
                     .iter()
                     .map(|p| shape_ast::ast::FunctionParam {
@@ -4205,6 +4261,9 @@ impl TypeInferenceEngine {
                     returns,
                     substitutions,
                 )),
+                // Type substitution does not touch effects; the declared row
+                // rides through and closes at instantiation (ADR-014 §8.3).
+                effects: effects.clone(),
             },
             TypeAnnotation::Union(members) => TypeAnnotation::Union(
                 members

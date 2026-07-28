@@ -3,6 +3,7 @@
 //! Defines error types for type inference and type checking,
 //! with detailed error messages for better developer experience.
 
+use super::effects::EffectRow;
 use super::{Type, TypeVar};
 use shape_ast::ast::TypeAnnotation;
 
@@ -45,6 +46,32 @@ pub enum TypeError {
     /// Type constraint violation
     #[error("Type constraint violation: {0}")]
     ConstraintViolation(String),
+
+    /// ADR-014 §8.1: a callable's effect row exceeds the row its boundary
+    /// declares. `excess` is the sorted list of atoms the boundary does not
+    /// permit — the payload #180's materialization fix consumes.
+    #[error(
+        "effect row {inferred} exceeds the declared row {declared}; \
+         the boundary does not permit {}",
+        .excess.join(", ")
+    )]
+    EffectRowExceedsBoundary {
+        inferred: String,
+        declared: String,
+        excess: Vec<String>,
+    },
+
+    /// ADR-010 §13: an effect parameter reached a checking, freezing, or
+    /// persistence point without substituting to a closed row.
+    #[error(
+        "effect parameter `{parameter}` is unbound at {site}; it must \
+         substitute to a closed row before checking, freezing, or persistence"
+    )]
+    UnboundEffectParameter { parameter: String, site: String },
+
+    /// Two rows could not be compared: different stage or catalog version.
+    #[error("effect rows are not comparable: {reason}")]
+    IncomparableEffectRows { reason: String },
 
     /// Const variable without explicit type
     #[error("Const variable '{0}' must have an explicit type annotation or initializer")]
@@ -182,13 +209,29 @@ fn format_type(ty: &Type) -> String {
     match ty {
         Type::Variable(_) => "unknown".to_string(),
         Type::Constrained { .. } => "constrained".to_string(),
-        Type::Function { params, returns } => {
+        Type::Function {
+            params,
+            returns,
+            effects,
+        } => {
             let rendered_params = params
                 .iter()
                 .map(format_type)
                 .collect::<Vec<_>>()
                 .join(", ");
-            format!("({}) -> {}", rendered_params, format_type(returns))
+            // An underived row renders as the bare arrow type: showing
+            // `! <underived>` in a user-facing message would advertise an
+            // internal proof gap as if it were a declared row.
+            let rendered_row = match effects {
+                EffectRow::Unproven => String::new(),
+                row => format!(" ! {}", row.render()),
+            };
+            format!(
+                "({}) -> {}{}",
+                rendered_params,
+                format_type(returns),
+                rendered_row
+            )
         }
         _ => ty
             .to_annotation()
@@ -233,7 +276,9 @@ fn format_annotation(ann: &TypeAnnotation) -> String {
                 .join(", ");
             format!("{{ {} }}", rendered)
         }
-        TypeAnnotation::Function { params, returns } => format!(
+        TypeAnnotation::Function {
+            params, returns, ..
+        } => format!(
             "({}) -> {}",
             params
                 .iter()

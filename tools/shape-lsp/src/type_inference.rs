@@ -1125,9 +1125,25 @@ pub fn type_to_string(ty: &Type) -> String {
         }
         Type::Variable(_) => "unknown".to_string(),
         Type::Constrained { .. } => "unknown".to_string(),
-        Type::Function { params, returns } => {
+        Type::Function {
+            params,
+            returns,
+            effects,
+        } => {
             let param_list: Vec<String> = params.iter().map(type_to_string).collect();
-            format!("({}) -> {}", param_list.join(", "), type_to_string(returns))
+            // A derived row is part of the type the user is hovering; an
+            // underived one renders as nothing, because showing an internal
+            // proof gap in hover text would read as a declared row.
+            let row = match effects {
+                shape_runtime::type_system::effects::EffectRow::Unproven => String::new(),
+                row => format!(" ! {}", row.render()),
+            };
+            format!(
+                "({}) -> {}{}",
+                param_list.join(", "),
+                type_to_string(returns),
+                row
+            )
         }
     }
 }
@@ -1552,11 +1568,11 @@ pub fn infer_function_signatures(program: &Program) -> HashMap<String, FunctionT
         };
 
         let (param_type_strings, return_type_string) = match ty {
-            Type::Function { params, returns } => (
+            Type::Function { params, returns, .. } => (
                 params.iter().map(type_to_string).collect::<Vec<_>>(),
                 Some(type_to_string(returns)),
             ),
-            Type::Concrete(TypeAnnotation::Function { params, returns }) => (
+            Type::Concrete(TypeAnnotation::Function { params, returns, .. }) => (
                 params
                     .iter()
                     .map(|p| {

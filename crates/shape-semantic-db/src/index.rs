@@ -238,6 +238,9 @@ fn normalize_contract(function: &FunctionDef) -> (CallableContract, Vec<Semantic
                 .map(|param| match param {
                     TypeParam::Type { name, .. } => name.clone(),
                     TypeParam::Const { name, .. } => format!("const {name}"),
+                    // ADR-014 §8.3: an effect binder is published as part of
+                    // the generic schema, exactly as a type binder is.
+                    TypeParam::Effect { name, .. } => format!("effect {name}"),
                 })
                 .collect()
         })

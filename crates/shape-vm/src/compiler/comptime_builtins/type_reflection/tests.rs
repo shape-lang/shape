@@ -271,6 +271,7 @@ fn callable(params: Vec<TypeAnnotation>, returns: TypeAnnotation) -> TypeAnnotat
             })
             .collect(),
         returns: Box::new(returns),
+        effects: None,
     }
 }
 
@@ -545,6 +546,7 @@ fn callable_structural_descriptor_records_names_and_identity_significant_modes()
             named("c", borrow(true, "int")),
         ],
         returns: Box::new(basic("bool")),
+        effects: None,
     };
     let canonical = canon(&overlay, &sig);
     let descriptor = canonical
@@ -577,6 +579,7 @@ fn callable_structural_descriptor_records_names_and_identity_significant_modes()
             named("z", borrow(true, "int")),
         ],
         returns: Box::new(basic("bool")),
+        effects: None,
     };
     assert_eq!(canon(&overlay, &renamed).identity, canonical.identity);
 }
@@ -1785,6 +1788,7 @@ mod payload_query {
         TypeAnnotation::Function {
             params,
             returns: Box::new(returns),
+            effects: None,
         }
     }
 

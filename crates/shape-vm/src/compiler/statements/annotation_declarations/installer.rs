@@ -181,6 +181,7 @@ fn lifecycle_function(
         is_async: false,
         is_comptime: false,
         where_clause: None,
+        effect_row: None,
     }
 }
 

@@ -3769,7 +3769,7 @@ impl<'a> Scan<'a> {
             TypeAnnotation::Object(fields) => fields
                 .iter()
                 .any(|field| self.annotation_mentions_type_param(&field.type_annotation)),
-            TypeAnnotation::Function { params, returns } => {
+            TypeAnnotation::Function { params, returns, .. } => {
                 params
                     .iter()
                     .any(|param| self.annotation_mentions_type_param(&param.type_annotation))

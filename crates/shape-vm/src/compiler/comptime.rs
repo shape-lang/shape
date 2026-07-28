@@ -767,6 +767,7 @@ fn comptime_builtin_forwarders() -> Vec<Item> {
                     where_clause: None,
                     is_async: false,
                     is_comptime: false,
+                    effect_row: None,
                 },
                 Span::DUMMY,
             )
@@ -2566,6 +2567,7 @@ pub(crate) fn execute_comptime_with_context(
         where_clause: None,
         is_async: false,
         is_comptime: false,
+        effect_row: None,
     };
 
     let mut items = comptime_builtin_forwarders();
@@ -3284,6 +3286,7 @@ pub(crate) fn execute_comptime_with_annotation_handler(
         where_clause: None,
         is_async: false,
         is_comptime: false,
+        effect_row: None,
     };
 
     let mut items = comptime_builtin_forwarders();

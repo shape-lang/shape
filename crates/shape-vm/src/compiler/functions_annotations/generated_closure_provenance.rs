@@ -30,7 +30,8 @@ pub(super) fn anchor_generated_function_decl(func_def: &mut FunctionDef, anchor:
         for type_param in type_params {
             match type_param {
                 shape_ast::ast::TypeParam::Type { span, .. }
-                | shape_ast::ast::TypeParam::Const { span, .. } => *span = anchor,
+                | shape_ast::ast::TypeParam::Const { span, .. }
+                | shape_ast::ast::TypeParam::Effect { span, .. } => *span = anchor,
             }
         }
     }

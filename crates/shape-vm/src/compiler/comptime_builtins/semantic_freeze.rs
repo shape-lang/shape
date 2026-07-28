@@ -223,6 +223,11 @@ pub(super) fn param_kind_of(param: &TypeParam) -> ParamKind {
     match param {
         TypeParam::Type { .. } => ParamKind::Type,
         TypeParam::Const { .. } => ParamKind::Const,
+        // ADR-014 §8.3: an effect binder is a declared generic parameter, so
+        // it must project to its own kind rather than being folded into
+        // `Type` — folding would let a frozen constructor claim a type
+        // argument where a closed row belongs.
+        TypeParam::Effect { .. } => ParamKind::Effect,
     }
 }
 

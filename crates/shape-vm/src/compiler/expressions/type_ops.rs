@@ -74,7 +74,9 @@ impl BytecodeCompiler {
             TypeAnnotation::Object(fields) => fields.iter().any(|field| {
                 Self::annotation_contains_type_param(&field.type_annotation, type_params)
             }),
-            TypeAnnotation::Function { params, returns } => {
+            TypeAnnotation::Function {
+                params, returns, ..
+            } => {
                 params
                     .iter()
                     .any(|p| Self::annotation_contains_type_param(&p.type_annotation, type_params))

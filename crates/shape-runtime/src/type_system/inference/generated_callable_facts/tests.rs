@@ -1,4 +1,5 @@
 use super::*;
+use crate::type_system::effects::EffectRow;
 use crate::type_system::{BuiltinTypes, TypeScheme, TypeVarGen};
 use shape_ast::ast::{FunctionDef, FunctionParameter, GeneratedNodeOrigin};
 
@@ -69,6 +70,7 @@ fn callable(param: Type) -> Type {
     Type::Function {
         params: vec![param],
         returns: Box::new(BuiltinTypes::string()),
+        effects: EffectRow::Unproven,
     }
 }
 
@@ -107,6 +109,7 @@ fn callable_declaration() -> FunctionDef {
         where_clause: None,
         is_async: false,
         is_comptime: false,
+        effect_row: None,
     }
 }
 

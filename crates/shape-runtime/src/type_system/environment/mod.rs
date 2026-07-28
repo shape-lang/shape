@@ -1733,7 +1733,9 @@ impl TypeEnvironment {
                 set.insert(var.clone());
                 set
             }
-            Type::Function { params, returns } => {
+            Type::Function {
+                params, returns, ..
+            } => {
                 let mut vars = HashSet::new();
                 for p in params {
                     vars.extend(self.free_type_vars(p));

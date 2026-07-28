@@ -50,6 +50,7 @@ pub(super) fn canonical_original_callable(
     let projection = freeze.canonicalize_type_projection(&TypeAnnotation::Function {
         params,
         returns: Box::new(return_type),
+        effects: None,
     })?;
     if projection.category() != FrozenTypeCategory::Callable {
         return Err("ctx.original signature did not canonicalize as a Callable".to_string());
@@ -97,6 +98,7 @@ impl PendingOriginalBodyShadow {
             where_clause: semantic_owner.where_clause.clone(),
             is_async: semantic_owner.is_async,
             is_comptime: semantic_owner.is_comptime,
+            effect_row: None,
         };
         Ok(Self {
             semantic_owner: semantic_owner.clone(),

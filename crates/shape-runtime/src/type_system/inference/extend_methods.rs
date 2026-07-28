@@ -233,7 +233,9 @@ impl TypeInferenceEngine {
                 }
                 TypeParamExpr::Concrete(Type::Concrete(ann.clone()))
             }
-            TypeAnnotation::Function { params, returns } => {
+            TypeAnnotation::Function {
+                params, returns, ..
+            } => {
                 let param_exprs: Vec<TypeParamExpr> = params
                     .iter()
                     .map(|p| {
@@ -330,6 +332,7 @@ impl TypeInferenceEngine {
             is_async: method.is_async,
             is_comptime: false,
             where_clause: None,
+            effect_row: None,
         }
     }
 

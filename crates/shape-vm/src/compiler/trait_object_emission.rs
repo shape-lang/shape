@@ -257,9 +257,9 @@ pub(super) fn has_nested_self(ann: &TypeAnnotation) -> bool {
             TypeAnnotation::Reference(path) => inside_generic && (path.as_str() == "Self"),
             TypeAnnotation::Generic { args, .. } => args.iter().any(|a| walk(a, true)),
             TypeAnnotation::Tuple(items) => items.iter().any(|a| walk(a, true)),
-            TypeAnnotation::Function { params, returns } => {
-                params.iter().any(|p| walk(&p.type_annotation, true)) || walk(returns, true)
-            }
+            TypeAnnotation::Function {
+                params, returns, ..
+            } => params.iter().any(|p| walk(&p.type_annotation, true)) || walk(returns, true),
             TypeAnnotation::Array(inner) => walk(inner, true),
             _ => false,
         }

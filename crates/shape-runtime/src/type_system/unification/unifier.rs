@@ -91,9 +91,16 @@ impl Unifier {
                 }
             }
 
-            Type::Function { params, returns } => Type::Function {
+            Type::Function {
+                params,
+                returns,
+                effects,
+            } => Type::Function {
                 params: params.iter().map(|p| self.apply_substitutions(p)).collect(),
                 returns: Box::new(self.apply_substitutions(returns)),
+                // Type-variable substitution carries the row unchanged; effect
+                // binders close through `EffectSubstitution`, not here.
+                effects: effects.clone(),
             },
 
             // A concrete annotation can still embed `tyvar` markers — an
@@ -154,7 +161,11 @@ impl Unifier {
                     .collect(),
             ),
 
-            TypeAnnotation::Function { params, returns } => TypeAnnotation::Function {
+            TypeAnnotation::Function {
+                params,
+                returns,
+                effects,
+            } => TypeAnnotation::Function {
                 params: params
                     .iter()
                     .map(|param| shape_ast::ast::FunctionParam {
@@ -164,6 +175,7 @@ impl Unifier {
                     })
                     .collect(),
                 returns: Box::new(self.apply_to_annotation(returns)),
+                effects: effects.clone(),
             },
 
             TypeAnnotation::Union(types) => TypeAnnotation::Union(
@@ -235,9 +247,9 @@ pub fn occurs_check(var: &TypeVar, ty: &Type) -> bool {
         Type::Generic { base, args } => {
             occurs_check(var, base) || args.iter().any(|a| occurs_check(var, a))
         }
-        Type::Function { params, returns } => {
-            params.iter().any(|p| occurs_check(var, p)) || occurs_check(var, returns)
-        }
+        Type::Function {
+            params, returns, ..
+        } => params.iter().any(|p| occurs_check(var, p)) || occurs_check(var, returns),
         Type::Concrete(ann) => annotation_occurs(var, ann),
     }
 }
@@ -255,7 +267,9 @@ fn annotation_occurs(var: &TypeVar, ann: &TypeAnnotation) -> bool {
         TypeAnnotation::Object(fields) => fields
             .iter()
             .any(|f| annotation_occurs(var, &f.type_annotation)),
-        TypeAnnotation::Function { params, returns } => {
+        TypeAnnotation::Function {
+            params, returns, ..
+        } => {
             params
                 .iter()
                 .any(|p| annotation_occurs(var, &p.type_annotation))

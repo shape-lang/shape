@@ -1533,6 +1533,7 @@ mod tests {
         let ann = TypeAnnotation::Function {
             params: Vec::new(),
             returns: Box::new(int_ann()),
+            effects: None,
         };
         let err = annotation_within_lift_domain(&ann).expect_err("function types reject");
         assert!(

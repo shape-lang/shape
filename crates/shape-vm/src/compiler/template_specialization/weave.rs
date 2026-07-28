@@ -194,6 +194,7 @@ impl BytecodeCompiler {
             where_clause: func_def.where_clause.clone(),
             is_async: func_def.is_async,
             is_comptime: func_def.is_comptime,
+            effect_row: None,
         };
 
         // Journaled reservation (the CheckedReplaceBody precedent): origin +

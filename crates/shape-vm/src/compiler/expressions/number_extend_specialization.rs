@@ -54,7 +54,9 @@ pub(super) fn substitute_type_params_in_annotation(
                 })
                 .collect(),
         ),
-        TypeAnnotation::Function { params, returns } => TypeAnnotation::Function {
+        TypeAnnotation::Function {
+            params, returns, ..
+        } => TypeAnnotation::Function {
             params: params
                 .iter()
                 .cloned()
@@ -65,6 +67,7 @@ pub(super) fn substitute_type_params_in_annotation(
                 })
                 .collect(),
             returns: Box::new(substitute_type_params_in_annotation(returns, substitutions)),
+            effects: None,
         },
         TypeAnnotation::Union(items) => TypeAnnotation::Union(
             items

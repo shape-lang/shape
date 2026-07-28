@@ -1,4 +1,5 @@
 use super::*;
+use crate::type_system::effects::EffectRow;
 
 fn callable_declaration() -> FunctionDef {
     FunctionDef {
@@ -14,6 +15,7 @@ fn callable_declaration() -> FunctionDef {
         where_clause: None,
         is_async: false,
         is_comptime: false,
+        effect_row: None,
     }
 }
 
@@ -23,6 +25,7 @@ fn callable_scheme(quantified: Vec<TypeVar>, result: TypeVar) -> TypeScheme {
         Type::Function {
             params: Vec::new(),
             returns: Box::new(Type::Variable(result)),
+            effects: EffectRow::Unproven,
         },
     )
 }

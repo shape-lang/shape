@@ -72,7 +72,9 @@ pub(crate) fn annotation_erases_witness_to_any(annotation: &TypeAnnotation) -> b
         TypeAnnotation::Object(fields) => fields
             .iter()
             .any(|field| annotation_erases_witness_to_any(&field.type_annotation)),
-        TypeAnnotation::Function { params, returns } => {
+        TypeAnnotation::Function {
+            params, returns, ..
+        } => {
             params
                 .iter()
                 .any(|param| annotation_erases_witness_to_any(&param.type_annotation))

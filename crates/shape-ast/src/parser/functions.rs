@@ -145,6 +145,7 @@ pub fn parse_function_def(pair: Pair<Rule>) -> Result<FunctionDef> {
     let mut type_params = None;
     let mut params = vec![];
     let mut return_type = None;
+    let mut effect_row = None;
     let mut where_clause = None;
     let mut body = vec![];
     let mut annotations = vec![];
@@ -180,10 +181,26 @@ pub fn parse_function_def(pair: Pair<Rule>) -> Result<FunctionDef> {
                 }
             }
             Rule::return_type => {
-                // Skip the "->" and get the type annotation
-                if let Some(type_pair) = inner_pair.into_inner().next() {
-                    return_type = Some(parse_type_annotation(type_pair)?);
+                // `return_type` is `"->" ~ type_annotation ~ effect_clause?`,
+                // so a declared row spelled after the return type arrives
+                // nested here rather than as a sibling.
+                for part in inner_pair.into_inner() {
+                    match part.as_rule() {
+                        Rule::effect_clause => {
+                            effect_row = Some(types::parse_effect_clause(part)?);
+                        }
+                        _ => {
+                            if return_type.is_none() {
+                                return_type = Some(parse_type_annotation(part)?);
+                            }
+                        }
+                    }
                 }
+            }
+            // A declaration with no return type may still declare a row:
+            // `fn touch(p: string) ! {FsWrite} { .. }`.
+            Rule::effect_clause => {
+                effect_row = Some(types::parse_effect_clause(inner_pair)?);
             }
             Rule::where_clause => {
                 where_clause = Some(parse_where_clause(inner_pair)?);
@@ -204,6 +221,7 @@ pub fn parse_function_def(pair: Pair<Rule>) -> Result<FunctionDef> {
         type_params,
         params,
         return_type,
+        effect_row,
         where_clause,
         body,
         annotations,

@@ -1096,9 +1096,7 @@ fn test_const_type_param_on_function_parses() {
                     assert_eq!(*ty, crate::ast::TypeAnnotation::Basic("int".to_string()));
                     assert!(default.is_none(), "no `= ...` default given in this test",);
                 }
-                crate::ast::TypeParam::Type { .. } => {
-                    panic!("expected Const variant for `const N: int`, got Type")
-                }
+                other => panic!("expected Const variant for `const N: int`, got {other:?}"),
             }
             // Accessor methods should also reflect the right name / bounds.
             assert_eq!(tp.name(), "N");
@@ -1142,9 +1140,7 @@ fn test_const_type_param_with_default_parses() {
                         other => panic!("expected literal integer default, got {:?}", other),
                     }
                 }
-                crate::ast::TypeParam::Type { .. } => {
-                    panic!("expected Const variant for `const N: int = 4`")
-                }
+                other => panic!("expected Const variant for `const N: int = 4`, got {other:?}"),
             }
         }
         other => panic!("Expected Function, got {:?}", other),

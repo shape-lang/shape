@@ -1124,6 +1124,7 @@ impl BytecodeCompiler {
         let Type::Function {
             params: callable_params,
             returns,
+            ..
         } = params.get(param_idx)?.canonicalize()
         else {
             return None;
@@ -1589,7 +1590,7 @@ impl BytecodeCompiler {
             .type_tracker
             .get_object_field_contract(receiver_schema_id, field_name)?
             .clone();
-        let shape_ast::ast::TypeAnnotation::Function { params, returns } = field_ann else {
+        let shape_ast::ast::TypeAnnotation::Function { params, returns, .. } = field_ann else {
             return None;
         };
         if !params.is_empty() {
@@ -8593,6 +8594,7 @@ impl BytecodeCompiler {
                 where_clause: None,
                 is_async: false,
                 is_comptime: false,
+                effect_row: None,
             };
             let (captured, mutated) =
                 EnvironmentAnalyzer::analyze_function_with_mutability(&proto_def, &outer_vars);
@@ -8644,6 +8646,7 @@ impl BytecodeCompiler {
                 where_clause: None,
                 is_async: false,
                 is_comptime: false,
+                effect_row: None,
             };
             let (_captured, mutated) =
                 EnvironmentAnalyzer::analyze_function_with_mutability(&proto_def, &outer_vars);
@@ -8678,6 +8681,7 @@ impl BytecodeCompiler {
             where_clause: None,
             is_async: false,
             is_comptime: false,
+            effect_row: None,
         };
         let outer_vars = self.collect_outer_scope_vars();
         let (mut captured_vars, _mutated) =

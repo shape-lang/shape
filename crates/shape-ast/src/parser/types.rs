@@ -258,6 +258,8 @@ pub fn parse_function_type(pair: Pair<Rule>) -> Result<TypeAnnotation> {
     let mut params = Vec::new();
     let mut return_type = None;
 
+    let mut effects = None;
+
     for inner in pair.into_inner() {
         match inner.as_rule() {
             Rule::type_param_list => {
@@ -265,6 +267,9 @@ pub fn parse_function_type(pair: Pair<Rule>) -> Result<TypeAnnotation> {
             }
             Rule::type_annotation => {
                 return_type = Some(parse_type_annotation(inner)?);
+            }
+            Rule::effect_clause => {
+                effects = Some(Box::new(parse_effect_clause(inner)?));
             }
             _ => {}
         }
@@ -278,7 +283,50 @@ pub fn parse_function_type(pair: Pair<Rule>) -> Result<TypeAnnotation> {
     Ok(TypeAnnotation::Function {
         params,
         returns: Box::new(returns),
+        effects,
     })
+}
+
+/// Parse an effect-row clause: `! {FsRead}`, `! {}`, `! F` (ADR-014 §8.3).
+///
+/// Atom names are carried verbatim. The catalog lives in the type system, so
+/// this layer neither validates nor orders them; a row is canonicalized when
+/// it is resolved.
+pub fn parse_effect_clause(pair: Pair<Rule>) -> Result<crate::ast::EffectRowAnnotation> {
+    let pair_loc = pair_location(&pair);
+    let span = pair_span(&pair);
+    let row = pair
+        .into_inner()
+        .find(|p| p.as_rule() == Rule::effect_row_annotation)
+        .ok_or_else(|| ShapeError::ParseError {
+            message: "effect clause missing its row".to_string(),
+            location: Some(pair_loc.clone()),
+        })?;
+    let inner = row
+        .into_inner()
+        .next()
+        .ok_or_else(|| ShapeError::ParseError {
+            message: "effect row is empty".to_string(),
+            location: Some(pair_loc.clone()),
+        })?;
+    match inner.as_rule() {
+        Rule::effect_atom_set => {
+            let names = inner
+                .into_inner()
+                .filter(|p| p.as_rule() == Rule::effect_atom_name)
+                .map(|p| p.as_str().to_string())
+                .collect();
+            Ok(crate::ast::EffectRowAnnotation::Atoms { names, span })
+        }
+        Rule::effect_param_use => Ok(crate::ast::EffectRowAnnotation::Param {
+            name: inner.as_str().to_string(),
+            span,
+        }),
+        other => Err(ShapeError::ParseError {
+            message: format!("invalid effect row: {other:?}"),
+            location: Some(pair_loc),
+        }),
+    }
 }
 
 /// Parse list of type parameters
@@ -396,6 +444,25 @@ pub fn parse_type_params(pair: Pair<Rule>) -> Result<Vec<crate::ast::TypeParam>>
             // / monomorphization still largely treat the variant as a
             // stub — B.3 binds const args at call sites, B.4 substitutes
             // them into specialized bodies.
+            // Effect binder: `effect F` (ADR-014 §8.3).
+            if first.as_rule() == Rule::effect_type_param {
+                let name = first
+                    .into_inner()
+                    .find(|p| p.as_rule() == Rule::ident)
+                    .ok_or_else(|| ShapeError::ParseError {
+                        message: "expected effect parameter name".to_string(),
+                        location: Some(pair_loc.clone()),
+                    })?
+                    .as_str()
+                    .to_string();
+                params.push(crate::ast::TypeParam::Effect {
+                    name,
+                    span: param_span,
+                    doc_comment,
+                });
+                continue;
+            }
+
             if first.as_rule() == Rule::const_type_param {
                 let mut const_inner = first.into_inner();
                 let name_pair = const_inner.next().ok_or_else(|| ShapeError::ParseError {

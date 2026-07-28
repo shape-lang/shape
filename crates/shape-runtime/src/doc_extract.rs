@@ -103,6 +103,7 @@ fn collect_items(
                         annotations: function.annotations.clone(),
                         is_async: function.is_async,
                         is_comptime: false,
+                        effect_row: None,
                     },
                     *span,
                 ));
@@ -774,7 +775,9 @@ fn format_type_annotation(ta: &TypeAnnotation) -> String {
                 format_type_annotation(inner)
             )
         }
-        TypeAnnotation::Function { params, returns } => {
+        TypeAnnotation::Function {
+            params, returns, ..
+        } => {
             let params = params
                 .iter()
                 .map(|param| match &param.name {

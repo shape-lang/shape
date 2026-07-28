@@ -455,7 +455,11 @@ impl TypeInferenceEngine {
                     })
                     .collect(),
             ),
-            TypeAnnotation::Function { params, returns } => TypeAnnotation::Function {
+            TypeAnnotation::Function {
+                params,
+                returns,
+                effects,
+            } => TypeAnnotation::Function {
                 params: params
                     .iter()
                     .map(|param| shape_ast::ast::FunctionParam {
@@ -470,6 +474,7 @@ impl TypeInferenceEngine {
                 returns: Box::new(Self::substitute_type_params_in_annotation(
                     returns, bindings,
                 )),
+                effects: effects.clone(),
             },
             TypeAnnotation::Union(types) => TypeAnnotation::Union(
                 types
@@ -1625,10 +1630,13 @@ impl TypeInferenceEngine {
             )));
         }
         let (params, returns) = match &func_type {
-            Type::Function { params, returns } => (params.clone(), returns.as_ref().clone()),
+            Type::Function {
+                params, returns, ..
+            } => (params.clone(), returns.as_ref().clone()),
             Type::Concrete(TypeAnnotation::Function {
                 params: concrete_params,
                 returns: concrete_returns,
+                ..
             }) => {
                 // Decode tyvar markers back into real Variables so call-arg
                 // substitution can resolve them — e.g. a closure-valued object field
@@ -1978,7 +1986,9 @@ impl TypeInferenceEngine {
             Type::Generic { base, args } => {
                 Self::type_contains_variable(base) || args.iter().any(Self::type_contains_variable)
             }
-            Type::Function { params, returns } => {
+            Type::Function {
+                params, returns, ..
+            } => {
                 params.iter().any(Self::type_contains_variable)
                     || Self::type_contains_variable(returns)
             }
@@ -2069,10 +2079,12 @@ impl TypeInferenceEngine {
             Type::Function {
                 params: expected_params,
                 returns: expected_returns,
+                ..
             } => {
                 if let Type::Function {
                     params: actual_params,
                     returns: actual_returns,
+                    ..
                 } = actual
                 {
                     for (exp_param, act_param) in expected_params.iter().zip(actual_params.iter()) {

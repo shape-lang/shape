@@ -208,6 +208,7 @@ mod tests {
             where_clause: None,
             is_async: false,
             is_comptime: false,
+            effect_row: None,
         };
 
         ctx.register_function(func);
@@ -239,6 +240,7 @@ mod tests {
             where_clause: None,
             is_async: false,
             is_comptime: false,
+            effect_row: None,
         };
 
         // Should not crash - undefined annotations are silently ignored
@@ -297,6 +299,7 @@ mod tests {
             where_clause: None,
             is_async: false,
             is_comptime: false,
+            effect_row: None,
         };
 
         // Register function - this should trigger on_define handler

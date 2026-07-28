@@ -348,7 +348,9 @@ fn format_type_annotation(ta: &TypeAnnotation) -> String {
             .map(format_type_annotation)
             .collect::<Vec<_>>()
             .join(" + "),
-        TypeAnnotation::Function { params, returns } => {
+        TypeAnnotation::Function {
+            params, returns, ..
+        } => {
             let params = params
                 .iter()
                 .map(|p| format_type_annotation(&p.type_annotation))

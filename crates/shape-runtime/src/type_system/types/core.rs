@@ -9,6 +9,7 @@ pub use super::type_var::{
     DeclaredTypeVarOwner, DeclaredTypeVarProvenance, TYVAR_ANNOTATION_PREFIX, TypeVar, TypeVarGen,
     annotation_as_tyvar, annotation_contains_reserved_type_var_carrier, tyvar_to_annotation,
 };
+use crate::type_system::effects::EffectRow;
 use crate::type_system::semantic::SemanticType;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -23,10 +24,48 @@ pub enum Type {
         var: TypeVar,
         constraint: Box<TypeConstraint>,
     },
+    /// ADR-014 §8.1: the effect row is a component of the function type. Two
+    /// function types that differ only in row are different types, and the row
+    /// participates in structural equality, unification, and subtyping.
+    ///
+    /// Construct through [`Type::function`] (row not derived) or
+    /// [`Type::function_with_effects`] (row known) rather than by literal, so
+    /// that every site that *does* know a row is greppable.
     Function {
         params: Vec<Type>,
         returns: Box<Type>,
+        effects: EffectRow,
     },
+}
+
+impl Type {
+    /// A function type whose row this call site does not derive. The row is
+    /// [`EffectRow::Unproven`] — a proof gap, explicitly not a purity claim.
+    pub fn function(params: Vec<Type>, returns: Type) -> Type {
+        Type::Function {
+            params,
+            returns: Box::new(returns),
+            effects: EffectRow::Unproven,
+        }
+    }
+
+    /// A function type with a known row: a declared `!` clause, an inferred
+    /// body row, or an `effect F` binder.
+    pub fn function_with_effects(params: Vec<Type>, returns: Type, effects: EffectRow) -> Type {
+        Type::Function {
+            params,
+            returns: Box::new(returns),
+            effects,
+        }
+    }
+
+    /// The row component, for any function type; `None` for non-functions.
+    pub fn effect_row(&self) -> Option<&EffectRow> {
+        match self {
+            Type::Function { effects, .. } => Some(effects),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -249,9 +288,12 @@ pub fn substitute(ty: &Type, subst: &HashMap<TypeVar, Type>) -> Type {
                 }
             }
         }
-        Type::Function { params, returns } => Type::Function {
+        Type::Function {
+            params, returns, ..
+        } => Type::Function {
             params: params.iter().map(|p| substitute(p, subst)).collect(),
             returns: Box::new(substitute(returns, subst)),
+            effects: EffectRow::Unproven,
         },
         Type::Concrete(_) => ty.clone(),
     }
@@ -275,9 +317,18 @@ impl Type {
                 base: Box::new(Self::canonicalize_collection_base(base)),
                 args: args.iter().map(|a| a.canonicalize()).collect(),
             },
-            Type::Function { params, returns } => Type::Function {
+            Type::Function {
+                params,
+                returns,
+                effects,
+            } => Type::Function {
                 params: params.iter().map(|p| p.canonicalize()).collect(),
                 returns: Box::new(returns.canonicalize()),
+                // The row is part of type identity (ADR-014 §8.1), so
+                // canonicalization must carry it. Dropping it here would make
+                // two function types that differ only in row compare equal
+                // through `probe_equal`.
+                effects: effects.clone(),
             },
         }
     }
@@ -304,12 +355,24 @@ impl Type {
                 ))),
                 args: args.iter().map(Self::canonicalize_annotation).collect(),
             },
-            TypeAnnotation::Function { params, returns } => Type::Function {
+            TypeAnnotation::Function {
+                params,
+                returns,
+                effects,
+            } => Type::Function {
                 params: params
                     .iter()
                     .map(|p| Self::canonicalize_annotation(&p.type_annotation))
                     .collect(),
                 returns: Box::new(Self::canonicalize_annotation(returns)),
+                // ADR-014 §8.1: the declared row is a component of the type.
+                // An unresolvable atom name would be a purity-relevant lie, so
+                // a bad row degrades to the proof gap rather than to `{}`.
+                effects: crate::type_system::effects::resolve_optional_row_annotation(
+                    effects.as_deref(),
+                    crate::type_system::effects::EffectStage::Runtime,
+                )
+                .unwrap_or(EffectRow::Unproven),
             },
             other => Type::Concrete(other.clone()),
         }
@@ -339,7 +402,11 @@ impl Type {
                 }
             }
             Type::Constrained { .. } => None, // Cannot convert constrained type
-            Type::Function { params, returns } => {
+            Type::Function {
+                params,
+                returns,
+                effects,
+            } => {
                 let param_anns: Vec<_> = params
                     .iter()
                     .map(|p| shape_ast::ast::FunctionParam {
@@ -356,6 +423,10 @@ impl Type {
                 Some(TypeAnnotation::Function {
                     params: param_anns,
                     returns: Box::new(ret_ann),
+                    // `to_annotation` renders a row only when one was proved;
+                    // a binder or a proof gap has no surface spelling that
+                    // would be honest here.
+                    effects: effects.to_annotation().map(Box::new),
                 })
             }
         }
@@ -392,7 +463,9 @@ impl Type {
                 }
             }
             Type::Constrained { var, .. } => Some(SemanticType::TypeVar(var.legacy_semantic_id()?)),
-            Type::Function { params, returns } => {
+            Type::Function {
+                params, returns, ..
+            } => {
                 let semantic_params: Vec<_> = params
                     .iter()
                     .map(|p| {
@@ -471,6 +544,7 @@ impl SemanticType {
                 Type::Function {
                     params: param_types,
                     returns: Box::new(sig.return_type.to_inference_type()),
+                    effects: EffectRow::Unproven,
                 }
             }
             SemanticType::Struct { name, fields } => {

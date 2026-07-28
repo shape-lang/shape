@@ -4,6 +4,7 @@ use crate::type_system::{
 };
 use shape_ast::ast::{GeneratedNodeOrigin, TypeAnnotation};
 use shape_ast::parser::parse_program;
+use crate::type_system::effects::EffectRow;
 
 fn require_exact<'a>(
     callee: &str,
@@ -51,6 +52,7 @@ fn identity_scheme(engine: &mut TypeInferenceEngine, source_name: &str) -> TypeS
         Type::Function {
             params: vec![parameter.clone()],
             returns: Box::new(parameter),
+            effects: EffectRow::Unproven,
         },
     )
 }
@@ -359,7 +361,7 @@ fn explicit_generic_calls_specialize_without_widening_the_declaration() {
     let (facts, errors) = engine.infer_program_facts_best_effort(&program);
     assert!(errors.is_empty(), "unexpected inference errors: {errors:?}");
 
-    let Type::Function { params, returns } = facts
+    let Type::Function { params, returns, .. } = facts
         .top_level_type("identity")
         .expect("generic signature is retained")
     else {
@@ -414,7 +416,7 @@ fn unannotated_callsites_still_widen_the_definition() {
         0
     );
 
-    let Type::Function { params, returns } = facts
+    let Type::Function { params, returns, .. } = facts
         .top_level_type("inferred")
         .expect("inferred signature is retained")
     else {

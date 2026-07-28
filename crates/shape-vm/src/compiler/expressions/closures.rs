@@ -691,7 +691,9 @@ fn annotation_contains_unknown(ann: &TypeAnnotation) -> bool {
         TypeAnnotation::Object(fields) => fields
             .iter()
             .any(|field| annotation_contains_unknown(&field.type_annotation)),
-        TypeAnnotation::Function { params, returns } => {
+        TypeAnnotation::Function {
+            params, returns, ..
+        } => {
             params
                 .iter()
                 .any(|param| annotation_contains_unknown(&param.type_annotation))
@@ -3163,6 +3165,7 @@ impl BytecodeCompiler {
             where_clause: None,
             is_async: false,
             is_comptime: false,
+            effect_row: None,
         };
 
         let outer_vars = self.collect_outer_scope_vars();
@@ -3466,6 +3469,7 @@ impl BytecodeCompiler {
             where_clause: None,
             is_async: false,
             is_comptime: false,
+            effect_row: None,
         };
 
         let user_pass_modes = self.effective_function_like_pass_modes(None, params, Some(body));

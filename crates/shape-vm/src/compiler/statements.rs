@@ -2694,6 +2694,7 @@ impl BytecodeCompiler {
             is_async: method.is_async,
             is_comptime: false,
             where_clause: None,
+            effect_row: None,
         })
     }
 
@@ -2836,6 +2837,7 @@ impl BytecodeCompiler {
             is_async: method.is_async,
             is_comptime: false,
             where_clause: None,
+            effect_row: None,
         })
     }
 
@@ -3228,6 +3230,7 @@ impl BytecodeCompiler {
             is_async: method.is_async,
             is_comptime: false,
             where_clause: None,
+            effect_row: None,
         })
     }
 
@@ -3283,6 +3286,7 @@ impl BytecodeCompiler {
             is_async: false,
             is_comptime: false,
             where_clause: None,
+            effect_row: None,
         };
 
         self.register_function(&func_def)?;
@@ -4022,6 +4026,7 @@ impl BytecodeCompiler {
             is_async: false,
             is_comptime: false,
             where_clause: None,
+            effect_row: None,
         };
         self.register_function(&fn_def)?;
         self.compile_function(&fn_def)?;
@@ -4373,7 +4378,11 @@ impl BytecodeCompiler {
                     })
                     .collect(),
             ),
-            TypeAnnotation::Function { params, returns } => TypeAnnotation::Function {
+            TypeAnnotation::Function {
+                params,
+                returns,
+                effects,
+            } => TypeAnnotation::Function {
                 params: params
                     .iter()
                     .cloned()
@@ -4391,6 +4400,9 @@ impl BytecodeCompiler {
                     module_path,
                     type_params,
                 )),
+                // Module qualification rewrites type NAMES; effect atoms are
+                // catalog identities, not module-scoped names.
+                effects: effects.clone(),
             },
             TypeAnnotation::Union(items) => TypeAnnotation::Union(
                 items

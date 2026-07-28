@@ -1179,7 +1179,10 @@ fn resolve_const_defaults_or_error(
     let mut const_args: Vec<ComptimeConstValue> = Vec::new();
     for tp in type_params {
         match tp {
-            shape_ast::ast::TypeParam::Type { .. } => continue,
+            // Effect binders close through `EffectSubstitution` at
+            // instantiation, not through the const-argument path.
+            shape_ast::ast::TypeParam::Type { .. }
+            | shape_ast::ast::TypeParam::Effect { .. } => continue,
             shape_ast::ast::TypeParam::Const { name, default, .. } => {
                 let Some(default_expr) = default else {
                     return Err(ShapeError::SemanticError {
@@ -1564,6 +1567,7 @@ mod tests {
             annotations: Vec::new(),
             is_async: false,
             is_comptime: false,
+            effect_row: None,
         }
     }
 

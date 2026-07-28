@@ -3,6 +3,7 @@
 //! Defines constructors for common built-in types in Shape.
 
 use super::core::Type;
+use crate::type_system::effects::EffectRow;
 use shape_ast::ast::TypeAnnotation;
 
 /// Built-in types for Shape
@@ -154,10 +155,12 @@ impl BuiltinTypes {
     }
 
     pub fn function(params: Vec<Type>, returns: Type) -> Type {
-        Type::Function {
-            params,
-            returns: Box::new(returns),
-        }
+        Type::function(params, returns)
+    }
+
+    /// A builtin function type with a known effect row (ADR-014 §8.1).
+    pub fn function_with_effects(params: Vec<Type>, returns: Type, effects: EffectRow) -> Type {
+        Type::function_with_effects(params, returns, effects)
     }
 }
 

@@ -477,6 +477,7 @@ fn mint_hook_body_fn(
         annotations: Vec::new(),
         is_async: false,
         is_comptime: false,
+        effect_row: None,
     }
 }
 
