@@ -2066,7 +2066,19 @@ impl<'a, 'b> MirToIR<'a, 'b> {
             }
 
             // Compile terminator.
-            self.compile_terminator(&block.terminator)?;
+            //
+            // #189: a terminator evaluates after every statement in its
+            // block, so its program point is "one past the last statement".
+            // Without this the position stayed `None` through terminator
+            // lowering, and `mir_has_prior_move_of_slot`'s fail-closed arm
+            // refused on ANY Move in the function — which is precisely the
+            // case that matters, because a method call like `.push()` IS a
+            // `TerminatorKind::Call`.
+            let prior_stmt_position = self.current_stmt_position;
+            self.current_stmt_position = Some((block.id, block.statements.len()));
+            let terminator_result = self.compile_terminator(&block.terminator);
+            self.current_stmt_position = prior_stmt_position;
+            terminator_result?;
         }
 
         // Seal all blocks after all code is emitted. Sealing before all
