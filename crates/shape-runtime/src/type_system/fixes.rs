@@ -78,7 +78,7 @@ fn render_clause(row: &ClosedEffectRow) -> String {
 
 /// One position of a callable's contract that the source leaves undeclared,
 /// paired with the type the checker inferred for it.
-pub(crate) struct UndeclaredPosition<'a> {
+pub struct UndeclaredPosition<'a> {
     /// What the position is, for the fix's label.
     pub what: ContractPosition,
     /// Byte offset the annotation belongs at: after a parameter's name, or
@@ -89,7 +89,7 @@ pub(crate) struct UndeclaredPosition<'a> {
 }
 
 /// Which part of a contract an [`UndeclaredPosition`] names.
-pub(crate) enum ContractPosition {
+pub enum ContractPosition {
     Param(String),
     Result,
 }
@@ -112,7 +112,7 @@ pub(crate) enum ContractPosition {
 /// the user's source would declare a contract that means nothing. [`spell`]
 /// therefore does its own conversion and returns `None` at exactly the points
 /// `to_annotation` papers over.
-pub(crate) fn declared_contract_fix(
+pub fn declared_contract_fix(
     source: &str,
     callable: &str,
     undeclared: &[UndeclaredPosition<'_>],
@@ -144,10 +144,17 @@ pub(crate) fn declared_contract_fix(
     // *plan* is byte-identical across compiles, not merely its result.
     edits.sort_by_key(|edit| (edit.start(), edit.end()));
 
-    Some(
-        SuggestedFix::new(format!("Declare the contract of `{callable}`"), 0.9)
-            .with_edits(source, edits),
-    )
+    // Name the one thing when there is one thing; name the contract when the
+    // fix spans several positions.
+    let label = match undeclared {
+        [only] => match &only.what {
+            ContractPosition::Param(name) => format!("Declare the type of parameter `{name}`"),
+            ContractPosition::Result => format!("Declare the result type of `{callable}`"),
+        },
+        _ => format!("Declare the contract of `{callable}`"),
+    };
+
+    Some(SuggestedFix::new(label, 0.9).with_edits(source, edits))
 }
 
 /// The Shape source text for an inferred type, or `None` when the type has no
@@ -733,5 +740,232 @@ mod effect_row_fix_tests {
         let plan = fix.edit_plan.as_ref().expect("plan");
         assert!(plan.validate(TRACER).is_ok());
         assert!(plan.validate(&format!("// edited\n{TRACER}")).is_err());
+    }
+}
+
+#[cfg(test)]
+mod declared_contract_fix_tests {
+    //! ADR-011 §2 / ADR-014 §8.2 / ADR-017 §4 — materializing a missing
+    //! declared contract.
+    //!
+    //! The theme is refusal. A materialized signature is a claim written into
+    //! the user's source, so every case where the compiler knows less than the
+    //! claim would assert has to produce no fix rather than a weaker one.
+
+    use super::*;
+    use crate::type_system::effects::{
+        ClosedEffectRow, EffectAtom, EffectRow, EffectStage, OperationalEffectId,
+    };
+    use crate::type_system::types::{BuiltinTypes, TypeVar, TypeVarGen};
+
+    /// `fn identity<T>(x) { return x }` — `T` is an explicit binder the author
+    /// wrote, so it has declared provenance.
+    const GENERIC: &str = "fn identity<T>(x) { return x }\n";
+
+    fn binder(name: &str) -> Type {
+        let mut generator = TypeVarGen::new();
+        Type::Variable(TypeVar::declared(generator.fresh_declared_owner(), 0, name))
+    }
+
+    /// An inference hole: a variable with no declared provenance. Nothing in
+    /// the source named it, so it has no honest spelling.
+    fn hole() -> Type {
+        TypeVarGen::new().fresh_type()
+    }
+
+    fn param<'a>(name: &str, at: usize, ty: &'a Type) -> UndeclaredPosition<'a> {
+        UndeclaredPosition {
+            what: ContractPosition::Param(name.to_string()),
+            insert_at: at,
+            inferred: ty,
+        }
+    }
+
+    fn result(at: usize, ty: &Type) -> UndeclaredPosition<'_> {
+        UndeclaredPosition {
+            what: ContractPosition::Result,
+            insert_at: at,
+            inferred: ty,
+        }
+    }
+
+    fn apply(fix: &SuggestedFix, source: &str) -> String {
+        fix.edit_plan
+            .as_ref()
+            .expect("machine-applicable")
+            .apply(source)
+            .expect("applies")
+    }
+
+    // -- Tripwire 3 ---------------------------------------------------------
+
+    /// Applying the signature fix to a generic callable preserves the explicit
+    /// binder. `T` is what the author wrote; `T` is what the contract declares.
+    #[test]
+    fn a_generic_callable_keeps_its_explicit_binders() {
+        let t = binder("T");
+        let after_x = GENERIC.find("(x)").expect("param list") + "(x".len();
+        let after_params = after_x + 1;
+
+        let fix = declared_contract_fix(
+            GENERIC,
+            "identity",
+            &[param("x", after_x, &t), result(after_params, &t)],
+        )
+        .expect("both positions spell");
+
+        let fixed = apply(&fix, GENERIC);
+        assert_eq!(fixed, "fn identity<T>(x: T) -> T { return x }\n");
+        assert!(!fixed.contains("unknown"), "{fixed}");
+        assert!(shape_ast::parse_program(&fixed).is_ok());
+    }
+
+    /// The hazard this refusal exists for is real, not hypothetical:
+    /// `Type::to_annotation` substitutes `unknown` inside a `Type::Function`
+    /// rather than failing (`types/core.rs:417,422`). Assert the leak first,
+    /// so that if `to_annotation` is ever fixed this test says so instead of
+    /// silently guarding nothing.
+    #[test]
+    fn a_signature_that_would_contain_unknown_is_refused() {
+        let leaky =
+            Type::function_with_effects(vec![hole()], BuiltinTypes::number(), EffectRow::Unproven);
+
+        let projected = leaky.to_annotation().expect("to_annotation answers");
+        assert!(
+            format!("{projected:?}").contains("unknown"),
+            "precondition: to_annotation still papers over the hole"
+        );
+
+        assert!(
+            declared_contract_fix("fn f(cb) { }\n", "f", &[param("cb", 5, &leaky)]).is_none(),
+            "a contract naming `unknown` declares nothing; it must not be written"
+        );
+    }
+
+    /// A bare inference hole has no spelling either — the same refusal one
+    /// level out.
+    #[test]
+    fn an_inference_hole_is_refused() {
+        let hole = hole();
+        assert!(declared_contract_fix("fn f(x) { }\n", "f", &[param("x", 5, &hole)]).is_none());
+    }
+
+    /// All-or-nothing: a signature with one position declared and another not
+    /// is still an undeclared contract, so one refusal drops the whole fix.
+    #[test]
+    fn one_unspellable_position_drops_the_whole_fix() {
+        let known = BuiltinTypes::number();
+        let unknown = hole();
+        let source = "fn f(a, b) { }\n";
+
+        assert!(
+            declared_contract_fix(source, "f", &[param("a", 6, &known)]).is_some(),
+            "the spellable position alone would produce a fix"
+        );
+        assert!(
+            declared_contract_fix(
+                source,
+                "f",
+                &[param("a", 6, &known), param("b", 9, &unknown)]
+            )
+            .is_none()
+        );
+    }
+
+    // -- What it spells -----------------------------------------------------
+
+    #[test]
+    fn a_function_typed_position_spells_its_row() {
+        let row = ClosedEffectRow::from_atoms(
+            EffectStage::Runtime,
+            [EffectAtom::Operation(OperationalEffectId::FsRead)],
+        )
+        .unwrap();
+        let ty =
+            Type::function_with_effects(vec![], BuiltinTypes::number(), EffectRow::Closed(row));
+        let source = "fn f(cb) { }\n";
+
+        let fixed = apply(
+            &declared_contract_fix(source, "f", &[param("cb", 7, &ty)]).expect("fix"),
+            source,
+        );
+        assert_eq!(fixed, "fn f(cb: fn() -> number ! {FsRead}) { }\n");
+        assert!(shape_ast::parse_program(&fixed).is_ok());
+    }
+
+    #[test]
+    fn an_array_spells_canonically_not_as_the_vec_alias() {
+        let ty = Type::Generic {
+            base: Box::new(Type::Concrete(shape_ast::ast::TypeAnnotation::Reference(
+                "Vec".into(),
+            ))),
+            args: vec![BuiltinTypes::number()],
+        };
+        assert_eq!(spell(&ty).as_deref(), Some("Array<number>"));
+    }
+
+    /// A bare generic name is not a type in Shape, so it is not written.
+    #[test]
+    fn a_generic_base_with_no_arguments_is_refused() {
+        let ty = Type::Generic {
+            base: Box::new(Type::Concrete(shape_ast::ast::TypeAnnotation::Reference(
+                "Option".into(),
+            ))),
+            args: vec![],
+        };
+        assert!(spell(&ty).is_none());
+    }
+
+    // -- Determinism (#205) --------------------------------------------------
+
+    /// The plan is byte-identical whichever order the checker visited the
+    /// positions in, and identical again on a second call.
+    #[test]
+    fn fix_output_is_byte_deterministic_across_position_order_and_invocations() {
+        let a = BuiltinTypes::number();
+        let b = BuiltinTypes::string();
+        let source = "fn f(a, b) { }\n";
+
+        let forward =
+            declared_contract_fix(source, "f", &[param("a", 6, &a), param("b", 9, &b)]).unwrap();
+        let backward =
+            declared_contract_fix(source, "f", &[param("b", 9, &b), param("a", 6, &a)]).unwrap();
+        let again =
+            declared_contract_fix(source, "f", &[param("a", 6, &a), param("b", 9, &b)]).unwrap();
+
+        assert_eq!(forward, backward, "visit order must not reach the plan");
+        assert_eq!(
+            forward, again,
+            "a second compile must produce the same bytes"
+        );
+        assert_eq!(apply(&forward, source), "fn f(a: number, b: string) { }\n");
+    }
+
+    // -- Refusals ------------------------------------------------------------
+
+    #[test]
+    fn the_label_names_the_one_position_when_there_is_only_one() {
+        let ty = BuiltinTypes::number();
+        let one = declared_contract_fix("fn f(a) { }\n", "f", &[param("a", 6, &ty)]).unwrap();
+        assert_eq!(one.label, "Declare the type of parameter `a`");
+
+        let only_result = declared_contract_fix("fn f() { }\n", "f", &[result(7, &ty)]).unwrap();
+        assert_eq!(only_result.label, "Declare the result type of `f`");
+
+        let both =
+            declared_contract_fix("fn f(a) { }\n", "f", &[param("a", 6, &ty), result(7, &ty)])
+                .unwrap();
+        assert_eq!(both.label, "Declare the contract of `f`");
+    }
+
+    #[test]
+    fn no_undeclared_positions_means_no_fix() {
+        assert!(declared_contract_fix("fn f() { }\n", "f", &[]).is_none());
+    }
+
+    #[test]
+    fn a_position_past_the_end_of_the_source_produces_no_fix() {
+        let ty = BuiltinTypes::number();
+        assert!(declared_contract_fix("fn f(a) { }", "f", &[param("a", 9_999, &ty)]).is_none());
     }
 }

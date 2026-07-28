@@ -191,8 +191,8 @@ async fn main() -> Result<()> {
             };
             run_tui(mode, extensions, &provider_opts).await?;
         }
-        (Some(Commands::Check { path, link }), _) => {
-            run_check(path, link).await?;
+        (Some(Commands::Check { path, link, fix }), _) => {
+            run_check(path, link, fix).await?;
         }
         (Some(Commands::Doctest { path, verbose }), _) => {
             run_doctest(path, verbose).await?;
