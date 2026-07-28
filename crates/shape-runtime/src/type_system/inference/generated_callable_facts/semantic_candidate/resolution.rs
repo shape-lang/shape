@@ -20,7 +20,9 @@ pub(in crate::type_system::inference::generated_callable_facts) fn type_is_seman
                     .iter()
                     .all(|arg| type_is_semantically_resolved(arg, allow_declared))
         }
-        Type::Function { params, returns } => {
+        Type::Function {
+            params, returns, ..
+        } => {
             params
                 .iter()
                 .all(|param| type_is_semantically_resolved(param, allow_declared))

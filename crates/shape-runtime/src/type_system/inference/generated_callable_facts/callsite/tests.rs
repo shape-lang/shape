@@ -1,4 +1,5 @@
 use super::*;
+use crate::type_system::effects::EffectRow;
 use crate::type_system::{
     BuiltinTypes, InferenceFacts, Type, TypeConstraint, TypeScheme, tyvar_to_annotation,
 };
@@ -44,17 +45,14 @@ fn node(expansion_low: i64) -> GeneratedNodeKey {
 }
 
 fn identity_scheme(engine: &mut TypeInferenceEngine, source_name: &str) -> TypeScheme {
-    let declared = TypeVar::declared(
-        engine.type_var_gen.fresh_declared_owner(),
-        0,
-        source_name,
-    );
+    let declared = TypeVar::declared(engine.type_var_gen.fresh_declared_owner(), 0, source_name);
     let parameter = Type::Variable(declared.clone());
     TypeScheme::poly(
         vec![declared],
         Type::Function {
             params: vec![parameter.clone()],
             returns: Box::new(parameter),
+            effects: EffectRow::Unproven,
         },
     )
 }
@@ -140,30 +138,41 @@ fn replay_isolation_restores_primary_candidates_after_nested_errors() {
         BuiltinTypes::integer(),
     );
 
-    let result: Result<(), &'static str> = engine.with_isolated_semantic_callsite_replay(|engine| {
-        record_scheme_candidate(
-            engine,
-            &scheme,
-            replay_key.callee(),
-            replay_key.call_span(),
-            BuiltinTypes::string(),
-        );
-        let nested_result: Result<(), &'static str> =
-            engine.with_isolated_semantic_callsite_replay(|engine| {
-                record_scheme_candidate(
-                    engine,
-                    &scheme,
-                    nested_key.callee(),
-                    nested_key.call_span(),
-                    BuiltinTypes::boolean(),
-                );
-                Err("nested replay stopped")
-            });
-        assert_eq!(nested_result, Err("nested replay stopped"));
-        assert!(engine.generated_inference.callsite_candidates.contains_key(&replay_key));
-        assert!(!engine.generated_inference.callsite_candidates.contains_key(&nested_key));
-        Err("outer replay stopped")
-    });
+    let result: Result<(), &'static str> =
+        engine.with_isolated_semantic_callsite_replay(|engine| {
+            record_scheme_candidate(
+                engine,
+                &scheme,
+                replay_key.callee(),
+                replay_key.call_span(),
+                BuiltinTypes::string(),
+            );
+            let nested_result: Result<(), &'static str> = engine
+                .with_isolated_semantic_callsite_replay(|engine| {
+                    record_scheme_candidate(
+                        engine,
+                        &scheme,
+                        nested_key.callee(),
+                        nested_key.call_span(),
+                        BuiltinTypes::boolean(),
+                    );
+                    Err("nested replay stopped")
+                });
+            assert_eq!(nested_result, Err("nested replay stopped"));
+            assert!(
+                engine
+                    .generated_inference
+                    .callsite_candidates
+                    .contains_key(&replay_key)
+            );
+            assert!(
+                !engine
+                    .generated_inference
+                    .callsite_candidates
+                    .contains_key(&nested_key)
+            );
+            Err("outer replay stopped")
+        });
 
     assert_eq!(result, Err("outer replay stopped"));
     assert_eq!(engine.generated_inference.callsite_candidates.len(), 1);
@@ -173,7 +182,12 @@ fn replay_isolation_restores_primary_candidates_after_nested_errors() {
             .callsite_candidates
             .contains_key(&primary_key)
     );
-    assert!(!engine.generated_inference.callsite_candidates.contains_key(&replay_key));
+    assert!(
+        !engine
+            .generated_inference
+            .callsite_candidates
+            .contains_key(&replay_key)
+    );
 }
 
 #[test]
@@ -347,7 +361,9 @@ fn explicit_generic_calls_specialize_without_widening_the_declaration() {
     let (facts, errors) = engine.infer_program_facts_best_effort(&program);
     assert!(errors.is_empty(), "unexpected inference errors: {errors:?}");
 
-    let Type::Function { params, returns } = facts
+    let Type::Function {
+        params, returns, ..
+    } = facts
         .top_level_type("identity")
         .expect("generic signature is retained")
     else {
@@ -402,7 +418,9 @@ fn unannotated_callsites_still_widen_the_definition() {
         0
     );
 
-    let Type::Function { params, returns } = facts
+    let Type::Function {
+        params, returns, ..
+    } = facts
         .top_level_type("inferred")
         .expect("inferred signature is retained")
     else {

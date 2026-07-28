@@ -3,6 +3,7 @@
 //! Handles type inference for top-level items: functions, patterns, variables, etc.
 
 use super::TypeInferenceEngine;
+use crate::type_system::effects::EffectRow;
 use crate::type_system::*;
 use shape_ast::ast::{
     DestructurePattern, Expr, ForeignFunctionDef, FunctionDef, Item, Literal, Span, Statement,
@@ -1169,7 +1170,10 @@ impl TypeInferenceEngine {
         types: &mut HashMap<String, Type>,
         errors: &mut Vec<TypeError>,
     ) {
-        let Some(Type::Function { params, returns }) = types.get(&func.name).cloned() else {
+        let Some(Type::Function {
+            params, returns, ..
+        }) = types.get(&func.name).cloned()
+        else {
             return;
         };
 
@@ -1372,6 +1376,7 @@ impl TypeInferenceEngine {
                     })
                     .collect(),
                 returns: Box::new(Self::type_from_annotation_preserving_tyvars(returns)),
+                effects: EffectRow::Unproven,
             },
             other => Type::Concrete(other.clone()),
         }
@@ -1479,6 +1484,7 @@ impl TypeInferenceEngine {
                 Type::Function {
                     params: param_types,
                     returns: Box::new(return_type),
+                    effects: EffectRow::Unproven,
                 }
             }
             TypeAnnotation::Union(types) => {

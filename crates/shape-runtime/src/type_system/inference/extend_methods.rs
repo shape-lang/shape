@@ -72,8 +72,7 @@ impl TypeInferenceEngine {
             // intact and still collide as genuine shadows.
             let mut receiver_type_params = receiver_type_params.clone();
             receiver_type_params.retain(|name| {
-                !(method_type_params.contains(name)
-                    && implicit_receiver_type_params.contains(name))
+                !(method_type_params.contains(name) && implicit_receiver_type_params.contains(name))
             });
 
             let is_generic = has_receiver_params || !method_type_params.is_empty();

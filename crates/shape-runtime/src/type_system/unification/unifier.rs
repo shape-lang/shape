@@ -3,6 +3,7 @@
 //! Implements unification algorithm for type inference,
 //! maintaining substitutions and applying them to types.
 
+use crate::type_system::effects::EffectRow;
 use crate::type_system::{Type, TypeVar, annotation_as_tyvar, tyvar_to_annotation};
 use shape_ast::ast::TypeAnnotation;
 use std::collections::HashMap;
@@ -91,9 +92,16 @@ impl Unifier {
                 }
             }
 
-            Type::Function { params, returns } => Type::Function {
+            Type::Function {
+                params,
+                returns,
+                effects,
+            } => Type::Function {
                 params: params.iter().map(|p| self.apply_substitutions(p)).collect(),
                 returns: Box::new(self.apply_substitutions(returns)),
+                // Type-variable substitution carries the row unchanged; effect
+                // binders close through `EffectSubstitution`, not here.
+                effects: effects.clone(),
             },
 
             // A concrete annotation can still embed `tyvar` markers — an
@@ -235,9 +243,9 @@ pub fn occurs_check(var: &TypeVar, ty: &Type) -> bool {
         Type::Generic { base, args } => {
             occurs_check(var, base) || args.iter().any(|a| occurs_check(var, a))
         }
-        Type::Function { params, returns } => {
-            params.iter().any(|p| occurs_check(var, p)) || occurs_check(var, returns)
-        }
+        Type::Function {
+            params, returns, ..
+        } => params.iter().any(|p| occurs_check(var, p)) || occurs_check(var, returns),
         Type::Concrete(ann) => annotation_occurs(var, ann),
     }
 }

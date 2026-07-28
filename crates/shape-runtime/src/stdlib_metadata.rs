@@ -420,7 +420,11 @@ impl StdlibMetadata {
             TypeAnnotation::Dyn(bounds) => format!("dyn {}", bounds.join(" + ")),
             // ADR-009 B3 (S1): existential descriptor package type.
             TypeAnnotation::Existential { witnesses, inner } => {
-                format!("exists<{}> {}", witnesses.join(", "), Self::format_type_annotation(inner))
+                format!(
+                    "exists<{}> {}",
+                    witnesses.join(", "),
+                    Self::format_type_annotation(inner)
+                )
             }
         }
     }
@@ -519,8 +523,7 @@ mod tests {
 
     #[test]
     fn optimize_source_parses_on_two_megabyte_thread_stack() {
-        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("stdlib-src/math/optimize.shape");
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("stdlib-src/math/optimize.shape");
         let source = std::fs::read_to_string(&path).expect("embedded optimize source must exist");
         let worker = std::thread::Builder::new()
             .name("optimize-parser-stack-budget".to_string())
@@ -535,7 +538,10 @@ mod tests {
             .join()
             .expect("optimize parser must stay within a 2 MiB stack")
             .expect("embedded optimize source must parse");
-        assert!(item_count > 0, "embedded optimize source must contain items");
+        assert!(
+            item_count > 0,
+            "embedded optimize source must contain items"
+        );
     }
 
     #[test]

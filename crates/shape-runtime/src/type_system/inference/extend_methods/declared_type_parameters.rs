@@ -162,7 +162,9 @@ impl TypeInferenceEngine {
                         .collect::<Option<Vec<_>>>()?,
                 })
             }
-            Type::Function { params, returns } => Some(TypeParamExpr::Function {
+            Type::Function {
+                params, returns, ..
+            } => Some(TypeParamExpr::Function {
                 params: params
                     .iter()
                     .map(|param| {

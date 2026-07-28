@@ -1,4 +1,5 @@
 use super::*;
+use crate::type_system::effects::EffectRow;
 
 fn callable_declaration() -> FunctionDef {
     FunctionDef {
@@ -23,6 +24,7 @@ fn callable_scheme(quantified: Vec<TypeVar>, result: TypeVar) -> TypeScheme {
         Type::Function {
             params: Vec::new(),
             returns: Box::new(Type::Variable(result)),
+            effects: EffectRow::Unproven,
         },
     )
 }
@@ -58,7 +60,10 @@ fn mixed_schemes_expose_only_the_declared_subsequence() {
     let declared = TypeVar::declared(engine.type_var_gen.fresh_declared_owner(), 0, "T");
     let scheme = callable_scheme(vec![raw, declared.clone()], declared.clone());
 
-    assert_eq!(declared_quantifiers(&scheme).unwrap(), vec![declared.clone()]);
+    assert_eq!(
+        declared_quantifiers(&scheme).unwrap(),
+        vec![declared.clone()]
+    );
     let tokens = TypeInferenceEngine::declared_parameter_tokens(&scheme).unwrap();
     assert_eq!(tokens.len(), 1);
     assert_eq!(tokens.get("T"), Some(&declared));
@@ -76,9 +81,7 @@ fn raw_quantifiers_may_change_while_republication_preserves_the_binding() {
         .unwrap();
     let token = engine.env.lookup_binding_token("subject").unwrap();
     let declaration = InferenceCallableDeclarationToken::of(&function);
-    assert!(
-        engine.generated_inference.callable_declared_parameters[&declaration].is_empty()
-    );
+    assert!(engine.generated_inference.callable_declared_parameters[&declaration].is_empty());
 
     let second = engine.type_var_gen.fresh_var();
     let second_scheme = callable_scheme(vec![second.clone()], second.clone());
@@ -88,10 +91,11 @@ fn raw_quantifiers_may_change_while_republication_preserves_the_binding() {
         .unwrap();
 
     assert_eq!(engine.env.lookup_binding_token("subject"), Some(token));
-    assert_eq!(engine.env.lookup("subject").unwrap().quantified, vec![second]);
-    assert!(
-        engine.generated_inference.callable_declared_parameters[&declaration].is_empty()
+    assert_eq!(
+        engine.env.lookup("subject").unwrap().quantified,
+        vec![second]
     );
+    assert!(engine.generated_inference.callable_declared_parameters[&declaration].is_empty());
 }
 
 #[test]

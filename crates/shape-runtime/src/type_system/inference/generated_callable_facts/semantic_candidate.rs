@@ -262,7 +262,9 @@ impl RecursiveCallableShape {
                 }
                 Ok(())
             }
-            Type::Function { params, returns } => {
+            Type::Function {
+                params, returns, ..
+            } => {
                 self.validate_callable(params.len(), path, visited)?;
                 for (index, parameter) in params.iter().enumerate() {
                     path.push(SemanticTypePathSegment::CallableParameter(index_u16(

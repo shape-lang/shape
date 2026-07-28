@@ -96,10 +96,12 @@ fn project_type(
         Type::Function {
             params: pattern_params,
             returns: pattern_returns,
+            ..
         } => match actual {
             Type::Function {
                 params: actual_params,
                 returns: actual_returns,
+                ..
             } if pattern_params.len() == actual_params.len() => {
                 for (index, (pattern_param, actual_param)) in
                     pattern_params.iter().zip(actual_params).enumerate()
@@ -321,7 +323,9 @@ fn type_mentions(ty: &Type, target: &TypeVar) -> bool {
         Type::Generic { base, args } => {
             type_mentions(base, target) || args.iter().any(|arg| type_mentions(arg, target))
         }
-        Type::Function { params, returns } => {
+        Type::Function {
+            params, returns, ..
+        } => {
             params.iter().any(|param| type_mentions(param, target))
                 || type_mentions(returns, target)
         }

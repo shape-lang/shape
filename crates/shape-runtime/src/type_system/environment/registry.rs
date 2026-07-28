@@ -1299,19 +1299,15 @@ mod tests {
 
         let impls: Vec<&TraitImplEntry> = reg.all_trait_impl_entries().collect();
         assert!(
-            impls
-                .iter()
-                .any(|e| e.trait_name == "Display"
-                    && e.target_type == "User"
-                    && e.impl_name.is_none()),
+            impls.iter().any(|e| e.trait_name == "Display"
+                && e.target_type == "User"
+                && e.impl_name.is_none()),
             "default impl must be enumerated"
         );
         assert!(
-            impls
-                .iter()
-                .any(|e| e.trait_name == "Display"
-                    && e.target_type == "User"
-                    && e.impl_name.as_deref() == Some("Fancy")),
+            impls.iter().any(|e| e.trait_name == "Display"
+                && e.target_type == "User"
+                && e.impl_name.as_deref() == Some("Fancy")),
             "named impl must be enumerated distinctly"
         );
 

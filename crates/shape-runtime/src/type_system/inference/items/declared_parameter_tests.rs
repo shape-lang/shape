@@ -157,7 +157,7 @@ fn function_predeclare_body_and_scheme_reuse_declared_tokens() {
     assert!(scheme.default_types.contains_key(declared));
     assert!(matches!(
         function_type,
-        Type::Function { params, returns }
+        Type::Function { params, returns, .. }
             if params == vec![Type::Variable(declared.clone())]
                 && *returns == Type::Variable(declared.clone())
     ));

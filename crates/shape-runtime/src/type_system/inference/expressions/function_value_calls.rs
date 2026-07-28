@@ -31,7 +31,9 @@ impl TypeInferenceEngine {
 
     fn function_shape_for_value_call(func_type: Type) -> Option<(Vec<Type>, Type)> {
         match func_type {
-            Type::Function { params, returns } => Some((params, returns.as_ref().clone())),
+            Type::Function {
+                params, returns, ..
+            } => Some((params, returns.as_ref().clone())),
             Type::Concrete(TypeAnnotation::Function {
                 params: concrete_params,
                 returns: concrete_returns,

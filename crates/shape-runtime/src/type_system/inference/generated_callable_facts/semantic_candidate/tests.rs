@@ -2,6 +2,7 @@ use shape_ast::ast::{FunctionParam, TypeAnnotation};
 
 use super::*;
 use crate::type_system::BuiltinTypes;
+use crate::type_system::effects::EffectRow;
 
 fn annotation_callable(optional: bool, parameter: TypeAnnotation) -> TypeAnnotation {
     TypeAnnotation::Function {
@@ -19,6 +20,7 @@ fn bare_inference_callable_cannot_fabricate_shape_evidence() {
     let callable = Type::Function {
         params: vec![BuiltinTypes::integer()],
         returns: Box::new(BuiltinTypes::string()),
+        effects: EffectRow::Unproven,
     };
 
     let error = SemanticTypeCandidate::monomorphic_binding(callable)

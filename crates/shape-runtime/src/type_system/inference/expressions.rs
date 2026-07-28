@@ -4,6 +4,7 @@
 
 use super::{CheckMode, TypeInferenceEngine};
 use crate::type_system::checking::MethodTable;
+use crate::type_system::effects::EffectRow;
 use crate::type_system::exhaustiveness;
 use crate::type_system::*;
 use shape_ast::ast::{BinaryOp, Expr, JoinKind, Literal, Span, TypeAnnotation};
@@ -149,6 +150,7 @@ impl TypeInferenceEngine {
                     self_ann,
                     generic_bindings,
                 )),
+                effects: EffectRow::Unproven,
             },
             _ => Type::Concrete(Self::substitute_trait_self_annotation(ann, self_ann)),
         }
@@ -916,7 +918,9 @@ impl TypeInferenceEngine {
                                     // Otherwise `obj.greet("World")` checks the arg against an
                                     // "unknown" param and rejects. Mirrors the Variable/
                                     // Constrained arms so call-site substitution resolves it.
-                                    Type::Function { params, returns } => {
+                                    Type::Function {
+                                        params, returns, ..
+                                    } => {
                                         let unifier = self.solver.unifier().clone();
                                         let conv = |t: &Type| -> TypeAnnotation {
                                             match &unifier.apply_substitutions(t) {
@@ -1285,9 +1289,9 @@ impl TypeInferenceEngine {
                 // Surface-1A LANG-W13-3-iife-closure-capture).
                 if method == "__call__" {
                     let func_shape = match &receiver_type {
-                        Type::Function { params, returns } => {
-                            Some((params.clone(), returns.as_ref().clone()))
-                        }
+                        Type::Function {
+                            params, returns, ..
+                        } => Some((params.clone(), returns.as_ref().clone())),
                         Type::Concrete(TypeAnnotation::Function {
                             params: concrete_params,
                             returns: concrete_returns,
@@ -1908,7 +1912,9 @@ impl TypeInferenceEngine {
                                 };
                                 return Ok(ret);
                             }
-                            Type::Function { params, returns } => {
+                            Type::Function {
+                                params, returns, ..
+                            } => {
                                 if params.len() != arg_types.len() {
                                     return Err(TypeError::ArityMismatch(
                                         params.len(),
@@ -3130,10 +3136,11 @@ impl TypeInferenceEngine {
         self.env
             .define(&cf.variable, TypeScheme::mono(loop_var_type));
 
-        self.comptime_witness_frames.push(super::ComptimeWitnessFrame {
-            witness_vars,
-            body_scope_depth: self.env.scope_depth(),
-        });
+        self.comptime_witness_frames
+            .push(super::ComptimeWitnessFrame {
+                witness_vars,
+                body_scope_depth: self.env.scope_depth(),
+            });
         Ok(())
     }
 
@@ -3147,10 +3154,7 @@ impl TypeInferenceEngine {
         subst: &std::collections::HashMap<String, Type>,
     ) -> Type {
         if let Some(name) = ann.as_type_name_str() {
-            if matches!(
-                ann,
-                TypeAnnotation::Basic(_) | TypeAnnotation::Reference(_)
-            ) {
+            if matches!(ann, TypeAnnotation::Basic(_) | TypeAnnotation::Reference(_)) {
                 if let Some(ty) = subst.get(name) {
                     return ty.clone();
                 }
@@ -3561,6 +3565,7 @@ impl TypeInferenceEngine {
                     Type::Function {
                         params: actual_params,
                         returns: actual_returns,
+                        ..
                     } if actual_params.len() == params.len() => {
                         for (expected_param, actual_param) in
                             params.iter().zip(actual_params.iter())

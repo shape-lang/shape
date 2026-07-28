@@ -76,7 +76,11 @@ pub fn annotation_to_string(ann: &TypeAnnotation) -> String {
         // handling (freeze/reflection) lands in later slices; render the
         // canonical spelling here.
         TypeAnnotation::Existential { witnesses, inner } => {
-            format!("exists<{}> {}", witnesses.join(", "), annotation_to_string(inner))
+            format!(
+                "exists<{}> {}",
+                witnesses.join(", "),
+                annotation_to_string(inner)
+            )
         }
     }
 }

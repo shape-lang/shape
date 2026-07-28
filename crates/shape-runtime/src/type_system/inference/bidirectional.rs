@@ -26,6 +26,7 @@
 //!   so downstream inference stays precise.
 
 use super::TypeInferenceEngine;
+use crate::type_system::effects::EffectRow;
 use crate::type_system::*;
 use shape_ast::ast::{Expr, FunctionParameter, Literal, ObjectEntry, Spanned, TypeAnnotation};
 
@@ -555,6 +556,7 @@ impl TypeInferenceEngine {
             Type::Function {
                 params: fp,
                 returns: fr,
+                ..
             } => (fp.clone(), *fr.clone()),
             _ => {
                 // Expected isn't a function type, fall back to regular inference
@@ -686,6 +688,7 @@ impl TypeInferenceEngine {
         Ok(Type::Function {
             params: actual_param_types,
             returns: Box::new(returned_type),
+            effects: EffectRow::Unproven,
         })
     }
 
@@ -737,6 +740,7 @@ impl TypeInferenceEngine {
         Ok(Type::Function {
             params: param_types,
             returns: Box::new(return_type),
+            effects: EffectRow::Unproven,
         })
     }
 
