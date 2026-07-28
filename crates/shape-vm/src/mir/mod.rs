@@ -14,6 +14,7 @@ pub mod escape;
 pub mod field_analysis;
 pub mod liveness;
 pub mod lowering;
+pub mod rc_elision;
 pub mod repair;
 pub mod return_ownership;
 pub mod solver;
@@ -29,5 +30,6 @@ pub use escape::{
 };
 pub use field_analysis::FieldAnalysis;
 pub use liveness::LivenessResult;
+pub use rc_elision::RcElisionPlan;
 pub use storage_planning::StoragePlan;
 pub use types::*;

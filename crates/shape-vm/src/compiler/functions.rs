@@ -1744,6 +1744,10 @@ impl BytecodeCompiler {
         // frame — writing 0u64 into arbitrary caller stack slots and
         // corrupting results like `test()`'s DateTime return value.
         let saved_ownership_drop_locals = std::mem::take(&mut self.ownership_drop_locals);
+        // ADR-018 §3 (#190): the elided-move record is per-function for the
+        // same reason the ownership drop scope is — a slot index recorded in a
+        // callee is meaningless in the caller's frame.
+        let saved_rc_elided_move_slots = std::mem::take(&mut self.rc_elided_move_slots);
         let saved_boxed_locals = std::mem::take(&mut self.boxed_locals);
         // Track A.1C.2: isolate per-function shared-local tracking so an
         // `AllocSharedLocal` emitted inside a nested function body does
@@ -2386,6 +2390,7 @@ impl BytecodeCompiler {
                         // Restore state
                         self.drop_locals = saved_drop_locals;
                         self.ownership_drop_locals = saved_ownership_drop_locals;
+                        self.rc_elided_move_slots = saved_rc_elided_move_slots.clone();
                         self.boxed_locals = saved_boxed_locals;
                         self.shared_locals = saved_shared_locals;
                         self.shared_drop_locals = saved_shared_drop_locals;
@@ -2519,6 +2524,7 @@ impl BytecodeCompiler {
         // Restore state
         self.drop_locals = saved_drop_locals;
         self.ownership_drop_locals = saved_ownership_drop_locals;
+        self.rc_elided_move_slots = saved_rc_elided_move_slots;
         self.boxed_locals = saved_boxed_locals;
         self.shared_locals = saved_shared_locals;
         self.shared_drop_locals = saved_shared_drop_locals;

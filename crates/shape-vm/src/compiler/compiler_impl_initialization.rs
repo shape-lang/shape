@@ -180,6 +180,7 @@ impl BytecodeCompiler {
             inferred_param_pass_modes: HashMap::new(),
             drop_locals: Vec::new(),
             ownership_drop_locals: Vec::new(),
+            rc_elided_move_slots: HashSet::new(),
             drop_type_info: HashMap::new(),
             current_function_saw_drop_obligated_local: false,
             drop_module_bindings: Vec::new(),

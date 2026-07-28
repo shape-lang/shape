@@ -249,6 +249,79 @@ impl BytecodeCompiler {
         best.map(|(_, point)| analysis.ownership_at(point))
     }
 
+    /// The source name currently bound to bytecode local `slot`, searching
+    /// innermost scope outwards. `None` when the slot is a compiler temporary
+    /// with no name-table entry, or when the innermost scope holding it binds
+    /// more than one name to it.
+    pub(super) fn binding_name_for_local(&self, slot: u16) -> Option<String> {
+        for scope in self.locals.iter().rev() {
+            let mut hit: Option<&String> = None;
+            for (name, &idx) in scope.iter() {
+                if idx == slot {
+                    if hit.is_some() {
+                        return None;
+                    }
+                    hit = Some(name);
+                }
+            }
+            if let Some(name) = hit {
+                return Some(name.clone());
+            }
+        }
+        None
+    }
+
+    /// ADR-018 §3 (#190): may this read of `slot` take the slot's share
+    /// instead of minting a second one?
+    ///
+    /// The MIR plan supplies the ownership proof (single whole-local read, no
+    /// loan, dominating every exit, not on a CFG cycle). The three checks
+    /// here are the ones only the bytecode compiler can make, and each one
+    /// guards a different releaser that would be left holding a cleared slot:
+    ///
+    /// - a boxed or `AllocSharedLocal`-promoted slot holds a cell pointer
+    ///   released by `DropCall` / `DropSharedLocal`, not by `DropLocal`;
+    /// - a slot whose type carries a user `impl Drop` is released by
+    ///   `DropCall`, which reads the slot to invoke `Drop::drop` — moving out
+    ///   from under it would both skip a user-visible finalizer and hand it a
+    ///   cleared receiver. Drop ordering is observable, so these never elide;
+    /// - a slot tracked for `DropClosureCaptures` is re-read at scope exit by
+    ///   compiler-injected emission that MIR does not model, so the "single
+    ///   read" proof does not cover it.
+    pub(super) fn rc_elision_applies_to_slot(&self, slot: u16) -> bool {
+        if !super::helpers::rc_elision_enabled() {
+            return false;
+        }
+        if self.slot_is_boxed(slot) || self.slot_is_shared(slot) {
+            return false;
+        }
+        if self.local_drop_kind(slot).is_some() {
+            return false;
+        }
+        if self
+            .closure_capture_drop_locals
+            .iter()
+            .any(|scope| scope.contains(&slot))
+        {
+            return false;
+        }
+        let Some(ctx) = self.current_mir_context_name() else {
+            return false;
+        };
+        let Some(analysis) = self.mir_borrow_analyses.get(ctx) else {
+            return false;
+        };
+        // Name-keyed, not offset-keyed: MIR slot numbering and bytecode local
+        // numbering diverge as soon as a body contains a lowered temporary
+        // (see `MirFunction::local_names`). The plan only publishes names that
+        // are unique among the function's user bindings, so this resolves to
+        // exactly one binding.
+        let Some(name) = self.binding_name_for_local(slot) else {
+            return false;
+        };
+        analysis.rc_elision.is_terminal_move_binding(&name)
+    }
+
     /// Emit a local-variable load with ownership awareness.
     ///
     /// When MIR analysis is available and proves Move semantics, emits
@@ -319,6 +392,24 @@ impl BytecodeCompiler {
             {
                 self.emit(Instruction::new(
                     OpCode::LoadLocalDeepClone,
+                    Some(Operand::Local(slot)),
+                ));
+                return;
+            }
+            // ADR-018 §3 (#190): when the MIR plan proves this is the
+            // binding's single whole-local read and it happens on every path
+            // to every exit, take the slot's existing share instead of
+            // minting a second one. `LoadLocalMove` clears the slot without
+            // releasing and publishes the bits without retaining, so the
+            // share is transferred rather than duplicated — there is no
+            // instant at which it is unowned, which is the covering-owning-
+            // reference condition ADR-018 §3 requires. Recording the slot
+            // here is what suppresses the now-unpaired scope-exit
+            // `DropLocal`; the two halves key off this one record.
+            if self.rc_elision_applies_to_slot(slot) {
+                self.rc_elided_move_slots.insert(slot);
+                self.emit(Instruction::new(
+                    OpCode::LoadLocalMove,
                     Some(Operand::Local(slot)),
                 ));
                 return;

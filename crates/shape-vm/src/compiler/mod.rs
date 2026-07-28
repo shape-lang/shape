@@ -99,7 +99,7 @@ mod functions;
 mod functions_annotations;
 mod functions_foreign;
 mod generation_reachability;
-mod helpers;
+pub(crate) mod helpers;
 mod helpers_binding;
 mod helpers_reference;
 mod import_permissions;
@@ -1598,6 +1598,24 @@ pub struct BytecodeCompiler {
     /// empty, so the compiler's emission path is byte-identical to
     /// pre-V1.1C.
     pub(crate) ownership_drop_locals: Vec<Vec<u16>>,
+    /// ADR-018 §3 (#190): local slots for which `emit_load_local_owned`
+    /// actually emitted `LoadLocalMove` in place of `CloneLocal`, i.e. whose
+    /// share the read took rather than duplicated.
+    ///
+    /// This records the *emission that happened*, not the eligibility that
+    /// could have been recomputed. The scope-exit and early-exit drop passes
+    /// suppress `DropLocal`, and `emit_drop_call_for_local` suppresses the
+    /// legacy `LoadLocal` + `DropCall` pass, on exactly this set — so the
+    /// cancelled retain and every cancelled release agree about which slots
+    /// they cover. A re-derived predicate could drift as later emission marks
+    /// a slot boxed or shared; a record cannot.
+    ///
+    /// A bare slot index is a sufficient key because `declare_local` allocates
+    /// from a monotonically increasing `next_local` that is reset only per
+    /// function (`functions.rs:1880`); `pop_scope` does not reclaim indices,
+    /// so no two bindings in one body ever share a slot. Saved and restored
+    /// around each function compile, like `ownership_drop_locals`.
+    pub(crate) rc_elided_move_slots: HashSet<u16>,
     /// Per-type drop kind: tracks whether each type has sync, async, or both drop impls.
     /// Populated during the first-pass registration of impl blocks.
     pub(crate) drop_type_info: HashMap<String, DropKind>,

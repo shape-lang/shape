@@ -725,6 +725,9 @@ impl MirBuilder {
         // Real user-binding slots (strict REAL-MOVE move-detection
         // discriminator, see MirFunction::binding_slots). Index === slot id,
         // matching `local_types`'s positional layout.
+        // Positional slot -> source name, the exact MIR/bytecode
+        // correspondence (see `MirFunction::local_names`).
+        let local_names: Vec<String> = self.locals.iter().map(|l| l.name.clone()).collect();
         let binding_slots: HashSet<SlotId> = self
             .locals
             .iter()
@@ -747,6 +750,7 @@ impl MirBuilder {
                 local_typed_array_element_types: self.local_typed_array_element_types,
                 local_declared_scalar_types: self.local_declared_scalar_types,
                 binding_slots,
+                local_names,
                 var_binding_slots: self.var_binding_slots,
             },
             had_fallbacks,

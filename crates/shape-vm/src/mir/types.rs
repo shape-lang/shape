@@ -886,6 +886,18 @@ pub struct MirFunction {
     /// f-string suppression at `helpers_binding.rs:280` at the MIR layer). This
     /// set is the discriminator.
     pub binding_slots: std::collections::HashSet<SlotId>,
+    /// Source name of each local, positionally indexed by slot id (same layout
+    /// as `local_types`). Compiler-synthesized temporaries keep their
+    /// `__mir_`-prefixed lowering names.
+    ///
+    /// This is the only exact correspondence between a MIR slot and a bytecode
+    /// local. MIR allocates a slot per lowered temporary while the bytecode
+    /// compiler allocates one per user binding, so the two numberings diverge
+    /// as soon as a body contains any temporary — a positional offset between
+    /// them is a coincidence, not a mapping. ADR-018 §3's elision consumes
+    /// this map (via `rc_elision`) rather than an offset, because getting the
+    /// correspondence wrong there means moving out of the wrong local.
+    pub local_names: Vec<String>,
     /// Slots that back a `var` smart-default binding (`var x = ...`), as opposed
     /// to an explicit `let` / `let mut` binding.
     ///

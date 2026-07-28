@@ -892,17 +892,17 @@ fn test_method_call_returned_non_drop_value_emits_no_typed_drop() {
 /// earns nothing shared is an ordinary owned local and its read compiles to
 /// the ownership-aware `CloneLocal`.
 ///
-/// The ticket words this tripwire as `LoadLocalMove`. That opcode is not
-/// reachable for a heap-carrying binding today: the V1.1C shortcut in
-/// `compiler/helpers_binding.rs::emit_load_local_owned` returns `CloneLocal`
-/// before the `OwnershipDecision::Move` match is consulted, and its own
-/// `TODO(V1.1D prerequisite)` records that re-consulting Move there (plus
-/// skipping moved-out slots in `DropLocal` tracking) is unlanded work
-/// outside this ticket. Asserting `LoadLocalMove` here would mean asserting
-/// something no `var` can currently produce, so this pins the property the
-/// tripwire protects — the read is ownership-aware and the slot is not
-/// pinned into a cell — which fails the moment a `var` is re-pinned to
-/// shared storage.
+/// The ticket words this tripwire as `LoadLocalMove`, and #190 (ADR-018 §3)
+/// landed the move path that makes the literal wording assertable: a single
+/// terminal read of an unaliased owned heap local now takes the slot's share
+/// rather than minting a second one. The literal opcode assertion lives with
+/// that work, in
+/// `executor::tests::rc_elision::a_qualifying_var_read_compiles_to_load_local_move`.
+///
+/// What this test keeps is the #181 property itself, which is about storage
+/// rather than about the opcode: a `var` that earns nothing shared is read
+/// directly, never through a cell. It fails the moment a `var` is re-pinned
+/// to shared storage, however the read is spelled.
 #[test]
 fn a_qualifying_var_read_is_ownership_aware_and_not_cell_pinned() {
     let bc = compile(
@@ -923,7 +923,8 @@ let r = f()
     let body = &bc.instructions[f.entry_point..f.entry_point + f.body_length];
 
     assert!(
-        body.iter().any(|i| i.opcode == OpCode::CloneLocal),
+        body.iter()
+            .any(|i| matches!(i.opcode, OpCode::CloneLocal | OpCode::LoadLocalMove)),
         "the `var xs` read must take the ownership-aware owned-heap load; got {:?}",
         body.iter().map(|i| i.opcode).collect::<Vec<_>>()
     );

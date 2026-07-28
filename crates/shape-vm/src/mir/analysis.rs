@@ -115,6 +115,11 @@ pub struct BorrowAnalysis {
     /// `SharedCow` RC'd cell so the `PromotedCell` carrier can outlive the
     /// referent's lexical frame. Every other sink keeps rejecting (B0003/etc).
     pub reference_escape_promotions: Vec<PromotionTrigger>,
+    /// ADR-018 §3: slots whose retain/release pair the bytecode compiler may
+    /// cancel by taking the slot's existing share at its single terminal read
+    /// instead of minting a second one. Read-only fact — this pass rewrites no
+    /// MIR, so the JIT's MIR consumer is unaffected.
+    pub rc_elision: super::rc_elision::RcElisionPlan,
 }
 
 /// Information about a single loan (borrow).
@@ -446,6 +451,7 @@ impl BorrowAnalysis {
             mutability_errors: Vec::new(),
             return_reference_summary: None,
             reference_escape_promotions: Vec::new(),
+            rc_elision: super::rc_elision::RcElisionPlan::default(),
         }
     }
 

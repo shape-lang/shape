@@ -479,6 +479,7 @@ mod tests {
             local_typed_array_element_types: std::collections::HashMap::new(),
             local_declared_scalar_types: std::collections::HashMap::new(),
             binding_slots: Default::default(),
+            local_names: Vec::new(),
             var_binding_slots: Default::default(),
         };
 
@@ -518,6 +519,7 @@ mod tests {
             local_typed_array_element_types: std::collections::HashMap::new(),
             local_declared_scalar_types: std::collections::HashMap::new(),
             binding_slots: Default::default(),
+            local_names: Vec::new(),
             var_binding_slots: Default::default(),
         };
 
@@ -550,6 +552,7 @@ mod tests {
             local_typed_array_element_types: std::collections::HashMap::new(),
             local_declared_scalar_types: std::collections::HashMap::new(),
             binding_slots: Default::default(),
+            local_names: Vec::new(),
             var_binding_slots: Default::default(),
         };
 
@@ -584,6 +587,7 @@ mod tests {
             local_typed_array_element_types: std::collections::HashMap::new(),
             local_declared_scalar_types: std::collections::HashMap::new(),
             binding_slots: Default::default(),
+            local_names: Vec::new(),
             var_binding_slots: Default::default(),
         };
 
