@@ -184,7 +184,79 @@ impl PluginLanguageRuntime {
         }))
     }
 
+    /// Deliver the declared Shape contract for this language, then collect the
+    /// interface stub the extension generates from it.
+    ///
+    /// ADR-019 §1 / R25 (POLY-STUB-CHANNEL, issue #196). This is the whole stub
+    /// channel in one call, because the two halves are not independently
+    /// meaningful: a contract delivered with no stub collected is the
+    /// caller-less `register_types` this ticket exists to fix, and a stub
+    /// requested without a contract has nothing to describe.
+    ///
+    /// Returns `None` when the extension declares no stub channel (the vtable
+    /// slot is `None` — an extension built before the capability existed). The
+    /// contract is still delivered in that case; only the stub is unavailable.
+    pub fn register_contract(
+        &self,
+        contract: &shape_abi_v1::foreign_types::ForeignContractExport,
+    ) -> Result<Option<String>> {
+        let bytes = rmp_serde::to_vec_named(contract).map_err(|e| ShapeError::RuntimeError {
+            message: format!(
+                "Failed to serialize the foreign contract for '{}': {}",
+                self.language_id, e
+            ),
+            location: None,
+        })?;
+        self.register_types(&bytes)?;
+        self.generate_stubs()
+    }
+
+    /// Return the interface stub document the extension generated from the
+    /// contract most recently delivered through [`Self::register_types`].
+    ///
+    /// `None` means the extension declares no stub channel; `Some("")` means it
+    /// declares one and produced nothing.
+    pub fn generate_stubs(&self) -> Result<Option<String>> {
+        let Some(generate_fn) = self.state.vtable.generate_stubs else {
+            return Ok(None);
+        };
+
+        let mut out_ptr: *mut u8 = std::ptr::null_mut();
+        let mut out_len: usize = 0;
+        let rc = unsafe { generate_fn(self.state.instance, &mut out_ptr, &mut out_len) };
+        if rc != 0 {
+            return Err(ShapeError::RuntimeError {
+                message: format!(
+                    "Language runtime '{}' generate_stubs failed (error code {})",
+                    self.language_id, rc
+                ),
+                location: None,
+            });
+        }
+        if out_ptr.is_null() || out_len == 0 {
+            return Ok(Some(String::new()));
+        }
+
+        let bytes = unsafe { std::slice::from_raw_parts(out_ptr, out_len) }.to_vec();
+        if let Some(free_fn) = self.state.vtable.free_buffer {
+            unsafe { free_fn(out_ptr, out_len) };
+        }
+
+        String::from_utf8(bytes)
+            .map(Some)
+            .map_err(|e| ShapeError::RuntimeError {
+                message: format!(
+                    "Language runtime '{}' returned a non-UTF-8 stub document: {}",
+                    self.language_id, e
+                ),
+                location: None,
+            })
+    }
+
     /// Register Shape type schemas with the runtime for stub generation.
+    ///
+    /// Prefer [`Self::register_contract`], which owns the payload encoding and
+    /// collects the generated stub; this is the raw vtable call.
     pub fn register_types(&self, types_msgpack: &[u8]) -> Result<()> {
         let register_fn = match self.state.vtable.register_types {
             Some(f) => f,

@@ -1,0 +1,391 @@
+{
+  "record_kind": "LegacyMigrationBaseline",
+  "record_version": 1,
+  "program_id": "adr011-012",
+  "ticket": 133,
+  "entry_id": "SEMANTIC-LEGACY-INVENTORY",
+  "manifest_ordinal": 23,
+  "title": "Freeze legacy discovery, comptime, and intrinsic authority",
+  "territory": "discovery producers, ambient comptime entry points and observations, live intrinsic selectors",
+  "authority": {
+    "adrs": [
+      "ADR-011",
+      "ADR-013"
+    ],
+    "rulings": [
+      "R1",
+      "R3",
+      "R14",
+      "R18",
+      "R20"
+    ]
+  },
+  "step": "docs/design/typed-comptime/adr011-012-execution-rulings.md — ten required steps, step 4",
+  "source_revision": "8b9a9fbc5075b86c448ca01caa114c633f8f6ca9",
+  "regenerate_with": "node scripts/generate-adr011-012-legacy-baselines.mjs --ticket 133",
+  "check_with": "node scripts/check-adr011-012-legacy-baselines.mjs --ticket 133",
+  "direction_rule": "Monotonic non-increasing. A set count may fall (migration progress) and may never rise. A new owner path is growth even when the total is unchanged, because it is a new surface carrying old authority.",
+  "excluded_from_hash": [
+    "source_revision",
+    "description"
+  ],
+  "total_count": 381,
+  "total_count_note": "Sum of the set counts. Sets may deliberately overlap (a narrowly scoped set can re-count sites a broader set already counts), so this is a ratchet aggregate for reporting movement — never a count of distinct legacy sites.",
+  "sets_sha256": "3a44f9d7ed4a653e33b6c33fda2f86c27be801e8b542279e8342d55a7a29aa8c",
+  "sets": [
+    {
+      "id": "ambient-builtin-name-selection",
+      "category": "live intrinsic selectors",
+      "description": "Terminal-name match arms selecting a BuiltinFunction. ADR-011 replaces name selection with a resolved IntrinsicId from the canonical catalog; every arm here is one spelling that currently carries authority.",
+      "scope": [
+        "crates",
+        "bin",
+        "tools",
+        "extensions"
+      ],
+      "exclude": [],
+      "pattern": "\"[A-Za-z_][A-Za-z0-9_]*\"\\s*=>\\s*BuiltinFunction::",
+      "count": 137,
+      "owner_count": 1,
+      "owners": [
+        {
+          "path": "crates/shape-vm/src/compiler/helpers.rs",
+          "count": 137
+        }
+      ]
+    },
+    {
+      "id": "internal-intrinsic-name-prefix-gates",
+      "category": "live intrinsic selectors",
+      "description": "Sites treating a `__native_` / `__intrinsic_` / `__json_` name prefix as authority. ADR-011 states these prefixes are presentation/hygiene, not authority.",
+      "scope": [
+        "crates",
+        "bin",
+        "tools",
+        "extensions"
+      ],
+      "exclude": [],
+      "pattern": "starts_with\\(\"__(native|intrinsic|json)_",
+      "count": 5,
+      "owner_count": 2,
+      "owners": [
+        {
+          "path": "crates/shape-vm/src/compiler/compiler_impl_reference_model.rs",
+          "count": 2
+        },
+        {
+          "path": "crates/shape-vm/src/compiler/helpers.rs",
+          "count": 3
+        }
+      ]
+    },
+    {
+      "id": "allow-internal-builtins-gates",
+      "category": "ambient comptime entry points",
+      "description": "Reads and writes of the `allow_internal_builtins` privilege flag. CLAUDE.md names this flag, with the terminal-name gates, as migration debt that must not grow.",
+      "scope": [
+        "crates",
+        "bin",
+        "tools",
+        "extensions"
+      ],
+      "exclude": [],
+      "pattern": "allow_internal_builtins",
+      "count": 37,
+      "owner_count": 12,
+      "owners": [
+        {
+          "path": "bin/shape-cli/tests/common/mod.rs",
+          "count": 1
+        },
+        {
+          "path": "crates/shape-runtime/src/type_system/environment/mod.rs",
+          "count": 1
+        },
+        {
+          "path": "crates/shape-runtime/stdlib-src/core/remote.shape",
+          "count": 1
+        },
+        {
+          "path": "crates/shape-vm/src/compiler/compiler_impl_initialization.rs",
+          "count": 1
+        },
+        {
+          "path": "crates/shape-vm/src/compiler/compiler_impl_reference_model.rs",
+          "count": 6
+        },
+        {
+          "path": "crates/shape-vm/src/compiler/expressions/function_calls.rs",
+          "count": 3
+        },
+        {
+          "path": "crates/shape-vm/src/compiler/functions.rs",
+          "count": 11
+        },
+        {
+          "path": "crates/shape-vm/src/compiler/functions_foreign.rs",
+          "count": 4
+        },
+        {
+          "path": "crates/shape-vm/src/compiler/helpers.rs",
+          "count": 4
+        },
+        {
+          "path": "crates/shape-vm/src/compiler/loops.rs",
+          "count": 2
+        },
+        {
+          "path": "crates/shape-vm/src/compiler/mod.rs",
+          "count": 1
+        },
+        {
+          "path": "crates/shape-vm/src/configuration.rs",
+          "count": 2
+        }
+      ]
+    },
+    {
+      "id": "prelude-name-authority",
+      "category": "discovery producers",
+      "description": "Uses of `prepend_prelude_items` and its returned `stdlib_function_names` set — the name-based discovery authority ADR-011 migration deletes. CLAUDE.md forbids extending the set or using it to authorize new semantics.",
+      "scope": [
+        "crates",
+        "bin",
+        "tools",
+        "extensions"
+      ],
+      "exclude": [],
+      "pattern": "prepend_prelude_items|stdlib_function_names",
+      "count": 20,
+      "owner_count": 17,
+      "owners": [
+        {
+          "path": "crates/shape-jit/src/compiler/a1d2_tests.rs",
+          "count": 1
+        },
+        {
+          "path": "crates/shape-jit/src/compiler/a1e_tests.rs",
+          "count": 1
+        },
+        {
+          "path": "crates/shape-jit/src/compiler/accessors.rs",
+          "count": 1
+        },
+        {
+          "path": "crates/shape-vm/src/bundle_compiler.rs",
+          "count": 1
+        },
+        {
+          "path": "crates/shape-vm/src/compiler/compiler_impl_initialization.rs",
+          "count": 1
+        },
+        {
+          "path": "crates/shape-vm/src/compiler/comptime_builtins/semantic_freeze.rs",
+          "count": 1
+        },
+        {
+          "path": "crates/shape-vm/src/compiler/functions.rs",
+          "count": 2
+        },
+        {
+          "path": "crates/shape-vm/src/compiler/mod.rs",
+          "count": 1
+        },
+        {
+          "path": "crates/shape-vm/src/compiler/statements/annotation_declarations/planner.rs",
+          "count": 1
+        },
+        {
+          "path": "crates/shape-vm/src/compiler/statements/annotation_import_pipeline_tests.rs",
+          "count": 1
+        },
+        {
+          "path": "crates/shape-vm/src/compiler/template_specialization/pseudo_tuple.rs",
+          "count": 1
+        },
+        {
+          "path": "crates/shape-vm/src/execution.rs",
+          "count": 1
+        },
+        {
+          "path": "crates/shape-vm/src/executor/tests/test_utils.rs",
+          "count": 2
+        },
+        {
+          "path": "crates/shape-vm/src/executor/tests/try_operator.rs",
+          "count": 1
+        },
+        {
+          "path": "crates/shape-vm/src/feature_tests/module_tests.rs",
+          "count": 1
+        },
+        {
+          "path": "crates/shape-vm/src/module_resolution.rs",
+          "count": 1
+        },
+        {
+          "path": "crates/shape-vm/src/test_utils.rs",
+          "count": 2
+        }
+      ]
+    },
+    {
+      "id": "declaration-discovery-producers",
+      "category": "discovery producers",
+      "description": "References to the current declaration-discovery producer. ADR-011 splits discovery into a bounded snapshot with one owner; this set is the surface that must collapse into it.",
+      "scope": [
+        "crates",
+        "bin",
+        "tools",
+        "extensions"
+      ],
+      "exclude": [],
+      "pattern": "declaration_discovery|DeclarationDiscovery",
+      "count": 44,
+      "owner_count": 4,
+      "owners": [
+        {
+          "path": "crates/shape-vm/src/compiler/comptime_builtins/expansion_provenance.rs",
+          "count": 14
+        },
+        {
+          "path": "crates/shape-vm/src/compiler/functions_annotations.rs",
+          "count": 10
+        },
+        {
+          "path": "crates/shape-vm/src/compiler/functions_annotations/declaration_discovery.rs",
+          "count": 17
+        },
+        {
+          "path": "crates/shape-vm/src/compiler/functions_annotations/e2_slice0_spike_tests.rs",
+          "count": 3
+        }
+      ]
+    },
+    {
+      "id": "legacy-reflection-call-forms",
+      "category": "ambient comptime entry points",
+      "description": "Live `type_info(...)` and `implements(\"...\")` call sites — the name-selected reflection cascade and the string-typed trait query. Their deletion exists on the paused adr009/e6 branch (f58a0d85) and is NOT merged, so this surface is still live; see docs/program/adr011-012/e6-disposition.md.",
+      "scope": [
+        "crates",
+        "bin",
+        "tools",
+        "extensions"
+      ],
+      "exclude": [],
+      "pattern": "\\btype_info\\s*\\(|\\bimplements\\s*\\(\\s*\"",
+      "count": 138,
+      "owner_count": 27,
+      "owners": [
+        {
+          "path": "crates/shape-runtime/src/builtin_metadata.rs",
+          "count": 3
+        },
+        {
+          "path": "crates/shape-runtime/src/type_schema/builtin_schemas.rs",
+          "count": 1
+        },
+        {
+          "path": "crates/shape-runtime/src/type_system/inference/access.rs",
+          "count": 3
+        },
+        {
+          "path": "crates/shape-runtime/stdlib-src/core/prelude.shape",
+          "count": 1
+        },
+        {
+          "path": "crates/shape-runtime/stdlib-src/core/types.shape",
+          "count": 3
+        },
+        {
+          "path": "crates/shape-vm/src/compiler/comptime.rs",
+          "count": 46
+        },
+        {
+          "path": "crates/shape-vm/src/compiler/comptime_builtins.rs",
+          "count": 3
+        },
+        {
+          "path": "crates/shape-vm/src/compiler/comptime_builtins/type_reflection.rs",
+          "count": 1
+        },
+        {
+          "path": "crates/shape-vm/src/compiler/comptime_concrete.rs",
+          "count": 2
+        },
+        {
+          "path": "crates/shape-vm/src/compiler/comptime_target.rs",
+          "count": 3
+        },
+        {
+          "path": "crates/shape-vm/src/compiler/expressions/function_calls.rs",
+          "count": 1
+        },
+        {
+          "path": "tools/shape-lsp/src/diagnostics.rs",
+          "count": 1
+        },
+        {
+          "path": "tools/shape-lsp/src/hover.rs",
+          "count": 1
+        },
+        {
+          "path": "tools/shape-test/tests/annotations_comptime/directives.rs",
+          "count": 1
+        },
+        {
+          "path": "tools/shape-test/tests/comptime/flagship_wf3d.rs",
+          "count": 8
+        },
+        {
+          "path": "tools/shape-test/tests/comptime/frozen_type.rs",
+          "count": 2
+        },
+        {
+          "path": "tools/shape-test/tests/comptime/functions.rs",
+          "count": 1
+        },
+        {
+          "path": "tools/shape-test/tests/comptime/reflect.rs",
+          "count": 2
+        },
+        {
+          "path": "tools/shape-test/tests/comptime/trait_evidence.rs",
+          "count": 1
+        },
+        {
+          "path": "tools/shape-test/tests/comptime/type_info_chained.rs",
+          "count": 47
+        },
+        {
+          "path": "tools/shape-test/tests/lsp/typed_comptime.rs",
+          "count": 1
+        },
+        {
+          "path": "tools/shape-test/tests/regression/language_surface.rs",
+          "count": 1
+        },
+        {
+          "path": "tools/vmjit-diff/corpus/ACC__comptime__b3.shape",
+          "count": 1
+        },
+        {
+          "path": "tools/vmjit-diff/corpus/ACC__comptime__pif2.shape",
+          "count": 1
+        },
+        {
+          "path": "tools/vmjit-diff/corpus/ACC__comptime__probe7.shape",
+          "count": 1
+        },
+        {
+          "path": "tools/vmjit-diff/corpus/ACC__comptime__probe7b.shape",
+          "count": 1
+        },
+        {
+          "path": "tools/vmjit-diff/corpus/ACC__comptime__probe7c.shape",
+          "count": 1
+        }
+      ]
+    }
+  ]
+}

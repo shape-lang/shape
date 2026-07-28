@@ -1,0 +1,13 @@
+# Build-parallelism cap — 2026-07-28 incident response.
+#
+# A cold `cargo test -p shape-test --no-run` at default parallelism
+# (jobs = nproc = 32) put ~32 concurrent workspace-sized link chains
+# (cc → collect2 → ld, 0.8–1.5 GiB RSS each) on this box: 49 GiB in
+# linkers alone, memory pressure avg10=99%, host load 121. The linker
+# tail, not rustc, is the memory driver on this workspace.
+#
+# jobs = 8 bounds the link tail to ~6–12 GiB. Remove when the
+# infra-level CARGO_BUILD_JOBS deployment (atlas) lands, or raise on a
+# bigger box.
+[build]
+jobs = 8

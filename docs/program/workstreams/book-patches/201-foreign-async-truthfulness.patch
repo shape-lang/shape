@@ -1,0 +1,225 @@
+diff -ru a/book/book-site/src/content/docs/stdlib/core/remote.mdx b/book/book-site/src/content/docs/stdlib/core/remote.mdx
+--- a/book/book-site/src/content/docs/stdlib/core/remote.mdx	2026-07-27 18:53:19.002189370 +0200
++++ b/book/book-site/src/content/docs/stdlib/core/remote.mdx	2026-07-27 18:54:08.339575583 +0200
+@@ -107,16 +107,18 @@
+ `@remote` also works on foreign function definitions. The function is
+ compiled and executed on the remote server using its language runtime:
+ 
+-This example uses an `async fn python` target with `numpy` on the receiver. Two
+-things keep it a reference sketch: async `@remote` targets are an E4-S5 residual
+-(tracked in #83), and the book-truth gate starts its loopback receiver without a
+-`--ffi-languages` opt-in, so it cannot run a foreign python runtime server-side
+-(tracked in #85). The synchronous python × `@remote` transfer itself is proven
+-green in the E4 S6 Rust acceptance suite; this cell stays `runnable=false` here.
++This example uses a `fn python` target with `numpy` on the receiver. It was
++written against `async fn python`, which is now a compile error (`[C0932]`,
++issue **#202**); the body never awaited anything, so dropping the keyword
++changes nothing it demonstrates. One thing still keeps it a reference sketch:
++the book-truth gate starts its loopback receiver without a `--ffi-languages`
++opt-in, so it cannot run a foreign python runtime server-side (tracked in #85).
++The synchronous python × `@remote` transfer itself is proven green in the E4 S6
++Rust acceptance suite; this cell stays `runnable=false` here.
+ 
+ ```shape runnable=false
+ @remote("gpu-worker:9527")
+-async fn python matrix_multiply(a: Array<Array<number>>, b: Array<Array<number>>) -> Result<Array<Array<number>>, string> {
++fn python matrix_multiply(a: Array<Array<number>>, b: Array<Array<number>>) -> Result<Array<Array<number>>, string> {
+     import numpy as np
+     a_np = np.array(a)
+     b_np = np.array(b)
+diff -ru a/book/book-site/src/content/docs/tooling/polyglot.mdx b/book/book-site/src/content/docs/tooling/polyglot.mdx
+--- a/book/book-site/src/content/docs/tooling/polyglot.mdx	2026-07-27 18:53:18.987189253 +0200
++++ b/book/book-site/src/content/docs/tooling/polyglot.mdx	2026-07-27 18:54:08.339575583 +0200
+@@ -121,7 +121,7 @@
+ 
+ ## Async Foreign Functions
+ 
+-Mark a polyglot function `async` and it runs on the async executor:
++**Not supported yet.** `async` on a polyglot function is a compile error:
+ 
+ ```shape runnable=false
+ async fn python fetch_json(url: string) -> Result<Vec<number>> {
+@@ -131,10 +131,50 @@
+             data = await response.json()
+             return data['values']
+ }
++```
++
++```
++[C0932] `async fn python fetch_json` is not supported — a foreign call runs
++synchronously on the VM thread and its declared return type is not a future.
++The body's own `await`s do run to completion inside the extension, but the
++caller cannot overlap anything with them, so `async` here promises a
++concurrency the runtime does not provide (ADR-019 §5 forbids this untruthful
++contract). Real foreign async — the invoke offloaded off-thread and resolved
++at `await` — is planned, not refused: see issue #202 (POLY-ASYNC-OFFLOAD).
++This rejection is transitional and is deleted when that lands.
++```
+ 
+-let values = await fetch_json("https://api.example.com/data")?
++The declaration used to compile, and that was the problem: it promised
++suspension and concurrency nobody delivered. A foreign call runs on the VM
++thread from start to finish, and the declared return type is a value, not a
++future. The body's own `await`s really do run — the Python extension wraps an
++async body in `asyncio.run(...)`, TypeScript in an `async function` — but they
++run to completion while the caller waits, so nothing overlaps. Rather than keep
++a declaration that misstates its own contract, the compiler now refuses it.
++
++Real foreign async is planned, not refused (**#202**): the invoke moves
++off-thread and `await` resolves it through the same pending-task channel
++Shape's own async uses, so two `async fn python` calls overlap instead of
++serializing.
++
++Until then, drop the keyword:
++
++```shape
++fn python fetch_json(url: string) -> Result<Vec<number>> {
++    import json
++    import urllib.request
++    with urllib.request.urlopen(url) as response:
++        return json.load(response)['values']
++}
+ ```
+ 
++The call runs synchronously — which is what it already did. One caveat, because
++the keyword is doing real work inside the extension: a body that uses `await`
++internally cannot simply lose the `async`, since the wrapper is what makes that
++`await` legal. Such a body must drive its own completion instead — wrap it in
++`asyncio.run(...)` for Python, or resolve the promise before returning for
++TypeScript.
++
+ ## Annotations
+ 
+ Polyglot functions accept annotations, with two handler kinds rejected.
+diff -ru a/book/book-site/src/content/docs/tooling/python-extension.mdx b/book/book-site/src/content/docs/tooling/python-extension.mdx
+--- a/book/book-site/src/content/docs/tooling/python-extension.mdx	2026-07-27 18:53:18.992189292 +0200
++++ b/book/book-site/src/content/docs/tooling/python-extension.mdx	2026-07-27 18:54:08.339575583 +0200
+@@ -146,27 +146,25 @@
+     punch_line: string,
+ }
+ 
+-async fn python fetch_joke(url: string) -> Result<JokeResponse> {
+-  import aiohttp
+-  async with aiohttp.ClientSession() as session:
+-    async with session.get(url) as response:
+-      data = await response.json()
+-  return data
++fn python fetch_joke(url: string) -> Result<JokeResponse> {
++  import json
++  import urllib.request
++  with urllib.request.urlopen(url) as response:
++    return json.load(response)
+ }
+ 
+-let joke = await fetch_joke("https://example.com/joke")?
++let joke = fetch_joke("https://example.com/joke")?
+ print(joke.punch_line)  // works — mapped from wire key "punch line"
+ ```
+ 
+ #### Inline object types
+ 
+ ```shape runnable=false
+-async fn python fetch(url: string) -> Result<{setup: string, @alias("punch line") punch_line: string}> {
+-  import aiohttp
+-  async with aiohttp.ClientSession() as session:
+-    async with session.get(url) as response:
+-      data = await response.json()
+-  return data
++fn python fetch(url: string) -> Result<{setup: string, @alias("punch line") punch_line: string}> {
++  import json
++  import urllib.request
++  with urllib.request.urlopen(url) as response:
++    return json.load(response)
+ }
+ ```
+ 
+@@ -192,24 +190,30 @@
+ 
+ ### Async Functions
+ 
+-Add the `async` keyword for I/O-bound Python:
++**Not supported yet** — `async fn python` is a compile error `[C0932]`, owned by
++issue **#202**. The keyword promised concurrency that never existed: the
++extension ran the coroutine to completion on Python's `asyncio` loop while the
++Shape VM blocked, so nothing overlapped. Write the function synchronously
++instead:
+ 
+ ```shape runnable=false
+-async fn python fetch_json(url: string) -> Result<{setup: string, punchline: string}> {
+-  import aiohttp
+-  async with aiohttp.ClientSession() as session:
+-    async with session.get(url) as response:
+-      data = await response.json()
+-  return data
++fn python fetch_json(url: string) -> Result<{setup: string, punchline: string}> {
++  import json
++  import urllib.request
++  with urllib.request.urlopen(url) as response:
++    return json.load(response)
+ }
+ 
+-let values = await fetch_json("https://official-joke-api.appspot.com/random_joke")?
++let values = fetch_json("https://official-joke-api.appspot.com/random_joke")?
+ 
+ print(values)
+ // {setup: "Why did the scarecrow win an award?", punchline: "He was outstanding in his field."}
+ ```
+ 
+-Async functions use Python's `asyncio` event loop internally. The Shape VM blocks until the coroutine completes.
++A body that genuinely needs `await` must drive its own loop — wrap it in
++`asyncio.run(...)` — until #202 lands. See
++[Polyglot Functions :: Async Foreign Functions](/tooling/polyglot/#async-foreign-functions)
++for the full diagnostic and what replaces it.
+ 
+ ## Enable It in LSP
+ 
+diff -ru a/book/book-site/src/content/docs/tooling/typescript-extension.mdx b/book/book-site/src/content/docs/tooling/typescript-extension.mdx
+--- a/book/book-site/src/content/docs/tooling/typescript-extension.mdx	2026-07-27 18:53:18.998189339 +0200
++++ b/book/book-site/src/content/docs/tooling/typescript-extension.mdx	2026-07-27 18:54:08.339575583 +0200
+@@ -175,7 +175,8 @@
+ 
+ ### Async Functions
+ 
+-Add the `async` keyword for I/O-bound TypeScript:
++**Not supported yet** — `async fn typescript` is a compile error `[C0932]`,
++owned by issue **#202**:
+ 
+ ```shape runnable=false
+ async fn typescript fetch_json(url: string) -> Result<{value: number}> {
+@@ -184,11 +185,14 @@
+ }
+ ```
+ 
+-`async fn typescript` wraps the body in an `async function`, returning a
+-Promise. The extension uses a cached Tokio runtime (built once per
+-`TsRuntime` instance on the first async call) to drive `deno_core`'s event
+-loop until the promise resolves. The Shape VM blocks the calling task until
+-the promise settles.
++The keyword promised concurrency that never existed. The extension wrapped the
++body in an `async function` and drove `deno_core`'s event loop with a cached
++Tokio runtime until the promise resolved — but the Shape VM blocked the calling
++task for the whole of it, so two such calls serialized. Write the body to
++resolve its own promise before returning, and drop the keyword, until #202
++lands. See
++[Polyglot Functions :: Async Foreign Functions](/tooling/polyglot/#async-foreign-functions)
++for the full diagnostic and what replaces it.
+ 
+ ## Enable It in LSP
+ 
+@@ -259,11 +263,11 @@
+ 
+ ### Async function never resolves
+ 
+-`async fn typescript` blocks until the returned promise settles. If a promise
+-never resolves (for example, awaiting a fetch with no timeout against an
+-unreachable host), the Shape VM will hang on the awaiting call. Use
+-`Result<T>` and surface a timeout from inside the TypeScript body for
+-defensive code paths.
++`async fn typescript` no longer compiles (`[C0932]`, issue **#202**), so this
++hang is no longer reachable through that keyword. The underlying hazard
++survives in any synchronous body that waits on something unbounded: the Shape
++VM blocks on the foreign call until it returns. Use `Result<T>` and surface a
++timeout from inside the TypeScript body for defensive code paths.
+ 
+ ### Hover works but TypeScript semantic highlighting is missing
+ 

@@ -42,6 +42,7 @@ shape-ast = { workspace = true }
 shape-abi-v1 = { workspace = true }
 shape-diagnostics = { workspace = true }
 shape-runtime = { workspace = true }
+shape-semantic-db = { workspace = true }
 shape-wire = { workspace = true }
 shape-jit = { workspace = true, optional = true }
 shape-vm = { workspace = true }
@@ -93,6 +94,11 @@ tui-textarea = "0.7"
 [dev-dependencies]
 tempfile = "3.24"
 shape-wire = { workspace = true }
+# ADR-017 §4 tripwire 1: proving that one compiler-emitted fix applies
+# byte-identically through this crate's `--diagnostics json` adapter and
+# through the LSP's code action needs both consumers in one test.
+shape-lsp = { workspace = true }
+tower-lsp-server = "0.23"
 assert_cmd = "2.0"
 predicates = "3.1"
 # WF-2C-fu R4: throwaway self-signed cert generation for the TLS-termination

@@ -61,7 +61,29 @@ fn parse_with_fallback(text: &str) -> Option<Program> {
 ///
 /// When `cached_program` is provided, it is used as a fallback AST when
 /// the current source text fails to parse (e.g., user is mid-edit).
+/// The shared semantic seam's facts are appended when the hovered word names a
+/// callable the seam publishes (ADR-011 §6). That section is additive: the LSP
+/// formats facts it reads from the seam, it does not compute its own.
 pub fn get_hover(
+    text: &str,
+    position: Position,
+    module_cache: Option<&ModuleCache>,
+    current_file: Option<&Path>,
+    cached_program: Option<&Program>,
+) -> Option<Hover> {
+    let base = get_hover_without_semantic_facts(
+        text,
+        position,
+        module_cache,
+        current_file,
+        cached_program,
+    );
+    crate::semantic_seam::augment_hover(base, text, position, current_file)
+}
+
+/// Hover content before the semantic-facts section is appended. Exposed so a
+/// test can observe the two separately.
+pub fn get_hover_without_semantic_facts(
     text: &str,
     position: Position,
     module_cache: Option<&ModuleCache>,
@@ -570,7 +592,11 @@ fn get_hook_template_body_hover(
         };
         lines.push(format!(
             "- `{}` hook on `{}` via `@{}`: `{}`{}",
-            row.hook_word, row.target_name, row.annotation_name, row.specialized_signature, captures
+            row.hook_word,
+            row.target_name,
+            row.annotation_name,
+            row.specialized_signature,
+            captures
         ));
     }
     Some(Hover {

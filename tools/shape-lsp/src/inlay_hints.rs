@@ -34,14 +34,13 @@ pub struct InlayHintConfig {
     /// call in a method chain (e.g. `xs.map(f).filter(g).sum()` → hint after
     /// `.map(f)` and `.filter(g)`).
     pub show_chain_hints: bool,
-    /// W2.4 / 1.25 + LSP-I (R8 W11): render an approximate
-    /// `BindingStorageClass` label after `let`/`var` bindings. The five
-    /// ADR-006 §2 categories — `[Direct]` / `[UniqueHeap]` / `[SharedCow]` /
-    /// `[SharedAtomic]` / `[SharedAtomicMut]` — are rendered as best-effort
-    /// labels from the LSP-side AST (the authoritative classifier lives in
-    /// the bytecode compiler at `crates/shape-vm/src/type_tracking.rs:286`
-    /// + the MIR borrow solver). Always surfaced with the `[… approx]`
-    /// qualifier so the user knows it is not the compiler verdict.
+    /// Render the compiler's `BindingStorageClass` decision after a binding
+    /// — `[Direct]`, `[UniqueHeap]`, `[SharedCow]`, `[Reference]`,
+    /// `[LocalMutablePtr]`. The label is `BindingStorageClass::name()`
+    /// projected from the compiler's own `binding_storage_query()` table
+    /// (ADR-017 §2 / R23), so it can only spell a class the compiler
+    /// actually has. It carries no `approx` qualifier because it is no
+    /// longer an approximation.
     ///
     /// **Standing pattern (binding 2026-05-26):** Shape-unique inlay hints
     /// (chain hints, binding-storage-class hints, anything not Rust/TS
@@ -49,8 +48,13 @@ pub struct InlayHintConfig {
     /// namespace. The canonical LSP key for this toggle is
     /// `shape.inlayHints.bindingStorageClass.enable: boolean` (Decision 2
     /// ratify). The legacy `bindingKindHints` key (W2.4 / 1.25 vintage) is
-    /// accepted as an alias for backward compatibility; future inlay-hint
-    /// sub-clusters should follow the same opt-in default-OFF shape.
+    /// accepted as an alias.
+    ///
+    /// A `var` declaration is the exception and is hinted regardless of this
+    /// toggle (#181): `var` exists to hand the storage decision to the
+    /// compiler, so hiding the decision by default leaves the user with a
+    /// declaration form whose entire meaning is invisible. This is the
+    /// default-ON case ERGO-VAR-TRUTH names; `let` keeps the opt-in shape.
     pub show_binding_kind_hints: bool,
 }
 
@@ -191,6 +195,21 @@ struct HintContext<'a> {
     /// when the Visitor revisits inner MethodCall nodes of the chain spine
     /// (W2.4 / 1.27).
     chain_hint_offsets: std::collections::HashSet<usize>,
+    /// ADR-017 §2 / R23: the compiler's per-binding storage decisions,
+    /// looked up by the bound name's source offset. The inner `None` means
+    /// this document carries no query authority — the storage-class hint is
+    /// then not emitted at all, rather than falling back to a guess.
+    ///
+    /// Filled on first use, not at construction: answering it costs a full
+    /// bytecode compile, and a request that emits no storage-class hint
+    /// (every `let`-only document with the toggle off) must not pay it.
+    binding_storage: Option<Option<shape_vm::compiler::BindingStorageTable>>,
+    /// Module context for the storage-decision query. An imported document
+    /// needs the same registration the semantic-diagnostics path performs, or
+    /// it has no query authority and shows no storage class.
+    file_path: Option<&'a std::path::Path>,
+    module_cache: Option<&'a crate::module_cache::ModuleCache>,
+    workspace_root: Option<&'a std::path::Path>,
 }
 
 impl<'a> HintContext<'a> {
@@ -291,6 +310,9 @@ impl<'a> HintContext<'a> {
         config: &'a InlayHintConfig,
         type_map: HashMap<String, String>,
         function_types: HashMap<String, FunctionTypeInfo>,
+        file_path: Option<&'a std::path::Path>,
+        module_cache: Option<&'a crate::module_cache::ModuleCache>,
+        workspace_root: Option<&'a std::path::Path>,
     ) -> Self {
         Self {
             text,
@@ -301,7 +323,32 @@ impl<'a> HintContext<'a> {
             type_map,
             function_types,
             chain_hint_offsets: std::collections::HashSet::new(),
+            binding_storage: None,
+            file_path,
+            module_cache,
+            workspace_root,
         }
+    }
+
+    /// The compiler's storage decision for the binding whose name starts at
+    /// `offset`, compiling the document on the first call that needs one.
+    fn storage_decision_at(
+        &mut self,
+        offset: usize,
+    ) -> Option<&shape_vm::compiler::BindingStorageDecision> {
+        if self.binding_storage.is_none() {
+            self.binding_storage = Some(crate::binding_storage::binding_storage_decisions(
+                self.program,
+                self.text,
+                self.file_path,
+                self.module_cache,
+                self.workspace_root,
+            ));
+        }
+        self.binding_storage
+            .as_ref()
+            .and_then(Option::as_ref)
+            .and_then(|table| table.at_name_offset(offset))
     }
 
     /// Collect type hint for a variable declaration without explicit type annotation.
@@ -313,7 +360,11 @@ impl<'a> HintContext<'a> {
         }
 
         let want_type_hint = self.config.show_variable_type_hints && decl.type_annotation.is_none();
-        let want_binding_hint = self.config.show_binding_kind_hints;
+        // #181: `var` hands the storage decision to the compiler, so the
+        // decision is part of reading the declaration — it is hinted whether
+        // or not the opt-in toggle is on. `let` keeps the opt-in shape.
+        let want_binding_hint = self.config.show_binding_kind_hints
+            || matches!(decl.kind, shape_ast::ast::VarKind::Var);
 
         if !want_type_hint && !want_binding_hint {
             return;
@@ -437,32 +488,32 @@ impl<'a> HintContext<'a> {
             }
         }
 
-        // 1.25 binding-kind hint (LSP-side heuristic) — flagged on
-        // `show_binding_kind_hints`. The compiler's `BindingStorageClass`
-        // (`crates/shape-vm/src/type_tracking.rs:286`) is the authoritative
-        // classifier; this LSP heuristic uses the declared/inferred type +
-        // `is_mut` to render a plausible label without paying full bytecode
-        // compilation cost on every keystroke.
-        if want_binding_hint {
-            let label_type = decl
-                .type_annotation
-                .as_ref()
-                .and_then(crate::type_inference::type_annotation_to_string)
-                .or(inferred_type.clone());
-            let label = binding_kind_label_for(decl, label_type.as_deref());
+        // ADR-017 §2 / R23: the storage-class hint READS the compiler's own
+        // decision (`binding_storage_query()`) — it does not classify. A
+        // binding the compiler did not decide, or a document with no query
+        // authority, gets no hint at all; the retired LSP-side heuristic
+        // guessed here, and its guess could name classes
+        // (`SharedAtomic`, `SharedAtomicMut`) `BindingStorageClass` has no
+        // variant for.
+        if want_binding_hint
+            && let Some((class, name)) = self
+                .storage_decision_at(span.start)
+                .map(|decision| (decision.storage_class.name(), decision.name.clone()))
+        {
             self.hints.push(InlayHint {
                 position,
-                label: InlayHintLabel::String(label),
+                label: InlayHintLabel::String(format!("[{class}]")),
                 kind: Some(InlayHintKind::TYPE),
                 text_edits: None,
                 tooltip: Some(tower_lsp_server::ls_types::InlayHintTooltip::String(
-                    "LSP-side approximation of BindingStorageClass (ADR-006 §2). The compiler's bytecode pass at crates/shape-vm/src/type_tracking.rs:286 is authoritative.".to_string(),
+                    crate::binding_storage::storage_class_tooltip(class),
                 )),
                 padding_left: Some(true),
                 padding_right: Some(true),
                 data: Some(serde_json::json!({
                     "kind": "binding-kind",
-                    "name": decl.pattern.as_identifier().unwrap_or_default(),
+                    "name": name,
+                    "storageClass": class,
                 })),
             });
         }
@@ -909,7 +960,7 @@ pub fn get_inlay_hints(
     config: &InlayHintConfig,
     _cached_program: Option<&Program>,
 ) -> Vec<InlayHint> {
-    get_inlay_hints_with_context(text, range, config, _cached_program, None, None)
+    get_inlay_hints_with_context(text, range, config, _cached_program, None, None, None)
 }
 
 /// Get inlay hints with optional file/workspace context for extension-aware inference.
@@ -920,6 +971,7 @@ pub fn get_inlay_hints_with_context(
     _cached_program: Option<&Program>,
     current_file: Option<&std::path::Path>,
     workspace_root: Option<&std::path::Path>,
+    module_cache: Option<&crate::module_cache::ModuleCache>,
 ) -> Vec<InlayHint> {
     // Parse the current document; never use cached AST spans for hint placement.
     let program = match parse_program(text) {
@@ -941,7 +993,17 @@ pub fn get_inlay_hints_with_context(
     };
     let function_types = infer_function_signatures(&program);
 
-    let mut ctx = HintContext::new(text, &program, range, config, type_map, function_types);
+    let mut ctx = HintContext::new(
+        text,
+        &program,
+        range,
+        config,
+        type_map,
+        function_types,
+        current_file,
+        module_cache,
+        workspace_root,
+    );
 
     // Use the Visitor trait for exhaustive AST traversal
     walk_program(&mut ctx, &program);
@@ -1050,184 +1112,6 @@ fn format_comptime_value(expr: &Expr) -> String {
         },
         _ => "...".to_string(),
     }
-}
-
-/// W2.4 / 1.25 + LSP-I (R8 W11): heuristic label approximating
-/// `BindingStorageClass` (ADR-006 §2) for a `let`/`var` binding. This is
-/// intentionally a best-effort LSP-side heuristic — the authoritative
-/// classification requires the MIR borrow solver + storage planner. The
-/// output uses the ADR-006 §2 vocabulary — `Direct`, `UniqueHeap`,
-/// `SharedCow`, `SharedAtomic`, `SharedAtomicMut` — with an `[… approx]`
-/// qualifier so the user knows it is not the compiler verdict.
-///
-/// **Mapping rules (LSP-side approximation):**
-/// - RHS calls `Channel(...)`/`Channel.new(...)`/`Mutex(...)`/`Mutex.new(...)`,
-///   declared type starts with `Channel`/`Mutex`, or the initializer is an
-///   `async let` / `spawn { ... }` shape → `SharedAtomicMut` when the binding
-///   is mutable, `SharedAtomic` otherwise (covers ADR-006 §2 line 119 / 143).
-/// - RHS calls `Atomic(...)`/`Atomic.new(...)` or declared type starts with
-///   `Atomic` → `SharedAtomic` (cross-thread read-shared, ADR-006 §2 line 118).
-/// - Initializer is itself a closure `FunctionExpr` (the var IS a closure),
-///   or the declared/inferred type contains `closure` / `Fn(`-like shape →
-///   `SharedCow` (closures escape their defining scope; ADR-006 §2 line 117).
-/// - Primitive value type (`int`, `number`, `bool`, ...) → `Direct`.
-/// - Any other heap-resident type → `UniqueHeap` (ADR-006 §2 default).
-/// - Reference initializer (`&expr` / `&mut expr`) → `Direct` (the binding
-///   itself is a stack-resident typed pointer; ADR-006 §2 line 50).
-fn binding_kind_label_for(decl: &VariableDecl, label_type: Option<&str>) -> String {
-    let class = classify_binding_storage(decl, label_type);
-    let mut_suffix = if decl.is_mut { " mut" } else { "" };
-    format!("[{}{} approx]", class, mut_suffix)
-}
-
-/// Return the ADR-006 §2 `BindingStorageClass` name as best the LSP-side
-/// heuristic can determine. Names match the canonical ADR-006 §2 vocabulary
-/// (`Direct`, `UniqueHeap`, `SharedCow`, `SharedAtomic`, `SharedAtomicMut`).
-fn classify_binding_storage(decl: &VariableDecl, label_type: Option<&str>) -> &'static str {
-    // Reference initializer: typed pointer carrier sits on the stack — Direct.
-    if let Some(Expr::Reference { .. }) = decl.value.as_ref() {
-        return "Direct";
-    }
-
-    // Initializer-shape probes (RHS-driven). These dominate over type-driven
-    // fallback when the user wrote an explicit concurrency-primitive construction.
-    if let Some(value) = decl.value.as_ref() {
-        if is_async_or_spawn_shape(value) {
-            return if decl.is_mut {
-                "SharedAtomicMut"
-            } else {
-                "SharedAtomic"
-            };
-        }
-        if let Some(class) = concurrency_constructor_class(value, decl.is_mut) {
-            return class;
-        }
-        if matches!(value, Expr::FunctionExpr { .. }) {
-            // The variable IS a closure — closures escape their defining scope
-            // by definition (ADR-006 §2 line 117).
-            return "SharedCow";
-        }
-    }
-
-    // Type-driven fallback.
-    if let Some(ty) = label_type {
-        let t = ty.trim();
-        let bare = t.trim_start_matches('&').trim_start_matches("mut ").trim();
-        if is_primitive_value_type(bare) {
-            return "Direct";
-        }
-        if bare.starts_with("Mutex") || bare.starts_with("Channel") {
-            return "SharedAtomicMut";
-        }
-        if bare.starts_with("Atomic") {
-            return "SharedAtomic";
-        }
-        if bare.starts_with("Arc<") {
-            // Bare Arc<T> is read-shared cross-thread — SharedAtomic. Arc<Mutex<T>>
-            // would be SharedAtomicMut but we'd need to peek inside.
-            if bare.contains("Mutex<") {
-                return "SharedAtomicMut";
-            }
-            return "SharedAtomic";
-        }
-        // Closure-typed binding (e.g. `(int) -> int`) — escapes when captured.
-        if bare.contains("->") && (bare.starts_with('(') || bare.starts_with("Fn")) {
-            return "SharedCow";
-        }
-        // Heap-resident default per ADR-006 §2 line 92.
-        return "UniqueHeap";
-    }
-
-    // No type info at all — pessimistic UniqueHeap default for heap-shaped
-    // initializers, Direct otherwise.
-    match decl.value.as_ref() {
-        Some(Expr::Literal(lit, _)) => match lit {
-            shape_ast::ast::Literal::Int(_)
-            | shape_ast::ast::Literal::Number(_)
-            | shape_ast::ast::Literal::Bool(_)
-            | shape_ast::ast::Literal::None => "Direct",
-            _ => "UniqueHeap",
-        },
-        _ => "UniqueHeap",
-    }
-}
-
-/// Detect RHS shapes that imply cross-thread/task escape (ADR-006 §2 line 143).
-fn is_async_or_spawn_shape(expr: &Expr) -> bool {
-    matches!(
-        expr,
-        Expr::AsyncLet(..) | Expr::AsyncScope(..) | Expr::Await(..) | Expr::Join(..)
-    )
-}
-
-/// Detect `Channel`/`Mutex`/`Atomic` constructor calls. Returns the appropriate
-/// `BindingStorageClass` name when matched.
-fn concurrency_constructor_class(expr: &Expr, is_mut: bool) -> Option<&'static str> {
-    let head_name = match expr {
-        Expr::FunctionCall { name, .. } => name.as_str(),
-        Expr::QualifiedFunctionCall { function, .. } => function.as_str(),
-        Expr::MethodCall {
-            receiver, method, ..
-        } => {
-            // Pattern: `Channel.new(...)` / `Mutex.new(...)` etc. — the receiver
-            // is the type-name `Identifier`, the method is `new`.
-            if method == "new" || method == "open" || method == "with_capacity" {
-                if let Expr::Identifier(name, _) = receiver.as_ref() {
-                    name.as_str()
-                } else {
-                    return None;
-                }
-            } else {
-                return None;
-            }
-        }
-        _ => return None,
-    };
-
-    // `Channel`/`Mutex` both imply interior mutability (ADR-006 §2.7.20:
-    // Channel's `Mutex<ChannelInner>` shape; ADR-006 §2 line 119 for Mutex)
-    // — surface as `SharedAtomicMut` regardless of the outer binding's
-    // `let mut` flag, since the *mutation capability* is what the storage
-    // class records.
-    let _ = is_mut;
-    match head_name {
-        "Channel" | "Mutex" => Some("SharedAtomicMut"),
-        "Atomic" => Some("SharedAtomic"),
-        _ => None,
-    }
-}
-
-/// Match the same primitive vocabulary `HintContext::is_primitive_value_type_name`
-/// uses but free-standing so the binding-kind label can share it. Keep the
-/// two sets aligned.
-fn is_primitive_value_type(name: &str) -> bool {
-    let normalized = name.trim().trim_end_matches('?');
-    matches!(
-        normalized,
-        "int"
-            | "integer"
-            | "i8"
-            | "i16"
-            | "i32"
-            | "i64"
-            | "u8"
-            | "u16"
-            | "u32"
-            | "u64"
-            | "number"
-            | "float"
-            | "f32"
-            | "f64"
-            | "bool"
-            | "boolean"
-            | "()"
-            | "void"
-            | "unit"
-            | "none"
-            | "null"
-            | "undefined"
-            | "never"
-    )
 }
 
 /// Check if a position is within a range
@@ -1931,44 +1815,174 @@ let r = xs.filter(|x| x > 0).reverse().sort()
         );
     }
 
+    /// TRIPWIRE 2 (#181): the hint text equals the storage planner's own
+    /// decision. Both sides are read here — the label from
+    /// `get_inlay_hints`, the class from the compiler's
+    /// `binding_storage_query()` — and any divergence fails this test rather
+    /// than misinforming the reader. The matrix covers the aliasing,
+    /// mutation and capture cases that move a `var`'s class.
     #[test]
-    fn test_binding_kind_label_covers_five_adr006_categories() {
-        // LSP-I (R8 W11): every ADR-006 §2 BindingStorageClass main category
-        // (Direct / UniqueHeap / SharedCow / SharedAtomic / SharedAtomicMut)
-        // must have a label-rendering path through the LSP-side heuristic.
+    fn binding_storage_hint_text_equals_the_compilers_decision() {
         let cfg = InlayHintConfig {
             show_binding_kind_hints: true,
             ..InlayHintConfig::default()
         };
 
         let cases: &[(&str, &str)] = &[
-            ("let x = 42\n", "[Direct approx]"),
-            ("let s = \"hello\"\n", "[UniqueHeap approx]"),
-            ("let f = |x| x + 1\n", "[SharedCow approx]"),
-            ("let a = Atomic.new(0)\n", "[SharedAtomic approx]"),
             (
-                "let mut q = Channel.new()\n",
-                "[SharedAtomicMut mut approx]",
+                "plain var, never aliased",
+                "fn f() -> int {\n    var a = 0\n    a = a + 1\n    a\n}\nlet r = f()\n",
+            ),
+            (
+                "var aliased by a second var",
+                "fn f() -> int {\n    var a = 0\n    a = a + 1\n    var b = a\n    b = b + 1\n    a + b\n}\nlet r = f()\n",
+            ),
+            (
+                "var mutated inside a closure",
+                "fn f() -> int {\n    var s = 0\n    let bump = || { s = s + 1 }\n    bump()\n    s\n}\nlet r = f()\n",
+            ),
+            (
+                "var holding an array that escapes",
+                "fn f() -> Array<int> {\n    var xs = [1, 2, 3]\n    xs.push(4)\n    xs\n}\nlet r = f()\n",
+            ),
+            (
+                "let and let mut alongside var",
+                "fn f() -> int {\n    let c = 1\n    let mut m = 2\n    m = m + 1\n    var v = 3\n    c + m + v\n}\nlet r = f()\n",
             ),
         ];
 
-        for (code, expected) in cases {
+        for (label, code) in cases {
+            let program = shape_ast::parser::parse_program(code)
+                .unwrap_or_else(|e| panic!("{label}: fixture must parse: {e:?}"));
+            let table =
+                crate::binding_storage::binding_storage_decisions(&program, code, None, None, None)
+                    .unwrap_or_else(|| panic!("{label}: fixture must compile"));
+            assert!(
+                !table.decisions().is_empty(),
+                "{label}: the compiler decided nothing, so this case proves nothing"
+            );
+
             let hints = get_inlay_hints(code, full_range(), &cfg, None);
-            let labels: Vec<String> = hints
+            let rendered: Vec<&str> = hints
                 .iter()
+                .filter(|h| {
+                    h.data
+                        .as_ref()
+                        .and_then(|d| d.get("kind"))
+                        .and_then(|v| v.as_str())
+                        == Some("binding-kind")
+                })
                 .filter_map(|h| match &h.label {
-                    InlayHintLabel::String(s) => Some(s.clone()),
+                    InlayHintLabel::String(s) => Some(s.as_str()),
                     _ => None,
                 })
                 .collect();
+
+            for decision in table.decisions() {
+                if decision.name_span.is_dummy() {
+                    continue;
+                }
+                let expected = format!("[{}]", decision.storage_class.name());
+                assert!(
+                    rendered.contains(&expected.as_str()),
+                    "{label}: the compiler decided {} for `{}`, but the hints rendered {:?} — \
+                     a hint that disagrees with the planner is this test's failure, not the reader's",
+                    decision.storage_class.name(),
+                    decision.name,
+                    rendered
+                );
+            }
+        }
+    }
+
+    /// The hint can only ever spell a class the compiler owns — the retired
+    /// heuristic could render `SharedAtomic` / `SharedAtomicMut`, which
+    /// `BindingStorageClass` has no variant for.
+    #[test]
+    fn binding_storage_hint_never_names_a_class_the_compiler_lacks() {
+        let cfg = InlayHintConfig {
+            show_binding_kind_hints: true,
+            ..InlayHintConfig::default()
+        };
+        let code = "let x = 42\nlet s = \"hello\"\nlet f = |x: int| x + 1\nvar v = 0\n";
+        let hints = get_inlay_hints(code, full_range(), &cfg, None);
+        let rendered: Vec<String> = hints
+            .iter()
+            .filter(|h| {
+                h.data
+                    .as_ref()
+                    .and_then(|d| d.get("kind"))
+                    .and_then(|v| v.as_str())
+                    == Some("binding-kind")
+            })
+            .filter_map(|h| match &h.label {
+                InlayHintLabel::String(s) => Some(s.clone()),
+                _ => None,
+            })
+            .collect();
+        let owned = [
+            "[Deferred]",
+            "[Direct]",
+            "[UniqueHeap]",
+            "[SharedCow]",
+            "[Reference]",
+            "[LocalMutablePtr]",
+        ];
+        for label in &rendered {
             assert!(
-                labels.iter().any(|l| l == expected),
-                "code {:?} expected label {:?}, got labels {:?}",
-                code,
-                expected,
-                labels
+                owned.contains(&label.as_str()),
+                "{label} is not a BindingStorageClass variant"
             );
         }
+    }
+
+    /// The storage decision costs a full bytecode compile, so a request
+    /// that emits no storage-class hint must not pay for one.
+    #[test]
+    fn a_request_that_needs_no_storage_hint_does_not_compile_the_document() {
+        crate::binding_storage::reset_compile_count();
+        let code = "let x = 42\nlet y = x + 1\n";
+        let hints = get_inlay_hints(code, full_range(), &InlayHintConfig::default(), None);
+        assert!(!hints.is_empty(), "the type hints still render");
+        assert_eq!(
+            crate::binding_storage::compile_count(),
+            0,
+            "a `let`-only document with the storage-class toggle off must not \
+             trigger a query-session compile"
+        );
+
+        // The same document WITH the toggle on pays for exactly one.
+        crate::binding_storage::reset_compile_count();
+        let cfg = InlayHintConfig {
+            show_binding_kind_hints: true,
+            ..InlayHintConfig::default()
+        };
+        let _ = get_inlay_hints(code, full_range(), &cfg, None);
+        assert_eq!(
+            crate::binding_storage::compile_count(),
+            1,
+            "the decisions must be compiled once per request, not once per binding"
+        );
+    }
+
+    /// #181: `var` hands its storage decision to the compiler, so the
+    /// decision is shown without the user opting in.
+    #[test]
+    fn a_var_binding_is_hinted_by_default() {
+        let code = "fn f() -> int {\n    var a = 0\n    a = a + 1\n    a\n}\nlet r = f()\n";
+        let hints = get_inlay_hints(code, full_range(), &InlayHintConfig::default(), None);
+        let any_kind = hints.iter().any(|h| {
+            h.data
+                .as_ref()
+                .and_then(|d| d.get("kind"))
+                .and_then(|v| v.as_str())
+                == Some("binding-kind")
+        });
+        assert!(
+            any_kind,
+            "a `var` must show its storage class by default; got: {:?}",
+            hints.iter().map(|h| h.label.clone()).collect::<Vec<_>>()
+        );
     }
 
     #[test]
@@ -2149,24 +2163,6 @@ let i = 10D
             hints.is_empty(),
             "invalid parse with no recoverable AST should not emit hints"
         );
-    }
-
-    // W14.2-B1: per-line coverage additions
-    #[test]
-    fn test_is_primitive_value_type_inlay() {
-        assert!(is_primitive_value_type("int"));
-        assert!(is_primitive_value_type("number"));
-        assert!(is_primitive_value_type("bool"));
-        assert!(is_primitive_value_type("i32"));
-        assert!(is_primitive_value_type("f64"));
-        assert!(is_primitive_value_type("int?"));
-        assert!(is_primitive_value_type("null"));
-        assert!(is_primitive_value_type("void"));
-        // string is NOT a value primitive here (it's a heap-allocated ref type)
-        assert!(!is_primitive_value_type("string"));
-        assert!(!is_primitive_value_type(""));
-        assert!(!is_primitive_value_type("MyType"));
-        assert!(!is_primitive_value_type("Array<int>"));
     }
 
     #[test]

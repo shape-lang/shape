@@ -37,6 +37,12 @@
 
 pub mod binary_builder;
 pub mod binary_format;
+pub mod foreign_types;
+
+pub use foreign_types::{
+    ForeignDirection, ForeignField, ForeignScalar, ForeignType, ForeignTypeShape,
+    UnmappedForeignType, UnmappedReason,
+};
 
 use std::ffi::{c_char, c_void};
 
@@ -744,8 +750,10 @@ pub struct LanguageRuntimeVTable {
     /// Returns: opaque instance pointer, or null on error.
     pub init: Option<unsafe extern "C" fn(config: *const u8, config_len: usize) -> *mut c_void>,
 
-    /// Register Shape type schemas for stub generation (e.g. `.pyi` files).
-    /// `types_msgpack`: MessagePack-encoded `Vec<TypeSchemaExport>`.
+    /// Deliver the declared Shape contract so the runtime can generate
+    /// interface stubs; read them back with [`Self::generate_stubs`].
+    /// `types_msgpack`: MessagePack-encoded
+    /// [`foreign_types::ForeignContractExport`] (ADR-019 §1 / #196).
     /// Returns: 0 on success.
     pub register_types: Option<
         unsafe extern "C" fn(instance: *mut c_void, types: *const u8, types_len: usize) -> i32,
@@ -878,10 +886,32 @@ pub struct LanguageRuntimeVTable {
     /// runtimes it generates.
     pub state_model: u32,
 
+    /// Return the interface stub document generated from the contract most
+    /// recently delivered through [`Self::register_types`] — a `.pyi` for
+    /// Python, a `.d.ts` for TypeScript.
+    ///
+    /// ADR-019 §1 / R25 (POLY-STUB-CHANNEL, issue #196). `register_types` alone
+    /// has no return channel, so the stubs it exists to produce could never
+    /// reach the host; this is the other half of that channel. The buffer is
+    /// UTF-8 stub source, freed by the caller via `free_buffer`. Returns 0 on
+    /// success.
+    ///
+    /// Landed in the designated additive tail: it occupies the former
+    /// `reserved0` slot, so the struct layout — and therefore
+    /// [`abi_build_fingerprint`] — is unchanged, and an extension built before
+    /// this capability existed stamps `None` here and is read as "no stub
+    /// channel" rather than mis-dispatched.
+    pub generate_stubs: Option<
+        unsafe extern "C" fn(
+            instance: *mut c_void,
+            out_ptr: *mut *mut u8,
+            out_len: *mut usize,
+        ) -> i32,
+    >,
+
     /// Reserved fn-pointer tail padding (null in v4). Lets additive vtable
     /// functions land later (e.g. the ffi-rebuild §7 `request_cancel` hook)
     /// without another ABI bump. Must be `None` when constructed by the macro.
-    pub reserved0: Option<unsafe extern "C" fn()>,
     pub reserved1: Option<unsafe extern "C" fn()>,
     pub reserved2: Option<unsafe extern "C" fn()>,
     pub reserved3: Option<unsafe extern "C" fn()>,
@@ -899,55 +929,6 @@ pub struct LanguageRuntimeLspConfig {
     pub file_extension: std::string::String,
     /// Extra search paths for the child LSP (e.g. stub directories).
     pub extra_paths: Vec<std::string::String>,
-}
-
-/// Exported Shape type schema for foreign language runtimes.
-///
-/// Serialized as MessagePack and passed to `register_types()`.
-#[derive(Debug, Clone, PartialEq)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-pub struct TypeSchemaExport {
-    /// Type name.
-    pub name: std::string::String,
-    /// Kind of type.
-    pub kind: TypeSchemaExportKind,
-    /// Fields (for struct types).
-    pub fields: Vec<TypeFieldExport>,
-    /// Enum variants (for enum types).
-    pub enum_variants: Option<Vec<EnumVariantExport>>,
-}
-
-/// Kind of exported type schema.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-pub enum TypeSchemaExportKind {
-    Struct,
-    Enum,
-    Alias,
-}
-
-/// A single field in an exported type schema.
-#[derive(Debug, Clone, PartialEq)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-pub struct TypeFieldExport {
-    /// Field name.
-    pub name: std::string::String,
-    /// Shape type name (e.g. "number", "string", "Array<Candle>").
-    pub type_name: std::string::String,
-    /// Whether the field is optional.
-    pub optional: bool,
-    /// Human-readable description.
-    pub description: Option<std::string::String>,
-}
-
-/// A single enum variant in an exported type schema.
-#[derive(Debug, Clone, PartialEq)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-pub struct EnumVariantExport {
-    /// Variant name.
-    pub name: std::string::String,
-    /// Payload fields (if any).
-    pub payload_fields: Option<Vec<TypeFieldExport>>,
 }
 
 // ============================================================================
@@ -1622,8 +1603,14 @@ pub const fn abi_build_fingerprint() -> u64 {
         h,
         core::mem::offset_of!(LanguageRuntimeVTable, register_types) as u64,
     );
-    h = abi_fingerprint_mix(h, core::mem::offset_of!(LanguageRuntimeVTable, compile) as u64);
-    h = abi_fingerprint_mix(h, core::mem::offset_of!(LanguageRuntimeVTable, invoke) as u64);
+    h = abi_fingerprint_mix(
+        h,
+        core::mem::offset_of!(LanguageRuntimeVTable, compile) as u64,
+    );
+    h = abi_fingerprint_mix(
+        h,
+        core::mem::offset_of!(LanguageRuntimeVTable, invoke) as u64,
+    );
     h = abi_fingerprint_mix(
         h,
         core::mem::offset_of!(LanguageRuntimeVTable, dispose_function) as u64,
@@ -1657,9 +1644,13 @@ pub const fn abi_build_fingerprint() -> u64 {
         h,
         core::mem::offset_of!(LanguageRuntimeVTable, state_model) as u64,
     );
+    // Formerly `reserved0`; assigned to `generate_stubs` by ADR-019 §1 (#196).
+    // The offset — and therefore this fingerprint — is unchanged, which is the
+    // point of the reserved tail: a pre-#196 extension leaves the slot `None`
+    // and the host reads "no stub channel" instead of mis-dispatching.
     h = abi_fingerprint_mix(
         h,
-        core::mem::offset_of!(LanguageRuntimeVTable, reserved0) as u64,
+        core::mem::offset_of!(LanguageRuntimeVTable, generate_stubs) as u64,
     );
     h = abi_fingerprint_mix(
         h,
@@ -1732,6 +1723,7 @@ macro_rules! language_runtime_plugin {
             dispose_function: $dispose_function:expr,
             language_id: $language_id:expr,
             get_lsp_config: $get_lsp_config:expr,
+            generate_stubs: $generate_stubs:expr,
             free_buffer: $free_buffer:expr,
             drop: $drop_fn:expr $(,)?
         } $(,)?
@@ -1749,6 +1741,7 @@ macro_rules! language_runtime_plugin {
                 dispose_function: $dispose_function,
                 language_id: $language_id,
                 get_lsp_config: $get_lsp_config,
+                generate_stubs: $generate_stubs,
                 free_buffer: $free_buffer,
                 drop: $drop_fn,
             }
@@ -1768,6 +1761,7 @@ macro_rules! language_runtime_plugin {
             dispose_function: $dispose_function:expr,
             language_id: $language_id:expr,
             get_lsp_config: $get_lsp_config:expr,
+            generate_stubs: $generate_stubs:expr,
             free_buffer: $free_buffer:expr,
             drop: $drop_fn:expr $(,)?
         } $(,)?
@@ -1785,6 +1779,7 @@ macro_rules! language_runtime_plugin {
                 dispose_function: $dispose_function,
                 language_id: $language_id,
                 get_lsp_config: $get_lsp_config,
+                generate_stubs: $generate_stubs,
                 free_buffer: $free_buffer,
                 drop: $drop_fn,
             }
@@ -1805,6 +1800,7 @@ macro_rules! language_runtime_plugin {
             dispose_function: $dispose_function:expr,
             language_id: $language_id:expr,
             get_lsp_config: $get_lsp_config:expr,
+            generate_stubs: $generate_stubs:expr,
             free_buffer: $free_buffer:expr,
             drop: $drop_fn:expr $(,)?
         } $(,)?
@@ -1913,6 +1909,19 @@ macro_rules! language_runtime_plugin {
         ) -> i32 {
             match ::std::panic::catch_unwind(::std::panic::AssertUnwindSafe(|| unsafe {
                 $register_types(instance, types, types_len)
+            })) {
+                Ok(v) => v,
+                Err(_) => 1,
+            }
+        }
+
+        unsafe extern "C" fn __shape_pc_generate_stubs(
+            instance: *mut ::std::ffi::c_void,
+            out_ptr: *mut *mut u8,
+            out_len: *mut usize,
+        ) -> i32 {
+            match ::std::panic::catch_unwind(::std::panic::AssertUnwindSafe(|| unsafe {
+                $generate_stubs(instance, out_ptr, out_len)
             })) {
                 Ok(v) => v,
                 Err(_) => 1,
@@ -2042,7 +2051,9 @@ macro_rules! language_runtime_plugin {
                 // null for future additive vtable functions.
                 runtime_descriptor: None,
                 state_model: $crate::STATE_MODEL_STATEFUL_OPAQUE,
-                reserved0: None,
+                // ADR-019 §1 (#196): the stub channel's return half, landed in
+                // the former `reserved0` slot — same layout, same fingerprint.
+                generate_stubs: Some(__shape_pc_generate_stubs),
                 reserved1: None,
                 reserved2: None,
                 reserved3: None,

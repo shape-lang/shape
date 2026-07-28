@@ -161,6 +161,15 @@ pub struct SourceLocation {
     pub notes: Vec<ErrorNote>,
     #[serde(default)]
     pub is_synthetic: bool,
+    /// Machine-applicable fixes the emitter proved for this diagnostic
+    /// (ADR-017 §4). Empty when the emitter proved none.
+    ///
+    /// This travels beside `hints` and `notes` for the same reason they do:
+    /// it is structured evidence the emitter already has, and every consumer
+    /// — CLI `--diagnostics json`, LSP code actions, MCP — must read the one
+    /// value rather than re-deriving it from rendered message text.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub fixes: Vec<shape_diagnostics::SuggestedFix>,
 }
 
 impl SourceLocation {
@@ -174,6 +183,7 @@ impl SourceLocation {
             hints: Vec::new(),
             notes: Vec::new(),
             is_synthetic: false,
+            fixes: Vec::new(),
         }
     }
 
@@ -189,6 +199,12 @@ impl SourceLocation {
 
     pub fn with_source_line(mut self, line: String) -> Self {
         self.source_line = Some(line);
+        self
+    }
+
+    /// Attach the machine-applicable fixes the emitter proved (ADR-017 §4).
+    pub fn with_fixes(mut self, fixes: Vec<shape_diagnostics::SuggestedFix>) -> Self {
+        self.fixes = fixes;
         self
     }
 }

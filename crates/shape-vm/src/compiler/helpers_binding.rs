@@ -121,6 +121,17 @@ impl BytecodeCompiler {
     // consult `OwnershipDecision` to decide Move vs Clone vs Copy for
     // non-Copy type assignments.
 
+    /// ADR-017 §2 / R23: the compiler's per-binding storage decisions, in
+    /// declaration order.
+    ///
+    /// This is the ONE surface tooling reads for `BindingStorageClass`. It is
+    /// display-safe and render-only in the sense of
+    /// `tools/shape-lsp/src/expansion_views.rs`: nothing here is fed back
+    /// into compilation, and the borrow makes it unwritable from outside.
+    pub fn binding_storage_query(&self) -> &super::BindingStorageTable {
+        &self.binding_storage_decisions
+    }
+
     /// Access the storage plan for the function currently being compiled.
     /// Returns `None` if no MIR storage plan exists for the current function.
     pub(super) fn current_storage_plan(&self) -> Option<&crate::mir::StoragePlan> {
@@ -1106,6 +1117,85 @@ impl BytecodeCompiler {
             self.type_tracker
                 .set_binding_storage_class(slot, storage_class);
         }
+        // ADR-017 §2: keep the published decision in step with the class the
+        // compiler just moved to. A `var`'s class is promoted AFTER its
+        // declaration site once an alias or a closure capture is seen, so a
+        // def-site-only snapshot would publish a stale class for exactly the
+        // bindings the surface exists to explain. Locals whose class comes
+        // from the MIR storage plan are not touched — that plan is fixed
+        // before the body compiles, and it is what codegen consults.
+        if !(is_local && self.mir_storage_class_for_slot(slot).is_some()) {
+            let owner = self.current_body_semantic_owner_key().map(str::to_string);
+            self.binding_storage_decisions.apply_promotion(
+                owner.as_deref(),
+                slot,
+                is_local,
+                storage_class,
+            );
+        }
+    }
+
+    /// ADR-017 §2 / R23: publish the storage decision for every name a
+    /// declaration binds.
+    ///
+    /// The recorded class is read through the compiler's OWN consult order at
+    /// a binding read (`expressions/identifiers.rs`, the storage-plan-aware
+    /// load decision): the MIR storage plan when the binding is a planned
+    /// function local, the type tracker's binding semantics otherwise. There
+    /// is no second derivation here — a decision this surface cannot source
+    /// from compiler state is not recorded at all, so tooling shows nothing
+    /// rather than a guess.
+    pub(super) fn record_binding_storage_decisions(
+        &mut self,
+        var_decl: &shape_ast::ast::VariableDecl,
+        is_local: bool,
+    ) {
+        let ownership_class = Self::binding_semantics_for_var_decl(var_decl).ownership_class;
+        let owner = self.current_body_semantic_owner_key().map(str::to_string);
+        for (name, name_span) in var_decl.pattern.get_bindings() {
+            let slot = if is_local {
+                self.resolve_local(&name)
+            } else {
+                let scoped_name = self
+                    .resolve_scoped_module_binding_name(&name)
+                    .unwrap_or_else(|| name.clone());
+                self.module_bindings.get(&scoped_name).copied()
+            };
+            let Some(slot) = slot else {
+                continue;
+            };
+            let Some(storage_class) = self.decided_storage_class_for_slot(slot, is_local) else {
+                continue;
+            };
+            self.binding_storage_decisions
+                .record(super::binding_storage_view::decision(
+                    name,
+                    name_span,
+                    var_decl.kind,
+                    var_decl.is_mut,
+                    ownership_class,
+                    storage_class,
+                    owner.clone(),
+                    slot,
+                    is_local,
+                ));
+        }
+    }
+
+    /// The storage class codegen reads for `slot`, in the compiler's own
+    /// consult order. `None` when neither source has decided yet.
+    pub(super) fn decided_storage_class_for_slot(
+        &self,
+        slot: u16,
+        is_local: bool,
+    ) -> Option<BindingStorageClass> {
+        if is_local {
+            if let Some(class) = self.mir_storage_class_for_slot(slot) {
+                return Some(class);
+            }
+        }
+        self.binding_semantics_for_slot(slot, is_local)
+            .map(|semantics| semantics.storage_class)
     }
 
     pub(super) fn set_binding_storage_class_for_name(

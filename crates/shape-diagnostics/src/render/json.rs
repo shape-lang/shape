@@ -48,8 +48,7 @@ mod tests {
             "consider narrowing this type",
         )
         .build();
-        let v: serde_json::Value =
-            serde_json::from_str(&super::render(&diag)).expect("valid JSON");
+        let v: serde_json::Value = serde_json::from_str(&super::render(&diag)).expect("valid JSON");
         assert_eq!(v["severity"], "warning");
     }
 }

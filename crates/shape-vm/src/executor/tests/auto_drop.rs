@@ -877,3 +877,62 @@ fn test_method_call_returned_non_drop_value_emits_no_typed_drop() {
         "a method-call return of a NON-Drop type must emit no typed Conn drop"
     );
 }
+
+// =============================================================================
+// #181 (ERGO-VAR-TRUTH) — a qualifying `var` takes the ownership-aware direct
+// load, not a shared cell.
+// =============================================================================
+
+/// TRIPWIRE 3 (#181), asserted on emitted opcodes.
+///
+/// The retired force-`SharedCow` gate made every `var` a `SharedCow` slot.
+/// `SharedCow` is excluded from `slot_is_heap_backed_owned`, so such a slot
+/// could never take the ownership-aware owned-heap load — every read went
+/// through the shared-cell path instead. With the gate gone, a `var` that
+/// earns nothing shared is an ordinary owned local and its read compiles to
+/// the ownership-aware `CloneLocal`.
+///
+/// The ticket words this tripwire as `LoadLocalMove`. That opcode is not
+/// reachable for a heap-carrying binding today: the V1.1C shortcut in
+/// `compiler/helpers_binding.rs::emit_load_local_owned` returns `CloneLocal`
+/// before the `OwnershipDecision::Move` match is consulted, and its own
+/// `TODO(V1.1D prerequisite)` records that re-consulting Move there (plus
+/// skipping moved-out slots in `DropLocal` tracking) is unlanded work
+/// outside this ticket. Asserting `LoadLocalMove` here would mean asserting
+/// something no `var` can currently produce, so this pins the property the
+/// tripwire protects — the read is ownership-aware and the slot is not
+/// pinned into a cell — which fails the moment a `var` is re-pinned to
+/// shared storage.
+#[test]
+fn a_qualifying_var_read_is_ownership_aware_and_not_cell_pinned() {
+    let bc = compile(
+        r#"
+fn take(xs: Array<int>) -> int { xs.len() }
+fn f() -> int {
+    var xs = [1, 2, 3]
+    take(xs)
+}
+let r = f()
+"#,
+    );
+    let f = bc
+        .functions
+        .iter()
+        .find(|func| func.name.ends_with("f"))
+        .expect("function f present");
+    let body = &bc.instructions[f.entry_point..f.entry_point + f.body_length];
+
+    assert!(
+        body.iter().any(|i| i.opcode == OpCode::CloneLocal),
+        "the `var xs` read must take the ownership-aware owned-heap load; got {:?}",
+        body.iter().map(|i| i.opcode).collect::<Vec<_>>()
+    );
+    assert!(
+        !body
+            .iter()
+            .any(|i| matches!(i.opcode, OpCode::LoadClosure | OpCode::LoadSharedLocal)),
+        "a `var` that is never captured or aliased must not be read through a \
+         shared cell — that is the pinning the retired force-SharedCow gate caused; got {:?}",
+        body.iter().map(|i| i.opcode).collect::<Vec<_>>()
+    );
+}

@@ -109,8 +109,57 @@ impl BytecodeCompiler {
             });
         }
 
+        // ADR-019 §5 step 1 (POLY-ASYNC-TRUTH, #201) — `async` on a
+        // language-runtime foreign declaration is a compile error until offload
+        // parity (#202) lands. Placed AHEAD of the opaque-body annotation
+        // requirements below because the declaration FORM is what does not
+        // exist: telling an author to annotate parameters on a declaration that
+        // can never compile buries the load-bearing sentence. Deliberately
+        // BEHIND the #68/#74 annotation loop above, whose documented precedence
+        // this slice does not disturb.
+        //
+        // TRANSITIONAL — this block and its producer are deleted when #202
+        // lands. `grep -rn "C0932"` returns the full deletion set.
+        if let Some(rejection) = def.unsupported_async_rejection() {
+            let mut location = self.span_to_source_location(rejection.span);
+            location.hints.push(rejection.fix_hint);
+            return Err(ShapeError::SemanticError {
+                message: rejection.message,
+                location: Some(location),
+            });
+        }
+
         // Validate `out` params: only allowed on extern C, must be ptr, no const/&/default.
         self.validate_out_params(def)?;
+
+        // ADR-019 §1 / #196 (POLY-STUB-CHANNEL) — a declared type outside the
+        // foreign marshaling table is refused HERE, at the declaration, instead
+        // of as a `foreign_marshal` `NotImplemented` on the first call that
+        // reaches it. The table is knowable from the signature alone, so the
+        // author should not have to run the program to learn the type cannot
+        // cross.
+        //
+        // Ordered AFTER the annotation and async gates (whose documented
+        // precedence this slice does not disturb) and BEFORE
+        // `validate_type_annotations`' `Result<T>` mandate: an author whose
+        // parameter type cannot cross should hear that first, not be told to
+        // wrap a return type on a signature that is not expressible anyway.
+        //
+        // Producer: `ForeignFunctionDef::unmapped_foreign_types`, shared with
+        // the LSP (`diagnostics.rs`) so both surfaces emit one text.
+        if let Some(rejection) = def.unmapped_foreign_types().into_iter().next() {
+            let span = if rejection.span.is_dummy() {
+                def.name_span
+            } else {
+                rejection.span
+            };
+            let mut location = self.span_to_source_location(span);
+            location.hints.push(rejection.fix_hint);
+            return Err(ShapeError::SemanticError {
+                message: rejection.message,
+                location: Some(location),
+            });
+        }
 
         // Foreign function bodies are opaque — require explicit type annotations.
         // Dynamic-language runtimes require Result<T> returns; native ABI
@@ -1165,8 +1214,7 @@ mod ffi_permission_tests {
     fn deterministic_context_refuses_foreign_program_at_load() {
         // §4.8.3 (Q6): a Deterministic execution context refuses a foreign-
         // bearing program at LOAD time — even when Ffi itself is granted.
-        let bytecode =
-            compile(r#"fn python add(a: int, b: int) -> Result<int> { return a + b }"#);
+        let bytecode = compile(r#"fn python add(a: int, b: int) -> Result<int> { return a + b }"#);
         let ca = bytecode
             .content_addressed
             .clone()
@@ -1187,8 +1235,7 @@ mod ffi_permission_tests {
 
     #[test]
     fn foreign_program_loads_when_ffi_granted_without_determinism() {
-        let bytecode =
-            compile(r#"fn python add(a: int, b: int) -> Result<int> { return a + b }"#);
+        let bytecode = compile(r#"fn python add(a: int, b: int) -> Result<int> { return a + b }"#);
         let ca = bytecode.content_addressed.clone().expect("ca");
         let granted = shape_abi_v1::PermissionSet::from([shape_abi_v1::Permission::Ffi]);
         let mut vm = VirtualMachine::new(VMConfig::default());
@@ -1198,8 +1245,7 @@ mod ffi_permission_tests {
 
     #[test]
     fn foreign_program_refused_at_load_without_ffi_grant() {
-        let bytecode =
-            compile(r#"fn python add(a: int, b: int) -> Result<int> { return a + b }"#);
+        let bytecode = compile(r#"fn python add(a: int, b: int) -> Result<int> { return a + b }"#);
         let ca = bytecode.content_addressed.clone().expect("ca");
         // readonly does not include Ffi (shape-abi-v1 preset invariant).
         let granted = shape_abi_v1::PermissionSet::readonly();
@@ -1320,8 +1366,7 @@ mod ffi_permission_tests {
     // ----------------------------------------------------------------------
 
     fn python_vm() -> (VirtualMachine, ()) {
-        let bytecode =
-            compile(r#"fn python padd(a: int, b: int) -> Result<int> { return a + b }"#);
+        let bytecode = compile(r#"fn python padd(a: int, b: int) -> Result<int> { return a + b }"#);
         let mut vm = VirtualMachine::new(VMConfig::default());
         vm.load_program(bytecode);
         vm.foreign_fn_handles = vec![None];
@@ -1570,12 +1615,9 @@ mod foreign_target_annotation_rejection_tests {
     use crate::compiler::BytecodeCompiler;
     use shape_ast::error::ShapeError;
 
-    fn compile_err_with_location(
-        src: &str,
-    ) -> (String, Option<shape_ast::error::SourceLocation>) {
+    fn compile_err_with_location(src: &str) -> (String, Option<shape_ast::error::SourceLocation>) {
         let program = shape_ast::parser::parse_program(src).expect("parse failed");
         let mut compiler = BytecodeCompiler::new();
-        compiler.allow_internal_builtins = true;
         // The weave.rs/install_registry.rs span-asserting harness shape:
         // source_text gives real span→line mapping.
         compiler.source_text = Some(src.to_string());
@@ -1588,7 +1630,6 @@ mod foreign_target_annotation_rejection_tests {
     fn compile_ok(src: &str) -> BytecodeCompiler {
         let program = shape_ast::parser::parse_program(src).expect("parse failed");
         let mut compiler = BytecodeCompiler::new();
-        compiler.allow_internal_builtins = true;
         compiler
             .compile_in_place(&program)
             .expect("fixture must compile");
@@ -2157,6 +2198,512 @@ extern "C" fn labs(x: int) -> int from "c"
 
 print(labs(0 - 42))
 "#,
+        );
+    }
+}
+
+#[cfg(test)]
+mod foreign_async_truthfulness_tests {
+    //! ADR-019 §5 step 1 (POLY-ASYNC-TRUTH, issue #201) — an `async` foreign
+    //! declaration is a compile error until offload parity lands.
+    //!
+    //! MEASURED before the fix (this same fixture set, run red at the head of
+    //! the slice): `async fn python` / `async fn typescript` COMPILED — at
+    //! top level, in `pub` position, and nested in a `mod` block. Nothing on
+    //! the Shape side consumed the `async`: `predeclare_foreign_function`
+    //! (`shape-runtime/.../inference/items.rs:117`) resolves the declared
+    //! return annotation verbatim with no `Future<T>` wrapping, and the
+    //! executor's `CallForeign` arm
+    //! (`executor/control_flow/mod.rs:968`) forwards `is_async` to
+    //! `runtime.compile` and then invokes SYNCHRONOUSLY on the VM thread. The
+    //! declaration therefore promised concurrency the runtime never provided —
+    //! the untruthful contract ADR-019 §5 forbids.
+    //!
+    //! What the rejection DOES take away, stated honestly: the extensions act
+    //! on `is_async` (python `async def` + `asyncio.run`,
+    //! `extensions/python/src/runtime.rs:203`; typescript `async function` on
+    //! a cached tokio runtime, `extensions/typescript/src/runtime.rs:90`), so
+    //! an async body's `await`s really do run today. They run to completion
+    //! while the VM thread blocks — a value, never overlap. That is why the
+    //! remedy is NOT a bare "delete `async`" for bodies that `await`; see
+    //! `async_rejection_remedy_is_not_flattened_to_bare_keyword_deletion`.
+    //!
+    //! **TRANSITIONAL — this whole module is #202's flip-to-green control.**
+    //! When POLY-ASYNC-OFFLOAD (issue #202) lands, the `..._is_rejected_*`
+    //! tests below flip to assert real offload behaviour (the stub returns a
+    //! future; two async foreign calls overlap) and the `[C0932]` producer is
+    //! deleted. The differential tests (sync foreign declarations unaffected)
+    //! survive that flip unchanged.
+    use crate::compiler::BytecodeCompiler;
+
+    fn compile_err_with_location(code: &str) -> (String, Option<shape_ast::error::SourceLocation>) {
+        let program = shape_ast::parser::parse_program(code).expect("parse failed");
+        let mut compiler = BytecodeCompiler::new();
+        compiler.allow_internal_builtins = true;
+        // `source_text` gives real span→line mapping (the span-asserting
+        // harness shape used by the sibling rejection tests above).
+        compiler.source_text = Some(code.to_string());
+        match compiler.compile(&program) {
+            Ok(_) => panic!("expected a compile error, but the program compiled"),
+            Err(shape_ast::error::ShapeError::SemanticError { message, location }) => {
+                (message, location)
+            }
+            Err(other) => panic!("expected SemanticError, got {other:?}"),
+        }
+    }
+
+    fn compile_ok(code: &str) -> crate::bytecode::BytecodeProgram {
+        let program = shape_ast::parser::parse_program(code).expect("parse failed");
+        let mut compiler = BytecodeCompiler::new();
+        compiler.allow_internal_builtins = true;
+        compiler.compile(&program).expect("fixture must compile")
+    }
+
+    /// Tripwire (1), python — the rejection fires, carries the stable code,
+    /// and names the owning issue so the reader knows the surface is planned,
+    /// not refused.
+    #[test]
+    fn async_fn_python_is_rejected_naming_the_owning_issue() {
+        let (message, location) = compile_err_with_location(
+            r#"
+async fn python fetch(url: string) -> Result<string> {
+    return url
+}
+"#,
+        );
+        assert!(
+            message.contains("[C0932]"),
+            "the rejection carries its stable code, got: {message}"
+        );
+        assert!(
+            message.contains("`async fn python fetch`"),
+            "the rejection renders the language and the function name, got: {message}"
+        );
+        assert!(
+            message.contains("issue #202"),
+            "the rejection names the owning issue, got: {message}"
+        );
+        assert!(
+            message.contains("ADR-019 §5"),
+            "the rejection cites the binding rule, got: {message}"
+        );
+        let location = location.expect("the rejection carries a source location");
+        assert_eq!(
+            location.line, 2,
+            "the rejection anchors at the declaration, got line {}",
+            location.line
+        );
+        assert!(
+            location
+                .hints
+                .iter()
+                .any(|h| h.contains("remove the `async` keyword")),
+            "the rejection offers the fix-it, got hints: {:?}",
+            location.hints
+        );
+    }
+
+    /// REMEDY WORDING IS LOAD-BEARING (the S2b precedent in the sibling
+    /// annotation-rejection module). "Delete `async`, it changes nothing" is
+    /// FALSE for a body that `await`s: the python extension compiles an async
+    /// declaration to `async def` + `asyncio.run(...)` and the typescript one
+    /// to an `async function`, so the keyword is what makes an `await` inside
+    /// the body legal at all. Dropping it from such a body produces a foreign
+    /// syntax error, not identical semantics. The hint must keep saying so.
+    #[test]
+    fn async_rejection_remedy_is_not_flattened_to_bare_keyword_deletion() {
+        let (_, location) = compile_err_with_location(
+            r#"
+async fn python fetch(url: string) -> Result<string> {
+    return url
+}
+"#,
+        );
+        let hint = location
+            .expect("location")
+            .hints
+            .first()
+            .cloned()
+            .expect("the rejection carries a hint");
+        assert!(
+            hint.contains("does not") && hint.contains("await"),
+            "the remedy must fence the semantics-preserving claim on the body not awaiting, got: \
+             {hint}"
+        );
+        assert!(
+            hint.contains("asyncio.run"),
+            "the remedy must tell an awaiting python body what to do instead, got: {hint}"
+        );
+        assert!(
+            hint.contains("#202"),
+            "the remedy must scope itself to the transitional window, got: {hint}"
+        );
+    }
+
+    /// Tripwire (1), typescript — same rejection, language rendered.
+    #[test]
+    fn async_fn_typescript_is_rejected_naming_the_owning_issue() {
+        let (message, _) = compile_err_with_location(
+            r#"
+async fn typescript fetch(url: string) -> Result<string> {
+    return url
+}
+"#,
+        );
+        assert!(
+            message.contains("[C0932]") && message.contains("issue #202"),
+            "got: {message}"
+        );
+        assert!(
+            message.contains("`async fn typescript fetch`"),
+            "the rejection renders the typescript language tag, got: {message}"
+        );
+    }
+
+    /// Tripwire (1), export position — `pub async fn python` reaches the same
+    /// chokepoint (`ExportItem::ForeignFunction` → `compile_foreign_function`).
+    #[test]
+    fn pub_async_fn_python_is_rejected() {
+        let (message, _) = compile_err_with_location(
+            r#"
+pub async fn python fetch(url: string) -> Result<string> {
+    return url
+}
+"#,
+        );
+        assert!(
+            message.contains("[C0932]"),
+            "the export position must reach the same rejection, got: {message}"
+        );
+    }
+
+    /// Tripwire (1), module-nested position.
+    #[test]
+    fn async_fn_python_nested_in_a_mod_block_is_rejected() {
+        let (message, _) = compile_err_with_location(
+            r#"
+mod net {
+    pub async fn python fetch(url: string) -> Result<string> {
+        return url
+    }
+}
+"#,
+        );
+        assert!(
+            message.contains("[C0932]"),
+            "the module-nested position must reach the same rejection, got: {message}"
+        );
+    }
+
+    /// The declaration form is rejected before the opaque-body annotation
+    /// requirements are, so an author who also omitted annotations is told the
+    /// load-bearing thing first — the form itself does not exist.
+    #[test]
+    fn async_rejection_precedes_the_missing_annotation_errors() {
+        let (message, _) = compile_err_with_location("async fn python fetch(url) { return url }");
+        assert!(
+            message.contains("[C0932]"),
+            "the unsupported-form rejection wins over the annotation errors, got: {message}"
+        );
+    }
+
+    /// Tripwire (2), differential — a sync `fn python` declaration compiles
+    /// exactly as before, and still registers its foreign entry.
+    #[test]
+    fn sync_fn_python_is_unaffected() {
+        let bytecode = compile_ok(
+            r#"
+fn python add(a: int, b: int) -> Result<int> {
+    return a + b
+}
+"#,
+        );
+        let entry = bytecode
+            .foreign_functions
+            .iter()
+            .find(|e| e.name == "add")
+            .expect("sync fn python still registers a foreign entry");
+        assert_eq!(entry.language, "python");
+        assert!(!entry.is_async, "the sync declaration stays sync");
+    }
+
+    /// Tripwire (2), differential — same for typescript.
+    #[test]
+    fn sync_fn_typescript_is_unaffected() {
+        let bytecode = compile_ok(
+            r#"
+fn typescript add(a: int, b: int) -> Result<int> {
+    return a + b
+}
+"#,
+        );
+        let entry = bytecode
+            .foreign_functions
+            .iter()
+            .find(|e| e.name == "add")
+            .expect("sync fn typescript still registers a foreign entry");
+        assert_eq!(entry.language, "typescript");
+        assert!(!entry.is_async);
+    }
+
+    /// Tripwire (2), differential — the sync path through the module-nested and
+    /// export positions is untouched too.
+    #[test]
+    fn sync_foreign_declarations_in_export_and_module_positions_are_unaffected() {
+        let bytecode = compile_ok(
+            r#"
+pub fn python top(a: int) -> Result<int> {
+    return a
+}
+
+mod net {
+    pub fn python nested(a: int) -> Result<int> {
+        return a
+    }
+}
+"#,
+        );
+        // Module-nested declarations register under their qualified path.
+        for name in ["top", "net::nested"] {
+            assert!(
+                bytecode.foreign_functions.iter().any(|e| e.name == name),
+                "sync foreign fn `{name}` must still register"
+            );
+        }
+    }
+
+    /// `extern "C" fn` async keeps its OWN, older rejection — the native-ABI
+    /// path is not a language runtime and is not what #202 will make work, so
+    /// the two must not collapse into one message.
+    #[test]
+    fn extern_c_async_keeps_its_distinct_native_abi_rejection() {
+        let (message, _) =
+            compile_err_with_location(r#"async extern "C" fn labs(x: int) -> int from "c";"#);
+        assert!(
+            message.contains("native ABI calls are synchronous"),
+            "extern C async keeps its own sentence, got: {message}"
+        );
+        assert!(
+            !message.contains("[C0932]"),
+            "the native-ABI rejection must not be re-labelled as the foreign-async one, got: \
+             {message}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod foreign_marshal_type_rejection_tests {
+    //! ADR-019 §1 / R25 (POLY-STUB-CHANNEL, issue #196) — tripwire (2): a
+    //! declared type with no foreign mapping is a structured diagnostic AT THE
+    //! DECLARATION, not a marshal-time error.
+    //!
+    //! MEASURED before this rejection existed: `fn python f(t: DataTable) ->
+    //! Result<int>` compiled clean and failed on the first call that reached
+    //! the boundary, with `foreign_marshal: HeapKind::DataTable has no FFI wire
+    //! projection yet (W17-foreign-ffi follow-up)` — an internal follow-up
+    //! label, at a runtime the author may not even reach on a given path.
+    //!
+    //! The producer (`ForeignFunctionDef::unmapped_foreign_types`) is shared
+    //! with the LSP (`diagnostics::validate_foreign_function_marshal_types`),
+    //! so the editor and `shape run` cannot disagree about whether a signature
+    //! is expressible.
+    use crate::compiler::BytecodeCompiler;
+
+    fn compile_err_with_location(code: &str) -> (String, Option<shape_ast::error::SourceLocation>) {
+        let program = shape_ast::parser::parse_program(code).expect("parse failed");
+        let mut compiler = BytecodeCompiler::new();
+        compiler.source_text = Some(code.to_string());
+        match compiler.compile(&program) {
+            Ok(_) => panic!("expected a compile error, but the program compiled"),
+            Err(shape_ast::error::ShapeError::SemanticError { message, location }) => {
+                (message, location)
+            }
+            Err(other) => panic!("expected SemanticError, got {other:?}"),
+        }
+    }
+
+    fn compile_ok(code: &str) -> crate::bytecode::BytecodeProgram {
+        let program = shape_ast::parser::parse_program(code).expect("parse failed");
+        let mut compiler = BytecodeCompiler::new();
+        compiler.compile(&program).expect("fixture must compile")
+    }
+
+    /// The headline case: a Shape builtin with no wire form, in parameter
+    /// position, refused at the parameter's own span.
+    #[test]
+    fn unmarshalable_parameter_type_is_refused_at_the_declaration() {
+        let (message, location) = compile_err_with_location(
+            r#"
+fn python analyze(data: DataTable) -> Result<number> {
+    return 1.0
+}
+"#,
+        );
+        assert!(
+            message.contains("[C0933]"),
+            "the rejection carries its stable code, got: {message}"
+        );
+        assert!(
+            message.contains("DataTable"),
+            "the rejection names the offending type, got: {message}"
+        );
+        assert!(
+            message.contains("parameter 'data'"),
+            "the rejection names the offending parameter, got: {message}"
+        );
+        let location = location.expect("the rejection carries a source location");
+        assert_eq!(
+            location.line, 2,
+            "the rejection anchors at the declaration, got line {}",
+            location.line
+        );
+        assert!(
+            location.hints.iter().any(|h| h.contains("string")),
+            "the rejection carries an actionable remedy, got hints: {:?}",
+            location.hints
+        );
+    }
+
+    /// Return position anchors at the declaration name and reports the return
+    /// type, not a parameter.
+    #[test]
+    fn unmarshalable_return_type_is_refused_at_the_declaration() {
+        let (message, _) = compile_err_with_location(
+            r#"
+fn python when() -> Result<DateTime> {
+    return 1
+}
+"#,
+        );
+        assert!(message.contains("[C0933]"), "got: {message}");
+        assert!(
+            message.contains("return type is declared"),
+            "the rejection says which side of the signature is wrong, got: {message}"
+        );
+        assert!(message.contains("DateTime"), "got: {message}");
+    }
+
+    /// `Array<T>` names the ELEMENT as the problem, not the whole spelling —
+    /// the marshal layer monomorphizes on the scalar element, and a reader who
+    /// is told "Array is unsupported" would draw the wrong conclusion.
+    #[test]
+    fn array_of_struct_names_the_element_as_the_problem() {
+        let (message, _) = compile_err_with_location(
+            r#"
+type Measurement { value: number }
+fn python outlier_ratio(readings: Array<Measurement>) -> Result<number> {
+    return 0.0
+}
+"#,
+        );
+        assert!(message.contains("[C0933]"), "got: {message}");
+        assert!(
+            message.contains("`Measurement`"),
+            "the rejection names the element type, got: {message}"
+        );
+        assert!(
+            message.contains("Array<int>"),
+            "the remedy names the element types that do cross, got: {message}"
+        );
+    }
+
+    /// The table's asymmetry is reported as such: a map crosses inward only, so
+    /// the same type is legal in one position and refused in the other.
+    #[test]
+    fn hashmap_crosses_as_a_parameter_and_is_refused_as_a_return_type() {
+        let bytecode = compile_ok(
+            r#"
+fn python counts(m: HashMap<string, int>) -> Result<int> {
+    return 1
+}
+"#,
+        );
+        assert!(
+            bytecode
+                .foreign_functions
+                .iter()
+                .any(|e| e.name == "counts"),
+            "a map parameter must still compile"
+        );
+
+        let (message, _) = compile_err_with_location(
+            r#"
+fn python tally() -> Result<HashMap<string, int>> {
+    return 1
+}
+"#,
+        );
+        assert!(message.contains("[C0933]"), "got: {message}");
+        assert!(
+            message.contains("cannot be returned"),
+            "the rejection states the direction, got: {message}"
+        );
+    }
+
+    /// Differential control: every shape in the marshaling table still
+    /// compiles. Without this, tightening the check to "reject everything" would
+    /// pass the negative tests above.
+    #[test]
+    fn every_mapped_shape_still_compiles() {
+        let bytecode = compile_ok(
+            r#"
+type Candle { open: number }
+fn python scalars(a: int, b: number, c: bool, d: string) -> Result<int> {
+    return 1
+}
+fn python arrays(xs: Array<int>, ys: Array<number>, zs: Array<string>) -> Result<Array<int>> {
+    return xs
+}
+fn python optionals(a: int?, b: Option<string>) -> Result<int?> {
+    return a
+}
+fn python objects(c: Candle) -> Result<Candle> {
+    return c
+}
+fn python unit_return(a: int) -> Result<none> {
+    return 1
+}
+"#,
+        );
+        for name in ["scalars", "arrays", "optionals", "objects", "unit_return"] {
+            assert!(
+                bytecode.foreign_functions.iter().any(|e| e.name == name),
+                "mapped declaration `{name}` must still compile"
+            );
+        }
+    }
+
+    /// `extern "C"` marshals through libffi against C types (`ptr`, `i32`,
+    /// `cslice`, …), a different table with its own checks. The foreign
+    /// marshaling table must not reach it.
+    #[test]
+    fn extern_c_declarations_are_out_of_scope() {
+        let bytecode =
+            compile_ok(r#"extern "C" fn memcpy_stub(dst: ptr, src: ptr, n: i64) -> ptr from "c";"#);
+        assert!(
+            bytecode
+                .foreign_functions
+                .iter()
+                .any(|e| e.name == "memcpy_stub"),
+            "a native-ABI declaration using C types must still compile"
+        );
+    }
+
+    /// The rejection must not swallow the async one: an `async fn python` with
+    /// an unmappable type reports [C0932] first, because the declaration FORM
+    /// is what does not exist.
+    #[test]
+    fn async_rejection_still_precedes_the_marshal_type_rejection() {
+        let (message, _) = compile_err_with_location(
+            r#"
+async fn python analyze(data: DataTable) -> Result<number> {
+    return 1.0
+}
+"#,
+        );
+        assert!(
+            message.contains("[C0932]"),
+            "the async rejection keeps its precedence, got: {message}"
         );
     }
 }

@@ -1,10 +1,14 @@
-# Proposed workstreams — ERGO / PERF / POLY (2026-07-27, PENDING RATIFICATION)
+# Workstreams — ERGO / PERF / POLY (2026-07-27, RATIFIED AND ENACTED)
 
 Status: drafted at user direction 2026-07-27, grounded in a six-lane code
 scout at main `7e343c20`; **open rulings answered by the user 2026-07-27**
 (see [ratification-grill.md](./ratification-grill.md): Q1 B, Q2 A, Q3 C,
-Q4 as recommended, Q5 B). **Not yet published**; enactment awaits explicit
-go-ahead. The ADR-011–016 tracker publication (89 entries, 285 edges,
+Q4 as recommended, Q5 B). **Enactment go-ahead given 2026-07-27**; the
+authority set committed on the #111 baseline and the tickets published per
+[publication-plan.json](./publication-plan.json) — 25 workstream tickets
+plus the EFFECT-ROW-IN-TYPE carrier for the Q2 edge into #143 (26 issues;
+the R21 row-in-type slice needed an owning issue and no published entry
+owns that work — disclosed in the plan). The ADR-011–016 tracker publication (89 entries, 285 edges,
 frontier #111) is frozen; the only approved changes to it are the Q2 delta
 below.
 

@@ -66,6 +66,87 @@ pub struct ForeignFunctionDef {
     pub native_abi: Option<NativeAbiBinding>,
 }
 
+/// The `[C0932]` foreign-async rejection produced by
+/// [`ForeignFunctionDef::unsupported_async_rejection`].
+///
+/// TRANSITIONAL — deleted with its producer when issue #202
+/// (POLY-ASYNC-OFFLOAD) lands.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ForeignAsyncRejection {
+    /// Full diagnostic sentence, `[C0932]`-tagged.
+    pub message: String,
+    /// Declaration-name span the rejection anchors at.
+    pub span: Span,
+    /// The semantics-preserving fix-it, rendered as a diagnostic hint.
+    pub fix_hint: String,
+}
+
+/// The remedy for a `[C0933]` rejection, per the reason the type is unmapped.
+///
+/// Each hint names a concrete rewrite that keeps the call — none of them say
+/// "use a different type" without saying which.
+fn unmapped_fix_hint(
+    unmapped: &shape_abi_v1::foreign_types::UnmappedForeignType,
+    direction: shape_abi_v1::foreign_types::ForeignDirection,
+) -> String {
+    use shape_abi_v1::foreign_types::{ForeignDirection, UnmappedReason};
+
+    let position = match direction {
+        ForeignDirection::Argument => "parameter",
+        ForeignDirection::Return => "return type",
+    };
+    match unmapped.reason {
+        UnmappedReason::NoWireProjection => format!(
+            "convert on the Shape side of the call: pass `{spelling}` as a `string` (or as \
+             `int` / `number` if it is numeric) and rebuild it in the foreign body. Shape \
+             types with no wire form — DataTable, DateTime, decimal, bigint, char, and the \
+             collection types beyond Array and HashMap — have no MessagePack projection.",
+            spelling = unmapped.spelling,
+        ),
+        UnmappedReason::NonScalarElement => format!(
+            "only `Array<int>`, `Array<number>`, `Array<bool>` and `Array<string>` cross. \
+             Send `{spelling}`'s fields as parallel scalar arrays, or declare an object \
+             type and pass one value per call.",
+            spelling = unmapped.spelling,
+        ),
+        UnmappedReason::NonStringMapKey => {
+            "declare the map as `HashMap<string, V>` — MessagePack map keys cross as strings."
+                .to_string()
+        }
+        UnmappedReason::UnsupportedConstructor => format!(
+            "`{spelling}` has no foreign form. Tuples, function types, unions, references \
+             and trait objects do not cross; declare an object type (`{{ a: int, b: string }}` \
+             or a named `type`) with the fields you need.",
+            spelling = unmapped.spelling,
+        ),
+        UnmappedReason::WrongDirection => format!(
+            "a foreign map crosses inward only. Declare the {position} as an object type — \
+             `{{ a: int }}` or a named `type` — which has a projection in both directions.",
+        ),
+        UnmappedReason::BadArity => format!(
+            "check the type arguments on `{spelling}`.",
+            spelling = unmapped.spelling,
+        ),
+    }
+}
+
+/// A `[C0933]` rejection: a declared parameter or return type that cannot cross
+/// the foreign boundary.
+///
+/// Produced by [`ForeignFunctionDef::unmapped_foreign_types`] and consumed by
+/// both the compiler and the LSP, so the editor and `shape run` cannot disagree
+/// about whether a signature is expressible.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ForeignTypeRejection {
+    /// Full diagnostic sentence, `[C0933]`-tagged.
+    pub message: String,
+    /// The declaration-site span: the parameter for a parameter, the function
+    /// name for the return type.
+    pub span: Span,
+    /// The remedy, rendered as a diagnostic hint.
+    pub fix_hint: String,
+}
+
 /// Native ABI link metadata attached to a foreign function declaration.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct NativeAbiBinding {
@@ -94,6 +175,151 @@ impl ForeignFunctionDef {
     /// Whether this function uses native ABI binding (e.g. `extern "C"`).
     pub fn is_native_abi(&self) -> bool {
         self.native_abi.is_some()
+    }
+
+    /// ADR-019 §5 step 1 (POLY-ASYNC-TRUTH, issue #201) — the `[C0932]`
+    /// rejection for an `async` declaration on a language-runtime foreign
+    /// function.
+    ///
+    /// MEASURED before this rejection existed: nothing on the SHAPE side
+    /// consumed the `async`. `predeclare_foreign_function` resolved the
+    /// declared return annotation verbatim with no `Future<T>` wrapping, and
+    /// the executor's `CallForeign` arm invoked the extension SYNCHRONOUSLY on
+    /// the VM thread.
+    ///
+    /// The extensions DO act on `is_async`, and the remedy wording below is
+    /// load-bearing because of it: the Python extension wraps the body in
+    /// `async def` + `asyncio.run(...)`
+    /// (`extensions/python/src/runtime.rs:203`) and the TypeScript extension
+    /// in `async function` driven by a cached tokio runtime
+    /// (`extensions/typescript/src/runtime.rs:90`). So an async foreign body
+    /// may legitimately contain `await` today, and its awaits really do run —
+    /// they just run to completion while the VM thread blocks. Deleting the
+    /// keyword is therefore semantics-preserving for a body that does not
+    /// `await`, and NOT sufficient on its own for one that does. Do not
+    /// flatten the hint back to a bare "remove `async`".
+    ///
+    /// **TRANSITIONAL.** ADR-019 §5 rules real foreign async IN — the invoke
+    /// offloaded off-thread and resolved at `await`, issue #202
+    /// (POLY-ASYNC-OFFLOAD). This producer is deleted when that lands; the
+    /// compiler's negative tests are its flip-to-green control.
+    ///
+    /// Native-ABI declarations (`extern "C"`) are OUT of scope: they are not
+    /// language runtimes, #202 does not make them async, and they already carry
+    /// their own older rejection at the compile site. The two must not collapse.
+    ///
+    /// Shared by the compiler and the LSP — one text, so the editor and
+    /// `shape run` cannot disagree about whether the surface exists (the same
+    /// seam as [`Self::validate_type_annotations`]).
+    pub fn unsupported_async_rejection(&self) -> Option<ForeignAsyncRejection> {
+        if !self.is_async || self.is_native_abi() {
+            return None;
+        }
+        Some(ForeignAsyncRejection {
+            message: format!(
+                "[C0932] `async fn {language} {name}` is not supported — a foreign call runs \
+                 synchronously on the VM thread and its declared return type is not a future. The \
+                 body's own `await`s do run to completion inside the extension, but the caller \
+                 cannot overlap anything with them, so `async` here promises a concurrency the \
+                 runtime does not provide (ADR-019 §5 forbids this untruthful contract). Real \
+                 foreign async — the invoke offloaded off-thread and resolved at `await` — is \
+                 planned, not refused: see issue #202 (POLY-ASYNC-OFFLOAD). This rejection is \
+                 transitional and is deleted when that lands.",
+                language = self.language,
+                name = self.name,
+            ),
+            span: self.name_span,
+            fix_hint: format!(
+                "remove the `async` keyword: the call already runs synchronously, so `fn \
+                 {language} {name}` keeps exactly the semantics it has today if its body does not \
+                 `await`. A body that DOES `await` must drive its own completion inside the body \
+                 until #202 lands (python: wrap it in `asyncio.run(...)`; typescript: resolve the \
+                 promise before returning).",
+                language = self.language,
+                name = self.name,
+            ),
+        })
+    }
+
+    /// ADR-019 §1 / R25 (POLY-STUB-CHANNEL, issue #196) — the `[C0933]`
+    /// rejections for declared types that cannot cross the foreign boundary.
+    ///
+    /// Every parameter and the return type are classified against the canonical
+    /// marshaling table (`shape_abi_v1::foreign_types`). A type outside the
+    /// table used to compile fine and fail on the first call, deep inside
+    /// `foreign_marshal`, with a `NotImplemented` naming an internal stage
+    /// number; the author saw it only at runtime and only on the path that hit
+    /// it. The table is knowable at the declaration, so the diagnostic belongs
+    /// there.
+    ///
+    /// Direction matters: the table is not symmetric. `HashMap<string, V>` has
+    /// an outbound projection and no inbound one, so it is legal as a parameter
+    /// and refused as a return type.
+    ///
+    /// Native-ABI declarations (`extern "C"`) are OUT of scope — they marshal
+    /// through libffi against C types (`ptr`, `i32`, `cslice`, …), a different
+    /// table with its own checks in `build_native_c_signature`.
+    ///
+    /// Shared by the compiler and the LSP — one text, so the editor and
+    /// `shape run` cannot disagree (the same seam as
+    /// [`Self::validate_type_annotations`] and
+    /// [`Self::unsupported_async_rejection`]).
+    pub fn unmapped_foreign_types(&self) -> Vec<ForeignTypeRejection> {
+        use shape_abi_v1::foreign_types::{ForeignDirection, ForeignType};
+
+        if self.is_native_abi() {
+            return Vec::new();
+        }
+
+        let mut rejections = Vec::new();
+
+        for param in &self.params {
+            let Some(annotation) = &param.type_annotation else {
+                // Missing annotations are `validate_type_annotations`' error;
+                // reporting both at one site would be noise.
+                continue;
+            };
+            let declared = annotation.to_type_string();
+            if let Err(unmapped) = ForeignType::classify(&declared, ForeignDirection::Argument) {
+                let param_name = param.simple_name().unwrap_or("_");
+                rejections.push(ForeignTypeRejection {
+                    message: format!(
+                        "[C0933] `fn {language} {name}`: parameter '{param_name}' is declared \
+                         `{declared}`, which cannot cross the foreign boundary — `{spelling}` \
+                         is unusable because {why}. Values cross as MessagePack, so the \
+                         declared type must be one the marshaling table projects (ADR-019 §1).",
+                        language = self.language,
+                        name = self.name,
+                        spelling = unmapped.spelling,
+                        why = unmapped.reason.explain(),
+                    ),
+                    span: param.span(),
+                    fix_hint: unmapped_fix_hint(&unmapped, ForeignDirection::Argument),
+                });
+            }
+        }
+
+        if let Some(return_annotation) = &self.return_type {
+            let declared = return_annotation.to_type_string();
+            if let Err(unmapped) = ForeignType::classify(&declared, ForeignDirection::Return) {
+                rejections.push(ForeignTypeRejection {
+                    message: format!(
+                        "[C0933] `fn {language} {name}`: the return type is declared \
+                         `{declared}`, which cannot cross the foreign boundary — `{spelling}` \
+                         is unusable because {why}. Values cross as MessagePack, so the \
+                         declared type must be one the marshaling table projects (ADR-019 §1).",
+                        language = self.language,
+                        name = self.name,
+                        spelling = unmapped.spelling,
+                        why = unmapped.reason.explain(),
+                    ),
+                    span: self.name_span,
+                    fix_hint: unmapped_fix_hint(&unmapped, ForeignDirection::Return),
+                });
+            }
+        }
+
+        rejections
     }
 
     /// Validate that all parameter and return types are explicitly annotated,

@@ -42,6 +42,10 @@ pub struct TsRuntime {
     /// invocation and reused for all subsequent calls, avoiding the overhead
     /// of building a new runtime per call.
     tokio_runtime: Option<tokio::runtime::Runtime>,
+    /// The `.d.ts` document generated from the contract most recently delivered
+    /// through `register_types` (ADR-019 §1 / #196). Empty until the host
+    /// delivers one.
+    stub_document: String,
 }
 
 impl TsRuntime {
@@ -60,18 +64,36 @@ impl TsRuntime {
             functions: HashMap::new(),
             next_id: 1,
             tokio_runtime: None,
+            stub_document: String::new(),
         })
     }
 
-    /// Register Shape type schemas for TypeScript declaration generation.
+    /// Accept the declared Shape contract and generate the `.d.ts` stub for it.
     ///
-    /// The runtime receives the full set of Shape types so it can generate
-    /// TypeScript interface declarations that the user's code can reference.
-    pub fn register_types(&mut self, _types_msgpack: &[u8]) -> Result<(), String> {
-        // Stub: the real implementation will deserialize TypeSchemaExport[]
-        // and generate TypeScript interface declarations injected into the
-        // runtime's global scope.
+    /// ADR-019 §1 / R25 (POLY-STUB-CHANNEL, issue #196). The payload is a
+    /// `ForeignContractExport`: functions and named object types already
+    /// classified against the marshaling table, so this side never parses a
+    /// Shape type spelling.
+    ///
+    /// A payload from a host speaking a newer contract version is refused
+    /// rather than guessed at — a misread contract yields a confidently wrong
+    /// stub, which is worse than none.
+    pub fn register_types(&mut self, types_msgpack: &[u8]) -> Result<(), String> {
+        if types_msgpack.is_empty() {
+            self.stub_document.clear();
+            return Ok(());
+        }
+        let contract: shape_abi_v1::foreign_types::ForeignContractExport =
+            rmp_serde::from_slice(types_msgpack)
+                .map_err(|e| format!("register_types: undecodable contract payload: {e}"))?;
+        contract.check_version()?;
+        self.stub_document = crate::stubs::render_stub(&contract);
         Ok(())
+    }
+
+    /// The `.d.ts` document generated from the last delivered contract.
+    pub fn stub_document(&self) -> &str {
+        &self.stub_document
     }
 
     /// Compile a foreign function body into a callable JavaScript function.
@@ -367,6 +389,32 @@ pub unsafe extern "C" fn ts_register_types(
     }
 }
 
+/// Return the `.d.ts` generated from the contract last delivered through
+/// `ts_register_types` (ADR-019 §1 / #196). Caller frees via `free_buffer`.
+pub unsafe extern "C" fn ts_generate_stubs(
+    instance: *mut c_void,
+    out_ptr: *mut *mut u8,
+    out_len: *mut usize,
+) -> i32 {
+    if instance.is_null() {
+        return PluginError::NotInitialized as i32;
+    }
+    if out_ptr.is_null() || out_len.is_null() {
+        return PluginError::InvalidArgument as i32;
+    }
+    let runtime = unsafe { &*(instance as *const TsRuntime) };
+    let mut bytes = runtime.stub_document().as_bytes().to_vec();
+    bytes.shrink_to_fit();
+    let len = bytes.len();
+    let ptr = bytes.as_mut_ptr();
+    std::mem::forget(bytes);
+    unsafe {
+        *out_ptr = ptr;
+        *out_len = len;
+    }
+    PluginError::Success as i32
+}
+
 pub unsafe extern "C" fn ts_compile(
     instance: *mut c_void,
     name: *const u8,
@@ -618,5 +666,73 @@ mod tests {
         assert_eq!(decoded.file_extension, ".ts");
 
         unsafe { ts_free_buffer(out_ptr, out_len) };
+    }
+}
+
+#[cfg(test)]
+mod contract_wire_tests {
+    //! ADR-019 §1 / #196 — the host encodes the contract with
+    //! `rmp_serde::to_vec_named` (`PluginLanguageRuntime::register_contract`);
+    //! this asserts that exact encoding decodes here. The two sides share only
+    //! the `shape-abi-v1` type, so nothing but a test binds the wire format.
+    use super::*;
+    use shape_abi_v1::foreign_types::{
+        ForeignContractExport, ForeignFunctionContract, ForeignParamContract, ForeignScalar,
+        ForeignType,
+    };
+
+    fn sample_contract(language: &str) -> ForeignContractExport {
+        let mut contract = ForeignContractExport::new(language);
+        contract.functions.push(ForeignFunctionContract {
+            name: "add".to_string(),
+            params: vec![ForeignParamContract {
+                name: "a".to_string(),
+                ty: ForeignType::Scalar(ForeignScalar::Int),
+            }],
+            returns: ForeignType::Optional(Box::new(ForeignType::Scalar(ForeignScalar::String))),
+        });
+        contract
+    }
+
+    #[test]
+    fn the_hosts_encoding_decodes_and_produces_a_stub() {
+        let contract = sample_contract("typescript");
+        let bytes = rmp_serde::to_vec_named(&contract).expect("encode as the host does");
+
+        let mut runtime = TsRuntime::new(&[]).expect("runtime initializes");
+        runtime
+            .register_types(&bytes)
+            .expect("the extension decodes the host's payload");
+
+        let stub = runtime.stub_document();
+        assert!(!stub.is_empty(), "a delivered contract must produce a stub");
+        assert!(stub.contains("add"), "the stub declares the function: {stub}");
+    }
+
+    #[test]
+    fn a_future_contract_version_is_refused_not_guessed() {
+        let mut contract = sample_contract("typescript");
+        contract.version = 999;
+        let bytes = rmp_serde::to_vec_named(&contract).expect("encode");
+
+        let mut runtime = TsRuntime::new(&[]).expect("runtime initializes");
+        let err = runtime
+            .register_types(&bytes)
+            .expect_err("an unknown contract version must be refused");
+        assert!(err.contains("999"), "the refusal names the version: {err}");
+        assert!(
+            runtime.stub_document().is_empty(),
+            "a refused contract must not leave a half-built stub"
+        );
+    }
+
+    #[test]
+    fn an_empty_payload_clears_the_stub() {
+        let mut runtime = TsRuntime::new(&[]).expect("runtime initializes");
+        let bytes = rmp_serde::to_vec_named(&sample_contract("typescript")).expect("encode");
+        runtime.register_types(&bytes).expect("accepted");
+        assert!(!runtime.stub_document().is_empty());
+        runtime.register_types(&[]).expect("empty payload accepted");
+        assert!(runtime.stub_document().is_empty());
     }
 }

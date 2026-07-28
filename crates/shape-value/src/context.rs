@@ -227,9 +227,10 @@ impl From<shape_ast::error::SourceLocation> for ErrorLocation {
 impl From<ErrorLocation> for shape_ast::error::SourceLocation {
     /// Widen an `ErrorLocation` (VM) into a `SourceLocation` (AST).
     ///
-    /// Extended fields (`length`, `hints`, `notes`, `is_synthetic`) are
-    /// filled with defaults. This direction is less common — mainly useful
-    /// when VM errors need to be reported through the AST error renderer.
+    /// Extended fields (`length`, `hints`, `notes`, `is_synthetic`, `fixes`)
+    /// are filled with defaults. This direction is less common — mainly
+    /// useful when VM errors need to be reported through the AST error
+    /// renderer.
     fn from(loc: ErrorLocation) -> Self {
         shape_ast::error::SourceLocation {
             file: loc.file,
@@ -240,6 +241,7 @@ impl From<ErrorLocation> for shape_ast::error::SourceLocation {
             hints: Vec::new(),
             notes: Vec::new(),
             is_synthetic: false,
+            fixes: Vec::new(),
         }
     }
 }
@@ -308,6 +310,7 @@ mod tests {
             hints: vec!["try this".to_string()],
             notes: vec![],
             is_synthetic: true,
+            fixes: vec![],
         };
         let loc: ErrorLocation = src.into();
         assert_eq!(loc.line, 10);

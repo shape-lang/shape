@@ -8,6 +8,7 @@
 
 pub mod analysis;
 pub mod annotation_discovery;
+pub mod binding_storage;
 pub mod call_hierarchy;
 pub mod code_actions;
 pub mod code_lens;
@@ -31,12 +32,15 @@ pub mod generated_symbols;
 pub mod grammar_completion;
 pub mod hover;
 pub mod inlay_hints;
+pub(crate) mod migrated_scrapers;
 pub mod module_cache;
 pub mod rename;
 pub mod scope;
+pub mod semantic_seam;
 pub mod semantic_tokens;
 pub mod server;
 pub mod signature_help;
+pub(crate) mod structured_fixes;
 pub mod symbols;
 pub mod toml_support;
 pub mod trait_lookup;

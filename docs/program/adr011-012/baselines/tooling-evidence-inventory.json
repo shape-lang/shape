@@ -1,0 +1,502 @@
+{
+  "record_kind": "LegacyMigrationBaseline",
+  "record_version": 1,
+  "program_id": "adr011-012",
+  "ticket": 135,
+  "entry_id": "TOOLING-EVIDENCE-INVENTORY",
+  "manifest_ordinal": 25,
+  "title": "Freeze duplicate tooling and stale evidence authority",
+  "territory": "duplicate LSP semantics, stale tests, old documentation claims",
+  "authority": {
+    "adrs": [
+      "ADR-011",
+      "ADR-012",
+      "ADR-013",
+      "ADR-016"
+    ],
+    "rulings": [
+      "R14",
+      "R19",
+      "R20"
+    ]
+  },
+  "step": "docs/design/typed-comptime/adr011-012-execution-rulings.md — ten required steps, step 4",
+  "source_revision": "8b9a9fbc5075b86c448ca01caa114c633f8f6ca9",
+  "regenerate_with": "node scripts/generate-adr011-012-legacy-baselines.mjs --ticket 135",
+  "check_with": "node scripts/check-adr011-012-legacy-baselines.mjs --ticket 135",
+  "direction_rule": "Monotonic non-increasing. A set count may fall (migration progress) and may never rise. A new owner path is growth even when the total is unchanged, because it is a new surface carrying old authority.",
+  "excluded_from_hash": [
+    "source_revision",
+    "description"
+  ],
+  "total_count": 549,
+  "total_count_note": "Sum of the set counts. Sets may deliberately overlap (a narrowly scoped set can re-count sites a broader set already counts), so this is a ratchet aggregate for reporting movement — never a count of distinct legacy sites.",
+  "sets_sha256": "e3fd56c701801ebb629887504fc6037d25285a9bf43373ccae68f074fac63a95",
+  "sets": [
+    {
+      "id": "lsp-parallel-validators",
+      "category": "duplicate LSP semantics",
+      "description": "Hand-written `validate_*` functions in the language server. R23 names the LSP's parallel validators as duplicate semantics that must become generated shrink-only baselines driven by the shared query surface.",
+      "scope": [
+        "tools/shape-lsp/src"
+      ],
+      "exclude": [],
+      "pattern": "fn validate_\\w+",
+      "count": 25,
+      "owner_count": 4,
+      "owners": [
+        {
+          "path": "tools/shape-lsp/src/analysis/import_registration.rs",
+          "count": 1
+        },
+        {
+          "path": "tools/shape-lsp/src/diagnostics.rs",
+          "count": 13
+        },
+        {
+          "path": "tools/shape-lsp/src/doc_diagnostics.rs",
+          "count": 10
+        },
+        {
+          "path": "tools/shape-lsp/src/toml_support/diagnostics.rs",
+          "count": 1
+        }
+      ]
+    },
+    {
+      "id": "lsp-message-scraping",
+      "category": "duplicate LSP semantics",
+      "description": "Language-server sites branching on rendered diagnostic prose (`.contains(...)` over a message). R23 requires fixes to be single-sourced at the diagnostic emitter through a structured edit field, retiring the message-scraping fix-extractors.",
+      "scope": [
+        "tools/shape-lsp/src"
+      ],
+      "exclude": [],
+      "pattern": "(message|msg|text|diagnostic)\\s*\\.\\s*contains\\(",
+      "count": 76,
+      "owner_count": 11,
+      "owners": [
+        {
+          "path": "tools/shape-lsp/src/analysis.rs",
+          "count": 5
+        },
+        {
+          "path": "tools/shape-lsp/src/analysis/import_registration/tests.rs",
+          "count": 2
+        },
+        {
+          "path": "tools/shape-lsp/src/code_actions.rs",
+          "count": 13
+        },
+        {
+          "path": "tools/shape-lsp/src/context.rs",
+          "count": 1
+        },
+        {
+          "path": "tools/shape-lsp/src/diagnostics.rs",
+          "count": 31
+        },
+        {
+          "path": "tools/shape-lsp/src/doc_actions.rs",
+          "count": 6
+        },
+        {
+          "path": "tools/shape-lsp/src/doc_diagnostics.rs",
+          "count": 2
+        },
+        {
+          "path": "tools/shape-lsp/src/rename.rs",
+          "count": 1
+        },
+        {
+          "path": "tools/shape-lsp/src/semantic_tokens.rs",
+          "count": 1
+        },
+        {
+          "path": "tools/shape-lsp/src/server.rs",
+          "count": 3
+        },
+        {
+          "path": "tools/shape-lsp/src/toml_support/diagnostics.rs",
+          "count": 11
+        }
+      ]
+    },
+    {
+      "id": "ignored-tests",
+      "category": "stale tests",
+      "description": "Total `#[ignore]` attributes in the source trees. This is a SUPERSET of stale evidence — some ignores are classified live gaps — so the count is a growth ratchet only; per-bucket classification is owned by scripts/check-ignored-test-classification.py.",
+      "scope": [
+        "crates",
+        "bin",
+        "tools",
+        "extensions"
+      ],
+      "exclude": [],
+      "pattern": "#\\[ignore",
+      "count": 141,
+      "owner_count": 27,
+      "owners": [
+        {
+          "path": "bin/shape-cli/src/commands/serve_cmd.rs",
+          "count": 1
+        },
+        {
+          "path": "bin/shape-cli/tests/distributed_async_cancellation_e2e.rs",
+          "count": 9
+        },
+        {
+          "path": "bin/shape-cli/tests/distributed_matrix_e2e.rs",
+          "count": 2
+        },
+        {
+          "path": "bin/shape-cli/tests/distributed_snapshot_polyglot_e2e.rs",
+          "count": 4
+        },
+        {
+          "path": "bin/shape-cli/tests/ffi_e2e.rs",
+          "count": 10
+        },
+        {
+          "path": "crates/shape-jit/src/core.rs",
+          "count": 21
+        },
+        {
+          "path": "crates/shape-jit/src/ffi/async_ops.rs",
+          "count": 1
+        },
+        {
+          "path": "crates/shape-jit/src/ffi/control/mod.rs",
+          "count": 1
+        },
+        {
+          "path": "crates/shape-jit/src/ffi_symbols/simulation/mod.rs",
+          "count": 1
+        },
+        {
+          "path": "crates/shape-jit/src/worker.rs",
+          "count": 2
+        },
+        {
+          "path": "crates/shape-vm/src/compiler/comptime.rs",
+          "count": 1
+        },
+        {
+          "path": "crates/shape-vm/src/compiler/comptime_target.rs",
+          "count": 3
+        },
+        {
+          "path": "crates/shape-vm/src/compiler/functions.rs",
+          "count": 13
+        },
+        {
+          "path": "crates/shape-vm/src/compiler/functions/reference_provenance_tests.rs",
+          "count": 2
+        },
+        {
+          "path": "crates/shape-vm/src/compiler/functions_annotations/c2_slice2_battery_tests.rs",
+          "count": 1
+        },
+        {
+          "path": "crates/shape-vm/src/compiler/helpers.rs",
+          "count": 1
+        },
+        {
+          "path": "crates/shape-vm/src/compiler/v2_typed_emission.rs",
+          "count": 1
+        },
+        {
+          "path": "crates/shape-vm/src/executor/state_builtins_tests.rs",
+          "count": 1
+        },
+        {
+          "path": "crates/shape-vm/src/executor/tests/iterator_ops.rs",
+          "count": 31
+        },
+        {
+          "path": "crates/shape-vm/src/executor/tests/mod.rs",
+          "count": 27
+        },
+        {
+          "path": "crates/shape-vm/src/executor/v2_handlers/integration_tests.rs",
+          "count": 2
+        },
+        {
+          "path": "tools/shape-test/README.md",
+          "count": 1
+        },
+        {
+          "path": "tools/shape-test/tests/annotations_runtime/before_after.rs",
+          "count": 1
+        },
+        {
+          "path": "tools/shape-test/tests/annotations_runtime/injection.rs",
+          "count": 1
+        },
+        {
+          "path": "tools/shape-test/tests/closures_hof/mutable_capture.rs",
+          "count": 1
+        },
+        {
+          "path": "tools/shape-test/tests/modules_visibility/scoped_contract.rs",
+          "count": 1
+        },
+        {
+          "path": "tools/shape-test/tests/objects_arrays/objects.rs",
+          "count": 1
+        }
+      ]
+    },
+    {
+      "id": "tests-asserting-legacy-mechanisms",
+      "category": "stale tests",
+      "description": "Test-tree sites naming a mechanism ADR-011/012 deletes. Each is evidence that will either move to the replacement contract or be deleted with its mechanism; a rise means new tests were written against superseded authority.",
+      "scope": [
+        "tools/shape-test/tests",
+        "bin/shape-cli/tests"
+      ],
+      "exclude": [],
+      "pattern": "HookDecision|ComptimeTarget|\\bstring_lit\\b|pseudo_tuple|\\btype_info\\s*\\(|\\bimplements\\s*\\(\\s*\"",
+      "count": 70,
+      "owner_count": 15,
+      "owners": [
+        {
+          "path": "bin/shape-cli/tests/cli/jit_c3_carrier_native.rs",
+          "count": 1
+        },
+        {
+          "path": "bin/shape-cli/tests/cli/jit_e4_hook_decision_native.rs",
+          "count": 1
+        },
+        {
+          "path": "tools/shape-test/tests/annotations_comptime/directives.rs",
+          "count": 1
+        },
+        {
+          "path": "tools/shape-test/tests/annotations_comptime/showcases.rs",
+          "count": 1
+        },
+        {
+          "path": "tools/shape-test/tests/annotations_runtime/before_after.rs",
+          "count": 1
+        },
+        {
+          "path": "tools/shape-test/tests/annotations_runtime/injection.rs",
+          "count": 1
+        },
+        {
+          "path": "tools/shape-test/tests/comptime/annotations.rs",
+          "count": 1
+        },
+        {
+          "path": "tools/shape-test/tests/comptime/flagship_wf3d.rs",
+          "count": 8
+        },
+        {
+          "path": "tools/shape-test/tests/comptime/frozen_type.rs",
+          "count": 2
+        },
+        {
+          "path": "tools/shape-test/tests/comptime/functions.rs",
+          "count": 1
+        },
+        {
+          "path": "tools/shape-test/tests/comptime/reflect.rs",
+          "count": 2
+        },
+        {
+          "path": "tools/shape-test/tests/comptime/trait_evidence.rs",
+          "count": 1
+        },
+        {
+          "path": "tools/shape-test/tests/comptime/type_info_chained.rs",
+          "count": 47
+        },
+        {
+          "path": "tools/shape-test/tests/lsp/typed_comptime.rs",
+          "count": 1
+        },
+        {
+          "path": "tools/shape-test/tests/regression/language_surface.rs",
+          "count": 1
+        }
+      ]
+    },
+    {
+      "id": "legacy-mechanism-doc-claims",
+      "category": "old documentation claims",
+      "description": "Documentation occurrences of a superseded mechanism name. Scanned over docs/ ONLY, and deliberately unlike scripts/check-no-dynamic.sh, which excludes documentation: #135's territory is exactly old documentation claims. Enforcement prose that names a mechanism in order to forbid it is counted too — the ratchet measures direction, and the authority set is expected to shrink this as ADR-011/012 documentation lands.",
+      "scope": [
+        "docs"
+      ],
+      "exclude": [
+        "docs/program/adr011-012/baselines/**",
+        "docs/program/adr011-012/legacy-identity-manifest.json"
+      ],
+      "pattern": "HookDecision|__ComptimeTarget|\\bstring_lit\\b|pseudo-tuple|pseudo_tuple|marker substitution",
+      "count": 237,
+      "owner_count": 40,
+      "owners": [
+        {
+          "path": "docs/adr/009-strictly-typed-comptime-and-annotations.md",
+          "count": 1
+        },
+        {
+          "path": "docs/adr/012-verified-annotation-elaboration-and-callable-transforms.md",
+          "count": 10
+        },
+        {
+          "path": "docs/audits/2026-07-11-vertical-deep-dive/10-comptime-annotations.md",
+          "count": 7
+        },
+        {
+          "path": "docs/cluster-audits/adr009-handover-2026-07-14.md",
+          "count": 1
+        },
+        {
+          "path": "docs/cluster-audits/adr009-handover-2026-07-14b.md",
+          "count": 1
+        },
+        {
+          "path": "docs/cluster-audits/wave12-comptime-proof-gap-scope.md",
+          "count": 1
+        },
+        {
+          "path": "docs/cluster-audits/wave30-disabled-comptime-extension-triage.md",
+          "count": 1
+        },
+        {
+          "path": "docs/cluster-audits/wave40-annotation-hook-type-model.md",
+          "count": 4
+        },
+        {
+          "path": "docs/cluster-audits/wave40-argument-pack-design-hybrid.md",
+          "count": 4
+        },
+        {
+          "path": "docs/cluster-audits/wave40-failure-hook-design-continuation.md",
+          "count": 1
+        },
+        {
+          "path": "docs/cluster-audits/wave40-remoting-provider-interface.md",
+          "count": 1
+        },
+        {
+          "path": "docs/cluster-audits/wave40-total-annotation-lifecycle.md",
+          "count": 2
+        },
+        {
+          "path": "docs/cluster-audits/wave41-comptime-current-surface.md",
+          "count": 5
+        },
+        {
+          "path": "docs/cluster-audits/wave41-comptime-example-matrix.md",
+          "count": 1
+        },
+        {
+          "path": "docs/cluster-audits/wave41-comptime-untyped-paths.md",
+          "count": 7
+        },
+        {
+          "path": "docs/cluster-audits/wave6-disabled-distributed-comptime-proof-triage.md",
+          "count": 2
+        },
+        {
+          "path": "docs/cluster-audits/wf4-coverage-matrix.md",
+          "count": 3
+        },
+        {
+          "path": "docs/defections.md",
+          "count": 10
+        },
+        {
+          "path": "docs/design/comptime-excellence.md",
+          "count": 11
+        },
+        {
+          "path": "docs/design/schema-identity-structural.md",
+          "count": 1
+        },
+        {
+          "path": "docs/design/typed-comptime-implementation.md",
+          "count": 8
+        },
+        {
+          "path": "docs/design/typed-comptime.md",
+          "count": 10
+        },
+        {
+          "path": "docs/design/typed-comptime/adr011-012-execution-rulings.md",
+          "count": 3
+        },
+        {
+          "path": "docs/design/typed-comptime/annotations-and-hooks.md",
+          "count": 2
+        },
+        {
+          "path": "docs/design/typed-comptime/c3-decisions.md",
+          "count": 7
+        },
+        {
+          "path": "docs/design/typed-comptime/c3-slice1-report.md",
+          "count": 10
+        },
+        {
+          "path": "docs/design/typed-comptime/c3-slice2-report.md",
+          "count": 5
+        },
+        {
+          "path": "docs/design/typed-comptime/c3-slice3-report.md",
+          "count": 3
+        },
+        {
+          "path": "docs/design/typed-comptime/c3-slice4-report.md",
+          "count": 1
+        },
+        {
+          "path": "docs/design/typed-comptime/c3-slice5-report.md",
+          "count": 13
+        },
+        {
+          "path": "docs/design/typed-comptime/c3-slice6-report.md",
+          "count": 6
+        },
+        {
+          "path": "docs/design/typed-comptime/c3-slice7-8-report.md",
+          "count": 4
+        },
+        {
+          "path": "docs/design/typed-comptime/e2-close-report.md",
+          "count": 1
+        },
+        {
+          "path": "docs/design/typed-comptime/e4-decisions.md",
+          "count": 14
+        },
+        {
+          "path": "docs/design/typed-comptime/e4-slice0-report.md",
+          "count": 12
+        },
+        {
+          "path": "docs/design/typed-comptime/e4-slice3-report.md",
+          "count": 2
+        },
+        {
+          "path": "docs/design/typed-comptime/e4-slice4-report.md",
+          "count": 42
+        },
+        {
+          "path": "docs/design/typed-comptime/e4-slice5-report.md",
+          "count": 8
+        },
+        {
+          "path": "docs/design/typed-comptime/e4-slice6-report.md",
+          "count": 5
+        },
+        {
+          "path": "docs/program/adr011-012/e6-disposition.md",
+          "count": 7
+        }
+      ]
+    }
+  ]
+}

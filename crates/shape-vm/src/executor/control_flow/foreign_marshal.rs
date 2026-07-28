@@ -48,6 +48,7 @@
 #![allow(clippy::approx_constant)] // arbitrary test floats; not math constants
 use crate::executor::result_option_carrier::{build_err, build_ok, build_some};
 use rmpv::Value as Rmp;
+use shape_abi_v1::foreign_types::{ForeignDirection, ForeignScalar, ForeignType};
 use shape_runtime::type_schema::{BuiltinSchemaIds, FieldType, TypeSchema, TypeSchemaRegistry};
 use shape_value::heap_value::{HashMapKindedRef, HeapKind, HeapValue, TypedObjectPtr};
 use shape_value::v2::string_obj::StringObj;
@@ -123,55 +124,60 @@ fn kinded_slot_to_msgpack_typed(
     }
 }
 
-/// Strip `Array<T>` / `Vec<T>` → `T` (single level, for scalar elements).
-fn strip_array_elem(s: &str) -> Option<&str> {
-    let inner = if let Some(rest) = s.strip_prefix("Array<") {
-        rest.strip_suffix('>')?
-    } else if let Some(rest) = s.strip_prefix("Vec<") {
-        rest.strip_suffix('>')?
-    } else {
-        return None;
-    };
-    Some(inner.trim())
-}
-
 /// Project a `Ptr(HeapKind::TypedArray)` slot to a msgpack `Array`, using
 /// the declared `Array<T>` type to select the element monomorphization
 /// (§4.4 — element kind is compile-time-proven, never runtime-tagged).
+///
+/// The element kind comes from the canonical marshaling table (ADR-019 §1 /
+/// #196), so the outbound element set and the declaration-site check cannot
+/// drift apart.
 fn typed_array_to_msgpack(bits: u64, declared: &str) -> Result<Rmp, VMError> {
     if bits == 0 {
         return Ok(Rmp::Array(Vec::new()));
     }
-    let elem = strip_array_elem(declared).ok_or_else(|| {
-        VMError::NotImplemented(format!(
-            "foreign_marshal: Array arg needs a declared `Array<T>` element \
-             type to select the buffer monomorphization; got '{declared}'"
-        ))
-    })?;
+    let elem = match ForeignType::classify(declared, ForeignDirection::Argument) {
+        Ok(ForeignType::Array(elem)) => elem,
+        Ok(other) => {
+            return Err(VMError::NotImplemented(format!(
+                "foreign_marshal: Array arg needs a declared `Array<T>` element \
+                 type to select the buffer monomorphization; got '{}'",
+                other.shape_spelling()
+            )));
+        }
+        Err(e) => {
+            return Err(VMError::NotImplemented(format!(
+                "foreign_marshal: Array arg declared '{}' is not in the foreign \
+                 marshaling table ('{}' {}).",
+                e.declared,
+                e.spelling,
+                e.reason.explain()
+            )));
+        }
+    };
     // `len` lives at offset 16 of the 24-byte struct — element-independent,
     // so any monomorphization reads it correctly.
     let n = unsafe { TypedArray::<i64>::len(bits as *const TypedArray<i64>) } as usize;
     let mut out = Vec::with_capacity(n);
     match elem {
-        "int" | "Int" => {
+        ForeignScalar::Int => {
             let s = unsafe { TypedArray::<i64>::as_slice(bits as *const TypedArray<i64>) };
             for v in s {
                 out.push(Rmp::Integer((*v).into()));
             }
         }
-        "number" | "Number" | "float" | "Float" => {
+        ForeignScalar::Number => {
             let s = unsafe { TypedArray::<f64>::as_slice(bits as *const TypedArray<f64>) };
             for v in s {
                 out.push(Rmp::F64(*v));
             }
         }
-        "bool" | "Bool" => {
+        ForeignScalar::Bool => {
             let s = unsafe { TypedArray::<u8>::as_slice(bits as *const TypedArray<u8>) };
             for v in s {
                 out.push(Rmp::Boolean(*v != 0));
             }
         }
-        "string" | "String" => {
+        ForeignScalar::String => {
             let ptr = bits as *const TypedArray<*const StringObj>;
             for i in 0..n {
                 let sp = unsafe { TypedArray::<*const StringObj>::get_unchecked(ptr, i as u32) };
@@ -179,12 +185,10 @@ fn typed_array_to_msgpack(bits: u64, declared: &str) -> Result<Rmp, VMError> {
                 out.push(Rmp::String(s.into()));
             }
         }
-        other => {
-            return Err(VMError::NotImplemented(format!(
-                "foreign_marshal: Array<{other}> arg has no scalar-element FFI \
-                 projection yet (ffi-rebuild §4.4 non-scalar element arms are \
-                 stage-7 territory)."
-            )));
+        ForeignScalar::Unit => {
+            return Err(VMError::NotImplemented(
+                "foreign_marshal: `Array<none>` has no element projection.".to_string(),
+            ));
         }
     }
     Ok(Rmp::Array(out))
@@ -555,49 +559,75 @@ pub fn unmarshal_result(
             e
         ))
     })?;
-    let inner_type = strip_result_wrapper(return_type);
-    msgpack_to_kinded_slot(&value, inner_type, schema_id, schemas, builtin)
+    // ADR-019 §1 / #196: the declared return type is classified against the
+    // canonical marshaling table (`shape_abi_v1::foreign_types`) — the same
+    // table the compiler rejects unmapped declarations with and the extensions
+    // render stubs from. A classification failure here is a host-side gap, not
+    // a user error: `compile_foreign_function` refuses the declaration first,
+    // so reaching this arm means the two disagreed.
+    let declared = ForeignType::classify(return_type, ForeignDirection::Return).map_err(|e| {
+        VMError::NotImplemented(format!(
+            "foreign_marshal::unmarshal_result: declared return type '{}' is not in \
+             the foreign marshaling table ('{}' {}). The declaration-site check \
+             ([C0933]) should have refused this signature — reaching the marshal \
+             layer means the compiler and the table disagree.",
+            e.declared,
+            e.spelling,
+            e.reason.explain(),
+        ))
+    })?;
+    foreign_type_to_kinded_slot(&value, &declared, schema_id, schemas, builtin)
 }
 
-/// Convert an `rmpv::Value` into a `KindedSlot` whose `NativeKind`
-/// matches the declared `target` type.
-fn msgpack_to_kinded_slot(
+/// Convert an `rmpv::Value` into a `KindedSlot` whose `NativeKind` matches the
+/// classified declared type.
+///
+/// One arm per [`ForeignType`] constructor, matched exhaustively: a new table
+/// constructor cannot be added without landing its inbound projection here.
+fn foreign_type_to_kinded_slot(
     val: &Rmp,
-    target: &str,
+    declared: &ForeignType,
     schema_id: Option<u32>,
     schemas: &TypeSchemaRegistry,
     builtin: &BuiltinSchemaIds,
 ) -> Result<KindedSlot, VMError> {
-    // `Option<T>` (ffi-rebuild §4.4, stage 3): the declared type is the
-    // oracle. Nil → None; any other wire value → unmarshal per T → Some.
-    // Selected by the declared type BEFORE the nil-guard so `Option<int>`
-    // returning null builds `None` rather than a conformance error.
-    //
-    // Representation note: the pattern-matcher's `None` discriminator emits
-    // `IsNull` (null-coding), so `None` MUST be the null sentinel
-    // (`KindedSlot::none()`) — a non-null `build_none` carrier would read as
-    // `Some` under `IsNull` and then fault in `UnwrapOption`. `Some(v)` uses
-    // the canonical `build_some` carrier: it is always non-null (so `IsNull`
-    // is `false`) and `op_unwrap_option`'s `read_option` path unwraps it
-    // correctly even for `Some(0)`/`Some(false)`.
-    if let Some(inner) = strip_option_inner(target) {
-        if matches!(val, Rmp::Nil) {
-            return Ok(KindedSlot::none());
+    let target = declared.shape_spelling();
+    let target = target.as_str();
+    match declared {
+        // `Option<T>`: the declared type is the oracle. Nil → None; any other
+        // wire value → unmarshal per T → Some. Selected BEFORE the nil-guard so
+        // `Option<int>` returning null builds `None` rather than a conformance
+        // error.
+        //
+        // Representation note: the pattern-matcher's `None` discriminator emits
+        // `IsNull` (null-coding), so `None` MUST be the null sentinel
+        // (`KindedSlot::none()`) — a non-null `build_none` carrier would read as
+        // `Some` under `IsNull` and then fault in `UnwrapOption`. `Some(v)` uses
+        // the canonical `build_some` carrier: it is always non-null (so `IsNull`
+        // is `false`) and `op_unwrap_option`'s `read_option` path unwraps it
+        // correctly even for `Some(0)`/`Some(false)`.
+        ForeignType::Optional(inner) => {
+            if matches!(val, Rmp::Nil) {
+                return Ok(KindedSlot::none());
+            }
+            let payload = foreign_type_to_kinded_slot(val, inner, schema_id, schemas, builtin)?;
+            Ok(build_some(builtin, payload))
         }
-        let payload = msgpack_to_kinded_slot(val, inner, schema_id, schemas, builtin)?;
-        return Ok(build_some(builtin, payload));
-    }
 
-    // Handle nil first
-    if matches!(val, Rmp::Nil) {
-        if target == "none" || target == "Unit" || target == "()" {
-            return Ok(KindedSlot::none());
+        ForeignType::Scalar(ForeignScalar::Unit) => match val {
+            Rmp::Nil => Ok(KindedSlot::none()),
+            _ => Err(marshal_error(format!(
+                "expected {}, got {}",
+                target,
+                msgpack_type_name(val)
+            ))),
+        },
+
+        _ if matches!(val, Rmp::Nil) => {
+            Err(marshal_error(format!("expected {}, got None", target)))
         }
-        return Err(marshal_error(format!("expected {}, got None", target)));
-    }
 
-    match target {
-        "int" | "Int" => match val {
+        ForeignType::Scalar(ForeignScalar::Int) => match val {
             Rmp::Integer(i) => Ok(KindedSlot::from_int(
                 i.as_i64()
                     .or_else(|| i.as_u64().map(|n| n as i64))
@@ -608,7 +638,8 @@ fn msgpack_to_kinded_slot(
                 msgpack_type_name(val)
             ))),
         },
-        "float" | "number" | "Number" | "Float" => match val {
+
+        ForeignType::Scalar(ForeignScalar::Number) => match val {
             Rmp::F64(f) => Ok(KindedSlot::from_number(*f)),
             Rmp::F32(f) => Ok(KindedSlot::from_number(*f as f64)),
             Rmp::Integer(i) => {
@@ -625,7 +656,8 @@ fn msgpack_to_kinded_slot(
                 msgpack_type_name(val)
             ))),
         },
-        "string" | "String" => match val {
+
+        ForeignType::Scalar(ForeignScalar::String) => match val {
             Rmp::String(s) => {
                 let s = s
                     .as_str()
@@ -637,67 +669,48 @@ fn msgpack_to_kinded_slot(
                 msgpack_type_name(val)
             ))),
         },
-        "bool" | "Bool" => match val {
+
+        ForeignType::Scalar(ForeignScalar::Bool) => match val {
             Rmp::Boolean(b) => Ok(KindedSlot::from_bool(*b)),
             _ => Err(marshal_error(format!(
                 "expected bool, got {}",
                 msgpack_type_name(val)
             ))),
         },
-        "none" | "Unit" | "()" => Err(marshal_error(format!(
-            "expected {}, got {}",
-            target,
-            msgpack_type_name(val)
-        ))),
 
-        // Vec<T> / Array<T> — scalar element T (ffi-rebuild §4.4, stage 3).
-        s if strip_array_elem(s).is_some() => {
-            let elem = strip_array_elem(s).unwrap();
-            match val {
-                Rmp::Array(items) => build_scalar_typed_array(items, elem),
-                _ => Err(marshal_error(format!(
-                    "expected {}, got {}",
-                    s,
-                    msgpack_type_name(val)
-                ))),
-            }
-        }
-
-        // Object type literal: {f1: T1, f2: T2, ...}
-        s if s.starts_with('{') && s.ends_with('}') => match val {
-            Rmp::Map(entries) => match schema_id {
-                Some(sid) => marshal_typed_object_from_msgpack(entries, sid, schemas),
-                None => Err(VMError::NotImplemented(format!(
-                    "foreign_marshal: object-typed return ({s}) lacks a \
-                     registered schema_id; ad-hoc field-set inference \
-                     is a follow-up."
-                ))),
-            },
+        ForeignType::Array(elem) => match val {
+            Rmp::Array(items) => build_scalar_typed_array(items, elem.shape_spelling()),
             _ => Err(marshal_error(format!(
-                "expected object, got {}",
+                "expected {}, got {}",
+                target,
                 msgpack_type_name(val)
             ))),
         },
 
-        // Named type with schema_id — marshal as typed object
-        _ if schema_id.is_some() => match val {
-            Rmp::Map(entries) => {
-                marshal_typed_object_from_msgpack(entries, schema_id.unwrap(), schemas)
-            }
+        // `HashMap<string, V>` is outbound-only; `ForeignType::classify` refuses
+        // it in return position, so this arm is unreachable through
+        // `unmarshal_result`. It exists because the match is exhaustive — and it
+        // states the asymmetry rather than defaulting.
+        ForeignType::Map(_) => Err(VMError::NotImplemented(format!(
+            "foreign_marshal: '{target}' has no inbound projection — a foreign \
+             map can be passed in but not returned."
+        ))),
+
+        ForeignType::Object { .. } => match val {
+            Rmp::Map(entries) => match schema_id {
+                Some(sid) => marshal_typed_object_from_msgpack(entries, sid, schemas),
+                None => Err(VMError::NotImplemented(format!(
+                    "foreign_marshal: object-typed return ({target}) lacks a \
+                     registered schema_id; ad-hoc field-set inference \
+                     is a follow-up."
+                ))),
+            },
             _ => Err(marshal_error(format!(
                 "expected object for type '{}', got {}",
                 target,
                 msgpack_type_name(val)
             ))),
         },
-
-        // No schema, unknown target — surface
-        _ => Err(VMError::NotImplemented(format!(
-            "foreign_marshal::unmarshal_result: return type '{target}' \
-             has no kind oracle (no schema_id, not a primitive). The \
-             §2.7.5 producer-side proof discipline refuses Bool-default \
-             fallback for unknown declared types."
-        ))),
     }
 }
 
@@ -904,29 +917,11 @@ fn build_field_slot(
 // Helpers
 // ============================================================================
 
-/// Strip `Result<...>` wrapper from a type string.
-fn strip_result_wrapper(s: &str) -> &str {
-    if s.starts_with("Result<") && s.ends_with('>') {
-        &s[7..s.len() - 1]
-    } else {
-        s
-    }
-}
-
-/// Strip `Option<T>` / `T?` → `T` (the declared inner type).
-fn strip_option_inner(s: &str) -> Option<&str> {
-    let s = s.trim();
-    if let Some(rest) = s.strip_prefix("Option<") {
-        return rest.strip_suffix('>').map(|inner| inner.trim());
-    }
-    // `T?` sugar. Guard against `??` and empty.
-    if let Some(inner) = s.strip_suffix('?') {
-        if !inner.is_empty() && !inner.ends_with('?') {
-            return Some(inner.trim());
-        }
-    }
-    None
-}
+// The `Result<...>` / `Option<T>` / `Array<T>` spelling strippers that used to
+// live here are gone: `ForeignType::classify` (shape-abi-v1) is the single
+// parser for declared foreign type spellings, and every consumer — the
+// declaration check, this marshal layer, and the extensions' stub renderers —
+// goes through it (ADR-019 §1 / #196).
 
 /// Build a `Ptr(HeapKind::TypedArray)` slot from a msgpack array with a
 /// scalar declared element type (ffi-rebuild §4.4, stage 3). Every element
@@ -996,9 +991,7 @@ fn build_scalar_typed_array(items: &[Rmp], elem: &str) -> Result<KindedSlot, VME
             for (i, it) in items.iter().enumerate() {
                 match it {
                     Rmp::String(s) => {
-                        let s = s
-                            .as_str()
-                            .ok_or_else(|| array_elem_err(i, "string", it))?;
+                        let s = s.as_str().ok_or_else(|| array_elem_err(i, "string", it))?;
                         ptrs.push(StringObj::new(s) as *const StringObj);
                     }
                     _ => return Err(array_elem_err(i, "string", it)),
@@ -1261,9 +1254,16 @@ mod tests {
     fn wrap_dynamic_result_exception_is_plain_err() {
         let (schemas, builtin) = schemas_with_builtins();
         let outcome = Err("ValueError: boom".to_string());
-        let slot =
-            wrap_dynamic_result(outcome, "f", "python", "Result<int>", None, &schemas, &builtin)
-                .unwrap();
+        let slot = wrap_dynamic_result(
+            outcome,
+            "f",
+            "python",
+            "Result<int>",
+            None,
+            &schemas,
+            &builtin,
+        )
+        .unwrap();
         // Result::Err carrier — a TypedObject.
         assert_eq!(slot.kind(), NativeKind::Ptr(HeapKind::TypedObject));
         drop(slot);
@@ -1290,10 +1290,7 @@ mod tests {
         assert!(!carrier.is_ok());
         let payload = carrier.clone_payload().unwrap();
         let msg = payload.as_str().unwrap();
-        assert!(
-            msg.starts_with("TypeConformanceError: "),
-            "got: {msg}"
-        );
+        assert!(msg.starts_with("TypeConformanceError: "), "got: {msg}");
         assert!(msg.contains("int"));
         drop(payload);
         drop(slot);
@@ -1318,4 +1315,104 @@ mod tests {
     }
 
     use crate::executor::result_option_carrier::read_result;
+
+    /// A representative wire value for a table entry, plus the `NativeKind` the
+    /// inbound projection must produce.
+    fn wire_witness(t: &ForeignType) -> (Rmp, NativeKind) {
+        match t {
+            ForeignType::Scalar(ForeignScalar::Int) => {
+                (Rmp::Integer(7i64.into()), NativeKind::Int64)
+            }
+            ForeignType::Scalar(ForeignScalar::Number) => (Rmp::F64(1.5), NativeKind::Float64),
+            ForeignType::Scalar(ForeignScalar::Bool) => (Rmp::Boolean(true), NativeKind::Bool),
+            ForeignType::Scalar(ForeignScalar::String) => {
+                (Rmp::String("s".into()), NativeKind::String)
+            }
+            ForeignType::Scalar(ForeignScalar::Unit) => (Rmp::Nil, NativeKind::Null),
+            ForeignType::Array(elem) => {
+                let item = match elem {
+                    ForeignScalar::Int => Rmp::Integer(1i64.into()),
+                    ForeignScalar::Number => Rmp::F64(1.0),
+                    ForeignScalar::Bool => Rmp::Boolean(false),
+                    ForeignScalar::String => Rmp::String("a".into()),
+                    ForeignScalar::Unit => Rmp::Nil,
+                };
+                (
+                    Rmp::Array(vec![item]),
+                    NativeKind::Ptr(HeapKind::TypedArray),
+                )
+            }
+            ForeignType::Optional(inner) => {
+                let (v, _) = wire_witness(inner);
+                // `Some(v)` rides the canonical non-null carrier.
+                (v, NativeKind::Ptr(HeapKind::TypedObject))
+            }
+            ForeignType::Object { .. } => (
+                Rmp::Map(vec![(Rmp::String("open".into()), Rmp::F64(1.0))]),
+                NativeKind::Ptr(HeapKind::TypedObject),
+            ),
+            // Outbound-only; excluded from this inbound sweep by `supports`.
+            ForeignType::Map(_) => (Rmp::Nil, NativeKind::Null),
+        }
+    }
+
+    /// ADR-019 §1 / #196 — the inbound half of the per-type marshaling-table
+    /// assertion. Every table entry that crosses in return position must have a
+    /// working projection here; a new entry with no arm fails this test rather
+    /// than surfacing `NotImplemented` at a user's first call.
+    #[test]
+    fn every_return_capable_table_entry_unmarshals() {
+        use shape_abi_v1::foreign_types::marshal_table;
+        let (mut schemas, builtin) = schemas_with_builtins();
+        let object_schema = shape_runtime::type_schema::TypeSchemaBuilder::new("Candle")
+            .f64_field("open")
+            .register(&mut schemas) as u32;
+
+        for entry in marshal_table() {
+            if !entry.supports(ForeignDirection::Return) {
+                continue;
+            }
+            let spelling = entry.shape_spelling();
+            let (wire, expected_kind) = wire_witness(&entry);
+            let schema_id = match entry {
+                ForeignType::Object { .. } => Some(object_schema),
+                _ => None,
+            };
+            let bytes = encode(&wire);
+            let slot = unmarshal_result(&bytes, &spelling, schema_id, &schemas, &builtin)
+                .unwrap_or_else(|e| {
+                    panic!(
+                        "table entry `{}` has no inbound marshal projection: {:?}",
+                        spelling, e
+                    )
+                });
+            assert_eq!(
+                slot.kind(),
+                expected_kind,
+                "table entry `{}` produced the wrong slot kind",
+                spelling
+            );
+            drop(slot);
+        }
+    }
+
+    /// The declared-type parser is shared, not duplicated: a spelling the table
+    /// refuses reaches the marshal layer only as a host-side gap, and says so.
+    #[test]
+    fn unmapped_return_type_names_the_table_and_the_declaration_check() {
+        let (schemas, builtin) = schemas_with_builtins();
+        let bytes = encode(&Rmp::Integer(1i64.into()));
+        let err = unmarshal_result(&bytes, "Result<DataTable>", None, &schemas, &builtin)
+            .expect_err("DataTable is not in the marshaling table");
+        match err {
+            VMError::NotImplemented(msg) => {
+                assert!(msg.contains("DataTable"), "message names the type: {msg}");
+                assert!(
+                    msg.contains("C0933"),
+                    "message cites the declaration check: {msg}"
+                );
+            }
+            other => panic!("expected NotImplemented, got {other:?}"),
+        }
+    }
 }

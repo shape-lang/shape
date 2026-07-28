@@ -214,6 +214,7 @@ impl BytecodeCompiler {
             mir_functions: HashMap::new(),
             mir_borrow_analyses: HashMap::new(),
             mir_storage_plans: HashMap::new(),
+            binding_storage_decisions: Default::default(),
             function_borrow_summaries: HashMap::new(),
             mir_span_to_point: HashMap::new(),
             mir_field_analyses: HashMap::new(),
@@ -1007,6 +1008,12 @@ impl BytecodeCompiler {
         }
         if let Some(source_line) = error.source_line {
             location = location.with_source_line(source_line);
+        }
+        // ADR-017 §4: the checker's proved fixes travel with the error so
+        // the CLI and the LSP read one value instead of each deriving their
+        // own from the rendered message.
+        if !error.fixes.is_empty() {
+            location = location.with_fixes(error.fixes);
         }
 
         ShapeError::SemanticError {
