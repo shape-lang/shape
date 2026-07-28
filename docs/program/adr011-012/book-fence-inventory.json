@@ -9,8 +9,8 @@
   },
   "counts": {
     "pages": 102,
-    "sections": 1376,
-    "fences_all_languages": 982,
+    "sections": 1379,
+    "fences_all_languages": 984,
     "fences_by_language": {
       "(none)": 52,
       "bash": 69,
@@ -20,15 +20,15 @@
       "python": 1,
       "rust": 37,
       "sh": 2,
-      "shape": 770,
+      "shape": 772,
       "text": 17,
       "toml": 14,
       "typescript": 1,
       "vim": 3
     },
-    "shape_fences": 770,
+    "shape_fences": 772,
     "shape_runnable_gated_candidates": 386,
-    "shape_illustrative_only_candidates": 384,
+    "shape_illustrative_only_candidates": 386,
     "shape_deferred": 0,
     "shape_with_expected_value": 21,
     "shape_with_expected_fail": 10,
@@ -37,11 +37,11 @@
   },
   "executed_subset_note": "shape_runnable_gated_candidates is the set book/book-site/scripts/run-book-truth-gate.mjs actually executes (it keeps runnable === true && !deferred). It is a subset of shape_fences, which is itself a subset of fences_all_languages. ADR-016 §6 rejects a percentage over a curated subset, so all three are reported and none is called the universe on its own.",
   "marker_counts": {
-    "missing-stable-identity": 770,
+    "missing-stable-identity": 772,
     "expectation-is-a-rendered-substring": 10,
     "no-declared-expected-value": 355,
-    "no-illustrative-reason": 384,
-    "no-illustrative-citation": 384,
+    "no-illustrative-reason": 386,
+    "no-illustrative-citation": 386,
     "no-owning-section": 11
   },
   "duplicate_declared_ids": [],
@@ -73,8 +73,8 @@
       "owner_hint": "#116 plus the R15 / PERF-CLOSURE-NATIVE witness lane"
     }
   ],
-  "sections_sha256": "e2170da69a092371ed5111a719d1cedab996bc5d4fe0b233f7edf59712e987ad",
-  "fences_sha256": "94a2e8be6f291c2b4fc0b3b633e1a03240a13b9d81dd9d5462a34ce4c76cb76a",
+  "sections_sha256": "8b4c3da5bdca80fe7a1268a8f170d6877ef60ef0d1621570e6b80dcfbe427251",
+  "fences_sha256": "7d40d22638578d702f1abf3c0caaad144675c6d1214f7da0c9a247f17ce75733",
   "sections": [
     {
       "page": "advanced/annotations.mdx",
@@ -9174,6 +9174,27 @@
       "anchor": "returning-structured-data",
       "title": "Returning Structured Data",
       "depth": 2,
+      "markers": []
+    },
+    {
+      "page": "tooling/polyglot.mdx",
+      "anchor": "sharing-buffers-without-copying",
+      "title": "Sharing Buffers Without Copying",
+      "depth": 2,
+      "markers": []
+    },
+    {
+      "page": "tooling/polyglot.mdx",
+      "anchor": "why-you-have-to-ask-for-it",
+      "title": "Why you have to ask for it",
+      "depth": 3,
+      "markers": []
+    },
+    {
+      "page": "tooling/polyglot.mdx",
+      "anchor": "what-can-be-shared",
+      "title": "What can be shared",
+      "depth": 3,
       "markers": []
     },
     {
@@ -28426,10 +28447,50 @@
       ]
     },
     {
-      "harness_id": "D__tooling__polyglot__4__L203.shape",
+      "harness_id": "D__tooling__polyglot__4__L206.shape",
       "page": "tooling/polyglot.mdx",
       "slice": "D",
       "fence_position": 5,
+      "language": "shape",
+      "declared_id": null,
+      "section_anchor": "sharing-buffers-without-copying",
+      "section_title": "Sharing Buffers Without Copying",
+      "classification_candidate": "illustrative-only",
+      "runnable_flag": "false",
+      "declared_modes": [],
+      "expectation_kind": null,
+      "body_lines": 10,
+      "markers": [
+        "no-illustrative-reason",
+        "no-illustrative-citation",
+        "missing-stable-identity"
+      ]
+    },
+    {
+      "harness_id": "D__tooling__polyglot__5__L226.shape",
+      "page": "tooling/polyglot.mdx",
+      "slice": "D",
+      "fence_position": 6,
+      "language": "shape",
+      "declared_id": null,
+      "section_anchor": "sharing-buffers-without-copying",
+      "section_title": "Sharing Buffers Without Copying",
+      "classification_candidate": "illustrative-only",
+      "runnable_flag": "false",
+      "declared_modes": [],
+      "expectation_kind": null,
+      "body_lines": 4,
+      "markers": [
+        "no-illustrative-reason",
+        "no-illustrative-citation",
+        "missing-stable-identity"
+      ]
+    },
+    {
+      "harness_id": "D__tooling__polyglot__6__L292.shape",
+      "page": "tooling/polyglot.mdx",
+      "slice": "D",
+      "fence_position": 7,
       "language": "shape",
       "declared_id": null,
       "section_anchor": "async-foreign-functions",
@@ -28446,10 +28507,10 @@
       ]
     },
     {
-      "harness_id": "D__tooling__polyglot__5__L295.shape",
+      "harness_id": "D__tooling__polyglot__7__L384.shape",
       "page": "tooling/polyglot.mdx",
       "slice": "D",
-      "fence_position": 6,
+      "fence_position": 8,
       "language": "shape",
       "declared_id": null,
       "section_anchor": "annotations",
@@ -28468,10 +28529,10 @@
       ]
     },
     {
-      "harness_id": "D__tooling__polyglot__6__L311.shape",
+      "harness_id": "D__tooling__polyglot__8__L400.shape",
       "page": "tooling/polyglot.mdx",
       "slice": "D",
-      "fence_position": 7,
+      "fence_position": 9,
       "language": "shape",
       "declared_id": null,
       "section_anchor": "nested-braces-and-strings",
@@ -28490,10 +28551,10 @@
       ]
     },
     {
-      "harness_id": "D__tooling__polyglot__7__L324.shape",
+      "harness_id": "D__tooling__polyglot__9__L413.shape",
       "page": "tooling/polyglot.mdx",
       "slice": "D",
-      "fence_position": 8,
+      "fence_position": 10,
       "language": "shape",
       "declared_id": null,
       "section_anchor": "visibility",
@@ -28512,10 +28573,10 @@
       ]
     },
     {
-      "harness_id": "D__tooling__polyglot__8__L339.shape",
+      "harness_id": "D__tooling__polyglot__10__L434.shape",
       "page": "tooling/polyglot.mdx",
       "slice": "D",
-      "fence_position": 9,
+      "fence_position": 11,
       "language": "shape",
       "declared_id": null,
       "section_anchor": "using-numpy",
@@ -28535,7 +28596,7 @@
       "harness_id": null,
       "page": "tooling/polyglot.mdx",
       "slice": "D",
-      "fence_position": 10,
+      "fence_position": 12,
       "language": null,
       "declared_id": null,
       "section_anchor": "error-handling",
@@ -28551,7 +28612,7 @@
       "harness_id": null,
       "page": "tooling/polyglot.mdx",
       "slice": "D",
-      "fence_position": 11,
+      "fence_position": 13,
       "language": null,
       "declared_id": null,
       "section_anchor": "content-addressed-identity",
