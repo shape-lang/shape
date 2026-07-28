@@ -202,6 +202,25 @@ check-legacy-baselines:
 regen-legacy-baselines:
 	node scripts/generate-adr011-012-legacy-baselines.mjs
 
+# --- ADR-018 §2 whole-program JIT bail ratchet (#187) ---
+
+# Per ADR-018 §2 an unsupported construct costs its enclosing function native
+# execution, never the program. The whole-program bail set is shrink-only and
+# ratcheted to zero. The gate fails on four shapes of growth: a new bail site, a
+# residual widened from Owner to Program scope, a bail added without its
+# `// WHOLE-PROGRAM-BAIL[..]` marker, and a marker retargeted at a different
+# construct while the count stays flat. Baseline in
+# docs/program/adr011-012/baselines/jit-whole-program-bail-inventory.json.
+check-jit-bails:
+	node scripts/check-jit-bail-baseline.mjs --self-test
+
+# Regenerate after a bail is genuinely removed — a construct gained a sound
+# per-function lowering, or a residual was narrowed to Owner scope. The
+# committed diff is the review surface: counts that RISE in it are the thing
+# ADR-018 §2 says must not happen.
+regen-jit-bail-baseline:
+	node scripts/generate-jit-bail-baseline.mjs
+
 # --- ADR-011..016 step-5 legacy identity manifest (#136) ---
 
 # Identity-default guard: every name-selected builtin identity that currently

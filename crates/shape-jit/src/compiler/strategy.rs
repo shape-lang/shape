@@ -41,6 +41,7 @@ impl JITCompiler {
         // to the bytecode interpreter (this structured `Err` routes through
         // the `[jit-fallback]` path) preserves VM == JIT. Root-cause fix (a
         // JIT-consumable top-level MIR carrying the baked literal) is v0.4.
+        // WHOLE-PROGRAM-BAIL[construct]: top-level-comptime-strategy — the borrow-solver top-level MIR re-lowers the comptime body instead of the baked literal
         if program.top_level_has_comptime {
             return Err("v0.3.3 comptime SURFACE (ADR-006 §2.7.14): top-level code \
                  contains a `comptime { ... }` block. The borrow-solver \
@@ -62,6 +63,7 @@ impl JITCompiler {
             .as_ref()
             .ok_or_else(|| "MirToIR: top-level code has no MIR data".to_string())?;
         let preflight = crate::mir_compiler::preflight(mir_data);
+        // WHOLE-PROGRAM-BAIL[construct]: top-level-preflight-strategy — top-level MIR failed MirToIR preflight
         if !preflight.can_compile {
             return Err(format!(
                 "MirToIR: top-level preflight failed: {}",
@@ -181,6 +183,7 @@ impl JITCompiler {
                 // Session 1 Commit 3: allocate Arc<SharedCell>s for
                 // every SharedCow local slot before the body runs.
                 mir_compiler.initialize_shared_local_slots()?;
+                // WHOLE-PROGRAM-BAIL[infra]: top-level-mir-lowering-strategy — a MIR-lowering refusal in TOP-LEVEL code; the same refusal inside a user function body is already per-function via `compile_failures`
                 mir_compiler.compile_body()?;
             }
             builder.finalize();
@@ -226,6 +229,7 @@ impl JITCompiler {
         // see the matching guard in `compile_strategy`. Deopt the whole
         // top-level program to the bytecode interpreter when top-level code
         // contains a `comptime { ... }` block, so VM == JIT.
+        // WHOLE-PROGRAM-BAIL[construct]: top-level-comptime-strategy-user-funcs — same as top-level-comptime-strategy, on the user-function-aware route
         if program.top_level_has_comptime {
             shape_vm::native_witness::record_program_fallback(
                 shape_vm::native_witness::FallbackReasonClass::TopLevelComptime,
@@ -251,6 +255,7 @@ impl JITCompiler {
             "MirToIR: top-level code has no MIR data".to_string()
         })?;
         let preflight = crate::mir_compiler::preflight(mir_data);
+        // WHOLE-PROGRAM-BAIL[construct]: top-level-preflight-strategy-user-funcs — same as top-level-preflight-strategy, on the user-function-aware route
         if !preflight.can_compile {
             shape_vm::native_witness::record_program_fallback(
                 shape_vm::native_witness::FallbackReasonClass::TopLevelMirPreflight,
@@ -358,6 +363,7 @@ impl JITCompiler {
                 // Session 1 Commit 3: allocate Arc<SharedCell>s for
                 // every SharedCow local slot before the body runs.
                 mir_compiler.initialize_shared_local_slots()?;
+                // WHOLE-PROGRAM-BAIL[infra]: top-level-mir-lowering-user-funcs — a MIR-lowering refusal in TOP-LEVEL code; the same refusal inside a user function body is already per-function via `compile_failures`
                 mir_compiler.compile_body()?;
                 tracing::debug!(
                     target: "shape_jit",

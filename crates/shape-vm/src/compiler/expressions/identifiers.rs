@@ -112,11 +112,11 @@ impl BytecodeCompiler {
             // but the JIT's direct-identifier-eval lowering of this shape
             // produces silent-wrong-output (e.g. VM=2, JIT=0 on
             // `print(LEVEL_INFO)` from an imported `pub const LEVEL_INFO`).
-            // Whole-program deopt is the binding-compliant surface-and-stop
+            // Deopting the owner is the binding-compliant surface-and-stop
             // per supervisor 2026-05-25 path (i) ruling; root-cause fix in
             // JIT identifier-eval lowering is v0.4 per close-summary §5.16
             // JIT-lowering followup workstream.
-            self.program.has_imported_const_inline = true;
+            self.record_jit_residual(crate::bytecode::JitResidual::ImportedConstInline);
             return self.compile_expr(&init_expr);
         }
         // Mutable closure captures: dispatch by CaptureKind.
@@ -225,13 +225,12 @@ impl BytecodeCompiler {
                 // referent (VM=6, JIT=<stack-pointer> observed). The ref-PARAM
                 // deref path has a dedicated JIT lowering (`ref_param_slots`
                 // short-circuit in `mir_compiler/rvalues.rs`) and is correct, so
-                // this is scoped to `reference_value_locals` only. Whole-program
-                // deopt to the interpreter preserves VM == JIT semantics —
-                // identical shape + flag as the `-> &T` escape-promote deopt at
-                // `function_calls.rs` (`has_reference_escape_promotion`). JIT
-                // stack-cell-reference deref lowering is the root-cause v0.4
-                // JIT-lowering followup.
-                self.program.has_reference_escape_promotion = true;
+                // this is scoped to `reference_value_locals` only. Deopting the
+                // owner to the interpreter preserves VM == JIT semantics —
+                // identical shape + residual as the `-> &T` escape-promote deopt
+                // at `function_calls.rs`. JIT stack-cell-reference deref
+                // lowering is the root-cause v0.4 JIT-lowering followup.
+                self.record_jit_residual(crate::bytecode::JitResidual::ReferenceEscapePromotion);
             } else {
                 let source_loc = self.span_to_source_location(span);
                 self.check_read_allowed_in_current_context(

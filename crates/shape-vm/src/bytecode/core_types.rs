@@ -825,6 +825,73 @@ pub struct BytecodeProgram {
     /// surface-and-stop shape as `has_try_unwrap_residual`. NOT serialised.
     #[serde(skip, default)]
     pub has_null_coalesce_residual: bool,
+
+    /// ADR-018 §2 / #187: per-owner attribution of the residual constructs the
+    /// five `has_*_residual` flags above summarise.
+    ///
+    /// The flags answer "does this program contain construct X"; this map
+    /// answers "which function contains it", which is what per-function deopt
+    /// granularity needs. Both are written by the single writer
+    /// `BytecodeCompiler::record_jit_residual`, so they cannot drift — the
+    /// flags are a program-level summary of this map, never an independent
+    /// fact. `jit_residuals_agree_with_summary_flags` asserts that invariant.
+    ///
+    /// NOT serialised, for the same reason as
+    /// `monomorphized_method_call_sites`: the keys are opaque per-program
+    /// function-table indices, and the linker renumbers function blobs. A
+    /// program that arrives through the link/deserialize path therefore has an
+    /// empty map and only the summary flags, which is the conservative
+    /// whole-program reading — losing attribution may cost native execution,
+    /// never soundness.
+    #[serde(skip, default)]
+    pub jit_residuals: crate::bytecode::JitResidualMap,
+}
+
+impl BytecodeProgram {
+    /// Whether any summary flag records a JIT residual construct.
+    pub fn has_any_jit_residual_summary(&self) -> bool {
+        self.has_try_unwrap_residual
+            || self.has_null_coalesce_residual
+            || self.has_imported_const_inline
+            || self.has_w17_marshal_residual
+            || self.has_reference_escape_promotion
+    }
+
+    /// Whether the program carries residuals whose per-owner attribution was
+    /// dropped — the linked / deserialized case documented on `jit_residuals`.
+    ///
+    /// The JIT must refuse the whole program here: without attribution it
+    /// cannot tell which function holds the unsound construct, so narrowing
+    /// the refusal would be a guess. This is the pre-#187 whole-program
+    /// behaviour, retained exactly for the case that still needs it.
+    pub fn has_unattributed_jit_residual(&self) -> bool {
+        self.has_any_jit_residual_summary() && self.jit_residuals.is_empty()
+    }
+
+    /// Whether the program-level summary flags agree with `jit_residuals`.
+    ///
+    /// True for any freshly compiled program (single writer). Also true for a
+    /// linked or deserialized program only when it carries no residuals at
+    /// all — the attribution is dropped by design on those paths, so this
+    /// predicate is an invariant check for the compile path, not a
+    /// round-trip assertion.
+    pub fn jit_residuals_agree_with_summary_flags(&self) -> bool {
+        use crate::bytecode::JitResidual;
+
+        let recorded = |kind: JitResidual| {
+            self.jit_residuals.owners().any(|owner| match owner {
+                None => self.jit_residuals.top_level().any(|r| r == kind),
+                Some(idx) => self.jit_residuals.for_function(idx).any(|r| r == kind),
+            })
+        };
+
+        recorded(JitResidual::TryUnwrap) == self.has_try_unwrap_residual
+            && recorded(JitResidual::NullCoalesce) == self.has_null_coalesce_residual
+            && recorded(JitResidual::ImportedConstInline) == self.has_imported_const_inline
+            && recorded(JitResidual::ModuleFnMarshalReturn) == self.has_w17_marshal_residual
+            && recorded(JitResidual::ReferenceEscapePromotion)
+                == self.has_reference_escape_promotion
+    }
 }
 
 /// Constants in the constant pool

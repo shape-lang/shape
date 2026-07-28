@@ -223,6 +223,12 @@ impl JITCompiler {
                 has_try_unwrap_residual: program.has_try_unwrap_residual,
                 has_reference_escape_promotion: program.has_reference_escape_promotion,
                 has_null_coalesce_residual: program.has_null_coalesce_residual,
+                // `functions` above is deliberately empty — this sub-program is
+                // one rebased function body, so the parent's function-index
+                // attribution does not apply here. The caller already refused
+                // to compile any residual-bearing function, so an empty map is
+                // the accurate statement about THIS body.
+                jit_residuals: Default::default(),
             };
 
             // MirToIR is the ONLY JIT compilation path (Phase 4: BytecodeToIR removed).
@@ -521,6 +527,7 @@ impl JITCompiler {
         maybe_emit_numeric_metrics(program);
 
         let module_binding_accesses = function_body_module_binding_accesses(program);
+        // WHOLE-PROGRAM-BAIL[construct]: function-body-module-binding — W39 F1: module bindings are not MIR places, so a native top-level plus an interpreted function would read an unsynchronized module-binding array
         if let Some(first) = module_binding_accesses.first() {
             shape_vm::native_witness::record_program_fallback(
                 shape_vm::native_witness::FallbackReasonClass::ModuleBindingFunctionBody,
@@ -634,6 +641,50 @@ impl JITCompiler {
             jit_compatible.push(bytecode_ok || mir_ok);
         }
 
+        // Phase 1a-bis (ADR-018 §2 / #187): demote functions carrying a
+        // residual construct — `?`, `??`, an inlined imported `pub const`, a
+        // direct imported-stdlib call, or a §2.7.30 escape-promoted reference
+        // return. Each has a diagnosed VM/JIT divergence, so its owner never
+        // runs native. Before #187 the JIT refused the ENTIRE program on any
+        // of them; the refusal is unchanged in strength and narrowed in scope
+        // to the function that actually holds the construct. Top-level
+        // residuals are still whole-program (`JITExecutor::execute_with_jit`)
+        // because top-level IS the entry the JIT compiles as `main`.
+        //
+        // The demoted function gets a null `function_table` slot and an
+        // `Interpreted` entry below, so every call to it routes through
+        // `dispatch_call_via_trampoline_vm` into the bytecode interpreter —
+        // the same interpreter the whole-program deopt used to reach.
+        //
+        // `Program`-scoped residuals never reach here: `execute_with_jit`
+        // refuses the whole program before compiling. Demoting only their
+        // owner would be unsound for the reason each one records.
+        for idx in 0..program.functions.len() {
+            if !program.jit_residuals.function_is_residual_bearing(idx) {
+                continue;
+            }
+            jit_compatible[idx] = false;
+            for residual in program.jit_residuals.for_function(idx) {
+                // #117 / R15: a demoted function is a COVERED fallback, not a
+                // missing witness. Recording it is what lets a consumer assert
+                // "this one fell back" as a positive fact, and what stops the
+                // sibling's native claim being read as covering it too.
+                shape_vm::native_witness::record_function_fallback(
+                    idx,
+                    residual.witness_class(),
+                    residual.reason(),
+                );
+                tracing::info!(
+                    target: "shape_jit::fallback",
+                    function = %program.functions[idx].name,
+                    function_index = idx,
+                    residual = residual.stable_id(),
+                    reason = residual.reason(),
+                    "jit-deopt-function: interpreted, siblings keep native code",
+                );
+            }
+        }
+
         // Phase 1b: Preflight main code (non-stdlib, non-function-body instructions).
         // Without this, unsupported builtins in top-level code slip through.
         {
@@ -646,6 +697,7 @@ impl JITCompiler {
                 .map(|(_, instr)| instr.clone())
                 .collect();
             let main_report = preflight_instructions(&main_instructions);
+            // WHOLE-PROGRAM-BAIL[construct]: main-code-preflight — top-level (non-function-body) instructions failed preflight
             if !main_report.can_jit() {
                 shape_vm::native_witness::record_program_fallback(
                     shape_vm::native_witness::FallbackReasonClass::MainCodeUnsupportedConstruct,
@@ -674,6 +726,7 @@ impl JITCompiler {
         // struct args were rejected outright at the compile stage before
         // WS-6, so this is a strict improvement: such programs now run
         // correctly on the interpreter rather than failing to compile.)
+        // WHOLE-PROGRAM-BAIL[construct]: generic-struct-specialization — WS-6: JIT struct-value codegen for a `<base>::struct_<name>` specialization is unsound (use-after-free on a later field read)
         if program
             .functions
             .iter()

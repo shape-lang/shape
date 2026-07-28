@@ -749,6 +749,14 @@ pub fn linked_to_bytecode_program(linked: &LinkedProgram) -> BytecodeProgram {
         has_try_unwrap_residual: linked.has_try_unwrap_residual,
         has_reference_escape_promotion: linked.has_reference_escape_promotion,
         has_null_coalesce_residual: linked.has_null_coalesce_residual,
+        // ADR-018 §2 / #187: per-function residual attribution is deliberately
+        // NOT reconstructed here. The linker topologically sorts function blobs
+        // and renumbers them, so the compile-time function indices the map is
+        // keyed by no longer identify the same functions. An empty map leaves
+        // the summary flags as the only signal, which the JIT reads as a
+        // whole-program refusal — the conservative direction: a linked program
+        // may lose native execution it could have kept, never soundness.
+        jit_residuals: crate::bytecode::JitResidualMap::default(),
         debug_info: linked.debug_info.clone(),
         data_schema: linked.data_schema.clone(),
         module_binding_names: linked.module_binding_names.clone(),

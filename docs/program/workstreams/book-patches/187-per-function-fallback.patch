@@ -1,0 +1,158 @@
+diff --git a/book/book-site/src/content/docs/advanced/jit-compilation.mdx b/book/book-site/src/content/docs/advanced/jit-compilation.mdx
+--- a/book/book-site/src/content/docs/advanced/jit-compilation.mdx
++++ b/book/book-site/src/content/docs/advanced/jit-compilation.mdx
+@@ -132,8 +132,25 @@
+ 
+ ## Tiered Compilation
+ 
+-Shape uses a three-tier compilation strategy. Every function starts interpreted
+-and is promoted to higher tiers based on observed call frequency.
++:::caution[Not wired into execution today]
++Everything in this section is implemented and unit-tested, but nothing reaches
++it at runtime. `VirtualMachine`'s tier manager is never installed outside
++tests, so no call counter is consulted, no compilation request is ever sent to
++the background thread, and no interpreter call path looks up native code.
++
++What `--mode jit` actually does is compile the whole program ahead of time,
++once, before execution — the pipeline described under
++[Scoped Per-Function JIT](#scoped-per-function-jit) and
++[`--mode jit` semantics](#--mode-jit-semantics). A function does not get faster
++after 100 calls; it is either native from the start or interpreted throughout.
++
++Read this section as the design of the tiering pipeline, not as a description
++of what runs. Making it the default execution mode is tracked in
++[#187](https://github.com/shape-lang/shape/issues/187).
++:::
++
++Shape's tiered design uses a three-tier strategy. Every function starts
++interpreted and is promoted to higher tiers based on observed call frequency.
+ 
+ ### Tier Definitions
+ 
+@@ -219,8 +236,13 @@
+ - **Toplevel script + functions attempt JIT compile** when the bytecode is
+   JIT-compatible (passes `compile_program_selective`'s per-function and
+   main-code preflight).
+-- **On JIT-compile failure, the executor falls through to the bytecode
+-  interpreter** for the whole program. This is _not_ silent-no-output — the
++- **A construct the JIT cannot lower soundly costs its enclosing function
++  native execution, not the program.** That function runs interpreted; its
++  siblings keep their native code. See
++  [Per-function fallback](#per-function-fallback) for which constructs, and for
++  the cases that still cost the whole program.
++- **On a whole-program refusal, the executor falls through to the bytecode
++  interpreter** for the entire program. This is _not_ silent-no-output — the
+   interpreter re-runs the same parsed `Program` and produces the same observable
+   result a `--mode vm` invocation would.
+ - **A one-line diagnostic is emitted to stderr** at `tracing::info` level when
+@@ -231,12 +253,11 @@
+   The diagnostic is always visible (uses `eprintln!`, no subscriber required).
+   Verbose JIT pipeline tracing is gated behind `--trace-jit=shape_jit=debug`
+   (replaces the legacy `SHAPE_JIT_DEBUG` env-var per closure-wave-F migration).
+-- **Tier-up promotion is preserved on hot functions** per the T1@100 / T2@10k
+-  thresholds — fall-through only fires when the entire program cannot be JIT-
+-  compiled at all (e.g. toplevel main code contains an opcode that the JIT
+-  preflight rejects, such as `AllocSharedModuleBinding`). Programs that JIT-
+-  compile successfully run the JIT path; tier promotion happens transparently
+-  on functions that cross the call-count thresholds.
++- **Compilation is ahead-of-time, not tiered.** `--mode jit` compiles the whole
++  program once before it runs. There is no call-count promotion at runtime: a
++  function is native from its first call or interpreted for every call. The
++  tiering pipeline exists in the codebase but is not wired into execution — see
++  the note under [Tiered Compilation](#tiered-compilation).
+ 
+ The fall-through path is implemented in `JITExecutor::execute_program`
+ (`crates/shape-jit/src/executor.rs`). It catches every `Err` from the JIT
+@@ -244,6 +265,72 @@
+ failure, JIT runtime signal, `RETURN_TAG_NANBOXED` surface-and-stop — and
+ re-dispatches to `BytecodeExecutor::execute_program` with the same `Program`.
+ 
++### Per-function fallback
++
++Some constructs have a known divergence between what the JIT would emit and
++what the interpreter does. The compiler records each one against the function
++that contains it, and that function is left as an `Interpreted` entry in the
++mixed function table. Calls into it route through the fallback trampoline; the
++rest of the program keeps its native code.
++
++```shape runnable
++fn halve(n: int) -> Result<int, string> {
++    if n % 2 != 0 {
++        return Err("odd")
++    }
++    return Ok(n / 2)
++}
++
++fn quarter(n: int) -> Result<int, string> {
++    let h = halve(n)?      // `?` — only this function runs interpreted
++    return halve(h)
++}
++
++fn scale(x: number, factor: number) -> number {
++    return x * factor      // unaffected: still compiled natively
++}
++
++print(quarter(20))
++print(scale(3.0, 4.0))
++```
++
++```
++Ok(5)
++12.0
++```
++
++Three constructs are handled this way today: the `?` operator, the `??`
++null-coalescing operator, and an imported `pub const` read at its use site. A
++function is also left interpreted when its body uses an operation the JIT does
++not lower at all — an `as` cast, for instance.
++
++One limit is worth knowing, because it decides how much the narrowing actually
++buys you: **calling an interpreted function by name from compiled code still
++costs the whole program its native execution.** The compiled caller has no way
++to receive the interpreted callee's return value with its type intact, so
++rather than risk handing back wrong bits, the compiler declines to compile that
++caller at all and the program runs interpreted.
++
++In practice that means the narrowing helps when the interpreted function is
++called from other interpreted code or not called on a hot path, and does not
++help when your toplevel calls it directly. Lifting this limit is ongoing work.
++
++Two constructs still cost the whole program its native execution, because the
++divergence spans a producer and a consumer that the per-function record covers
++only one half of:
++
++| Construct | Why it is not narrowed to one function |
++|---|---|
++| A direct call to an imported standard-library function | The callee is resolved through a hidden module binding. A native toplevel plus an interpreted function reading that binding would see different values for it. |
++| A reference returned by a function declared `-> &T` | The record is attached to the code that *reads* the reference, but the reference-counted cell it points into is created by the function that *returns* it. Interpreting only the reader would leave a native producer handing back a raw stack address. |
++
++A construct in toplevel code — outside any function — also costs the whole
++program, because toplevel is what the JIT compiles as the entry point and there
++is no smaller unit to demote.
++
++The set of whole-program refusals is inventoried and may only shrink; the
++target is that none remain.
++
+ ### Verifying fall-through behavior
+ 
+ The supervisor-ratified corrected smoke harness reads stdout via `tail -1` and
+@@ -428,13 +515,12 @@
+ globally. Shared utility functions that appear in many programs are compiled on
+ first encounter and reused from cache for every subsequent load.
+ 
+-Typical promotion timeline for a hot inner loop:
+-
+-1. First 100 calls: interpreted (Tier 0).
+-2. Calls 100-10,000: Tier 1 native code (compiled in background, available
+-   within milliseconds of crossing the threshold).
+-3. Beyond 10,000 calls: Tier 2 optimized code with inlined callees and
+-   propagated constants.
++The promotion timeline the tier thresholds describe — interpreted for the first
++100 calls, Tier 1 after that, Tier 2 beyond 10,000 — is the design, not current
++behavior. Today a function's tier is fixed before the program starts: `--mode
++jit` compiles ahead of time, so a function is native from its first call or
++interpreted for every call. See the note under
++[Tiered Compilation](#tiered-compilation).
+ 
+ ## Fully Typed Native Values
+ 

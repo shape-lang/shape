@@ -89,14 +89,15 @@ pub struct Cli {
 pub enum ExecutionModeArg {
     /// Use bytecode VM (interpreter only).
     Vm,
-    /// Use JIT compilation (tiered: interpreter → baseline @ T1=100 calls →
-    /// optimizing @ T2=10k calls). The toplevel script and every reachable
-    /// function attempt JIT-compile when possible; on JIT-compile failure
-    /// the executor falls through to the bytecode interpreter (NOT
-    /// silent-no-output) and emits a `[jit-fallback]` diagnostic to stderr.
-    /// Use `--trace-jit=shape_jit=debug` to promote per-function diagnostics.
-    /// See `book/advanced/jit-compilation` "--mode jit semantics" for the
-    /// full path (3) binding.
+    /// Compile ahead of time with Cranelift, before the program runs. The
+    /// toplevel script and every reachable function attempt JIT-compile; a
+    /// function the JIT cannot lower runs interpreted while the rest stay
+    /// native, and a whole-program refusal falls through to the bytecode
+    /// interpreter (NOT silent-no-output) with a `[jit-fallback]` diagnostic
+    /// on stderr. Use `--trace-jit=shape_jit=debug` for per-function
+    /// diagnostics. Note there is no call-count promotion: a function is
+    /// native from its first call or interpreted for every call. See
+    /// `book/advanced/jit-compilation`.
     Jit,
 }
 

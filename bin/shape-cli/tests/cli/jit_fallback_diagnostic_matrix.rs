@@ -132,12 +132,21 @@ fn fallback_f2_preflight_shared_module_binding_diagnostic_emits() {
         .find(|l| l.starts_with("[jit-fallback]"))
         .unwrap_or("")
         .to_string();
+    // Re-pointed by #187 (ADR-018 §2), not relaxed. The fallback CLASS is
+    // unchanged — this fixture's direct imported-stdlib call still costs the
+    // whole program its native execution — but the diagnostic now names the
+    // residual by its stable id and states why it cannot be narrowed to the
+    // enclosing function. Asserting the stable id plus the whole-program word
+    // pins exactly that: were `module-fn-marshal-return` ever narrowed to
+    // `Owner` scope without closing the module-binding desynchronization, this
+    // assertion fails rather than silently passing on a weaker refusal.
     assert!(
-        fallback_line.contains("R8 W9 B1 W17-marshal-return-arms")
-            && fallback_line.contains("JIT ModuleFn dispatch")
-            && fallback_line.contains("kinded handler ABI"),
-        "f2 fallback diagnostic should mention the current ModuleFn/kinded \
-         ABI fallback class; got: {}",
+        fallback_line.contains("module-fn-marshal-return")
+            && fallback_line.contains("whole-program JIT residual")
+            && fallback_line.contains("module-binding array"),
+        "f2 fallback diagnostic should name the whole-program \
+         `module-fn-marshal-return` residual and its module-binding \
+         desynchronization reason; got: {}",
         fallback_line
     );
 }

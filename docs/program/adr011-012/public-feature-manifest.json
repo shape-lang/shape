@@ -178,6 +178,132 @@
         "compiler-diagnostics"
       ],
       "distributed_semantics_required": false
+    },
+    "execution.jit-per-function-fallback": {
+      "public_name": "Per-function JIT fallback",
+      "family": "execution-jit",
+      "status": "experimental",
+      "status_basis": {
+        "classification": "current-executable",
+        "declared_limits": [
+          {
+            "limit": "Narrowed granularity covers three residual constructs — `?`, `??`, and an imported `pub const` inlined at use — plus any function the JIT declines to lower at all (a VM-only opcode, an `as` cast). Such a function runs interpreted while its siblings keep native code. Two residuals still cost the whole program: a direct call to an imported stdlib function, and a reference returned via the escape-to-refcount `PromotedCell` carrier.",
+            "authority": {
+              "kind": "source",
+              "reference": "crates/shape-vm/src/bytecode/jit_residual.rs `JitResidual::scope` and `JitResidual::program_scope_reason` — the scope table and, for every Program-scoped entry, why narrowing it to its owner would be unsound"
+            }
+          },
+          {
+            "limit": "A direct call BY NAME from compiled code to a function that was not compiled still costs the whole program its native execution. Lowering it through the trampoline was attempted under #187 and reverted: the indirect path stores the trampoline's raw u64 without converting it by the callee's return kind, which produced silent-wrong-output on two corpus programs (a `number` return printing 91747331608791740000 for 1.0; a `Result` return printing Ok(106498971113408) for Ok(42)). So the narrowing helps a demoted function called from interpreted code or off the hot path, and does not help when a compiled caller names it directly.",
+            "authority": {
+              "kind": "source",
+              "reference": "crates/shape-jit/src/mir_compiler/terminators.rs — the retained refusal and the reverted-attempt record, naming the two differential reproducers; the prerequisite is a kind-correct trampoline return handoff on the indirect path (PERF-HOF-CARRIER / PERF-CLOSURE-NATIVE)"
+            }
+          },
+          {
+            "limit": "A construct in TOP-LEVEL code still costs the whole program. Top-level is the entry the JIT compiles as `main`, so there is no smaller unit to demote under whole-program compilation.",
+            "authority": {
+              "kind": "source",
+              "reference": "crates/shape-jit/src/executor.rs `execute_with_jit` — the `top_level_is_residual_bearing` refusal, marked `WHOLE-PROGRAM-BAIL[construct]: top-level-residual`"
+            }
+          },
+          {
+            "limit": "Fifteen whole-program refusals remain in the JIT compile path, each declaring itself with a `WHOLE-PROGRAM-BAIL[construct]` marker and inventoried in a shrink-only baseline. The count may only fall; the target is zero.",
+            "authority": {
+              "kind": "source",
+              "reference": "docs/program/adr011-012/baselines/jit-whole-program-bail-inventory.json — 15 construct sites, 4 infra sites, 2 Program-scoped residuals at this revision; enforced by scripts/check-jit-bail-baseline.mjs"
+            }
+          },
+          {
+            "limit": "A program that arrives through the linker or a deserialize carries no per-function attribution, because the linker renumbers function blobs. Such a program takes the whole-program refusal rather than a narrowed one — it may lose native execution it could have kept, never soundness.",
+            "authority": {
+              "kind": "source",
+              "reference": "crates/shape-vm/src/linker.rs — `jit_residuals` is reset to empty on the linked program, with `BytecodeProgram::has_unattributed_jit_residual` refusing the whole program in that case"
+            }
+          },
+          {
+            "limit": "The tiered interpreter-first pipeline (T1 at 100 calls, T2 at 10k, with OSR) is NOT the CLI default and is not reachable at all: `VirtualMachine.tier_manager` is never assigned outside tests, `JitCompilationBackend` is never installed outside tests, and no interpreter call path reads `TierManager::get_native_code`. `--mode jit` is ahead-of-time whole-program compilation.",
+            "authority": {
+              "kind": "issue",
+              "reference": "shape-lang/shape#187 — measured 2026-07-28: `TierManager::new` has callers only in `crates/shape-vm/src/tier.rs` tests, `crates/shape-vm/src/executor/osr.rs` tests and `crates/shape-vm/benches/vm_benchmarks.rs`; `get_native_code` has no production caller; `crates/shape-vm/src/executor/control_flow/mod.rs` `op_call` records a call count and then dispatches unconditionally to the interpreter"
+            }
+          }
+        ],
+        "evidence": [
+          {
+            "kind": "source",
+            "reference": "crates/shape-jit/src/compiler/deopt_granularity_tests.rs::one_unsupported_construct_keeps_every_other_function_natively_dispatched — under a NativeExecutionWitness session (#117), `hot_double` is natively dispatched 200 times with zero interpreter dispatches and no program fallback, while `uses_try` carries a covered TryUnwrapResidual fallback; one program, both dispositions, from the runtime authority rather than log prose"
+          },
+          {
+            "kind": "source",
+            "reference": "crates/shape-jit/src/compiler/deopt_granularity_tests.rs::one_unsupported_construct_keeps_every_other_function_native — a two-function program where one function uses `?`: that function's mixed-table entry is `Interpreted` and the sibling's is `Native`, in the same compiled program; passing at wave4-ergo under `--features deep-tests`"
+          },
+          {
+            "kind": "source",
+            "reference": "crates/shape-jit/src/compiler/deopt_granularity_tests.rs::try_operator_is_attributed_to_its_enclosing_function_not_the_program — the `?` residual is recorded against the holding function and not against top-level, and the program-level summary flag still agrees with the per-owner map"
+          },
+          {
+            "kind": "source",
+            "reference": "crates/shape-jit/src/compiler/deopt_granularity_tests.rs::a_program_scoped_residual_still_refuses_the_whole_program — pins which residuals are Owner-scoped and which remain Program-scoped, so a scope change is a test change"
+          },
+          {
+            "kind": "source",
+            "reference": "bin/shape-cli/tests/cli/jit_fallback_diagnostic_matrix.rs::fallback_f2_preflight_shared_module_binding_diagnostic_emits — the imported-stdlib-call fixture still emits exactly one `[jit-fallback]` line naming the whole-program residual and its reason, so narrowing that residual without closing the hazard fails here"
+          },
+          {
+            "kind": "source",
+            "reference": "crates/shape-vm/src/bytecode/jit_residual.rs::tests::every_program_scoped_residual_records_why_it_cannot_be_narrowed — a Program-scoped residual with no recorded reason fails the build"
+          }
+        ]
+      },
+      "authority": [
+        {
+          "kind": "adr",
+          "reference": "ADR-018 §2 — an unsupported construct costs its enclosing function native execution, never the program; the whole-program bail set is a generated shrink-only baseline ratcheted to zero"
+        },
+        {
+          "kind": "issue",
+          "reference": "shape-lang/shape#187 (PERF-DEOPT-GRANULARITY) — the slice that attributed residual constructs per function and added the bail ratchet"
+        },
+        {
+          "kind": "source",
+          "reference": "crates/shape-jit/src/compiler/program.rs `compile_program_selective` — demotes a residual-bearing function to a `MixedFunctionTable` `Interpreted` entry, leaving its siblings native"
+        },
+        {
+          "kind": "source",
+          "reference": "crates/shape-vm/src/compiler/helpers.rs `BytecodeCompiler::record_jit_residual` — the single writer for both the per-owner attribution and the program-level summary flags"
+        }
+      ],
+      "owner": {
+        "repository": "shape-lang/shape",
+        "component": "JIT execution — shape-jit executor and selective compiler, shape-vm residual attribution"
+      },
+      "surfaces": [
+        "cli",
+        "language-semantics"
+      ],
+      "targets": [
+        "function"
+      ],
+      "required_modes": [
+        "compile",
+        "jit",
+        "vm"
+      ],
+      "required_evidence_classes": [
+        "positive-execution",
+        "native-execution",
+        "vm-jit-parity",
+        "structured-diagnostic"
+      ],
+      "required_semantic_dimensions": [
+        "user-model",
+        "vm-jit",
+        "success",
+        "unsupported-use",
+        "compiler-diagnostics"
+      ],
+      "distributed_semantics_required": false
     }
   }
 }

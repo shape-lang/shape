@@ -89,6 +89,14 @@ jobs:
       - name: ADR-016 Book fence universe (#115) — inventory integrity
         run: node scripts/check-adr011-012-book-fence-inventory.mjs --self-test
 
+      # ADR-018 §2 / R24 (#187). The whole-program JIT bail set is shrink-only
+      # and ratcheted to zero: an unsupported construct must cost its enclosing
+      # function native execution, never the program. Same source-only shape as
+      # the guards above, and in this job for the same reason — it is already a
+      # required check, so the gate binds without a branch-protection change.
+      - name: ADR-018 whole-program JIT bails (#187) — shrink-only, target zero
+        run: node scripts/check-jit-bail-baseline.mjs --self-test
+
   # Foreign-call (FFI) end-to-end tier. The `rust` job above runs
   # `cargo test --workspace --all-targets`, which exercises the always-on
   # extern-C sentinels in `bin/shape-cli/tests/ffi_e2e.rs` but NOT the

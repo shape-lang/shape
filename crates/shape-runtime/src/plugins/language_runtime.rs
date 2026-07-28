@@ -128,8 +128,7 @@ impl BufferRefusal {
                     .to_string()
             }
             BufferRefusal::NoInvokeEntry => {
-                "the extension declares a buffer capability with no invoke entry point"
-                    .to_string()
+                "the extension declares a buffer capability with no invoke entry point".to_string()
             }
             BufferRefusal::NoReleaseAccounting => {
                 "the extension offers buffer views but no release accounting, so nothing \

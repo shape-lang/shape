@@ -23,6 +23,12 @@ mod witness_emit;
 #[cfg(test)]
 mod strategy_preflight_tests;
 
+// ADR-018 §2 / #187 per-function deopt granularity. The attribution tests run
+// ungated (bytecode compile only); the mixed-table tests inside carry their
+// own `deep-tests` gate because they JIT-compile.
+#[cfg(test)]
+mod deopt_granularity_tests;
+
 // Heavy execution-path tests — gated behind the `deep-tests` feature.
 // See crate-level `deep-tests` gate in `mir_compiler/mod.rs` for rationale.
 #[cfg(all(test, feature = "deep-tests"))]

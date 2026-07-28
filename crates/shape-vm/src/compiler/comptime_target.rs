@@ -704,7 +704,9 @@ pub(crate) fn type_annotation_to_string(ta: &TypeAnnotation) -> String {
             .map(type_annotation_to_string)
             .collect::<Vec<_>>()
             .join(" & "),
-        TypeAnnotation::Function { params, returns, .. } => {
+        TypeAnnotation::Function {
+            params, returns, ..
+        } => {
             let params_str = params
                 .iter()
                 .map(|p| type_annotation_to_string(&p.type_annotation))

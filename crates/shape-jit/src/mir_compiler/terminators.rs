@@ -1796,6 +1796,37 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                 // returns garbage — the same BRANCH-DROP failure as an
                 // unresolved name. A Function constant is never an indirect
                 // callable, so bail the whole-function JIT to the interpreter.
+                //
+                // #187 ATTEMPTED AND REVERTED (2026-07-28). Letting this fall
+                // through to the indirect path is the obvious way to make
+                // per-function granularity reach direct call sites, and it does
+                // compile: the trampoline runs the demoted callee and the
+                // caller stays native. It is also UNSOUND at HEAD, because the
+                // indirect path `write_place`s `jit_call_value`'s raw `u64`
+                // result with no conversion driven by the callee's return kind
+                // (see the `write_place(destination, result)` below — there is
+                // no `user_func_return_kinds` consultation on this path). The
+                // VM/JIT differential caught two silent-wrong-output
+                // reproducers immediately:
+                //
+                //   * `A__fundamentals__functions__14__L227.shape` — a callee
+                //     returning `number` handed its f64 back as raw bits:
+                //     VM `1.0`, JIT `91747331608791740000`;
+                //   * `A__fundamentals__traits__10__L234.shape` — a callee
+                //     returning `Result<int, AnyError>` handed back an Arc
+                //     pointer: VM `Ok(42)`, JIT `Ok(106498971113408)`.
+                //
+                // Both are the c4-4B class this discipline exists to prevent.
+                // An `int`-returning callee survives the round trip only
+                // because raw i64 bits happen to be the right bits — which is
+                // why a two-function `int` fixture passes while the corpus
+                // fails, and why "it works on my fixture" is not evidence here.
+                //
+                // The prerequisite is a kind-correct trampoline return handoff
+                // on the indirect path; that is the closure-argument carrier
+                // work in PERF-HOF-CARRIER / PERF-CLOSURE-NATIVE, not a #187
+                // edit. Until it lands this refusal stays, and the
+                // whole-program-bail baseline keeps its recorded floor.
                 if func_ref.is_none() {
                     if let Operand::Constant(MirConstant::Function(name)) = func {
                         return Err(format!(
