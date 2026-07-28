@@ -522,6 +522,7 @@ impl JITCompiler {
         maybe_emit_numeric_metrics(program);
 
         let module_binding_accesses = function_body_module_binding_accesses(program);
+        // WHOLE-PROGRAM-BAIL[construct]: function-body-module-binding — W39 F1: module bindings are not MIR places, so a native top-level plus an interpreted function would read an unsynchronized module-binding array
         if let Some(first) = module_binding_accesses.first() {
             return Err(format!(
                 "W39 F1 module-binding function-body SURFACE (ADR-006 §2.7.14): \
@@ -652,6 +653,7 @@ impl JITCompiler {
                 .map(|(_, instr)| instr.clone())
                 .collect();
             let main_report = preflight_instructions(&main_instructions);
+            // WHOLE-PROGRAM-BAIL[construct]: main-code-preflight — top-level (non-function-body) instructions failed preflight
             if !main_report.can_jit() {
                 return Err(format!(
                     "Main code contains unsupported constructs: {:?}",
@@ -676,6 +678,7 @@ impl JITCompiler {
         // struct args were rejected outright at the compile stage before
         // WS-6, so this is a strict improvement: such programs now run
         // correctly on the interpreter rather than failing to compile.)
+        // WHOLE-PROGRAM-BAIL[construct]: generic-struct-specialization — WS-6: JIT struct-value codegen for a `<base>::struct_<name>` specialization is unsound (use-after-free on a later field read)
         if program
             .functions
             .iter()

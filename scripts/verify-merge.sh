@@ -712,6 +712,28 @@ fi
 echo
 
 # -----------------------------------------------------------------------------
+# CHECK 21 — ADR-018 §2 whole-program JIT bail ratchet (#187, R24)
+# -----------------------------------------------------------------------------
+# An unsupported construct costs its enclosing function native execution, never
+# the program. The whole-program bail set is shrink-only and ratcheted to zero.
+# Four shapes of growth fail: a new bail site; a residual widened from Owner to
+# Program scope, which turns a one-function cost into a whole-program one; a
+# refusal added without its `// WHOLE-PROGRAM-BAIL[..]` marker, which is how a
+# ratchet gets evaded rather than raised; and a marker retargeted at a different
+# construct while the count stays flat. --self-test runs the forced negatives,
+# each of which also asserts its unmutated positive control is accepted.
+# Regenerate a legitimately shrunk baseline with `just regen-jit-bail-baseline`.
+echo "=== CHECK 21: whole-program JIT bail ratchet (ADR-018 §2) ==="
+if node scripts/check-jit-bail-baseline.mjs --self-test; then
+  record_pass "whole-program JIT bail ratchet"
+  echo "  -> clean"
+else
+  record_fail "whole-program JIT bail ratchet" "a bail site was added, a residual widened to Program scope, a refusal carries no marker, a marker was retargeted, or the baseline was hand-edited"
+  echo "  -> FAILED (new bail, widened residual, unmarked refusal, retargeted marker, or hand-edited baseline)"
+fi
+echo
+
+# -----------------------------------------------------------------------------
 # REPORT
 # -----------------------------------------------------------------------------
 echo "=== SUMMARY ==="

@@ -135,6 +135,7 @@ impl ProgramExecutor for JITExecutor {
         // (`let x = comptime { 3 + 4 }`) took the same SURFACE-deopt before;
         // the result is identical (interpreter runs the baked literal), only
         // now without the wasted double-compile.
+        // WHOLE-PROGRAM-BAIL[construct]: top-level-comptime-preexec — a top-level `comptime { .. }` block; deopt before the first compile keeps its side effects exactly-once
         if shape_vm::compiler::program_has_top_level_comptime(program) {
             tracing::info!(
                 target: "shape_jit::fallback",
@@ -207,6 +208,7 @@ impl ProgramExecutor for JITExecutor {
             })?;
         let bytecode_compile_ms = bytecode_compile_start.elapsed().as_millis();
 
+        // WHOLE-PROGRAM-BAIL[construct]: user-trait-or-impl-declared — native trait-method dispatch can diverge from the VM for ordinary trait calls
         if program_declares_user_trait_or_impl(program) {
             let reason = "Wave-20A user-trait-method JIT SURFACE \
                           (ADR-006 §2.7.14): the source program declares a \
@@ -347,6 +349,7 @@ impl JITExecutor {
         // is v0.4 follow-up (per audit §5 Option B; Option A was infeasible
         // because smoke s2 currently emits the same `Vec.map::*` unverified
         // shape and depends on the interpreter handling it cleanly).
+        // WHOLE-PROGRAM-BAIL[construct]: v2-typed-opcode-unverified — a V2 typed opcode has no matching FrameDescriptor
         if let Err(errors) = shape_vm::bytecode::verifier::verify_v2_typed_opcodes(bytecode) {
             let total = errors.len();
             let first = errors
@@ -396,6 +399,7 @@ impl JITExecutor {
         //
         // Each residual names its own root cause in `JitResidual::reason`;
         // removing one is what shrinks the #187 whole-program-bail baseline.
+        // WHOLE-PROGRAM-BAIL[construct]: program-scoped-residual — a residual whose scope is Program; see `JitResidual::program_scope_reason` for the per-residual hazard
         if let Some(residual) = bytecode.jit_residuals.program_scoped().next() {
             return Err(shape_runtime::error::ShapeError::RuntimeError {
                 message: format!(
@@ -413,6 +417,7 @@ impl JITExecutor {
                 location: None,
             });
         }
+        // WHOLE-PROGRAM-BAIL[construct]: unattributed-residual — residuals present but the linker/deserialize path dropped the per-function attribution
         if bytecode.has_unattributed_jit_residual() {
             return Err(shape_runtime::error::ShapeError::RuntimeError {
                 message: "ADR-018 §2 unattributed JIT residual: the program \
@@ -428,6 +433,7 @@ impl JITExecutor {
                 location: None,
             });
         }
+        // WHOLE-PROGRAM-BAIL[construct]: top-level-residual — the residual is in top-level code, which IS the entry the JIT compiles as `main`
         if bytecode.jit_residuals.top_level_is_residual_bearing() {
             let reasons: Vec<&str> = bytecode
                 .jit_residuals
@@ -449,6 +455,7 @@ impl JITExecutor {
             });
         }
 
+        // WHOLE-PROGRAM-BAIL[construct]: scalar-move-lift-surface — legacy NewObject / `clone` / `diff` / operator-trait dispatch lowering is unproven
         if let Some(surface) = scalar_move_lift_exposed_jit_surface(bytecode) {
             return Err(shape_runtime::error::ShapeError::RuntimeError {
                 message: format!(
@@ -495,6 +502,7 @@ impl JITExecutor {
             .trait_method_symbols
             .keys()
             .any(|k| k.starts_with("Drop::"));
+        // WHOLE-PROGRAM-BAIL[construct]: user-drop-impl — JIT `emit_drop` has no user-Drop trait-method dispatch and would elide the user `Drop::drop` body
         if has_user_drop_impl {
             return Err(shape_runtime::error::ShapeError::RuntimeError {
                 message: "R8 W9 B3 Drop-bearing-scope-exit SURFACE \
@@ -557,6 +565,7 @@ impl JITExecutor {
         let (jit_fn, _mixed_table) = match compile_result {
             Ok(Ok(result)) => result,
             Ok(Err(e)) => {
+                // WHOLE-PROGRAM-BAIL[infra]: selective-compile-failed — propagates a refusal raised inside `compile_program_selective`; the construct-driven bails there carry their own markers
                 return Err(shape_runtime::error::ShapeError::RuntimeError {
                     message: format!("JIT compilation failed: {}", e),
                     location: None,
@@ -570,6 +579,7 @@ impl JITExecutor {
                 } else {
                     "unknown panic".to_string()
                 };
+                // WHOLE-PROGRAM-BAIL[infra]: selective-compile-panicked — a panic escaped the JIT pipeline; the program runs interpreted rather than on a half-built module
                 return Err(shape_runtime::error::ShapeError::RuntimeError {
                     message: format!("JIT compilation panicked: {}", msg),
                     location: None,
@@ -883,6 +893,7 @@ impl JITExecutor {
                     }));
                 }
                 _ => {
+                    // WHOLE-PROGRAM-BAIL[infra]: unknown-jit-signal — a negative signal with no recognised meaning; fires after execution, so it is a JIT-pipeline failure rather than a construct refusal
                     return Err(shape_runtime::error::ShapeError::RuntimeError {
                         message: format!("JIT execution error (code: {})", signal),
                         location: None,
@@ -946,6 +957,7 @@ impl JITExecutor {
                     .as_ref()
                     .and_then(|fd| fd.return_kind.or_else(|| fd.slots.last().copied()));
                 let _ = return_hint;
+                // WHOLE-PROGRAM-BAIL[infra]: return-tag-nanboxed-kind-gap — the return tag was never stamped from the call signature; fires after execution, so it is a kind-source gap in JIT emission rather than a construct refusal
                 return Err(shape_runtime::error::ShapeError::RuntimeError {
                     message: format!(
                         "JIT-FFI return path: RETURN_TAG_NANBOXED reached the \

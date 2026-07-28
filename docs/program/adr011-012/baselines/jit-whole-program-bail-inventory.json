@@ -1,0 +1,162 @@
+{
+  "record_kind": "JitWholeProgramBailBaseline",
+  "record_version": 1,
+  "program_id": "adr017-019",
+  "ticket": 187,
+  "entry_id": "JIT-WHOLE-PROGRAM-BAIL-INVENTORY",
+  "title": "Whole-program JIT bail inventory (ratchet to zero)",
+  "authority": {
+    "adrs": [
+      "ADR-018"
+    ],
+    "rulings": [
+      "R15",
+      "R24"
+    ],
+    "section": "ADR-018 §2 — deopt granularity becomes per-function"
+  },
+  "direction_rule": "Monotonic non-increasing. `sites` and `program_scoped_residuals` may fall (a construct gained a sound per-function lowering, or a residual was narrowed from Program scope to Owner scope) and may never rise. A new site id is growth even when the total is unchanged, because it is a new refusal costing the whole program its native execution. ADR-018 §2's zero target is the `construct` category — refusals driven by something the source program contains. `infra` sites (a Cranelift failure, a caught panic, a post-execution kind-source gap) abandon the program too, but removing them is a different problem from per-function granularity: they are inventoried and reported, and adding one is still growth.",
+  "scanned_files": [
+    "crates/shape-jit/src/executor.rs",
+    "crates/shape-jit/src/compiler/strategy.rs",
+    "crates/shape-jit/src/compiler/program.rs"
+  ],
+  "residual_source_file": "crates/shape-vm/src/bytecode/jit_residual.rs",
+  "regenerate_with": "node scripts/generate-jit-bail-baseline.mjs",
+  "check_with": "node scripts/check-jit-bail-baseline.mjs",
+  "excluded_from_hash": [
+    "source_revision"
+  ],
+  "source_revision": "068f1f2d2336ec64d1ddbcfbe10251f0d13f7006",
+  "site_count": 19,
+  "construct_site_count": 15,
+  "infra_site_count": 4,
+  "program_scoped_residual_count": 2,
+  "inventory_sha256": "bb2fed387bb0e3cba118ff715ad410595a95c9a991143f4ddd5a423b223fc22f",
+  "sites": [
+    {
+      "id": "function-body-module-binding",
+      "category": "construct",
+      "reason": "W39 F1: module bindings are not MIR places, so a native top-level plus an interpreted function would read an unsynchronized module-binding array",
+      "file": "crates/shape-jit/src/compiler/program.rs"
+    },
+    {
+      "id": "generic-struct-specialization",
+      "category": "construct",
+      "reason": "WS-6: JIT struct-value codegen for a `<base>::struct_<name>` specialization is unsound (use-after-free on a later field read)",
+      "file": "crates/shape-jit/src/compiler/program.rs"
+    },
+    {
+      "id": "main-code-preflight",
+      "category": "construct",
+      "reason": "top-level (non-function-body) instructions failed preflight",
+      "file": "crates/shape-jit/src/compiler/program.rs"
+    },
+    {
+      "id": "program-scoped-residual",
+      "category": "construct",
+      "reason": "a residual whose scope is Program; see `JitResidual::program_scope_reason` for the per-residual hazard",
+      "file": "crates/shape-jit/src/executor.rs"
+    },
+    {
+      "id": "return-tag-nanboxed-kind-gap",
+      "category": "infra",
+      "reason": "the return tag was never stamped from the call signature; fires after execution, so it is a kind-source gap in JIT emission rather than a construct refusal",
+      "file": "crates/shape-jit/src/executor.rs"
+    },
+    {
+      "id": "scalar-move-lift-surface",
+      "category": "construct",
+      "reason": "legacy NewObject / `clone` / `diff` / operator-trait dispatch lowering is unproven",
+      "file": "crates/shape-jit/src/executor.rs"
+    },
+    {
+      "id": "selective-compile-failed",
+      "category": "infra",
+      "reason": "propagates a refusal raised inside `compile_program_selective`; the construct-driven bails there carry their own markers",
+      "file": "crates/shape-jit/src/executor.rs"
+    },
+    {
+      "id": "selective-compile-panicked",
+      "category": "infra",
+      "reason": "a panic escaped the JIT pipeline; the program runs interpreted rather than on a half-built module",
+      "file": "crates/shape-jit/src/executor.rs"
+    },
+    {
+      "id": "top-level-comptime-preexec",
+      "category": "construct",
+      "reason": "a top-level `comptime { .. }` block; deopt before the first compile keeps its side effects exactly-once",
+      "file": "crates/shape-jit/src/executor.rs"
+    },
+    {
+      "id": "top-level-comptime-strategy",
+      "category": "construct",
+      "reason": "the borrow-solver top-level MIR re-lowers the comptime body instead of the baked literal",
+      "file": "crates/shape-jit/src/compiler/strategy.rs"
+    },
+    {
+      "id": "top-level-comptime-strategy-user-funcs",
+      "category": "construct",
+      "reason": "same as top-level-comptime-strategy, on the user-function-aware route",
+      "file": "crates/shape-jit/src/compiler/strategy.rs"
+    },
+    {
+      "id": "top-level-preflight-strategy",
+      "category": "construct",
+      "reason": "top-level MIR failed MirToIR preflight",
+      "file": "crates/shape-jit/src/compiler/strategy.rs"
+    },
+    {
+      "id": "top-level-preflight-strategy-user-funcs",
+      "category": "construct",
+      "reason": "same as top-level-preflight-strategy, on the user-function-aware route",
+      "file": "crates/shape-jit/src/compiler/strategy.rs"
+    },
+    {
+      "id": "top-level-residual",
+      "category": "construct",
+      "reason": "the residual is in top-level code, which IS the entry the JIT compiles as `main`",
+      "file": "crates/shape-jit/src/executor.rs"
+    },
+    {
+      "id": "unattributed-residual",
+      "category": "construct",
+      "reason": "residuals present but the linker/deserialize path dropped the per-function attribution",
+      "file": "crates/shape-jit/src/executor.rs"
+    },
+    {
+      "id": "unknown-jit-signal",
+      "category": "infra",
+      "reason": "a negative signal with no recognised meaning; fires after execution, so it is a JIT-pipeline failure rather than a construct refusal",
+      "file": "crates/shape-jit/src/executor.rs"
+    },
+    {
+      "id": "user-drop-impl",
+      "category": "construct",
+      "reason": "JIT `emit_drop` has no user-Drop trait-method dispatch and would elide the user `Drop::drop` body",
+      "file": "crates/shape-jit/src/executor.rs"
+    },
+    {
+      "id": "user-trait-or-impl-declared",
+      "category": "construct",
+      "reason": "native trait-method dispatch can diverge from the VM for ordinary trait calls",
+      "file": "crates/shape-jit/src/executor.rs"
+    },
+    {
+      "id": "v2-typed-opcode-unverified",
+      "category": "construct",
+      "reason": "a V2 typed opcode has no matching FrameDescriptor",
+      "file": "crates/shape-jit/src/executor.rs"
+    }
+  ],
+  "program_scoped_residuals": [
+    {
+      "id": "module-fn-marshal-return",
+      "variant": "ModuleFnMarshalReturn"
+    },
+    {
+      "id": "reference-escape-promotion",
+      "variant": "ReferenceEscapePromotion"
+    }
+  ]
+}

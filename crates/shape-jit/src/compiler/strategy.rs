@@ -41,6 +41,7 @@ impl JITCompiler {
         // to the bytecode interpreter (this structured `Err` routes through
         // the `[jit-fallback]` path) preserves VM == JIT. Root-cause fix (a
         // JIT-consumable top-level MIR carrying the baked literal) is v0.4.
+        // WHOLE-PROGRAM-BAIL[construct]: top-level-comptime-strategy — the borrow-solver top-level MIR re-lowers the comptime body instead of the baked literal
         if program.top_level_has_comptime {
             return Err("v0.3.3 comptime SURFACE (ADR-006 §2.7.14): top-level code \
                  contains a `comptime { ... }` block. The borrow-solver \
@@ -62,6 +63,7 @@ impl JITCompiler {
             .as_ref()
             .ok_or_else(|| "MirToIR: top-level code has no MIR data".to_string())?;
         let preflight = crate::mir_compiler::preflight(mir_data);
+        // WHOLE-PROGRAM-BAIL[construct]: top-level-preflight-strategy — top-level MIR failed MirToIR preflight
         if !preflight.can_compile {
             return Err(format!(
                 "MirToIR: top-level preflight failed: {}",
@@ -226,6 +228,7 @@ impl JITCompiler {
         // see the matching guard in `compile_strategy`. Deopt the whole
         // top-level program to the bytecode interpreter when top-level code
         // contains a `comptime { ... }` block, so VM == JIT.
+        // WHOLE-PROGRAM-BAIL[construct]: top-level-comptime-strategy-user-funcs — same as top-level-comptime-strategy, on the user-function-aware route
         if program.top_level_has_comptime {
             return Err("v0.3.3 comptime SURFACE (ADR-006 §2.7.14): top-level code \
                  contains a `comptime { ... }` block; the borrow-solver \
@@ -243,6 +246,7 @@ impl JITCompiler {
             .as_ref()
             .ok_or_else(|| "MirToIR: top-level code has no MIR data".to_string())?;
         let preflight = crate::mir_compiler::preflight(mir_data);
+        // WHOLE-PROGRAM-BAIL[construct]: top-level-preflight-strategy-user-funcs — same as top-level-preflight-strategy, on the user-function-aware route
         if !preflight.can_compile {
             return Err(format!(
                 "MirToIR: top-level preflight failed: {}",
