@@ -260,12 +260,13 @@ pub(crate) struct InFlightForeignCall {
     /// Delivers the extension's raw msgpack return payload. Unmarshalling waits
     /// for the interpreter thread, which owns the schema registry.
     pub completion: Receiver<Result<Vec<u8>, String>>,
-    /// Present only for the blocking-pool strategy. Aborting a `spawn_blocking`
-    /// task does not interrupt a closure that has already started: the foreign
-    /// body runs to completion and its result is discarded, which is exactly the
-    /// run-to-completion-then-discard semantics #202 declares. It is NOT a
-    /// confirmation that the foreign runtime stopped, and nothing in this module
-    /// reports it as one.
+    /// Present only for the blocking-pool strategy, and weaker than it looks.
+    /// Aborting a `spawn_blocking` task cannot interrupt a closure that has
+    /// already started: the foreign body runs to completion and its result is
+    /// discarded — the run-to-completion-then-discard semantics #202 declares.
+    /// (If the task had not yet begun, the abort does prevent it starting, and
+    /// no foreign code runs at all.) Neither outcome is a confirmation that the
+    /// foreign runtime stopped, and nothing in this module reports one as such.
     pub abort: Option<tokio::task::AbortHandle>,
 }
 
@@ -349,6 +350,7 @@ pub(crate) mod tests {
     use super::*;
     use crate::executor::{VMConfig, VirtualMachine};
     use shape_abi_v1::LanguageRuntimeVTable;
+    use std::sync::atomic::Ordering;
     use std::time::{Duration, Instant};
 
     /// A sleep long enough that serialization is unmistakable and short enough
@@ -695,7 +697,22 @@ fn python quick(a: int) -> Result<int> {
             .expect("the async call starts");
         let task_id = future_id(&handle);
 
-        // Cancel while the extension is still inside the sleep.
+        // Wait until the extension is definitely INSIDE the body before
+        // cancelling. Without this the test races the blocking pool: aborting a
+        // `spawn_blocking` task that has not begun executing prevents it from
+        // running at all, which is a different (and less interesting) outcome —
+        // no foreign code ran, so there is nothing to run to completion. The
+        // case worth pinning is the one where the distinction bites: the body is
+        // already running and cannot be stopped.
+        let waited = std::time::Instant::now();
+        while sleepy_extension::IN_FLIGHT.load(Ordering::SeqCst) == 0 {
+            assert!(
+                waited.elapsed() < Duration::from_secs(5),
+                "the offloaded invoke never started"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+
         assert!(vm.task_scheduler.has_pending_async(task_id));
         vm.task_scheduler.cancel(task_id);
         assert!(

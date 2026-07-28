@@ -80,9 +80,11 @@ pub struct PendingAsyncTask {
     /// companion hook.
     ///
     /// For an offloaded foreign invoke this aborts the blocking-pool task, which
-    /// does NOT interrupt a closure that has already started: the foreign body
-    /// runs to completion and its result is discarded. It is a discard, never a
-    /// confirmation that the foreign runtime stopped (ADR-019 §5 / #202).
+    /// cannot interrupt a closure that has already started: the foreign body
+    /// runs to completion and its result is discarded. (If it had not yet begun,
+    /// the abort prevents it starting, and no foreign code runs at all.) Either
+    /// way it is a discard, never a confirmation that the foreign runtime
+    /// stopped (ADR-019 §5 / #202).
     pub abort: Option<AbortHandle>,
 }
 
