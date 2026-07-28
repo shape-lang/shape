@@ -167,7 +167,12 @@ memory, and must not run it concurrently with any other cargo invocation.
 ### Operational rules now binding on this workspace
 
 1. Never build all of shape-test at once. Build exactly the one target needed:
-   `cargo test -p shape-test --test <name> --no-run`.
+   `cargo test -p shape-test --test <name> --no-run`. Measured cost of that
+   form after touching `tools/shape-test/src/lib.rs`: **1.9 GB peak, 6
+   processes**, of which a single `ld` is 1.72 GB. That one linker is the
+   irreducible floor for any shape-test build — but it is ~30x cheaper than the
+   all-targets form at default parallelism, and it stays flat regardless of the
+   `jobs` setting because there is only ever one link in flight.
 2. One cargo invocation at a time, per worktree and across worktrees.
 3. `.cargo/config.toml`'s `[build] jobs` bound is not optional and must not be
    removed; the first build after it lands is a cold-ish rebuild and will be
