@@ -4,7 +4,7 @@ This file provides guidance to Claude Code when working with the Shape language 
 
 ## Project Overview
 
-Shape is a **statically-typed programming language** implemented in Rust. It features a bytecode VM with tiered JIT compilation (via Cranelift), capability-based sandboxing with 16 fine-grained permissions, content-addressed bytecode for distributed execution, polyglot interop (inline Python/TypeScript/C), a trait system, async/await, compile-time evaluation, generics, pattern matching, ergonomic annotations + comptime (enabling user-defined LLM integration patterns in stdlib/userland), and rich tooling (LSP, REPL, tree-sitter grammar, package registry with Ed25519 signing).
+Shape is a **statically-typed programming language** implemented in Rust. It features a bytecode VM with tiered JIT compilation (via Cranelift), capability-based sandboxing with 17 fine-grained permissions, content-addressed bytecode for distributed execution, polyglot interop (inline Python/TypeScript/C), a trait system, async/await, compile-time evaluation, generics, pattern matching, ergonomic annotations + comptime (enabling user-defined LLM integration patterns in stdlib/userland), and rich tooling (LSP, REPL, tree-sitter grammar, package registry with Ed25519 signing).
 
 ## Repository Structure
 
@@ -36,7 +36,7 @@ The repo is a monorepo with several top-level projects:
 | **shape-vm** | `crates/shape-vm/` | Stack-based bytecode interpreter, typed opcodes, feedback vectors, resource limits, content-addressed bytecode, linker |
 | **shape-jit** | `crates/shape-jit/` | Cranelift JIT compiler (tiered: baseline @ 100 calls, optimizing @ 10k) |
 | **shape-wire** | `crates/shape-wire/` | Serialization (MessagePack) and QUIC transport, wire protocol v2 |
-| **shape-abi-v1** | `crates/shape-abi-v1/` | Stable C ABI for native extensions, Permission enum (16 permissions), PermissionSet, ScopeConstraints |
+| **shape-abi-v1** | `crates/shape-abi-v1/` | Stable C ABI for native extensions, Permission enum (17 permissions), PermissionSet, ScopeConstraints |
 | **shape-macros** | `crates/shape-macros/` | Procedural macros for builtin introspection |
 | **shape-viz** | `crates/shape-viz/` | Visualization (split: shape-viz-core + shape-viz-native) |
 | **shape-cli** | `bin/shape-cli/` | CLI: REPL, script runner, TUI editor, `wire-serve`, `ext install` |
@@ -169,7 +169,7 @@ Shape supports:
 
 ### Security Model (Three Tiers)
 1. **Compile-time capability checking**: Static analysis derives `required_permissions` from stdlib calls. Baked into FunctionBlob content hash. Checked at load time — zero runtime cost.
-2. **Runtime permission gating**: Every stdlib I/O call guarded by `check_permission()` (~5ns per call). 16 permissions across filesystem (`FsRead`, `FsWrite`, `FsScoped`), network (`NetConnect`, `NetListen`, `NetScoped`), system (`Process`, `Env`, `Time`, `Random`), and sandbox controls (`Vfs`, `Deterministic`, `Capture`, `MemLimited`, `TimeLimited`, `OutputLimited`).
+2. **Runtime permission gating**: Every stdlib I/O call guarded by `check_permission()` (~5ns per call). 17 permissions across filesystem (`FsRead`, `FsWrite`, `FsScoped`), network (`NetConnect`, `NetListen`, `NetScoped`), system (`Process`, `Env`, `Time`, `Random`), and sandbox controls (`Vfs`, `Deterministic`, `Capture`, `MemLimited`, `TimeLimited`, `OutputLimited`), and FFI (`Ffi`).
 3. **Resource sandboxing**: `ResourceLimits` caps instruction count, memory (default sandbox: 256 MB), wall time (30s), output volume (1 MB). Presets: `unlimited()` for trusted code, `sandboxed()` for untrusted.
 
 **ScopeConstraints** narrow permissions to specific filesystem paths (glob patterns) and network hosts/ports.
@@ -366,7 +366,7 @@ For comprehensive concept-to-location mapping see [`docs/codebase-index.md`](doc
 | MIR borrow solver | `crates/shape-vm/src/mir/solver.rs` |
 | MIR storage planning | `crates/shape-vm/src/mir/storage_planning.rs` |
 | Capability tags | `crates/shape-runtime/src/stdlib/capability_tags.rs` |
-| Permission enum (16 perms) | `crates/shape-abi-v1/src/lib.rs:996` |
+| Permission enum (17 perms) | `crates/shape-abi-v1/src/lib.rs:996` |
 | `LanguageRuntimeVTable` (polyglot) | `crates/shape-abi-v1/src/lib.rs:742` |
 | Resource limits | `crates/shape-vm/src/resource_limits.rs` |
 | Content-addressed blobs | `crates/shape-vm/src/bytecode/content_addressed.rs` |
