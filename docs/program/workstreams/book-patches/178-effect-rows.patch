@@ -52,15 +52,18 @@
 +believed to be enforced but is not is worse than none at all.
 +
 +**Live now.** The row is a component of the function type. It participates in
-+type identity, unification, and subtyping; the subset judgment runs in the
++type identity and unification; the subset judgment is implemented in the
 +constraint solver; and `effect` binders substitute to closed rows at
-+instantiation. Where both sides of a comparison have a known row, the subset
-+check is real.
++instantiation. Ask the solver whether one row fits another and you get the
++right answer.
 +
-+**Not live yet.** Shape does not yet walk a function *body* to derive what it
-+actually does. Closure and function bodies therefore have no inferred row, so
-+in ordinary code the checker frequently has nothing to compare a declared row
-+against.
++**Not live yet.** Two things. Shape does not yet walk a function *body* to
++derive what it actually does, so bodies have no inferred row to compare a
++declaration against. And no production checking path asks the solver the
++subset question yet, so a row written in *type* position is recorded but not
++enforced: passing a `! {FsRead}` function where `! {}` is declared compiles
++today. Write rows in type position to document a boundary, not to rely on
++one.
 +
 +That gap is why an effect clause on a function **declaration** is currently a
 +compile error:
@@ -83,14 +86,16 @@
 +the file it had just declared it would not read. Rather than ship a contract
 +that can lie, Shape refuses the declaration until the body walk lands -- the
 +same call the language made for `async` foreign declarations. Rows in *type*
-+position are unaffected, because those are checked evidence rather than an
-+unchecked claim.
++position are unaffected: they are recorded rather than claimed, so writing one
++asserts nothing about a body that nothing has read.
 +
 +:::note[Arriving in a later release]
-+Declaration-position rows, body row inference, and the resulting
-+declaration-vs-body enforcement are planned work, tracked as EFFECT-CONTRACT.
-+When it lands, `[C0934]` disappears and a declared row becomes a checked
-+promise: a body that exceeds it fails with the excess effects named.
++Declaration-position rows, body row inference, enforcement of type-position
++subsumption, and the resulting declaration-vs-body checking are planned work,
++tracked as EFFECT-CONTRACT. When it lands, `[C0934]` disappears and a declared
++row becomes a checked promise: a body that exceeds it fails with the excess
++effects named, and the compiler offers the corrected row as a one-keystroke
++fix.
 +:::
 +
  ## See Also

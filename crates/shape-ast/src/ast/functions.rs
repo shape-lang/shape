@@ -195,10 +195,25 @@ impl FunctionDef {
     ///
     /// Scope is deliberately the DECLARATION position only. Rows on function
     /// TYPES — parameters, higher-order signatures, and `effect F` binders —
-    /// stay live, because those the solver genuinely checks through the
-    /// subset judgment whenever a function value meets a declared parameter.
-    /// A type-position row is checked evidence; a declaration-position row was
-    /// an unchecked claim. Only the claim is refused.
+    /// stay writable, because there the row is a component of the type: it
+    /// participates in type identity and unification, and the subset judgment
+    /// that decides it exists and is exercised
+    /// (`ConstraintSolver::check_declared_boundary`).
+    ///
+    /// What a type-position row is NOT, at this revision, is *enforced*: no
+    /// production checking path calls that seam, so passing a `! {FsRead}`
+    /// function value where `! {}` is declared still compiles. Measured
+    /// 2026-07-28 under #180 — an earlier revision of this text claimed those
+    /// rows "are really checked", which was true of the judgment and false of
+    /// the program. Production wiring of the boundary check lands with #143,
+    /// alongside the body walk.
+    ///
+    /// The declaration position is refused and the type position is not,
+    /// because the two gaps differ in kind. A declaration-position row is a
+    /// claim about a body that nothing derives, and nothing ever will until
+    /// the body walk exists. A type-position row is a constraint on callers
+    /// that the existing seam already decides correctly — what is missing is
+    /// the call to it.
     ///
     /// Shared by the compiler and the editor — the LSP surfaces this through
     /// the compile path it already runs rather than through a second
@@ -212,16 +227,16 @@ impl FunctionDef {
             message: format!(
                 "[C0934] the effect clause `{clause}` on `fn {name}` is not enforced yet, so it \
                  cannot be declared here. Effect rows are live as a TYPE component — on \
-                 parameters, on higher-order signatures, and as `effect F` binders — and those \
-                 are really checked by subset subsumption. What does not exist yet is the body \
-                 walk that derives what `{name}` actually does and compares it against this \
-                 clause (ADR-014 §8.2). Until it does, a declared row is a promise nothing \
-                 verifies: `! {{}}` on a function that reads a file would compile and run. \
-                 Rather than ship a contract that can lie, the declaration is refused — the same \
-                 call the program made for `async` foreign declarations in issue #201. \
-                 Declaration-vs-body enforcement is planned, not refused: see issue #143 \
-                 (EFFECT-CONTRACT). This rejection is transitional and is deleted when that \
-                 lands.",
+                 parameters, on higher-order signatures, and as `effect F` binders — where the \
+                 row is carried in the type and decided by the subset judgment at the boundary \
+                 seam. Two things do not exist yet: the body walk that would derive what \
+                 `{name}` actually does, and the production call to that seam (ADR-014 §8.2). \
+                 Until they do, a declared row is a promise nothing verifies: `! {{}}` on a \
+                 function that reads a file would compile and run. Rather than ship a contract \
+                 that can lie, the declaration is refused — the same call the program made for \
+                 `async` foreign declarations in issue #201. Enforcement is planned, not \
+                 refused: both halves land with issue #143 (EFFECT-CONTRACT). This rejection is \
+                 transitional and is deleted when that lands.",
                 clause = row.render(),
                 name = self.name,
             ),
@@ -229,9 +244,11 @@ impl FunctionDef {
             fix_hint: format!(
                 "delete the `{clause}` clause from `fn {name}`. That preserves today's semantics \
                  exactly — nothing was checking the row, so removing it removes no guarantee. \
-                 Effect rows you want checked NOW go in type position instead: a callback \
-                 parameter typed `f: fn() -> T ! {{FsRead}}` is enforced against the closure you \
-                 pass it.",
+                 A row in TYPE position — a callback parameter typed `f: fn() -> T ! {{FsRead}}` \
+                 — is accepted and is carried in the type, so writing one documents the \
+                 boundary and will start checking the moment #143 wires the seam. It is not \
+                 checked against the value you pass yet either; nothing in Shape enforces an \
+                 effect row at this revision.",
                 clause = row.render(),
                 name = self.name,
             ),

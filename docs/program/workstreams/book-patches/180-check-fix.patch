@@ -1,0 +1,99 @@
+diff --git a/book/book-site/src/content/docs/tooling/projects.mdx b/book/book-site/src/content/docs/tooling/projects.mdx
+index 91f1cbe..cb390e0 100644
+--- a/book/book-site/src/content/docs/tooling/projects.mdx
++++ b/book/book-site/src/content/docs/tooling/projects.mdx
+@@ -145,3 +145,94 @@ Project `shape.toml` and script frontmatter are mutually exclusive during execut
+ ## LSP
+ 
+ The Shape LSP validates `shape.toml` directly and provides completion, hover, and diagnostics for known sections and keys.
++
++## Checking, and Applying Fixes
++
++`shape check` type-checks a file or a project without executing anything:
++
++```sh
++shape check src/main.shape     # a single file
++shape check                    # the current directory, via shape.toml
++shape check --link             # additionally resolve every foreign symbol
++```
++
++Some diagnostics carry a **machine-applicable fix**: the compiler proves the
++exact byte spans and the exact replacement text, rather than describing a
++repair in prose. `shape check --fix` applies those, rewriting the checked file
++in place.
++
++A non-exhaustive match is the fix that ships today. Given this file:
++
++```shape runnable=false
++enum Status { Active, Inactive }
++
++fn describe(s: Status) -> string {
++    match s {
++        Status::Active => "on",
++    }
++}
++```
++
++`shape check` reports the missing variant, and `shape check --fix` writes the
++arm:
++
++```sh
++$ shape check --fix status.shape
++error: Semantic error: Non-exhaustive match on 'Status': missing variants Inactive
++  applied: Add missing match arm for Status
++fixed: applied 1 fix(es) to status.shape; re-run `shape check` to confirm
++```
++
++The arm arrives empty, because the compiler knows which variant is missing and
++does not know what you want it to do:
++
++```shape runnable=false
++    match s {
++        Status::Active => "on",
++        Status::Inactive => {
++        },
++    }
++```
++
++Fill it in and the program checks and runs:
++
++```shape
++enum Status { Active, Inactive }
++
++fn describe(s: Status) -> string {
++    match s {
++        Status::Active => "on",
++        Status::Inactive => "off",
++    }
++}
++
++print(describe(Status::Active))
++print(describe(Status::Inactive))
++```
++
++### What `--fix` will and will not do
++
++A fix is **evidence-backed**: it applies facts the compiler already proved —
++which variants a match is missing, what a scrutinee's enum is called — and
++never a guess. Where the proved facts do not determine a safe edit, the
++diagnostic still explains the problem and `--fix` offers nothing.
++
++A fix is also **bound to the revision it was proved against**. Each one carries
++a digest of the source it was checked on, so if the file changed between the
++check and the apply, the fix is refused rather than applied at offsets that no
++longer mean what they meant. You will see the diagnostic and an unmodified
++file, which is the correct outcome — re-run `shape check --fix` and get a fix
++proved against what you now have.
++
++Three limits worth knowing:
++
++- Only diagnostics that emit a fix can be fixed. Today that is the
++  non-exhaustive match; more are being added diagnostic by diagnostic.
++- The file is rewritten in place, with no backup and no preview. Run it on a
++  clean working tree.
++- A project is checked from its entry file, so `--fix` repairs that file and
++  not the modules it imports.
++
++The same proved fixes reach the editor as one-keystroke code actions, and the
++`--diagnostics json` output carries their spans verbatim, so a tool can apply
++them without running the compiler itself.

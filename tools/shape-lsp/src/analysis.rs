@@ -647,7 +647,9 @@ mod effect_row_declaration_editor_parity {
     #[test]
     fn the_editor_leaves_type_position_rows_alone() {
         // The differential that survives #143's flip: TYPE-position rows are
-        // checked evidence and stay live, so they must not be flagged.
+        // ACCEPTED and stay writable, so they must not be flagged. Accepted is
+        // all this asserts — type-position subsumption is not enforced at this
+        // revision either (measured 2026-07-28 under #180); #143 wires it.
         let messages =
             diagnostics_for("fn hof(f: fn() -> int ! {FsRead}) -> int {\n    return f()\n}\n");
         assert!(
