@@ -76,6 +76,11 @@ jobs:
       - name: ADR-016 Book coverage manifest (#113) — no reclassified fence, no reused identity
         run: node scripts/check-adr011-012-book-coverage-manifest.mjs --self-test
 
+      # ADR-016 §2 / §3 / R19 (#114). The denominator both manifests are
+      # measured against, re-derived from the tree on every run.
+      - name: ADR-016 public feature candidates (#114) — inventory matches the tree
+        run: node scripts/check-adr011-012-public-feature-candidates.mjs --self-test
+
   # Foreign-call (FFI) end-to-end tier. The `rust` job above runs
   # `cargo test --workspace --all-targets`, which exercises the always-on
   # extern-C sentinels in `bin/shape-cli/tests/ffi_e2e.rs` but NOT the
