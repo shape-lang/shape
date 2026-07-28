@@ -26,10 +26,25 @@
 
 use std::cell::Cell;
 
+/// Sentinel stored in [`BUFFER_CEILING`] for "no ceiling installed".
+///
+/// The public API still speaks `Option<u64>`; the *storage* does not. Since
+/// #194 the ceiling is consulted on every typed-carrier allocation, and the
+/// unlimited case (the CLI default) is overwhelmingly the common one, so the
+/// check wants to be one load and one compare. `Cell<Option<u64>>` costs a
+/// discriminant test on top of that, on the hottest path in the runtime.
+///
+/// Using `u64::MAX` as the sentinel is exact rather than approximate: a buffer
+/// of more than `u64::MAX` bytes is unrepresentable, so "ceiling == u64::MAX"
+/// and "no ceiling" permit precisely the same set of allocations. A caller
+/// that installs a literal `Some(u64::MAX)` ceiling gets unlimited, which is
+/// what it asked for.
+const NO_CEILING: u64 = u64::MAX;
+
 thread_local! {
     /// Maximum bytes any single heap buffer may occupy on the current
-    /// thread's VM execution. `None` = unlimited.
-    static BUFFER_CEILING: Cell<Option<u64>> = const { Cell::new(None) };
+    /// thread's VM execution. [`NO_CEILING`] = unlimited.
+    static BUFFER_CEILING: Cell<u64> = const { Cell::new(NO_CEILING) };
 
     /// A pending memory-ceiling breach recorded by a low-level growth path
     /// (`TypedArray::grow`) that has no fallible return channel of its own
@@ -50,7 +65,8 @@ thread_local! {
 /// prior execution's recorded breach never leaks into this one.
 pub fn set_ceiling(bytes: Option<u64>) -> Option<u64> {
     PENDING_BREACH.with(|c| c.set(None));
-    BUFFER_CEILING.with(|c| c.replace(bytes))
+    let prev = BUFFER_CEILING.with(|c| c.replace(bytes.unwrap_or(NO_CEILING)));
+    if prev == NO_CEILING { None } else { Some(prev) }
 }
 
 /// Record a memory-ceiling breach detected on an infallible growth path.
@@ -79,8 +95,10 @@ pub fn take_breach() -> Option<AllocBudgetExceeded> {
 }
 
 /// Current per-buffer ceiling (for diagnostics / tests). `None` = unlimited.
+#[inline]
 pub fn ceiling() -> Option<u64> {
-    BUFFER_CEILING.with(|c| c.get())
+    let c = BUFFER_CEILING.with(|c| c.get());
+    if c == NO_CEILING { None } else { Some(c) }
 }
 
 /// Check whether a single buffer of `new_size_bytes` is permitted. Returns
@@ -96,25 +114,24 @@ pub fn ceiling() -> Option<u64> {
 /// Honesty about the evidence: the attribute is justified on first principles,
 /// NOT by measurement. #194 does carry a reproducible ~11% regression on the
 /// charter's `startup_hello` workload (nearly pure allocation, so a constant
-/// per-allocation cost shows at its highest proportion there), but adding this
-/// attribute did not measurably reduce it — the machine was too contended to
-/// resolve a few percent. Do not cite `#[inline]` here as a fix for that
-/// regression; its cause is still open.
+/// per-allocation cost shows at its highest proportion there), and adding this
+/// attribute did not measurably reduce it. Do not cite `#[inline]` here as a
+/// fix for that regression.
+///
+/// The body is one thread-local load and one unsigned compare — no `Option`
+/// discriminant, because the storage uses the [`NO_CEILING`] sentinel. The
+/// unlimited case falls straight through.
 #[inline]
 pub fn check_size(new_size_bytes: u64) -> Result<(), AllocBudgetExceeded> {
-    BUFFER_CEILING.with(|c| match c.get() {
-        None => Ok(()),
-        Some(ceiling) => {
-            if new_size_bytes > ceiling {
-                Err(AllocBudgetExceeded {
-                    requested: new_size_bytes,
-                    ceiling,
-                })
-            } else {
-                Ok(())
-            }
-        }
-    })
+    let ceiling = BUFFER_CEILING.with(|c| c.get());
+    if new_size_bytes > ceiling {
+        Err(AllocBudgetExceeded {
+            requested: new_size_bytes,
+            ceiling,
+        })
+    } else {
+        Ok(())
+    }
 }
 
 /// Error returned by [`check_size`] when a buffer would exceed the ceiling.
@@ -181,6 +198,29 @@ mod tests {
         for _ in 0..1000 {
             assert!(check_size(80).is_ok());
         }
+    }
+
+    /// The `NO_CEILING` sentinel is an exact encoding, not an approximation.
+    /// A buffer larger than `u64::MAX` bytes is unrepresentable, so a ceiling
+    /// of `u64::MAX` and no ceiling at all permit the same set of allocations
+    /// — which is why the storage can drop the `Option` discriminant from the
+    /// hottest path in the runtime without changing behaviour.
+    #[test]
+    fn max_ceiling_and_no_ceiling_are_indistinguishable() {
+        let _g = BudgetGuard::new(Some(u64::MAX));
+        assert!(check_size(u64::MAX).is_ok(), "nothing can exceed u64::MAX");
+        assert!(check_size(1 << 40).is_ok());
+        // It reads back as unlimited, because that is what it is.
+        assert_eq!(ceiling(), None);
+    }
+
+    /// A finite ceiling still round-trips through the sentinel encoding.
+    #[test]
+    fn finite_ceiling_round_trips() {
+        let _g = BudgetGuard::new(Some(4096));
+        assert_eq!(ceiling(), Some(4096));
+        assert!(check_size(4096).is_ok(), "at the ceiling is allowed");
+        assert!(check_size(4097).is_err());
     }
 
     #[test]
