@@ -44,7 +44,7 @@ impl DecimalObj {
     /// Returns a raw pointer with refcount initialized to 1.
     pub fn new(value: Decimal) -> *mut Self {
         let layout = std::alloc::Layout::new::<Self>();
-        let ptr = unsafe { std::alloc::alloc(layout) as *mut Self };
+        let ptr = crate::v2::heap_alloc::alloc_block(layout) as *mut Self;
         assert!(!ptr.is_null(), "allocation failed for DecimalObj");
         unsafe {
             (*ptr).header = HeapHeader::new(HEAP_KIND_V2_DECIMAL);
@@ -69,7 +69,7 @@ impl DecimalObj {
     pub unsafe fn drop(ptr: *mut Self) {
         // No nested allocation; just dealloc the struct.
         let layout = std::alloc::Layout::new::<Self>();
-        unsafe { std::alloc::dealloc(ptr as *mut u8, layout) };
+        unsafe { crate::v2::heap_alloc::dealloc_block(ptr as *mut u8, layout) };
     }
 
     /// Byte offset constants for JIT codegen.

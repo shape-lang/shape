@@ -15,10 +15,44 @@
 //!  16       4   len (element count)
 //!  20       4   cap (allocated capacity)
 //! ```
+//!
+//! ## Why the header and the buffer are two allocations (#194)
+//!
+//! #194 set out to collapse these into one block — header at `ptr`, elements
+//! inline at `ptr + 24`, one `malloc` instead of two. It is not sound for a
+//! GROWABLE array, and the reason is worth writing down so it is not
+//! rediscovered by the next attempt.
+//!
+//! A combined block cannot grow in place. `realloc` may move the block, and
+//! the block's address IS the heap object's identity — refcounted slots, GC
+//! side tables and JIT-held registers all name the array by that pointer. So
+//! growth would have to spill the elements to a fresh out-of-line buffer,
+//! leaving the struct where it is.
+//!
+//! Spilling is what breaks. While the elements are inline the block's size is
+//! `24 + cap * size_of::<T>()`, recoverable from `cap`. After a spill, `cap`
+//! describes the NEW buffer and the ORIGINAL inline capacity — the number the
+//! free path needs to hand `dealloc` a matching `Layout` — is gone. There is
+//! nowhere to keep it: the 24 bytes are fully occupied (refcount 0..4, kind
+//! 4..6, flags 6, the element-type stamp in `_pad` at 7, `data` 8..16, `len`
+//! 16..20, `cap` 20..24), and widening the struct is exactly the layout change
+//! the JIT's fixed-offset loads forbid. The element-type-erased free paths
+//! (`release_v2_typed_array`, `free_v2_typed_array_memory_only`) make it
+//! worse: they reconstruct the buffer layout from `(cap, elem_type)` alone,
+//! with no access to `T`.
+//!
+//! One block, growable, stable identity, and a recoverable free layout are
+//! over-determined; something has to give. The collapse becomes available for
+//! arrays PROVEN not to grow — which is what PERF-ESCAPE (#193) and PERF-ARENA
+//! (#195) are for, and where the single-block constructor belongs. Note the
+//! immutable carriers already do this: `jit_v2_string_alloc` allocates a
+//! `StringObj` header with its bytes trailing in the same block, precisely
+//! because a string never grows.
 
+use super::heap_alloc::{alloc_block, dealloc_block, try_alloc_block, try_realloc_block};
 use super::heap_header::{HEAP_KIND_V2_TYPED_ARRAY, HeapHeader};
 use crate::{HeapKind, HeapValue, NativeKind};
-use std::alloc::{Layout, alloc, dealloc, realloc};
+use std::alloc::Layout;
 use std::ptr;
 
 /// Typed contiguous array with refcounted header.
@@ -61,12 +95,12 @@ impl<T: Copy> TypedArray<T> {
     /// Returns a raw pointer to the heap-allocated array.
     pub fn with_capacity(cap: u32) -> *mut Self {
         let layout = Layout::new::<Self>();
-        let ptr = unsafe { alloc(layout) as *mut Self };
+        let ptr = alloc_block(layout) as *mut Self;
         assert!(!ptr.is_null(), "allocation failed for TypedArray");
 
         let data = if cap > 0 {
             let data_layout = Layout::array::<T>(cap as usize).expect("invalid array layout");
-            let data_ptr = unsafe { alloc(data_layout) as *mut T };
+            let data_ptr = alloc_block(data_layout) as *mut T;
             assert!(!data_ptr.is_null(), "allocation failed for TypedArray data");
             data_ptr
         } else {
@@ -255,11 +289,11 @@ impl<T: Copy> TypedArray<T> {
             if arr.cap > 0 && !arr.data.is_null() {
                 let data_layout =
                     Layout::array::<T>(arr.cap as usize).expect("invalid array layout");
-                dealloc(arr.data as *mut u8, data_layout);
+                dealloc_block(arr.data as *mut u8, data_layout);
             }
             // Free the TypedArray struct itself.
             let layout = Layout::new::<Self>();
-            dealloc(ptr as *mut u8, layout);
+            dealloc_block(ptr as *mut u8, layout);
         }
     }
 
@@ -277,35 +311,35 @@ impl<T: Copy> TypedArray<T> {
             };
             let new_layout = Layout::array::<T>(new_cap as usize).expect("invalid array layout");
 
-            // Enforce the per-execution per-buffer heap ceiling, if installed.
-            // A doubling realloc can jump several GB in a single instruction,
-            // so a memory ceiling — not the instruction cap — is what bounds
-            // the RSS of an allocation-heavy runaway loop (the canonical case:
-            // one buffer growing without bound). Over the ceiling => fail
-            // in-process here rather than letting RSS climb until the host
-            // OOM-killer reaps the process. No ceiling (CLI default) => no-op.
-            // Over the ceiling: record the breach on the thread-local budget
-            // and REFUSE to grow (leave cap/len unchanged) rather than
-            // `panic!`-ing. A panic here aborts the whole process (exit 101)
-            // — on a serve node that kills every in-flight request; on the
-            // CLI it is an uncatchable crash on untrusted input. The VM's
+            // The per-execution per-buffer heap ceiling is enforced by the
+            // allocation seam (#194), which meters every block on the way to
+            // the allocator. A doubling realloc can jump several GB in a
+            // single instruction, so a memory ceiling — not the instruction
+            // cap — is what bounds the RSS of an allocation-heavy runaway loop
+            // (the canonical case: one buffer growing without bound).
+            //
+            // This is a refusal-channel caller, so it uses the seam's `try_*`
+            // entry points: over the ceiling the seam records the breach and
+            // returns `Err`, and we REFUSE to grow (leaving cap/len unchanged)
+            // rather than `panic!`-ing. A panic here aborts the whole process
+            // (exit 101) — on a serve node that kills every in-flight request;
+            // on the CLI it is an uncatchable crash on untrusted input. The
             // caller (`push`) sees the unchanged capacity and skips its write;
             // the dispatch loop drains the recorded breach and surfaces a
             // clean `VMError` (graceful non-101 exit). Because the offending
             // buffer never grows past this point, its size is bounded exactly
             // at the ceiling — the memory DoS is contained here.
-            if let Err(e) = crate::v2::alloc_budget::check_size(new_layout.size() as u64) {
-                crate::v2::alloc_budget::record_breach(e);
-                return;
-            }
-
-            let new_data = if arr.cap == 0 || arr.data.is_null() {
-                alloc(new_layout) as *mut T
+            let grown = if arr.cap == 0 || arr.data.is_null() {
+                try_alloc_block(new_layout)
             } else {
                 let old_layout =
                     Layout::array::<T>(arr.cap as usize).expect("invalid array layout");
-                realloc(arr.data as *mut u8, old_layout, new_layout.size()) as *mut T
+                try_realloc_block(arr.data as *mut u8, old_layout, new_layout.size())
             };
+            let Ok(new_data) = grown else {
+                return;
+            };
+            let new_data = new_data as *mut T;
             assert!(!new_data.is_null(), "reallocation failed for TypedArray");
 
             arr.data = new_data;
@@ -414,11 +448,11 @@ impl<T: super::heap_element::HeapElement> TypedArray<*const T> {
                 // Free the data buffer.
                 let data_layout =
                     Layout::array::<*const T>(arr.cap as usize).expect("invalid array layout");
-                dealloc(arr.data as *mut u8, data_layout);
+                dealloc_block(arr.data as *mut u8, data_layout);
             }
             // Free the TypedArray struct itself.
             let layout = Layout::new::<Self>();
-            dealloc(ptr as *mut u8, layout);
+            dealloc_block(ptr as *mut u8, layout);
         }
     }
 }
@@ -699,10 +733,10 @@ impl TypedArray<CallableArrayElem> {
                 });
                 let data_layout = Layout::array::<CallableArrayElem>(arr.cap as usize)
                     .expect("invalid array layout");
-                dealloc(arr.data as *mut u8, data_layout);
+                dealloc_block(arr.data as *mut u8, data_layout);
             }
             let layout = Layout::new::<Self>();
-            dealloc(ptr as *mut u8, layout);
+            dealloc_block(ptr as *mut u8, layout);
         }
     }
 }
@@ -727,10 +761,10 @@ impl TypedArray<*const crate::content::ContentNode> {
                 let data_layout =
                     Layout::array::<*const crate::content::ContentNode>(arr.cap as usize)
                         .expect("invalid array layout");
-                dealloc(arr.data as *mut u8, data_layout);
+                dealloc_block(arr.data as *mut u8, data_layout);
             }
             let layout = Layout::new::<Self>();
-            dealloc(ptr as *mut u8, layout);
+            dealloc_block(ptr as *mut u8, layout);
         }
     }
 }
@@ -845,7 +879,7 @@ pub unsafe fn release_v2_typed_array(ptr: *mut u8) {
                     ptr, other
                 );
                 let layout = Layout::new::<TypedArray<u8>>();
-                dealloc(ptr, layout);
+                dealloc_block(ptr, layout);
             }
         }
     }
@@ -905,11 +939,11 @@ pub unsafe fn free_v2_typed_array_memory_only(ptr: *mut u8) {
             } else {
                 Layout::array::<*const u8>(cap).expect("invalid array layout")
             };
-            dealloc(data, data_layout);
+            dealloc_block(data, data_layout);
         }
         // Struct header is a fixed 24 bytes for every `T` (asserted above).
         let layout = Layout::new::<TypedArray<u8>>();
-        dealloc(ptr, layout);
+        dealloc_block(ptr, layout);
     }
 }
 
@@ -986,12 +1020,12 @@ impl<T> TypedArray<T> {
     #[doc(alias = "with_capacity")]
     pub fn with_capacity_generic(cap: u32) -> *mut Self {
         let layout = Layout::new::<Self>();
-        let ptr = unsafe { alloc(layout) as *mut Self };
+        let ptr = alloc_block(layout) as *mut Self;
         assert!(!ptr.is_null(), "allocation failed for TypedArray");
 
         let data = if cap > 0 {
             let data_layout = Layout::array::<T>(cap as usize).expect("invalid array layout");
-            let data_ptr = unsafe { alloc(data_layout) as *mut T };
+            let data_ptr = alloc_block(data_layout) as *mut T;
             assert!(!data_ptr.is_null(), "allocation failed for TypedArray data");
             data_ptr
         } else {

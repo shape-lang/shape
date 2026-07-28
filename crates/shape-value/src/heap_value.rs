@@ -1152,10 +1152,10 @@ unsafe impl HashMapValueElem for TypedObjectPtr {
                 }
                 let data_layout = std::alloc::Layout::array::<TypedObjectPtr>(arr.cap as usize)
                     .expect("invalid array layout");
-                std::alloc::dealloc(arr.data as *mut u8, data_layout);
+                crate::v2::heap_alloc::dealloc_block(arr.data as *mut u8, data_layout);
             }
             let layout = std::alloc::Layout::new::<crate::v2::typed_array::TypedArray<Self>>();
-            std::alloc::dealloc(ptr as *mut u8, layout);
+            crate::v2::heap_alloc::dealloc_block(ptr as *mut u8, layout);
         }
     }
     #[inline]
@@ -1184,10 +1184,10 @@ unsafe impl HashMapValueElem for TraitObjectPtr {
                 }
                 let data_layout = std::alloc::Layout::array::<TraitObjectPtr>(arr.cap as usize)
                     .expect("invalid array layout");
-                std::alloc::dealloc(arr.data as *mut u8, data_layout);
+                crate::v2::heap_alloc::dealloc_block(arr.data as *mut u8, data_layout);
             }
             let layout = std::alloc::Layout::new::<crate::v2::typed_array::TypedArray<Self>>();
-            std::alloc::dealloc(ptr as *mut u8, layout);
+            crate::v2::heap_alloc::dealloc_block(ptr as *mut u8, layout);
         }
     }
     #[inline]
@@ -1217,10 +1217,10 @@ unsafe impl HashMapValueElem for CallablePtr {
                 }
                 let data_layout = std::alloc::Layout::array::<CallablePtr>(arr.cap as usize)
                     .expect("invalid array layout");
-                std::alloc::dealloc(arr.data as *mut u8, data_layout);
+                crate::v2::heap_alloc::dealloc_block(arr.data as *mut u8, data_layout);
             }
             let layout = std::alloc::Layout::new::<crate::v2::typed_array::TypedArray<Self>>();
-            std::alloc::dealloc(ptr as *mut u8, layout);
+            crate::v2::heap_alloc::dealloc_block(ptr as *mut u8, layout);
         }
     }
     #[inline]
@@ -1268,10 +1268,10 @@ unsafe impl HashMapValueElem for HashMapKindedRef {
                 }
                 let data_layout = std::alloc::Layout::array::<HashMapKindedRef>(arr.cap as usize)
                     .expect("invalid array layout");
-                std::alloc::dealloc(arr.data as *mut u8, data_layout);
+                crate::v2::heap_alloc::dealloc_block(arr.data as *mut u8, data_layout);
             }
             let layout = std::alloc::Layout::new::<crate::v2::typed_array::TypedArray<Self>>();
-            std::alloc::dealloc(ptr as *mut u8, layout);
+            crate::v2::heap_alloc::dealloc_block(ptr as *mut u8, layout);
         }
     }
     #[inline]
@@ -1779,11 +1779,23 @@ impl<V: HashMapValueElem> HashMapData<V> {
     /// `values` must point to a live `TypedArray<V>`; `value` must be a
     /// valid owned V (caller transfers one share).
     unsafe fn values_push(values: *mut crate::v2::typed_array::TypedArray<V>, value: V) {
-        use std::alloc::{Layout, alloc, realloc};
+        use crate::v2::heap_alloc::{alloc_block, realloc_block};
+        use std::alloc::Layout;
         unsafe {
             let arr = &mut *values;
             if arr.len == arr.cap {
-                // Grow (doubling, min 4).
+                // Grow (doubling, min 4). Routed through the #194 seam, which
+                // is what puts this path under the `alloc_budget` heap ceiling
+                // — before the seam this sibling of `TypedArray::grow` was
+                // unmetered, so a runaway `HashMap` insert loop escaped the
+                // bound the array path enforced.
+                //
+                // `values_push` has no refusal channel (it returns `()` and
+                // then unconditionally writes the value), so a breach must not
+                // refuse the growth here: refusing would leave `cap` unchanged
+                // and the write below would go out of bounds. The seam records
+                // the breach, the growth proceeds, and the VM surfaces the
+                // breach at its next safepoint.
                 let new_cap = if arr.cap == 0 {
                     4u32
                 } else {
@@ -1792,11 +1804,11 @@ impl<V: HashMapValueElem> HashMapData<V> {
                 let new_layout =
                     Layout::array::<V>(new_cap as usize).expect("invalid array layout");
                 let new_data = if arr.cap == 0 || arr.data.is_null() {
-                    alloc(new_layout) as *mut V
+                    alloc_block(new_layout) as *mut V
                 } else {
                     let old_layout =
                         Layout::array::<V>(arr.cap as usize).expect("invalid array layout");
-                    realloc(arr.data as *mut u8, old_layout, new_layout.size()) as *mut V
+                    realloc_block(arr.data as *mut u8, old_layout, new_layout.size()) as *mut V
                 };
                 assert!(
                     !new_data.is_null(),
@@ -3432,7 +3444,7 @@ impl TraitObjectStorage {
     #[allow(clippy::not_unsafe_ptr_arg_deref)]
     pub fn _new(value: *const TypedObjectStorage, vtable: Arc<crate::value::VTable>) -> *mut Self {
         let layout = std::alloc::Layout::new::<Self>();
-        let ptr = unsafe { std::alloc::alloc(layout) as *mut Self };
+        let ptr = crate::v2::heap_alloc::alloc_block(layout) as *mut Self;
         assert!(!ptr.is_null(), "allocation failed for TraitObjectStorage");
         unsafe {
             // SAFETY: `ptr` points to fresh, uninitialized memory of size
@@ -3484,7 +3496,7 @@ impl TraitObjectStorage {
             std::ptr::drop_in_place(&mut (*ptr).vtable);
             // Deallocate the struct's heap memory.
             let layout = std::alloc::Layout::new::<Self>();
-            std::alloc::dealloc(ptr as *mut u8, layout);
+            crate::v2::heap_alloc::dealloc_block(ptr as *mut u8, layout);
         }
     }
 
@@ -4357,7 +4369,7 @@ impl TypedObjectStorage {
             field_provenance.len(),
         );
         let layout = std::alloc::Layout::new::<Self>();
-        let ptr = unsafe { std::alloc::alloc(layout) as *mut Self };
+        let ptr = crate::v2::heap_alloc::alloc_block(layout) as *mut Self;
         assert!(!ptr.is_null(), "allocation failed for TypedObjectStorage");
         unsafe {
             // SAFETY: `ptr` points to fresh, uninitialized memory of size
@@ -4413,7 +4425,7 @@ impl TypedObjectStorage {
             std::ptr::drop_in_place(&mut (*ptr).field_provenance);
             // Deallocate the struct's heap memory.
             let layout = std::alloc::Layout::new::<Self>();
-            std::alloc::dealloc(ptr as *mut u8, layout);
+            crate::v2::heap_alloc::dealloc_block(ptr as *mut u8, layout);
         }
     }
 
@@ -4454,7 +4466,7 @@ impl TypedObjectStorage {
             #[cfg(miri)]
             std::ptr::drop_in_place(&mut (*ptr).field_provenance);
             let layout = std::alloc::Layout::new::<Self>();
-            std::alloc::dealloc(ptr as *mut u8, layout);
+            crate::v2::heap_alloc::dealloc_block(ptr as *mut u8, layout);
         }
     }
 
@@ -6894,6 +6906,74 @@ mod hashmap_mutation {
     // 2026-05-16). Pin the per-V `insert` / `len` / `get_share` API on
     // `HashMapData<HashMapKindedRef>`. Storage-layer counterpart of
     // `v2_group_by` in `shape-vm/executor/objects/hashmap_methods.rs`.
+
+    /// `values_push` growth is metered by the #194 allocation seam.
+    ///
+    /// This path is the reason the seam's tripwire is not just a grep. Before
+    /// the seam, `alloc_budget` was consulted in exactly one place —
+    /// `TypedArray::grow` — and this function is the *other* doubling growth
+    /// path, with the same unbounded-loop exposure and no ceiling check at
+    /// all. A ceiling that one of two growth paths honours does not bound a
+    /// runaway; it only decides which runaway wins.
+    ///
+    /// The growth still succeeds, and that is deliberate: `values_push` writes
+    /// the value immediately after growing, so refusing the growth here would
+    /// turn a memory-ceiling breach into an out-of-bounds write. What the seam
+    /// changes is that the breach is now *recorded*, which is what lets the VM
+    /// surface a clean error at its next safepoint.
+    #[test]
+    fn values_push_growth_is_metered_by_the_seam() {
+        use crate::v2::alloc_budget::{self, BudgetGuard};
+        use crate::v2::typed_array::TypedArray;
+
+        // Doubling schedule for `i64` values: cap 0 → 4 (32 B) → 8 (64 B) →
+        // 16 (128 B). A 100-byte ceiling is crossed by the last of those and
+        // by none of the earlier ones.
+        let _g = BudgetGuard::new(Some(100));
+        assert!(
+            alloc_budget::take_breach().is_none(),
+            "guard install clears any prior breach"
+        );
+
+        let values: *mut TypedArray<i64> = TypedArray::<i64>::new();
+        for i in 0..16i64 {
+            unsafe { HashMapData::<i64>::values_push(values, i) };
+        }
+
+        assert!(
+            alloc_budget::take_breach().is_some(),
+            "the values buffer crossed the ceiling and the seam must have seen \
+             it — before #194 this path allocated unmetered"
+        );
+
+        // Metering observes; it does not corrupt. Every value landed and the
+        // buffer is intact.
+        assert_eq!(unsafe { TypedArray::len(values) }, 16);
+        assert_eq!(unsafe { TypedArray::get(values, 0) }, Some(0));
+        assert_eq!(unsafe { TypedArray::get(values, 15) }, Some(15));
+        unsafe { TypedArray::drop_array(values) };
+    }
+
+    /// The same growth under a generous ceiling records nothing — the negative
+    /// control, without which the test above could pass because *something*
+    /// always breaches.
+    #[test]
+    fn values_push_growth_under_generous_ceiling_records_no_breach() {
+        use crate::v2::alloc_budget::{self, BudgetGuard};
+        use crate::v2::typed_array::TypedArray;
+
+        let _g = BudgetGuard::new(Some(1 << 20));
+        let values: *mut TypedArray<i64> = TypedArray::<i64>::new();
+        for i in 0..16i64 {
+            unsafe { HashMapData::<i64>::values_push(values, i) };
+        }
+        assert!(
+            alloc_budget::take_breach().is_none(),
+            "128 bytes is nowhere near a 1 MiB ceiling"
+        );
+        assert_eq!(unsafe { TypedArray::len(values) }, 16);
+        unsafe { TypedArray::drop_array(values) };
+    }
 
     #[test]
     fn hashmap_value_v_insert_appends_and_grows_index() {

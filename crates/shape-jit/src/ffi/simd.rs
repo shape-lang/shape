@@ -21,7 +21,8 @@
 //! The JIT compiler extracts Series data pointers and lengths, then calls these
 //! functions directly for maximum performance.
 
-use std::alloc::{Layout, alloc};
+use shape_value::v2::heap_alloc::{alloc_block, dealloc_block};
+use std::alloc::Layout;
 
 /// SIMD threshold - arrays smaller than this use scalar fallback
 const SIMD_THRESHOLD: usize = 16;
@@ -152,7 +153,7 @@ fn alloc_f64_buffer(len: usize) -> *mut f64 {
     // 32-byte alignment for AVX
     let layout =
         Layout::from_size_align(len * std::mem::size_of::<f64>(), 32).expect("Invalid layout");
-    unsafe { alloc(layout) as *mut f64 }
+    alloc_block(layout) as *mut f64
 }
 
 /// Generic binary operation with autovectorization hints
@@ -298,7 +299,7 @@ pub extern "C" fn jit_simd_free(ptr: *mut f64, len: u64) {
     let layout = Layout::from_size_align(len as usize * std::mem::size_of::<f64>(), 32)
         .expect("Invalid layout");
     unsafe {
-        std::alloc::dealloc(ptr as *mut u8, layout);
+        dealloc_block(ptr as *mut u8, layout);
     }
 }
 

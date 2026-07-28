@@ -22,7 +22,8 @@
 //! compile time, giving O(1) access with no schema lookup.
 
 #![allow(clippy::approx_constant)] // arbitrary test floats; not math constants
-use std::alloc::{Layout, alloc_zeroed, dealloc};
+use shape_value::v2::heap_alloc::{alloc_zeroed_block, dealloc_block};
+use std::alloc::Layout;
 
 /// Heap kind tag for v2 typed structs.
 /// Uses a JIT-private range (132+) to avoid collision with existing HK_ constants.
@@ -52,7 +53,7 @@ pub extern "C" fn jit_v2_struct_alloc(total_size: u32) -> *mut u8 {
         Err(_) => return std::ptr::null_mut(),
     };
 
-    let ptr = unsafe { alloc_zeroed(layout) };
+    let ptr = alloc_zeroed_block(layout);
     if ptr.is_null() {
         return ptr;
     }
@@ -201,7 +202,7 @@ pub extern "C" fn jit_v2_struct_release(ptr: *mut u8, total_size: u32) {
         if rc <= 1 {
             // Refcount reached zero — deallocate
             let layout = Layout::from_size_align_unchecked(total_size as usize, 8);
-            dealloc(ptr, layout);
+            dealloc_block(ptr, layout);
         } else {
             rc_ptr.write(rc - 1);
         }
