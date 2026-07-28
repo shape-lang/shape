@@ -56,6 +56,12 @@ pub fn set_ceiling(bytes: Option<u64>) -> Option<u64> {
 /// Record a memory-ceiling breach detected on an infallible growth path.
 /// Keeps the FIRST breach if one is already pending (that is the one closest
 /// to the cause). Idempotent and cheap.
+///
+/// `#[cold]` + `#[inline]`: reached only on a ceiling breach, which ends the
+/// execution, so keeping it off the allocation fast path's straight-line code
+/// is worth more than the call it saves.
+#[cold]
+#[inline]
 pub fn record_breach(e: AllocBudgetExceeded) {
     PENDING_BREACH.with(|c| {
         if c.get().is_none() {
@@ -81,6 +87,20 @@ pub fn ceiling() -> Option<u64> {
 /// `Ok(())` when there is no ceiling (unlimited) or the buffer fits; returns
 /// `Err` when it would exceed the ceiling. Pure — mutates no state — so it is
 /// stable across retries and needs no matching credit on free.
+///
+/// `#[inline]` because since #194 this runs on EVERY typed-carrier allocation
+/// rather than only on `TypedArray::grow`, and its callers live in other
+/// crates: without the attribute each allocation pays an un-inlinable
+/// cross-crate call to reach a single thread-local load.
+///
+/// Honesty about the evidence: the attribute is justified on first principles,
+/// NOT by measurement. #194 does carry a reproducible ~11% regression on the
+/// charter's `startup_hello` workload (nearly pure allocation, so a constant
+/// per-allocation cost shows at its highest proportion there), but adding this
+/// attribute did not measurably reduce it — the machine was too contended to
+/// resolve a few percent. Do not cite `#[inline]` here as a fix for that
+/// regression; its cause is still open.
+#[inline]
 pub fn check_size(new_size_bytes: u64) -> Result<(), AllocBudgetExceeded> {
     BUFFER_CEILING.with(|c| match c.get() {
         None => Ok(()),
