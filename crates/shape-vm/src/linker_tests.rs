@@ -604,3 +604,180 @@ fn ffi_reservation_leaves_existing_content_hash_unchanged() {
     ]));
     assert_ne!(blob.content_hash, with_ffi.content_hash);
 }
+
+// ── The environment-digest receiver refusal (ADR-019 §4 / #198) ────────────
+
+/// Build a foreign entry, hashed under an optional environment digest.
+fn foreign_entry_under(env_digest: Option<[u8; 32]>) -> crate::bytecode::ForeignFunctionEntry {
+    let mut entry = crate::bytecode::ForeignFunctionEntry {
+        name: "total".to_string(),
+        language: "python".to_string(),
+        body_text: "return sum(xs)".to_string(),
+        param_names: vec!["xs".to_string()],
+        param_types: vec!["Array<number>".to_string()],
+        return_type: Some("Result<number>".to_string()),
+        arg_count: 1,
+        is_async: false,
+        dynamic_errors: true,
+        return_type_schema_id: None,
+        param_shares: vec![],
+        env_digest,
+        content_hash: None,
+        native_abi: None,
+    };
+    entry.compute_content_hash();
+    entry
+}
+
+/// A blob that calls the foreign function named by `dependency`.
+fn blob_calling_foreign(dependency: [u8; 32]) -> FunctionBlob {
+    let mut blob = make_blob(
+        "main",
+        vec![
+            Instruction {
+                opcode: OpCode::CallForeign,
+                operand: Some(Operand::ForeignFunction(0)),
+            },
+            Instruction {
+                opcode: OpCode::Return,
+                operand: None,
+            },
+        ],
+        vec![],
+        vec![],
+        vec![],
+    );
+    blob.foreign_dependencies = vec![dependency];
+    blob.finalize();
+    blob
+}
+
+/// The receiver-side refusal the environment digest produces, exercised
+/// directly (ADR-019 §4 / #198, tripwire 3).
+///
+/// A sender compiled a foreign function under one environment; the receiver
+/// assembled the same source under another. The two content hashes differ, so
+/// the blob's `foreign_dependencies` entry names a function the receiver does
+/// not have, and linking refuses instead of running the body against the
+/// environment that happens to be here.
+///
+/// The mechanism is live and this test passes today, because the test sets
+/// `env_digest` itself — the one line #160 will make the compiler write. What
+/// is staged is the compiler wiring, covered by
+/// `a_remote_placement_refuses_a_mismatched_environment_end_to_end` below.
+#[test]
+fn a_differing_environment_digest_refuses_the_blob() {
+    let sender_entry = foreign_entry_under(Some([1u8; 32]));
+    let receiver_entry = foreign_entry_under(Some([2u8; 32]));
+    assert_ne!(
+        sender_entry.content_hash, receiver_entry.content_hash,
+        "two environments must give the same body two identities"
+    );
+
+    let blob = blob_calling_foreign(sender_entry.content_hash.expect("hashed"));
+    let entry_hash = blob.content_hash;
+    let mut program = make_program(vec![blob], entry_hash);
+    // The receiver's own assembly of the function — same source, its own
+    // environment.
+    program.foreign_functions = vec![receiver_entry];
+
+    let err =
+        link(&program).expect_err("a foreign dependency from another environment must refuse");
+    assert!(
+        matches!(err, LinkError::MissingForeignEntry { .. }),
+        "expected the version-refusal-class link error, got: {err:?}"
+    );
+}
+
+/// The control: the same blob links when the two sides share an environment.
+///
+/// Without it, the refusal above could be "linking foreign calls never works".
+#[test]
+fn a_matching_environment_digest_links() {
+    let entry = foreign_entry_under(Some([1u8; 32]));
+    let blob = blob_calling_foreign(entry.content_hash.expect("hashed"));
+    let entry_hash = blob.content_hash;
+    let mut program = make_program(vec![blob], entry_hash);
+    program.foreign_functions = vec![entry];
+
+    link(&program).expect("matching environments link");
+}
+
+/// STAGED, NOT WIRED (ADR-019 §4 / #198, tripwire 3 end to end).
+///
+/// The refusal above is proven at the mechanism. What cannot be proven yet is
+/// the path a user actually travels: compile a `fn python` in a project whose
+/// `[foreign.python]` names lockfile A, place it remotely on a node holding
+/// lockfile B, and be refused. That needs the compiler to stamp `env_digest`
+/// from the resolved environment, which is #160's format bump — see
+/// `ForeignFunctionEntry::env_digest`.
+///
+/// TO FLIP: delete the `#[ignore]`. The body already spells the assertion; it
+/// fails today only because `compile_ok` produces `env_digest: None` on both
+/// sides, so the two hashes agree and nothing refuses. #160 should also carry
+/// the two digests into `LinkError::MissingForeignEntry`'s message so the
+/// refusal names the environment mismatch rather than a bare missing hash.
+#[test]
+#[ignore = "#198 staged join: flips green when #160 wires env_digest in the compiler"]
+fn a_remote_placement_refuses_a_mismatched_environment_end_to_end() {
+    use shape_runtime::project::{
+        ForeignEnvironmentDigest, ForeignEnvironmentSection, ForeignLockfile, LockedPackage,
+    };
+
+    let section = ForeignEnvironmentSection {
+        runtime: "cpython".to_string(),
+        version: "3.11.7".to_string(),
+        lockfile: None,
+        root: None,
+        checker: None,
+    };
+    let lockfile_of = |version: &str| ForeignLockfile {
+        version: 1,
+        language: "python".to_string(),
+        packages: std::collections::BTreeMap::from([(
+            "numpy".to_string(),
+            LockedPackage {
+                version: version.to_string(),
+                integrity: None,
+                source: None,
+            },
+        )]),
+        modules: Default::default(),
+    };
+    let sender_env = ForeignEnvironmentDigest::derive("python", &section, lockfile_of("1.26.4"));
+    let receiver_env = ForeignEnvironmentDigest::derive("python", &section, lockfile_of("2.0.0"));
+
+    let source = r#"
+fn python total(xs: Array<number>) -> Result<number> {
+    return 0.0
+}
+
+fn main() -> int {
+    return 0
+}
+"#;
+    let compile = |src: &str| {
+        let parsed = shape_ast::parser::parse_program(src).expect("parse");
+        crate::compiler::BytecodeCompiler::new()
+            .compile(&parsed)
+            .expect("compiles")
+    };
+    let sender = compile(source);
+    let receiver = compile(source);
+
+    // The assertion #160 makes true: each side's compiler stamped ITS OWN
+    // environment, so the two content hashes disagree.
+    assert_eq!(
+        sender.foreign_functions[0].env_digest,
+        Some(sender_env.digest()),
+        "the compiler must stamp the resolved environment"
+    );
+    assert_eq!(
+        receiver.foreign_functions[0].env_digest,
+        Some(receiver_env.digest())
+    );
+    assert_ne!(
+        sender.foreign_functions[0].content_hash, receiver.foreign_functions[0].content_hash,
+        "differing environments must give the same source differing foreign identities"
+    );
+}
