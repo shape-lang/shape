@@ -1,0 +1,36 @@
+// #188 slice 2 (PERF-CLOSURE-NATIVE) reproducer, committed per R15.
+//
+// The soundness fixture for the guarded direct dispatch. The emitter records a
+// `function_id` speculation per callee SLOT, but a slot's runtime content is
+// not fixed by that: here one slot holds two DIFFERENT closures over the
+// program's life, and a third call site receives whichever one is passed.
+//
+// If the guard were dropped — if the recorded `function_id` were treated as a
+// proof rather than a speculation — the second loop would call the FIRST
+// closure's body with the SECOND closure's captures, which is silent wrong
+// output, not a crash. The arithmetic is chosen so the two closures cannot
+// produce the same total: `+ a` versus `* b`.
+//
+// The guard reloads the real `function_id` from the block header (offset 8,
+// written as a `u32` by `emit_heap_closure`) and takes the ordinary indirect
+// path on mismatch, so both bodies still run natively and the answer is right.
+// Expected witness: `__closure_0` and `__closure_1` each `native-dispatched`
+// 50 times, neither with interpreter dispatches.
+
+let a = 10
+let b = 100
+
+let mut f = |x: int| x + a
+let mut total = 0
+
+for i in 0..50 {
+    total = total + f(i)
+}
+
+f = |x: int| x * b
+
+for i in 0..50 {
+    total = total + f(i)
+}
+
+print(total)

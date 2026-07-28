@@ -40,6 +40,7 @@ pub use format::jit_format;
 #[allow(deprecated)]
 pub use closure::jit_make_closure;
 
+pub use closure::jit_closure_block_ptr;
 pub use closure::jit_finalize_heap_closure;
 
 // Track A.1D: OwnedMutable capture cell allocator (Box<ValueWord>). Called

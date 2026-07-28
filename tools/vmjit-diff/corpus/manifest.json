@@ -6,7 +6,7 @@
   "counts": {
     "book": 240,
     "acceptance": 224,
-    "synthetic": 6
+    "synthetic": 7
   },
   "skippedCount": 0,
   "entries": [
@@ -2351,6 +2351,11 @@
       "id": "SYN__jit-double-execution.shape",
       "tier": "synthetic",
       "source": "tools/vmjit-diff/synthetic/SYN__jit-double-execution.shape"
+    },
+    {
+      "id": "SYN__closure-dispatch-guard.shape",
+      "tier": "synthetic",
+      "source": "tools/vmjit-diff/synthetic/SYN__closure-dispatch-guard.shape (#188 slice 2 guarded-dispatch soundness repro)"
     },
     {
       "id": "SYN__first-class-closure-dispatch.shape",

@@ -177,6 +177,55 @@ pub unsafe extern "C" fn jit_finalize_heap_closure(
     }
 }
 
+/// Recover the raw `TypedClosureHeader*` from a heap-closure slot value, or
+/// `0` when this slot cannot serve a direct native call.
+///
+/// #188 slice 2. The heap-closure carrier a closure slot holds is
+/// `Arc::into_raw(Arc::new(HeapValue::ClosureRaw(block)))` — the layout of
+/// `Arc<T>` and of the `HeapValue` enum are Rust-internal, so the MIR emitter
+/// cannot compute the block address inline. This is the one hop that has to
+/// happen in Rust; everything after it (the callee-identity guard, the capture
+/// loads, the call itself) is native code in the caller's own body.
+///
+/// It is a typed accessor on ADR-005's single discriminator, not a dispatch
+/// decision: it matches one `HeapValue` arm and returns an address. It
+/// classifies nothing, fabricates no kind, and reads no tag bits from the
+/// payload.
+///
+/// Returns `0` — meaning "take the ordinary indirect path" — for:
+///   * null bits;
+///   * the documented zero-capture dual carrier, where a function-typed slot
+///     holds a NaN-boxed `box_function(fn_id)` instead of an Arc (the same
+///     `is_inline_function` bit-shape check `jit_call_value` performs before
+///     its own `Arc::from_raw`, and for the same reason: dereferencing that
+///     carrier as an Arc would read unrelated memory);
+///   * any other `HeapValue` arm.
+///
+/// SAFETY: `bits` is either 0, a NaN-boxed inline function ref, or
+/// `Arc::into_raw(Arc<HeapValue>) as u64` from `jit_finalize_heap_closure`.
+/// The returned pointer borrows from the Arc — it is valid only while the
+/// caller's slot still holds its share, which the emitted call sequence
+/// guarantees by keeping the callee slot live across the call. No share is
+/// taken or released here.
+#[unsafe(no_mangle)]
+pub extern "C" fn jit_closure_block_ptr(bits: u64) -> i64 {
+    use crate::ffi::value_ffi::is_inline_function;
+    use shape_value::heap_value::HeapValue;
+    use std::mem::ManuallyDrop;
+    use std::sync::Arc;
+
+    if bits == 0 || is_inline_function(bits) {
+        return 0;
+    }
+    unsafe {
+        let arc = ManuallyDrop::new(Arc::<HeapValue>::from_raw(bits as *const HeapValue));
+        match &**arc {
+            HeapValue::ClosureRaw(block) => block.as_ptr() as i64,
+            _ => 0,
+        }
+    }
+}
+
 // ============================================================================
 // Per-NativeKind::Ptr(HeapKind::Closure) kinded retain / release
 // ============================================================================

@@ -1753,6 +1753,196 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                     }
                 }
 
+                // ── #188 slice 2: ESCAPING-CLOSURE GUARDED DIRECT DISPATCH ──
+                //
+                // The stack-closure path above only reaches non-escaping
+                // closures. Every other closure — a module-scope `let f = |x|
+                // ...`, one passed as a parameter, one returned from a
+                // function — lives in an `Arc<HeapValue::ClosureRaw>` block,
+                // and calling it ran the ENTIRE closure body on the
+                // interpreter via `jit_call_value`'s trampoline. That is what
+                // this ticket is about.
+                //
+                // The side table records the `function_id` the emitter saw at
+                // the `MakeClosureHeap` that wrote the callee slot. That is a
+                // SPECULATION about the slot's runtime content, not a proof —
+                // reassignment, a branch join, or a closure arriving from
+                // elsewhere all break it. So the emitted shape is a guarded
+                // monomorphic inline cache:
+                //
+                //   block_ptr = jit_closure_block_ptr(callee_bits)
+                //   if block_ptr == 0                          -> slow path
+                //   if block_ptr->function_id != recorded_fid  -> slow path
+                //   else: load captures from the block at their layout
+                //         offsets and call user_func_refs[fid] natively
+                //
+                // Both arms converge on a merge block carrying the result, so
+                // the PENDING_CALL_ERROR check, `write_place` and continuation
+                // lowering are shared rather than duplicated.
+                //
+                // The guard is what makes a wrong speculation harmless: a
+                // mismatch costs one compare and takes the same trampoline the
+                // code took before. `function_id` sits at byte offset 8 of the
+                // block — written as a `u32` by `emit_heap_closure` right
+                // after the 8-byte `HeapHeader`, a `repr(C)` offset, not a
+                // Rust-layout guess.
+                let heap_closure_fast: Option<(
+                    super::HeapClosureCallInfo,
+                    cranelift::codegen::ir::entities::FuncRef,
+                )> = match func {
+                    Operand::Copy(Place::Local(slot))
+                    | Operand::Move(Place::Local(slot))
+                    | Operand::MoveExplicit(Place::Local(slot)) => self
+                        .heap_closure_call_info
+                        .get(slot)
+                        .cloned()
+                        .and_then(|info| {
+                            self.user_func_refs
+                                .get(&info.function_id)
+                                .copied()
+                                .map(|fr| (info, fr))
+                        }),
+                    _ => None,
+                };
+
+                if let Some((info, closure_func_ref)) = heap_closure_fast {
+                    // Compile the callee and args ONCE, before the branch, so
+                    // neither arm re-runs `compile_operand`'s side effects.
+                    // Both blocks are dominated by this one, so the values are
+                    // available in each.
+                    let callee_kind = self.operand_slot_kind_or_carrier(func);
+                    let callee_val = self.compile_operand(func)?;
+                    let callee_boxed = self.widen_to_i64(callee_val);
+
+                    let mut arg_pairs: Vec<(Value, shape_value::NativeKind)> =
+                        Vec::with_capacity(args.len());
+                    for arg in args.iter() {
+                        let arg_kind = self.operand_slot_kind_or_carrier(arg);
+                        let val = self.compile_operand(arg)?;
+                        arg_pairs.push((self.widen_to_i64(val), arg_kind));
+                    }
+
+                    let block_inst = self
+                        .builder
+                        .ins()
+                        .call(self.ffi.closure_block_ptr, &[callee_boxed]);
+                    let block_ptr = self.builder.inst_results(block_inst)[0];
+
+                    let guard_block = self.builder.create_block();
+                    let fast_block = self.builder.create_block();
+                    let slow_block = self.builder.create_block();
+                    let merge_block = self.builder.create_block();
+                    self.builder.append_block_param(merge_block, types::I64);
+
+                    // Guard 1: the accessor refused (null bits, the
+                    // zero-capture NaN-box dual carrier, or a non-ClosureRaw
+                    // payload).
+                    let zero64 = self.builder.ins().iconst(types::I64, 0);
+                    let have_block = self.builder.ins().icmp(IntCC::NotEqual, block_ptr, zero64);
+                    self.builder
+                        .ins()
+                        .brif(have_block, guard_block, &[], slow_block, &[]);
+
+                    // Guard 2: the block's real callee identity matches the
+                    // one this call site was compiled against.
+                    self.builder.switch_to_block(guard_block);
+                    self.builder.seal_block(guard_block);
+                    let actual_fid =
+                        self.builder
+                            .ins()
+                            .load(types::I32, MemFlags::trusted(), block_ptr, 8);
+                    let expected_fid = self
+                        .builder
+                        .ins()
+                        .iconst(types::I32, info.function_id as i64);
+                    let fid_matches =
+                        self.builder
+                            .ins()
+                            .icmp(IntCC::Equal, actual_fid, expected_fid);
+                    self.builder
+                        .ins()
+                        .brif(fid_matches, fast_block, &[], slow_block, &[]);
+
+                    // ── FAST: captures from the block, then a native call ──
+                    // The callee ABI is `fn(ctx, param_0..param_{arity-1})`
+                    // with params [0..captures_count) already being the
+                    // leading captures (see `compiler/function_abi.rs`) — the
+                    // same shape the stack-closure path calls.
+                    //
+                    // Capture loads are raw borrows: the shares stay owned by
+                    // the closure block, which outlives the call because the
+                    // caller's slot still holds the `Arc<HeapValue>`. Same
+                    // discipline as the stack-closure path and as the VM's
+                    // `read_capture_kinded`.
+                    self.builder.switch_to_block(fast_block);
+                    self.builder.seal_block(fast_block);
+                    let mut call_args =
+                        Vec::with_capacity(info.capture_offsets.len() + arg_pairs.len() + 1);
+                    call_args.push(self.ctx_ptr);
+                    for (off, ty) in info.capture_offsets.iter().zip(info.capture_types.iter()) {
+                        let raw =
+                            self.builder
+                                .ins()
+                                .load(*ty, MemFlags::trusted(), block_ptr, *off);
+                        call_args.push(self.widen_to_i64(raw));
+                    }
+                    for (boxed, _) in arg_pairs.iter() {
+                        call_args.push(*boxed);
+                    }
+                    let fast_inst = self.builder.ins().call(closure_func_ref, &call_args);
+                    let signal = self.builder.inst_results(fast_inst)[0];
+
+                    let zero32 = self.builder.ins().iconst(types::I32, 0);
+                    let is_error = self
+                        .builder
+                        .ins()
+                        .icmp(IntCC::SignedLessThan, signal, zero32);
+                    let deopt_block = self.builder.create_block();
+                    let fast_continue = self.builder.create_block();
+                    self.builder
+                        .ins()
+                        .brif(is_error, deopt_block, &[], fast_continue, &[]);
+                    self.builder.switch_to_block(deopt_block);
+                    self.builder.seal_block(deopt_block);
+                    self.builder.ins().return_(&[signal]);
+
+                    self.builder.switch_to_block(fast_continue);
+                    self.builder.seal_block(fast_continue);
+                    let stack_offset = crate::context::STACK_OFFSET as i32;
+                    let fast_result = self.builder.ins().load(
+                        types::I64,
+                        MemFlags::new(),
+                        self.ctx_ptr,
+                        stack_offset,
+                    );
+                    self.builder.ins().jump(merge_block, &[fast_result.into()]);
+
+                    // ── SLOW: the ordinary indirect path, unchanged ────────
+                    self.builder.switch_to_block(slow_block);
+                    self.builder.seal_block(slow_block);
+                    let slow_result =
+                        self.emit_call_value_sequence(callee_boxed, callee_kind, &arg_pairs);
+                    self.builder.ins().jump(merge_block, &[slow_result.into()]);
+
+                    self.builder.switch_to_block(merge_block);
+                    self.builder.seal_block(merge_block);
+                    let result = self.builder.block_params(merge_block)[0];
+
+                    // Shared wind-down. The trampoline error check runs on the
+                    // merged path because the fast arm's callee can itself have
+                    // made a trampoline call that set the flag.
+                    self.emit_pending_call_error_deopt();
+                    self.release_old_value_if_heap(destination)?;
+                    self.write_place(destination, result)?;
+                    self.reload_referenced_locals();
+
+                    let next_block = self.block_map.get(next).ok_or_else(|| {
+                        format!("MirToIR: unknown call continuation block {}", next)
+                    })?;
+                    self.builder.ins().jump(*next_block, &[]);
+                    return Ok(());
+                }
+
                 // Check if we have a direct FuncRef for the callee.
                 let func_ref = func_id.and_then(|fid| self.user_func_refs.get(&fid).copied());
 
@@ -1904,188 +2094,28 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                         .load(types::I64, MemFlags::new(), self.ctx_ptr, stack_offset)
                 } else {
                     // ── INDIRECT CALL (closures/first-class functions) ────
-                    //
-                    // ADR-006 §2.7.7 / Q9 + §2.7.11 / Q12: every push into
-                    // `JITContext.stack` writes the producing-site kind into
-                    // the parallel `stack_kinds` track in lockstep. The
-                    // callee's kind classifies the dispatch shape inside
-                    // `jit_call_value` (Closure → raw-Arc closure path,
-                    // FunctionRef / UInt64 → function-id path); per-arg
-                    // kinds flow into the trampoline VM's frame setup as
-                    // §2.7.11/Q12 carriers.
-                    let stack_base_offset = crate::context::STACK_OFFSET as i32;
-                    let sp_offset = crate::context::STACK_PTR_OFFSET as i32;
-
-                    let old_sp = self.builder.ins().load(
-                        types::I64,
-                        MemFlags::new(),
-                        self.ctx_ptr,
-                        sp_offset,
-                    );
-
-                    // Source the callee kind from the producing site.
-                    // Precise kinds — `Ptr(HeapKind::Closure)` for
-                    // closure-bearing slots seeded by `infer_slot_kinds::
-                    // ClosureCapture`, `UInt64` for `MirConstant::Function`
-                    // inline function refs — drive the §2.7.11/Q12 callee
-                    // classification at `jit_call_value` exactly. For
-                    // opaque-source slots whose inference left `None`,
-                    // the documented §2.7.5 carrier kind `UInt64` flows in
-                    // instead — `jit_call_value`'s UInt64 arm preserves
-                    // the existing JIT-internal NaN-box bit-shape dispatch
-                    // (cases 1 / 2 — inline function refs and legacy
-                    // HK_CLOSURE callees). NOT a Bool-default fallback
-                    // (§2.7.7 #9 forbidden); `UInt64` is the §2.7.5
-                    // carrier kind for I64-wide raw bits without further
-                    // classification.
+                    // Compile the callee and args, then hand the widened
+                    // values to the shared emitter. #188 slice 2 factored the
+                    // push sequence out so the heap-closure fast path's
+                    // guard-failure branch reaches the SAME code rather than a
+                    // second copy of it that could drift.
                     let callee_kind = self.operand_slot_kind_or_carrier(func);
-
-                    // R4.2E: indirect-call callee pushed to ctx.stack as raw
-                    // I64 bit-pattern. Widen narrow types inline — closures
-                    // are already I64 in practice but the code path is type-
-                    // agnostic.
                     let callee_val = self.compile_operand(func)?;
-                    let callee_ty = self.builder.func.dfg.value_type(callee_val);
-                    let callee_boxed = if callee_ty == types::I64 {
-                        callee_val
-                    } else if callee_ty == types::F64 {
-                        self.builder
-                            .ins()
-                            .bitcast(types::I64, MemFlags::new(), callee_val)
-                    } else if callee_ty == types::I32 {
-                        self.builder.ins().sextend(types::I64, callee_val)
-                    } else if callee_ty == types::I8 {
-                        self.builder.ins().uextend(types::I64, callee_val)
-                    } else if callee_ty == types::I16 {
-                        self.builder.ins().sextend(types::I64, callee_val)
-                    } else {
-                        callee_val
-                    };
-                    let callee_slot_idx = old_sp;
-                    let callee_byte_off = self.builder.ins().ishl_imm(callee_slot_idx, 3);
-                    let callee_abs_off = self
-                        .builder
-                        .ins()
-                        .iadd_imm(callee_byte_off, stack_base_offset as i64);
-                    let callee_addr = self.builder.ins().iadd(self.ctx_ptr, callee_abs_off);
-                    self.builder
-                        .ins()
-                        .store(MemFlags::new(), callee_boxed, callee_addr, 0);
-                    // Lockstep parallel-kind track write (§2.7.7 / Q9).
-                    self.emit_kind_track_write(callee_slot_idx, callee_kind);
+                    let callee_boxed = self.widen_to_i64(callee_val);
 
-                    // R4.2E: indirect-call args pushed to ctx.stack as raw
-                    // I64 bit-patterns. Widen narrow Cranelift types inline.
-                    for (i, arg) in args.iter().enumerate() {
-                        // Source the arg kind from the producing site for the
-                        // parallel-kind track. Falls back to `UInt64`
-                        // (the §2.7.5 carrier kind for I64-wide raw bits)
-                        // when the producing-site inference is opaque —
-                        // not a Bool-default fallback.
-                        let _ = i;
+                    let mut arg_pairs: Vec<(Value, shape_value::NativeKind)> =
+                        Vec::with_capacity(args.len());
+                    for arg in args.iter() {
                         let arg_kind = self.operand_slot_kind_or_carrier(arg);
-
                         let val = self.compile_operand(arg)?;
-                        let val_ty = self.builder.func.dfg.value_type(val);
-                        let boxed = if val_ty == types::I64 {
-                            val
-                        } else if val_ty == types::F64 {
-                            self.builder.ins().bitcast(types::I64, MemFlags::new(), val)
-                        } else if val_ty == types::I32 {
-                            self.builder.ins().sextend(types::I64, val)
-                        } else if val_ty == types::I8 {
-                            self.builder.ins().uextend(types::I64, val)
-                        } else if val_ty == types::I16 {
-                            self.builder.ins().sextend(types::I64, val)
-                        } else {
-                            val
-                        };
-                        let slot_idx = self.builder.ins().iadd_imm(old_sp, (i + 1) as i64);
-                        let byte_off = self.builder.ins().ishl_imm(slot_idx, 3);
-                        let abs_off = self
-                            .builder
-                            .ins()
-                            .iadd_imm(byte_off, stack_base_offset as i64);
-                        let store_addr = self.builder.ins().iadd(self.ctx_ptr, abs_off);
-                        self.builder
-                            .ins()
-                            .store(MemFlags::new(), boxed, store_addr, 0);
-                        // Lockstep parallel-kind track write (§2.7.7 / Q9).
-                        self.emit_kind_track_write(slot_idx, arg_kind);
+                        arg_pairs.push((self.widen_to_i64(val), arg_kind));
                     }
 
-                    // v2-boundary: arg_count stored as a raw i64 on ctx.stack.
-                    // jit_call_value decodes this via direct `as usize` — no NaN-box.
-                    //
-                    // ADR-006 §2.7.11/Q12 + §2.7.5: the arg_count sentinel
-                    // slot's kind is `NativeKind::UInt64` — the documented
-                    // "I64-wide raw bits carrier kind" / function-id-class
-                    // kind already used for FFI-boundary scalar sentinels
-                    // (cf. `dispatch_call_via_trampoline_vm` callee/arg
-                    // kind companion). NOT a Bool-default fallback.
-                    let total_items = 1 + args.len() + 1; // callee + args + arg_count
-                    let argc_slot_idx =
-                        self.builder.ins().iadd_imm(old_sp, (1 + args.len()) as i64);
-                    let argc_byte_off = self.builder.ins().ishl_imm(argc_slot_idx, 3);
-                    let argc_abs_off = self
-                        .builder
-                        .ins()
-                        .iadd_imm(argc_byte_off, stack_base_offset as i64);
-                    let argc_addr = self.builder.ins().iadd(self.ctx_ptr, argc_abs_off);
-                    let argc_val = self.builder.ins().iconst(types::I64, args.len() as i64);
-                    self.builder
-                        .ins()
-                        .store(MemFlags::new(), argc_val, argc_addr, 0);
-                    // Lockstep parallel-kind track write (§2.7.7 / Q9).
-                    self.emit_kind_track_write(argc_slot_idx, shape_value::NativeKind::UInt64);
-
-                    // Update stack_ptr
-                    let new_sp = self.builder.ins().iadd_imm(old_sp, total_items as i64);
-                    self.builder
-                        .ins()
-                        .store(MemFlags::new(), new_sp, self.ctx_ptr, sp_offset);
-
-                    // jit_call_value reads callee + args + arg_count from stack
-                    // AND the parallel-kind track for the §2.7.11/Q12
-                    // callee-classification dispatch.
-                    let inst = self
-                        .builder
-                        .ins()
-                        .call(self.ffi.call_value, &[self.ctx_ptr]);
-                    self.builder.inst_results(inst)[0]
+                    self.emit_call_value_sequence(callee_boxed, callee_kind, &arg_pairs)
                 };
 
                 // ── r5c-2-bz-b-jit-err-surface: VM-trampoline error deopt ──
-                // `jit_call_value` (via `dispatch_call_via_trampoline_vm`)
-                // can hit a VM `Err` and return a value-shaped placeholder.
-                // Deopt the JIT frame BEFORE `write_place` / refcount-retain
-                // when `pending_call_error` is set — same shape as the
-                // `MirConstant::Method` path above.
-                {
-                    let err_flag_offset = crate::context::PENDING_CALL_ERROR_OFFSET as i32;
-                    let err_flag = self.builder.ins().load(
-                        types::I8,
-                        MemFlags::new(),
-                        self.ctx_ptr,
-                        err_flag_offset,
-                    );
-                    let zero_i8 = self.builder.ins().iconst(types::I8, 0);
-                    let has_err = self.builder.ins().icmp(IntCC::NotEqual, err_flag, zero_i8);
-                    let err_deopt_block = self.builder.create_block();
-                    let err_continue_block = self.builder.create_block();
-                    self.builder
-                        .ins()
-                        .brif(has_err, err_deopt_block, &[], err_continue_block, &[]);
-                    self.builder.switch_to_block(err_deopt_block);
-                    self.builder.seal_block(err_deopt_block);
-                    let trampoline_err_signal = self.builder.ins().iconst(
-                        types::I32,
-                        (crate::context::SIGNAL_TRAMPOLINE_ERROR as u32) as i64,
-                    );
-                    self.builder.ins().return_(&[trampoline_err_signal]);
-                    self.builder.switch_to_block(err_continue_block);
-                    self.builder.seal_block(err_continue_block);
-                }
+                self.emit_pending_call_error_deopt();
 
                 // 4. Store result to destination
                 self.release_old_value_if_heap(destination)?;
@@ -2505,5 +2535,127 @@ impl<'a, 'b> MirToIR<'a, 'b> {
         self.reload_referenced_locals();
 
         Ok(())
+    }
+
+    /// Emit the `jit_call_value` indirect-dispatch sequence for an
+    /// already-compiled callee and argument list, returning the raw result
+    /// value.
+    ///
+    /// ADR-006 §2.7.7 / Q9 + §2.7.11 / Q12: every push into
+    /// `JITContext.stack` writes the producing-site kind into the parallel
+    /// `stack_kinds` track in lockstep. The callee's kind classifies the
+    /// dispatch shape inside `jit_call_value` (Closure -> raw-Arc closure
+    /// path, FunctionRef / UInt64 -> function-id path); per-arg kinds flow
+    /// into the trampoline VM's frame setup as §2.7.11/Q12 carriers, which is
+    /// what #188 slice 1 made load-bearing.
+    ///
+    /// Callers pass values already widened to I64 by `widen_to_i64`, and pass
+    /// each kind from `operand_slot_kind_or_carrier` at the PRODUCING site —
+    /// never re-derived from bits here.
+    fn emit_call_value_sequence(
+        &mut self,
+        callee_boxed: Value,
+        callee_kind: shape_value::NativeKind,
+        args: &[(Value, shape_value::NativeKind)],
+    ) -> Value {
+        let stack_base_offset = crate::context::STACK_OFFSET as i32;
+        let sp_offset = crate::context::STACK_PTR_OFFSET as i32;
+
+        let old_sp = self
+            .builder
+            .ins()
+            .load(types::I64, MemFlags::new(), self.ctx_ptr, sp_offset);
+
+        let callee_byte_off = self.builder.ins().ishl_imm(old_sp, 3);
+        let callee_abs_off = self
+            .builder
+            .ins()
+            .iadd_imm(callee_byte_off, stack_base_offset as i64);
+        let callee_addr = self.builder.ins().iadd(self.ctx_ptr, callee_abs_off);
+        self.builder
+            .ins()
+            .store(MemFlags::new(), callee_boxed, callee_addr, 0);
+        // Lockstep parallel-kind track write (§2.7.7 / Q9).
+        self.emit_kind_track_write(old_sp, callee_kind);
+
+        for (i, (boxed, arg_kind)) in args.iter().enumerate() {
+            let slot_idx = self.builder.ins().iadd_imm(old_sp, (i + 1) as i64);
+            let byte_off = self.builder.ins().ishl_imm(slot_idx, 3);
+            let abs_off = self
+                .builder
+                .ins()
+                .iadd_imm(byte_off, stack_base_offset as i64);
+            let store_addr = self.builder.ins().iadd(self.ctx_ptr, abs_off);
+            self.builder
+                .ins()
+                .store(MemFlags::new(), *boxed, store_addr, 0);
+            // Lockstep parallel-kind track write (§2.7.7 / Q9).
+            self.emit_kind_track_write(slot_idx, *arg_kind);
+        }
+
+        // v2-boundary: arg_count stored as a raw i64 on ctx.stack.
+        // jit_call_value decodes this via direct `as usize` — no NaN-box.
+        //
+        // ADR-006 §2.7.11/Q12 + §2.7.5: the arg_count sentinel slot's kind is
+        // `NativeKind::UInt64` — the documented "I64-wide raw bits carrier
+        // kind" / function-id-class kind already used for FFI-boundary scalar
+        // sentinels. NOT a Bool-default fallback.
+        let total_items = 1 + args.len() + 1; // callee + args + arg_count
+        let argc_slot_idx = self.builder.ins().iadd_imm(old_sp, (1 + args.len()) as i64);
+        let argc_byte_off = self.builder.ins().ishl_imm(argc_slot_idx, 3);
+        let argc_abs_off = self
+            .builder
+            .ins()
+            .iadd_imm(argc_byte_off, stack_base_offset as i64);
+        let argc_addr = self.builder.ins().iadd(self.ctx_ptr, argc_abs_off);
+        let argc_val = self.builder.ins().iconst(types::I64, args.len() as i64);
+        self.builder
+            .ins()
+            .store(MemFlags::new(), argc_val, argc_addr, 0);
+        self.emit_kind_track_write(argc_slot_idx, shape_value::NativeKind::UInt64);
+
+        let new_sp = self.builder.ins().iadd_imm(old_sp, total_items as i64);
+        self.builder
+            .ins()
+            .store(MemFlags::new(), new_sp, self.ctx_ptr, sp_offset);
+
+        let inst = self
+            .builder
+            .ins()
+            .call(self.ffi.call_value, &[self.ctx_ptr]);
+        self.builder.inst_results(inst)[0]
+    }
+
+    /// Emit the `r5c-2-bz-b-jit-err-surface` VM-trampoline error deopt.
+    ///
+    /// `jit_call_value` (via `dispatch_call_via_trampoline_vm`) can hit a VM
+    /// `Err` and return a value-shaped placeholder. Deopt the JIT frame BEFORE
+    /// `write_place` / refcount-retain when `pending_call_error` is set, so
+    /// the placeholder never reaches a heap-kinded retain site.
+    ///
+    /// #188 slice 2 factored this out so the heap-closure fast path's merge
+    /// block runs the identical check rather than a second copy.
+    fn emit_pending_call_error_deopt(&mut self) {
+        let err_flag_offset = crate::context::PENDING_CALL_ERROR_OFFSET as i32;
+        let err_flag =
+            self.builder
+                .ins()
+                .load(types::I8, MemFlags::new(), self.ctx_ptr, err_flag_offset);
+        let zero_i8 = self.builder.ins().iconst(types::I8, 0);
+        let has_err = self.builder.ins().icmp(IntCC::NotEqual, err_flag, zero_i8);
+        let err_deopt_block = self.builder.create_block();
+        let err_continue_block = self.builder.create_block();
+        self.builder
+            .ins()
+            .brif(has_err, err_deopt_block, &[], err_continue_block, &[]);
+        self.builder.switch_to_block(err_deopt_block);
+        self.builder.seal_block(err_deopt_block);
+        let trampoline_err_signal = self.builder.ins().iconst(
+            types::I32,
+            (crate::context::SIGNAL_TRAMPOLINE_ERROR as u32) as i64,
+        );
+        self.builder.ins().return_(&[trampoline_err_signal]);
+        self.builder.switch_to_block(err_continue_block);
+        self.builder.seal_block(err_continue_block);
     }
 }

@@ -173,6 +173,41 @@ pub(crate) struct StackClosureCallInfo {
     pub(crate) capture_types: Vec<cranelift::prelude::Type>,
 }
 
+/// #188 slice 2: side-table entry for an ESCAPING (heap-allocated) closure
+/// call.
+///
+/// The sibling of [`StackClosureCallInfo`] for the carrier the stack path
+/// cannot reach. A stack closure's captures live in a Cranelift `StackSlot`
+/// the emitter owns; an escaping closure's live inside an
+/// `Arc<HeapValue::ClosureRaw>` block, so the call site recovers the block
+/// address through `jit_closure_block_ptr` and loads each capture at its
+/// `ClosureLayout` offset.
+///
+/// **This is a speculation, not a proof.** The recorded `function_id` is what
+/// the emitter saw at the `MakeClosureHeap` that wrote this slot; it is not a
+/// guarantee about what the slot HOLDS when the call executes (a reassignment,
+/// a join from another branch, or a closure arriving from elsewhere all break
+/// it). The emitted sequence therefore reloads the actual `function_id` from
+/// the block header and branches to the ordinary indirect path on mismatch —
+/// see `terminators.rs`. Recording an entry here can only add a guarded fast
+/// path; it can never redirect a call.
+///
+/// Only recorded when the layout has NO cell-storage captures
+/// (`owned_mutable_capture_mask == 0 && shared_capture_mask == 0`): those are
+/// transfer-only cell pointers the callee reads through its closure-self
+/// opcodes rather than as leading params, so they do not fit the
+/// `fn(ctx, captures..., args...)` native ABI this path calls.
+#[derive(Debug, Clone)]
+pub(crate) struct HeapClosureCallInfo {
+    /// Target function_id as seen at the `MakeClosureHeap` that wrote the slot.
+    /// Re-checked against the block header at run time before it is used.
+    pub(crate) function_id: u16,
+    /// Per-capture byte offset inside the `TypedClosureHeader` block.
+    pub(crate) capture_offsets: Vec<i32>,
+    /// Per-capture native Cranelift type.
+    pub(crate) capture_types: Vec<cranelift::prelude::Type>,
+}
+
 /// MIR-to-Cranelift IR compiler.
 ///
 /// Each instance compiles a single MIR function. Reuses the JIT's existing
@@ -343,6 +378,16 @@ pub struct MirToIR<'a, 'b> {
     /// FFI dispatcher can't recognise — the fix is to not dispatch through
     /// the FFI at all when the JIT itself built the closure.
     pub(crate) stack_closure_call_info: HashMap<SlotId, StackClosureCallInfo>,
+
+    /// #188 slice 2: the escaping-closure sibling of
+    /// `stack_closure_call_info`. Populated at the `MakeClosureHeap` lowering
+    /// that writes the slot, and only when the layout has no cell-storage
+    /// captures. An entry here makes the `Call` terminator emit a GUARDED
+    /// direct call: the block header's real `function_id` is compared against
+    /// the recorded one at run time and the ordinary `jit_call_value` path
+    /// runs on mismatch. See [`HeapClosureCallInfo`] for why the recorded id
+    /// is a speculation rather than a proof.
+    pub(crate) heap_closure_call_info: HashMap<SlotId, HeapClosureCallInfo>,
 
     // ── Phase 4b Round 5c-2-α jit-ref-param-chain-stamp ────────────
     /// Param slots whose source-declaration carries a reference borrow kind
@@ -1104,6 +1149,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
             non_escaping_closure_slots,
             stack_closure_slots: HashMap::new(),
             stack_closure_call_info: HashMap::new(),
+            heap_closure_call_info: HashMap::new(),
             closure_function_layouts,
             owned_mutable_capture_slots: HashMap::new(),
             shared_capture_slots: HashMap::new(),
