@@ -1,0 +1,14 @@
+// #189 (PERF-HOF-CARRIER) iterator customer class 4/4, committed per R15.
+//
+// CLASS: an adapter followed by a NON-collecting terminal.
+//
+// `.collect()` materialises an array; `.count()` consumes the chain without
+// building one, so it exercises a different terminal shape over the same
+// adapter propagation. Both terminals must stay correct across the
+// unification, which is why this is a separate class from
+// `SYN__iterator-adapter-chain.shape` rather than another line in it.
+//
+// Measured at 039be067: Wave 1b SEAM B refusal, whole-function bail, VM == JIT.
+
+let xs = [1, 2, 3, 4, 5, 6]
+print(xs.iter().filter(|x| x > 3).count())

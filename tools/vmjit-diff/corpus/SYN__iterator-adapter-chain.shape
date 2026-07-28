@@ -1,0 +1,23 @@
+// #189 (PERF-HOF-CARRIER) iterator customer class 3/4, committed per R15.
+//
+// CLASS: a multi-adapter lazy chain terminating in `.collect()`, over
+// NON-INT elements.
+//
+// Two deliberate choices:
+//
+//   * TWO adapters (`map` then `filter`) exercise
+//     `iterator_adapter_return_kind`'s receiver-parametric propagation —
+//     adapter names are not receiver-invariant (`Array.map` returns an Array),
+//     so the kind has to be carried forward from the `iter()` receiver through
+//     each link. A single-adapter fixture would not prove the chain.
+//
+//   * `number` elements, not `int`. Slice 1 of #188 established the lesson the
+//     hard way: an `int` payload survives a broken carrier round-trip because
+//     raw i64 bits happen to be the right bits, so an int-only fixture is not
+//     evidence. The f64 payload here is what a carrier bug actually shows up in.
+//
+// Measured at 039be067: Wave 1b SEAM B refusal, whole-function bail, VM == JIT
+// (`[5.0, 7.0, 9.0]`).
+
+let xs = [1.5, 2.5, 3.5, 4.5]
+print(xs.iter().map(|x| x * 2.0).filter(|x| x > 4.0).collect())
