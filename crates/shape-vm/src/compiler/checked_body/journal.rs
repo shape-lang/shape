@@ -120,6 +120,10 @@ impl BytecodeCompiler {
         let prior_borrow_summary = self.function_borrow_summaries.get(name).cloned();
         let prior_return_ref = self.function_return_reference_summaries.get(name).cloned();
         self.push_executable_undo(Box::new(move |c| {
+            // ADR-017 §2: a rolled-back body's storage decisions must not
+            // stay published — tooling would render a class for a body the
+            // compiler discarded.
+            c.binding_storage_decisions.forget_owner(&key);
             restore_map(&mut c.mir_functions, &key, prior_functions);
             restore_map(&mut c.mir_borrow_analyses, &key, prior_borrows);
             restore_map(&mut c.mir_storage_plans, &key, prior_storage);

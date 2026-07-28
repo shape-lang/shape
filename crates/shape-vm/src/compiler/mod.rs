@@ -57,6 +57,7 @@ use shape_runtime::type_system::{
 };
 
 // Sub-modules
+pub(crate) mod binding_storage_view;
 pub(crate) mod comptime;
 pub(crate) mod comptime_builtins;
 // ADR-009 D1 (S4): the generated-symbol query surface — the ONE query API
@@ -77,6 +78,11 @@ pub use comptime_builtins::expansion_provenance::{
     HygienicSymbol, SourceAnchor, SymbolId,
 };
 pub use generation_reachability::program_may_generate;
+// ADR-017 §2 / R23: the per-binding storage-decision surface. Tooling reads
+// the compiler's own verdict through
+// `BytecodeCompiler::binding_storage_query()` instead of re-deriving
+// `BindingStorageClass` from the declaration's shape.
+pub use binding_storage_view::{BindingStorageDecision, BindingStorageTable};
 // ADR-009 C3 #14 (S8c): the hook-install hover/query surface — tooling
 // reads the compiler-owned install registry through this display-safe
 // projection (`BytecodeCompiler::hook_install_query`), never a text scan
@@ -1841,6 +1847,11 @@ pub struct BytecodeCompiler {
     /// Storage plans produced by the storage planning pass for each function.
     /// Maps function name to the plan mapping each MIR slot to a `BindingStorageClass`.
     pub(crate) mir_storage_plans: HashMap<String, crate::mir::StoragePlan>,
+
+    /// ADR-017 §2 / R23: the per-binding storage decision, in declaration
+    /// order, published to tooling via `binding_storage_query()`. Recorded at
+    /// declaration sites; never read back by compilation.
+    pub(crate) binding_storage_decisions: binding_storage_view::BindingStorageTable,
 
     /// Per-function borrow summaries for interprocedural alias checking.
     /// Describes which parameters conflict and must not alias at call sites.

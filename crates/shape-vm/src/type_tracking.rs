@@ -367,6 +367,29 @@ pub enum BindingStorageClass {
     LocalMutablePtr,
 }
 
+impl BindingStorageClass {
+    /// The class's user-facing name. This is the ONE spelling tooling shows
+    /// (ADR-017 §2): the LSP's storage-class inlay hint renders this string
+    /// rather than a vocabulary of its own, so a hint can never name a class
+    /// the compiler has no variant for.
+    pub const fn name(self) -> &'static str {
+        match self {
+            BindingStorageClass::Deferred => "Deferred",
+            BindingStorageClass::Direct => "Direct",
+            BindingStorageClass::UniqueHeap => "UniqueHeap",
+            BindingStorageClass::SharedCow => "SharedCow",
+            BindingStorageClass::Reference => "Reference",
+            BindingStorageClass::LocalMutablePtr => "LocalMutablePtr",
+        }
+    }
+}
+
+impl std::fmt::Display for BindingStorageClass {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.name())
+    }
+}
+
 /// Ownership/storage metadata for a binding slot.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BindingSemantics {
