@@ -330,7 +330,7 @@ Code touchpoints carry a `// ADR-006` marker.
 - `prove_native_kind() -> Result<NativeKind, ProofGap>` in `compiler/type_tracking.rs`. `ProofGap`'s constructor is private to the type-tracking module — emit code cannot fabricate "I proved it". The Rust type system enforces this.
 - `just check-no-dynamic` recipe greps for forbidden symbols on every CI run and pre-commit. Build fails on hit.
 - Sentinel test `crates/shape-vm/src/executor/tests/no_dynamic.rs` asserts forbidden symbols are absent.
-- `just verify-merge` / `bash scripts/verify-merge.sh` — Phase 2d merge gate (15 checks as of 2026-07-05, exit-code-based, NOT grep -c). Required pre-merge for every Phase 2d sub-cluster branch. Catches the 4 take-both regex misses + HeapKind ordinal collisions + 4-table HeapKind lockstep + receiver-recovery suspicious patterns (3ac2f11 soundness rule heuristic).
+- `just verify-merge` / `bash scripts/verify-merge.sh` — Phase 2d merge gate (17 checks as of 2026-07-28, exit-code-based, NOT grep -c). Required pre-merge for every Phase 2d sub-cluster branch. Catches the 4 take-both regex misses + HeapKind ordinal collisions + 4-table HeapKind lockstep + receiver-recovery suspicious patterns (3ac2f11 soundness rule heuristic) + the ADR-011–016 legacy-authority ratchets (CHECK 15/16) and the ADR-016 public feature manifest contract (CHECK 17).
 
 ### Phase 2d entry points (binding for Phase 2d sub-cluster work)
 

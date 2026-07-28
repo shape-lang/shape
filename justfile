@@ -220,6 +220,31 @@ check-legacy-identity:
 regen-legacy-identity:
 	node scripts/generate-adr011-012-legacy-identity-manifest.mjs
 
+# --- ADR-016 public feature manifest contract (#112) ---
+
+# The PublicFeatureManifest is Shape's inventory of user-observable features.
+# This gate owns the rules JSON Schema cannot express, all aimed at one failure:
+# making a coverage gate green by editing the denominator. Status is DERIVED from
+# status_basis rather than asserted beside it; status moves forward only, so a
+# public feature can never be relabelled `planned` to shed its runnable-evidence
+# obligation; every published feature_id stays in the inventory forever as a live
+# row or a tombstoned removed row, so identities are never reused and features
+# never silently disappear; and no source revision, counterpart SHA, attestation
+# or mutable verification state may appear — those belong to the external pair
+# evidence (ADR-016 §3, §7), and the gate rejects a SCHEMA that declares such a
+# field, not only a manifest that carries one.
+#
+# --self-test runs the forced negatives. Each asserts both that its mutation is
+# rejected and that the unmutated input is accepted, so a gate that rejects
+# everything cannot pass as a working gate.
+#
+# Once BOOK-PAIR-PROMOTE establishes the first accepted pair, this call gains
+# `--previous <accepted manifest>` and the migration record stops being
+# "initial". `--print-identity` emits the content identity the next revision
+# records as identity_migration.previous_manifest.sha256.
+check-public-features:
+	node scripts/check-adr011-012-public-feature-manifest.mjs --self-test
+
 # Phase 2d merge gate. Run before merging any sub-cluster branch into
 # bulldozer-strictly-typed. Exit-code-based (NOT grep -c) per handover §0.
 # See docs/cluster-audits/phase-2d-handover.md §0 + scripts/verify-merge.sh.
