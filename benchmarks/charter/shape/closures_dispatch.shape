@@ -1,0 +1,30 @@
+// Charter workload: closure-heavy dispatch. The same closure is called three
+// ways — through a local variable, through a function parameter, and through a
+// value returned from a function — which is exactly the surface
+// PERF-CLOSURE-NATIVE has to make native. No charter bar applies to this
+// category; it is reported as an informational measurement.
+// Checksum: accumulated result, rounded to an integer.
+fn apply(f: (number) -> number, x: number) -> number {
+    return f(x)
+}
+
+fn make_scaler(k: number) -> (number) -> number {
+    return |x| x * k + 1.0
+}
+
+fn run(iterations: int) -> number {
+    let direct = |x: number| x * 2.0 + 1.0
+    let returned = make_scaler(2.0)
+    let mut acc = 0.0
+    let mut i = 0
+    while i < iterations {
+        let v = (i % 64) as number
+        acc = acc + direct(v)
+        acc = acc + apply(direct, v)
+        acc = acc + returned(v)
+        i = i + 1
+    }
+    return acc
+}
+
+print(run(6000000) as int)

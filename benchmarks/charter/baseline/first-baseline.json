@@ -1,0 +1,542 @@
+{
+  "schema": "shape.perf-suite.report/v1",
+  "generated_utc": "2026-07-28T07:42:48.049306120+00:00",
+  "charter": {
+    "authority": "ADR-018 §1; R24; grill Q5 (user-ratified 2026-07-27). Workstream row: docs/program/workstreams/perf.md, PERF-SUITE. Issue: #186.",
+    "calibration_state": "pre-calibration",
+    "calibrations": [],
+    "notes": [
+      "The charter allows exactly one recorded calibration of the multipliers after the first measured baseline. Until that calibration is recorded, bar outcomes in this suite are measurements against the ratified targets, not a settled gate.",
+      "Ratios are reference-runtime time divided by Shape time on the primary statistic: a ratio of 1.5 means Shape is 1.5x faster than the reference.",
+      "The primary ratio is whole-process wall time on both sides, which includes each runtime's own startup. Because Shape's startup floor is the larger one in absolute terms and the smaller one as a fraction of a long workload, this primary ratio is the more favourable number for Shape; the startup-adjusted ratio is reported alongside it and is the harsher one.",
+      "Recorded [jit-fallback] lines are observations. Their absence is NOT evidence that a workload executed natively -- that claim requires R15's NativeExecutionWitness (NATIVE-WITNESS, #117), which is outside this ticket.",
+      "The 15% noise bound is declared from the first baseline run on the pinned machine, where the worst quiet-machine run-to-run deviation observed was 8.3%. It is a declared bound, not a derived one. When a noise check fails, the pinned reference runtime acts as the control: if it moved by the same order on the same workload, the verdict is machine contention and the bound must not be widened to make the check pass."
+    ]
+  },
+  "measurement": {
+    "warmup_runs": 1,
+    "iterations": 3,
+    "primary_statistic": "min",
+    "noise_bound_pct": 15.0,
+    "timeout_secs": 300
+  },
+  "revision": {
+    "git_commit": "6f856b0bf190428bcc9a5601bba0f8f269e7102b",
+    "git_dirty": false,
+    "shape_binary": "/home/dev/dev/shape-lang/shape-wave1-perf-suite/target/release/shape",
+    "shape_binary_sha256": "sha256:5985f8353e974b8485911ea340fc4f5ef5099921a06a99155f7574bbb0f0e7fa",
+    "manifest_sha256": "sha256:4a5b6074b622348eb0f1d3f437c6e57871bc9f250452faf211591dc21c16e469"
+  },
+  "environment": {
+    "arch": "x86_64",
+    "cpu_logical_cores": "32",
+    "cpu_model": "AMD RYZEN AI MAX+ 395 w/ Radeon 8060S",
+    "extensions_fingerprint": "sha256:dc1182d811aa767385f1badfda40409952e7cd712ebaaa76199647edc94f7fdf",
+    "node_binary": "/nix/store/785jidgnryzj566s25s3rb262d4g5znb-nodejs-24.14.1/bin/node",
+    "node_v8_version": "13.6.233.17-node.44",
+    "node_version": "v24.14.1",
+    "os_kernel": "Linux 6.12.93",
+    "rustc_version": "rustc 1.94.1 (e408947bf 2026-03-25) (built from a source tarball)"
+  },
+  "environment_identity": "sha256:415aa49313d7d645b6b715f0b44d4bc96f34f102edbae8a9058453918c7a381c",
+  "pinned_environment_identity": "sha256:415aa49313d7d645b6b715f0b44d4bc96f34f102edbae8a9058453918c7a381c",
+  "integrity": {
+    "status": "ok",
+    "covered_files": 78
+  },
+  "reference": {
+    "status": "available",
+    "runtime": "node",
+    "binary": "/nix/store/785jidgnryzj566s25s3rb262d4g5znb-nodejs-24.14.1/bin/node",
+    "version": "v24.14.1"
+  },
+  "comparison": {
+    "status": "rendered"
+  },
+  "load_average_1m": [
+    1.42,
+    1.39
+  ],
+  "startup_floor_ms": {
+    "node": 19.980833,
+    "shape": 198.597647
+  },
+  "workloads": [
+    {
+      "id": "numeric_mandelbrot",
+      "category": "numeric",
+      "shape": {
+        "timing": {
+          "samples_ms": [
+            3800.808126,
+            3828.4980370000003,
+            3903.6051700000003
+          ],
+          "min_ms": 3800.808126,
+          "median_ms": 3828.4980370000003,
+          "max_ms": 3903.6051700000003
+        },
+        "exit_ok": true,
+        "stdout_canonical": "9.873661000e6",
+        "jit_fallbacks": [
+          "[jit-fallback] function main failed JIT compile: Runtime error: JIT compilation failed: Route A surface-and-stop: SURFACE — direct call to `mandelbrot` resolved to a function index but has no JIT FuncRef (callee not in the compiled set). Wh"
+        ]
+      },
+      "reference": {
+        "timing": {
+          "samples_ms": [
+            46.828994,
+            40.728899999999996,
+            43.559418
+          ],
+          "min_ms": 40.728899999999996,
+          "median_ms": 43.559418,
+          "max_ms": 46.828994
+        },
+        "exit_ok": true,
+        "stdout_canonical": "9.873661000e6"
+      },
+      "outputs_agree": true,
+      "ratio_process": 0.010715852694953957,
+      "ratio_startup_adjusted": 0.00575981529145954,
+      "adjusted_ratio_confidence": "low: the reference kernel time left after subtracting its startup floor is under 50ms, so this adjusted ratio should not be read precisely",
+      "bar": {
+        "status": "below",
+        "ratio": 0.010715852694953957,
+        "bar": 1.5
+      }
+    },
+    {
+      "id": "numeric_matmul",
+      "category": "numeric",
+      "shape": {
+        "timing": {
+          "samples_ms": [
+            2786.798332,
+            2844.067107,
+            2895.6715969999996
+          ],
+          "min_ms": 2786.798332,
+          "median_ms": 2844.067107,
+          "max_ms": 2895.6715969999996
+        },
+        "exit_ok": true,
+        "stdout_canonical": "1.013648000e6",
+        "jit_fallbacks": [
+          "[jit-fallback] function main failed JIT compile: Runtime error: JIT compilation failed: Main code contains unsupported constructs: JitPreflightReport { vm_only_opcodes: [ConvertToInt], unsupported_builtins: [] }; running under interpreter"
+        ]
+      },
+      "reference": {
+        "timing": {
+          "samples_ms": [
+            40.066342999999996,
+            37.072277,
+            40.554852000000004
+          ],
+          "min_ms": 37.072277,
+          "median_ms": 40.066342999999996,
+          "max_ms": 40.554852000000004
+        },
+        "exit_ok": true,
+        "stdout_canonical": "1.013648000e6"
+      },
+      "outputs_agree": true,
+      "ratio_process": 0.013302820148235972,
+      "ratio_startup_adjusted": 0.006603600755943699,
+      "adjusted_ratio_confidence": "low: the reference kernel time left after subtracting its startup floor is under 50ms, so this adjusted ratio should not be read precisely",
+      "bar": {
+        "status": "below",
+        "ratio": 0.013302820148235972,
+        "bar": 1.5
+      }
+    },
+    {
+      "id": "numeric_spline",
+      "category": "numeric",
+      "shape": {
+        "timing": {
+          "samples_ms": [
+            2720.569072,
+            2743.204801,
+            2740.522279
+          ],
+          "min_ms": 2720.569072,
+          "median_ms": 2740.522279,
+          "max_ms": 2743.204801
+        },
+        "exit_ok": true,
+        "stdout_canonical": "9.457796000e6",
+        "jit_fallbacks": [
+          "[jit-fallback] function main failed JIT compile: Runtime error: JIT compilation failed: Main code contains unsupported constructs: JitPreflightReport { vm_only_opcodes: [ConvertToInt], unsupported_builtins: [] }; running under interpreter"
+        ]
+      },
+      "reference": {
+        "timing": {
+          "samples_ms": [
+            36.326112,
+            35.530344,
+            36.554792000000006
+          ],
+          "min_ms": 35.530344,
+          "median_ms": 36.326112,
+          "max_ms": 36.554792000000006
+        },
+        "exit_ok": true,
+        "stdout_canonical": "9.457796000e6"
+      },
+      "outputs_agree": true,
+      "ratio_process": 0.013059894110271648,
+      "ratio_startup_adjusted": 0.0061656174395393875,
+      "adjusted_ratio_confidence": "low: the reference kernel time left after subtracting its startup floor is under 50ms, so this adjusted ratio should not be read precisely",
+      "bar": {
+        "status": "below",
+        "ratio": 0.013059894110271648,
+        "bar": 1.5
+      }
+    },
+    {
+      "id": "collections_pipeline",
+      "category": "collections",
+      "shape": {
+        "timing": {
+          "samples_ms": [
+            1306.357304,
+            1267.991311,
+            1256.993098
+          ],
+          "min_ms": 1256.993098,
+          "median_ms": 1267.991311,
+          "max_ms": 1306.357304
+        },
+        "exit_ok": true,
+        "stdout_canonical": "8.540214000e7",
+        "jit_fallbacks": [
+          "[jit-fallback] function main failed JIT compile: Runtime error: JIT compilation failed: Main code contains unsupported constructs: JitPreflightReport { vm_only_opcodes: [ConvertToInt], unsupported_builtins: [] }; running under interpreter"
+        ]
+      },
+      "reference": {
+        "timing": {
+          "samples_ms": [
+            73.539293,
+            68.948251,
+            72.992704
+          ],
+          "min_ms": 68.948251,
+          "median_ms": 72.992704,
+          "max_ms": 73.539293
+        },
+        "exit_ok": true,
+        "stdout_canonical": "8.540214000e7"
+      },
+      "outputs_agree": true,
+      "ratio_process": 0.05485173395916292,
+      "ratio_startup_adjusted": 0.046265710943612134,
+      "adjusted_ratio_confidence": "low: the reference kernel time left after subtracting its startup floor is under 50ms, so this adjusted ratio should not be read precisely",
+      "bar": {
+        "status": "measured_not_gating",
+        "ratio": 0.05485173395916292,
+        "reason": "The charter states this bar as '>= 1.0x post closure-nativity'. PERF-CLOSURE-NATIVE has not landed, so the measurement is reported and no pass/fail is claimed."
+      }
+    },
+    {
+      "id": "collections_hashmap",
+      "category": "collections",
+      "shape": {
+        "timing": {
+          "samples_ms": [
+            621.9497240000001,
+            619.5039810000001,
+            633.992564
+          ],
+          "min_ms": 619.5039810000001,
+          "median_ms": 621.9497240000001,
+          "max_ms": 633.992564
+        },
+        "exit_ok": true,
+        "stdout_canonical": "1.919520000e9",
+        "jit_fallbacks": [
+          "[jit-fallback] function main failed JIT compile: Runtime error: JIT compilation failed: MirToIR: function 'query' failed preflight: EnumPayload (R8 W9 G.2 Step 2 Bucket 2): `Pattern::Constructor` payload binder (`Ok(_)` / `Err(_)` / `Some(_"
+        ]
+      },
+      "reference": {
+        "timing": {
+          "samples_ms": [
+            35.28935,
+            37.945750000000004,
+            34.433388
+          ],
+          "min_ms": 34.433388,
+          "median_ms": 35.28935,
+          "max_ms": 37.945750000000004
+        },
+        "exit_ok": true,
+        "stdout_canonical": "1.919520000e9"
+      },
+      "outputs_agree": true,
+      "ratio_process": 0.05558219003599914,
+      "ratio_startup_adjusted": 0.034336748660095,
+      "adjusted_ratio_confidence": "low: the reference kernel time left after subtracting its startup floor is under 50ms, so this adjusted ratio should not be read precisely",
+      "bar": {
+        "status": "measured_not_gating",
+        "ratio": 0.05558219003599914,
+        "reason": "The charter states this bar as '>= 1.0x post closure-nativity'. PERF-CLOSURE-NATIVE has not landed, so the measurement is reported and no pass/fail is claimed."
+      }
+    },
+    {
+      "id": "strings_transform",
+      "category": "strings_json",
+      "shape": {
+        "timing": {
+          "samples_ms": [
+            1171.688505,
+            1188.619075,
+            1178.3985349999998
+          ],
+          "min_ms": 1171.688505,
+          "median_ms": 1178.3985349999998,
+          "max_ms": 1188.619075
+        },
+        "exit_ok": true,
+        "stdout_canonical": "7.726080000e6",
+        "jit_fallbacks": [
+          "[jit-fallback] function main failed JIT compile: Runtime error: JIT compilation failed: MirToIR: string method `.split(...)` on a proven `NativeKind::String` receiver returns a string, but the `jit_call_method` VM trampoline produces a NaN-"
+        ]
+      },
+      "reference": {
+        "timing": {
+          "samples_ms": [
+            88.474699,
+            84.901783,
+            88.138104
+          ],
+          "min_ms": 84.901783,
+          "median_ms": 88.138104,
+          "max_ms": 88.474699
+        },
+        "exit_ok": true,
+        "stdout_canonical": "7.726080000e6"
+      },
+      "outputs_agree": true,
+      "ratio_process": 0.07246105311923325,
+      "ratio_startup_adjusted": 0.06671622641017555,
+      "bar": {
+        "status": "below",
+        "ratio": 0.07246105311923325,
+        "bar": 1.0
+      }
+    },
+    {
+      "id": "json_roundtrip",
+      "category": "strings_json",
+      "shape": {
+        "timing": {
+          "samples_ms": [
+            1020.189005,
+            1016.8814289999999,
+            1018.2235340000001
+          ],
+          "min_ms": 1016.8814289999999,
+          "median_ms": 1018.2235340000001,
+          "max_ms": 1020.189005
+        },
+        "exit_ok": true,
+        "stdout_canonical": "4.842225000e6",
+        "jit_fallbacks": [
+          "[jit-fallback] function main failed JIT compile: Runtime error: JIT compilation failed: W39 F1 module-binding function-body SURFACE (ADR-006 §2.7.14): function 'roundtrip' contains LoadModuleBinding at bytecode instruction 2043. Module bind"
+        ]
+      },
+      "reference": {
+        "timing": {
+          "samples_ms": [
+            72.741701,
+            75.972043,
+            74.590402
+          ],
+          "min_ms": 72.741701,
+          "median_ms": 74.590402,
+          "max_ms": 75.972043
+        },
+        "exit_ok": true,
+        "stdout_canonical": "4.842225000e6"
+      },
+      "outputs_agree": true,
+      "ratio_process": 0.07153410311714918,
+      "ratio_startup_adjusted": 0.06447746999341117,
+      "bar": {
+        "status": "below",
+        "ratio": 0.07153410311714918,
+        "bar": 1.0
+      }
+    },
+    {
+      "id": "alloc_object_graph",
+      "category": "allocation",
+      "shape": {
+        "timing": {
+          "samples_ms": [
+            2332.759638,
+            2337.102411,
+            2345.4654929999997
+          ],
+          "min_ms": 2332.759638,
+          "median_ms": 2337.102411,
+          "max_ms": 2345.4654929999997
+        },
+        "exit_ok": true,
+        "stdout_canonical": "3.616800000e7",
+        "jit_fallbacks": [
+          "[jit-fallback] function main failed JIT compile: Runtime error: JIT compilation failed: Main code contains unsupported constructs: JitPreflightReport { vm_only_opcodes: [ConvertToInt], unsupported_builtins: [] }; running under interpreter"
+        ]
+      },
+      "reference": {
+        "timing": {
+          "samples_ms": [
+            52.905730999999996,
+            52.653828,
+            54.686885
+          ],
+          "min_ms": 52.653828,
+          "median_ms": 52.905730999999996,
+          "max_ms": 54.686885
+        },
+        "exit_ok": true,
+        "stdout_canonical": "3.616800000e7"
+      },
+      "outputs_agree": true,
+      "ratio_process": 0.022571475921601143,
+      "ratio_startup_adjusted": 0.015309519679286614,
+      "adjusted_ratio_confidence": "low: the reference kernel time left after subtracting its startup floor is under 50ms, so this adjusted ratio should not be read precisely",
+      "bar": {
+        "status": "below",
+        "ratio": 0.022571475921601143,
+        "bar": 0.8
+      }
+    },
+    {
+      "id": "alloc_tree",
+      "category": "allocation",
+      "shape": {
+        "timing": {
+          "samples_ms": [
+            3468.798492,
+            3526.623051,
+            3506.0780139999997
+          ],
+          "min_ms": 3468.798492,
+          "median_ms": 3506.0780139999997,
+          "max_ms": 3526.623051
+        },
+        "exit_ok": true,
+        "stdout_canonical": "3.931904000e7",
+        "jit_fallbacks": [
+          "[jit-fallback] function main failed JIT compile: Runtime error: JIT compilation failed: Route A surface-and-stop: SURFACE — Rvalue::Aggregate reached the kind-blind fallback. The v2 typed-array fast path in statements.rs requires the destin"
+        ]
+      },
+      "reference": {
+        "timing": {
+          "samples_ms": [
+            83.19312500000001,
+            92.42365199999999,
+            87.032523
+          ],
+          "min_ms": 83.19312500000001,
+          "median_ms": 87.032523,
+          "max_ms": 92.42365199999999
+        },
+        "exit_ok": true,
+        "stdout_canonical": "3.931904000e7"
+      },
+      "outputs_agree": true,
+      "ratio_process": 0.023983268325290776,
+      "ratio_startup_adjusted": 0.019329788901696652,
+      "bar": {
+        "status": "below",
+        "ratio": 0.023983268325290776,
+        "bar": 0.8
+      }
+    },
+    {
+      "id": "closures_dispatch",
+      "category": "closures",
+      "shape": {
+        "timing": {
+          "samples_ms": [
+            3883.306024,
+            3787.776784,
+            3894.455967
+          ],
+          "min_ms": 3787.776784,
+          "median_ms": 3883.306024,
+          "max_ms": 3894.455967
+        },
+        "exit_ok": true,
+        "stdout_canonical": "1.152000000e9",
+        "jit_fallbacks": [
+          "[jit-fallback] function main failed JIT compile: Runtime error: JIT compilation failed: Main code contains unsupported constructs: JitPreflightReport { vm_only_opcodes: [ConvertToInt], unsupported_builtins: [] }; running under interpreter"
+        ]
+      },
+      "reference": {
+        "timing": {
+          "samples_ms": [
+            26.732982999999997,
+            28.780818,
+            26.2797
+          ],
+          "min_ms": 26.2797,
+          "median_ms": 26.732982999999997,
+          "max_ms": 28.780818
+        },
+        "exit_ok": true,
+        "stdout_canonical": "1.152000000e9"
+      },
+      "outputs_agree": true,
+      "ratio_process": 0.006938027634312676,
+      "ratio_startup_adjusted": 0.0017549603292481184,
+      "adjusted_ratio_confidence": "low: the reference kernel time left after subtracting its startup floor is under 50ms, so this adjusted ratio should not be read precisely",
+      "bar": {
+        "status": "measured_not_gating",
+        "ratio": 0.006938027634312676,
+        "reason": "The charter defines no bar for closure dispatch on its own; this workload is the informational input to PERF-CLOSURE-NATIVE and its witness."
+      }
+    },
+    {
+      "id": "startup_hello",
+      "category": "startup",
+      "shape": {
+        "timing": {
+          "samples_ms": [
+            198.597647,
+            203.898274,
+            200.009574
+          ],
+          "min_ms": 198.597647,
+          "median_ms": 200.009574,
+          "max_ms": 203.898274
+        },
+        "exit_ok": true,
+        "stdout_canonical": "hello"
+      },
+      "reference": {
+        "timing": {
+          "samples_ms": [
+            20.940719,
+            19.980833,
+            20.906936
+          ],
+          "min_ms": 19.980833,
+          "median_ms": 20.906936,
+          "max_ms": 20.940719
+        },
+        "exit_ok": true,
+        "stdout_canonical": "hello"
+      },
+      "outputs_agree": true,
+      "ratio_process": 0.1006096159840202,
+      "bar": {
+        "status": "below",
+        "ratio": 0.1006096159840202,
+        "bar": 5.0
+      }
+    }
+  ]
+}

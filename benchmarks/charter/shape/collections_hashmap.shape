@@ -1,0 +1,35 @@
+// Charter workload: collection pipeline — hash-map build and query traffic.
+// Checksum: sum of the values found by the query pass.
+fn build(n: int) -> HashMap<string, int> {
+    let mut m = HashMap()
+    let mut i = 0
+    while i < n {
+        m = m.set(f"key-{i}", i * 3)
+        i = i + 1
+    }
+    return m
+}
+
+fn query(m: HashMap<string, int>, n: int, rounds: int) -> int {
+    let mut found = 0
+    let mut r = 0
+    while r < rounds {
+        let mut i = 0
+        while i < n {
+            match m.get(f"key-{i}") {
+                Some(v) => {
+                    found = found + v
+                },
+                None => {
+                    found = found - 1
+                },
+            }
+            i = i + 1
+        }
+        r = r + 1
+    }
+    return found
+}
+
+let m = build(4000)
+print(query(m, 4000, 80))

@@ -1,0 +1,61 @@
+// Charter workload: allocation-heavy — recursive build-and-discard of a
+// complete binary tree held as an index-linked array (Shape's `type` has no
+// recursive self-reference, so the tree is materialised as nodes plus child
+// indices — the allocation traffic is what this workload measures).
+// Checksum: summed node depths.
+type TreeNode {
+    depth: int,
+    left: int,
+    right: int,
+}
+
+fn build_tree(depth: int) -> Array<TreeNode> {
+    let mut nodes: Array<TreeNode> = []
+    let total = (1 << depth) - 1
+    let mut i = 0
+    while i < total {
+        let l = 2 * i + 1
+        let r = 2 * i + 2
+        let mut left = -1
+        let mut right = -1
+        if l < total {
+            left = l
+        }
+        if r < total {
+            right = r
+        }
+        nodes.push(TreeNode { depth: depth, left: left, right: right })
+        i = i + 1
+    }
+    return nodes
+}
+
+fn sum_tree(nodes: Array<TreeNode>) -> int {
+    let mut acc = 0
+    let mut i = 0
+    while i < nodes.len() {
+        let n = nodes[i]
+        acc = acc + n.depth
+        if n.left >= 0 {
+            acc = acc + 1
+        }
+        if n.right >= 0 {
+            acc = acc + 1
+        }
+        i = i + 1
+    }
+    return acc
+}
+
+fn churn(rounds: int, depth: int) -> int {
+    let mut total = 0
+    let mut r = 0
+    while r < rounds {
+        let t = build_tree(depth)
+        total = total + sum_tree(t)
+        r = r + 1
+    }
+    return total
+}
+
+print(churn(160, 14))

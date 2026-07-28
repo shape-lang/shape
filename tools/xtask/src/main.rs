@@ -59,6 +59,63 @@ enum Commands {
         #[arg(long)]
         verbose: bool,
     },
+    /// Performance charter comparison suite (PERF-SUITE, ADR-018 §1).
+    PerfSuite {
+        #[command(subcommand)]
+        command: PerfSuiteCommand,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum PerfSuiteCommand {
+    /// Measure the committed suite against the pinned reference and write a
+    /// machine-readable report.
+    Run {
+        /// Where to write the JSON report.
+        #[arg(long, default_value = "target/perf-suite/report.json")]
+        out: PathBuf,
+        #[arg(long)]
+        iterations: Option<usize>,
+        #[arg(long)]
+        warmup: Option<usize>,
+        /// Reference runtime binary; defaults to `node` on PATH.
+        #[arg(long)]
+        node: Option<PathBuf>,
+        /// Measure whatever binary is already at target/release/shape.
+        #[arg(long)]
+        no_build: bool,
+    },
+    /// Tripwire 1: run the suite twice at one revision and assert the two runs
+    /// agree within the manifest's declared noise bound.
+    NoiseCheck {
+        #[arg(long, default_value = "target/perf-suite")]
+        out_dir: PathBuf,
+        #[arg(long)]
+        iterations: Option<usize>,
+        #[arg(long)]
+        node: Option<PathBuf>,
+        #[arg(long)]
+        no_build: bool,
+        /// Override the manifest's declared bound (recorded in the output
+        /// rather than edited into the manifest).
+        #[arg(long)]
+        bound_pct: Option<f64>,
+    },
+    /// Tripwire 3: verify (or deliberately re-record) benchmark-file hashes.
+    Integrity {
+        /// Rewrite the digest file from what is on disk. A reviewable act —
+        /// never a way to silence a failing check.
+        #[arg(long)]
+        record: bool,
+    },
+    /// Re-pin the manifest's environment identity to this machine.
+    RecordEnvironment {
+        #[arg(long)]
+        node: Option<PathBuf>,
+    },
+    /// Tripwire 2, across reports: compare two reports, refusing when their
+    /// environment identities differ.
+    Compare { first: PathBuf, second: PathBuf },
 }
 
 #[derive(Subcommand, Debug)]
@@ -124,6 +181,60 @@ fn run() -> Result<()> {
         } => loc_check(&root, warn_threshold, fail_threshold),
         Commands::GrammarParity { corpus_dir } => grammar_parity(&root, corpus_dir),
         Commands::Doctest { verbose } => run_doctest(&root, verbose),
+        Commands::PerfSuite { command } => perf_suite_command(&root, command),
+    }
+}
+
+fn perf_suite_command(root: &Path, command: PerfSuiteCommand) -> Result<()> {
+    use xtask::perf_suite::{self, RunOptions};
+
+    match command {
+        PerfSuiteCommand::Run {
+            out,
+            iterations,
+            warmup,
+            node,
+            no_build,
+        } => {
+            let report = perf_suite::run_suite(
+                root,
+                &RunOptions {
+                    iterations,
+                    warmup,
+                    node,
+                    build: !no_build,
+                    out: Some(root.join(&out)),
+                    quiet: false,
+                },
+            )?;
+            perf_suite::print_summary(&report);
+            println!("\n  report written to {}", root.join(&out).display());
+            if report.integrity.status != "ok" {
+                bail!("benchmark integrity is violated; the report records the violations");
+            }
+            Ok(())
+        }
+        PerfSuiteCommand::NoiseCheck {
+            out_dir,
+            iterations,
+            node,
+            no_build,
+            bound_pct,
+        } => perf_suite::noise_check(
+            root,
+            &root.join(&out_dir),
+            iterations,
+            node,
+            !no_build,
+            bound_pct,
+        ),
+        PerfSuiteCommand::Integrity { record } => perf_suite::integrity_command(root, record),
+        PerfSuiteCommand::RecordEnvironment { node } => {
+            perf_suite::record_environment_command(root, node.as_deref())
+        }
+        PerfSuiteCommand::Compare { first, second } => {
+            perf_suite::compare_command(&first, &second)
+        }
     }
 }
 

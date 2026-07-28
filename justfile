@@ -296,3 +296,26 @@ diff-vmjit-fast *ARGS:
 # and tools/vmjit-diff/synthetic/.
 diff-vmjit-corpus *ARGS:
 	node tools/vmjit-diff/build-corpus.mjs {{ARGS}}
+
+# --- Performance charter suite (PERF-SUITE, ADR-018 §1, issue #186) ---
+#
+# The committed comparison suite lives in benchmarks/charter/: Shape workloads,
+# matched reference-runtime workloads, a pinned environment manifest, and the
+# integrity digest. Existing files under benchmarks/ are immutable — the suite
+# extends that tree, it does not edit it.
+
+# Measure the suite against the pinned reference and write a JSON report.
+perf-suite *ARGS:
+	cargo run -q -p xtask -- perf-suite run {{ARGS}}
+
+# Tripwire 1: two consecutive runs at one revision must agree within the
+# manifest's declared noise bound. Requires an otherwise idle machine — the
+# reference runtime is the control, and if it moves too the verdict is
+# contention, not a Shape finding.
+perf-suite-noise *ARGS:
+	cargo run -q -p xtask -- perf-suite noise-check {{ARGS}}
+
+# Tripwire 3: benchmark-file hashes. Also asserted as a unit test, so
+# `just test-fast` fails on an edited benchmark.
+perf-suite-integrity:
+	cargo run -q -p xtask -- perf-suite integrity

@@ -1,0 +1,49 @@
+// Charter workload: allocation-heavy — object-graph churn. Each round builds a
+// fresh array of records that reference each other by index, walks the graph,
+// and drops it.
+// Checksum: accumulated walk total, rounded to an integer.
+type Record {
+    id: int,
+    next: int,
+    weight: number,
+}
+
+fn build_graph(n: int) -> Array<Record> {
+    let mut g: Array<Record> = []
+    let mut i = 0
+    while i < n {
+        g.push(Record {
+            id: i,
+            next: (i * 7 + 3) % n,
+            weight: ((i % 31) as number) * 0.5,
+        })
+        i = i + 1
+    }
+    return g
+}
+
+fn walk(g: Array<Record>, steps: int) -> number {
+    let mut acc = 0.0
+    let mut cursor = 0
+    let mut s = 0
+    while s < steps {
+        let node = g[cursor]
+        acc = acc + node.weight
+        cursor = node.next
+        s = s + 1
+    }
+    return acc
+}
+
+fn churn(rounds: int, n: int, steps: int) -> number {
+    let mut total = 0.0
+    let mut r = 0
+    while r < rounds {
+        let g = build_graph(n)
+        total = total + walk(g, steps)
+        r = r + 1
+    }
+    return total
+}
+
+print(churn(240, 5000, 20000) as int)

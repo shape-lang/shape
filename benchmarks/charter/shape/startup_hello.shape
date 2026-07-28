@@ -1,0 +1,4 @@
+// Charter workload: startup — the cold-start floor. Whatever the runtime does
+// before user code runs (stdlib preparation, extension loading, engine init)
+// is inside this measurement, because that is what a CLI user pays.
+print("hello")
