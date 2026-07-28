@@ -202,8 +202,7 @@ pub(super) fn assert_no_install_publication_survives(
 /// true-positive flip slice 0 was designed to trip.
 #[test]
 fn install_is_atomic_generated_extend_body_failure_leaves_nothing() {
-    let program =
-        shape_ast::parse_program(FAILING_ANALYSIS_BODY_PROGRAM).expect("fixture parses");
+    let program = shape_ast::parse_program(FAILING_ANALYSIS_BODY_PROGRAM).expect("fixture parses");
     let mut compiler = BytecodeCompiler::new();
 
     // The install must be REJECTED (undefined-function body error). If this ever
@@ -279,7 +278,9 @@ fn successful_generated_install_publishes_and_runs() {
         "successful install compiles a real (runnable) body, not a zero-length ghost"
     );
     assert!(
-        compiler.generated_symbols.contains_name(SUCCESS_METHOD_NAME),
+        compiler
+            .generated_symbols
+            .contains_name(SUCCESS_METHOD_NAME),
         "successful install keeps its generated-symbol reservation"
     );
     assert!(
@@ -306,7 +307,9 @@ fn failed_install_after_a_successful_one_preserves_the_earlier_reservation() {
         .compile_in_place(&succeeding)
         .expect("the first generated install compiles");
     assert!(
-        compiler.generated_symbols.contains_name(SUCCESS_METHOD_NAME),
+        compiler
+            .generated_symbols
+            .contains_name(SUCCESS_METHOD_NAME),
         "the first install reserves its generated symbol"
     );
 
@@ -318,11 +321,15 @@ fn failed_install_after_a_successful_one_preserves_the_earlier_reservation() {
     );
 
     assert!(
-        compiler.generated_symbols.contains_name(SUCCESS_METHOD_NAME),
+        compiler
+            .generated_symbols
+            .contains_name(SUCCESS_METHOD_NAME),
         "H2: the earlier successful install's reservation must survive a later failed install"
     );
     assert!(
-        !compiler.generated_symbols.contains_name(ANALYSIS_METHOD_NAME),
+        !compiler
+            .generated_symbols
+            .contains_name(ANALYSIS_METHOD_NAME),
         "the failed install's own reservation is rolled back"
     );
 }
@@ -348,8 +355,7 @@ fn failed_install_restores_a_displaced_preexisting_function_def() {
         .expect("register the simulated below-watermark prelude method");
     let functions_before = compiler.program.functions.len();
 
-    let program =
-        shape_ast::parse_program(FAILING_ANALYSIS_BODY_PROGRAM).expect("fixture parses");
+    let program = shape_ast::parse_program(FAILING_ANALYSIS_BODY_PROGRAM).expect("fixture parses");
     assert!(
         compiler.compile_in_place(&program).is_err(),
         "the generated install rejects"

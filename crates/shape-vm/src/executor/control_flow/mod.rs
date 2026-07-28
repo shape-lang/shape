@@ -1014,7 +1014,8 @@ impl VirtualMachine {
                     )
                     .map_err(VMError::RuntimeError)?;
                     if let Some(stub) = stub {
-                        self.foreign_stub_documents.insert(language.to_string(), stub);
+                        self.foreign_stub_documents
+                            .insert(language.to_string(), stub);
                     }
 
                     // `runtime.compile` carries the extension's compile-error

@@ -197,8 +197,7 @@ impl VirtualMachine {
                 let n = unsafe { TypedArray::<*const StringObj>::len(keys_ptr) };
                 for i in 0..n {
                     // SAFETY: `i < n`; `keys` buffer holds live StringObjs.
-                    let kp =
-                        unsafe { TypedArray::<*const StringObj>::get_unchecked(keys_ptr, i) };
+                    let kp = unsafe { TypedArray::<*const StringObj>::get_unchecked(keys_ptr, i) };
                     let s = unsafe { StringObj::as_str(kp) };
                     // Fresh StringObj (refcount = 1) owned by the result array.
                     let fresh = StringObj::new(s) as *const StringObj;

@@ -4230,7 +4230,10 @@ impl TypeInferenceEngine {
             // witness list intact.
             TypeAnnotation::Existential { witnesses, inner } => TypeAnnotation::Existential {
                 witnesses: witnesses.clone(),
-                inner: Box::new(Self::apply_substitutions_to_annotation(inner, substitutions)),
+                inner: Box::new(Self::apply_substitutions_to_annotation(
+                    inner,
+                    substitutions,
+                )),
             },
             TypeAnnotation::Basic(_)
             | TypeAnnotation::Reference(_)

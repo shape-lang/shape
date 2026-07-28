@@ -68,7 +68,11 @@ fn assert_c2_fixture_reaches_native_jit(fixture: &str, expected_stdout: &str) {
 /// `[jit-fallback]` line, VM==JIT stdout by fall-through) for a PRE-EXISTING
 /// named reason substring. Not a faked zero-fallback: the fall-through is the
 /// honest state, and this pins WHY.
-fn assert_c2_fixture_named_fallback(fixture: &str, expected_stdout: &str, reason_substrings: &[&str]) {
+fn assert_c2_fixture_named_fallback(
+    fixture: &str,
+    expected_stdout: &str,
+    reason_substrings: &[&str],
+) {
     assert_fixture_has_no_top_level_comptime(fixture);
 
     let vm = run_workspace_fixture("vm", "smokes-jit-closure", fixture);

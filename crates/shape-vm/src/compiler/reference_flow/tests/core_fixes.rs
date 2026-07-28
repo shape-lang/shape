@@ -3,10 +3,8 @@ use shape_ast::error::ShapeError;
 use shape_value::v2::ConcreteType;
 
 use super::{compiler_with_named_slots, semantic_message, semantics};
-use crate::compiler::reference_flow::{
-    BindingKey, ReferenceClass, ReferenceFlowPredecessor,
-};
 use crate::compiler::BytecodeCompiler;
+use crate::compiler::reference_flow::{BindingKey, ReferenceClass, ReferenceFlowPredecessor};
 use crate::type_tracking::{BindingOwnershipClass, BindingSemantics, BindingStorageClass};
 
 #[test]
@@ -14,10 +12,9 @@ fn restore_resets_current_only_reference_storage_in_both_namespaces() {
     let mut compiler = compiler_with_named_slots();
     let saved = compiler.reference_flow_snapshot();
 
-    compiler.type_tracker.set_local_binding_semantics(
-        11,
-        semantics(BindingStorageClass::Direct),
-    );
+    compiler
+        .type_tracker
+        .set_local_binding_semantics(11, semantics(BindingStorageClass::Direct));
     compiler.type_tracker.set_binding_semantics(
         12,
         BindingSemantics::deferred(BindingOwnershipClass::Flexible),
@@ -40,12 +37,16 @@ fn restore_resets_current_only_reference_storage_in_both_namespaces() {
     assert!(!compiler.reference_value_locals.contains(&11));
     assert!(!compiler.exclusive_reference_value_locals.contains(&11));
     assert!(!compiler.reference_value_module_bindings.contains(&12));
-    assert!(!compiler
-        .reference_value_local_referent_concrete_type
-        .contains_key(&11));
-    assert!(!compiler
-        .reference_value_module_binding_referent_concrete_type
-        .contains_key(&12));
+    assert!(
+        !compiler
+            .reference_value_local_referent_concrete_type
+            .contains_key(&11)
+    );
+    assert!(
+        !compiler
+            .reference_value_module_binding_referent_concrete_type
+            .contains_key(&12)
+    );
     assert_eq!(
         compiler
             .type_tracker
@@ -112,14 +113,12 @@ fn same_number_local_and_module_keys_remain_independent() {
     compiler
         .module_bindings
         .insert("module_zero".to_string(), 0);
-    compiler.type_tracker.set_local_binding_semantics(
-        0,
-        semantics(BindingStorageClass::Direct),
-    );
-    compiler.type_tracker.set_binding_semantics(
-        0,
-        semantics(BindingStorageClass::Direct),
-    );
+    compiler
+        .type_tracker
+        .set_local_binding_semantics(0, semantics(BindingStorageClass::Direct));
+    compiler
+        .type_tracker
+        .set_binding_semantics(0, semantics(BindingStorageClass::Direct));
     compiler.set_reference_flow_class(
         BindingKey::Local(0),
         ReferenceClass::SharedReference {
@@ -153,9 +152,11 @@ fn same_number_local_and_module_keys_remain_independent() {
     assert!(compiler.reference_value_locals.contains(&0));
     assert!(compiler.reference_value_module_bindings.contains(&0));
     assert!(!compiler.exclusive_reference_value_locals.contains(&0));
-    assert!(compiler
-        .exclusive_reference_value_module_bindings
-        .contains(&0));
+    assert!(
+        compiler
+            .exclusive_reference_value_module_bindings
+            .contains(&0)
+    );
 }
 
 #[test]
@@ -200,10 +201,9 @@ fn c0912_uses_structural_key_name_and_best_binding_location() {
 fn c0912_uses_fallback_span_without_fabricating_a_binding_name() {
     let mut compiler = BytecodeCompiler::new();
     compiler.set_source("first\nmerge site\n");
-    compiler.type_tracker.set_local_binding_semantics(
-        19,
-        semantics(BindingStorageClass::Direct),
-    );
+    compiler
+        .type_tracker
+        .set_local_binding_semantics(19, semantics(BindingStorageClass::Direct));
     compiler.set_reference_flow_class(
         BindingKey::Local(19),
         ReferenceClass::SharedReference { referent: None },

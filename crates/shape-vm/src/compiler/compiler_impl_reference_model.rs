@@ -2173,9 +2173,10 @@ impl BytecodeCompiler {
             // program).
             if swapped {
                 let shadow_span = edit.shadow().name_span;
-                analysis_program
-                    .items
-                    .insert(0, shape_ast::ast::Item::Function(edit.shadow().clone(), shadow_span));
+                analysis_program.items.insert(
+                    0,
+                    shape_ast::ast::Item::Function(edit.shadow().clone(), shadow_span),
+                );
             }
         }
 
@@ -3143,11 +3144,7 @@ impl BytecodeCompiler {
         // Permission preflight precedes every borrowed annotation/import state
         // mutation. The graph lifecycle consumes this pending state on success
         // or discards it on every later module-compilation error.
-        self.authorize_and_stage_graph_import_permissions(
-            module_id,
-            graph,
-            &resolved_imports,
-        )?;
+        self.authorize_and_stage_graph_import_permissions(module_id, graph, &resolved_imports)?;
 
         // All modules compile uniformly through the normal module path.
         // Set allow_internal_builtins for stdlib modules.

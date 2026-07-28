@@ -632,8 +632,7 @@ impl VirtualMachine {
                     future_id,
                     resume_ip,
                 }) if future_id == super::SNAPSHOT_FUTURE_ID => {
-                    let marker =
-                        self.consume_snapshot_suspension(resume_ip, ctx.as_deref_mut())?;
+                    let marker = self.consume_snapshot_suspension(resume_ip, ctx.as_deref_mut())?;
                     self.push_kinded_slot(marker)?;
                     continue;
                 }

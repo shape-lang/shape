@@ -130,6 +130,12 @@ pub(crate) fn run_isolated_async_fn(
     // `time::sleep` call inside the task body loads an uninitialised module
     // binding (`Null`) and fails the value-call dispatch.
     vm.populate_module_objects();
+    // #202: bind module-scope slots that name a top-level function, so a call
+    // reaching one through `LoadModuleBinding` + `CallValue` — which is how a
+    // foreign stub is reached — finds a callable instead of an uninitialised
+    // slot. Bindings initialised by top-level expressions stay uninitialised;
+    // that boundary is unchanged.
+    vm.seed_module_function_bindings();
     let result = vm
         .execute_function_by_id_at_host_boundary(func_id, Vec::new(), None)
         .map_err(|e| e.to_string())?;
@@ -159,4 +165,89 @@ fn kinded_scalar_to_typed_return(bits: u64, kind: NativeKind) -> Result<TypedRet
         }
     };
     Ok(TypedReturn::Concrete(concrete))
+}
+
+#[cfg(test)]
+mod isolated_task_registry_tests {
+    //! #202 work item 6 — the isolated task VM inherits the parent's
+    //! language-runtime registry.
+    //!
+    //! MEASURED before the fix: a foreign call inside a spawned user `async fn`
+    //! failed link-now with `no extension provides language 'python'`, because
+    //! `run_isolated_async_fn` built its VM with `VirtualMachine::new` and never
+    //! set the registry. The same call from the parent VM worked, which is what
+    //! made it confusing rather than merely broken.
+    //!
+    //! The test drives the foreign STUB function directly as the spawned task,
+    //! because the stub's own body is where `CallForeign` lives — that puts
+    //! link-now on the isolated VM's execution path without depending on how a
+    //! caller reaches the stub.
+
+    use super::*;
+    use crate::compiler::BytecodeCompiler;
+    use shape_runtime::plugins::language_runtime::PluginLanguageRuntime;
+
+    const ZERO_ARG_FOREIGN: &str = r#"
+fn python seven() -> Result<int> {
+    return 7
+}
+"#;
+
+    fn compiled() -> (crate::bytecode::BytecodeProgram, u16) {
+        let program = shape_ast::parser::parse_program(ZERO_ARG_FOREIGN).expect("parse");
+        let bytecode = BytecodeCompiler::new().compile(&program).expect("compile");
+        let func_id = bytecode
+            .functions
+            .iter()
+            .position(|f| f.name == "seven")
+            .expect("the foreign stub is registered as a function") as u16;
+        (bytecode, func_id)
+    }
+
+    fn run_with(
+        runtimes: std::collections::HashMap<String, std::sync::Arc<PluginLanguageRuntime>>,
+    ) -> String {
+        let (bytecode, func_id) = compiled();
+        match run_isolated_async_fn(
+            bytecode,
+            crate::executor::VMConfig::default(),
+            None,
+            None,
+            runtimes,
+            func_id,
+        ) {
+            Ok(_) => String::new(),
+            Err(e) => e,
+        }
+    }
+
+    /// The regression: with an EMPTY registry the isolated VM cannot resolve the
+    /// language, and says so. This is the shape of the bug — it is asserted so
+    /// the next test's passing is meaningful rather than vacuous.
+    #[test]
+    fn an_empty_registry_is_what_the_bug_looked_like() {
+        let error = run_with(std::collections::HashMap::new());
+        assert!(
+            error.contains("no extension provides language"),
+            "without a registry the isolated VM must fail at link-now, got: {error}"
+        );
+    }
+
+    /// The fix: the parent's registry crosses in, so link-now resolves the
+    /// language and the call proceeds past it.
+    #[test]
+    fn the_parent_registry_crosses_into_the_isolated_task_vm() {
+        let vtable = &crate::executor::foreign_async::tests::sleepy_extension::SHARED;
+        let runtime = PluginLanguageRuntime::new(vtable, &serde_json::Value::Null)
+            .expect("fake runtime initializes");
+        let mut runtimes = std::collections::HashMap::new();
+        runtimes.insert("python".to_string(), std::sync::Arc::new(runtime));
+
+        let error = run_with(runtimes);
+        assert!(
+            !error.contains("no extension provides language"),
+            "the isolated VM must resolve the language through the inherited \
+             registry, got: {error}"
+        );
+    }
 }

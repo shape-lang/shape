@@ -761,8 +761,8 @@ pub(crate) fn infer_slot_kinds_with_concrete_function_returns_and_field_kinds(
                     if idx < n && kinds[idx].is_none() {
                         let ret_kind = match func {
                             Operand::Constant(MirConstant::Method(name)) => {
-                                method_return_kind_from_in_pass_kinds(name, args, &kinds)
-                                    .or_else(|| {
+                                method_return_kind_from_in_pass_kinds(name, args, &kinds).or_else(
+                                    || {
                                         user_method_return_kind_from_receiver(
                                             name,
                                             args,
@@ -771,7 +771,8 @@ pub(crate) fn infer_slot_kinds_with_concrete_function_returns_and_field_kinds(
                                             function_indices,
                                             function_return_kinds,
                                         )
-                                    })
+                                    },
+                                )
                             }
                             Operand::Constant(MirConstant::Function(name)) => {
                                 named_function_return_kind(
@@ -971,10 +972,14 @@ fn user_method_return_kind_from_receiver(
         Operand::Constant(_) => return None,
     };
     let type_name = match concrete_types.get(receiver_slot.0 as usize) {
-        Some(ConcreteType::Struct(named)) => named
-            .name_str()
-            .or_else(|| local_struct_type_names.get(&receiver_slot).map(String::as_str))?,
-        _ => local_struct_type_names.get(&receiver_slot).map(String::as_str)?,
+        Some(ConcreteType::Struct(named)) => named.name_str().or_else(|| {
+            local_struct_type_names
+                .get(&receiver_slot)
+                .map(String::as_str)
+        })?,
+        _ => local_struct_type_names
+            .get(&receiver_slot)
+            .map(String::as_str)?,
     };
     let candidates = [
         format!("{}::{}", type_name, method_name),

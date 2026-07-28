@@ -5,8 +5,7 @@ use std::collections::BTreeMap;
 use shape_ast::ast::{AnnotationDef, ExportItem, Item};
 use shape_ast::error::{Result, ShapeError};
 
-const POISONED_COMPILER_DIAGNOSTIC: &str =
-    "Internal compiler error: annotation declaration installation failed; this compiler is poisoned and cannot be reused";
+const POISONED_COMPILER_DIAGNOSTIC: &str = "Internal compiler error: annotation declaration installation failed; this compiler is poisoned and cannot be reused";
 
 /// Opaque phase evidence for annotation declarations.
 ///

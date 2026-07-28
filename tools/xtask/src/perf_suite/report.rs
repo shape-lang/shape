@@ -81,8 +81,7 @@ pub fn evaluate_bar(input: &BarInputs<'_>) -> BarStatus {
         return BarStatus::MeasuredNotGating {
             ratio: Some(ratio),
             reason: input.category.precondition.clone().unwrap_or_else(|| {
-                "this category carries no charter bar; the measurement is informational"
-                    .to_string()
+                "this category carries no charter bar; the measurement is informational".to_string()
             }),
         };
     }
@@ -373,7 +372,11 @@ pub const NOISE_ABSOLUTE_FLOOR_MS: f64 = 10.0;
 /// manifest's declared noise bound. Compares the primary statistic per
 /// (workload, runtime) pair; a workload present in only one run is itself a
 /// violation, reported with an infinite deviation.
-pub fn check_noise(first: &[(String, String, f64)], second: &[(String, String, f64)], bound_pct: f64) -> Vec<NoiseViolation> {
+pub fn check_noise(
+    first: &[(String, String, f64)],
+    second: &[(String, String, f64)],
+    bound_pct: f64,
+) -> Vec<NoiseViolation> {
     let mut violations = Vec::new();
     for (workload, runtime, first_ms) in first {
         let matched = second
@@ -664,7 +667,10 @@ mod tests {
     #[test]
     fn integer_and_float_spellings_of_one_number_compare_equal() {
         assert_eq!(canonicalize_output("3"), canonicalize_output("3.0"));
-        assert_eq!(canonicalize_output(" 486165 \n"), canonicalize_output("486165.0"));
+        assert_eq!(
+            canonicalize_output(" 486165 \n"),
+            canonicalize_output("486165.0")
+        );
     }
 
     #[test]

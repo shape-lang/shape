@@ -72,15 +72,10 @@ fn structural_mismatch_refuses_authority_before_running_body() {
     let emission_id = register(&mut compiler, &emission);
     let mut called = false;
 
-    let result = compiler.with_body_analysis_authority(
-        emission_id,
-        &source,
-        &emission,
-        |_| {
-            called = true;
-            Ok(())
-        },
-    );
+    let result = compiler.with_body_analysis_authority(emission_id, &source, &emission, |_| {
+        called = true;
+        Ok(())
+    });
 
     let ShapeError::RuntimeError { message, .. } = result.expect_err("mismatch must fail") else {
         panic!("mismatch must be an internal invariant error");
@@ -103,28 +98,23 @@ fn forced_error_restores_enclosing_authority_scope() {
     compiler.current_function = Some(outer_id);
 
     compiler
-        .with_body_analysis_authority(
-            outer_id,
-            &outer_source,
-            &outer_emission,
-            |compiler| {
-                let enclosing = compiler.active_body_analysis_authority.clone();
-                let inner_result: Result<()> = compiler.with_body_analysis_authority(
-                    inner_id,
-                    &inner_source,
-                    &inner_emission,
-                    |_| {
-                        Err(ShapeError::RuntimeError {
-                            message: "forced authority failure".to_string(),
-                            location: None,
-                        })
-                    },
-                );
-                assert!(inner_result.is_err());
-                assert_eq!(compiler.active_body_analysis_authority, enclosing);
-                Ok(())
-            },
-        )
+        .with_body_analysis_authority(outer_id, &outer_source, &outer_emission, |compiler| {
+            let enclosing = compiler.active_body_analysis_authority.clone();
+            let inner_result: Result<()> = compiler.with_body_analysis_authority(
+                inner_id,
+                &inner_source,
+                &inner_emission,
+                |_| {
+                    Err(ShapeError::RuntimeError {
+                        message: "forced authority failure".to_string(),
+                        location: None,
+                    })
+                },
+            );
+            assert!(inner_result.is_err());
+            assert_eq!(compiler.active_body_analysis_authority, enclosing);
+            Ok(())
+        })
         .expect("outer scope");
     assert!(compiler.active_body_analysis_authority.is_none());
 }
@@ -206,9 +196,11 @@ fn exclusive_impl_metadata_and_return_projection_are_explicit() {
     let registered = &compiler.program.functions[emission_id];
     assert_eq!(registered.ref_params, vec![true]);
     assert_eq!(registered.ref_mutates, vec![true]);
-    assert!(!compiler
-        .inferred_param_pass_modes
-        .contains_key(&emission.name));
+    assert!(
+        !compiler
+            .inferred_param_pass_modes
+            .contains_key(&emission.name)
+    );
     assert_eq!(
         compiler
             .type_tracker

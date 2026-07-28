@@ -96,8 +96,7 @@ let x = @trace_expr() (1 + 2)
 print(x)
 "#;
 
-    ShapeTest::new(code)
-        .expect_run_err_contains("do not include function");
+    ShapeTest::new(code).expect_run_err_contains("do not include function");
 }
 
 #[test]

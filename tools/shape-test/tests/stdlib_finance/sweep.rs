@@ -68,7 +68,9 @@ fn signal_is_buy_runs_vm() {
 
 #[test]
 fn signal_is_buy_runs_jit() {
-    ShapeTest::new(SIGNAL_BUY_PROGRAM).with_jit().expect_bool(true);
+    ShapeTest::new(SIGNAL_BUY_PROGRAM)
+        .with_jit()
+        .expect_bool(true);
 }
 
 const SIGNAL_CROSS_PROGRAM: &str = r#"

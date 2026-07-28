@@ -644,8 +644,7 @@ impl VirtualMachine {
         self.task_scheduler.store_pending_async(
             task_id,
             crate::executor::task_scheduler::PendingAsyncTask {
-                completion:
-                    crate::executor::task_scheduler::AsyncCompletion::Typed(rx),
+                completion: crate::executor::task_scheduler::AsyncCompletion::Typed(rx),
                 abort: Some(handle.abort_handle()),
             },
         );
@@ -1052,6 +1051,54 @@ impl VirtualMachine {
     /// 4 comptime introspection forms wired by C2-comptime-rebuild
     /// (`a5df165`) — `build_config` / `implements` / `warning` /
     /// `error` — now dispatch end-to-end via VM mode.
+    /// Bind every module-scope binding that names a top-level function to that
+    /// function's value, WITHOUT running the program's top-level code.
+    ///
+    /// #202. The isolated task VM (`run_isolated_async_fn`) deliberately does
+    /// not run top-level code — that would re-execute the whole program — so the
+    /// `StoreModuleBinding` that normally seeds these slots never happens and
+    /// they stay at their default. A call that reaches a top-level function
+    /// through its module binding (`LoadModuleBinding` + `CallValue`, which is
+    /// how a foreign stub is reached — see `remote.rs`'s WF-3E fixAB note) then
+    /// dispatches on an uninitialised slot and fails with "callee must be
+    /// Closure, ModuleFn or UInt64, got Bool".
+    ///
+    /// Function bindings are the part of module state that is knowable without
+    /// running anything: a top-level `fn`'s value is its id, fixed at compile
+    /// time. Bindings initialised by top-level EXPRESSIONS remain uninitialised
+    /// — that is the documented WF-2D-fu isolation boundary and this does not
+    /// move it.
+    pub fn seed_module_function_bindings(&mut self) {
+        use shape_value::NativeKind;
+
+        // The binding store grows lazily (`module_binding_pad_to_kinded`), so it
+        // is EMPTY until the first write — which, on this path, never happens.
+        // Pad first or the loop below has nothing to walk.
+        let binding_count = self.program.module_binding_names.len();
+        if binding_count == 0 {
+            return;
+        }
+        self.module_binding_pad_to_kinded(binding_count - 1);
+
+        let names = self.program.module_binding_names.clone();
+        for (idx, name) in names.iter().enumerate() {
+            // Only seed a slot still carrying the never-written sentinel; never
+            // overwrite a value something else already put there.
+            if self.module_binding_kinds[idx] != NativeKind::Bool
+                || self.module_bindings[idx] != Self::NONE_BITS
+            {
+                continue;
+            }
+            let Some(func_id) = self.program.functions.iter().position(|f| &f.name == name) else {
+                continue;
+            };
+            // Same encoding `PushConst` gives `Constant::Function` (stack_ops):
+            // the id inline, kinded `UInt64`. No heap share to account for.
+            self.module_bindings[idx] = func_id as u64;
+            self.module_binding_kinds[idx] = NativeKind::UInt64;
+        }
+    }
+
     pub fn populate_module_objects(&mut self) {
         use shape_runtime::module_exports::ModuleFnEntry;
         use shape_value::heap_value::TypedObjectStorage;

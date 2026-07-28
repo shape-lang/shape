@@ -3,10 +3,7 @@ use crate::type_system::{Type, TypeVar, TypeVarGen};
 
 fn solve_pair(left: &TypeVar, right: &TypeVar) -> ConstraintSolver {
     let mut solver = ConstraintSolver::new();
-    let mut constraints = vec![(
-        Type::Variable(left.clone()),
-        Type::Variable(right.clone()),
-    )];
+    let mut constraints = vec![(Type::Variable(left.clone()), Type::Variable(right.clone()))];
     solver
         .solve(&mut constraints)
         .expect("variable pair must unify");
@@ -51,9 +48,7 @@ fn raw_variable_pairs_retain_left_to_right_binding() {
     let solver = solve_pair(&left, &right);
 
     assert_eq!(
-        solver
-            .unifier()
-            .apply_substitutions(&Type::Variable(left)),
+        solver.unifier().apply_substitutions(&Type::Variable(left)),
         Type::Variable(right.clone())
     );
     assert!(solver.unifier().lookup(&right).is_none());
@@ -67,9 +62,7 @@ fn declared_variable_pairs_retain_left_to_right_binding() {
     let solver = solve_pair(&left, &right);
 
     assert_eq!(
-        solver
-            .unifier()
-            .apply_substitutions(&Type::Variable(left)),
+        solver.unifier().apply_substitutions(&Type::Variable(left)),
         Type::Variable(right.clone())
     );
     assert!(solver.unifier().lookup(&right).is_none());

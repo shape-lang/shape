@@ -18,7 +18,7 @@ use shape_value::heap_value::{
     HashMapData, HashMapKindedRef, HeapValue, TypedObjectPtr, TypedObjectStorage,
 };
 use shape_value::v2::string_obj::StringObj;
-use shape_value::v2::typed_array::{stamp_elem_type, TypedArray, ELEM_TYPE_STRING};
+use shape_value::v2::typed_array::{ELEM_TYPE_STRING, TypedArray, stamp_elem_type};
 use shape_value::{HeapKind, KindedSlot, NativeKind, ValueSlot};
 use std::sync::Arc;
 
@@ -74,10 +74,19 @@ pub fn create_state_module() -> ModuleExports {
         ],
     ));
 
-    module.add_type_schema(TypeSchema::new("ModuleState", vec![
-        ("bindings".to_string(), FieldType::Any),
-        ("schemas".to_string(), FieldType::HashMap { key: Box::new(FieldType::String), value: Box::new(FieldType::String) }),
-    ]));
+    module.add_type_schema(TypeSchema::new(
+        "ModuleState",
+        vec![
+            ("bindings".to_string(), FieldType::Any),
+            (
+                "schemas".to_string(),
+                FieldType::HashMap {
+                    key: Box::new(FieldType::String),
+                    value: Box::new(FieldType::String),
+                },
+            ),
+        ],
+    ));
 
     module.add_type_schema(TypeSchema::new(
         "CallPayload",
@@ -451,7 +460,7 @@ fn serializable_arm_name(sv: &shape_runtime::snapshot::SerializableVMValue) -> &
 }
 
 fn bytes_from_array_arg(arg: &KindedSlot) -> Result<Vec<u8>, String> {
-    use shape_runtime::snapshot::{slot_to_serializable, SerializableVMValue as SV};
+    use shape_runtime::snapshot::{SerializableVMValue as SV, slot_to_serializable};
 
     let store = ephemeral_store()?;
     let sv = slot_to_serializable(arg.slot().raw(), arg.kind(), &store).map_err(|e| {
@@ -722,7 +731,11 @@ fn slot_to_f64(slot: &KindedSlot) -> Option<f64> {
     }
 }
 
-fn slot_to_delta_scalar(op: &str, label: &str, slot: &KindedSlot) -> Result<ScalarDeltaValue, String> {
+fn slot_to_delta_scalar(
+    op: &str,
+    label: &str,
+    slot: &KindedSlot,
+) -> Result<ScalarDeltaValue, String> {
     if let Some(value) = slot_to_i64(slot) {
         return Ok(ScalarDeltaValue::Int(value));
     }
@@ -859,7 +872,10 @@ fn scalar_to_return(value: ScalarDeltaValue) -> TypedReturn {
     }
 }
 
-fn delta_storage<'a>(ctx: &ModuleContext, slot: &'a KindedSlot) -> Result<&'a TypedObjectStorage, String> {
+fn delta_storage<'a>(
+    ctx: &ModuleContext,
+    slot: &'a KindedSlot,
+) -> Result<&'a TypedObjectStorage, String> {
     if slot.kind() != NativeKind::Ptr(HeapKind::TypedObject) || slot.raw() == 0 {
         return Err(format!(
             "state.patch: state-diff carrier surface — delta argument must \
@@ -924,19 +940,25 @@ fn root_change_from_map(changed: &HashMapKindedRef) -> Result<Option<ScalarDelta
     }
     match changed {
         HashMapKindedRef::I64(data) => {
-            let idx = data.get_index(ROOT_DELTA_PATH).expect("contains_key checked");
+            let idx = data
+                .get_index(ROOT_DELTA_PATH)
+                .expect("contains_key checked");
             Ok(Some(ScalarDeltaValue::Int(unsafe {
                 data.value_at_raw(idx)
             })))
         }
         HashMapKindedRef::F64(data) => {
-            let idx = data.get_index(ROOT_DELTA_PATH).expect("contains_key checked");
+            let idx = data
+                .get_index(ROOT_DELTA_PATH)
+                .expect("contains_key checked");
             Ok(Some(ScalarDeltaValue::Number(unsafe {
                 data.value_at_raw(idx)
             })))
         }
         HashMapKindedRef::Bool(data) => {
-            let idx = data.get_index(ROOT_DELTA_PATH).expect("contains_key checked");
+            let idx = data
+                .get_index(ROOT_DELTA_PATH)
+                .expect("contains_key checked");
             let raw = unsafe { data.value_at_raw(idx) };
             match raw {
                 0 => Ok(Some(ScalarDeltaValue::Bool(false))),
@@ -949,7 +971,9 @@ fn root_change_from_map(changed: &HashMapKindedRef) -> Result<Option<ScalarDelta
             }
         }
         HashMapKindedRef::String(data) => {
-            let idx = data.get_index(ROOT_DELTA_PATH).expect("contains_key checked");
+            let idx = data
+                .get_index(ROOT_DELTA_PATH)
+                .expect("contains_key checked");
             let ptr = unsafe { data.value_at_raw(idx) };
             let value = unsafe { StringObj::as_str(ptr) }.to_string();
             Ok(Some(ScalarDeltaValue::String(value)))
@@ -993,10 +1017,7 @@ fn delta_root_change(delta: &TypedObjectStorage) -> Result<Option<ScalarDeltaVal
 /// Wave-26A implements the first real Delta carrier: homogeneous scalar/string
 /// root replacement. `Delta.changed["$"]` carries the new value, and
 /// `Delta.removed` is empty. Object/array/map/path deltas surface honestly.
-pub(crate) fn state_diff(
-    args: &[KindedSlot],
-    ctx: &ModuleContext,
-) -> Result<TypedReturn, String> {
+pub(crate) fn state_diff(args: &[KindedSlot], ctx: &ModuleContext) -> Result<TypedReturn, String> {
     let [old, new] = args else {
         return Err(content_surface("state.diff"));
     };
@@ -1024,10 +1045,7 @@ pub(crate) fn state_diff(
 ///
 /// Applies Wave-26A's bounded root-replacement Delta. Empty deltas return the
 /// supported scalar/string base value unchanged.
-pub(crate) fn state_patch(
-    args: &[KindedSlot],
-    ctx: &ModuleContext,
-) -> Result<TypedReturn, String> {
+pub(crate) fn state_patch(args: &[KindedSlot], ctx: &ModuleContext) -> Result<TypedReturn, String> {
     let [base, delta] = args else {
         return Err(content_surface("state.patch"));
     };

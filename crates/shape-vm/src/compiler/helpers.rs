@@ -1275,9 +1275,11 @@ pub(crate) fn infer_top_level_concrete_types_from_mir_with_resolvers(
                                 // and the JIT return-kind arm
                                 // (`parametric_method_return_kind_from_receiver`:
                                 // `("get", Array) => Ptr(HeapKind::Option)`).
-                                ("get", shape_value::v2::ConcreteType::Array(elem)) => Some(
-                                    shape_value::v2::ConcreteType::Option(Box::new((**elem).clone())),
-                                ),
+                                ("get", shape_value::v2::ConcreteType::Array(elem)) => {
+                                    Some(shape_value::v2::ConcreteType::Option(Box::new(
+                                        (**elem).clone(),
+                                    )))
+                                }
                                 _ => None,
                             };
                             if let Some(ct) = inferred {
@@ -2818,10 +2820,7 @@ impl BytecodeCompiler {
         // the outer function's body length via the jump-over emission pattern.
         // Scan only the instructions directly owned by this callee; malformed
         // function-window metadata provides no return-kind authority.
-        let direct_instructions = self
-            .program
-            .direct_function_instructions(callee_idx)
-            .ok()?;
+        let direct_instructions = self.program.direct_function_instructions(callee_idx).ok()?;
         // Scan the body for typed `ReturnValue<Kind>` opcodes. If the
         // callee uses a single typed-return kind across all return sites,
         // declare that kind for the call result. Mixed kinds (e.g. one
@@ -3605,11 +3604,7 @@ impl BytecodeCompiler {
     /// [`Self::mint_hygienic_fn_name`] the rendering is unspellable
     /// (SOH-prefixed), so it can neither collide with nor be resolved to a
     /// user function of any spelling.
-    pub(super) fn mint_hygienic_fn_name_stable(
-        &self,
-        role: HygienicRole,
-        nonce: u64,
-    ) -> String {
+    pub(super) fn mint_hygienic_fn_name_stable(&self, role: HygienicRole, nonce: u64) -> String {
         HygienicSymbol::mint(role, nonce).unspellable_descriptor()
     }
 
@@ -3907,9 +3902,7 @@ impl BytecodeCompiler {
         {
             let slots = match &proven_hints {
                 Some(h) if needs_descriptor_for_slots => h.clone(),
-                None if needs_descriptor_for_params => {
-                    proven_params.clone().unwrap_or_default()
-                }
+                None if needs_descriptor_for_params => proven_params.clone().unwrap_or_default(),
                 _ => Vec::new(),
             };
             let mut frame = crate::type_tracking::FrameDescriptor::from_slots(slots);
@@ -6350,10 +6343,7 @@ impl BytecodeCompiler {
     /// `local_drop_kind` consults, so the drop-plan stays single-authority.
     /// Bounded to a bare-identifier receiver bound to a local whose type name is
     /// tracked (the sound, name-heuristic-free case); everything else is `None`.
-    fn receiver_local_tracked_type_name(
-        &self,
-        receiver: &shape_ast::ast::Expr,
-    ) -> Option<String> {
+    fn receiver_local_tracked_type_name(&self, receiver: &shape_ast::ast::Expr) -> Option<String> {
         let shape_ast::ast::Expr::Identifier(name, _) = receiver else {
             return None;
         };

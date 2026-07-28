@@ -256,8 +256,7 @@ impl BytecodeExecutor {
             Some((store, seed)) => (store, seed),
             None => {
                 return Err(ShapeError::RuntimeError {
-                    message: "resume: no snapshot store is configured on the engine"
-                        .to_string(),
+                    message: "resume: no snapshot store is configured on the engine".to_string(),
                     location: None,
                 });
             }
@@ -290,12 +289,13 @@ impl BytecodeExecutor {
         // Restore the VM (STAGE-R5 two-pass identity restore + call-stack
         // rebuild). `from_snapshot` sets `vm.ip = snapshot.ip` — the
         // post-`snapshot()`-call instruction.
-        let mut vm = VirtualMachine::from_snapshot(bytecode, &vm_snapshot, &store).map_err(|e| {
-            ShapeError::RuntimeError {
-                message: format!("resume: failed to restore VM state: {e}"),
-                location: None,
-            }
-        })?;
+        let mut vm =
+            VirtualMachine::from_snapshot(bytecode, &vm_snapshot, &store).map_err(|e| {
+                ShapeError::RuntimeError {
+                    message: format!("resume: failed to restore VM state: {e}"),
+                    location: None,
+                }
+            })?;
 
         // Re-prime the restored VM with the resuming host's execution envelope.
         if let Some(limits) = self.resource_limits.clone() {
@@ -327,12 +327,11 @@ impl BytecodeExecutor {
         // resolves a real callee, not the uninitialised sentinel. Idempotent
         // with any bindings the snapshot already restored (writes the same
         // typed value; ADR-006 §2.7.8 kinded write, no Bool-default).
-        vm.initialize_foreign_stub_bindings().map_err(|e| {
-            ShapeError::RuntimeError {
+        vm.initialize_foreign_stub_bindings()
+            .map_err(|e| ShapeError::RuntimeError {
                 message: format!("resume: foreign stub binding init failed: {e:?}"),
                 location: None,
-            }
-        })?;
+            })?;
 
         // Chained snapshots: a resumed VM is indistinguishable from a running
         // one and may snapshot again (§4.5.1 step 5).
@@ -348,12 +347,12 @@ impl BytecodeExecutor {
         // the slot below the real callee AS the callee (the release-blocking
         // silent-corruption bug). See VmSnapshot::interrupt_saved.
         if !vm_snapshot.interrupt_saved {
-            let resumed = vm
-                .build_snapshot_resumed_marker()
-                .map_err(|e| ShapeError::RuntimeError {
-                    message: format!("resume: {e}"),
-                    location: None,
-                })?;
+            let resumed =
+                vm.build_snapshot_resumed_marker()
+                    .map_err(|e| ShapeError::RuntimeError {
+                        message: format!("resume: {e}"),
+                        location: None,
+                    })?;
             vm.push_kinded_slot(resumed)
                 .map_err(|e| ShapeError::RuntimeError {
                     message: format!("resume: failed to push resume marker: {e}"),
@@ -727,12 +726,11 @@ impl BytecodeExecutor {
         match self.granted_permissions.clone() {
             Some(granted) => match bytecode.content_addressed.clone() {
                 Some(ca) => {
-                    vm.load_program_with_permissions(ca, &granted).map_err(|e| {
-                        shape_runtime::error::ShapeError::SemanticError {
+                    vm.load_program_with_permissions(ca, &granted)
+                        .map_err(|e| shape_runtime::error::ShapeError::SemanticError {
                             message: format!("Permission denied at load: {e}"),
                             location: None,
-                        }
-                    })?;
+                        })?;
                 }
                 None => vm.load_program(bytecode),
             },
@@ -767,10 +765,9 @@ impl BytecodeExecutor {
         // also drops the deleted loop's `dynamic_errors = false` runtime flip
         // — the compile side already stamps `dynamic_errors: dynamic_language`
         // on the entry, so no consumer loses the flag.
-        vm.foreign_fn_handles =
-            std::iter::repeat_with(|| None)
-                .take(vm.program.foreign_functions.len())
-                .collect();
+        vm.foreign_fn_handles = std::iter::repeat_with(|| None)
+            .take(vm.program.foreign_functions.len())
+            .collect();
         // Install the VM-level language-runtime registry (ffi-rebuild §4.2) so
         // the dynamic foreign-call link-now path can resolve its runtime —
         // same threading shape `remote.rs` uses.

@@ -1,8 +1,6 @@
 use super::*;
 use crate::compiler::BytecodeCompiler;
-use shape_ast::ast::{
-    GeneratedExpansionFingerprint, GeneratedNodeIssuer, GeneratedNodePath,
-};
+use shape_ast::ast::{GeneratedExpansionFingerprint, GeneratedNodeIssuer, GeneratedNodePath};
 use shape_ast::parser::parse_program;
 use shape_runtime::type_system::{
     SemanticCallSiteFact, SemanticTypeCandidate, TypeInferenceEngine,

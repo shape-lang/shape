@@ -193,8 +193,7 @@ fn extern_c_string_aggregate_arg() {
 /// to completion, exit 0.
 #[test]
 fn extern_c_declaration_is_never_fatal() {
-    let program =
-        "extern \"C\" fn nope(x: int) -> int from \"c\" as \"definitely_missing_symbol_xyz\"\n\
+    let program = "extern \"C\" fn nope(x: int) -> int from \"c\" as \"definitely_missing_symbol_xyz\"\n\
          print(\"DECLARED_OK\")\n";
     let run = run_shape(program, "vm", None);
     assert_eq!(
@@ -203,7 +202,11 @@ fn extern_c_declaration_is_never_fatal() {
         "declaring-without-calling must be non-fatal; stderr={}",
         run.stderr
     );
-    assert!(run.stdout.contains("DECLARED_OK"), "stdout={:?}", run.stdout);
+    assert!(
+        run.stdout.contains("DECLARED_OK"),
+        "stdout={:?}",
+        run.stdout
+    );
 }
 
 /// Error channel, extern-C link failure (§4.2 / §4.5 class 3): CALLING an
@@ -211,8 +214,7 @@ fn extern_c_declaration_is_never_fatal() {
 /// the library, and the symbol — not a silent null, not a panic.
 #[test]
 fn extern_c_missing_symbol_is_structured_error() {
-    let program =
-        "extern \"C\" fn nope(x: int) -> int from \"c\" as \"definitely_missing_symbol_xyz\"\n\
+    let program = "extern \"C\" fn nope(x: int) -> int from \"c\" as \"definitely_missing_symbol_xyz\"\n\
          print(nope(1))\n";
     let run = run_shape(program, "vm", None);
     assert_ne!(
@@ -286,7 +288,9 @@ fn python_exception_becomes_catchable_err() {
         run.stderr
     );
     assert!(
-        run.stdout.contains("ERR=") && run.stdout.contains("ValueError") && run.stdout.contains("boom"),
+        run.stdout.contains("ERR=")
+            && run.stdout.contains("ValueError")
+            && run.stdout.contains("boom"),
         "Err payload should carry the foreign exception; stdout={:?}",
         run.stdout
     );
@@ -394,5 +398,169 @@ fn typescript_throw_becomes_catchable_err() {
         !run.stdout.contains("TypeConformanceError:"),
         "a genuine throw must NOT carry the TypeConformanceError prefix; stdout={:?}",
         run.stdout
+    );
+}
+
+// =========================================================================
+// async fn <language> — real offload (ADR-019 §5 / #202, POLY-ASYNC-OFFLOAD)
+// =========================================================================
+//
+// The host-level proof of overlap lives in shape-vm's
+// `executor::foreign_async` tripwires, against an instrumented fake
+// extension, so it runs on every machine. These are the end-to-end half:
+// the real CPython and V8 embeddings, driven through the real `shape`
+// binary, sleeping in their own languages. They belong to the FFI tier for
+// the same reason every other `fn python` / `fn typescript` test does.
+//
+// A wall-clock budget rather than an equality: the assertion is "clearly
+// less than serialized", with headroom for interpreter startup and a loaded
+// machine. Serialized would be at least 1.0s of sleep alone; the budget is
+// well under that and cannot be met by accident.
+
+/// The overlap tripwire, python. Two `async fn python` calls that each sleep
+/// 500ms are STARTED before either is awaited; both must finish in about
+/// 500ms of sleep, not 1000ms.
+///
+/// `time.sleep` is the right probe precisely because CPython releases the GIL
+/// across it — which is the property the Python runtime's
+/// `INSTANCE_CONCURRENCY_SHARED` declaration is claiming.
+#[test]
+#[ignore = "needs built python extension + CPython; run via `just test-ffi`"]
+fn python_two_async_calls_overlap() {
+    let ext = extension_dir();
+    let program = "async fn python nap(ms: int) -> Result<int> {\n\
+                   \x20   import time\n\
+                   \x20   time.sleep(ms / 1000.0)\n\
+                   \x20   return ms\n\
+                   }\n\
+                   let a = nap(500)\n\
+                   let b = nap(500)\n\
+                   match await a { Ok(v) => print(f\"A={v}\"), Err(e) => print(f\"ERR={e}\") }\n\
+                   match await b { Ok(v) => print(f\"B={v}\"), Err(e) => print(f\"ERR={e}\") }\n";
+
+    let start = std::time::Instant::now();
+    let run = run_shape(program, "vm", Some(&ext));
+    let elapsed = start.elapsed();
+
+    assert_eq!(run.exit_code, Some(0), "stderr={}", run.stderr);
+    assert!(
+        run.stdout.contains("A=500") && run.stdout.contains("B=500"),
+        "both awaits must produce their values; stdout={:?} stderr={}",
+        run.stdout,
+        run.stderr
+    );
+    assert!(
+        elapsed < Duration::from_millis(900),
+        "two overlapped 500ms `async fn python` sleeps must finish in well under the \
+         1000ms they would take serialized; took {elapsed:?}"
+    );
+}
+
+/// The overlap tripwire, typescript. The TypeScript runtime declares
+/// `INSTANCE_CONCURRENCY_THREAD_AFFINE`, so the overlap comes from two
+/// dedicated workers each owning their own V8 isolate, not from one isolate
+/// being re-entered.
+///
+/// A BUSY WAIT rather than a timer, for two reasons. The practical one: the
+/// extension embeds a bare `deno_core::JsRuntime` with no web extensions, so
+/// `setTimeout` is not defined (a pre-existing limitation of the TypeScript
+/// vertical, unrelated to #202 — the offload itself runs fine and surfaces the
+/// `ReferenceError` as a clean `Err`). The better one: a CPU-bound loop cannot
+/// be overlapped by event-loop interleaving on a single isolate, only by two
+/// isolates on two threads — which is exactly the claim being tested.
+#[test]
+#[ignore = "needs built typescript extension + V8; run via `just test-ffi`"]
+fn typescript_two_async_calls_overlap() {
+    let ext = extension_dir();
+    let program = "async fn typescript nap(ms: int) -> Result<int> {\n\
+                   \x20   const end = Date.now() + ms;\n\
+                   \x20   while (Date.now() < end) {}\n\
+                   \x20   return ms;\n\
+                   }\n\
+                   let a = nap(500)\n\
+                   let b = nap(500)\n\
+                   match await a { Ok(v) => print(f\"A={v}\"), Err(e) => print(f\"ERR={e}\") }\n\
+                   match await b { Ok(v) => print(f\"B={v}\"), Err(e) => print(f\"ERR={e}\") }\n";
+
+    let start = std::time::Instant::now();
+    let run = run_shape(program, "vm", Some(&ext));
+    let elapsed = start.elapsed();
+
+    assert_eq!(run.exit_code, Some(0), "stderr={}", run.stderr);
+    assert!(
+        run.stdout.contains("A=500") && run.stdout.contains("B=500"),
+        "both awaits must produce their values; stdout={:?} stderr={}",
+        run.stdout,
+        run.stderr
+    );
+    assert!(
+        elapsed < Duration::from_millis(900),
+        "two overlapped 500ms `async fn typescript` sleeps must finish in well under \
+         the 1000ms they would take serialized; took {elapsed:?}"
+    );
+}
+
+/// An `async fn python` call delivers its VALUE, its body's own `await` still
+/// runs, and vm ≡ jit.
+///
+/// All three in one fixture because they are one claim about one call: the
+/// python extension wraps an async declaration in `async def` +
+/// `asyncio.run(...)`, so `await` inside the body is legal and drives to
+/// completion — now on a worker thread rather than on the interpreter thread —
+/// and the result is the declared `Result<int>` after the Shape-side `await`.
+/// vm ≡ jit holds by construction: a function containing a foreign call is
+/// interpreter-only in both modes (`vm_only_opcode_reason(CallForeignAsync)`).
+#[test]
+#[ignore = "needs built python extension + CPython; run via `just test-ffi`"]
+fn python_async_body_awaits_internally_and_delivers_its_value_vm_jit() {
+    let ext = extension_dir();
+    let program = "async fn python fetch(x: int) -> Result<int> {\n\
+                   \x20   import asyncio\n\
+                   \x20   await asyncio.sleep(0)\n\
+                   \x20   return x * 2\n\
+                   }\n\
+                   match await fetch(21) { Ok(v) => print(f\"RESULT={v}\"), Err(e) => print(f\"ERR={e}\") }\n";
+    assert_vm_jit_stdout(program, Some(&ext), "RESULT=42");
+}
+
+/// REGRESSION (#202 work item 6): a foreign call inside a SPAWNED user
+/// `async fn` used to fail link-now with "no extension provides language
+/// 'python'", because the isolated task VM was built with an empty extension
+/// registry. The same call from the parent VM worked, which is what made it
+/// confusing rather than merely broken.
+#[test]
+#[ignore = "needs built python extension + CPython; run via `just test-ffi`"]
+fn python_foreign_call_inside_a_spawned_async_fn_succeeds() {
+    let ext = extension_dir();
+    // `async let` is only legal inside an async fn, hence the wrapper; the
+    // deferred zero-arg call is what routes `work()` onto the isolated task VM.
+    let program = "fn python double(a: int) -> Result<int> {\n\
+                   \x20   return a * 2\n\
+                   }\n\
+                   async fn work() -> int {\n\
+                   \x20   match double(21) { Ok(v) => return v, Err(e) => return 0 }\n\
+                   }\n\
+                   async fn driver() -> int {\n\
+                   \x20   async let t = work()\n\
+                   \x20   return await t\n\
+                   }\n\
+                   print(f\"RESULT={await driver()}\")\n";
+    let run = run_shape(program, "vm", Some(&ext));
+    assert_eq!(
+        run.exit_code,
+        Some(0),
+        "a foreign call inside a spawned async fn must link; stderr={}",
+        run.stderr
+    );
+    assert!(
+        !run.stderr.contains("no extension provides language"),
+        "the isolated task VM must inherit the parent's extension registry; stderr={}",
+        run.stderr
+    );
+    assert!(
+        run.stdout.contains("RESULT=42"),
+        "stdout={:?} stderr={}",
+        run.stdout,
+        run.stderr
     );
 }

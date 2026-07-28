@@ -878,6 +878,59 @@ mod module_setup_tests {
         value.as_i64().expect("integer result")
     }
 
+    /// ADR-019 §5 / #202 — the aliasing cure, exercised.
+    ///
+    /// The host now calls `invoke` from blocking-pool worker threads while the
+    /// interpreter thread may be inside `compile`, which is only sound because
+    /// every method here takes `&self`. Before the cure the FFI shims handed
+    /// out `&mut *(instance as *mut PythonRuntime)` and this pattern was
+    /// undefined behaviour, not merely racy.
+    ///
+    /// The overlap is the second claim: `time.sleep` releases the GIL, so two
+    /// concurrent invokes finish in about one sleep rather than two. That
+    /// property is what the extension's `INSTANCE_CONCURRENCY_SHARED`
+    /// declaration promises the host, and it is asserted here rather than
+    /// assumed.
+    #[test]
+    fn concurrent_invokes_on_one_runtime_are_sound_and_overlap() {
+        use std::sync::Arc;
+
+        let runtime = Arc::new(PythonRuntime::new(&[]).expect("runtime initializes"));
+        let handle = runtime
+            .compile(
+                "nap",
+                "import time\ntime.sleep(0.3)\nreturn 1\n",
+                &[],
+                &[],
+                "Result<int>",
+                false,
+            )
+            .expect("compile succeeds");
+        // The handle is an opaque id, not a pointer into the runtime; passing
+        // it across threads is what the host does too.
+        let handle_bits = handle as usize;
+
+        let start = std::time::Instant::now();
+        let threads: Vec<_> = (0..2)
+            .map(|_| {
+                let runtime = Arc::clone(&runtime);
+                std::thread::spawn(move || invoke_int(&runtime, handle_bits as *mut c_void))
+            })
+            .collect();
+        let results: Vec<i64> = threads
+            .into_iter()
+            .map(|t| t.join().expect("no panic on the worker"))
+            .collect();
+        let elapsed = start.elapsed();
+
+        assert_eq!(results, vec![1, 1], "both concurrent invokes must succeed");
+        assert!(
+            elapsed < std::time::Duration::from_millis(500),
+            "two concurrent 300ms sleeps must overlap (CPython releases the GIL \
+             across time.sleep); took {elapsed:?}, serialized would be ~600ms"
+        );
+    }
+
     /// The counter lives in the module's own globals, so it increments only if
     /// the module survives between calls.
     const COUNTING_BODY: &str = "global _setups\n\
@@ -923,7 +976,11 @@ mod module_setup_tests {
             1,
             "a second declaration starts with its own module state"
         );
-        assert_eq!(invoke_int(&runtime, first), 3, "and the first is undisturbed");
+        assert_eq!(
+            invoke_int(&runtime, first),
+            3,
+            "and the first is undisturbed"
+        );
     }
 
     /// Disposal takes the handle's module with it — otherwise a long-running
@@ -934,7 +991,11 @@ mod module_setup_tests {
         let handle = runtime
             .compile("disposable", COUNTING_BODY, &[], &[], "Result<int>", false)
             .expect("compiles");
-        let module_name = runtime.compiled(handle).expect("handle is live").module_name.clone();
+        let module_name = runtime
+            .compiled(handle)
+            .expect("handle is live")
+            .module_name
+            .clone();
         invoke_int(&runtime, handle);
 
         let registered = |name: &str| -> bool {
@@ -946,7 +1007,10 @@ mod module_setup_tests {
                     .unwrap_or(false)
             })
         };
-        assert!(registered(&module_name), "the module is registered while live");
+        assert!(
+            registered(&module_name),
+            "the module is registered while live"
+        );
         runtime.dispose_function(handle);
         assert!(
             !registered(&module_name),
@@ -1042,7 +1106,10 @@ mod contract_wire_tests {
 
         let stub = runtime.stub_document();
         assert!(!stub.is_empty(), "a delivered contract must produce a stub");
-        assert!(stub.contains("add"), "the stub declares the function: {stub}");
+        assert!(
+            stub.contains("add"),
+            "the stub declares the function: {stub}"
+        );
     }
 
     #[test]

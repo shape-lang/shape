@@ -2134,7 +2134,10 @@ mod tests {
         assert_eq!(rejections.len(), 1);
         assert_eq!(
             d.message,
-            format!("{}\n\nhelp: {}", rejections[0].message, rejections[0].fix_hint),
+            format!(
+                "{}\n\nhelp: {}",
+                rejections[0].message, rejections[0].fix_hint
+            ),
             "the editor must render the compiler's producer output verbatim"
         );
     }

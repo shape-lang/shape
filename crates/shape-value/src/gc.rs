@@ -718,7 +718,6 @@ impl GcNode {
             && unsafe { crate::v2::typed_array::read_elem_type(self.addr as *const u8) }
                 == crate::v2::typed_array::ELEM_TYPE_CALLABLE
     }
-
 }
 
 /// Read a node's GC color.
@@ -898,15 +897,19 @@ unsafe fn node_for_each_child<F: FnMut(GcNode)>(node: GcNode, mut f: F) {
         _ => {
             if let Some(hk) = node.child_heapkind() {
                 unsafe {
-                    crate::gc_visit::for_each_heap_child(node.addr as *const u8, hk, |bits, cnk| {
-                        if bits != 0 {
-                            f(GcNode {
-                                addr: bits as usize,
-                                nk: cnk,
-                                clo: None,
-                            });
-                        }
-                    });
+                    crate::gc_visit::for_each_heap_child(
+                        node.addr as *const u8,
+                        hk,
+                        |bits, cnk| {
+                            if bits != 0 {
+                                f(GcNode {
+                                    addr: bits as usize,
+                                    nk: cnk,
+                                    clo: None,
+                                });
+                            }
+                        },
+                    );
                 }
             }
         }
@@ -975,8 +978,7 @@ unsafe fn scan_black(node: GcNode, side: &mut GcSideTable) {
 /// # Safety
 /// See [`mark_gray`].
 unsafe fn collect_white(node: GcNode, side: &mut GcSideTable, freed: &mut Vec<GcNode>) {
-    if unsafe { node_color(node, side) } == GcColor::White
-        && !unsafe { node_buffered(node, side) }
+    if unsafe { node_color(node, side) } == GcColor::White && !unsafe { node_buffered(node, side) }
     {
         unsafe { node_set_color(node, GcColor::Black, side) };
         unsafe { node_for_each_child(node, |child| collect_white(child, side, freed)) };
@@ -1043,10 +1045,7 @@ unsafe fn free_white_node(node: GcNode, side: &mut GcSideTable) -> bool {
                     .expect("ClosureBlock free-kind node must carry its layout")
             };
             unsafe {
-                crate::v2::closure_raw::dealloc_typed_closure_no_drop(
-                    node.addr as *mut u8,
-                    layout,
-                );
+                crate::v2::closure_raw::dealloc_typed_closure_no_drop(node.addr as *mut u8, layout);
             }
             true
         }
@@ -1156,8 +1155,11 @@ pub fn collect_cycles() -> usize {
         // collection is NOT reachable and is raw-freed in step (5). Read BEFORE
         // the neuter in (3), while every array element still points at B.
         let mut reachable: ahash::AHashSet<usize> = ahash::AHashSet::new();
-        let mut stack: Vec<GcNode> =
-            freed.iter().copied().filter(|n| n.is_closure_value()).collect();
+        let mut stack: Vec<GcNode> = freed
+            .iter()
+            .copied()
+            .filter(|n| n.is_closure_value())
+            .collect();
         for n in &stack {
             reachable.insert(n.addr);
         }
@@ -1184,8 +1186,11 @@ pub fn collect_cycles() -> usize {
         }
 
         // (4) Gather the closure-VALUE `Arc` pointers to drop in Phase B.
-        let cascade_b_ptrs: Vec<usize> =
-            freed.iter().filter(|n| n.is_closure_value()).map(|n| n.addr).collect();
+        let cascade_b_ptrs: Vec<usize> = freed
+            .iter()
+            .filter(|n| n.is_closure_value())
+            .map(|n| n.addr)
+            .collect();
 
         // (5) Count + raw-free. Every cascade-reachable node is reclaimed by the
         // Phase-B cascade (count it). Any node NOT reachable is a disjoint
@@ -1444,10 +1449,16 @@ mod tests {
             // Force it Purple first so the Black transition is observable.
             gc_meta(a as *mut u8, HeapKind::TypedObject)
                 .set_color(GcColor::Purple, &mut GcSideTable::new());
-            assert_eq!(color_of(a as *mut u8, HeapKind::TypedObject), GcColor::Purple);
+            assert_eq!(
+                color_of(a as *mut u8, HeapKind::TypedObject),
+                GcColor::Purple
+            );
 
             gc_increment_barrier(a as u64, NativeKind::Ptr(HeapKind::TypedObject));
-            assert_eq!(color_of(a as *mut u8, HeapKind::TypedObject), GcColor::Black);
+            assert_eq!(
+                color_of(a as *mut u8, HeapKind::TypedObject),
+                GcColor::Black
+            );
             // Coloring is metadata only — refcount untouched.
             assert_eq!((*a).header.refcount.load(Ordering::SeqCst), 1);
 
@@ -1474,16 +1485,14 @@ mod tests {
             crate::v2::refcount::v2_retain(&(*b).header); // b.rc = 2
 
             // External root of `a` drops: decrement-to-nonzero → buffer a.
-            let surv_a =
-                gc_decrement_precheck(a as u64, NativeKind::Ptr(HeapKind::TypedObject));
+            let surv_a = gc_decrement_precheck(a as u64, NativeKind::Ptr(HeapKind::TypedObject));
             assert!(surv_a.is_some(), "a.rc=2>1 ⇒ survivor");
             crate::v2::refcount::v2_release(&(*a).header); // a.rc = 1
             let (pa, ka) = surv_a.unwrap();
             gc_buffer_possible_root(pa, ka);
 
             // External root of `b` drops: decrement-to-nonzero → buffer b.
-            let surv_b =
-                gc_decrement_precheck(b as u64, NativeKind::Ptr(HeapKind::TypedObject));
+            let surv_b = gc_decrement_precheck(b as u64, NativeKind::Ptr(HeapKind::TypedObject));
             assert!(surv_b.is_some(), "b.rc=2>1 ⇒ survivor");
             crate::v2::refcount::v2_release(&(*b).header); // b.rc = 1
             let (pb, kb) = surv_b.unwrap();
@@ -1491,8 +1500,14 @@ mod tests {
 
             // Buffer holds exactly {a, b}, in order, each colored Purple.
             assert_eq!(candidate_buffer_snapshot(), vec![a as usize, b as usize]);
-            assert_eq!(color_of(a as *mut u8, HeapKind::TypedObject), GcColor::Purple);
-            assert_eq!(color_of(b as *mut u8, HeapKind::TypedObject), GcColor::Purple);
+            assert_eq!(
+                color_of(a as *mut u8, HeapKind::TypedObject),
+                GcColor::Purple
+            );
+            assert_eq!(
+                color_of(b as *mut u8, HeapKind::TypedObject),
+                GcColor::Purple
+            );
 
             // Dedup: re-buffering `a` (buffered bit already set) must not append.
             gc_buffer_possible_root(a as *mut u8, HeapKind::TypedObject);
@@ -1520,7 +1535,10 @@ mod tests {
         unsafe {
             let a = mk_obj(7); // rc = 1
             let surv = gc_decrement_precheck(a as u64, NativeKind::Ptr(HeapKind::TypedObject));
-            assert!(surv.is_none(), "rc=1 ⇒ will hit zero ⇒ RC fast path, no buffer");
+            assert!(
+                surv.is_none(),
+                "rc=1 ⇒ will hit zero ⇒ RC fast path, no buffer"
+            );
             assert_eq!(candidate_buffer_len(), 0);
             TypedObjectStorage::_drop(a); // frees normally
         }
@@ -1712,8 +1730,14 @@ mod tests {
             assert_eq!((*a).header.refcount.load(Ordering::SeqCst), 2);
             assert_eq!((*b).header.refcount.load(Ordering::SeqCst), 1);
             // Both survivors are Black, buffered cleared.
-            assert_eq!(color_of(a as *mut u8, HeapKind::TypedObject), GcColor::Black);
-            assert_eq!(color_of(b as *mut u8, HeapKind::TypedObject), GcColor::Black);
+            assert_eq!(
+                color_of(a as *mut u8, HeapKind::TypedObject),
+                GcColor::Black
+            );
+            assert_eq!(
+                color_of(b as *mut u8, HeapKind::TypedObject),
+                GcColor::Black
+            );
 
             // Teardown: drop the extra external ref → now a pure garbage cycle;
             // re-buffer and collect it so the test leaks nothing.
@@ -1758,8 +1782,10 @@ mod tests {
         unsafe {
             // Two-field objects: [Ptr(TypedObject) edge, Arc<String> leaf].
             let mk = |schema: u64, s: &str| -> *mut TypedObjectStorage {
-                let kinds: Arc<[NativeKind]> =
-                    Arc::from(vec![NativeKind::Ptr(HeapKind::TypedObject), NativeKind::String]);
+                let kinds: Arc<[NativeKind]> = Arc::from(vec![
+                    NativeKind::Ptr(HeapKind::TypedObject),
+                    NativeKind::String,
+                ]);
                 let arc: Arc<String> = Arc::new(s.to_string());
                 TypedObjectStorage::_new(
                     schema,
@@ -1795,7 +1821,10 @@ mod tests {
             assert_eq!(count_of(sb), 1);
 
             let freed = collect_cycles();
-            assert_eq!(freed, 2, "object cycle collected; string leaves via side table");
+            assert_eq!(
+                freed, 2,
+                "object cycle collected; string leaves via side table"
+            );
 
             // The real Arc strong counts are STILL 1 — trial-deletion ran on the
             // shadow copy, never the real Arc (the shares leak, §3.5 fast-follow).
@@ -1826,8 +1855,10 @@ mod tests {
                                  field0: *const TypedObjectStorage,
                                  s: &Arc<String>|
              -> *mut TypedObjectStorage {
-                let kinds: Arc<[NativeKind]> =
-                    Arc::from(vec![NativeKind::Ptr(HeapKind::TypedObject), NativeKind::String]);
+                let kinds: Arc<[NativeKind]> = Arc::from(vec![
+                    NativeKind::Ptr(HeapKind::TypedObject),
+                    NativeKind::String,
+                ]);
                 TypedObjectStorage::_new(
                     schema,
                     vec![
@@ -1891,9 +1922,7 @@ mod tests {
     /// (`var arr = []; arr.push(|| arr.len())`).
     struct Finding31Cycle {
         /// Node A — `*mut TypedArray<CallableArrayElem>` (v2 header carrier).
-        arr: *mut crate::v2::typed_array::TypedArray<
-            crate::v2::typed_array::CallableArrayElem,
-        >,
+        arr: *mut crate::v2::typed_array::TypedArray<crate::v2::typed_array::CallableArrayElem>,
         /// Node B — `Arc::into_raw(Arc<HeapValue::ClosureRaw>)` (header-less).
         closure_value: *const crate::heap_value::HeapValue,
         /// Node D — `Arc::into_raw(Arc<SharedCell>)` (header-less).
@@ -1912,11 +1941,13 @@ mod tests {
     /// `extra_external`; B/C/D each 1 (their single cycle holder).
     unsafe fn build_finding31_cycle(extra_external: u32) -> Finding31Cycle {
         use crate::v2::closure_layout::CaptureKind;
-        use crate::v2::closure_raw::{alloc_typed_closure, write_capture_raw_u64, OwnedClosureBlock};
+        use crate::v2::closure_raw::{
+            OwnedClosureBlock, alloc_typed_closure, write_capture_raw_u64,
+        };
         use crate::v2::concrete_type::ConcreteType;
         use crate::v2::typed_array::{
-            stamp_elem_type, CallableArrayElem, CallableArrayElemKind, TypedArray,
-            ELEM_TYPE_CALLABLE,
+            CallableArrayElem, CallableArrayElemKind, ELEM_TYPE_CALLABLE, TypedArray,
+            stamp_elem_type,
         };
         unsafe {
             // A — CALLABLE TypedArray (external root share = 1).
@@ -2033,8 +2064,16 @@ mod tests {
             // B and D reached strong count 0 — the std-Arc residuals are gone,
             // not leaked (part-1 left them at 1). Read via `Weak` — the payloads
             // are freed, so a direct `arc_strong` would be a use-after-free.
-            assert_eq!(weak_b.strong_count(), 0, "B (Arc<HeapValue>) fully reclaimed");
-            assert_eq!(weak_d.strong_count(), 0, "D (Arc<SharedCell>) fully reclaimed");
+            assert_eq!(
+                weak_b.strong_count(),
+                0,
+                "B (Arc<HeapValue>) fully reclaimed"
+            );
+            assert_eq!(
+                weak_d.strong_count(),
+                0,
+                "D (Arc<SharedCell>) fully reclaimed"
+            );
 
             // A and C are freed by the cascade. Do NOT touch c.arr / c.cell /
             // c.closure_value again — the allocations are gone. Dropping the
@@ -2104,7 +2143,11 @@ mod tests {
             // A + B + C + D).
             crate::v2::typed_array::release_v2_typed_array(c.arr as *mut u8); // A.rc = 1
             gc_buffer_possible_root(c.arr as *mut u8, HeapKind::TypedArray);
-            assert_eq!(collect_cycles(), 4, "the now-garbage cycle is fully reclaimed");
+            assert_eq!(
+                collect_cycles(),
+                4,
+                "the now-garbage cycle is fully reclaimed"
+            );
         }
         clear_candidate_buffer();
     }

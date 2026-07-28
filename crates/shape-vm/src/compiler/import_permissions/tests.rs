@@ -119,7 +119,10 @@ fn annotation_only_dependency_carrier_is_hashed_linked_and_refused_at_load() {
     let carrier = permission_blob(&content_addressed, "pkg::annotation_only");
 
     assert_eq!(carrier.required_permissions, expected);
-    assert!(carrier.instructions.is_empty(), "carrier code must be empty");
+    assert!(
+        carrier.instructions.is_empty(),
+        "carrier code must be empty"
+    );
     assert!(carrier.constants.is_empty());
     assert!(carrier.strings.is_empty());
     assert!(carrier.dependencies.is_empty());
@@ -334,9 +337,7 @@ fn only_embedded_resolver_provenance_suppresses_bootstrap_call_stamping() {
     let mut loader = shape_runtime::module_loader::ModuleLoader::new();
     loader.register_embedded_stdlib_module(
         "std::core::bootstrap_probe",
-        shape_runtime::module_loader::ModuleCode::Source(Arc::from(
-            "pub fn probe() -> int { 1 }",
-        )),
+        shape_runtime::module_loader::ModuleCode::Source(Arc::from("pub fn probe() -> int { 1 }")),
     );
     let authentic = crate::module_graph::build_module_graph(&root, &mut loader, &[], &[])
         .expect("embedded module graph builds");

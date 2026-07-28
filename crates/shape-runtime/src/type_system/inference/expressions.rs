@@ -3130,10 +3130,11 @@ impl TypeInferenceEngine {
         self.env
             .define(&cf.variable, TypeScheme::mono(loop_var_type));
 
-        self.comptime_witness_frames.push(super::ComptimeWitnessFrame {
-            witness_vars,
-            body_scope_depth: self.env.scope_depth(),
-        });
+        self.comptime_witness_frames
+            .push(super::ComptimeWitnessFrame {
+                witness_vars,
+                body_scope_depth: self.env.scope_depth(),
+            });
         Ok(())
     }
 
@@ -3147,10 +3148,7 @@ impl TypeInferenceEngine {
         subst: &std::collections::HashMap<String, Type>,
     ) -> Type {
         if let Some(name) = ann.as_type_name_str() {
-            if matches!(
-                ann,
-                TypeAnnotation::Basic(_) | TypeAnnotation::Reference(_)
-            ) {
+            if matches!(ann, TypeAnnotation::Basic(_) | TypeAnnotation::Reference(_)) {
                 if let Some(ty) = subst.get(name) {
                     return ty.clone();
                 }

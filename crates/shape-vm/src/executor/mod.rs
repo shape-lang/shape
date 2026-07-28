@@ -480,10 +480,8 @@ pub struct VirtualMachine {
     /// Declared contracts built for the offload path, memoised per language
     /// (ADR-019 §5 / #202). A thread-affine worker owns a private extension
     /// instance and must receive the contract before its first compile.
-    pub(crate) foreign_offload_contracts: HashMap<
-        String,
-        std::sync::Arc<shape_abi_v1::foreign_types::ForeignContractExport>,
-    >,
+    pub(crate) foreign_offload_contracts:
+        HashMap<String, std::sync::Arc<shape_abi_v1::foreign_types::ForeignContractExport>>,
 
     /// Interface stub documents (`.pyi`, `.d.ts`) each language's extension
     /// generated for the contract delivered above, keyed by language id.

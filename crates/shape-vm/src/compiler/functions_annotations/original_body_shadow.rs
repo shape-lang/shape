@@ -5,20 +5,13 @@
 //! until the complete handler outcome is known. Only then is it independently
 //! analyzed under its semantic owner and emitted under its hygienic identity.
 
-use super::{
-    BytecodeCompiler, FunctionDef, OriginalCapability, ParamPassMode, Result, ShapeError,
-};
-use crate::compiler::comptime_builtins::{
-    FreezeOverlay, FrozenTypeCategory, FrozenTypeIdentity,
-};
+use super::{BytecodeCompiler, FunctionDef, OriginalCapability, ParamPassMode, Result, ShapeError};
+use crate::compiler::comptime_builtins::{FreezeOverlay, FrozenTypeCategory, FrozenTypeIdentity};
 use shape_ast::ast::{FunctionParam, TypeAnnotation};
 
-const SHADOW_IDENTITY_DIAGNOSTIC: &str =
-    "internal original-body capability invariant: shadow identity does not match the staged semantic owner";
-const CALLABLE_IDENTITY_DIAGNOSTIC: &str =
-    "internal original-body capability invariant: frozen callable identity does not match the staged semantic owner and shadow emission";
-const CALLABLE_PAYLOAD_DIAGNOSTIC: &str =
-    "internal original-body capability invariant: frozen callable identity has no complete Callable payload";
+const SHADOW_IDENTITY_DIAGNOSTIC: &str = "internal original-body capability invariant: shadow identity does not match the staged semantic owner";
+const CALLABLE_IDENTITY_DIAGNOSTIC: &str = "internal original-body capability invariant: frozen callable identity does not match the staged semantic owner and shadow emission";
+const CALLABLE_PAYLOAD_DIAGNOSTIC: &str = "internal original-body capability invariant: frozen callable identity has no complete Callable payload";
 
 pub(super) fn canonical_original_callable(
     freeze: &FreezeOverlay,
@@ -33,8 +26,7 @@ pub(super) fn canonical_original_callable(
             };
             return Err(format!(
                 "`ctx.original` capability requires a typed parameter, but parameter '{}' of '{}' has no type annotation",
-                parameter_name,
-                function.name
+                parameter_name, function.name
             ));
         };
         let type_annotation = if parameter.is_reference {
@@ -115,11 +107,7 @@ impl PendingOriginalBodyShadow {
         })
     }
 
-    fn validate_cardinality(
-        semantic_owner: &FunctionDef,
-        actual: usize,
-        fact: &str,
-    ) -> Result<()> {
+    fn validate_cardinality(semantic_owner: &FunctionDef, actual: usize, fact: &str) -> Result<()> {
         let expected = semantic_owner.params.len();
         if actual == expected {
             return Ok(());
@@ -198,15 +186,15 @@ impl BytecodeCompiler {
         let effective_pass_modes = pending.effective_pass_modes;
 
         self.register_function(&emission)?;
-        let emission_id = self.find_function(&emission.name).ok_or_else(|| {
-            ShapeError::RuntimeError {
-                message: format!(
-                    "Original-body shadow '{}' was not registered",
-                    emission.name
-                ),
-                location: None,
-            }
-        })?;
+        let emission_id =
+            self.find_function(&emission.name)
+                .ok_or_else(|| ShapeError::RuntimeError {
+                    message: format!(
+                        "Original-body shadow '{}' was not registered",
+                        emission.name
+                    ),
+                    location: None,
+                })?;
 
         // The untouched body is analyzed under its original semantic identity.
         // The replacement body has not entered its normal analysis path yet.

@@ -2486,9 +2486,7 @@ impl BytecodeCompiler {
             .iter()
             .enumerate()
             .map(|(id, member)| {
-                let id = pinned_ordinals
-                    .as_ref()
-                    .map_or(id as u16, |pins| pins[id]);
+                let id = pinned_ordinals.as_ref().map_or(id as u16, |pins| pins[id]);
                 // W18.0 (User 2026-05-23 Item 1): carry variant payload
                 // shape into the runtime EnumVariantInfo so print() can
                 // render `Red` / `Blue(42)` / `Point { x: 1, y: 2 }` per
@@ -5369,9 +5367,7 @@ impl BytecodeCompiler {
                 Item::TypeAlias(def, _) => {
                     fields.push((def.name.clone(), "type".to_string(), None))
                 }
-                Item::Module(def, _) => {
-                    fields.push((def.name.clone(), "module".to_string(), None))
-                }
+                Item::Module(def, _) => fields.push((def.name.clone(), "module".to_string(), None)),
                 // H4: Include annotation definitions in module target fields
                 Item::AnnotationDef(def, _) => {
                     fields.push((def.name.clone(), "annotation".to_string(), None))
@@ -5999,8 +5995,7 @@ impl BytecodeCompiler {
             return Ok(());
         }
         if handler_outcome.replaced || inline_outcome.replaced {
-            if let Err(err) =
-                self.recheck_replaced_module_items(&module_path, &module_items, span)
+            if let Err(err) = self.recheck_replaced_module_items(&module_path, &module_items, span)
             {
                 self.pop_module_reference_scope();
                 self.module_scope_stack.pop();

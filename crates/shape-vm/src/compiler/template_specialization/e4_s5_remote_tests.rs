@@ -31,7 +31,12 @@ use crate::executor::{VMConfig, VirtualMachine};
 /// as `configuration.rs::register_stdlib_modules` does for the real binary) so
 /// the `@remote` short-circuit's `__call_raising` emission resolves the native
 /// export — the compiler needs this for `is_native_module_export`.
-fn compile_source(src: &str) -> (shape_ast::error::Result<()>, crate::compiler::BytecodeCompiler) {
+fn compile_source(
+    src: &str,
+) -> (
+    shape_ast::error::Result<()>,
+    crate::compiler::BytecodeCompiler,
+) {
     let program = shape_ast::parse_program(src).expect("fixture parses");
     let mut compiler = crate::compiler::BytecodeCompiler::new()
         .with_extensions(vec![crate::executor::create_remote_module_exports()]);
@@ -233,11 +238,17 @@ fn compute(x: int) -> int { return x * 2 }"#,
     );
     let compiler = compiled_ok(&src);
 
-    let wrapper_id = compiler.find_function("compute").expect("wrapper registered") as u16;
+    let wrapper_id = compiler
+        .find_function("compute")
+        .expect("wrapper registered") as u16;
     let shadow_name = compiler.template_weave_impl_name("compute");
-    let shadow_id = compiler.find_function(&shadow_name).expect("shadow registered") as u16;
+    let shadow_id = compiler
+        .find_function(&shadow_name)
+        .expect("shadow registered") as u16;
     let helper_name = compiler.template_weave_decision_helper_name("compute");
-    let helper_index = compiler.find_function(&helper_name).expect("helper registered");
+    let helper_index = compiler
+        .find_function(&helper_name)
+        .expect("helper registered");
     let helper = &compiler.program.functions[helper_index];
 
     let pushed = pushed_function_ids(&compiler, helper);

@@ -201,8 +201,8 @@ mod tests {
         use crate::ffi::v2::{jit_v2_typed_object_release, jit_v2_typed_object_retain};
         use shape_runtime::type_schema::{SyncRegistryScope, TypeSchemaRegistry};
         use shape_value::heap_value::TypedObjectStorage;
-        use std::sync::atomic::Ordering;
         use std::sync::Arc;
+        use std::sync::atomic::Ordering;
 
         let mut reg = TypeSchemaRegistry::new_with_stdlib();
         let schema_id = reg.register_type("PocBalance", vec![("v".to_string(), FieldType::F64)]);

@@ -53,10 +53,10 @@ await run()
         run.stderr
     );
 
-    let first = marker_value(&run.stdout, "TLS_ASYNC_SNAPSHOT_0=")
-        .expect("TLS_ASYNC_SNAPSHOT_0 marker");
-    let second = marker_value(&run.stdout, "TLS_ASYNC_SNAPSHOT_1=")
-        .expect("TLS_ASYNC_SNAPSHOT_1 marker");
+    let first =
+        marker_value(&run.stdout, "TLS_ASYNC_SNAPSHOT_0=").expect("TLS_ASYNC_SNAPSHOT_0 marker");
+    let second =
+        marker_value(&run.stdout, "TLS_ASYNC_SNAPSHOT_1=").expect("TLS_ASYNC_SNAPSHOT_1 marker");
     let first_hash = tagged_snapshot_hash(&first, "11", "first TLS async snapshot");
     let second_hash = tagged_snapshot_hash(&second, "22", "second TLS async snapshot");
     assert_ne!(

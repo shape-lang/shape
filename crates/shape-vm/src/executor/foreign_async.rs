@@ -65,7 +65,10 @@ pub(crate) struct ForeignCompileSpec {
 }
 
 impl ForeignCompileSpec {
-    fn compile_with(&self, runtime: &PluginLanguageRuntime) -> Result<CompiledForeignFunction, String> {
+    fn compile_with(
+        &self,
+        runtime: &PluginLanguageRuntime,
+    ) -> Result<CompiledForeignFunction, String> {
         runtime
             .compile(
                 &self.name,
@@ -133,10 +136,7 @@ impl AffineWorkerPool {
 /// A failure to build the instance is reported to every job the worker would
 /// have taken rather than logged and forgotten — a silently dead worker would
 /// look exactly like a slow one.
-fn affine_worker_loop(
-    template: &PluginLanguageRuntime,
-    jobs: &Mutex<Receiver<AffineJob>>,
-) {
+fn affine_worker_loop(template: &PluginLanguageRuntime, jobs: &Mutex<Receiver<AffineJob>>) {
     let runtime = template.fresh_instance();
     let mut compiled: HashMap<usize, CompiledForeignFunction> = HashMap::new();
     let mut contract_delivered = false;
@@ -288,14 +288,15 @@ pub(crate) fn start_offloaded_invoke(
         ForeignOffload::Shared => {
             let runtime = Arc::clone(runtime);
             let compiled = compiled.clone();
-            let handle = crate::executor::async_runtime::shared_runtime().spawn_blocking(
-                move || {
-                    let outcome = runtime.invoke(&compiled, &args_bytes).map_err(|e| e.to_string());
+            let handle =
+                crate::executor::async_runtime::shared_runtime().spawn_blocking(move || {
+                    let outcome = runtime
+                        .invoke(&compiled, &args_bytes)
+                        .map_err(|e| e.to_string());
                     // Receiver may be gone (await cancelled, VM torn down);
                     // the result is discarded, not retried.
                     let _ = tx.send(outcome);
-                },
-            );
+                });
             InFlightForeignCall {
                 completion: rx,
                 abort: Some(handle.abort_handle()),
@@ -332,7 +333,7 @@ pub(crate) fn start_offloaded_invoke(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     //! Runtime tripwires for ADR-019 §5 / #202 (POLY-ASYNC-OFFLOAD).
     //!
     //! These drive the REAL VM path (`invoke_foreign_async_kinded` → offload →
@@ -357,7 +358,7 @@ mod tests {
 
     /// A fake language runtime whose `invoke` sleeps, so wall-clock is a direct
     /// readout of whether calls overlapped.
-    mod sleepy_extension {
+    pub(crate) mod sleepy_extension {
         use super::SLEEP;
         use shape_abi_v1::{ErrorModel, LanguageRuntimeVTable, STATE_MODEL_STATEFUL_OPAQUE};
         use std::collections::HashSet;

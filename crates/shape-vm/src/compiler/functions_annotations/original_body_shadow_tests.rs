@@ -15,7 +15,10 @@ fn source_function(source: &str, name: &str) -> FunctionDef {
 }
 
 fn annotation_carrier_identity(compiler: &BytecodeCompiler, name: &str) -> Option<String> {
-    compiler.program.compiled_annotations.get(name)
+    compiler
+        .program
+        .compiled_annotations
+        .get(name)
         .map(|carrier| format!("{carrier:#?}"))
 }
 
@@ -63,7 +66,10 @@ fn compile_annotated_function(
                 .expect("annotation definition consumes preparation evidence");
         }
     }
-    assert_eq!(compiler.program.compiled_annotations.len(), prepared_cardinality);
+    assert_eq!(
+        compiler.program.compiled_annotations.len(),
+        prepared_cardinality
+    );
     assert_eq!(
         annotation_carrier_identity(&compiler, expected_annotation_name)
             .expect("pass two retains the prepared annotation carrier"),
@@ -164,13 +170,9 @@ fn authentic_capability_has_a_complete_callable_payload_and_publishes() {
         .expect("stored callable has a complete payload");
     assert_eq!(payload.category(), FrozenTypeCategory::Callable);
 
-    let pending = PendingOriginalBodyShadow::new(
-        &owner,
-        capability,
-        &[None],
-        &[ParamPassMode::ByRefShared],
-    )
-    .expect("authenticated pending shadow");
+    let pending =
+        PendingOriginalBodyShadow::new(&owner, capability, &[None], &[ParamPassMode::ByRefShared])
+            .expect("authenticated pending shadow");
     compiler
         .finalize_pending_original_body_shadow(pending)
         .expect("authenticated shadow publishes");
@@ -187,13 +189,9 @@ fn staged_emission_passing_mode_tamper_refuses_before_publication() {
     install_frozen_owners(&mut compiler, &[&owner]);
     let capability = authenticated_capability(&compiler, &owner);
     let shadow_name = capability.shadow_name().to_string();
-    let mut pending = PendingOriginalBodyShadow::new(
-        &owner,
-        capability,
-        &[None],
-        &[ParamPassMode::ByRefShared],
-    )
-    .expect("authenticated pending shadow");
+    let mut pending =
+        PendingOriginalBodyShadow::new(&owner, capability, &[None], &[ParamPassMode::ByRefShared])
+            .expect("authenticated pending shadow");
     pending.emission.params[0].is_mut_reference = true;
     let before = artifact_counts(&compiler);
 
@@ -221,13 +219,9 @@ fn same_signature_foreign_owner_capability_refuses_before_publication() {
     );
     let capability = authenticated_capability(&compiler, &foreign);
     let shadow_name = capability.shadow_name().to_string();
-    let pending = PendingOriginalBodyShadow::new(
-        &owner,
-        capability,
-        &[None],
-        &[ParamPassMode::ByValue],
-    )
-    .expect("cardinality-valid foreign binding reaches final validation");
+    let pending =
+        PendingOriginalBodyShadow::new(&owner, capability, &[None], &[ParamPassMode::ByValue])
+            .expect("cardinality-valid foreign binding reaches final validation");
     let before = artifact_counts(&compiler);
 
     let error = compiler
@@ -245,13 +239,9 @@ fn staged_emission_signature_tamper_refuses_before_publication() {
     install_frozen_owners(&mut compiler, &[&owner]);
     let capability = authenticated_capability(&compiler, &owner);
     let shadow_name = capability.shadow_name().to_string();
-    let mut pending = PendingOriginalBodyShadow::new(
-        &owner,
-        capability,
-        &[None],
-        &[ParamPassMode::ByValue],
-    )
-    .expect("authenticated pending shadow");
+    let mut pending =
+        PendingOriginalBodyShadow::new(&owner, capability, &[None], &[ParamPassMode::ByValue])
+            .expect("authenticated pending shadow");
     pending.emission.return_type = Some(TypeAnnotation::Basic("string".to_string()));
     let before = artifact_counts(&compiler);
 
@@ -270,17 +260,15 @@ fn invalid_or_non_callable_identity_refuses_before_payload_and_publication() {
     install_frozen_owners(&mut compiler, &[&owner]);
     let capability = authenticated_capability(&compiler, &owner);
     let shadow_name = capability.shadow_name().to_string();
-    let pending = PendingOriginalBodyShadow::new(
-        &owner,
-        capability,
-        &[None],
-        &[ParamPassMode::ByValue],
-    )
-    .expect("authenticated pending shadow");
+    let pending =
+        PendingOriginalBodyShadow::new(&owner, capability, &[None], &[ParamPassMode::ByValue])
+            .expect("authenticated pending shadow");
     let freeze = compiler
         .comptime_freeze_overlay()
         .expect("installed semantic freeze");
-    let int_identity = freeze.identity_of("int").expect("frozen primitive identity");
+    let int_identity = freeze
+        .identity_of("int")
+        .expect("frozen primitive identity");
 
     for invalid in [int_identity, FrozenTypeIdentity::INVALID] {
         let mut tampered = pending.clone();
@@ -374,7 +362,11 @@ fn probe(value: int) -> int {
         .iter()
         .filter(|function| function.is_closure)
         .collect();
-    assert_eq!(closures.len(), 2, "both persistent closure artifacts remain");
+    assert_eq!(
+        closures.len(),
+        2,
+        "both persistent closure artifacts remain"
+    );
     let shadow_closure = closures
         .iter()
         .find(|function| function.arity == 1)
@@ -482,15 +474,13 @@ fn pending_shadow_rejects_misaligned_reference_provenance() {
     install_frozen_owners(&mut compiler, &[&semantic_owner]);
     let capability = authenticated_capability(&compiler, &semantic_owner);
 
-    let error = PendingOriginalBodyShadow::new(
-        &semantic_owner,
-        capability,
-        &[],
-        &[ParamPassMode::ByValue],
-    )
-    .expect_err("missing provenance is a structural error");
+    let error =
+        PendingOriginalBodyShadow::new(&semantic_owner, capability, &[], &[ParamPassMode::ByValue])
+            .expect_err("missing provenance is a structural error");
 
-    assert!(error.to_string().contains(
-        "function 'probe' has 1 parameters but 0 inferred-reference provenance entries"
-    ));
+    assert!(
+        error.to_string().contains(
+            "function 'probe' has 1 parameters but 0 inferred-reference provenance entries"
+        )
+    );
 }

@@ -12,11 +12,10 @@ use shape_value::heap_value::{
 };
 use shape_value::v2::string_obj::StringObj;
 use shape_value::v2::typed_array::{
-    read_elem_type, stamp_elem_type, TypedArray, ELEM_TYPE_BOOL, ELEM_TYPE_CALLABLE,
-    ELEM_TYPE_CONTENT, ELEM_TYPE_F32, ELEM_TYPE_F64, ELEM_TYPE_I16, ELEM_TYPE_I32,
-    ELEM_TYPE_I64, ELEM_TYPE_I8, ELEM_TYPE_STRING, ELEM_TYPE_TRAIT_OBJECT,
-    ELEM_TYPE_TYPED_ARRAY, ELEM_TYPE_TYPED_OBJECT, ELEM_TYPE_U16, ELEM_TYPE_U32,
-    ELEM_TYPE_U8, ELEM_TYPE_UNKNOWN,
+    ELEM_TYPE_BOOL, ELEM_TYPE_CALLABLE, ELEM_TYPE_CONTENT, ELEM_TYPE_F32, ELEM_TYPE_F64,
+    ELEM_TYPE_I8, ELEM_TYPE_I16, ELEM_TYPE_I32, ELEM_TYPE_I64, ELEM_TYPE_STRING,
+    ELEM_TYPE_TRAIT_OBJECT, ELEM_TYPE_TYPED_ARRAY, ELEM_TYPE_TYPED_OBJECT, ELEM_TYPE_U8,
+    ELEM_TYPE_U16, ELEM_TYPE_U32, ELEM_TYPE_UNKNOWN, TypedArray, read_elem_type, stamp_elem_type,
 };
 use shape_value::{HeapKind, KindedSlot, NativeKind, ValueSlot};
 use std::sync::Arc;

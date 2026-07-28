@@ -7,8 +7,8 @@ use std::collections::HashMap;
 
 use crate::bytecode::Function;
 use crate::module_graph::{ModuleGraph, ModuleId, ResolvedImport};
-use shape_ast::error::{Result, ShapeError};
 use shape_abi_v1::PermissionSet;
+use shape_ast::error::{Result, ShapeError};
 
 use super::{BytecodeCompiler, FunctionBlobBuilder};
 
@@ -304,7 +304,10 @@ impl BytecodeCompiler {
 
         let blob_name = Self::module_permission_blob_name(&pending.canonical_path);
         if self.blob_name_to_hash.contains_key(&blob_name)
-            || self.completed_blobs.iter().any(|blob| blob.name == blob_name)
+            || self
+                .completed_blobs
+                .iter()
+                .any(|blob| blob.name == blob_name)
         {
             return Err(Self::permission_state_error(format!(
                 "duplicate authenticated module-permission carrier for '{}'",
@@ -364,8 +367,7 @@ impl BytecodeCompiler {
             )));
         }
 
-        self.blob_name_to_hash
-            .insert(blob_name, blob.content_hash);
+        self.blob_name_to_hash.insert(blob_name, blob.content_hash);
         if let Some(cache) = self.blob_cache.as_mut() {
             cache.put_blob(&blob);
         }
