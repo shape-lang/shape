@@ -713,6 +713,8 @@ impl VirtualMachine {
         ctx: Option<&mut shape_runtime::context::ExecutionContext>,
         is_async: bool,
     ) -> Result<(), VMError> {
+        #[cfg(feature = "rc-stats")]
+        crate::rc_stats::note_addressable();
         // The compiler emits the type name as `Operand::Property(StringId)`
         // (see compiler/helpers.rs::emit_drop_call_for_local). For
         // unannotated locals it emits `Instruction::simple` with no

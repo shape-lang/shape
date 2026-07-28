@@ -743,7 +743,7 @@ mod measured {
     use super::*;
     use crate::rc_stats;
 
-    fn run_counted(source: &str, elision: bool) -> (u64, u64) {
+    fn run_counted(source: &str, elision: bool) -> (u64, u64, u64) {
         rc_stats::reset();
         let _ = with_rc_elision_flag(elision, || eval(source));
         rc_stats::snapshot()
@@ -761,19 +761,18 @@ mod measured {
             let source = std::fs::read_to_string(&path)
                 .unwrap_or_else(|e| panic!("charter workload {path} unreadable: {e}"));
 
-            let (on_retain, on_release) = run_counted(&source, true);
-            let (off_retain, off_release) = run_counted(&source, false);
+            let (on_retain, on_release, on_addr) = run_counted(&source, true);
+            let (off_retain, off_release, off_addr) = run_counted(&source, false);
 
             let on_total = on_retain + on_release;
             let off_total = off_retain + off_release;
-            let pct = if off_total == 0 {
-                0.0
-            } else {
-                100.0 * (off_total as f64 - on_total as f64) / off_total as f64
-            };
+            let removed = off_total.saturating_sub(on_total);
+            let pct_all = 100.0 * removed as f64 / off_total.max(1) as f64;
+            let pct_addr =
+                100.0 * (off_addr.saturating_sub(on_addr)) as f64 / off_addr.max(1) as f64;
             println!(
-                "{name}: retains {off_retain} -> {on_retain}, releases {off_release} -> {on_release}, \
-                 total {off_total} -> {on_total} ({pct:.2}% fewer)"
+                "{name}:\n  retains  {off_retain} -> {on_retain}\n  releases {off_release} -> {on_release}\n                   all refcount ops {off_total} -> {on_total} (-{removed}, {pct_all:.5}%)\n                   addressable opcode ops {off_addr} -> {on_addr} (-{}, {pct_addr:.2}%)",
+                off_addr.saturating_sub(on_addr)
             );
 
             assert!(

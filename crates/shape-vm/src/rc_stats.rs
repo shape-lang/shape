@@ -17,6 +17,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 static RETAINS: AtomicU64 = AtomicU64::new(0);
 static RELEASES: AtomicU64 = AtomicU64::new(0);
+static ADDRESSABLE: AtomicU64 = AtomicU64::new(0);
 
 #[inline]
 pub fn note_retain() {
@@ -28,15 +29,27 @@ pub fn note_release() {
     RELEASES.fetch_add(1, Ordering::Relaxed);
 }
 
-/// `(retains, releases)` since the last [`reset`].
-pub fn snapshot() -> (u64, u64) {
+/// One execution of an opcode this pass can add or remove: `CloneLocal`,
+/// `DropLocal`, `LoadLocalMove`, `DropCall`. Every other retain and release in
+/// the counts above is executor-internal — array element reads, field loads,
+/// container growth — which ADR-018 §3 puts explicitly out of scope. This is
+/// the denominator the reduction should be read against.
+#[inline]
+pub fn note_addressable() {
+    ADDRESSABLE.fetch_add(1, Ordering::Relaxed);
+}
+
+/// `(retains, releases, addressable)` since the last [`reset`].
+pub fn snapshot() -> (u64, u64, u64) {
     (
         RETAINS.load(Ordering::Relaxed),
         RELEASES.load(Ordering::Relaxed),
+        ADDRESSABLE.load(Ordering::Relaxed),
     )
 }
 
 pub fn reset() {
     RETAINS.store(0, Ordering::Relaxed);
     RELEASES.store(0, Ordering::Relaxed);
+    ADDRESSABLE.store(0, Ordering::Relaxed);
 }
