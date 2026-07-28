@@ -139,6 +139,11 @@ pub struct FFIFuncRefs {
     // Closure construction (Phase H2: typed closure block → Arc<Closure>).
     pub(crate) make_closure: FuncRef,
     pub(crate) finalize_heap_closure: FuncRef,
+    /// #188 slice 2: recovers the raw `TypedClosureHeader*` from an
+    /// `Arc<HeapValue::ClosureRaw>` closure slot, or 0 when the slot cannot
+    /// serve a direct native call. Consumed by the heap-closure direct
+    /// dispatch fast path in `mir_compiler/terminators.rs`.
+    pub(crate) closure_block_ptr: FuncRef,
     // Track A.1D: OwnedMutable capture cell allocator. Called from
     // `emit_heap_closure` once per `CaptureKind::OwnedMutable` capture to
     // obtain the `*mut ValueWord` pointer installed into the Ptr slot.

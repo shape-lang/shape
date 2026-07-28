@@ -242,6 +242,12 @@ fn dispatch_call_via_trampoline_vm(
     })
 }
 
+/// Maximum `[captures..., args...]` count the native closure-call path can
+/// enter directly. Bounded by `call_jit_fn_with_args`'s transmute table, which
+/// covers `fn(ctx)` through `fn(ctx, a0..a7)`; anything wider takes the
+/// interpreter.
+const MAX_NATIVE_CLOSURE_CALL_ARGS: usize = 8;
+
 /// Dispatch a raw-Arc closure callee through the trampoline VM by borrowing
 /// its existing `OwnedClosureBlock`.
 ///
@@ -272,6 +278,95 @@ fn dispatch_borrowed_closure_via_trampoline_vm(
     // `TypedClosureHeader` per the construction invariant.
     let closure_function_id =
         unsafe { shape_value::v2::closure_raw::typed_closure_function_id(closure_block.as_ptr()) };
+
+    // ── #188 slice 2: native closure dispatch from the trampoline ────────
+    //
+    // The MIR emitter's guarded fast path (`terminators.rs`) can only pin a
+    // closure whose `MakeClosureHeap` it can see in the SAME function. A
+    // closure that arrives as a PARAMETER — `fn apply(g: (int) => int, n: int)
+    // { g(n) }`, the shape every higher-order function has — has no such
+    // definition to speculate from, and the emitter cannot even know the
+    // capture count, so it cannot build a call signature.
+    //
+    // Here that information is all available dynamically: the block carries
+    // its `function_id`, and its `ClosureLayout` carries the capture count,
+    // per-capture offsets and widths. So this is where the parameter shape
+    // gets its native call. If the closure body was JIT-compiled, marshal
+    // `[captures..., args...]` and enter it through the same native ABI the
+    // emitter's direct path uses (`fn(ctx, param_0..param_{arity-1})` with
+    // params [0..captures_count) being the captures, per
+    // `compiler/function_abi.rs`).
+    //
+    // Declined, each falling through to the interpreter below:
+    //   * cell-storage captures (`OwnedMutable` / `Shared`) — those slots hold
+    //     transfer-only cell pointers the callee reads through its
+    //     closure-self opcodes, not as leading params, so they do not fit
+    //     this ABI;
+    //   * arity above `call_jit_fn_with_args`'s supported range;
+    //   * a null function-table entry (body not compiled — #187 demotion).
+    //
+    // Capture bits come from `read_capture_kinded`, which reads at the slot's
+    // own `FieldKind` width with the per-kind sign/zero extension that
+    // `write_capture_typed` round-trips — the same widening the emitter's
+    // `widen_to_i64` performs, and never a blanket 8-byte read that would
+    // overrun a narrow trailing capture.
+    //
+    // Reads are borrows: the shares stay owned by the block, which the caller
+    // holds live across this call.
+    {
+        let layout = closure_block.layout();
+        let no_cell_captures =
+            layout.owned_mutable_capture_mask == 0 && layout.shared_capture_mask == 0;
+        let total_args = layout.capture_count() + arg_pairs.len();
+        if no_cell_captures && total_args <= MAX_NATIVE_CLOSURE_CALL_ARGS && !jit_ctx.is_null() {
+            let ctx_ref = unsafe { &mut *jit_ctx };
+            if !ctx_ref.function_table.is_null()
+                && (closure_function_id as usize) < ctx_ref.function_table_len
+            {
+                let raw_fn_ptr = unsafe {
+                    *(ctx_ref.function_table as *const *const u8).add(closure_function_id as usize)
+                };
+                if !raw_fn_ptr.is_null() {
+                    let mut native_args: Vec<u64> = Vec::with_capacity(total_args);
+                    for i in 0..layout.capture_count() {
+                        let (bits, _kind) = unsafe { closure_block.read_capture_kinded(i) };
+                        native_args.push(bits);
+                    }
+                    native_args.extend(arg_pairs.iter().map(|(bits, _)| *bits));
+
+                    ctx_ref.stack_ptr = 0;
+                    let signal =
+                        unsafe { call_jit_fn_with_args(raw_fn_ptr, jit_ctx, &native_args) };
+                    if signal >= 0 && ctx_ref.stack_ptr > 0 {
+                        ctx_ref.stack_ptr -= 1;
+                        let ret_bits = ctx_ref.stack[ctx_ref.stack_ptr];
+                        ctx_ref.stack_kinds[ctx_ref.stack_ptr] =
+                            crate::ffi::stack_kind_code::SENTINEL;
+                        return ret_bits;
+                    }
+                    // A negative signal is the callee's own deopt/error
+                    // signal; it has already been surfaced through
+                    // `pending_call_error` or is a hard JIT error. Report it
+                    // rather than silently re-running the body on the
+                    // interpreter, which would double any side effect the
+                    // native attempt already performed.
+                    raise_trampoline_error(
+                        jit_ctx,
+                        format!(
+                            "JIT closure native dispatch for function {} returned signal {}",
+                            closure_function_id, signal
+                        ),
+                    );
+                    return TAG_NULL;
+                }
+            }
+        }
+    }
+
+    // #117 / R15 (#188 close): the raw-Arc closure trampoline is a
+    // covered-fallback dispatch event. Recorded only once the native path
+    // above has declined — announcing it earlier would report an interpreter
+    // dispatch for a call that ran natively.
     shape_vm::native_witness::record_interpreter_dispatch(closure_function_id as usize);
 
     let kinded_args: Vec<KindedSlot> = arg_pairs

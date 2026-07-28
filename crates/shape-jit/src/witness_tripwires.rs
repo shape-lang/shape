@@ -186,6 +186,109 @@ fn one_program_carries_both_dispositions_at_once() {
 }
 
 // ---------------------------------------------------------------------------
+// Tripwire 1b — #188 slice 2: the closure BODY runs native
+// ---------------------------------------------------------------------------
+
+/// A capturing closure called through a VARIABLE and through a PARAMETER, plus
+/// a reassignment so one callee slot holds two different closures.
+const CLOSURE_DISPATCH_FIXTURE: &str = r#"
+fn apply(g: (int) => int, n: int) -> int { return g(n) }
+
+let k = 3
+let mut f = |x: int| x * k
+let mut total = 0
+
+for i in 0..200 {
+    total = total + f(i) + apply(f, i)
+}
+
+f = |x: int| x + k
+
+for i in 0..200 {
+    total = total + f(i)
+}
+
+print(total)
+"#;
+
+#[test]
+fn a_capturing_closure_body_is_natively_dispatched() {
+    // The #188 acceptance claim, and the one that cannot be made from the
+    // compiler's classification alone: `native_installed` says the closure was
+    // COMPILED, which was already true before slice 2 while every call still
+    // ran on the interpreter. Only the dispatch COUNT, recorded from inside the
+    // emitted body, distinguishes the two.
+    //
+    // Both call shapes are covered, and they take different routes:
+    //   * `f(i)` — the MIR emitter's guarded direct dispatch, which loads the
+    //     captures out of the closure block and calls the body natively;
+    //   * `apply(f, i)` — inside `apply`, `g` is a parameter with no
+    //     `MakeClosureHeap` to speculate from, so the native call comes from
+    //     the trampoline's own dispatch in `ffi/control/mod.rs`.
+    //
+    // The reassignment is the soundness half: two closures share one callee
+    // slot, so the emitter's recorded `function_id` is wrong for half the
+    // calls. Both bodies must still be natively dispatched AND the program must
+    // still print the right answer — a guard that silently called the wrong
+    // body would keep the counts and corrupt the result.
+    let witness = jit_witness(CLOSURE_DISPATCH_FIXTURE);
+
+    assert!(
+        witness.program_fallback.is_none(),
+        "the fixture must stay on the native path, got {:?}",
+        witness.program_fallback
+    );
+
+    let closures: Vec<_> = witness
+        .functions
+        .iter()
+        .filter(|f| f.function_identity.starts_with("__closure"))
+        .collect();
+    assert_eq!(
+        closures.len(),
+        2,
+        "both closure literals must be registered units, got {:?}",
+        closures
+            .iter()
+            .map(|f| &f.function_identity)
+            .collect::<Vec<_>>()
+    );
+
+    for closure in &closures {
+        let unit = assert_native_dispatch(&witness, &closure.function_identity)
+            .unwrap_or_else(|e| panic!("{} must be a native claim: {e:?}", closure.function_identity));
+        assert!(
+            unit.native_dispatches > 0,
+            "{} announced no native entry — installation alone is not a nativity \
+             claim (R15)",
+            closure.function_identity
+        );
+        assert_eq!(
+            unit.interpreter_dispatches, 0,
+            "{} still reached the interpreter trampoline",
+            closure.function_identity
+        );
+    }
+
+    // The first closure is called through both the variable and the parameter
+    // route (200 each = 400); the second only through the variable (200). 600
+    // native closure entries, none of them interpreted.
+    let mut counts: Vec<u64> = closures.iter().map(|f| f.native_dispatches).collect();
+    counts.sort_unstable();
+    assert_eq!(
+        counts,
+        vec![200, 400],
+        "expected one closure entered 400 times (variable + parameter) and one \
+         entered 200 times (variable only); got {counts:?}"
+    );
+
+    // `apply` itself stays native too — the closure call inside it must not
+    // cost it its own compilation.
+    let apply = assert_native_dispatch(&witness, "apply").expect("`apply` must be native");
+    assert_eq!(apply.native_dispatches, 200);
+}
+
+// ---------------------------------------------------------------------------
 // Tripwire 2 — the known silent-divergence hazard is never silent
 // ---------------------------------------------------------------------------
 

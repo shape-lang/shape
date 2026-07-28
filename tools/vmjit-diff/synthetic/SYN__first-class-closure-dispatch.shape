@@ -15,13 +15,24 @@
 //                  `installed-not-dispatched` with 0 interpreter dispatches
 //                  while running 200 times on the interpreter.
 //
-// After: no program fallback in either shape; `__main__` / `apply` /
-// `hot_double` are `native-dispatched`, and `__closure_0` reads
-// `interpreter-fallback` with 200 interpreter dispatches — the truthful record
-// that the closure BODY is still interpreted. This file is the differential
-// anchor: it must keep producing identical output under vm and jit, and it must
-// keep reaching the native path at all (a re-introduced whole-program bail is
-// invisible to a fixture that already bails).
+// Slice 1 removed the whole-program bail, so both shapes reached the native
+// path, but the closure BODY still ran on the interpreter (`__closure_0`:
+// `interpreter-fallback`, 0 native / 200 interpreter).
+//
+// Slice 2 makes the body native in both shapes. `__main__` / `apply` /
+// `hot_double` AND `__closure_0` all read `native-dispatched` with zero
+// interpreter dispatches:
+//   * variable  -> the MIR emitter's guarded direct dispatch
+//     (`heap_closure_call_info` + the block-header `function_id` guard in
+//     `mir_compiler/terminators.rs`);
+//   * parameter -> the trampoline's native closure dispatch in
+//     `ffi/control/mod.rs`, which is where a closure the emitter cannot pin
+//     statically gets its native call.
+//
+// This file is the differential anchor: it must keep producing identical
+// output under vm and jit, and it must keep reaching the native path at all
+// (a re-introduced whole-program bail is invisible to a fixture that already
+// bails). The witness facts themselves are asserted in `witness_tripwires.rs`.
 
 fn hot_double(n: int) -> int { return n * 2 }
 

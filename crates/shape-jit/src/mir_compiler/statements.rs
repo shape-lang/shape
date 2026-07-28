@@ -192,6 +192,13 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                         if let Some(ss) = self.stack_closure_slots.get(src).copied() {
                             self.stack_closure_slots.insert(*dst, ss);
                         }
+                        // #188 slice 2: the heap-closure speculation follows a
+                        // slot copy the same way. Propagating a wrong guess is
+                        // harmless — the call site re-checks the block's real
+                        // function_id before using it.
+                        if let Some(info) = self.heap_closure_call_info.get(src).cloned() {
+                            self.heap_closure_call_info.insert(*dst, info);
+                        }
                     }
 
                     // Release old value if overwriting a heap local.
@@ -688,6 +695,36 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                         &[closure_ptr, fid_val_32, cap_val_32, layout_val],
                     );
                     let closure_val = self.builder.inst_results(inst)[0];
+
+                    // #188 slice 2: record the direct-dispatch speculation for
+                    // this slot, so a later `Call` on it can load the captures
+                    // and call the closure body natively instead of handing the
+                    // whole body to the interpreter through `jit_call_value`.
+                    //
+                    // Cell-storage captures are excluded: `OwnedMutable` and
+                    // `Shared` slots hold transfer-only cell pointers that the
+                    // callee reads through its closure-self opcodes, not as
+                    // leading params, so they do not fit the
+                    // `fn(ctx, captures..., args...)` native ABI. Those calls
+                    // keep using the trampoline.
+                    if layout.owned_mutable_capture_mask == 0 && layout.shared_capture_mask == 0 {
+                        let mut capture_offsets = Vec::with_capacity(layout.capture_count());
+                        let mut capture_types = Vec::with_capacity(layout.capture_count());
+                        for i in 0..layout.capture_count() {
+                            capture_offsets.push(layout.heap_capture_offset(i) as i32);
+                            capture_types
+                                .push(cranelift_type_for_field_kind(layout.capture_kind(i)));
+                        }
+                        self.heap_closure_call_info.insert(
+                            *closure_slot,
+                            super::HeapClosureCallInfo {
+                                function_id: fid,
+                                capture_offsets,
+                                capture_types,
+                            },
+                        );
+                    }
+
                     let place = Place::Local(*closure_slot);
                     self.release_old_value_if_heap(&place)?;
                     self.write_place(&place, closure_val)?;

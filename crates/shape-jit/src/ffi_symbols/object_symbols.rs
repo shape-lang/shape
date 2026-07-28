@@ -22,7 +22,7 @@ use super::super::ffi::object::{
     jit_alloc_owned_mut_cell_i8, jit_alloc_owned_mut_cell_i16, jit_alloc_owned_mut_cell_i32,
     jit_alloc_owned_mut_cell_i64, jit_alloc_owned_mut_cell_ptr, jit_alloc_owned_mut_cell_u8,
     jit_alloc_owned_mut_cell_u16, jit_alloc_owned_mut_cell_u32, jit_alloc_owned_mut_cell_u64,
-    jit_alloc_shared_cell, jit_arc_shared_release, jit_arc_shared_retain,
+    jit_alloc_shared_cell, jit_arc_shared_release, jit_arc_shared_retain, jit_closure_block_ptr,
     jit_finalize_heap_closure, jit_format, jit_get_prop, jit_hashmap_shape_id,
     jit_hashmap_value_at, jit_length, jit_make_closure, jit_new_object, jit_object_rest,
     jit_read_owned_mut_cell_bool, jit_read_owned_mut_cell_f64, jit_read_owned_mut_cell_i8,
@@ -203,6 +203,9 @@ pub fn register_object_symbols(builder: &mut JITBuilder) {
         "jit_finalize_heap_closure",
         jit_finalize_heap_closure as *const u8,
     );
+    // #188 slice 2: heap-closure block-pointer accessor used by the direct
+    // closure-dispatch fast path in `mir_compiler/terminators.rs`.
+    builder.symbol("jit_closure_block_ptr", jit_closure_block_ptr as *const u8);
     // Track A.1D: allocator for `CaptureKind::OwnedMutable` capture cells.
     // `MirToIR::emit_heap_closure` calls this per OwnedMutable capture to
     // get a fresh `Box::into_raw`'d `*mut ValueWord` pointer, then stores
@@ -966,6 +969,20 @@ pub fn declare_object_functions(module: &mut JITModule, ffi_funcs: &mut HashMap<
             .declare_function("jit_finalize_heap_closure", Linkage::Import, &sig)
             .expect("Failed to declare jit_finalize_heap_closure");
         ffi_funcs.insert("jit_finalize_heap_closure".to_string(), func_id);
+    }
+
+    // #188 slice 2: jit_closure_block_ptr(bits) -> i64. Recovers the raw
+    // `TypedClosureHeader*` from an `Arc<HeapValue::ClosureRaw>` closure slot
+    // so the caller can load captures and call the closure body natively.
+    // Returns 0 when the slot cannot serve a direct call.
+    {
+        let mut sig = module.make_signature();
+        sig.params.push(AbiParam::new(types::I64)); // closure slot bits
+        sig.returns.push(AbiParam::new(types::I64)); // TypedClosureHeader* or 0
+        let func_id = module
+            .declare_function("jit_closure_block_ptr", Linkage::Import, &sig)
+            .expect("Failed to declare jit_closure_block_ptr");
+        ffi_funcs.insert("jit_closure_block_ptr".to_string(), func_id);
     }
 
     // Track A.1D: jit_alloc_owned_mut_cell(initial: u64) -> *mut u64.
