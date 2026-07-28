@@ -233,6 +233,195 @@ pub unsafe fn dealloc_block(ptr: *mut u8, layout: Layout) {
     unsafe { std::alloc::dealloc(ptr, layout) }
 }
 
+/// Allocation-count and layout-identity differential for the typed heap
+/// carriers (#194 tripwire 1).
+///
+/// Every number in this module is a fact about how the runtime allocates,
+/// pinned so a refactor cannot change it silently. The counts were the same
+/// before the seam existed — the seam replaced each direct `std::alloc` call
+/// one-for-one — so asserting them here is asserting equality with the
+/// pre-seam behaviour, and any future change to a count has to be made
+/// deliberately by editing an expectation.
+///
+/// The layout assertions exist for the same reason from the other direction:
+/// the JIT emits raw loads at literal byte offsets into these carriers, so a
+/// field moving is a silent miscompile rather than a build failure. `size_of`
+/// and `offset_of` are checked here so the failure is loud and local.
+#[cfg(test)]
+mod alloc_differential {
+    use super::*;
+    use crate::v2::alloc_budget::BudgetGuard;
+    use crate::v2::decimal_obj::DecimalObj;
+    use crate::v2::string_obj::StringObj;
+    use crate::v2::typed_array::TypedArray;
+    use std::mem::{align_of, offset_of, size_of};
+
+    // ── Layout identity ─────────────────────────────────────────────────────
+
+    /// `TypedArray<T>` is 24 bytes with header@0, data@8, len@16, cap@20 for
+    /// every monomorphization. The JIT hard-codes these offsets and
+    /// `free_v2_typed_array_memory_only` frees element-type-erased on the
+    /// strength of the size being fixed, so both facts are load-bearing.
+    #[test]
+    fn typed_array_layout_is_pinned() {
+        macro_rules! assert_layout {
+            ($t:ty) => {
+                assert_eq!(size_of::<TypedArray<$t>>(), 24, "TypedArray size");
+                assert_eq!(align_of::<TypedArray<$t>>(), 8, "TypedArray align");
+                assert_eq!(offset_of!(TypedArray<$t>, header), 0, "header offset");
+                assert_eq!(offset_of!(TypedArray<$t>, data), 8, "data offset");
+                assert_eq!(offset_of!(TypedArray<$t>, len), 16, "len offset");
+                assert_eq!(offset_of!(TypedArray<$t>, cap), 20, "cap offset");
+            };
+        }
+        assert_layout!(f64);
+        assert_layout!(i64);
+        assert_layout!(i32);
+        assert_layout!(u8);
+        assert_layout!(f32);
+        assert_layout!(char);
+        assert_layout!(*const u8);
+    }
+
+    #[test]
+    fn string_and_decimal_layout_is_pinned() {
+        assert_eq!(size_of::<StringObj>(), 24, "StringObj size");
+        assert_eq!(align_of::<StringObj>(), 8, "StringObj align");
+        assert_eq!(offset_of!(StringObj, header), 0);
+        assert_eq!(offset_of!(StringObj, data), StringObj::OFFSET_DATA);
+        assert_eq!(offset_of!(StringObj, len), StringObj::OFFSET_LEN);
+
+        assert_eq!(offset_of!(DecimalObj, header), 0);
+        assert_eq!(offset_of!(DecimalObj, value), DecimalObj::OFFSET_VALUE);
+    }
+
+    // ── Allocation counts ───────────────────────────────────────────────────
+
+    /// An empty array is one block: the 24-byte struct. With no capacity there
+    /// is no element buffer to allocate.
+    #[test]
+    fn empty_typed_array_allocates_one_block() {
+        reset_counts();
+        let arr = TypedArray::<f64>::new();
+        assert_eq!(counts().allocs, 1, "struct only — no buffer at cap 0");
+        unsafe { TypedArray::drop_array(arr) };
+        assert_eq!(counts().deallocs, 1);
+        assert_eq!(counts().live(), 0);
+    }
+
+    /// An array WITH capacity is two blocks: the struct and a separate element
+    /// buffer. This is the double allocation #194 set out to collapse; the
+    /// count is asserted here so that if the collapse lands, it lands as a
+    /// deliberate edit to this expectation and not as an unnoticed drift.
+    #[test]
+    fn typed_array_with_capacity_allocates_struct_plus_buffer() {
+        reset_counts();
+        let arr = TypedArray::<f64>::with_capacity(8);
+        assert_eq!(
+            counts().allocs,
+            2,
+            "header and element buffer are separate allocations"
+        );
+        unsafe { TypedArray::drop_array(arr) };
+        assert_eq!(counts().deallocs, 2, "both blocks are freed");
+        assert_eq!(counts().live(), 0);
+    }
+
+    #[test]
+    fn from_slice_allocates_struct_plus_buffer() {
+        reset_counts();
+        let arr = TypedArray::<f64>::from_slice(&[1.0, 2.0, 3.0]);
+        assert_eq!(counts().allocs, 2);
+        assert_eq!(unsafe { TypedArray::len(arr) }, 3);
+        unsafe { TypedArray::drop_array(arr) };
+        assert_eq!(counts().live(), 0);
+    }
+
+    /// Growth from capacity 0 allocates a fresh buffer; growth from a non-zero
+    /// capacity reallocs in place. The doubling schedule (0 → 4 → 8 → 16)
+    /// means the number of growths for N pushes is fixed, so the counts below
+    /// are exact rather than bounds.
+    #[test]
+    fn push_growth_schedule_is_pinned() {
+        reset_counts();
+        let arr = TypedArray::<f64>::new();
+        assert_eq!(counts().allocs, 1, "struct");
+
+        // First push: cap 0 → 4, a fresh buffer allocation.
+        unsafe { TypedArray::push(arr, 1.0) };
+        assert_eq!(counts().allocs, 2, "first growth allocates the buffer");
+        assert_eq!(counts().reallocs, 0);
+
+        // Pushes 2..=4 fit in the capacity already granted.
+        for i in 2..=4 {
+            unsafe { TypedArray::push(arr, i as f64) };
+        }
+        assert_eq!(counts().allocs, 2, "no allocation while capacity remains");
+        assert_eq!(counts().reallocs, 0);
+
+        // Push 5 doubles 4 → 8 via realloc.
+        unsafe { TypedArray::push(arr, 5.0) };
+        assert_eq!(counts().reallocs, 1, "growth past capacity reallocs");
+
+        // Pushes 6..=8 fit; push 9 doubles 8 → 16.
+        for i in 6..=8 {
+            unsafe { TypedArray::push(arr, i as f64) };
+        }
+        assert_eq!(counts().reallocs, 1);
+        unsafe { TypedArray::push(arr, 9.0) };
+        assert_eq!(counts().reallocs, 2);
+
+        assert_eq!(unsafe { TypedArray::len(arr) }, 9);
+        assert_eq!(unsafe { TypedArray::capacity(arr) }, 16);
+        unsafe { TypedArray::drop_array(arr) };
+        assert_eq!(counts().live(), 0, "struct + buffer both retired");
+    }
+
+    /// A non-empty string is two blocks (struct + byte buffer); an empty one
+    /// is a single block, because there are no bytes to hold.
+    #[test]
+    fn string_obj_allocation_counts() {
+        reset_counts();
+        let s = StringObj::new("hello");
+        assert_eq!(counts().allocs, 2, "struct + byte buffer");
+        assert_eq!(unsafe { StringObj::as_str(s) }, "hello");
+        unsafe { StringObj::drop(s) };
+        assert_eq!(counts().deallocs, 2);
+
+        reset_counts();
+        let empty = StringObj::new("");
+        assert_eq!(counts().allocs, 1, "empty string allocates no buffer");
+        unsafe { StringObj::drop(empty) };
+        assert_eq!(counts().live(), 0);
+    }
+
+    /// A decimal is a single block — the value is stored inline, with no
+    /// nested allocation.
+    #[test]
+    fn decimal_obj_allocation_counts() {
+        reset_counts();
+        let d = DecimalObj::new(rust_decimal::Decimal::new(1234, 2));
+        assert_eq!(counts().allocs, 1);
+        unsafe { DecimalObj::drop(d) };
+        assert_eq!(counts().deallocs, 1);
+        assert_eq!(counts().live(), 0);
+    }
+
+    /// Allocating and freeing many transient arrays leaves nothing live. This
+    /// is the shape a leak would break: the counts are cumulative, so an
+    /// unfreed block per iteration shows up as a non-zero `live()`.
+    #[test]
+    fn transient_arrays_leave_nothing_live() {
+        reset_counts();
+        for _ in 0..100 {
+            let arr = TypedArray::<i64>::from_slice(&[1, 2, 3, 4]);
+            unsafe { TypedArray::drop_array(arr) };
+        }
+        assert_eq!(counts().allocs, 200, "two blocks per array");
+        assert_eq!(counts().live(), 0, "every block retired");
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

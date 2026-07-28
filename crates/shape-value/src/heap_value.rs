@@ -6907,6 +6907,74 @@ mod hashmap_mutation {
     // `HashMapData<HashMapKindedRef>`. Storage-layer counterpart of
     // `v2_group_by` in `shape-vm/executor/objects/hashmap_methods.rs`.
 
+    /// `values_push` growth is metered by the #194 allocation seam.
+    ///
+    /// This path is the reason the seam's tripwire is not just a grep. Before
+    /// the seam, `alloc_budget` was consulted in exactly one place —
+    /// `TypedArray::grow` — and this function is the *other* doubling growth
+    /// path, with the same unbounded-loop exposure and no ceiling check at
+    /// all. A ceiling that one of two growth paths honours does not bound a
+    /// runaway; it only decides which runaway wins.
+    ///
+    /// The growth still succeeds, and that is deliberate: `values_push` writes
+    /// the value immediately after growing, so refusing the growth here would
+    /// turn a memory-ceiling breach into an out-of-bounds write. What the seam
+    /// changes is that the breach is now *recorded*, which is what lets the VM
+    /// surface a clean error at its next safepoint.
+    #[test]
+    fn values_push_growth_is_metered_by_the_seam() {
+        use crate::v2::alloc_budget::{self, BudgetGuard};
+        use crate::v2::typed_array::TypedArray;
+
+        // Doubling schedule for `i64` values: cap 0 → 4 (32 B) → 8 (64 B) →
+        // 16 (128 B). A 100-byte ceiling is crossed by the last of those and
+        // by none of the earlier ones.
+        let _g = BudgetGuard::new(Some(100));
+        assert!(
+            alloc_budget::take_breach().is_none(),
+            "guard install clears any prior breach"
+        );
+
+        let values: *mut TypedArray<i64> = TypedArray::<i64>::new();
+        for i in 0..16i64 {
+            unsafe { HashMapData::<i64>::values_push(values, i) };
+        }
+
+        assert!(
+            alloc_budget::take_breach().is_some(),
+            "the values buffer crossed the ceiling and the seam must have seen \
+             it — before #194 this path allocated unmetered"
+        );
+
+        // Metering observes; it does not corrupt. Every value landed and the
+        // buffer is intact.
+        assert_eq!(unsafe { TypedArray::len(values) }, 16);
+        assert_eq!(unsafe { TypedArray::get(values, 0) }, Some(0));
+        assert_eq!(unsafe { TypedArray::get(values, 15) }, Some(15));
+        unsafe { TypedArray::drop_array(values) };
+    }
+
+    /// The same growth under a generous ceiling records nothing — the negative
+    /// control, without which the test above could pass because *something*
+    /// always breaches.
+    #[test]
+    fn values_push_growth_under_generous_ceiling_records_no_breach() {
+        use crate::v2::alloc_budget::{self, BudgetGuard};
+        use crate::v2::typed_array::TypedArray;
+
+        let _g = BudgetGuard::new(Some(1 << 20));
+        let values: *mut TypedArray<i64> = TypedArray::<i64>::new();
+        for i in 0..16i64 {
+            unsafe { HashMapData::<i64>::values_push(values, i) };
+        }
+        assert!(
+            alloc_budget::take_breach().is_none(),
+            "128 bytes is nowhere near a 1 MiB ceiling"
+        );
+        assert_eq!(unsafe { TypedArray::len(values) }, 16);
+        unsafe { TypedArray::drop_array(values) };
+    }
+
     #[test]
     fn hashmap_value_v_insert_appends_and_grows_index() {
         let mut outer: HashMapData<HashMapKindedRef> = HashMapData::new();
