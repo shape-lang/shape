@@ -10,6 +10,10 @@ use std::path::{Path, PathBuf};
 use super::dependency_spec::{
     DependencySpec, NativeDependencySpec, parse_native_dependencies_section,
 };
+use super::foreign_env::{
+    ForeignEnvironmentDigest, ForeignEnvironmentError, ForeignEnvironmentSection,
+    resolve_foreign_environment,
+};
 use super::permissions::PermissionsSection;
 use super::sandbox::SandboxSection;
 
@@ -66,6 +70,16 @@ pub struct ShapeProject {
     pub sandbox: Option<SandboxSection>,
     #[serde(default)]
     pub extensions: Vec<ExtensionEntry>,
+    /// `[foreign.<language>]` — the declared environment for each foreign
+    /// language the project calls into (ADR-019 §4 / #198).
+    ///
+    /// A named field rather than an entry in `extension_sections`: an
+    /// environment declaration is a property of the project, checked by the
+    /// toolchain, and must be readable whether or not the extension that will
+    /// run it is loaded. `BTreeMap` because everything downstream of it feeds a
+    /// digest.
+    #[serde(default)]
+    pub foreign: std::collections::BTreeMap<String, ForeignEnvironmentSection>,
     #[serde(flatten, default)]
     pub extension_sections: HashMap<String, toml::Value>,
 }
@@ -182,6 +196,32 @@ impl ShapeProject {
             if sandbox.deterministic && sandbox.seed.is_none() {
                 errors
                     .push("sandbox.deterministic is true but sandbox.seed is not set".to_string());
+            }
+        }
+
+        // Validate declared foreign environments (ADR-019 §4 / #198). An
+        // environment with no runtime identity or no version is not a pin, and
+        // a pin that does not pin is worse than none: it looks reproducible.
+        for (language, section) in &self.foreign {
+            if section.runtime.trim().is_empty() {
+                errors.push(format!(
+                    "foreign.{language}.runtime must name the interpreter/runtime (e.g. \"cpython\")"
+                ));
+            }
+            if section.version.trim().is_empty() {
+                errors.push(format!(
+                    "foreign.{language}.version must pin the interpreter/runtime version"
+                ));
+            }
+            if let Some(checker) = &section.checker {
+                if checker.name.trim().is_empty() {
+                    errors.push(format!("foreign.{language}.checker.name must not be empty"));
+                }
+                if checker.version.trim().is_empty() {
+                    errors.push(format!(
+                        "foreign.{language}.checker.version must pin the checker version"
+                    ));
+                }
             }
         }
 
@@ -314,6 +354,25 @@ impl ProjectRoot {
             .iter()
             .map(|p| self.root_path.join(p))
             .collect()
+    }
+
+    /// Resolve one language's declared environment and derive its digest
+    /// (ADR-019 §4 / #198).
+    ///
+    /// Reads the declared lockfile; does not check whether this host can
+    /// provide the environment. That is
+    /// [`ForeignEnvironmentDigest::check_provided`], kept separate so the
+    /// digest stays a function of the source.
+    pub fn foreign_environment(
+        &self,
+        language: &str,
+    ) -> Result<ForeignEnvironmentDigest, ForeignEnvironmentError> {
+        resolve_foreign_environment(&self.root_path, &self.config.foreign, language)
+    }
+
+    /// Every declared foreign language, in canonical order.
+    pub fn declared_foreign_languages(&self) -> Vec<&str> {
+        self.config.foreign.keys().map(|s| s.as_str()).collect()
     }
 }
 

@@ -1,0 +1,161 @@
+diff --git a/book/book-site/src/content/docs/tooling/polyglot.mdx b/book/book-site/src/content/docs/tooling/polyglot.mdx
+index ab1a98b..9785531 100644
+--- a/book/book-site/src/content/docs/tooling/polyglot.mdx
++++ b/book/book-site/src/content/docs/tooling/polyglot.mdx
+@@ -449,7 +449,139 @@ let r = correlation([1, 2, 3, 4, 5], [2, 4, 5, 4, 5])?
+ let smoothed = moving_average([10, 20, 30, 40, 50, 60, 70], 3)?
+ ```
+ 
+-Any package installed in the active Python environment is available.
++Every package the declared environment locks is available — and only those. See
++[Declaring the Foreign Environment](#declaring-the-foreign-environment).
++
++## Declaring the Foreign Environment
++
++A foreign body runs against an interpreter and a set of installed packages, and
++Shape needs both written down. Declare them in `shape.toml` under
++`[foreign.<language>]`:
++
++```toml
++[foreign.python]
++runtime = "cpython"
++version = "3.11.7"
++root = ".venv"
++lockfile = "python.lock"
++```
++
++`runtime` and `version` pin the interpreter. `root` is the environment
++directory, relative to the project root — a virtualenv for Python. `lockfile`
++names the resolved package set; it defaults to `<language>.lock`.
++
++The lockfile is TOML:
++
++```toml
++version = 1
++language = "python"
++
++[packages.numpy]
++version = "1.26.4"
++integrity = "sha256-..."
++```
++
++Shape derives one **environment digest** from these declared, locked inputs —
++runtime identity, version, the lockfile's content, and the checker pin below.
++The digest is a property of what you wrote, never of the machine that compiled:
++the same source and the same lockfile produce the same digest on every host.
++Reordering or reformatting the lockfile does not change it; changing a package
++version does.
++
++### Nothing is discovered
++
++Shape does not look for a virtualenv. Earlier versions searched the working
++directory for `.venv/`, then `venv/`, then `pyrightconfig.json`, then
++`$VIRTUAL_ENV`, and activated whatever turned up — so the same program could
++import different packages depending on which directory you ran it from. That
++search is gone. A stray `.venv` next to your program has no effect, and neither
++does a `$VIRTUAL_ENV` inherited from your shell.
++
++The search paths come from the declaration instead:
++`lib/python3.11/site-packages` follows from `version = "3.11.7"`.
++
++If you declare no `[foreign.python]` at all, foreign bodies run against the base
++interpreter with nothing added to the import path.
++
++### A declared environment that is missing is an error
++
++If `[foreign.python]` names a `root` or a `lockfile` that this machine does not
++have, the first call into a `fn python` fails before the body is compiled:
++
++```
++foreign function 'correlation': [C0936] the `python` environment declares the
++root `/proj/.venv`, which is not a directory on this host. This is a pre-entry
++failure: nothing falls back to whatever the host happens to have installed.
++```
++
++The same applies to a missing lockfile, a lockfile written for another language,
++and a `root` whose layout disagrees with the declared version (a `python3.10`
++tree under a `version = "3.11.7"` declaration).
++
++### Pinning the checker
++
++The type checker that will verify foreign bodies is pinned alongside the
++environment, because its version and its strictness setting change its verdict
++as surely as a package version changes behaviour:
++
++```toml
++[foreign.python.checker]
++name = "pyright"
++version = "1.1.350"
++settings = { strict = true, pythonVersion = "3.11" }
++```
++
++The checker pin is part of the environment digest, so upgrading a checker is a
++reviewed change to your manifest rather than a build that breaks one morning
++because a tool updated underneath it. Compile-time checking of foreign bodies
++is not wired up yet — the pin is what makes it reproducible when it lands.
++
++### TypeScript modules
++
++TypeScript's environment declares modules rather than packages, and its lockfile
++maps each import specifier a body writes to a vendored file:
++
++```toml
++[foreign.typescript]
++runtime = "deno"
++version = "1.40.0"
++root = "vendor"
++```
++
++```toml
++version = 1
++language = "typescript"
++
++[modules."./stats"]
++path = "stats.js"
++integrity = "sha256-..."
++```
++
++A body imports it dynamically:
++
++```shape runnable=false
++fn typescript spread(xs: Vec<number>) -> Result<number> {
++    const stats = await import("./stats");
++    return stats.spread(xs);
++}
++```
++
++Resolution has exactly one source: this table. There is no `node_modules`
++search, no registry lookup, and no network. A specifier the lock does not
++declare is refused, and the refusal lists what the lock does declare.
++`integrity` is verified when present, so a vendored file that changed on disk is
++caught rather than executed.
++
++Three limits are worth knowing before you reach them:
++
++- Locks are written or generated by other tooling today. Shape does not yet turn
++  a `package.json` into a lockfile.
++- Vendored sources must be JavaScript. This runtime embeds V8, not the
++  TypeScript compiler; a `.ts` path is refused with pre-transpilation named as
++  the remedy.
++- A top-level `import` statement inside a fence is a syntax error — a foreign
++  body is a function body, not a module. Use dynamic `await import(...)`, as
++  above.
+ 
+ ## Language Extension Setup
+ 
+@@ -559,6 +691,15 @@ fn process(data: Vec<number>) -> number {
+ See [Content-Addressed Bytecode](/advanced/content-addressed-bytecode/) for the
+ full hashing architecture.
+ 
++One thing the foreign hash does **not** yet cover: the environment digest. Two
++programs with identical bodies running against different locked package sets
++still hash identically today, so a distributed receiver cannot refuse work that
++was compiled against an environment it does not have. The digest is computed and
++the join is implemented; turning it on changes every existing foreign function's
++hash, which is a versioned format change that lands with verified artifact
++persistence. Until then, treat a foreign function's content hash as identifying
++its *source*, not its environment.
++
+ ## DataTable Bridge Status
+ 
+ `DataTable` ↔ `pd.DataFrame` marshalling is **planned but not yet implemented**.

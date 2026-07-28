@@ -230,6 +230,7 @@ mod tests {
             is_async: false,
             dynamic_errors: true,
             return_type_schema_id: None,
+            env_digest: None,
             content_hash: None,
             native_abi: None,
             param_shares: Vec::new(),

@@ -90,6 +90,32 @@ pub struct ForeignFunctionEntry {
     /// build a view or walk the elements onto the wire.
     #[serde(default)]
     pub param_shares: Vec<shape_abi_v1::foreign_types::BufferShare>,
+    /// The declared foreign environment this function was compiled against
+    /// (ADR-019 §4 / #198): `ForeignEnvironmentDigest::digest`.
+    ///
+    /// **STAGED, NOT WIRED.** No compiler path sets this today, and everything
+    /// downstream is written so that landing #160 wires it in one commit: set
+    /// it in `compile_foreign_function` from the project's resolved
+    /// environment, and every consequence below follows without further edits.
+    ///
+    /// Joining the digest is a deliberate break of every existing foreign
+    /// function's content hash — it is what closes ADR-019 §4's named defect,
+    /// that the current hash claims a determinism the environment does not
+    /// provide. That break is a versioned bytecode-format bump, and #160
+    /// (VERIFIED-ARTIFACT-PERSISTENCE) owns the version this ticket must not
+    /// land ahead of. So the hash contribution below is written but gated on
+    /// `is_some()`, and this field is the flag: while it is `None` everywhere,
+    /// no hash moves.
+    ///
+    /// When it does move: a receiver assembling a program whose foreign entries
+    /// were hashed under a different environment finds no matching entry for a
+    /// blob's `foreign_dependencies` hash and refuses with
+    /// `LinkError::MissingForeignEntry`. #160's wiring should carry the two
+    /// digests into that message so the refusal names the environment
+    /// mismatch rather than reporting a bare missing hash — see
+    /// `a_differing_environment_digest_refuses_the_blob`.
+    #[serde(default)]
+    pub env_digest: Option<[u8; 32]>,
     /// Content hash for caching and deduplication.
     /// Computed from (language, body_text, param_types, return_type).
     #[serde(default)]
@@ -261,6 +287,17 @@ impl ForeignFunctionEntry {
                     shape_abi_v1::foreign_types::BufferShare::SharedMut => 2u8,
                 }]);
             }
+        }
+        // ADR-019 §4 / #198: the declared environment is semantics-affecting
+        // foreign identity — the same body against numpy 1.26.4 and numpy 2.0
+        // is not the same function, and content addressing that ignores it is
+        // the defect §4 names. Domain-separated like every run above it, and
+        // written only when a digest is actually present, so while `env_digest`
+        // stays `None` (it is not wired yet — see the field) every pre-#198
+        // hash is byte-identical.
+        if let Some(env) = &self.env_digest {
+            hasher.update(b"\0env\0");
+            hasher.update(env);
         }
         if let Some(ref rt) = self.return_type {
             hasher.update(rt.as_bytes());

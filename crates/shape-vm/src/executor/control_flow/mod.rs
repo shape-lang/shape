@@ -975,6 +975,16 @@ impl VirtualMachine {
                 // The `ffi_languages` scope check already ran in phase 1
                 // (`check_ffi_permission`) before this link-now.
                 None => {
+                    // ADR-019 §4 / #198: the declared environment is checked
+                    // BEFORE the runtime lookup and before any compile. A
+                    // project that pinned an environment this host cannot
+                    // provide gets the pre-entry refusal — not a body compiled
+                    // against whatever interpreter is lying around.
+                    if let Some(refusal) = self.foreign_environment_refusals.get(language) {
+                        return Err(VMError::RuntimeError(format!(
+                            "foreign function '{name}': {refusal}"
+                        )));
+                    }
                     let Some(runtime) = self.language_runtimes.get(language).cloned() else {
                         return Err(VMError::RuntimeError(format!(
                             "foreign function '{}': no extension provides language '{}'; install \

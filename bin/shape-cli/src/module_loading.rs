@@ -25,6 +25,16 @@ pub fn wire_vm_executor_module_loading(
         executor.clear_native_resolution_context();
     }
 
+    // ADR-019 §4 / #198. Declared `[foreign.<language>]` environments this host
+    // cannot provide become pre-entry refusals at link-now. Resolved here, next
+    // to `[native-dependencies]`, because both are the same kind of fact: what
+    // the project declared about the world outside Shape.
+    executor.set_foreign_environment_refusals(
+        foreign_environment_refusals_for_context(context_file)
+            .into_iter()
+            .collect(),
+    );
+
     let mut loader = engine.get_runtime_mut().configured_module_loader();
     if let Some(context_file) = context_file {
         loader.configure_for_context(context_file, None);
@@ -36,6 +46,33 @@ pub fn wire_vm_executor_module_loading(
         executor.resolve_file_imports_from_source(source, context_dir);
     }
     Ok(())
+}
+
+/// The declared foreign environments this host could not provide, for the
+/// project owning `context_file` (ADR-019 §4 / #198).
+///
+/// A script outside any project declares nothing and refuses nothing.
+fn foreign_environment_refusals_for_context(
+    context_file: Option<&Path>,
+) -> std::collections::BTreeMap<String, String> {
+    let Some(project) = project_root_for_context(context_file) else {
+        return Default::default();
+    };
+    let bindings = shape_runtime::project::bind_declared_environments(
+        &project.root_path,
+        &project.config.foreign,
+    );
+    shape_runtime::project::environment_refusals(&bindings)
+}
+
+fn project_root_for_context(
+    context_file: Option<&Path>,
+) -> Option<shape_runtime::project::ProjectRoot> {
+    let base_dir = context_file?
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from("."));
+    shape_runtime::project::find_project_root(&base_dir)
 }
 
 fn resolve_native_libraries_for_context(

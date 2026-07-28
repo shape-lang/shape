@@ -282,6 +282,15 @@ impl BytecodeCompiler {
             // validated against the language, the pass mode and the element
             // type by `invalid_buffer_shares` above.
             param_shares: def.params.iter().map(|p| p.buffer_share).collect(),
+            // ADR-019 §4 / #198 — THE FLIP POINT. Staged as `None`: joining the
+            // declared environment digest here breaks every existing foreign
+            // function's content hash, and that break is the versioned
+            // bytecode-format bump #160 owns. When #160 lands, this line reads
+            // the project's resolved `ForeignEnvironmentDigest` for
+            // `def.language` and the rest of the join is already in place
+            // (`compute_content_hash`'s `\0env\0` run, and the link-time
+            // refusal it produces on a receiver with a different environment).
+            env_digest: None,
             content_hash: None,
             native_abi,
         };
@@ -1490,6 +1499,65 @@ mod ffi_permission_tests {
             msg.contains("Failed to link"),
             "expected a native link failure past the language gate, got: {msg}"
         );
+    }
+
+    // ----------------------------------------------------------------------
+    // ADR-019 §4 / #198 — the declared-environment pre-entry gate.
+    // ----------------------------------------------------------------------
+
+    #[test]
+    fn a_refused_foreign_environment_stops_the_call_before_the_runtime_lookup() {
+        let (mut vm, _) = python_vm();
+        vm.set_foreign_environment_refusals(std::collections::HashMap::from([(
+            "python".to_string(),
+            "[C0936] the `python` environment declares the root `/nope/.venv`, which is not a \
+             directory on this host."
+                .to_string(),
+        )]));
+        let err = vm
+            .invoke_foreign_kinded(0, &[])
+            .expect_err("a declared-but-unprovidable environment must refuse");
+        let msg = format!("{err:?}");
+        assert!(msg.contains("[C0936]"), "got: {msg}");
+        assert!(msg.contains("padd"), "the refusal names the call: {msg}");
+        // The ordering is the point: this VM has no python runtime registered
+        // either, so a gate that ran AFTER the lookup would produce the
+        // extension-absence message instead.
+        assert!(
+            !msg.contains("no extension provides language"),
+            "the environment gate must precede the runtime lookup: {msg}"
+        );
+    }
+
+    #[test]
+    fn an_unrefused_language_reaches_the_runtime_lookup() {
+        // The differential: same VM, refusal recorded for a DIFFERENT language.
+        // Nothing about `fn python` changes, which is what says the gate reads
+        // the language rather than merely the presence of the map.
+        let (mut vm, _) = python_vm();
+        vm.set_foreign_environment_refusals(std::collections::HashMap::from([(
+            "typescript".to_string(),
+            "[C0936] typescript is not provided here".to_string(),
+        )]));
+        let err = vm
+            .invoke_foreign_kinded(0, &[])
+            .expect_err("no runtime registered → link-now failure past the gate");
+        let msg = format!("{err:?}");
+        assert!(!msg.contains("[C0936]"), "got: {msg}");
+        assert!(
+            msg.contains("no extension provides language"),
+            "expected the ordinary runtime-lookup failure, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn no_declared_environment_refuses_nothing() {
+        // The default a project without `[foreign.*]` produces.
+        let (mut vm, _) = python_vm();
+        vm.set_foreign_environment_refusals(std::collections::HashMap::new());
+        let err = vm.invoke_foreign_kinded(0, &[]).expect_err("no runtime");
+        let msg = format!("{err:?}");
+        assert!(!msg.contains("[C0936]"), "got: {msg}");
     }
 }
 
@@ -2995,6 +3063,147 @@ fn python total(xs: Array<number>) -> Result<number> {
         assert_eq!(
             with_shares, entry.content_hash,
             "an all-copied share vector hashes identically to no share vector at all"
+        );
+    }
+
+    // ── The staged environment-digest join (ADR-019 §4 / #198) ─────────────
+    //
+    // The join is written and tested here but NOT wired: `env_digest` is
+    // `None` on every entry the compiler builds, because joining it breaks
+    // every existing foreign function's content hash and that break is the
+    // versioned format bump #160 owns. These three tests are what #160 needs
+    // to land the flip in one commit — one says the hash has not moved yet, one
+    // says it moves correctly when the field is set, and one says a receiver
+    // refuses across the difference.
+
+    #[test]
+    fn the_compiler_does_not_set_an_environment_digest_yet() {
+        // The flag itself. If this ever fails, the format bump landed — check
+        // that #160's version bump landed with it.
+        let program = compile_ok(
+            r#"
+fn python total(xs: Array<number>) -> Result<number> {
+    return 0.0
+}
+"#,
+        );
+        assert_eq!(program.foreign_functions[0].env_digest, None);
+    }
+
+    #[test]
+    fn a_pre_198_entry_hashes_to_the_pre_198_pre_image() {
+        // The `\0env\0` run is gated on `env_digest.is_some()`, so an entry
+        // without one must hash to exactly the bytes the pre-#198 code hashed.
+        // Asserted against an INDEPENDENT spelling of that old pre-image rather
+        // than against the implementation, so the two cannot drift together.
+        use sha2::{Digest, Sha256};
+
+        let mut entry = crate::bytecode::ForeignFunctionEntry {
+            name: "total".to_string(),
+            language: "python".to_string(),
+            body_text: "return 0.0".to_string(),
+            param_names: vec!["xs".to_string()],
+            param_types: vec!["Array<number>".to_string()],
+            return_type: Some("Result<number>".to_string()),
+            arg_count: 1,
+            is_async: false,
+            dynamic_errors: true,
+            return_type_schema_id: None,
+            param_shares: Vec::new(),
+            env_digest: None,
+            content_hash: None,
+            native_abi: None,
+        };
+        entry.compute_content_hash();
+
+        let mut expected = Sha256::new();
+        expected.update(b"python");
+        expected.update(b"\0");
+        expected.update(b"return 0.0");
+        expected.update(b"\0");
+        expected.update(b"Array<number>");
+        expected.update(b"\0");
+        expected.update(b"\0names\0");
+        expected.update(b"xs");
+        expected.update(b"\0");
+        expected.update(b"\0async\0");
+        expected.update([0u8]);
+        expected.update(b"Result<number>");
+        let mut want = [0u8; 32];
+        want.copy_from_slice(&expected.finalize());
+
+        assert_eq!(
+            entry.content_hash,
+            Some(want),
+            "#198 must not move a single existing foreign function's content hash"
+        );
+    }
+
+    #[test]
+    fn same_source_different_lockfile_moves_the_digest_but_not_yet_the_hash() {
+        // Tripwire 1, in its staged form. Two real environment digests derived
+        // from the same declaration and two different lockfiles: the digests
+        // differ, and the content hash does NOT move — because nothing sets the
+        // field yet. The second half is the deliberate part.
+        use shape_runtime::project::{
+            ForeignEnvironmentDigest, ForeignEnvironmentSection, ForeignLockfile, LockedPackage,
+        };
+
+        let section = ForeignEnvironmentSection {
+            runtime: "cpython".to_string(),
+            version: "3.11.7".to_string(),
+            lockfile: None,
+            root: None,
+            checker: None,
+        };
+        let lockfile_of = |version: &str| ForeignLockfile {
+            version: 1,
+            language: "python".to_string(),
+            packages: std::collections::BTreeMap::from([(
+                "numpy".to_string(),
+                LockedPackage {
+                    version: version.to_string(),
+                    integrity: None,
+                    source: None,
+                },
+            )]),
+            modules: Default::default(),
+        };
+        let first = ForeignEnvironmentDigest::derive("python", &section, lockfile_of("1.26.4"));
+        let second = ForeignEnvironmentDigest::derive("python", &section, lockfile_of("2.0.0"));
+        assert_ne!(
+            first.digest(),
+            second.digest(),
+            "a different lockfile is a different environment"
+        );
+
+        let source = r#"
+fn python total(xs: Array<number>) -> Result<number> {
+    return 0.0
+}
+"#;
+        let a = compile_ok(source);
+        let b = compile_ok(source);
+        assert_eq!(
+            a.foreign_functions[0].content_hash, b.foreign_functions[0].content_hash,
+            "the join is staged: until #160 wires it, the environment cannot move a hash"
+        );
+
+        // …and the flip. Set the field by hand — the one line #160 will make
+        // the compiler write — and the hash moves, distinctly per environment.
+        let mut wired_a = a.foreign_functions[0].clone();
+        let mut wired_b = b.foreign_functions[0].clone();
+        wired_a.env_digest = Some(first.digest());
+        wired_b.env_digest = Some(second.digest());
+        wired_a.compute_content_hash();
+        wired_b.compute_content_hash();
+        assert_ne!(
+            wired_a.content_hash, wired_b.content_hash,
+            "once wired, the same source under two lockfiles is two functions"
+        );
+        assert_ne!(
+            wired_a.content_hash, a.foreign_functions[0].content_hash,
+            "wiring the digest is a deliberate break of the existing hash"
         );
     }
 }
