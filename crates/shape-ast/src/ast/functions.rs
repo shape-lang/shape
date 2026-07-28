@@ -183,8 +183,10 @@ impl ForeignFunctionDef {
     ///
     /// Shared by the compiler and the LSP — one text, so the editor and
     /// `shape run` cannot disagree (the same seam as
-    /// [`Self::validate_type_annotations`] and
-    /// [`Self::unsupported_async_rejection`]).
+    /// [`Self::validate_type_annotations`]). The third member of that family,
+    /// the `[C0932]` foreign-async rejection, was deleted with #202: `async fn
+    /// python` / `async fn typescript` now compile to a real off-thread
+    /// offload.
     pub fn unmapped_foreign_types(&self) -> Vec<ForeignTypeRejection> {
         use shape_abi_v1::foreign_types::{ForeignDirection, ForeignType};
 
