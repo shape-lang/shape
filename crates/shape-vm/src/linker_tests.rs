@@ -712,9 +712,10 @@ fn a_matching_environment_digest_links() {
 /// from the resolved environment, which is #160's format bump — see
 /// `ForeignFunctionEntry::env_digest`.
 ///
-/// TO FLIP: delete the `#[ignore]`. The body already spells the assertion; it
-/// fails today only because `compile_ok` produces `env_digest: None` on both
-/// sides, so the two hashes agree and nothing refuses. #160 should also carry
+/// TO FLIP: delete this test's ignore attribute. The body already spells the
+/// assertion; it fails today only because the compiler leaves `env_digest`
+/// `None` on both sides, so the two hashes agree and nothing refuses. #160
+/// should also carry
 /// the two digests into `LinkError::MissingForeignEntry`'s message so the
 /// refusal names the environment mismatch rather than a bare missing hash.
 #[test]

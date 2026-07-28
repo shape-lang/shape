@@ -5550,6 +5550,7 @@ dependencies = [
  "rmpv",
  "serde",
  "serde_json",
+ "sha2",
  "shape-abi-v1",
  "tokio",
 ]
