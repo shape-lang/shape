@@ -667,6 +667,28 @@ fi
 echo
 
 # -----------------------------------------------------------------------------
+# CHECK 19 — ADR-016 public feature candidate inventory (#114, R19)
+# -----------------------------------------------------------------------------
+# ADR-016 §3 lets a complete inventory be built in bounded waves "only after
+# their exact stable rows and content hash are committed". This re-derives those
+# rows from the grammar, the stdlib sources, the CLI enums, the LSP capabilities
+# and the ABI on every run, so the denominator the wave breakdown is planned
+# against cannot silently go stale. Shrinkage is reported before growth: a
+# public surface that disappears from the candidate inventory before it was ever
+# entered in the manifest never gets the removed-row tombstone ADR-016 §2
+# requires. Regenerate with `just regen-public-feature-candidates`; the diff is
+# the review surface.
+echo "=== CHECK 19: public feature candidate inventory (ADR-016) ==="
+if node scripts/check-adr011-012-public-feature-candidates.mjs --self-test; then
+  record_pass "public feature candidates"
+  echo "  -> clean"
+else
+  record_fail "public feature candidates" "a public surface appeared or disappeared without regenerating the inventory, a scan gap was dropped, or a candidate row acquired a classification"
+  echo "  -> FAILED (inventory drift, dropped scan gap, or a classified candidate row)"
+fi
+echo
+
+# -----------------------------------------------------------------------------
 # REPORT
 # -----------------------------------------------------------------------------
 echo "=== SUMMARY ==="

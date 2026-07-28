@@ -278,6 +278,22 @@ check-book-coverage-gaps:
 	node scripts/check-adr011-012-book-coverage-manifest.mjs \
 		--public-features docs/program/adr011-012/public-feature-manifest.json
 
+# --- ADR-016 public feature candidate inventory (#114) ---
+
+# ADR-016 §3 lets a complete inventory be built in bounded waves "only after
+# their exact stable rows and content hash are committed". This re-derives those
+# rows from the grammar, the stdlib sources, the CLI enums, the LSP capabilities
+# and the ABI, so the denominator the waves are planned against cannot go stale.
+# Shrinkage is reported before growth: a public surface that disappears from the
+# candidate inventory never gets the removed-row tombstone ADR-016 §2 requires.
+check-public-feature-candidates:
+	node scripts/check-adr011-012-public-feature-candidates.mjs --self-test
+
+# Regenerate the inventory after a real change to a public surface. The
+# committed diff is the review surface.
+regen-public-feature-candidates:
+	node scripts/check-adr011-012-public-feature-candidates.mjs --write
+
 # Phase 2d merge gate. Run before merging any sub-cluster branch into
 # bulldozer-strictly-typed. Exit-code-based (NOT grep -c) per handover §0.
 # See docs/cluster-audits/phase-2d-handover.md §0 + scripts/verify-merge.sh.
