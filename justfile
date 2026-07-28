@@ -294,6 +294,28 @@ check-public-feature-candidates:
 regen-public-feature-candidates:
 	node scripts/check-adr011-012-public-feature-candidates.mjs --write
 
+# --- ADR-016 Book fence universe (#115) ---
+
+# ADR-016 §6 requires the gate to extract "the full Shape-fence universe" and
+# rejects a percentage over a curated subset. This is that universe, scanned from
+# shape-web's COMMITTED content: 977 fences, 767 of them Shape, of which the
+# committed harness actually executes 385. All three numbers are reported and
+# none is called the universe on its own.
+#
+# Two halves. The integrity half needs only the committed file and runs anywhere,
+# including CI: it recomputes both content hashes, checks the counts against the
+# rows, and refuses a row that acquired a real ADR-016 §5 classification the scan
+# cannot supply. The currency half re-derives from a shape-web checkout and runs
+# where one exists. The gate says which half it ran rather than presenting a
+# skipped re-derivation as a passing one.
+check-book-fences:
+	node scripts/check-adr011-012-book-fence-inventory.mjs --self-test
+
+# Regenerate after Book content changes. Needs a shape-web checkout; reads its
+# committed HEAD, never its working tree.
+regen-book-fences:
+	node scripts/check-adr011-012-book-fence-inventory.mjs --write
+
 # Phase 2d merge gate. Run before merging any sub-cluster branch into
 # bulldozer-strictly-typed. Exit-code-based (NOT grep -c) per handover §0.
 # See docs/cluster-audits/phase-2d-handover.md §0 + scripts/verify-merge.sh.

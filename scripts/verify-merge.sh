@@ -689,6 +689,29 @@ fi
 echo
 
 # -----------------------------------------------------------------------------
+# CHECK 20 — ADR-016 Book fence universe (#115, R19)
+# -----------------------------------------------------------------------------
+# ADR-016 §6 requires the full Shape-fence universe, not a curated subset, and
+# §5 requires every fence to carry a stable explicit identity and one
+# classification. The committed inventory holds every fence in shape-web's
+# COMMITTED content with the markers saying what §5 still wants. This check
+# recomputes both content hashes rather than trusting the stored fields, verifies
+# the counts against the rows, refuses a scanned row that acquired a real §5
+# classification, and rejects a fence identity built from a line number or an
+# ordinal. When a shape-web checkout is present it also re-derives from the
+# corpus; when it is not, it says so rather than reporting a skipped check as a
+# pass.
+echo "=== CHECK 20: Book fence universe (ADR-016) ==="
+if node scripts/check-adr011-012-book-fence-inventory.mjs --self-test; then
+  record_pass "book fence universe"
+  echo "  -> clean"
+else
+  record_fail "book fence universe" "the inventory drifted from the corpus, a count or marker was edited, a scanned row acquired a classification, or an identity carried an ordinal"
+  echo "  -> FAILED (inventory drift, edited count/marker, classified scan row, or an ordinal identity)"
+fi
+echo
+
+# -----------------------------------------------------------------------------
 # REPORT
 # -----------------------------------------------------------------------------
 echo "=== SUMMARY ==="
