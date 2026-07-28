@@ -634,28 +634,6 @@ static CORE_BUILTINS: &[BuiltinMetadata] = &[
     },
     // Comptime-only builtins
     BuiltinMetadata {
-        name: "implements",
-        signature: "implements(type_name: string, trait_name: string) -> bool",
-        description: "Returns true if the given type implements the specified trait. Only valid inside comptime blocks.",
-        category: "Comptime",
-        parameters: &[
-            BuiltinParam {
-                name: "type_name",
-                param_type: "string",
-                optional: false,
-                description: "Type name to check",
-            },
-            BuiltinParam {
-                name: "trait_name",
-                param_type: "string",
-                optional: false,
-                description: "Trait name to check",
-            },
-        ],
-        return_type: "bool",
-        example: Some("comptime { implements(\"Point\", \"Display\") }"),
-    },
-    BuiltinMetadata {
         name: "warning",
         signature: "warning(msg: string) -> ()",
         description: "Emit a compile-time warning. Only valid inside comptime blocks.",
@@ -691,26 +669,6 @@ static CORE_BUILTINS: &[BuiltinMetadata] = &[
         parameters: &[],
         return_type: "Object",
         example: Some("let v = comptime { build_config().version }"),
-    },
-    // W7 (2026-05-17) — `type_info(T)` comptime builtin re-introduced per
-    // `docs/cluster-audits/v0.3-w7-type_info-comptime-typed-return.md` §4
-    // (recommendation Option (b) TypeInfo struct return) + §8 (user
-    // dispositions Q1-Q5). Returns the `TypeInfo` struct declared in
-    // `std::core::types`; pattern mirrors `build_config` (pre-registered
-    // schema + `typed_object_from_pairs`).
-    BuiltinMetadata {
-        name: "type_info",
-        signature: "type_info(type_name: string) -> TypeInfo",
-        description: "Returns the `TypeInfo` reflection record for the named type. Only valid inside comptime blocks. Bare type identifiers passed at the call site are rewritten to string literals by the comptime preprocessor.",
-        category: "Comptime",
-        parameters: &[BuiltinParam {
-            name: "type_name",
-            param_type: "string",
-            optional: false,
-            description: "Type name to reflect on (bare identifiers are auto-stringified at the call site)",
-        }],
-        return_type: "TypeInfo",
-        example: Some("comptime { let ti = type_info(Point); print(ti.name) }"),
     },
     // ADR-009 A1 S4 — the `type_ref`/`type_category` rows are NOT
     // hand-written here. They are owned by the shared reflection catalog

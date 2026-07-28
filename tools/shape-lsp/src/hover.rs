@@ -1239,17 +1239,6 @@ fn get_comptime_block_hover(text: &str, position: Position) -> Option<Hover> {
 
 /// Get hover for comptime builtin functions.
 fn get_comptime_builtin_hover(word: &str) -> Option<Hover> {
-    // B9 (audit `v0.3-lsp-parity-audit.md` §B B9 row): suppress hover for
-    // `type_info`. The bare-name builtin is reachable via metadata for
-    // compiler-side bookkeeping, but the LSP hover surface treats the
-    // comptime-builtin set as the four canonical Comptime entries
-    // (`implements`, `warning`, `error`, `build_config`). `type_info` is
-    // exposed via `<expr>.type()` and `T.type()` plus `type_info(T).fields`
-    // inside comptime; surface-and-stop the bare-name hover so editors don't
-    // imply a stable bare-name surface in user code.
-    if word == "type_info" {
-        return None;
-    }
     let function = unified_metadata()
         .all_functions()
         .into_iter()

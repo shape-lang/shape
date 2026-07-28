@@ -250,7 +250,7 @@ let r = comptime {
 }
 
 /// R4: a boolean cannot authorize an operation that requires implementation
-/// evidence — the legacy `implements(...)` bool result never unifies with
+/// evidence — a bool in the `find_impl` trait position never unifies with
 /// the evidence surface.
 #[test]
 fn r4_boolean_cannot_authorize_implementation_evidence() {
@@ -269,7 +269,7 @@ impl Greetable for User {
 }
 
 let r = comptime {
-  match find_impl(type_ref(User), implements(User, Greetable)) {
+  match find_impl(type_ref(User), true) {
     Some(proof) => "some"
     None => "none"
   }
@@ -328,10 +328,9 @@ print(t)
     .expect_run_err_contains("TraitRef is a comptime-only compiler capability");
 }
 
-/// R7: arbitrary values and legacy reflection descriptors cannot forge
-/// TraitRef/ImplRef evidence — the opaque carriers are distinct types that
-/// never unify with scalars or legacy record shapes (structural, S3; the
-/// decode tier is pinned by the trait_evidence.rs unit tests).
+/// R7: arbitrary values cannot forge TraitRef/ImplRef evidence — the opaque
+/// carriers are distinct types that never unify with scalars (structural, S3;
+/// the decode tier is pinned by the trait_evidence.rs unit tests).
 #[test]
 fn r7_arbitrary_values_and_legacy_descriptors_cannot_forge_evidence() {
     let preamble = r#"
@@ -359,15 +358,6 @@ type User { id: int }
   }
 }"#,
             "TypeRef",
-        ),
-        (
-            r#"let r = comptime {
-  match find_impl(type_ref(User), type_info(User)) {
-    Some(proof) => "some"
-    None => "none"
-  }
-}"#,
-            "TraitRef",
         ),
     ] {
         ShapeTest::new(&format!("{preamble}\n{tail}")).expect_run_err_contains_any(&[

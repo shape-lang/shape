@@ -189,26 +189,6 @@ fn stamp_for(
     }
 }
 
-/// ADR-009 E5 CKPT-4 (design §2 class D — MIGRATE): build a `__ComptimeTypeRef`
-/// for a bare NAMED type, producer-stamped with the type's frozen identity when
-/// the name reconstructs. `type_info(T)`'s top-level `type_ref` describes the
-/// type `T` itself (a bare nominal / primitive), so its stamp AST is
-/// `Basic(name)`: a resolved struct/enum/alias spells via `bare_nominal_name_of`,
-/// a primitive via the synonym-family inverse. An UNRESOLVED name (a scoped
-/// generic parameter, an unknown name — `kind: "Unresolved"`) does not
-/// reconstruct → stamp `INVALID` → the consumer rules it LOUD (no reparse — the
-/// `.source` fallback is DELETED, E5 CKPT-5). Shares the ONE stamp-gate predicate (`stamp_for`) with
-/// every other producer (E1-D7(b), no parallel gate logic).
-pub(crate) fn build_named_type_ref_descriptor(
-    name: &str,
-    kind: Option<&str>,
-    overlay: Option<&FreezeOverlay>,
-) -> KindedSlot {
-    let ast = TypeAnnotation::Basic(name.to_string());
-    let identity = stamp_for(overlay, Some(&ast));
-    build_type_ref_descriptor(name, kind, identity)
-}
-
 /// Build an `Array<string>` slot carried by a stamped v2-raw
 /// `TypedArray<*const StringObj>`.
 fn nb_string_array(strings: Vec<String>) -> Result<KindedSlot, ShapeError> {
@@ -260,8 +240,8 @@ fn nb_object_array(objs: Vec<KindedSlot>) -> Result<KindedSlot, ShapeError> {
     ))
 }
 
-/// Build the `Array<FieldDescriptor>` slot shared by `target.fields` (annotation
-/// handlers) and `type_info(T).fields` (general reflection). Each row is a
+/// Build the `Array<FieldDescriptor>` slot for `target.fields` (annotation
+/// handlers). Each row is a
 /// `__ComptimeFieldDescriptor` TypedObject `{name, type, annotations, optional}`;
 /// a top-level `Option<T>` / `T?` field type is unwrapped to `T` with `optional`
 /// set true (comptime-excellence §4.1.1). Both introspection surfaces produce
@@ -610,8 +590,8 @@ impl ComptimeTarget {
         };
 
         // fields: array of {name, type, annotations, optional} TypedObjects,
-        // built through the shared `build_field_descriptor_array` row builder so
-        // `target.fields` and `type_info(T).fields` produce identical rows. The
+        // built through the shared `build_field_descriptor_array` row builder for
+        // `target.fields`. The
         // field ASTs (E1 slice-5 R2+H1) thread through for per-field stamping.
         let fields_arr =
             build_field_descriptor_array(&self.fields, overlay, &self.field_type_asts)?;

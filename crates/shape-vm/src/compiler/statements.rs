@@ -1062,7 +1062,8 @@ impl BytecodeCompiler {
                 self.build_and_register_vtable(&trait_basename, type_name, impl_block)?;
 
                 // BUG-4.6 fix: Register the trait impl in the type inference
-                // environment so that `implements()` can see it at comptime.
+                // environment so comptime trait-evidence queries (`find_impl`)
+                // can see it.
                 let all_method_names: Vec<String> =
                     impl_block.methods.iter().map(|m| m.name.clone()).collect();
                 if let Some(selector) = impl_name {

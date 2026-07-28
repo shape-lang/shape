@@ -1,3 +1,0 @@
-let r = comptime { implements("int", "Display") }
-let msg = if r { "yes" } else { "no" }
-print(msg)

@@ -1185,15 +1185,11 @@ fn test_comptime_builtin_hover_build_config() {
 }
 
 #[test]
-fn test_comptime_builtin_hover_implements() {
+fn test_comptime_builtin_hover_implements_removed() {
+    // ADR-009 E5 (#21): the legacy `implements(...)` comptime builtin was
+    // deleted; its successor is `find_impl(type_ref(T), trait_ref(Tr))`.
     let hover = get_comptime_builtin_hover("implements");
-    assert!(hover.is_some(), "Should get hover for implements");
-    if let Some(h) = hover {
-        if let HoverContents::Markup(markup) = h.contents {
-            assert!(markup.value.contains("implements"));
-            assert!(markup.value.contains("trait"));
-        }
-    }
+    assert!(hover.is_none(), "implements hover should not exist");
 }
 
 #[test]

@@ -48,7 +48,7 @@
 //! - [`ConstantValue::concrete_type`] — return the value's type. Total.
 //! - [`type_name_constant`] — given a `ConcreteType`, build a
 //!   `ConstantValue::String` carrying the canonical type name (used by
-//!   `type_info()`-style typed comptime queries).
+//!   typed comptime type-name queries).
 //! - [`type_annotation_to_constant_value`] — resolve a `TypeAnnotation` to a
 //!   typed-name `ConstantValue::String`. Returns `None` for annotations that
 //!   cannot be reduced to a `ConcreteType` (unions, intersections, dyn).
@@ -182,7 +182,7 @@ impl ConstantValue {
 /// Build a `ConstantValue::String` whose payload is the canonical type name
 /// for `ct` (e.g. `"int"`, `"number"`, `"Array<int>"`, `"int?"`).
 ///
-/// This is the typed analogue of the v2 Phase 5 `type_info()` query: instead
+/// This is the typed analogue of a comptime type-name query: instead
 /// of returning a NaN-boxed string, it returns a typed `ConstantValue`
 /// whose own concrete type is `String`.
 pub fn type_name_constant(ct: &ConcreteType) -> ConstantValue {

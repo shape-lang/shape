@@ -4,18 +4,16 @@
 //! They provide compile-time reflection, trait checking, and compiler messaging.
 //!
 //! Available builtins:
-//! - `implements(T, Trait)` — returns true if T implements Trait
 //! - `warning(msg)` — emits a compile-time warning
 //! - `error(msg)` — emits a compile-time error
 //! - `build_config()` — returns build-time configuration
-//! - `type_info(T)` — returns the `TypeInfo` reflection record for type `T`
-//!   (W7 2026-05-17 — see
-//!   `docs/cluster-audits/v0.3-w7-type_info-comptime-typed-return.md`)
+//! - `type_ref(T)` / `type_category(T)` / `reflect(T)` / `find_impl(...)` —
+//!   the typed reflection surface (registered in
+//!   `register_frozen_reflection_builtins` / `trait_evidence`)
 
-use shape_runtime::marshal::{register_typed_fn_1, register_typed_fn_2};
+use shape_runtime::marshal::register_typed_fn_1;
 use shape_runtime::module_exports::ModuleExports;
 use shape_runtime::type_schema::typed_object_for_named_schema;
-use shape_runtime::type_system::BuiltinTypes;
 use shape_runtime::typed_module_exports::{
     ConcreteReturn, ConcreteType, TypedReturn, register_typed_function,
 };
@@ -62,11 +60,11 @@ pub(in crate::compiler) use type_reflection::payloads::CallableDescriptor;
 // per the `type_reflection/tests.rs:1779` pattern.
 #[cfg(test)]
 pub(in crate::compiler) use type_reflection::payloads::ParamDescriptor;
-// Legacy-path confinement (ADR-009 §4.1 "one kind vocabulary", ticket A1 S5):
-// `type_reflection::build_type_info_heap_value` is deliberately NOT
-// re-exported. The legacy `type_info` intrinsic below is its only caller
-// (path-qualified); ticket E5 deletes the whole path. Sentinel:
-// `type_reflection/tests.rs::legacy_type_info_vocabulary_is_confined_to_the_legacy_intrinsic_path`.
+// ADR-009 §4.1 "one kind vocabulary" (ticket E5): the legacy `type_info`
+// intrinsic + its `TypeKindLabel` / `build_type_info_heap_value` /
+// `__ComptimeTypeInfo` carrier are DELETED. The typed reflection surface
+// (`type_ref` / `type_category` / `reflect` / `find_impl`) is the only
+// reflection vocabulary. Sentinel: `type_reflection/tests.rs::legacy_type_info_vocabulary_is_gone`.
 
 pub(crate) const TYPE_REF_INTRINSIC: &str = "\u{1}comptime:type-ref";
 pub(crate) const TYPE_CATEGORY_INTRINSIC: &str = "\u{1}comptime:type-category";
@@ -1570,30 +1568,24 @@ fn nb_str(s: &str) -> KindedSlot {
 /// are available during comptime execution but NOT during normal runtime.
 ///
 /// ADR-009 §4.1 (slice S2): the reflection builtins (`type_ref` /
-/// `type_category` / `type_info`) consume the per-compilation-unit semantic
+/// `type_category` / `reflect`) consume the per-compilation-unit semantic
 /// freeze through the shared `Arc<FreezeOverlay>` handle — the intrinsic
 /// closures clone the `Arc`, never snapshot data. The deleted per-site
 /// `build_type_reflection_snapshot` rebuild has no successor here.
 ///
-/// `trait_impl_keys` contains the set of registered trait implementations.
-/// Supported key forms:
-/// - Legacy: "TraitName::TypeName"
-/// - Canonical: "TraitName::TypeName::ImplNameOrDefault"
-///
 /// `site_time_impl_keys` (slice S5) is the superset key snapshot visible at
 /// the comptime site (live keys + J-CT.2 `comptime impl` pairs); it feeds
 /// ONLY `find_impl`'s named Dec 52 post-barrier ordering diagnostic — never
-/// evidence, never the legacy `implements` path.
+/// evidence. Supported key forms: "TraitName::TypeName" and
+/// "TraitName::TypeName::ImplNameOrDefault".
 pub(crate) fn create_comptime_builtins_module(
-    trait_impl_keys: HashSet<String>,
     site_time_impl_keys: HashSet<String>,
     freeze: Arc<FreezeOverlay>,
 ) -> ModuleExports {
-    let mut module = comptime_builtins_module_base(trait_impl_keys, Arc::clone(&freeze));
+    let mut module = comptime_builtins_module_base(Arc::clone(&freeze));
     // ADR-009 B2 (slice S4): `trait_ref` / `find_impl` consume the SAME
     // freeze handle — implementation evidence comes ONLY from the frozen
-    // barrier truth (freeze inputs 4/5), never from the legacy
-    // `trait_impl_keys` set above (E5 deletes that path).
+    // barrier truth (freeze inputs 4/5).
     trait_evidence::register_trait_evidence_builtins(
         &mut module,
         Arc::clone(&freeze),
@@ -1623,46 +1615,8 @@ pub(crate) fn create_comptime_builtins_module(
 /// then finds any composite identity interned at produce time. The overlay
 /// reaching the reflection trio (`create_comptime_builtins_module`) is the same
 /// Arc, so the whole comptime module shares one freeze memo.
-fn comptime_builtins_module_base(
-    trait_impl_keys: HashSet<String>,
-    freeze: Arc<FreezeOverlay>,
-) -> ModuleExports {
+fn comptime_builtins_module_base(freeze: Arc<FreezeOverlay>) -> ModuleExports {
     let mut module = ModuleExports::new("__comptime__");
-
-    // implements(type_name: string, trait_name: string) -> bool
-    // Checks the TypeRegistry's trait impl data captured at compile time.
-    register_typed_fn_2::<_, Arc<String>, Arc<String>>(
-        &mut module,
-        "implements",
-        "Check if a type implements a trait at compile time",
-        [("type_name", "string"), ("trait_name", "string")],
-        ConcreteType::Bool,
-        move |type_name, trait_name, _ctx| {
-            let has_impl = |ty: &str| {
-                let legacy = format!("{}::{}", trait_name, ty);
-                let canonical_prefix = format!("{}::{}::", trait_name, ty);
-                trait_impl_keys.contains(&legacy)
-                    || trait_impl_keys
-                        .iter()
-                        .any(|key| key.starts_with(&canonical_prefix))
-            };
-
-            if has_impl(type_name.as_str()) {
-                return Ok(TypedReturn::Concrete(ConcreteReturn::Bool(true)));
-            }
-
-            // Numeric widening: integer-family aliases can satisfy number-family impls.
-            if BuiltinTypes::is_integer_type_name(type_name.as_str()) {
-                for widen_to in &["number", "float", "f64"] {
-                    if has_impl(widen_to) {
-                        return Ok(TypedReturn::Concrete(ConcreteReturn::Bool(true)));
-                    }
-                }
-            }
-
-            Ok(TypedReturn::Concrete(ConcreteReturn::Bool(false)))
-        },
-    );
 
     // warning(msg: string) -> Unit
     // Collects a compile-time warning. The message flows out on the
@@ -1801,10 +1755,10 @@ fn comptime_builtins_module_base(
         },
     );
 
-    // The freeze-consuming reflection trio (`type_ref` / `type_category` /
-    // `type_info`) is NOT part of the base: `create_comptime_builtins_module`
-    // registers it with the shared `Arc<FreezeOverlay>` handle (the barrier
-    // runs before every comptime site — S3).
+    // The freeze-consuming reflection builtins (`type_ref` / `type_category` /
+    // `reflect` / `find_impl`) are NOT part of the base:
+    // `create_comptime_builtins_module` registers them with the shared
+    // `Arc<FreezeOverlay>` handle (the barrier runs before every comptime site — S3).
 
     // item_fn(name: string, return_type: string | TypeRef, value: literal) -> ItemFragment
     //
@@ -2537,7 +2491,7 @@ fn comptime_builtins_module_base(
 }
 
 /// Register the freeze-consuming reflection builtins (`type_ref` /
-/// `type_category` / `reflect` / legacy `type_info`) against the shared
+/// `type_category` / `reflect`) against the shared
 /// per-compilation-unit freeze handle (ADR-009 §4.1, slice S2; `reflect`
 /// added in B1 S3). Each closure clones the `Arc<FreezeOverlay>` — the
 /// base index is shared, never rebuilt and never copied.
@@ -2936,66 +2890,6 @@ fn register_frozen_reflection_builtins(module: &mut ModuleExports, freeze: Arc<F
             )?;
             Ok(TypedReturn::Concrete(ConcreteReturn::OpaqueTypedObject(
                 Arc::new(carrier),
-            )))
-        },
-    );
-
-    // W7 (2026-05-17) — `type_info(T)` comptime builtin.
-    //
-    // Returns the `TypeInfo` reflection record for the named type. See
-    // `docs/cluster-audits/v0.3-w7-type_info-comptime-typed-return.md` §4
-    // (recommendation (b) TypeInfo struct return) + §8 (user dispositions
-    // Q1-Q5). Bare type-identifier arguments are rewritten to string
-    // literals at the call site by `rewrite_type_info_ident_args` in
-    // `comptime.rs` (mirror of the `implements` precedent).
-    //
-    // Schema layout matches `crates/shape-runtime/stdlib-src/core/types.shape`:
-    //   TypeInfo { name: string, kind: TypeKind }
-    //   FieldInfo { name: string, type_name: string }   // future-use; not
-    //                                                   // transitively reachable
-    //                                                   // through TypeInfo today
-    //   TypeKind = enum { Int Float Bool String Decimal BigInt
-    //                     Array HashMap Option Result TypedObject
-    //                     TraitObject TypeVar Function Tuple Unit Unknown }
-    //
-    // S2 (comptime-excellence §4.3): the TypeInfo record is built via the
-    // reserved, concrete named schema `__ComptimeTypeInfo` ({name, kind},
-    // registered at init in `builtin_schemas.rs`) — see
-    // `build_type_info_heap_value`. The previous
-    // `register_predeclared_any_schema(&["kind", "name"])` lazily minted an
-    // anonymous `{kind, name}` schema whose field ORDER was the reverse of
-    // the stdlib `TypeInfo {name, kind}` the compiler uses for the
-    // `OpaqueTypedObject("TypeInfo")` return type, so typed field access
-    // read `name`/`kind` at swapped offsets. Named construction in
-    // {name, kind} order aligns the physical layout with the consumer.
-    //
-    // `type_info(T).fields` returns the declared fields of a TypedObject type as
-    // an `Array<FieldDescriptor>` — the same row shape as `target.fields` in an
-    // annotation handler (comptime-excellence §4.1.2). Every non-TypedObject kind
-    // reflects an empty array.
-    //
-    // This legacy path (TypeKindLabel string vocabulary) consumes the SAME
-    // freeze handle as the typed reflection surface; E5 deletes it.
-    let freeze_for_type_info = freeze;
-    register_typed_function(
-        module,
-        "type_info",
-        "Return the TypeInfo reflection record for the named type",
-        vec![],
-        ConcreteType::OpaqueTypedObject("TypeInfo".to_string()),
-        move |nb_args, _ctx| {
-            // The type name arrives as a string arg (bare type identifiers are
-            // rewritten to string literals before the comptime block runs). If
-            // it cannot be read as a string, surface a clean error rather than
-            // reflecting an arbitrary name.
-            let raw_name = nb_args
-                .first()
-                .and_then(|nb| nb.as_str())
-                .ok_or_else(|| "type_info expects a type name".to_string())?;
-            let type_info_hv =
-                type_reflection::build_type_info_heap_value(raw_name, &freeze_for_type_info)?;
-            Ok(TypedReturn::Concrete(ConcreteReturn::OpaqueTypedObject(
-                Arc::new(type_info_hv),
             )))
         },
     );
@@ -4976,7 +4870,6 @@ mod tests {
     fn test_comptime_builtins_module_created() {
         let module = create_comptime_builtins_module(
             Default::default(),
-            Default::default(),
             semantic_freeze::overlay_for_tests(&crate::compiler::BytecodeCompiler::new()),
         );
         assert_eq!(module.name, "__comptime__");
@@ -4986,7 +4879,6 @@ mod tests {
     fn test_comptime_warning_builtin() {
         let ctx = test_ctx();
         let module = create_comptime_builtins_module(
-            Default::default(),
             Default::default(),
             semantic_freeze::overlay_for_tests(&crate::compiler::BytecodeCompiler::new()),
         );
@@ -5007,7 +4899,6 @@ mod tests {
         let ctx = test_ctx();
         let module = create_comptime_builtins_module(
             Default::default(),
-            Default::default(),
             semantic_freeze::overlay_for_tests(&crate::compiler::BytecodeCompiler::new()),
         );
         let error = module
@@ -5022,57 +4913,9 @@ mod tests {
     }
 
     #[test]
-    fn test_comptime_implements_returns_false_when_not_registered() {
-        let module = create_comptime_builtins_module(
-            Default::default(),
-            Default::default(),
-            semantic_freeze::overlay_for_tests(&crate::compiler::BytecodeCompiler::new()),
-        );
-        let result = module
-            .typed_exports()
-            .get("implements")
-            .expect("implements function should exist");
-        assert_eq!(result.return_type, ConcreteType::Bool);
-    }
-
-    #[test]
-    fn test_comptime_implements_returns_true_when_registered() {
-        let mut impls = HashSet::new();
-        impls.insert("Serializable::number".to_string());
-        impls.insert("Display::Currency".to_string());
-        let module = create_comptime_builtins_module(
-            impls,
-            Default::default(),
-            semantic_freeze::overlay_for_tests(&crate::compiler::BytecodeCompiler::new()),
-        );
-        let result = module
-            .typed_exports()
-            .get("implements")
-            .expect("implements function should exist");
-        assert_eq!(result.return_type, ConcreteType::Bool);
-    }
-
-    #[test]
-    fn test_comptime_implements_numeric_widening() {
-        let mut impls = HashSet::new();
-        impls.insert("Serializable::number".to_string());
-        let module = create_comptime_builtins_module(
-            impls,
-            Default::default(),
-            semantic_freeze::overlay_for_tests(&crate::compiler::BytecodeCompiler::new()),
-        );
-        let result = module
-            .typed_exports()
-            .get("implements")
-            .expect("implements function should exist");
-        assert_eq!(result.return_type, ConcreteType::Bool);
-    }
-
-    #[test]
     fn test_comptime_build_config_builtin() {
         let ctx = test_ctx();
         let module = create_comptime_builtins_module(
-            Default::default(),
             Default::default(),
             semantic_freeze::overlay_for_tests(&crate::compiler::BytecodeCompiler::new()),
         );
@@ -5125,7 +4968,6 @@ mod freeze_handle_module_tests {
             .identity_of("int")
             .expect("int is frozen in every unit");
         let module = create_comptime_builtins_module(
-            Default::default(),
             Default::default(),
             Arc::clone(&overlay),
         );
@@ -5206,7 +5048,7 @@ mod freeze_handle_module_tests {
         let int_identity = overlay
             .identity_of("int")
             .expect("int is frozen in every unit");
-        let module = create_comptime_builtins_module(Default::default(), Default::default(), Arc::clone(&overlay));
+        let module = create_comptime_builtins_module(Default::default(), Arc::clone(&overlay));
         let ctx = test_ctx();
 
         let reflect = module
@@ -5262,7 +5104,7 @@ mod freeze_handle_module_tests {
         let nominal_identity = overlay
             .identity_of("Array")
             .expect("Array is frozen as a builtin nominal");
-        let module = create_comptime_builtins_module(Default::default(), Default::default(), Arc::clone(&overlay));
+        let module = create_comptime_builtins_module(Default::default(), Arc::clone(&overlay));
         let ctx = test_ctx();
 
         let reflect = module
@@ -5282,7 +5124,7 @@ mod freeze_handle_module_tests {
     #[test]
     fn reflect_intrinsic_rejects_non_type_ref_args_and_unknown_identities() {
         let overlay = semantic_freeze::overlay_for_tests(&crate::compiler::BytecodeCompiler::new());
-        let module = create_comptime_builtins_module(Default::default(), Default::default(), Arc::clone(&overlay));
+        let module = create_comptime_builtins_module(Default::default(), Arc::clone(&overlay));
         let ctx = test_ctx();
         let reflect = module
             .typed_exports()

@@ -2232,86 +2232,74 @@ mod payload_query {
     }
 }
 
-/// ADR-009 §4.1 "one kind vocabulary" (ticket A1, slice S5): confinement
-/// sentinel for the legacy `type_info` vocabulary.
+/// ADR-009 §4.1 "one kind vocabulary" (ticket E5 / #21, Tranche 1): DELETION
+/// sentinel for the legacy `type_info` reflection vocabulary.
 ///
-/// `TypeKindLabel` / `classify_legacy_type_info` / `build_type_info_heap_value`
-/// and the `__ComptimeTypeInfo` schema survive ONLY on the legacy `type_info`
-/// intrinsic path until ticket E5 deletes them. This sentinel (file-read, same
-/// pattern as `executor/tests/no_dynamic.rs`) pins that confinement so the
-/// vocabulary cannot silently re-spread into the semantic-freeze module, the
-/// shared runtime reflection catalog, or a crate-wide re-export before E5.
+/// The `type_info(T)` builtin and its `TypeKindLabel` / `classify_legacy_type_info`
+/// / `build_type_info_heap_value` / `__ComptimeTypeInfo` carrier were DELETED
+/// (successor: the typed `reflect(type_ref(T))` / `type_category(...)` surface).
+/// This sentinel (file-read, same pattern as `executor/tests/no_dynamic.rs`)
+/// makes the successor structurally impossible to walk back: it fails the build
+/// if any of the deleted DEFINITION forms reappear. It matches definition forms,
+/// not bare symbol names, so tombstone comments that describe the deleted code by
+/// name (allowed per CLAUDE.md) do not trip it.
 #[test]
-fn legacy_type_info_vocabulary_is_confined_to_the_legacy_intrinsic_path() {
+fn legacy_type_info_vocabulary_is_gone() {
     let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
     let read = |relative: &str| {
         std::fs::read_to_string(manifest.join(relative))
             .unwrap_or_else(|error| panic!("sentinel could not read {relative}: {error}"))
     };
 
-    const LEGACY_VOCABULARY: [&str; 4] = [
-        "TypeKindLabel",
-        "classify_legacy_type_info",
-        "build_type_info_heap_value",
-        "__ComptimeTypeInfo",
-    ];
-
-    // 1. The semantic-freeze module and the shared runtime catalog must not
-    //    mention the legacy vocabulary at all (not even in comments — the new
-    //    surface describes the legacy path by ticket, never by symbol).
-    for relative in [
-        "src/compiler/comptime_builtins/semantic_freeze.rs",
-        "../shape-runtime/src/comptime_reflection.rs",
+    // 1. The legacy classifier/record-builder definitions are DELETED from the
+    //    reflection module. Definition forms (`enum ` / `fn `), so a tombstone
+    //    comment naming the symbols in backticks does not match.
+    let reflection = read("src/compiler/comptime_builtins/type_reflection.rs");
+    for needle in [
+        "enum TypeKindLabel",
+        "fn classify_legacy_type_info",
+        "fn build_type_info_heap_value",
     ] {
-        let source = read(relative);
-        for symbol in LEGACY_VOCABULARY {
-            assert!(
-                !source.contains(symbol),
-                "legacy type_info vocabulary `{symbol}` leaked into {relative} \
-                 (E5-deletes territory; confined to the legacy type_info path)"
-            );
-        }
-    }
-
-    // 2. No crate-wide re-export: in `comptime_builtins.rs`,
-    //    `build_type_info_heap_value` may appear only path-qualified at the
-    //    single legacy `type_info` intrinsic call site (or in comments),
-    //    never inside a `use` list.
-    let parent = read("src/compiler/comptime_builtins.rs");
-    for (index, _) in parent.match_indices("build_type_info_heap_value") {
-        let qualified = parent[..index].ends_with("type_reflection::");
-        let line_start = parent[..index].rfind('\n').map_or(0, |p| p + 1);
-        let comment = parent[line_start..index].trim_start().starts_with("//");
         assert!(
-            qualified || comment,
-            "`build_type_info_heap_value` must stay confined: every non-comment \
-             use in comptime_builtins.rs must be path-qualified \
-             `type_reflection::build_type_info_heap_value` at the legacy \
-             type_info intrinsic (found an unqualified occurrence, e.g. a \
-             crate-wide `use` re-export)"
+            !reflection.contains(needle),
+            "legacy type_info definition `{needle}` reappeared in type_reflection.rs \
+             — the E5 deletion (successor: reflect(type_ref(T))) must stay deleted"
         );
     }
 
-    // 3. Visibility confinement: the legacy builder is `pub(super)` (reachable
-    //    from the parent intrinsic-registration module only), never
-    //    `pub(crate)`.
-    let reflection = read("src/compiler/comptime_builtins/type_reflection.rs");
-    assert!(
-        reflection.contains("pub(super) fn build_type_info_heap_value"),
-        "build_type_info_heap_value must be pub(super) (legacy-path confinement)"
-    );
+    // 2. The `__ComptimeTypeInfo` carrier schema is DELETED. The quoted schema
+    //    name (its registration / whitelist / has_type key) must not reappear in
+    //    the schema-registration files.
+    for relative in [
+        "../shape-runtime/src/type_schema/builtin_schemas.rs",
+        "src/compiler/post_inference_verify.rs",
+    ] {
+        let source = read(relative);
+        assert!(
+            !source.contains("\"__ComptimeTypeInfo\""),
+            "the deleted `__ComptimeTypeInfo` carrier schema reappeared in {relative} \
+             (registration/whitelist) — it must stay deleted"
+        );
+    }
 
-    // 4. E5-deletes markers: each confined symbol's definition site carries
-    //    the `E5-deletes` confinement marker for grep visibility.
+    // 3. The `type_info` and `implements` comptime-builtin metadata rows are
+    //    DELETED. The catalog-row form (`name: "..."`) must not reappear.
+    let metadata = read("../shape-runtime/src/builtin_metadata.rs");
+    for needle in ["name: \"type_info\"", "name: \"implements\""] {
+        assert!(
+            !metadata.contains(needle),
+            "a deleted comptime-builtin metadata row (`{needle}`) reappeared in \
+             builtin_metadata.rs — type_info/implements stay deleted"
+        );
+    }
+
+    // 4. The `implements` intrinsic declaration is DELETED from the stdlib
+    //    prelude source.
+    let intrinsics = read("../shape-runtime/stdlib-src/core/intrinsics.shape");
     assert!(
-        reflection.contains("E5-deletes"),
-        "type_reflection.rs must carry the E5-deletes confinement marker"
-    );
-    let schemas = read("../shape-runtime/src/type_schema/builtin_schemas.rs");
-    assert!(
-        schemas.contains("E5-deletes"),
-        "builtin_schemas.rs __ComptimeTypeInfo registration must carry the \
-         E5-deletes confinement marker"
+        !intrinsics.contains("fn implements("),
+        "the deleted `implements` intrinsic declaration reappeared in intrinsics.shape \
+         — its successor is find_impl(type_ref(T), trait_ref(Tr))"
     );
 }
 

@@ -898,7 +898,7 @@ fn __t__() {
                 "trait lookup cannot use text",
             ),
             (
-                r#"fn __t__() { return match find_impl(type_ref(User), implements(User, Greetable)) { Some(p) => 1 None => 0 } }"#,
+                r#"fn __t__() { return match find_impl(type_ref(User), true) { Some(p) => 1 None => 0 } }"#,
                 "a boolean cannot authorize an operation that requires implementation evidence",
             ),
         ] {

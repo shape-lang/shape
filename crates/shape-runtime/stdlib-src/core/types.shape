@@ -1,7 +1,11 @@
 /// @module std::core::types
 /// Compile-time type reflection — `TypeInfo`, `FieldInfo`, `TypeKind`.
 ///
-/// Returned by the `type_info(T)` comptime builtin. `TypeInfo` carries a
+/// The legacy comptime builtin that produced these records was deleted in
+/// ADR-009 E5 (#21); they are retained as nominal types with no producer. The
+/// typed reflection surface is `reflect(type_ref(T))` plus `type_category(...)`.
+///
+/// `TypeInfo` carries a
 /// canonical type name and a `TypeKind` discriminator. `FieldInfo` describes
 /// a single struct field; the `fields` slice on `TypeInfo` is populated for
 /// `TypedObject` kinds. `TypeKind` is a flat enum discriminator (audit-doc
@@ -107,26 +111,18 @@ pub type FieldInfo {
 
 /// Compile-time reflection of a Shape type.
 ///
-/// Returned by `type_info(T)` inside `comptime { }` blocks.
+/// NOTE (ADR-009 E5, ticket #21): the legacy `type_info(T)` builtin that
+/// produced this record was DELETED. The typed reflection surface is
+/// `reflect(type_ref(T))` (returning a `FrozenType<T>` sum) plus
+/// `type_category(...)`. This record shape is retained as a nominal type only;
+/// it currently has no producer.
 ///
 /// `kind` is a string-encoded `TypeKind` variant name (e.g. `"Int"`,
-/// `"TypedObject"`, `"Unresolved"`). Comptime user code can compare via
-/// equality (`if ti.kind == "TypedObject" { ... }`). The variant-name
-/// strings are stable and match `TypeKind` variant declarations 1:1.
+/// `"TypedObject"`, `"Unresolved"`). The variant-name strings match `TypeKind`
+/// variant declarations 1:1.
 ///
 /// `fields` is the declared-field descriptor array (populated for
-/// `TypedObject` kinds; empty for every other kind). It mirrors the runtime
-/// `__ComptimeTypeInfo` schema (`builtin_schemas.rs`), which is the single
-/// owner of the reflected object layout (§4.3.6) — comptime access
-/// (`type_info(T).fields[i].name`) resolves through that runtime schema, so
-/// this user-facing mirror must carry `fields` in lockstep.
-///
-/// **W7-followup**: once the comptime VM can resolve user-defined
-/// enum schemas from the outer compilation's `current_registry()`
-/// (current state: comptime VM gets a fresh per-program registry per
-/// `compile_and_execute_comptime_program` in `comptime.rs`), `kind`
-/// will project to a `TypeKind` enum-variant value directly. The
-/// string encoding here is the cross-registry-boundary stable form.
+/// `TypedObject` kinds; empty for every other kind).
 pub type TypeInfo {
     /// Canonical type name (e.g. `"Point"`, `"int"`, `"T"`).
     name: string,

@@ -9,5 +9,4 @@ mod functions;
 mod nominal;
 mod reflect;
 mod trait_evidence;
-mod type_info_chained;
 mod typed_constructor;

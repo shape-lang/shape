@@ -194,8 +194,6 @@ builtin fn snapshot() -> Snapshot;
 /// Exit process with optional code.
 builtin fn exit(code: number = 0) -> void;
 
-/// Check whether a type implements a trait (comptime only).
-builtin fn implements(type_name: string, trait_name: string) -> bool;
 /// Emit a compile-time warning.
 builtin fn warning(msg: string) -> void;
 /// Emit a compile-time error and abort compilation.

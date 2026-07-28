@@ -779,18 +779,6 @@ fn raw_composite_frozen_categories_cannot_escape_to_runtime_code() {
     .expect_run_err_contains("FrozenTypeCategory is comptime-only reflection data");
 }
 
-/// S5 R14 (legacy confinement): the E5-confined `type_info` path learned
-/// NOTHING from A2 — the checked type-argument grammar exists ONLY for
-/// `type_ref(`, so a composite spelling under `type_info` parses as a VALUE
-/// array literal whose elements are undefined value names (named rejection,
-/// never a classified legacy descriptor). The unit-level confinement
-/// sentinel (type_reflection/tests.rs) pins the source-level vocabulary.
-#[test]
-fn legacy_type_info_does_not_learn_composite_forms() {
-    ShapeTest::new("let info = comptime { type_info([int, string]) }")
-        .expect_run_err_contains("Undefined variable");
-}
-
 #[test]
 fn strings_cannot_construct_type_refs() {
     ShapeTest::new(
@@ -873,12 +861,6 @@ fn type_ref_requires_exactly_one_type_argument() {
 fn type_ref_is_comptime_only() {
     ShapeTest::new("let reflected = type_ref(int)")
         .expect_run_err_contains("comptime-only builtin");
-}
-
-#[test]
-fn legacy_reflection_descriptors_cannot_forge_type_refs() {
-    ShapeTest::new("let category = comptime { type_category(type_info(int).type_ref) }")
-        .expect_run_err_contains_any(&["TypeRef", "not compatible", "do not unify"]);
 }
 
 #[test]

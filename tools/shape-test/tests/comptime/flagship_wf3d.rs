@@ -24,9 +24,8 @@
 //!        it carries `Function.mir_data` and the JIT compiles it NATIVELY
 //!        (previously: bytecode-only → Phase-4 "has no MIR data" → whole-program
 //!        deopt).
-//!   F2 — `type_info(T)` reflection: `type_info(T).fields[i].name` / `.type`
-//!        resolve to concrete strings; `kind` uses the renamed discriminator
-//!        strings (`Number`, `Unresolved`) per §4.1.2.
+//!   F2 — DELETED with the legacy reflection builtin in ADR-009 E5 #21; the
+//!        typed successor surface is gated by `comptime/reflect.rs`.
 //!   F3 — comptime `error()` routes through the LSDS diagnostic pipeline
 //!        (`[C0001]`), the same `Diagnostic` the CLI serializes to JSON.
 //!   F4 — impl-level method emission: `extend {T} { method m() -> ... }`,
@@ -63,38 +62,9 @@ fn wf3d_f1_generated_free_fn_jit() {
         .expect_string("User schema");
 }
 
-// ============================================================================
-// F2 — type_info(T).fields[i].name / .type + renamed kind discriminators
-// ============================================================================
-
-const F2_PROGRAM: &str = r#"
-type Point { x: int, y: number }
-let reflected: string = comptime {
-    let ti = type_info(Point)
-    let n = type_info("number")
-    let u = type_info("NopeXYZ")
-    f"{ti.name}|{ti.kind}|{ti.fields[0].name}:{ti.fields[0].type}|{ti.fields[1].name}:{ti.fields[1].type}|{n.kind}|{u.kind}"
-}
-reflected
-"#;
-
-// `type_info("number").kind` == "Number" (renamed from the old "Float");
-// `type_info("NopeXYZ").kind` == "Unresolved" (renamed from the old
-// "Unknown"; also absorbs the old "TypeVar"). Field descriptor rows carry
-// `name` + `type` (the runtime `__ComptimeFieldDescriptor` shape).
-const F2_EXPECTED: &str = "Point|TypedObject|x:int|y:number|Number|Unresolved";
-
-#[test]
-fn wf3d_f2_type_info_fields_and_kind_vm() {
-    ShapeTest::new(F2_PROGRAM).expect_string(F2_EXPECTED);
-}
-
-#[test]
-fn wf3d_f2_type_info_fields_and_kind_jit() {
-    ShapeTest::new(F2_PROGRAM)
-        .with_jit()
-        .expect_string(F2_EXPECTED);
-}
+// F2 (legacy `type_info(T)` reflection) was DELETED in ADR-009 E5 #21 together
+// with the `type_info` builtin. The typed reflection surface is covered by the
+// `reflect(...)` / `type_category(...)` suite in `comptime/reflect.rs`.
 
 // ============================================================================
 // F3 — comptime error() routes through the LSDS diagnostic pipeline (C0001)

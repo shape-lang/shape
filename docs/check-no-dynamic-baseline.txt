@@ -18,7 +18,7 @@
 0	\bConvertBoolToString\b	W4-d Convert<X>To<Y> opcode pattern
 0	\brebox_native_bits\b	W-series typed->tagged rebox helper
 8	\blast_emitted_native_kind\b	sparse kind tracker (replace with prove_native_kind)
-12	\bcapture_as_value\b	closure capture deletion progress
+4	\bcapture_as_value\b	closure capture deletion progress
 17	\b(nan_box|NanBox|NanTag)\b	NanBox residuals
 0	\bSlotKind::(Dynamic|Unknown)\b	deleted SlotKind variants
 0	ValueBits shim	rejected rename

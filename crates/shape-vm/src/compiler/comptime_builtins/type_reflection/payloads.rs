@@ -717,7 +717,7 @@ fn frozen_record_descriptor_slot(descriptor: &RecordDescriptor) -> Result<Kinded
 /// field's value-type frozen identity halves + the `optional` flag + the plain
 /// field `name`. ADR-009 E5 CKPT-3: `name` is the spell/reflect-only freeze fact
 /// (a `String`-kind slot, refcount-cloned into the object by the schema builder —
-/// same pattern as `nb_str` populating `__ComptimeTypeInfo.name`); the member
+/// same pattern as `nb_str` populating `__ComptimeTarget.name`); the member
 /// identity remains the identity/dedup-bearing handle (Dec 57).
 fn record_field_slot(field: &RecordFieldDescriptor) -> KindedSlot {
     typed_object_for_named_schema(

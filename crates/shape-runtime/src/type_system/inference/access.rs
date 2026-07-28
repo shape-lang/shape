@@ -816,33 +816,6 @@ impl TypeInferenceEngine {
         ))
     }
 
-    /// The `FieldDescriptor` row shape (comptime-excellence §4.1.1) as a
-    /// concrete object annotation, so `type_info(T).fields[i]` /
-    /// `target.fields[i]` subscript access resolves to a real object type with
-    /// `.name` / `.type` / `.optional` / `.annotations` fields (an
-    /// `unknown`-element array is iterable but not indexable, which regressed
-    /// the flagship `fields[0].name` form).
-    fn comptime_field_descriptor_annotation() -> TypeAnnotation {
-        TypeAnnotation::Object(vec![
-            Self::typed_object_field("name", TypeAnnotation::Basic("string".to_string())),
-            Self::typed_object_field("type", TypeAnnotation::Basic("string".to_string())),
-            Self::typed_object_field(
-                "annotations",
-                TypeAnnotation::Array(Box::new(TypeAnnotation::Basic("string".to_string()))),
-            ),
-            Self::typed_object_field("optional", TypeAnnotation::Basic("bool".to_string())),
-            Self::typed_object_field("type_ref", Self::comptime_type_ref_annotation()),
-        ])
-    }
-
-    fn comptime_type_ref_annotation() -> TypeAnnotation {
-        TypeAnnotation::Object(vec![
-            Self::typed_object_field("name", TypeAnnotation::Basic("string".to_string())),
-            Self::typed_object_field("kind", TypeAnnotation::Basic("string".to_string())),
-            Self::typed_object_field("source", TypeAnnotation::Basic("string".to_string())),
-        ])
-    }
-
     fn infer_comptime_builtin_call(
         &mut self,
         name: &str,
@@ -861,10 +834,6 @@ impl TypeInferenceEngine {
 
         let string = BuiltinTypes::string();
         let result = match name {
-            "implements" => {
-                self.check_comptime_builtin_args(arg_types, &[string.clone(), string], call_span)?;
-                BuiltinTypes::boolean()
-            }
             "warning" => {
                 self.check_comptime_builtin_args(arg_types, &[string], call_span)?;
                 BuiltinTypes::void()
@@ -890,24 +859,6 @@ impl TypeInferenceEngine {
                     ("target_arch", TypeAnnotation::Basic("string".to_string())),
                     ("target_os", TypeAnnotation::Basic("string".to_string())),
                     ("version", TypeAnnotation::Basic("string".to_string())),
-                ])
-            }
-            "type_info" => {
-                self.check_comptime_builtin_args(arg_types, &[string], call_span)?;
-                Self::comptime_object_type(vec![
-                    ("kind", TypeAnnotation::Basic("string".to_string())),
-                    ("name", TypeAnnotation::Basic("string".to_string())),
-                    // `fields` is the declared-field descriptor array
-                    // (comptime-excellence §4.1.2). A concrete `FieldDescriptor`
-                    // element (not `unknown`) so `type_info(T).fields[i].name`
-                    // subscript access resolves identically to `target.fields`.
-                    (
-                        "fields",
-                        TypeAnnotation::Array(Box::new(
-                            Self::comptime_field_descriptor_annotation(),
-                        )),
-                    ),
-                    ("type_ref", Self::comptime_type_ref_annotation()),
                 ])
             }
             "type_ref" => {
@@ -1081,8 +1032,7 @@ impl TypeInferenceEngine {
                                 "a boolean cannot authorize an operation that requires \
                                  implementation evidence: find_impl consumes a compiler-issued \
                                  TypeRef and TraitRef and answers with ImplRef evidence — a bool \
-                                 (including an implements(...) result) never unifies with \
-                                 implementation evidence"
+                                 never unifies with implementation evidence"
                                     .to_string(),
                             ));
                         }
@@ -1164,14 +1114,12 @@ impl TypeInferenceEngine {
         // the expected param is a concrete `Function` shape; everything else
         // falls through to plain `infer_expr` (unchanged behavior).
         let expected_closure_param_types = self.callee_concrete_param_fn_types(name, args);
-        // `type_info(User)` / `type_ref(User)` / `implements(Bar, Serialize)`
-        // name a type or trait directly as the argument: a bare identifier that
-        // is not a value binding. The comptime driver rewrites legacy reflection
-        // arguments to strings, while `type_ref` receives an unspellable typed
-        // syntax marker and is then lowered to its compiler-issued identity.
-        // Mirror those distinct carriers here so the outer type-check accepts
-        // the bare-identifier form without making TypeRef constructible from
-        // source strings.
+        // `type_ref(User)` / `trait_ref(Greetable)` name a type or trait
+        // directly as the argument: a bare identifier that is not a value
+        // binding. `type_ref` receives an unspellable typed syntax marker and is
+        // then lowered to its compiler-issued identity. Mirror that carrier here
+        // so the outer type-check accepts the bare-identifier form without making
+        // TypeRef constructible from source strings.
         let is_type_ref_builtin =
             name == "type_ref" && crate::builtin_metadata::is_comptime_builtin_function(name);
         if is_type_ref_builtin {
@@ -1264,9 +1212,7 @@ impl TypeInferenceEngine {
             }
         }
         let type_symbol_ident_args = crate::builtin_metadata::is_comptime_builtin_function(name)
-            && ((self.in_comptime_context() && matches!(name, "type_info" | "implements"))
-                || is_type_ref_builtin
-                || is_trait_ref_builtin);
+            && (is_type_ref_builtin || is_trait_ref_builtin);
         let mut arg_types: Vec<Type> = Vec::with_capacity(args.len());
         for (i, arg) in args.iter().enumerate() {
             // ADR-009 A2 (S4): the type-syntax carrier is never inferred as a

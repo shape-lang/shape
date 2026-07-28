@@ -2690,7 +2690,7 @@ function my_func() {
     fn test_validate_comptime_builtins_outside_comptime() {
         use shape_ast::parser::parse_program;
 
-        let source = r#"let x = implements("Point", "Display")"#;
+        let source = r#"let x = build_config()"#;
         let program = parse_program(source).unwrap();
         let diagnostics = validate_comptime_builtins_context(&program, source);
 
@@ -2707,7 +2707,7 @@ function my_func() {
     fn test_validate_comptime_builtins_inside_comptime_ok() {
         use shape_ast::parser::parse_program;
 
-        let source = "comptime {\n  let has = implements(\"Point\", \"Display\")\n}";
+        let source = "comptime {\n  let has = build_config()\n}";
         let program = parse_program(source).unwrap();
         let diagnostics = validate_comptime_builtins_context(&program, source);
 

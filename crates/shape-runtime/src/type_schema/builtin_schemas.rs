@@ -922,32 +922,6 @@ pub fn register_builtin_schemas(registry: &mut TypeSchemaRegistry) -> BuiltinSch
         .array_field("captures", FieldType::Any)
         .register(registry);
 
-    // TypeInfo record returned by the `type_info(T)` comptime builtin.
-    // `__`-prefixed to avoid clashing with the user-visible stdlib
-    // `TypeInfo` type (`stdlib-src/core/types.shape`). `name` / `kind` NAMES
-    // and ORDER lead so the object's physical layout aligns with the first two
-    // typed fields; `fields` follows as the declared-field descriptor array.
-    // Field access on the reflection result resolves by NAME through this
-    // schema, so appending `fields` does not disturb `name` / `kind` reads.
-    //
-    // E5-deletes: this schema is the carrier of the LEGACY `type_info`
-    // reflection path only (ADR-009 §4.1 "one kind vocabulary" — the typed
-    // surface uses `__ComptimeFrozenTypeRef` / `FrozenTypeCategory`). It is
-    // confined to shape-vm's `type_reflection::build_type_info_heap_value`;
-    // ticket E5 deletes the path and this registration with it. Sentinel:
-    // shape-vm `type_reflection/tests.rs::
-    // legacy_type_info_vocabulary_is_confined_to_the_legacy_intrinsic_path`.
-    let _comptime_type_info = TypeSchemaBuilder::new("__ComptimeTypeInfo")
-        .string_field("name")
-        .string_field("kind")
-        // `fields` reuses the same `__ComptimeFieldDescriptor` row as
-        // `target.fields` (comptime-excellence §4.1.2): one row shape, one
-        // builder, no split introspection story. TypedObject kinds populate it
-        // from the type's declared fields; every other kind is an empty array.
-        .array_field("fields", FieldType::Any)
-        .object_field("type_ref", "__ComptimeTypeRef")
-        .register(registry);
-
     // §4.4 comptime-handler `ctx` compile-context record. Read-only build
     // context handed to `@comptime` blocks/handlers. Field NAMES + ORDER match
     // the handler's `ctx` param type annotation
@@ -1019,7 +993,6 @@ mod tests {
         assert!(registry.has_type("__ComptimeParamDescriptor"));
         assert!(registry.has_type("__ComptimeAnnotationDescriptor"));
         assert!(registry.has_type("__ComptimeTarget"));
-        assert!(registry.has_type("__ComptimeTypeInfo"));
         assert!(registry.has_type("__ComptimeTypeRef"));
         assert!(registry.has_type(COMPTIME_FROZEN_TYPE_REF_SCHEMA));
         assert!(registry.has_type(COMPTIME_FROZEN_TRAIT_REF_SCHEMA));

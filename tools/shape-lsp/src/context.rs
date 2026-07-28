@@ -2400,7 +2400,7 @@ mod tests {
 
     #[test]
     fn test_comptime_block_not_after_close() {
-        let text = "comptime {\n    implements(\"Foo\", \"Display\")\n}\nlet x = ";
+        let text = "comptime {\n    build_config()\n}\nlet x = ";
         let position = Position {
             line: 3,
             character: 8,
