@@ -10,7 +10,9 @@ Where earlier text classifies the teardown continuation, an admitted execution,
 or a recovery obligation as affine or merely single-use, this ADR's linear
 classification governs.
 
-Proposed amendment 2026-07-27 (pending ratification): §8 fixes how effect rows
+Amendment 2026-07-27, ratified the same day (R21; user grill rulings Q2/Q4a,
+`docs/program/workstreams/ratification-grill.md`) — first implementation
+slice landed 2026-07-28 (#178, the row-in-type slice): §8 fixes how effect rows
 appear in function types and how effects flow through higher-order and generic
 code. It extends §1's algebra without weakening it, under §8.3's
 schema-versus-fact distinction: a generic declared contract may persist with
