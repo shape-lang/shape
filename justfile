@@ -182,12 +182,12 @@ check-no-dynamic:
 
 # --- Allocation seam gate (#194, ADR-018 §4) ---
 
-# Typed heap carriers allocate through `shape_value::v2::heap_alloc` and
-# nowhere else. The seam is where the `alloc_budget` heap ceiling is enforced
-# and where region allocation (#195) will hook in, so a single direct
-# `std::alloc::alloc` elsewhere silently reopens the bypass this ticket closed
-# — invisibly, because nothing observable changes at runtime.
-# See scripts/check-alloc-seam.sh.
+# The seam is where the `alloc_budget` heap ceiling is enforced and where
+# region allocation (#195) will hook in, so a single direct `std::alloc::alloc`
+# elsewhere silently reopens the bypass this ticket closed — invisibly, because
+# nothing observable changes at runtime. See scripts/check-alloc-seam.sh.
+
+# Typed heap carriers must allocate through `shape_value::v2::heap_alloc` only.
 check-alloc-seam:
 	bash scripts/check-alloc-seam.sh
 
