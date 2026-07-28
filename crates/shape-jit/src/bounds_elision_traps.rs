@@ -172,6 +172,60 @@ print(back([1, 2, 3, 4]))
     assert_both_tiers_trap("back", src);
 }
 
+// ── Nested loops ────────────────────────────────────────────────────────
+
+/// The bspline-class shape. The outer variable's fact reaches the inner
+/// loop's body, so `cp[seg + 2]` elides there — but one element past the
+/// slack must still trap, from inside the inner loop.
+#[test]
+fn nested_inner_loop_access_beyond_the_slack_still_traps() {
+    let src = r#"
+fn spline(cp: Array<number>, samples: int) -> number {
+    let mut acc = 0.0
+    let mut seg = 1
+    let n = cp.length - 2
+    while seg < n {
+        let mut s = 0
+        while s < samples {
+            acc = acc + cp[seg + 2] + cp[seg + 3]
+            s = s + 1
+        }
+        seg = seg + 1
+    }
+    return acc
+}
+print(spline([1.0, 2.0, 3.0, 4.0, 5.0], 2))
+"#;
+    assert_both_tiers_trap("spline", src);
+}
+
+/// And the in-range form of the same kernel must agree with the interpreter.
+#[test]
+fn nested_inner_loop_kernel_agrees_with_the_interpreter() {
+    let src = r#"
+fn spline(cp: Array<number>, samples: int) -> number {
+    let mut acc = 0.0
+    let mut seg = 1
+    let n = cp.length - 2
+    while seg < n {
+        let mut s = 0
+        while s < samples {
+            acc = acc + cp[seg - 1] + cp[seg] + cp[seg + 1] + cp[seg + 2]
+            s = s + 1
+        }
+        seg = seg + 1
+    }
+    return acc
+}
+let pts: Array<number> = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]
+spline(pts, 3)
+"#;
+    elision_is_live("spline", src);
+    let vm = run_vm(src).expect("the interpreter must accept the kernel");
+    let jit = run_jit("spline", src).expect("the JIT must accept the kernel");
+    assert_eq!(vm, jit, "elided JIT result diverges from the interpreter");
+}
+
 // ── Shape (c): field-projected receiver ─────────────────────────────────
 
 /// Shape (c) is proven at the plan level (see `tests/bounds_elision.rs`) but

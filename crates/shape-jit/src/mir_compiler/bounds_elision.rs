@@ -51,10 +51,9 @@
 //!   inside the loop. Length-mutating operations would otherwise invalidate
 //!   the bound between its capture and the access.
 //!
-//! Inside `B` (the header's true successor, which the header test dominates)
-//! `s <= iv <= bnd - 1 <= base.length - slack - 1`, hence
-//! `base.length >= s + slack + 1`. That yields the three admitted index
-//! shapes:
+//! Wherever the header's fact still holds, `s <= iv <= bnd - 1 <=
+//! base.length - slack - 1`, hence `base.length >= s + slack + 1`. That yields
+//! the three admitted index shapes:
 //!
 //! | shape | admitted when | proof |
 //! |---|---|---|
@@ -62,10 +61,19 @@
 //! | `base[iv ± c]` | `s + o >= 0` and `o <= slack` (`o` = signed offset) | `iv + o >= s + o >= 0`; `iv + o <= length - 1 + (o - slack) < length` |
 //! | `base[c]` | `0 <= c <= s + slack` | `length >= s + slack + 1 > c` |
 //!
-//! Index temporaries carrying an `iv`-dependent value must be defined in `B`
-//! before the access and before the first assignment to `iv` in `B`, so the
-//! value they hold is the `iv` the header test constrained. Pure-constant
-//! index temporaries carry no such requirement.
+//! The fact's scope is computed by `header_fact_blocks`: every loop block
+//! reachable from the header's true successor without passing through a block
+//! that steps `iv`, minus every block an `iv` step can reach without going
+//! back through the header. One clean path is not enough — a block a dirty
+//! path also reaches is excluded. This is what puts a **nested inner loop** in
+//! scope: the outer induction variable is invariant across the inner loop, so
+//! `cp[seg + 2]` inside an inner `while s < samples` body still carries the
+//! outer loop's fact. That is the bspline-class shape.
+//!
+//! Index temporaries carrying an `iv`-dependent value must be defined in the
+//! access's own block, before the access and before the first assignment to
+//! `iv` in that block, so the value they hold is the `iv` the header test
+//! constrained. Pure-constant index temporaries carry no such requirement.
 //!
 //! # Deliberate non-admissions
 //!
@@ -662,6 +670,76 @@ fn is_non_negative_step(ctx: &Ctx<'_>, rv: &Rvalue, iv: SlotId) -> bool {
     }
 }
 
+/// The loop blocks where the header's range fact on `iv` still holds.
+///
+/// The fact `s <= iv < bnd` is established by the header test and survives
+/// until `iv` is stepped. A block `B` qualifies when it is reachable from the
+/// header's true successor *without* passing through a block that steps `iv`,
+/// AND no `iv`-stepping block can reach `B` without going back through the
+/// header (which would re-establish the fact anyway). The second condition is
+/// what makes this sound: reachability by one clean path is not enough if a
+/// dirty path also arrives.
+///
+/// This is what puts a nested inner loop in scope — the outer induction
+/// variable is invariant across the inner loop, so `cp[seg + 2]` inside an
+/// inner `while s < samples` body carries the outer loop's fact. Blocks that
+/// step `iv` themselves are included; the per-statement index rule in
+/// `PosLimit` handles accesses before the step.
+fn header_fact_blocks(
+    ctx: &Ctx<'_>,
+    header: BasicBlockId,
+    true_bb: BasicBlockId,
+    iv: SlotId,
+    loop_blocks: &HashSet<BasicBlockId>,
+) -> Vec<BasicBlockId> {
+    let steps_iv: HashSet<BasicBlockId> = loop_blocks
+        .iter()
+        .copied()
+        .filter(|b| ctx.block(*b).is_some_and(|blk| block_assigns(blk, iv)))
+        .collect();
+
+    // Forward reachability from the body entry, never expanding through a
+    // block that steps `iv`.
+    let mut clean: HashSet<BasicBlockId> = HashSet::new();
+    let mut stack = vec![true_bb];
+    while let Some(b) = stack.pop() {
+        if !loop_blocks.contains(&b) || !clean.insert(b) {
+            continue;
+        }
+        if steps_iv.contains(&b) {
+            continue; // reachable, but nothing past it is clean via this path
+        }
+        if let Some(blk) = ctx.block(b) {
+            for succ in successors(&blk.terminator.kind) {
+                stack.push(succ);
+            }
+        }
+    }
+
+    // Anything a stepping block can reach without re-entering the header has
+    // seen an unguarded step.
+    let mut tainted: HashSet<BasicBlockId> = HashSet::new();
+    let mut stack: Vec<BasicBlockId> = steps_iv
+        .iter()
+        .filter_map(|b| ctx.block(*b))
+        .flat_map(|blk| successors(&blk.terminator.kind))
+        .collect();
+    while let Some(b) = stack.pop() {
+        if b == header || !loop_blocks.contains(&b) || !tainted.insert(b) {
+            continue;
+        }
+        if let Some(blk) = ctx.block(b) {
+            for succ in successors(&blk.terminator.kind) {
+                stack.push(succ);
+            }
+        }
+    }
+
+    let mut out: Vec<BasicBlockId> = clean.difference(&tainted).copied().collect();
+    out.sort_by_key(|b| b.0);
+    out
+}
+
 /// The last `Assign(Local(cond), BinaryOp(Lt|Le, iv, bnd))` in `header`.
 fn find_guard_definition(header: &BasicBlock, cond: SlotId) -> Option<(BinOp, SlotId, Operand)> {
     let mut found = None;
@@ -712,9 +790,6 @@ pub fn analyze(mir: &MirFunction) -> BoundsElisionPlan {
         if loop_blocks.len() < 2 {
             continue; // no back edge — a plain `if`, not a loop
         }
-        let Some(body) = ctx.block(*true_bb) else {
-            continue;
-        };
         if !loop_blocks.contains(true_bb) {
             continue;
         }
@@ -752,42 +827,49 @@ pub fn analyze(mir: &MirFunction) -> BoundsElisionPlan {
             continue;
         };
 
-        let iv_first_assign = body
-            .statements
-            .iter()
-            .position(|s| matches!(&s.kind, StatementKind::Assign(Place::Local(x), _) if *x == iv))
-            .unwrap_or(usize::MAX);
-
-        for (stmt_idx, stmt) in body.statements.iter().enumerate() {
-            let pos = PosLimit {
-                body: *true_bb,
-                before_stmt: stmt_idx,
-                iv_first_assign,
+        for scope_block in header_fact_blocks(&ctx, header.id, *true_bb, iv, &loop_blocks) {
+            let Some(block) = ctx.block(scope_block) else {
+                continue;
             };
-            for (base_place, index_op) in index_accesses_in_statement(&stmt.kind) {
-                let Some((base_key, index_key)) = classify_access(base_place, index_op) else {
-                    continue;
+            let iv_first_assign = block
+                .statements
+                .iter()
+                .position(
+                    |s| matches!(&s.kind, StatementKind::Assign(Place::Local(x), _) if *x == iv),
+                )
+                .unwrap_or(usize::MAX);
+
+            for (stmt_idx, stmt) in block.statements.iter().enumerate() {
+                let pos = PosLimit {
+                    body: scope_block,
+                    before_stmt: stmt_idx,
+                    iv_first_assign,
                 };
-                if base_key != bound.base {
-                    continue;
-                }
-                let Some(fact) = resolve_index(&ctx, index_op, iv, pos) else {
-                    continue;
-                };
-                let admitted = match fact {
-                    // `length >= iv_lower + slack + 1`, so every index in
-                    // `0..=iv_lower + slack` is in range.
-                    IndexFact::Const(c) => c >= 0 && c <= iv_lower.saturating_add(slack),
-                    // `iv + o >= iv_lower + o >= 0` and `iv + o < length`.
-                    IndexFact::IvOffset(o) => iv_lower.saturating_add(o) >= 0 && o <= slack,
-                };
-                if admitted {
-                    plan.trusted.insert(AccessSite {
-                        block: *true_bb,
-                        stmt: stmt_idx,
-                        base: base_key,
-                        index: index_key,
-                    });
+                for (base_place, index_op) in index_accesses_in_statement(&stmt.kind) {
+                    let Some((base_key, index_key)) = classify_access(base_place, index_op) else {
+                        continue;
+                    };
+                    if base_key != bound.base {
+                        continue;
+                    }
+                    let Some(fact) = resolve_index(&ctx, index_op, iv, pos) else {
+                        continue;
+                    };
+                    let admitted = match fact {
+                        // `length >= iv_lower + slack + 1`, so every index in
+                        // `0..=iv_lower + slack` is in range.
+                        IndexFact::Const(c) => c >= 0 && c <= iv_lower.saturating_add(slack),
+                        // `iv + o >= iv_lower + o >= 0` and `iv + o < length`.
+                        IndexFact::IvOffset(o) => iv_lower.saturating_add(o) >= 0 && o <= slack,
+                    };
+                    if admitted {
+                        plan.trusted.insert(AccessSite {
+                            block: scope_block,
+                            stmt: stmt_idx,
+                            base: base_key,
+                            index: index_key,
+                        });
+                    }
                 }
             }
         }

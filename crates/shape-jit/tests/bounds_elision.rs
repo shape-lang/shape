@@ -355,6 +355,93 @@ print(bad_incl([1, 2, 3]))
     assert_plan(&mir, 0);
 }
 
+// ── Nested loops: the outer fact reaches the inner body ─────────────────
+
+/// The bspline-class shape: an outer loop whose induction variable indexes a
+/// window, and an inner loop over samples that does the indexing. The outer
+/// variable is invariant across the inner loop, so its range fact still holds
+/// there. All four windowed accesses elide even though none of them is in the
+/// outer loop's immediate body block.
+#[test]
+fn nested_inner_loop_body_inherits_the_outer_loop_fact() {
+    let mir = mir_of(
+        "spline",
+        r#"
+fn spline(cp: Array<number>, samples: int) -> number {
+    let mut acc = 0.0
+    let mut seg = 1
+    let n = cp.length - 2
+    while seg < n {
+        let mut s = 0
+        while s < samples {
+            acc = acc + cp[seg - 1] + cp[seg] + cp[seg + 1] + cp[seg + 2]
+            s = s + 1
+        }
+        seg = seg + 1
+    }
+    return acc
+}
+print(spline([1.0, 2.0, 3.0, 4.0, 5.0], 2))
+"#,
+    );
+    assert_plan(&mir, 4);
+}
+
+/// The inner loop's own induction variable is bounded by an unrelated
+/// parameter, so accesses indexed by *it* are not admitted — only the outer
+/// variable carries a length-derived fact.
+#[test]
+fn nested_inner_variable_without_a_length_fact_is_not_trusted() {
+    let mir = mir_of(
+        "mixed",
+        r#"
+fn mixed(cp: Array<number>, samples: int) -> number {
+    let mut acc = 0.0
+    let mut seg = 0
+    let n = cp.length
+    while seg < n {
+        let mut s = 0
+        while s < samples {
+            acc = acc + cp[seg] + cp[s]
+            s = s + 1
+        }
+        seg = seg + 1
+    }
+    return acc
+}
+print(mixed([1.0, 2.0, 3.0], 2))
+"#,
+    );
+    // `cp[seg]` elides; `cp[s]` does not.
+    assert_plan(&mir, 1);
+}
+
+/// A step of the induction variable on a path that does not go back through
+/// the header invalidates the fact for anything downstream. The analyzer must
+/// not admit a block merely because *one* clean path reaches it.
+#[test]
+fn access_after_an_unguarded_step_is_not_trusted() {
+    let mir = mir_of(
+        "stepped",
+        r#"
+fn stepped(arr: Array<int>, flag: bool) -> int {
+    let mut acc = 0
+    let mut i = 0
+    while i < arr.length {
+        if flag {
+            i = i + 1
+        }
+        acc = acc + arr[i]
+        i = i + 1
+    }
+    return acc
+}
+print(stepped([1, 2, 3], true))
+"#,
+    );
+    assert_plan(&mir, 0);
+}
+
 // ── Shape (c): field-projected receivers ─────────────────────────────────
 
 #[test]
