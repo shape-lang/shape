@@ -8,9 +8,9 @@ use crate::ffi::value_ffi::TAG_NULL;
 use shape_runtime::type_schema::builtin_schemas::{
     OPTION_PAYLOAD, OPTION_VARIANT_NONE, OPTION_VARIANT_SOME,
 };
+use shape_value::NativeKind;
 use shape_value::heap_value::{HeapKind, TypedObjectStorage};
 use shape_value::slot::ValueSlot;
-use shape_value::NativeKind;
 use std::sync::Arc;
 
 fn resolve_option_schema_id() -> Option<u64> {
@@ -84,8 +84,11 @@ fn build_option_object(variant: i64, payload_bits: u64, payload_kind: NativeKind
         return TAG_NULL;
     };
 
-    let slots = vec![ValueSlot::from_int(variant), ValueSlot::from_raw(payload_bits)]
-        .into_boxed_slice();
+    let slots = vec![
+        ValueSlot::from_int(variant),
+        ValueSlot::from_raw(payload_bits),
+    ]
+    .into_boxed_slice();
     let heap_mask = if payload_field_owns_heap_share(payload_bits, payload_kind) {
         1u64 << OPTION_PAYLOAD
     } else {

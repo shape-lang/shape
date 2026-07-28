@@ -75,12 +75,12 @@ use std::collections::HashSet;
 
 use shape_ast::ast::expressions::Expr;
 use shape_ast::ast::functions::FunctionDef;
+use shape_ast::ast::patterns::DestructurePattern;
 use shape_ast::ast::program::{OwnershipModifier, VarKind, VariableDecl};
 use shape_ast::ast::span::Span;
 use shape_ast::ast::statements::Statement;
 use shape_ast::ast::types::{ObjectTypeField, TypeAnnotation};
 use shape_ast::error::{Result, ShapeError};
-use shape_ast::ast::patterns::DestructurePattern;
 
 use super::MutationCarrier;
 use super::install_registry::StagedHookInstall;
@@ -117,7 +117,10 @@ impl BytecodeCompiler {
     /// DISTINCT nonce (a `decision`-salted digest of the function name), so it
     /// never collides with the impl shadow. Stable digest ⇒ idempotent
     /// re-registration (`register_function` dedups by name).
-    pub(in crate::compiler) fn template_weave_decision_helper_name(&self, func_name: &str) -> String {
+    pub(in crate::compiler) fn template_weave_decision_helper_name(
+        &self,
+        func_name: &str,
+    ) -> String {
         use std::hash::{Hash, Hasher};
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
         func_name.hash(&mut hasher);
@@ -199,16 +202,18 @@ impl BytecodeCompiler {
         // transaction.
         let site = &first.site;
         let content = generated_free_fn_content(&shadow);
-        let source_anchor = site.source_anchor().map_err(|message| ShapeError::SemanticError {
-            message,
-            location: Some(self.span_to_source_location(application_span)),
-        })?;
-        let generator_anchor = site.generator_anchor().map_err(|message| {
-            ShapeError::SemanticError {
+        let source_anchor = site
+            .source_anchor()
+            .map_err(|message| ShapeError::SemanticError {
                 message,
                 location: Some(self.span_to_source_location(application_span)),
-            }
-        })?;
+            })?;
+        let generator_anchor =
+            site.generator_anchor()
+                .map_err(|message| ShapeError::SemanticError {
+                    message,
+                    location: Some(self.span_to_source_location(application_span)),
+                })?;
         let origin = GeneratedOrigin {
             expansion: site.identity().clone(),
             node_path: GeneratedNodePath::decl_root(format!("weave_impl:{}", func_def.name)),
@@ -298,8 +303,7 @@ impl BytecodeCompiler {
         };
 
         let mut stmts: Vec<Statement> = Vec::new();
-        let mut current_args: Vec<Expr> =
-            param_names.iter().map(|name| ident(name)).collect();
+        let mut current_args: Vec<Expr> = param_names.iter().map(|name| ident(name)).collect();
 
         // ADR-009 E4 S4 (S4-4) — the DECISION `before` form. When a staged
         // `before` install carries a `DecisionHandlerPlan`, the wrapper's result
@@ -401,7 +405,11 @@ impl BytecodeCompiler {
                                 })
                                 .collect(),
                         );
-                        stmts.push(decl(&local, Some(aggregate_annotation), call(&symbol, args)));
+                        stmts.push(decl(
+                            &local,
+                            Some(aggregate_annotation),
+                            call(&symbol, args),
+                        ));
                         current_args = fields
                             .iter()
                             .map(|(name, _)| Expr::PropertyAccess {
@@ -520,7 +528,10 @@ annotation hookann() on function {{
 
     fn compile_source(
         src: &str,
-    ) -> (shape_ast::error::Result<()>, crate::compiler::BytecodeCompiler) {
+    ) -> (
+        shape_ast::error::Result<()>,
+        crate::compiler::BytecodeCompiler,
+    ) {
         let program = shape_ast::parse_program(src).expect("fixture parses");
         let mut compiler = crate::compiler::BytecodeCompiler::new();
         // S5a: real span→line mapping for the application-site anchoring
@@ -586,7 +597,10 @@ annotation hookann() on function {{
             "install(before_hook(add_one, []))",
             "@hookann()\nfn victim(a: int) -> int { return a * 10 }\n\nvictim(4)",
         ));
-        assert_eq!(value, 50, "the before mutation must be observed (skip ⇒ 40)");
+        assert_eq!(
+            value, 50,
+            "the before mutation must be observed (skip ⇒ 40)"
+        );
 
         // The C3-G6 SMALL observables: the woven wrapper compiles as an
         // ORDINARY fn — mir_data attached (the deleted legacy weave's
@@ -598,7 +612,11 @@ annotation hookann() on function {{
             "the woven wrapper must carry mir_data (bytecode AND MIR from the wrapped def)"
         );
         let shadows = shadow_entries(&compiler, "victim");
-        assert_eq!(shadows.len(), 1, "exactly one weave shadow per woven target");
+        assert_eq!(
+            shadows.len(),
+            1,
+            "exactly one weave shadow per woven target"
+        );
         assert!(
             shadows[0].name.starts_with('\u{1}'),
             "the shadow name is unspellable (SOH-prefixed): {:?}",
@@ -632,7 +650,10 @@ annotation hookann() on function {{
             "install(before_hook(add_one, []))\n    install(after_hook(double, []))",
             "@hookann()\nfn victim(a: int) -> int { return a * 10 }\n\nvictim(4)",
         ));
-        assert_eq!(value, 100, "before and after must both fire around the impl");
+        assert_eq!(
+            value, 100,
+            "before and after must both fire around the impl"
+        );
     }
 
     // ── ADR-009 E4 S4 (S4-4): the DECISION weave — the single-join branch ──
@@ -654,7 +675,10 @@ annotation hookann() on function {{
             "install(before_hook(decide, []))",
             "@hookann()\nfn compute(a: int) -> int { return a * 10 }\n\ncompute(5)",
         ));
-        assert_eq!(value, 50, "Proceed continues to the impl (5*10); a dropped Proceed ≠ 50");
+        assert_eq!(
+            value, 50,
+            "Proceed continues to the impl (5*10); a dropped Proceed ≠ 50"
+        );
     }
 
     // Return → the impl NEVER runs: compute(-3) short-circuits to 999, NOT the
@@ -727,7 +751,8 @@ annotation hookann() on function {{
         ));
         let err = result.expect_err("stacking a before with a decision hook is not supported");
         assert!(
-            err.to_string().contains("must be the only `before` install"),
+            err.to_string()
+                .contains("must be the only `before` install"),
             "the named composition rejection fires: {err}"
         );
     }
@@ -746,7 +771,9 @@ annotation hookann() on function {{
             "install(before_hook(decide, []))",
             "@hookann()\nfn compute(a: int) -> int { return a * 10 }\n\ncompute(5)",
         ));
-        result.expect_err("a reserved failure transform is a named surface-and-stop").to_string()
+        result
+            .expect_err("a reserved failure transform is a named surface-and-stop")
+            .to_string()
     }
 
     #[test]
@@ -766,9 +793,14 @@ annotation hookann() on function {{
     #[test]
     fn re_place_transform_surfaces_and_stops() {
         let err = decision_failure_transform_reject("HookDecision::RePlace(0)");
-        assert!(err.contains("`re-place` (choose-another-placement) failure transform is designed"));
+        assert!(
+            err.contains("`re-place` (choose-another-placement) failure transform is designed")
+        );
         assert!(err.contains("#80"), "cites the D6 umbrella: {err}");
-        assert!(err.contains("@remote"), "names the @remote coupling (now delivered): {err}");
+        assert!(
+            err.contains("@remote"),
+            "names the @remote coupling (now delivered): {err}"
+        );
     }
 
     // Gate 2 misplaced-decision: a decision constructor in an AFTER body rejects.
@@ -779,8 +811,13 @@ annotation hookann() on function {{
             "install(after_hook(af, []))",
             "@hookann()\nfn compute(a: int) -> int { return a * 10 }\n\ncompute(5)",
         ));
-        let err = result.expect_err("a decision constructor in an after body rejects").to_string();
-        assert!(err.contains("cannot appear in an `after` hook body"), "{err}");
+        let err = result
+            .expect_err("a decision constructor in an after body rejects")
+            .to_string();
+        assert!(
+            err.contains("cannot appear in an `after` hook body"),
+            "{err}"
+        );
         assert!(err.contains("#80"), "cites the D6 umbrella: {err}");
     }
 
@@ -796,8 +833,13 @@ annotation hookann() on function {{
             "install(before_hook(decide, []))",
             "@hookann()\nfn compute(a: int) -> int { return a * 10 }\n\ncompute(5)",
         ));
-        let err = result.expect_err("a failure Return on a non-failure R rejects").to_string();
-        assert!(err.contains("failure channel"), "names the missing failure channel: {err}");
+        let err = result
+            .expect_err("a failure Return on a non-failure R rejects")
+            .to_string();
+        assert!(
+            err.contains("failure channel"),
+            "names the missing failure channel: {err}"
+        );
         assert!(err.contains("recover"), "names recover: {err}");
         assert!(err.contains("#80"), "cites the D6 umbrella: {err}");
     }
@@ -817,7 +859,10 @@ annotation hookann() on function {{
              match compute(-3) { Ok(v) => v, Err(e) => -1 }",
         );
         let (value, _) = top_level_i64(&src);
-        assert_eq!(value, -1, "the impl's failure-valued R threads through the after to the caller");
+        assert_eq!(
+            value, -1,
+            "the impl's failure-valued R threads through the after to the caller"
+        );
     }
 
     // ── the heterogeneous AGGREGATE carrier (polymorphic before) ───────────
@@ -845,7 +890,10 @@ annotation hookann() on function {{
             "slot 0 mutated (4*3+2=14) AND slot 1 typed-preserved (2.5 > 2.0 ⇒ +100)"
         );
         let wrapper = function_entry(&compiler, "victim");
-        assert!(wrapper.mir_data.is_some(), "the aggregate wrapper stays mir-attached");
+        assert!(
+            wrapper.mir_data.is_some(),
+            "the aggregate wrapper stays mir-attached"
+        );
     }
 
     // Arity-1 Single carrier (polymorphic): the mutated arg flows back as
@@ -904,7 +952,10 @@ victim_a(10) * 1000 + victim_b(10)
         let (value, compiler) = top_level_i64(src);
         // victim_a: 10*3 = 30 → 31; victim_b: 10*5 = 50 → 51 — BYTE-SAME
         // output as the S2 twin (the flip changes identity, not behavior).
-        assert_eq!(value, 31051, "each baked handler holds its own config constant");
+        assert_eq!(
+            value, 31051,
+            "each baked handler holds its own config constant"
+        );
         assert_eq!(compiler.hook_install_registry.len(), 2);
         let (row_a, row_b) = (
             &compiler.hook_install_registry[0],
@@ -966,7 +1017,10 @@ victim_a(10) * 1000 + victim_b(20)
 "#;
         let (value, compiler) = top_level_i64(src);
         // victim_a: 10*3 = 30 → 31; victim_b: 20*3 = 60 → 62.
-        assert_eq!(value, 31062, "both targets execute through the shared baked handler");
+        assert_eq!(
+            value, 31062,
+            "both targets execute through the shared baked handler"
+        );
         assert_eq!(compiler.hook_install_registry.len(), 2);
         assert_eq!(
             compiler.hook_install_registry[0].function_index,
@@ -1109,7 +1163,10 @@ victim_a([1], 4) * 10000 + victim_b([2], 7)
 "#;
         let (value, compiler) = top_level_i64(src);
         // victim_a: n=4+1=5; victim_b: n=7+1=8 → 800.
-        assert_eq!(value, 50800, "both alias-spelled weaves compile and execute");
+        assert_eq!(
+            value, 50800,
+            "both alias-spelled weaves compile and execute"
+        );
         assert_eq!(compiler.hook_install_registry.len(), 2);
         assert_eq!(
             compiler.hook_install_registry[0].function_index,
@@ -1218,7 +1275,10 @@ victim_a([1], 4) * 10000 + victim_b([2], 7)
             "install(before_hook(tmpl, []))",
             "@hookann()\nfn victim(a: int) -> int { return a * 10 }\n\nvictim(4)",
         ));
-        assert_eq!(value, 50, "the transitive local mutation must be observed (skip ⇒ 40)");
+        assert_eq!(
+            value, 50,
+            "the transitive local mutation must be observed (skip ⇒ 40)"
+        );
     }
 
     // An UNPROVABLE initializer keeps the local outside the provable set —
@@ -1334,7 +1394,10 @@ victim_a([1], 4) * 10000 + victim_b([2], 7)
             "install(after_hook(post, []))",
             "@hookann()\nfn victim(a: int) -> int { return a * 10 }\n\nvictim(4)",
         ));
-        assert_eq!(value, 40, "the bound-honoring after body threads the result");
+        assert_eq!(
+            value, 40,
+            "the bound-honoring after body threads the result"
+        );
         assert_eq!(compiler.hook_install_registry.len(), 1);
     }
 
@@ -1577,7 +1640,10 @@ victim_a([1], 4) * 10000 + victim_b([2], 7)
             "install(before_hook(tmpl, []))",
             "@hookann()\nfn victim(a: int) -> int { return a * 10 }\n\nvictim(4)",
         ));
-        assert_eq!(value, 80, "the carrier-proving exit delivers the doubled arg");
+        assert_eq!(
+            value, 80,
+            "the carrier-proving exit delivers the doubled arg"
+        );
         assert_eq!(compiler.hook_install_registry.len(), 1);
     }
 
@@ -1593,7 +1659,10 @@ victim_a([1], 4) * 10000 + victim_b([2], 7)
         let value = execute_top_level(&compiler)
             .as_i64()
             .expect("trailing literal is the top-level value");
-        assert_eq!(value, 7, "the void weave executes without corrupting the stack");
+        assert_eq!(
+            value, 7,
+            "the void weave executes without corrupting the stack"
+        );
         assert_eq!(shadow_entries(&compiler, "log_it").len(), 1);
     }
 
@@ -1625,7 +1694,10 @@ victim_a([1], 4) * 10000 + victim_b([2], 7)
         let value = execute_top_level(&compiler)
             .as_i64()
             .expect("trailing literal is the top-level value");
-        assert_eq!(value, 7, "the observer weave executes cleanly (green control)");
+        assert_eq!(
+            value, 7,
+            "the observer weave executes cleanly (green control)"
+        );
         assert_eq!(shadow_entries(&compiler, "hello").len(), 1);
         assert_eq!(compiler.hook_install_registry.len(), 2);
         assert_eq!(
@@ -1744,9 +1816,7 @@ victim_a([1], 4) * 10000 + victim_b([2], 7)
         );
 
         // Original behavior preserved: the plain program still runs 1*10.
-        let (value, _) = top_level_i64(
-            "fn victim(a: int) -> int { return a * 10 }\n\nvictim(1)",
-        );
+        let (value, _) = top_level_i64("fn victim(a: int) -> int { return a * 10 }\n\nvictim(1)");
         assert_eq!(value, 10);
     }
 
@@ -1770,7 +1840,10 @@ victim_a([1], 4) * 10000 + victim_b([2], 7)
             "install(before_hook(add_n, [capture(\"n\", 7)]))",
             "@hookann()\nfn victim(a: int) -> int { return a * 10 }\n\nvictim(4)",
         ));
-        assert_eq!(value, 110, "before(4) = 4 + baked 7 = 11 → impl 110 (skip ⇒ 40)");
+        assert_eq!(
+            value, 110,
+            "before(4) = 4 + baked 7 = 11 → impl 110 (skip ⇒ 40)"
+        );
         let row = &compiler.hook_install_registry[0];
         assert!(
             row.specialized_symbol.contains("::cfg#1::i:7"),
@@ -1839,9 +1912,18 @@ victim_a(1) * 1000000 + victim_b(1) * 1000 + victim_c(1)
             .iter()
             .map(|row| row.function_index)
             .collect();
-        assert_ne!(indices[0], indices[1], "[1,2] vs [1,2,3] are distinct (rule 6)");
-        assert_ne!(indices[0], indices[2], "[1,2] vs [2,1] are distinct (rule 6)");
-        assert_ne!(indices[1], indices[2], "[1,2,3] vs [2,1] are distinct (rule 6)");
+        assert_ne!(
+            indices[0], indices[1],
+            "[1,2] vs [1,2,3] are distinct (rule 6)"
+        );
+        assert_ne!(
+            indices[0], indices[2],
+            "[1,2] vs [2,1] are distinct (rule 6)"
+        );
+        assert_ne!(
+            indices[1], indices[2],
+            "[1,2,3] vs [2,1] are distinct (rule 6)"
+        );
         assert_eq!(
             compiler.hook_install_registry[0].captures,
             vec![("cfg".to_string(), "[1, 2]".to_string())],
@@ -1885,7 +1967,10 @@ victim_a(1) * 1000 + victim_b(2)
 "#;
         let (value, compiler) = top_level_i64(src);
         // a: 112; b: 2*100+10+2 = 212 → +1 = 213.
-        assert_eq!(value, 112_213, "both targets execute through the shared baked handler");
+        assert_eq!(
+            value, 112_213,
+            "both targets execute through the shared baked handler"
+        );
         assert_eq!(compiler.hook_install_registry.len(), 2);
         assert_eq!(
             compiler.hook_install_registry[0].function_index,
@@ -1893,8 +1978,7 @@ victim_a(1) * 1000 + victim_b(2)
             "rule 6: structurally EQUAL composite config SHARES one specialization"
         );
         assert_eq!(
-            compiler.hook_install_registry[0].captures,
-            compiler.hook_install_registry[1].captures,
+            compiler.hook_install_registry[0].captures, compiler.hook_install_registry[1].captures,
             "non-vacuity: both rows record the same [1, 2] rendering"
         );
     }
@@ -1942,7 +2026,10 @@ victim_a(1) * 1000 + victim_b(1)
 "#;
         let (value, compiler) = top_level_i64(src);
         // a: 10 + len("ab") = 12; b: 10 + len("a") = 11.
-        assert_eq!(value, 12011, "each handler observes its own string boundaries");
+        assert_eq!(
+            value, 12011,
+            "each handler observes its own string boundaries"
+        );
         assert_ne!(
             compiler.hook_install_registry[0].function_index,
             compiler.hook_install_registry[1].function_index,
@@ -1989,7 +2076,10 @@ victim_a(1) * 1000 + victim_b(1)
 "#;
         let (value, compiler) = top_level_i64(src);
         // a: 100 + 2*10 + 2 = 122; b: 100 + 1*10 + 2 = 112.
-        assert_eq!(value, 122_112, "each handler observes its own nesting boundaries");
+        assert_eq!(
+            value, 122_112,
+            "each handler observes its own nesting boundaries"
+        );
         assert_ne!(
             compiler.hook_install_registry[0].function_index,
             compiler.hook_install_registry[1].function_index,
@@ -2191,9 +2281,16 @@ victim(4)
         // before chain in application order: 4*3 = 12 → 12 + 5*10 + 2 = 64
         // → impl(64) = 64. Skip-either ⇒ 16 / 12; any misread of either
         // baked constant shifts the value.
-        assert_eq!(value, 64, "the baked scalar AND composite config drive the mutation");
+        assert_eq!(
+            value, 64,
+            "the baked scalar AND composite config drive the mutation"
+        );
 
-        assert_eq!(compiler.hook_install_registry.len(), 2, "two config-bearing installs");
+        assert_eq!(
+            compiler.hook_install_registry.len(),
+            2,
+            "two config-bearing installs"
+        );
         for row in &compiler.hook_install_registry {
             let handler = &compiler.program.functions[usize::from(row.function_index)];
             assert!(
@@ -2246,7 +2343,10 @@ victim(4)
         ));
         // before: 4*3 + 5 = 17 → impl(17) = 17. Skip ⇒ 4; a misread of
         // either baked constant shifts the value.
-        assert_eq!(value, 17, "BOTH mixed-typed baked constants drive the mutation");
+        assert_eq!(
+            value, 17,
+            "BOTH mixed-typed baked constants drive the mutation"
+        );
         assert_eq!(compiler.hook_install_registry.len(), 1, "one install lands");
         let row = &compiler.hook_install_registry[0];
         assert_eq!(
@@ -2281,7 +2381,10 @@ victim(4)
         ));
         // before: 4*3 + len("ab") = 14 → impl(14) = 140. Skip ⇒ 40; a
         // dropped tag ⇒ 120; a different tag length shifts the value.
-        assert_eq!(value, 140, "the int AND the string baked constants drive the mutation");
+        assert_eq!(
+            value, 140,
+            "the int AND the string baked constants drive the mutation"
+        );
         assert_eq!(compiler.hook_install_registry.len(), 1, "one install lands");
         assert_eq!(
             compiler.hook_install_registry[0].captures,
@@ -2314,8 +2417,15 @@ victim(4)
         ));
         // before: 4+3 = 7 → impl(7) = 70 → after: 70*5 + 2 = 352. Skipping
         // the before ⇒ 202; skipping the after ⇒ 70.
-        assert_eq!(value, 352, "the int before-capture AND the array after-capture both bake");
-        assert_eq!(compiler.hook_install_registry.len(), 2, "both installs land");
+        assert_eq!(
+            value, 352,
+            "the int before-capture AND the array after-capture both bake"
+        );
+        assert_eq!(
+            compiler.hook_install_registry.len(),
+            2,
+            "both installs land"
+        );
         assert_eq!(
             compiler.hook_install_registry[0].captures,
             vec![("bump".to_string(), "3".to_string())]
@@ -2369,7 +2479,10 @@ fn victim_c(a: int) -> int { return a + 3 }
 "#;
         let (value, compiler) = top_level_i64(src);
         // a: 10*3+2 = 32 → 33; b: 20*3+2 = 62 → 64; c: 30*3+3 = 93 → 96.
-        assert_eq!(value, 33064096, "all three targets execute their own mixed config");
+        assert_eq!(
+            value, 33064096,
+            "all three targets execute their own mixed config"
+        );
         assert_eq!(compiler.hook_install_registry.len(), 3);
         assert_eq!(
             compiler.hook_install_registry[0].function_index,
@@ -2426,7 +2539,11 @@ victim_a(4) * 1000 + victim_b(4)
             value, 140_240,
             "each application's OWN typed config values drive its mutation"
         );
-        assert_eq!(compiler.hook_install_registry.len(), 2, "both installs land");
+        assert_eq!(
+            compiler.hook_install_registry.len(),
+            2,
+            "both installs land"
+        );
         assert_eq!(
             compiler.hook_install_registry[0].captures,
             vec![
@@ -2757,7 +2874,10 @@ fn victim(a: int) -> int { return a + 1 }
 victim(4)
 "#;
             let (value, compiler) = top_level_i64(src);
-            assert_eq!(value, 13, "4*3 = 12 → impl(12) = 13 (skip ⇒ 5; misread times shifts)");
+            assert_eq!(
+                value, 13,
+                "4*3 = 12 → impl(12) = 13 (skip ⇒ 5; misread times shifts)"
+            );
             assert_eq!(compiler.hook_install_registry.len(), 1);
             for row in &compiler.hook_install_registry {
                 let handler = &compiler.program.functions[usize::from(row.function_index)];
@@ -2882,7 +3002,10 @@ fn victim(a: int) -> int { return a + 1 }
 victim(4)
 "#;
             let (value, compiler) = top_level_i64(src);
-            assert_eq!(value, 7, "4+2 = 6 → impl(6) = 7 (skip ⇒ 5; ambient [7,8] shifts)");
+            assert_eq!(
+                value, 7,
+                "4+2 = 6 → impl(6) = 7 (skip ⇒ 5; ambient [7,8] shifts)"
+            );
             assert_eq!(compiler.hook_install_registry.len(), 1);
             for row in &compiler.hook_install_registry {
                 let handler = &compiler.program.functions[usize::from(row.function_index)];
@@ -3043,7 +3166,10 @@ fn victim(a: int) -> int { return a * 10 }
 victim(4)
 "#;
             let (value, _) = top_level_i64(src);
-            assert_eq!(value, 60, "the LOCAL bump (2) drives the hook: (4+2)*10; ambient 7 ⇒ 110");
+            assert_eq!(
+                value, 60,
+                "the LOCAL bump (2) drives the hook: (4+2)*10; ambient 7 ⇒ 110"
+            );
         }
 
         // Sequential visibility: a use BEFORE the same-spelled local `let`
@@ -3132,7 +3258,10 @@ fn victim(a: int) -> int { return a * 10 }
 victim(4)
 "#;
             let (value, _) = top_level_i64(src);
-            assert_eq!(value, 50, "helper(4) = 5 → impl(5) = 50 — module fn callees are code");
+            assert_eq!(
+                value, 50,
+                "helper(4) = 5 → impl(5) = 50 — module fn callees are code"
+            );
         }
 
         // ── Dec-65: the [C0931] config-arg pre-check + the
@@ -3320,9 +3449,8 @@ victim(4)
             let (result, _) = compile_source(src);
             let err = result.expect_err("the pseudo-tuple is not readable inside comptime");
             assert!(
-                err.to_string().contains(
-                    "a `comptime` block inside a template body cannot read `args`"
-                ),
+                err.to_string()
+                    .contains("a `comptime` block inside a template body cannot read `args`"),
                 "the named Dec-65 walker sentence fires: {err}"
             );
             assert!(
@@ -3332,4 +3460,3 @@ victim(4)
         }
     }
 }
-

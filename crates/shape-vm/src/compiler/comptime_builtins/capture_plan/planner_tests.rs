@@ -61,13 +61,7 @@ fn inherited_parameter_semantics_are_installed_by_ordinal_and_only_for_param_acc
             "misleading_names",
             &params,
             accesses.len(),
-            Some(
-                accesses
-                    .iter()
-                    .copied()
-                    .map(parameter_evidence)
-                    .collect(),
-            ),
+            Some(accesses.iter().copied().map(parameter_evidence).collect()),
         )
         .expect("structural capture parameters install by ordinal");
 

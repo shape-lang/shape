@@ -147,6 +147,17 @@ impl TypeInferenceEngine {
         };
         let return_type = if has_out_params {
             self.foreign_out_param_visible_return_type(def, &raw_param_types, raw_return_type)
+        } else if def.is_async && !def.is_native_abi() {
+            // ADR-019 §5 / #202 (POLY-ASYNC-OFFLOAD). An async foreign call is
+            // offloaded and yields a `Future(id)` handle immediately, so the
+            // declared `Result<T>` is what `await` produces, not what the call
+            // produces. Wrapping it here is what makes the type tell the truth:
+            // `await py_fetch()` is `Result<T>`, and forgetting the `await` is a
+            // type error instead of a `Result<T>`-shaped hole holding a future.
+            //
+            // Native-ABI declarations are excluded: `extern "C"` cannot be
+            // async, and the compiler refuses one separately.
+            BuiltinTypes::future(raw_return_type)
         } else {
             raw_return_type
         };

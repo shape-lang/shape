@@ -21,7 +21,7 @@
     ]
   },
   "step": "docs/design/typed-comptime/adr011-012-execution-rulings.md — ten required steps, step 4",
-  "source_revision": "fa3f9a8446a545fb950d8cf1a41c404987d4c32a",
+  "source_revision": "7854eb4e20647a483870340d822d8c875b0090f8",
   "regenerate_with": "node scripts/generate-adr011-012-legacy-baselines.mjs --ticket 135",
   "check_with": "node scripts/check-adr011-012-legacy-baselines.mjs --ticket 135",
   "direction_rule": "Monotonic non-increasing. A set count may fall (migration progress) and may never rise. A new owner path is growth even when the total is unchanged, because it is a new surface carrying old authority.",
@@ -29,9 +29,9 @@
     "source_revision",
     "description"
   ],
-  "total_count": 486,
+  "total_count": 487,
   "total_count_note": "Sum of the set counts. Sets may deliberately overlap (a narrowly scoped set can re-count sites a broader set already counts), so this is a ratchet aggregate for reporting movement — never a count of distinct legacy sites.",
-  "sets_sha256": "13d40b31f6a6c6a3798492f2e6b2164580dd7659fadeddb219d70584aa842464",
+  "sets_sha256": "f4a71c719fc3c8e30811deabf9b08a71dc632b1d819a5ee3037f34349bfaf4c3",
   "sets": [
     {
       "id": "lsp-parallel-validators",
@@ -42,7 +42,7 @@
       ],
       "exclude": [],
       "pattern": "fn validate_\\w+",
-      "count": 25,
+      "count": 24,
       "owner_count": 4,
       "owners": [
         {
@@ -51,7 +51,7 @@
         },
         {
           "path": "tools/shape-lsp/src/diagnostics.rs",
-          "count": 13
+          "count": 12
         },
         {
           "path": "tools/shape-lsp/src/doc_diagnostics.rs",
@@ -72,7 +72,7 @@
       ],
       "exclude": [],
       "pattern": "(message|msg|text|diagnostic)\\s*\\.\\s*contains\\(",
-      "count": 76,
+      "count": 74,
       "owner_count": 11,
       "owners": [
         {
@@ -93,7 +93,7 @@
         },
         {
           "path": "tools/shape-lsp/src/diagnostics.rs",
-          "count": 31
+          "count": 29
         },
         {
           "path": "tools/shape-lsp/src/doc_actions.rs",
@@ -133,7 +133,7 @@
       ],
       "exclude": [],
       "pattern": "#\\[ignore",
-      "count": 141,
+      "count": 145,
       "owner_count": 27,
       "owners": [
         {
@@ -154,7 +154,7 @@
         },
         {
           "path": "bin/shape-cli/tests/ffi_e2e.rs",
-          "count": 10
+          "count": 14
         },
         {
           "path": "crates/shape-jit/src/core.rs",

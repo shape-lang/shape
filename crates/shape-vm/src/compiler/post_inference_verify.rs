@@ -721,7 +721,13 @@ mod tests {
     #[test]
     fn positive_vm_state_introspection_passes() {
         let mut reg = TypeSchemaRegistry::new();
-        for name in &["FrameState", "VmState", "ModuleState", "CallPayload", "Delta"] {
+        for name in &[
+            "FrameState",
+            "VmState",
+            "ModuleState",
+            "CallPayload",
+            "Delta",
+        ] {
             let id = reg.allocate_id();
             let schema =
                 TypeSchema::with_id(id, *name, vec![("contents".to_string(), FieldType::Any)]);

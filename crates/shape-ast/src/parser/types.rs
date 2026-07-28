@@ -182,8 +182,9 @@ pub fn parse_exists_type(pair: Pair<Rule>) -> Result<TypeAnnotation> {
     }
     if witnesses.is_empty() {
         return Err(ShapeError::ParseError {
-            message: "existential type requires at least one witness: `exists<W...> Descriptor<W...>`"
-                .to_string(),
+            message:
+                "existential type requires at least one witness: `exists<W...> Descriptor<W...>`"
+                    .to_string(),
             location: Some(pair_loc),
         });
     }

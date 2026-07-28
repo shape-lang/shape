@@ -844,7 +844,13 @@ fn lower_decision_stmt(
                 .to_string(),
         )),
         Statement::If(if_stmt, _) => {
-            lower_decision_expr(&mut if_stmt.condition, shadow_name, is_async, carrier, proof)?;
+            lower_decision_expr(
+                &mut if_stmt.condition,
+                shadow_name,
+                is_async,
+                carrier,
+                proof,
+            )?;
             lower_decision_exits(
                 &mut if_stmt.then_body,
                 shadow_name,
@@ -858,12 +864,30 @@ fn lower_decision_stmt(
             }
             Ok(())
         }
-        Statement::For(for_loop, _) => {
-            lower_decision_exits(&mut for_loop.body, shadow_name, is_async, carrier, proof, false)
-        }
+        Statement::For(for_loop, _) => lower_decision_exits(
+            &mut for_loop.body,
+            shadow_name,
+            is_async,
+            carrier,
+            proof,
+            false,
+        ),
         Statement::While(while_loop, _) => {
-            lower_decision_expr(&mut while_loop.condition, shadow_name, is_async, carrier, proof)?;
-            lower_decision_exits(&mut while_loop.body, shadow_name, is_async, carrier, proof, false)
+            lower_decision_expr(
+                &mut while_loop.condition,
+                shadow_name,
+                is_async,
+                carrier,
+                proof,
+            )?;
+            lower_decision_exits(
+                &mut while_loop.body,
+                shadow_name,
+                is_async,
+                carrier,
+                proof,
+                false,
+            )
         }
         Statement::Expression(value, _) => {
             // A control-flow expression carries its exits as nested `return`s
@@ -924,12 +948,16 @@ fn lower_decision_expr(
                             lower_decision_expr(value, shadow_name, is_async, carrier, proof)?;
                         }
                     }
-                    BlockItem::Assignment(assign) => {
-                        lower_decision_expr(&mut assign.value, shadow_name, is_async, carrier, proof)?
-                    }
-                    BlockItem::Statement(stmt) => lower_decision_stmt(
-                        stmt, shadow_name, is_async, carrier, proof, false,
+                    BlockItem::Assignment(assign) => lower_decision_expr(
+                        &mut assign.value,
+                        shadow_name,
+                        is_async,
+                        carrier,
+                        proof,
                     )?,
+                    BlockItem::Statement(stmt) => {
+                        lower_decision_stmt(stmt, shadow_name, is_async, carrier, proof, false)?
+                    }
                     BlockItem::Expression(inner) => {
                         lower_decision_expr(inner, shadow_name, is_async, carrier, proof)?
                     }
@@ -938,8 +966,20 @@ fn lower_decision_expr(
             Ok(())
         }
         Expr::If(if_expr, _) => {
-            lower_decision_expr(&mut if_expr.condition, shadow_name, is_async, carrier, proof)?;
-            lower_decision_expr(&mut if_expr.then_branch, shadow_name, is_async, carrier, proof)?;
+            lower_decision_expr(
+                &mut if_expr.condition,
+                shadow_name,
+                is_async,
+                carrier,
+                proof,
+            )?;
+            lower_decision_expr(
+                &mut if_expr.then_branch,
+                shadow_name,
+                is_async,
+                carrier,
+                proof,
+            )?;
             if let Some(else_branch) = &mut if_expr.else_branch {
                 lower_decision_expr(else_branch, shadow_name, is_async, carrier, proof)?;
             }
@@ -959,7 +999,13 @@ fn lower_decision_expr(
             Ok(())
         }
         Expr::Match(match_expr, _) => {
-            lower_decision_expr(&mut match_expr.scrutinee, shadow_name, is_async, carrier, proof)?;
+            lower_decision_expr(
+                &mut match_expr.scrutinee,
+                shadow_name,
+                is_async,
+                carrier,
+                proof,
+            )?;
             for arm in &mut match_expr.arms {
                 if let Some(guard) = &mut arm.guard {
                     lower_decision_expr(guard, shadow_name, is_async, carrier, proof)?;
@@ -972,11 +1018,23 @@ fn lower_decision_expr(
             lower_decision_expr(&mut loop_expr.body, shadow_name, is_async, carrier, proof)
         }
         Expr::While(while_expr, _) => {
-            lower_decision_expr(&mut while_expr.condition, shadow_name, is_async, carrier, proof)?;
+            lower_decision_expr(
+                &mut while_expr.condition,
+                shadow_name,
+                is_async,
+                carrier,
+                proof,
+            )?;
             lower_decision_expr(&mut while_expr.body, shadow_name, is_async, carrier, proof)
         }
         Expr::For(for_expr, _) => {
-            lower_decision_expr(&mut for_expr.iterable, shadow_name, is_async, carrier, proof)?;
+            lower_decision_expr(
+                &mut for_expr.iterable,
+                shadow_name,
+                is_async,
+                carrier,
+                proof,
+            )?;
             lower_decision_expr(&mut for_expr.body, shadow_name, is_async, carrier, proof)
         }
         Expr::Let(let_expr, _) => {
@@ -1058,22 +1116,22 @@ fn statement_retains_decision_ctor(stmt: &Statement) -> bool {
             decision_variant(value).is_some() || expr_retains_decision_ctor(value)
         }
         Statement::If(if_stmt, _) => {
-            if_stmt.then_body.iter().any(statement_retains_decision_ctor)
+            if_stmt
+                .then_body
+                .iter()
+                .any(statement_retains_decision_ctor)
                 || if_stmt
                     .else_body
                     .as_ref()
                     .is_some_and(|body| body.iter().any(statement_retains_decision_ctor))
         }
-        Statement::For(for_loop, _) => {
-            for_loop.body.iter().any(statement_retains_decision_ctor)
-        }
+        Statement::For(for_loop, _) => for_loop.body.iter().any(statement_retains_decision_ctor),
         Statement::While(while_loop, _) => {
             while_loop.body.iter().any(statement_retains_decision_ctor)
         }
-        Statement::VariableDecl(decl, _) => decl
-            .value
-            .as_ref()
-            .is_some_and(expr_retains_decision_ctor),
+        Statement::VariableDecl(decl, _) => {
+            decl.value.as_ref().is_some_and(expr_retains_decision_ctor)
+        }
         Statement::Assignment(assign, _) => expr_retains_decision_ctor(&assign.value),
         _ => false,
     }
@@ -1086,10 +1144,9 @@ fn expr_retains_decision_ctor(expr: &Expr) -> bool {
     }
     match expr {
         Expr::Block(block, _) => block.items.iter().any(|item| match item {
-            BlockItem::VariableDecl(decl) => decl
-                .value
-                .as_ref()
-                .is_some_and(expr_retains_decision_ctor),
+            BlockItem::VariableDecl(decl) => {
+                decl.value.as_ref().is_some_and(expr_retains_decision_ctor)
+            }
             BlockItem::Assignment(assign) => expr_retains_decision_ctor(&assign.value),
             BlockItem::Statement(stmt) => statement_retains_decision_ctor(stmt),
             BlockItem::Expression(inner) => expr_retains_decision_ctor(inner),
@@ -1240,29 +1297,32 @@ fn reserved_failure_transform(namespace: &str, name: &str) -> Option<FailureTran
 /// tracked in the D6 umbrella (#80).
 fn reject_reserved_failure_transform(transform: FailureTransform) -> ShapeError {
     let message = match transform {
-        FailureTransform::Recover =>
+        FailureTransform::Recover => {
             "the `recover` failure transform is designed but not implemented in E4 — E4 #20 ships \
              only propagate-typed-failure. `recover` would let a failure handler substitute a \
              valid `R` result for the failure and continue the after-chain with it; it is \
              planned, not rejected — see issue #80. In E4 a hook cannot convert a failure into a \
              success value: return a valid `R` on the success path, or let the typed failure \
              propagate outward with `return HookDecision::Return(<failure-valued result>)` when \
-             the target's return type has a failure channel.",
-        FailureTransform::Retry =>
+             the target's return type has a failure channel."
+        }
+        FailureTransform::Retry => {
             "the `retry` failure transform is designed but not implemented in E4 — E4 #20 ships \
              only propagate-typed-failure. `retry` would re-invoke the target with the same or a \
              lens-transformed argument pack under the execution-certainty gate (RetryState / \
              retry_not_executed), and its interaction with an awaited impl shadow and the \
              after-chain is explicitly unmodeled; it is planned, not rejected — see issue #80. In \
              E4 a hook cannot re-invoke the target: let the typed failure propagate outward and \
-             retry at the call site.",
-        FailureTransform::RePlace =>
+             retry at the call site."
+        }
+        FailureTransform::RePlace => {
             "the `re-place` (choose-another-placement) failure transform is designed but not \
              implemented in E4 — E4 #20 ships only propagate-typed-failure. `re-place` would \
              re-dispatch the failed call to a different placement/route (the @remote \
              retry-at-placement path — @remote itself ships in E4, re-place does not); it is \
              planned, not rejected — see issue #80. In E4 a hook cannot re-route a failed call: \
-             let the typed failure propagate outward.",
+             let the typed failure propagate outward."
+        }
     };
     reject(message.to_string())
 }
@@ -1723,7 +1783,8 @@ fn resolve_provable_locals(
                 entry.insert(proof);
             }
             std::collections::hash_map::Entry::Occupied(mut entry) => {
-                let keep = matches!((entry.get(), &proof), (Some(existing), Some(new)) if existing == new);
+                let keep =
+                    matches!((entry.get(), &proof), (Some(existing), Some(new)) if existing == new);
                 if !keep {
                     entry.insert(None);
                 }
@@ -2352,12 +2413,20 @@ fn carrier_write_concrete_type(
             object,
             end_index: None,
             ..
-        } => concrete_type_for_expr(compiler, expr).or_else(|| {
-            match carrier_write_concrete_type(compiler, declared_slots, captures, locals, object)? {
-                ConcreteType::Array(element) => Some(*element),
-                _ => None,
-            }
-        }),
+        } => {
+            concrete_type_for_expr(compiler, expr).or_else(|| {
+                match carrier_write_concrete_type(
+                    compiler,
+                    declared_slots,
+                    captures,
+                    locals,
+                    object,
+                )? {
+                    ConcreteType::Array(element) => Some(*element),
+                    _ => None,
+                }
+            })
+        }
         Expr::BinaryOp {
             left, op, right, ..
         } => {
@@ -2365,10 +2434,8 @@ fn carrier_write_concrete_type(
             let rt =
                 carrier_write_concrete_type(compiler, declared_slots, captures, locals, right)?;
             match op {
-                BinaryOp::Add => {
-                    (lt == rt && (is_numeric(&lt) || lt == ConcreteType::String))
-                        .then(|| lt.clone())
-                }
+                BinaryOp::Add => (lt == rt && (is_numeric(&lt) || lt == ConcreteType::String))
+                    .then(|| lt.clone()),
                 BinaryOp::Sub | BinaryOp::Mul | BinaryOp::Div | BinaryOp::Mod | BinaryOp::Pow => {
                     (lt == rt && is_numeric(&lt)).then(|| lt.clone())
                 }
@@ -2593,11 +2660,7 @@ impl<'a> Scan<'a> {
     /// Rewrite face only: a constant index with no parameter slot on THIS
     /// target. Quotes the index and the target's arity + signature (the
     /// specialization seam adds the two-signature application-site frame).
-    fn reject_index_out_of_range(
-        &self,
-        index: i64,
-        plan: &PseudoTuplePlan,
-    ) -> ShapeError {
+    fn reject_index_out_of_range(&self, index: i64, plan: &PseudoTuplePlan) -> ShapeError {
         let arity = plan.arity();
         reject(format!(
             "the `{args}` pseudo-tuple index {index} is out of range for this target: the \
@@ -3120,8 +3183,7 @@ impl<'a> Scan<'a> {
     /// same-spelled shadow can never be blessed through the flat map.
     fn note_binding_event(&self, name: &str, init: Option<&Expr>) {
         match self.face {
-            Face::Rewrite { local_bindings, .. }
-            | Face::AfterReturnScan { local_bindings, .. } => {
+            Face::Rewrite { local_bindings, .. } | Face::AfterReturnScan { local_bindings, .. } => {
                 local_bindings
                     .borrow_mut()
                     .push((name.to_string(), init.cloned()));
@@ -3394,11 +3456,7 @@ impl<'a> Scan<'a> {
     }
 
     /// The minted local for a range-checked constant index (rewrite face).
-    fn checked_slot_local(
-        &self,
-        index: i64,
-        plan: &PseudoTuplePlan,
-    ) -> Result<String> {
+    fn checked_slot_local(&self, index: i64, plan: &PseudoTuplePlan) -> Result<String> {
         if index < 0 || (index as usize) >= plan.arity() {
             return Err(self.reject_index_out_of_range(index, plan));
         }
@@ -3719,7 +3777,9 @@ impl<'a> Scan<'a> {
             }
             TypeAnnotation::Generic { name, args } => {
                 (!name.is_qualified() && name.name() == self.type_param)
-                    || args.iter().any(|arg| self.annotation_mentions_type_param(arg))
+                    || args
+                        .iter()
+                        .any(|arg| self.annotation_mentions_type_param(arg))
             }
             TypeAnnotation::Reference(path) => {
                 !path.is_qualified() && path.name() == self.type_param
@@ -3732,9 +3792,7 @@ impl<'a> Scan<'a> {
             TypeAnnotation::Dyn(paths) => paths
                 .iter()
                 .any(|path| !path.is_qualified() && path.name() == self.type_param),
-            TypeAnnotation::Existential { inner, .. } => {
-                self.annotation_mentions_type_param(inner)
-            }
+            TypeAnnotation::Existential { inner, .. } => self.annotation_mentions_type_param(inner),
         }
     }
 
@@ -3796,10 +3854,9 @@ impl<'a> Scan<'a> {
                 }
                 Ok(match self.face {
                     Face::Validate => Intercept::LegalKeep,
-                    Face::Rewrite { plan, .. } => Intercept::Replace(Expr::Literal(
-                        Literal::Int(plan.arity() as i64),
-                        *span,
-                    )),
+                    Face::Rewrite { plan, .. } => {
+                        Intercept::Replace(Expr::Literal(Literal::Int(plan.arity() as i64), *span))
+                    }
                     // Unreachable: the ambient/after-return faces run with
                     // unspellable sentinel template names, so
                     // `is_args_identifier` can never match; `No` keeps the
@@ -3853,7 +3910,11 @@ impl<'a> Scan<'a> {
             // frame and would bypass the F1 arm and both exit gates; see
             // `scan_fstring_interior_exits` for the measured leak).
             Expr::Literal(lit, _) => {
-                if let Literal::FormattedString { value, mode: interp_mode } = &*lit {
+                if let Literal::FormattedString {
+                    value,
+                    mode: interp_mode,
+                } = &*lit
+                {
                     self.ambient_scan_fstring(value, *interp_mode, mode)?;
                     if mode == ScanMode::TemplateBody
                         && self.pseudo_tuple_surface_live()
@@ -4203,9 +4264,7 @@ impl<'a> Scan<'a> {
                 })
             }
 
-            Expr::Loop(loop_expr, _) => {
-                self.ambient_frame(|| self.expr(&mut loop_expr.body, mode))
-            }
+            Expr::Loop(loop_expr, _) => self.ambient_frame(|| self.expr(&mut loop_expr.body, mode)),
 
             Expr::Let(let_expr, _) => {
                 if let Some(annotation) = &let_expr.type_annotation {
@@ -4244,10 +4303,8 @@ impl<'a> Scan<'a> {
                             ..
                         } = self.face
                         {
-                            *assign_expr.target = Expr::Identifier(
-                                self.checked_slot_local(slot_index, plan)?,
-                                span,
-                            );
+                            *assign_expr.target =
+                                Expr::Identifier(self.checked_slot_local(slot_index, plan)?, span);
                             // Rewrite the RHS FIRST so the collected write
                             // carries the post-rewrite expression (nested
                             // `args[j]` reads already resolved to their
@@ -4376,7 +4433,9 @@ impl<'a> Scan<'a> {
 
             Expr::UsingImpl { expr: inner, .. } => self.expr(inner, mode),
 
-            Expr::SimulationCall { params, span: _, .. } => self.named_exprs(params, mode),
+            Expr::SimulationCall {
+                params, span: _, ..
+            } => self.named_exprs(params, mode),
 
             Expr::WindowExpr(window, _) => self.window_expr(window, mode),
 
@@ -5015,15 +5074,16 @@ fn t<Args>(args: Args) -> Args {
                 panic!("expected a plain field, got {entry:?}");
             };
             assert_eq!(key, &format!("a{index}"));
-            assert!(
-                matches!(value, Expr::Identifier(name, _) if name == &slot_local_name(index))
-            );
+            assert!(matches!(value, Expr::Identifier(name, _) if name == &slot_local_name(index)));
         }
 
         // (4) the return annotation is the fully-typed inline object schema —
         // the transient Tuple annotation never survives resolution.
         let Some(TypeAnnotation::Object(fields)) = &def.return_type else {
-            panic!("expected the object return annotation, got {:?}", def.return_type);
+            panic!(
+                "expected the object return annotation, got {:?}",
+                def.return_type
+            );
         };
         assert_eq!(fields.len(), 2);
         assert_eq!(fields[0].name, "a0");
@@ -5534,7 +5594,10 @@ fn t<Args>(args: Args) -> HookDecision<Args> {
         )
         .expect_err("a kind-divergent Return must be rejected");
         let message = err.to_string();
-        assert!(message.contains("short-circuit read"), "names the read: {message}");
+        assert!(
+            message.contains("short-circuit read"),
+            "names the read: {message}"
+        );
         assert!(
             message.contains("delivering `string`"),
             "names the proven kind: {message}"

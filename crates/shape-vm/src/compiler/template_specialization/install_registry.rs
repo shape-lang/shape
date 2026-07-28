@@ -253,8 +253,7 @@ impl BytecodeCompiler {
         //    capture values flow into the specialization plan (rule-6
         //    identity + the bake) — the S2 bind-a-call-site-plan step is
         //    deleted with `CaptureBindingPlan`.
-        let handler =
-            self.specialize_template(&bound.template, &bound.capture_values, &target)?;
+        let handler = self.specialize_template(&bound.template, &bound.capture_values, &target)?;
 
         // 7. One journaled registry row (displaced-entry undo: the journal
         //    records the pre-write length; rollback truncates back, so a
@@ -403,21 +402,20 @@ impl BytecodeCompiler {
             .map(|record| {
                 let TemplateBodyOrigin { origin, sugar, .. } =
                     self.template_body_origin(&record.body_fn, record.hook_kind);
-                let declared_signature = match record
-                    .template_sig
-                    .strip_prefix(record.body_fn.as_str())
-                {
-                    Some(sig) => {
-                        display_safe_declared_signature(sig.trim_start().to_string(), record.hook_kind)
-                    }
-                    // Unreachable by construction (`template_sig` is
-                    // `"{body_fn} {sig}"`, written by the one apply seam);
-                    // fail SAFE for display — never risk a raw SOH prefix.
-                    None => {
-                        debug_assert!(false, "template_sig lost its body-fn prefix");
-                        String::new()
-                    }
-                };
+                let declared_signature =
+                    match record.template_sig.strip_prefix(record.body_fn.as_str()) {
+                        Some(sig) => display_safe_declared_signature(
+                            sig.trim_start().to_string(),
+                            record.hook_kind,
+                        ),
+                        // Unreachable by construction (`template_sig` is
+                        // `"{body_fn} {sig}"`, written by the one apply seam);
+                        // fail SAFE for display — never risk a raw SOH prefix.
+                        None => {
+                            debug_assert!(false, "template_sig lost its body-fn prefix");
+                            String::new()
+                        }
+                    };
                 let hook_word = match record.hook_kind {
                     TemplateHookKind::Before => "before",
                     TemplateHookKind::After => "after",
@@ -472,7 +470,10 @@ fn display_safe_declared_signature(sig: String, hook_kind: TemplateHookKind) -> 
     }
     // Defensive only (no known rendering reaches here): scrub any residual
     // mint token so no SOH byte can ever display.
-    debug_assert!(false, "declared-Sig rendering carried a mint outside the type-param head");
+    debug_assert!(
+        false,
+        "declared-Sig rendering carried a mint outside the type-param head"
+    );
     let mut out = String::with_capacity(sig.len());
     let mut rest = sig.as_str();
     while let Some(position) = rest.find('\u{1}') {
@@ -606,7 +607,10 @@ annotation hookann() on function {{
     /// pins can assert the post-compile (or post-rollback) registry state.
     fn compile_source(
         src: &str,
-    ) -> (shape_ast::error::Result<()>, crate::compiler::BytecodeCompiler) {
+    ) -> (
+        shape_ast::error::Result<()>,
+        crate::compiler::BytecodeCompiler,
+    ) {
         let program = shape_ast::parse_program(src).expect("fixture parses");
         let mut compiler = crate::compiler::BytecodeCompiler::new();
         let result = compiler.compile_in_place(&program);
@@ -735,9 +739,17 @@ annotation hookann() on function {{
             .as_typed_object_storage()
             .expect("the 2-ary mutation aggregate is the inline-schema TypedObject");
         assert_eq!(storage.field_kinds[0], NativeKind::Int64);
-        assert_eq!(storage.slots()[0].raw() as i64, 17, "slot 0 mutated via capture + length");
+        assert_eq!(
+            storage.slots()[0].raw() as i64,
+            17,
+            "slot 0 mutated via capture + length"
+        );
         assert_eq!(storage.field_kinds[1], NativeKind::Float64);
-        assert_eq!(f64::from_bits(storage.slots()[1].raw()), 4.5, "slot 1 flows through");
+        assert_eq!(
+            f64::from_bits(storage.slots()[1].raw()),
+            4.5,
+            "slot 1 flows through"
+        );
     }
 
     // THE VERIFY-1 REFUTER SHAPE THROUGH THE API: two targets whose FLAT
@@ -1206,7 +1218,8 @@ type Widget {{
             "internal-error-shaped: {err}"
         );
         assert!(
-            err.to_string().contains("snapshot-resolved before any directive applies"),
+            err.to_string()
+                .contains("snapshot-resolved before any directive applies"),
             "names the snapshot discipline: {err}"
         );
         assert!(compiler.hook_install_registry.is_empty());
@@ -1271,7 +1284,9 @@ victim(4)
         );
         assert_eq!(compiler.hook_install_registry.len(), 2);
         assert!(
-            compiler.hook_install_registry[1].template_sig.starts_with("h2 "),
+            compiler.hook_install_registry[1]
+                .template_sig
+                .starts_with("h2 "),
             "row 2 records the SNAPSHOT-resolved template, not the nested run's: {}",
             compiler.hook_install_registry[1].template_sig
         );
@@ -1351,7 +1366,10 @@ victim(1)
         assert_eq!(view.declared_signature, "<Args>(args: Args) -> Args");
         assert_eq!(view.specialized_signature, "(int) -> int");
         assert_eq!(view.captures, vec![("factor".to_string(), "3".to_string())]);
-        assert_eq!(view.body_fn, None, "a sugar mint is never a display identity");
+        assert_eq!(
+            view.body_fn, None,
+            "a sugar mint is never a display identity"
+        );
         assert_ne!(view.application_span, Span::default());
         for field in [
             view.annotation_name.as_str(),

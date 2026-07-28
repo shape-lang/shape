@@ -26,18 +26,16 @@ use crate::compiler::BytecodeCompiler;
 use crate::compiler::monomorphization::semantic_specialization::{
     SemanticSpecializationRequest, SpecializationProgressKey,
 };
-use crate::compiler::template_specialization::const_lift::{
-    self, LiftedConst, structural_key_segment,
-};
-use crate::compiler::template_specialization::pseudo_tuple::{
-    self, TemplateSpecializationPlan,
-};
 use crate::compiler::monomorphization::substitution;
 use crate::compiler::monomorphization::substitution::concrete_to_annotation;
 use crate::compiler::monomorphization::type_resolution::{
     ClosureSpec, ComptimeConstValue, build_mono_key_full, build_mono_key_with_consts,
     comptime_const_value_from_literal_expr, split_type_and_const_param_names,
 };
+use crate::compiler::template_specialization::const_lift::{
+    self, LiftedConst, structural_key_segment,
+};
+use crate::compiler::template_specialization::pseudo_tuple::{self, TemplateSpecializationPlan};
 
 /// Phase C — per-module specialization budget.
 ///
@@ -392,8 +390,8 @@ impl BytecodeCompiler {
         // cycle-detector SpecializationProgressKey. Computed once and reused
         // at the symbol rename seam below so key and symbol stay
         // identity-locked.
-        let template_suffix = template_plan
-            .map(|plan| template_specialization_key_suffix(type_args, &plan.captures));
+        let template_suffix =
+            template_plan.map(|plan| template_specialization_key_suffix(type_args, &plan.captures));
         let mut mono_key = build_mono_key(base_fn_name, type_args);
         if let Some(suffix) = &template_suffix {
             mono_key.push_str(suffix);
@@ -547,11 +545,9 @@ impl BytecodeCompiler {
             // `compile_function` = the C3-G10 battery, cache_remove-on-Err,
             // the Hard classification) runs UNCHANGED.
             if !plan.captures.is_empty() {
-                let capture_params = const_lift::declared_capture_params_from_tail(
-                    &specialized_def,
-                    &plan.captures,
-                )
-                .map_err(SpecializationFailure::Hard)?;
+                let capture_params =
+                    const_lift::declared_capture_params_from_tail(&specialized_def, &plan.captures)
+                        .map_err(SpecializationFailure::Hard)?;
                 const_lift::bake_captures_into_def(
                     &mut specialized_def,
                     &plan.captures,
@@ -955,9 +951,7 @@ impl BytecodeCompiler {
         if self
             .specialization_type_overlays
             .current()
-            .is_some_and(|outer| {
-                outer.has_lexical_parameter_name_collision(&declared_type_params)
-            })
+            .is_some_and(|outer| outer.has_lexical_parameter_name_collision(&declared_type_params))
         {
             // One name map cannot preserve whether an inlined `type_ref(T)`
             // originated in the caller closure or the callee template. Keep

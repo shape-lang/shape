@@ -193,8 +193,7 @@ fn extern_c_string_aggregate_arg() {
 /// to completion, exit 0.
 #[test]
 fn extern_c_declaration_is_never_fatal() {
-    let program =
-        "extern \"C\" fn nope(x: int) -> int from \"c\" as \"definitely_missing_symbol_xyz\"\n\
+    let program = "extern \"C\" fn nope(x: int) -> int from \"c\" as \"definitely_missing_symbol_xyz\"\n\
          print(\"DECLARED_OK\")\n";
     let run = run_shape(program, "vm", None);
     assert_eq!(
@@ -203,7 +202,11 @@ fn extern_c_declaration_is_never_fatal() {
         "declaring-without-calling must be non-fatal; stderr={}",
         run.stderr
     );
-    assert!(run.stdout.contains("DECLARED_OK"), "stdout={:?}", run.stdout);
+    assert!(
+        run.stdout.contains("DECLARED_OK"),
+        "stdout={:?}",
+        run.stdout
+    );
 }
 
 /// Error channel, extern-C link failure (§4.2 / §4.5 class 3): CALLING an
@@ -211,8 +214,7 @@ fn extern_c_declaration_is_never_fatal() {
 /// the library, and the symbol — not a silent null, not a panic.
 #[test]
 fn extern_c_missing_symbol_is_structured_error() {
-    let program =
-        "extern \"C\" fn nope(x: int) -> int from \"c\" as \"definitely_missing_symbol_xyz\"\n\
+    let program = "extern \"C\" fn nope(x: int) -> int from \"c\" as \"definitely_missing_symbol_xyz\"\n\
          print(nope(1))\n";
     let run = run_shape(program, "vm", None);
     assert_ne!(
@@ -234,6 +236,12 @@ fn extern_c_missing_symbol_is_structured_error() {
 
 /// Happy path scalar: `fn python` returns `Result<int>` (the dynamic-language
 /// Result mandate, §3.6), the call evaluates to `Ok(7)`. Runs vm ≡ jit.
+///
+/// Also #202 tripwire (2), the `op_await` pass-through differential: `await` on
+/// a SYNCHRONOUS foreign call yields the same value as not awaiting it. Only an
+/// `async` declaration produces a future, so `await` here has nothing to
+/// resolve and passes the value through — folded into this fixture rather than
+/// given its own, so the two results are compared on one call in one process.
 #[test]
 #[ignore = "needs built python extension + CPython; run via `just test-ffi`"]
 fn python_scalar_ok_vm_jit() {
@@ -241,8 +249,17 @@ fn python_scalar_ok_vm_jit() {
     let program = "fn python add(a: int, b: int) -> Result<int> {\n\
                    \x20   return a + b\n\
                    }\n\
-                   match add(3, 4) { Ok(v) => print(f\"RESULT={v}\"), Err(e) => print(f\"ERR={e}\") }\n";
+                   match add(3, 4) { Ok(v) => print(f\"RESULT={v}\"), Err(e) => print(f\"ERR={e}\") }\n\
+                   match await add(3, 4) { Ok(v) => print(f\"AWAITED={v}\"), Err(e) => print(f\"ERR={e}\") }\n";
     assert_vm_jit_stdout(program, Some(&ext), "RESULT=7");
+    let run = run_shape(program, "vm", Some(&ext));
+    assert!(
+        run.stdout.contains("AWAITED=7"),
+        "#202 tripwire (2): `await` on a sync foreign call must pass the value \
+         through unchanged; stdout={:?} stderr={}",
+        run.stdout,
+        run.stderr
+    );
 }
 
 /// Container argument: an `Array<int>` marshals across the boundary as a list
@@ -286,7 +303,9 @@ fn python_exception_becomes_catchable_err() {
         run.stderr
     );
     assert!(
-        run.stdout.contains("ERR=") && run.stdout.contains("ValueError") && run.stdout.contains("boom"),
+        run.stdout.contains("ERR=")
+            && run.stdout.contains("ValueError")
+            && run.stdout.contains("boom"),
         "Err payload should carry the foreign exception; stdout={:?}",
         run.stdout
     );
@@ -394,5 +413,216 @@ fn typescript_throw_becomes_catchable_err() {
         !run.stdout.contains("TypeConformanceError:"),
         "a genuine throw must NOT carry the TypeConformanceError prefix; stdout={:?}",
         run.stdout
+    );
+}
+
+/// The #202 overlap assertion, measured INSIDE the foreign bodies.
+///
+/// Timing the subprocess from the outside cannot work here: under `cargo test`
+/// the `shape` binary is the DEBUG build, whose stdlib compilation takes tens of
+/// seconds and varies by seconds between runs — noise that swamps the
+/// sub-second sleeps being measured. So each call reports the wall-clock
+/// interval it actually occupied, as `[start, end]`, and the test asserts the
+/// two intervals OVERLAP. That is a direct observation of two foreign bodies
+/// being inside the runtime at the same moment, and no amount of startup cost or
+/// machine load can fake it or break it.
+///
+/// `program` must print `A0=<start> A1=<end>` and `B0=… B1=…`. Units are
+/// whatever the language's clock uses (seconds for Python's `time.time()`,
+/// milliseconds for JS `Date.now()`); `min_span` is the nap length in those
+/// units, and exists so a probe that returned instantly cannot pass vacuously.
+fn assert_foreign_calls_overlapped(
+    program: &str,
+    ext_dir: Option<&Path>,
+    min_span: f64,
+    label: &str,
+) {
+    let run = run_shape(program, "vm", ext_dir);
+    assert_eq!(run.exit_code, Some(0), "stderr={}", run.stderr);
+
+    let field = |name: &str| -> f64 {
+        let needle = format!("{name}=");
+        let rest = run.stdout.split(&needle).nth(1).unwrap_or_else(|| {
+            panic!(
+                "{label}: missing {name} in stdout={:?} stderr={}",
+                run.stdout, run.stderr
+            )
+        });
+        let text: String = rest
+            .chars()
+            .take_while(|c| c.is_ascii_digit() || *c == '.' || *c == '-')
+            .collect();
+        text.parse()
+            .unwrap_or_else(|e| panic!("{label}: {name} is not a number ({text:?}): {e}"))
+    };
+
+    let (a_start, a_end) = (field("A0"), field("A1"));
+    let (b_start, b_end) = (field("B0"), field("B1"));
+
+    assert!(
+        a_end - a_start >= min_span * 0.9 && b_end - b_start >= min_span * 0.9,
+        "{label}: each call must actually have occupied its nap — got spans {} and {}, \
+         expected about {min_span}",
+        a_end - a_start,
+        b_end - b_start
+    );
+
+    let overlap = a_end.min(b_end) - a_start.max(b_start);
+    assert!(
+        overlap > 0.0,
+        "{label}: the two foreign calls did not overlap — A ran [{a_start}, {a_end}] and \
+         B ran [{b_start}, {b_end}], which is serialization. The whole point of an async \
+         foreign call is that both are in flight before either is awaited."
+    );
+    assert!(
+        overlap >= min_span * 0.5,
+        "{label}: the calls overlapped by only {overlap}, less than half of {min_span} — \
+         they are mostly serialized"
+    );
+}
+
+// =========================================================================
+// async fn <language> — real offload (ADR-019 §5 / #202, POLY-ASYNC-OFFLOAD)
+// =========================================================================
+//
+// The host-level proof of overlap lives in shape-vm's
+// `executor::foreign_async` tripwires, against an instrumented fake
+// extension, so it runs on every machine. These are the end-to-end half:
+// the real CPython and V8 embeddings, driven through the real `shape`
+// binary, sleeping in their own languages. They belong to the FFI tier for
+// the same reason every other `fn python` / `fn typescript` test does.
+//
+// A wall-clock budget rather than an equality: the assertion is "clearly
+// less than serialized", with headroom for interpreter startup and a loaded
+// machine. Serialized would be at least 1.0s of sleep alone; the budget is
+// well under that and cannot be met by accident.
+
+/// The overlap tripwire, python. Two `async fn python` calls that each sleep
+/// 500ms are STARTED before either is awaited; both must finish in about
+/// 500ms of sleep, not 1000ms.
+///
+/// `time.sleep` is the right probe precisely because CPython releases the GIL
+/// across it — which is the property the Python runtime's
+/// `INSTANCE_CONCURRENCY_SHARED` declaration is claiming.
+#[test]
+#[ignore = "needs built python extension + CPython; run via `just test-ffi`"]
+fn python_two_async_calls_overlap() {
+    let ext = extension_dir();
+    // Each call reports the interval it occupied. `time.sleep` is the right
+    // probe precisely because CPython releases the GIL across it — the property
+    // the extension's INSTANCE_CONCURRENCY_SHARED declaration is claiming.
+    let program = "async fn python nap(ms: int) -> Result<Array<number>> {\n\
+                   \x20   import time\n\
+                   \x20   start = time.time()\n\
+                   \x20   time.sleep(ms / 1000.0)\n\
+                   \x20   return [start, time.time()]\n\
+                   }\n\
+                   let a = nap(500)\n\
+                   let b = nap(500)\n\
+                   match await a { Ok(v) => print(f\"A0={v[0]} A1={v[1]}\"), Err(e) => print(f\"ERR={e}\") }\n\
+                   match await b { Ok(v) => print(f\"B0={v[0]} B1={v[1]}\"), Err(e) => print(f\"ERR={e}\") }\n";
+    // `time.time()` is in seconds.
+    assert_foreign_calls_overlapped(program, Some(&ext), 0.5, "async fn python");
+}
+
+/// The overlap tripwire, typescript. The TypeScript runtime declares
+/// `INSTANCE_CONCURRENCY_THREAD_AFFINE`, so the overlap comes from two
+/// dedicated workers each owning their own V8 isolate, not from one isolate
+/// being re-entered.
+///
+/// A BUSY WAIT rather than a timer, for two reasons. The practical one: the
+/// extension embeds a bare `deno_core::JsRuntime` with no web extensions, so
+/// `setTimeout` is not defined (a pre-existing limitation of the TypeScript
+/// vertical, unrelated to #202 — the offload itself runs fine and surfaces the
+/// `ReferenceError` as a clean `Err`). The better one: a CPU-bound loop cannot
+/// be overlapped by event-loop interleaving on a single isolate, only by two
+/// isolates on two threads — which is exactly the claim being tested.
+#[test]
+#[ignore = "needs built typescript extension + V8; run via `just test-ffi`"]
+fn typescript_two_async_calls_overlap() {
+    let ext = extension_dir();
+    // A BUSY WAIT rather than a timer, for two reasons. The practical one: the
+    // extension embeds a bare `deno_core::JsRuntime` with no web extensions, so
+    // `setTimeout` is not defined (a pre-existing limitation of the TypeScript
+    // vertical, unrelated to #202 — the offload itself runs fine and surfaces
+    // the `ReferenceError` as a clean `Err`). The better one: a CPU-bound loop
+    // cannot be overlapped by event-loop interleaving on a single isolate, only
+    // by two isolates on two threads — which is exactly the claim being tested.
+    let program = "async fn typescript nap(ms: int) -> Result<Array<number>> {\n\
+                   \x20   const start = Date.now();\n\
+                   \x20   const stop = start + ms;\n\
+                   \x20   while (Date.now() < stop) {}\n\
+                   \x20   return [start, Date.now()];\n\
+                   }\n\
+                   let a = nap(500)\n\
+                   let b = nap(500)\n\
+                   match await a { Ok(v) => print(f\"A0={v[0]} A1={v[1]}\"), Err(e) => print(f\"ERR={e}\") }\n\
+                   match await b { Ok(v) => print(f\"B0={v[0]} B1={v[1]}\"), Err(e) => print(f\"ERR={e}\") }\n";
+    // `Date.now()` is in milliseconds.
+    assert_foreign_calls_overlapped(program, Some(&ext), 500.0, "async fn typescript");
+}
+
+/// An `async fn python` call delivers its VALUE, its body's own `await` still
+/// runs, and vm ≡ jit.
+///
+/// All three in one fixture because they are one claim about one call: the
+/// python extension wraps an async declaration in `async def` +
+/// `asyncio.run(...)`, so `await` inside the body is legal and drives to
+/// completion — now on a worker thread rather than on the interpreter thread —
+/// and the result is the declared `Result<int>` after the Shape-side `await`.
+/// vm ≡ jit holds by construction: a function containing a foreign call is
+/// interpreter-only in both modes (`vm_only_opcode_reason(CallForeignAsync)`).
+#[test]
+#[ignore = "needs built python extension + CPython; run via `just test-ffi`"]
+fn python_async_body_awaits_internally_and_delivers_its_value_vm_jit() {
+    let ext = extension_dir();
+    let program = "async fn python fetch(x: int) -> Result<int> {\n\
+                   \x20   import asyncio\n\
+                   \x20   await asyncio.sleep(0)\n\
+                   \x20   return x * 2\n\
+                   }\n\
+                   match await fetch(21) { Ok(v) => print(f\"RESULT={v}\"), Err(e) => print(f\"ERR={e}\") }\n";
+    assert_vm_jit_stdout(program, Some(&ext), "RESULT=42");
+}
+
+/// REGRESSION (#202 work item 6): a foreign call inside a SPAWNED user
+/// `async fn` used to fail link-now with "no extension provides language
+/// 'python'", because the isolated task VM was built with an empty extension
+/// registry. The same call from the parent VM worked, which is what made it
+/// confusing rather than merely broken.
+#[test]
+#[ignore = "needs built python extension + CPython; run via `just test-ffi`"]
+fn python_foreign_call_inside_a_spawned_async_fn_succeeds() {
+    let ext = extension_dir();
+    // `async let` is only legal inside an async fn, hence the wrapper; the
+    // deferred zero-arg call is what routes `work()` onto the isolated task VM.
+    let program = "fn python double(a: int) -> Result<int> {\n\
+                   \x20   return a * 2\n\
+                   }\n\
+                   async fn work() -> int {\n\
+                   \x20   match double(21) { Ok(v) => return v, Err(e) => return 0 }\n\
+                   }\n\
+                   async fn driver() -> int {\n\
+                   \x20   async let t = work()\n\
+                   \x20   return await t\n\
+                   }\n\
+                   print(f\"RESULT={await driver()}\")\n";
+    let run = run_shape(program, "vm", Some(&ext));
+    assert_eq!(
+        run.exit_code,
+        Some(0),
+        "a foreign call inside a spawned async fn must link; stderr={}",
+        run.stderr
+    );
+    assert!(
+        !run.stderr.contains("no extension provides language"),
+        "the isolated task VM must inherit the parent's extension registry; stderr={}",
+        run.stderr
+    );
+    assert!(
+        run.stdout.contains("RESULT=42"),
+        "stdout={:?} stderr={}",
+        run.stdout,
+        run.stderr
     );
 }

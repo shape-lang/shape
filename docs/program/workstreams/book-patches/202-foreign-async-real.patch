@@ -1,0 +1,269 @@
+diff -u --recursive a/book/book-site/src/content/docs/stdlib/core/remote.mdx b/book/book-site/src/content/docs/stdlib/core/remote.mdx
+--- a/book/book-site/src/content/docs/stdlib/core/remote.mdx
++++ b/book/book-site/src/content/docs/stdlib/core/remote.mdx
+@@ -107,14 +107,14 @@
+ `@remote` also works on foreign function definitions. The function is
+ compiled and executed on the remote server using its language runtime:
+ 
+-This example uses a `fn python` target with `numpy` on the receiver. It was
+-written against `async fn python`, which is now a compile error (`[C0932]`,
+-issue **#202**); the body never awaited anything, so dropping the keyword
+-changes nothing it demonstrates. One thing still keeps it a reference sketch:
+-the book-truth gate starts its loopback receiver without a `--ffi-languages`
+-opt-in, so it cannot run a foreign python runtime server-side (tracked in #85).
+-The synchronous python × `@remote` transfer itself is proven green in the E4 S6
+-Rust acceptance suite; this cell stays `runnable=false` here.
++This example uses a `fn python` target with `numpy` on the receiver. It is
++written synchronously because that is all it needs — the body never awaits
++anything. `async fn python` is now supported (issue **#202**) and composes with
++`@remote`, but adding the keyword here would buy nothing. One thing keeps this a
++reference sketch: the book-truth gate starts its loopback receiver without a
++`--ffi-languages` opt-in, so it cannot run a foreign python runtime server-side
++(tracked in #85). The synchronous python × `@remote` transfer itself is proven
++green in the E4 S6 Rust acceptance suite; this cell stays `runnable=false` here.
+ 
+ ```shape runnable=false
+ @remote("gpu-worker:9527")
+diff -u --recursive a/book/book-site/src/content/docs/tooling/polyglot.mdx b/book/book-site/src/content/docs/tooling/polyglot.mdx
+--- a/book/book-site/src/content/docs/tooling/polyglot.mdx
++++ b/book/book-site/src/content/docs/tooling/polyglot.mdx
+@@ -196,7 +196,9 @@
+ 
+ ## Async Foreign Functions
+ 
+-**Not supported yet.** `async` on a polyglot function is a compile error:
++`async fn python` and `async fn typescript` run the foreign body **off the
++interpreter thread** and resolve it at `await`, so two of them overlap instead
++of serializing:
+ 
+ ```shape runnable=false
+ async fn python fetch_json(url: string) -> Result<Vec<number>> {
+@@ -206,49 +208,63 @@
+             data = await response.json()
+             return data['values']
+ }
+-```
+ 
+-```
+-[C0932] `async fn python fetch_json` is not supported — a foreign call runs
+-synchronously on the VM thread and its declared return type is not a future.
+-The body's own `await`s do run to completion inside the extension, but the
+-caller cannot overlap anything with them, so `async` here promises a
+-concurrency the runtime does not provide (ADR-019 §5 forbids this untruthful
+-contract). Real foreign async — the invoke offloaded off-thread and resolved
+-at `await` — is planned, not refused: see issue #202 (POLY-ASYNC-OFFLOAD).
+-This rejection is transitional and is deleted when that lands.
+-```
++// Both calls are in flight after these two lines — neither has been awaited.
++let a = fetch_json("https://example.com/a")
++let b = fetch_json("https://example.com/b")
+ 
+-The declaration used to compile, and that was the problem: it promised
+-suspension and concurrency nobody delivered. A foreign call runs on the VM
+-thread from start to finish, and the declared return type is a value, not a
+-future. The body's own `await`s really do run — the Python extension wraps an
+-async body in `asyncio.run(...)`, TypeScript in an `async function` — but they
+-run to completion while the caller waits, so nothing overlaps. Rather than keep
+-a declaration that misstates its own contract, the compiler now refuses it.
+-
+-Real foreign async is planned, not refused (**#202**): the invoke moves
+-off-thread and `await` resolves it through the same pending-task channel
+-Shape's own async uses, so two `async fn python` calls overlap instead of
+-serializing.
+-
+-Until then, drop the keyword:
+-
+-```shape
+-fn python fetch_json(url: string) -> Result<Vec<number>> {
+-    import json
+-    import urllib.request
+-    with urllib.request.urlopen(url) as response:
+-        return json.load(response)['values']
+-}
++let values_a = await a
++let values_b = await b
+ ```
+ 
+-The call runs synchronously — which is what it already did. One caveat, because
+-the keyword is doing real work inside the extension: a body that uses `await`
+-internally cannot simply lose the `async`, since the wrapper is what makes that
+-`await` legal. Such a body must drive its own completion instead — wrap it in
+-`asyncio.run(...)` for Python, or resolve the promise before returning for
+-TypeScript.
++Calling an `async` foreign function does not run it to completion; it starts it
++and hands back a future. Your program keeps going, which is the whole point: the
++second call launches while the first is still out. `await` then collects the
++declared `Result<T>`.
++
++Because the call yields a future, the type of `fetch_json(...)` is
++`Future<Result<Vec<number>>>` and the type of `await fetch_json(...)` is
++`Result<Vec<number>>`. Forgetting the `await` is a type error, not a value that
++quietly behaves oddly later.
++
++### What "overlap" means per language
++
++The two runtimes reach concurrency differently, and the difference is declared
++by each extension rather than assumed by Shape:
++
++| Runtime | How it overlaps | Practical limit |
++|---|---|---|
++| Python | Several invokes share one interpreter. CPython releases the GIL across `time.sleep`, file and socket IO, so waiting calls overlap. | Two calls that are both **CPU-bound in pure Python** still contend on the GIL. Release it (`numpy`, IO, a C extension) to overlap real work. |
++| TypeScript | A V8 isolate cannot leave the thread that created it, so Shape gives TypeScript dedicated worker threads, each owning its own isolate. | Four workers, so at most four `async fn typescript` calls run at once; a fifth queues. Module-level state in an async TypeScript body is per-worker. |
++
++An extension that does not declare how it may be driven off-thread is refused
++rather than run synchronously behind an `async` spelling — the diagnostic names
++the missing vtable declaration.
++
++### Awaiting inside the body
++
++An async body's own `await` still works, and the keyword is what makes it legal:
++the Python extension wraps the body in `async def` + `asyncio.run(...)`, the
++TypeScript extension in an `async function`. Those inner awaits now run on a
++worker thread rather than blocking the caller.
++
++### Cancellation
++
++Cancelling an in-flight foreign `await` stops Shape waiting and discards the
++result. It does **not** stop the foreign body: Shape cannot interrupt code
++running inside CPython or V8, and does not claim to. The body runs to
++completion and its result is dropped. A cancellation request is never reported
++as confirmed foreign termination.
++
++### Fidelity
++
++This is the same fidelity as Shape's own async: an eager offload plus a
++blocking receive at the await point, not a suspended interpreter frame. True
++interpreter suspension is a runtime-wide later item and will change none of the
++contracts above.
++
++Synchronous `fn python` / `fn typescript` are unaffected — they still run inline
++on the calling thread and return their value directly, with no future involved.
+ 
+ ## Annotations
+ 
+diff -u --recursive a/book/book-site/src/content/docs/tooling/python-extension.mdx b/book/book-site/src/content/docs/tooling/python-extension.mdx
+--- a/book/book-site/src/content/docs/tooling/python-extension.mdx
++++ b/book/book-site/src/content/docs/tooling/python-extension.mdx
+@@ -294,26 +294,41 @@
+ 
+ ### Async Functions
+ 
+-**Not supported yet** — `async fn python` is a compile error `[C0932]`, owned by
+-issue **#202**. The keyword promised concurrency that never existed: the
+-extension ran the coroutine to completion on Python's `asyncio` loop while the
+-Shape VM blocked, so nothing overlapped. Write the function synchronously
+-instead:
++`async fn python` runs the body on a background worker and returns a future; the
++call does not block, and `await` collects the declared `Result<T>`:
+ 
+ ```shape runnable=false
+-fn python fetch_json(url: string) -> Result<{setup: string, punchline: string}> {
++async fn python fetch_json(url: string) -> Result<{setup: string, punchline: string}> {
+   import json
+   import urllib.request
+   with urllib.request.urlopen(url) as response:
+     return json.load(response)
+ }
+ 
+-let values = fetch_json("https://official-joke-api.appspot.com/random_joke")?
++// Two requests in flight at once.
++let first = fetch_json("https://official-joke-api.appspot.com/random_joke")
++let second = fetch_json("https://official-joke-api.appspot.com/random_joke")
+ 
+-print(values)
++print(await first)
++print(await second)
+ // {setup: "Why did the scarecrow win an award?", punchline: "He was outstanding in his field."}
+ ```
+ 
++Several invokes share one CPython interpreter, which is safe because the
++extension holds no state that a second thread could tear: the overlap comes from
++CPython releasing the GIL across `time.sleep`, file IO and socket IO. Two calls
++that are both CPU-bound in pure Python still contend on the GIL — release it
++(`numpy`, IO, a C extension) if you want real parallel work.
++
++A body may `await` internally; the extension wraps an async declaration in
++`async def` + `asyncio.run(...)`, and those inner awaits now run on the worker
++rather than blocking your program.
++
++Synchronous `fn python` is unchanged: it runs inline and returns its value
++directly. See
++[Polyglot Functions :: Async Foreign Functions](/tooling/polyglot/#async-foreign-functions)
++for cancellation semantics and the cross-language comparison.
++
+ A body that genuinely needs `await` must drive its own loop — wrap it in
+ `asyncio.run(...)` — until #202 lands. See
+ [Polyglot Functions :: Async Foreign Functions](/tooling/polyglot/#async-foreign-functions)
+diff -u --recursive a/book/book-site/src/content/docs/tooling/typescript-extension.mdx b/book/book-site/src/content/docs/tooling/typescript-extension.mdx
+--- a/book/book-site/src/content/docs/tooling/typescript-extension.mdx
++++ b/book/book-site/src/content/docs/tooling/typescript-extension.mdx
+@@ -243,24 +243,37 @@
+ 
+ ### Async Functions
+ 
+-**Not supported yet** — `async fn typescript` is a compile error `[C0932]`,
+-owned by issue **#202**:
++`async fn typescript` runs the body on a dedicated worker thread and returns a
++future; `await` collects the declared `Result<T>`:
+ 
+ ```shape runnable=false
+ async fn typescript fetch_json(url: string) -> Result<{value: number}> {
+     const response = await fetch(url);
+     return await response.json();
+ }
++
++let a = fetch_json("https://example.com/a")
++let b = fetch_json("https://example.com/b")
++print(await a)
++print(await b)
+ ```
+ 
+-The keyword promised concurrency that never existed. The extension wrapped the
+-body in an `async function` and drove `deno_core`'s event loop with a cached
+-Tokio runtime until the promise resolved — but the Shape VM blocked the calling
+-task for the whole of it, so two such calls serialized. Write the body to
+-resolve its own promise before returning, and drop the keyword, until #202
+-lands. See
++A V8 isolate is bound to the thread that created it, so the overlap does not
++come from re-entering one isolate — Shape gives TypeScript **four dedicated
++worker threads, each owning its own isolate**. Two consequences worth knowing:
++at most four `async fn typescript` calls run at once and a fifth queues, and
++module-level state in an async TypeScript body is per-worker rather than shared
++across every call.
++
++The extension embeds a bare `deno_core` runtime with no web platform
++extensions, so browser globals such as `setTimeout` and `fetch` are not defined.
++That limit is independent of `async` and applies to synchronous bodies too; a
++reference to one surfaces as an ordinary `Err` carrying the `ReferenceError`.
++
++Synchronous `fn typescript` is unchanged: it runs inline on the calling thread.
++See
+ [Polyglot Functions :: Async Foreign Functions](/tooling/polyglot/#async-foreign-functions)
+-for the full diagnostic and what replaces it.
++for cancellation semantics and the cross-language comparison.
+ 
+ ## Enable It in LSP
+ 
+@@ -331,11 +344,17 @@
+ 
+ ### Async function never resolves
+ 
+-`async fn typescript` no longer compiles (`[C0932]`, issue **#202**), so this
+-hang is no longer reachable through that keyword. The underlying hazard
+-survives in any synchronous body that waits on something unbounded: the Shape
+-VM blocks on the foreign call until it returns. Use `Result<T>` and surface a
+-timeout from inside the TypeScript body for defensive code paths.
++An `async fn typescript` call that never returns holds one of the four worker
++threads for as long as it runs; enough of them and later async calls queue
++behind it. Cancelling the `await` releases your program but not the worker —
++Shape cannot interrupt code inside V8, so the body runs to completion and its
++result is discarded.
++
++A synchronous `fn typescript` that waits on something unbounded is worse: it
++blocks the interpreter thread outright.
++
++Either way, surface a timeout from inside the TypeScript body and return
++`Result<T>` rather than relying on the caller to escape.
+ 
+ ### Hover works but TypeScript semantic highlighting is missing
+ 

@@ -1,7 +1,7 @@
 //! Structural inference and inherited-pack evidence for capture planning.
 
 use super::*;
-use crate::compiler::{reference_flow::BindingKey, BytecodeCompiler};
+use crate::compiler::{BytecodeCompiler, reference_flow::BindingKey};
 
 impl BytecodeCompiler {
     pub(super) fn capture_binding_facts(

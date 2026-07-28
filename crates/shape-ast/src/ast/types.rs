@@ -191,7 +191,11 @@ impl TypeAnnotation {
                 format!("{{{}}}", fields_str.join(", "))
             }
             TypeAnnotation::Existential { witnesses, inner } => {
-                format!("exists<{}> {}", witnesses.join(", "), inner.to_type_string())
+                format!(
+                    "exists<{}> {}",
+                    witnesses.join(", "),
+                    inner.to_type_string()
+                )
             }
             _ => "any".to_string(),
         }

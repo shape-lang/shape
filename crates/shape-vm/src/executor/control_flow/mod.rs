@@ -147,6 +147,7 @@ impl VirtualMachine {
             CallClosure => self.op_call_closure(instruction, ctx)?,
             CallFunctionIndirect => self.op_call_function_indirect(instruction, ctx)?,
             CallForeign => self.op_call_foreign(instruction)?,
+            CallForeignAsync => self.op_call_foreign_async(instruction)?,
             Return => self.op_return()?,
             ReturnValue => self.op_return_value()?,
             ReturnValueI64 => self.op_return_value_i64()?,
@@ -879,42 +880,57 @@ impl VirtualMachine {
         Ok(())
     }
 
-    /// SHARED foreign-call core (ffi-rebuild §4.9). Called by BOTH tiers (the
-    /// interpreter here; the JIT out-of-line call in stage J2). There is
-    /// exactly ONE foreign-call implementation in the system, so `--mode vm`
-    /// and `--mode jit` cannot diverge on foreign-call semantics.
+    /// `CallForeignAsync`: start the invoke off-thread and push its
+    /// `Future(id)` (ADR-019 §5 / #202).
     ///
-    /// Pinned order (§4.2 / §4.8.2): read entry metadata → `Ffi` permission +
-    /// `ffi_languages` scope (phase 1, pre-link) → link-now if the handle is
-    /// absent (native: `ffi_libraries`/`ffi_symbols` scope BEFORE `dlopen`;
-    /// dynamic: runtime lookup) → dispatch. No foreign code (including
-    /// `dlopen` ELF constructors) ever runs before its scope check.
-    pub(crate) fn invoke_foreign_kinded(
+    /// Identical stack discipline to [`Self::op_call_foreign`] — the same
+    /// arg-count constant, the same pop-not-peek share transfer — so the only
+    /// difference an author can observe is that the result is a future.
+    pub(in crate::executor) fn op_call_foreign_async(
+        &mut self,
+        instruction: &Instruction,
+    ) -> Result<(), VMError> {
+        let foreign_idx = match instruction.operand {
+            Some(Operand::ForeignFunction(idx)) => idx as usize,
+            _ => return Err(VMError::InvalidOperand),
+        };
+
+        let (arg_count_bits, arg_count_kind) = self.pop_kinded()?;
+        let arg_count_slot = KindedSlot::new(ValueSlot::from_raw(arg_count_bits), arg_count_kind);
+        let arg_count = int_operand(&arg_count_slot)
+            .map_err(|_| VMError::RuntimeError("Expected integer for arg count".to_string()))?
+            as usize;
+        crate::executor::vm_impl::stack::drop_with_kind(arg_count_bits, arg_count_kind);
+
+        let mut args: Vec<KindedSlot> = Vec::with_capacity(arg_count);
+        for _ in 0..arg_count {
+            let (bits, kind) = self.pop_kinded()?;
+            args.push(KindedSlot::new(ValueSlot::from_raw(bits), kind));
+        }
+        args.reverse();
+
+        let result = self.invoke_foreign_async_kinded(foreign_idx, &args)?;
+        self.push_kinded(result.raw(), result.kind())?;
+        std::mem::forget(result);
+        // `args` drops here — each `KindedSlot` releases its share.
+        Ok(())
+    }
+
+    /// Link-now for one foreign entry: resolve the handle if it is absent
+    /// (§4.2). A failed link is NOT cached — retry on the next call, since the
+    /// environment may change.
+    ///
+    /// Extracted so the synchronous dispatch (`invoke_foreign_kinded`) and the
+    /// #202 async offload (`invoke_foreign_async_kinded`) link through exactly
+    /// one implementation — an `async fn python` and a `fn python` must not be
+    /// able to reach different handles, contracts or scope checks.
+    fn ensure_foreign_linked(
         &mut self,
         foreign_idx: usize,
-        args: &[KindedSlot],
-    ) -> Result<KindedSlot, VMError> {
-        // Read the entry metadata (clone the small bits so the `&self` borrow
-        // is released before the link-now `&mut self` calls below).
-        let entry = self
-            .program
-            .foreign_functions
-            .get(foreign_idx)
-            .ok_or_else(|| {
-                VMError::RuntimeError(format!(
-                    "Foreign function index {} out of bounds",
-                    foreign_idx
-                ))
-            })?;
-        let name = entry.name.clone();
-        let language = entry.language.clone();
-        let native_spec = entry.native_abi.clone();
-        let is_native = native_spec.is_some();
-
-        // §4.8.2 phase 1: coarse `Ffi` presence + `ffi_languages` scope
-        // (computable from the entry alone — no handle, no resolution).
-        self.check_ffi_permission(&name, &language, is_native)?;
-
+        name: &str,
+        language: &str,
+        native_spec: &Option<crate::bytecode::NativeAbiSpec>,
+    ) -> Result<(), VMError> {
         // Link-now if the handle is absent (§4.2). A failed link is NOT
         // cached — retry on next call (environment may change).
         let already_linked = self
@@ -958,7 +974,7 @@ impl VirtualMachine {
                 // The `ffi_languages` scope check already ran in phase 1
                 // (`check_ffi_permission`) before this link-now.
                 None => {
-                    let Some(runtime) = self.language_runtimes.get(&language).cloned() else {
+                    let Some(runtime) = self.language_runtimes.get(language).cloned() else {
                         return Err(VMError::RuntimeError(format!(
                             "foreign function '{}': no extension provides language '{}'; install \
                              it with `shape ext install {}` or check your frontmatter / shape.toml",
@@ -998,7 +1014,8 @@ impl VirtualMachine {
                     )
                     .map_err(VMError::RuntimeError)?;
                     if let Some(stub) = stub {
-                        self.foreign_stub_documents.insert(language.clone(), stub);
+                        self.foreign_stub_documents
+                            .insert(language.to_string(), stub);
                     }
 
                     // `runtime.compile` carries the extension's compile-error
@@ -1029,6 +1046,45 @@ impl VirtualMachine {
                 }
             }
         }
+        Ok(())
+    }
+    /// SHARED foreign-call core (ffi-rebuild §4.9). Called by BOTH tiers (the
+    /// interpreter here; the JIT out-of-line call in stage J2). There is
+    /// exactly ONE foreign-call implementation in the system, so `--mode vm`
+    /// and `--mode jit` cannot diverge on foreign-call semantics.
+    ///
+    /// Pinned order (§4.2 / §4.8.2): read entry metadata → `Ffi` permission +
+    /// `ffi_languages` scope (phase 1, pre-link) → link-now if the handle is
+    /// absent (native: `ffi_libraries`/`ffi_symbols` scope BEFORE `dlopen`;
+    /// dynamic: runtime lookup) → dispatch. No foreign code (including
+    /// `dlopen` ELF constructors) ever runs before its scope check.
+    pub(crate) fn invoke_foreign_kinded(
+        &mut self,
+        foreign_idx: usize,
+        args: &[KindedSlot],
+    ) -> Result<KindedSlot, VMError> {
+        // Read the entry metadata (clone the small bits so the `&self` borrow
+        // is released before the link-now `&mut self` calls below).
+        let entry = self
+            .program
+            .foreign_functions
+            .get(foreign_idx)
+            .ok_or_else(|| {
+                VMError::RuntimeError(format!(
+                    "Foreign function index {} out of bounds",
+                    foreign_idx
+                ))
+            })?;
+        let name = entry.name.clone();
+        let language = entry.language.clone();
+        let native_spec = entry.native_abi.clone();
+        let is_native = native_spec.is_some();
+
+        // §4.8.2 phase 1: coarse `Ffi` presence + `ffi_languages` scope
+        // (computable from the entry alone — no handle, no resolution).
+        self.check_ffi_permission(&name, &language, is_native)?;
+
+        self.ensure_foreign_linked(foreign_idx, &name, &language, &native_spec)?;
 
         // Dispatch on the (now-present) handle. The dispatch is a live foreign
         // frame (polyglot-distributed §4.5): a Shape callback re-entered from
@@ -1102,6 +1158,174 @@ impl VirtualMachine {
         self.foreign_reentry_depth -= 1;
         self.foreign_frame_stack.pop();
         dispatch_result
+    }
+
+    /// Start an `async fn <language>` foreign call and return its `Future(id)`
+    /// handle (ADR-019 §5 / #202, POLY-ASYNC-OFFLOAD).
+    ///
+    /// The interpreter thread does the parts that need the VM — permission and
+    /// scope checks, link-now, argument marshalling against the schema registry
+    /// — then hands owned msgpack bytes to a worker and returns immediately. It
+    /// does NOT block: the caller receives a `Future(id)` and runs on, so a
+    /// second async foreign call launches while the first is still in flight.
+    /// `await` collects the result through the same `PendingAsyncTask` channel
+    /// Shape's own async module calls use.
+    ///
+    /// Native-ABI (`extern "C"`) entries never reach here: the compiler refuses
+    /// `async` on them, and this refuses one that arrived anyway rather than
+    /// quietly running it synchronously.
+    pub(crate) fn invoke_foreign_async_kinded(
+        &mut self,
+        foreign_idx: usize,
+        args: &[KindedSlot],
+    ) -> Result<KindedSlot, VMError> {
+        let entry = self
+            .program
+            .foreign_functions
+            .get(foreign_idx)
+            .ok_or_else(|| {
+                VMError::RuntimeError(format!(
+                    "Foreign function index {} out of bounds",
+                    foreign_idx
+                ))
+            })?;
+        let name = entry.name.clone();
+        let language = entry.language.clone();
+        let native_spec = entry.native_abi.clone();
+        if native_spec.is_some() {
+            return Err(VMError::RuntimeError(format!(
+                "foreign function '{}': an `extern \"C\"` declaration cannot be async \
+                 (native ABI calls are synchronous); the async offload path is for \
+                 language-runtime declarations only",
+                name
+            )));
+        }
+        let param_types = entry.param_types.clone();
+        let body_text = entry.body_text.clone();
+        let param_names = entry.param_names.clone();
+        let return_type = entry.return_type.clone();
+
+        // Same pinned order as the synchronous core (§4.2 / §4.8.2): permission
+        // and scope first, then link-now, then dispatch. Offloading must not
+        // move a single foreign byte ahead of its scope check.
+        self.check_ffi_permission(&name, &language, false)?;
+        self.ensure_foreign_linked(foreign_idx, &name, &language, &native_spec)?;
+
+        let Some(ForeignFunctionHandle::Runtime { runtime, compiled }) =
+            self.foreign_fn_handles.get(foreign_idx).cloned().flatten()
+        else {
+            return Err(VMError::RuntimeError(format!(
+                "foreign function '{}': link produced no language-runtime handle \
+                 (internal error)",
+                name
+            )));
+        };
+
+        // Marshalling reads the VM's schema registry, so it stays here; only
+        // owned bytes cross to the worker.
+        let args_bytes = foreign_marshal::marshal_args_typed(
+            args,
+            &param_types,
+            &self.program.type_schema_registry,
+        )?;
+
+        let contract = self.offload_contract_for(&language);
+        let spec = crate::executor::foreign_async::ForeignCompileSpec {
+            name: name.clone(),
+            body_text,
+            param_names,
+            param_types,
+            return_type,
+        };
+        let strategy = self
+            .foreign_async_offloads
+            .strategy(&language, &runtime)
+            .map_err(VMError::RuntimeError)?;
+        let in_flight = crate::executor::foreign_async::start_offloaded_invoke(
+            strategy,
+            &runtime,
+            &compiled,
+            foreign_idx,
+            &spec,
+            &contract,
+            args_bytes,
+        );
+
+        let task_id = self.next_future_id();
+        self.task_scheduler.store_pending_async(
+            task_id,
+            crate::executor::task_scheduler::PendingAsyncTask {
+                completion: crate::executor::task_scheduler::AsyncCompletion::Foreign {
+                    foreign_idx,
+                    bytes: in_flight.completion,
+                },
+                abort: in_flight.abort,
+            },
+        );
+        Ok(KindedSlot::new(
+            ValueSlot::from_raw(task_id),
+            shape_value::NativeKind::Ptr(shape_value::heap_value::HeapKind::Future),
+        ))
+    }
+
+    /// The declared contract for `language`, memoised per VM.
+    ///
+    /// A thread-affine worker owns a private extension instance, and an instance
+    /// that never received the contract is the caller-less `register_types` #196
+    /// existed to fix. Building it once per language keeps the delivery off the
+    /// per-call path.
+    fn offload_contract_for(
+        &mut self,
+        language: &str,
+    ) -> std::sync::Arc<shape_abi_v1::foreign_types::ForeignContractExport> {
+        if let Some(contract) = self.foreign_offload_contracts.get(language) {
+            return std::sync::Arc::clone(contract);
+        }
+        let contract = std::sync::Arc::new(foreign_contract::build_contract(
+            language,
+            &self.program.foreign_functions,
+            &self.program.type_schema_registry,
+        ));
+        self.foreign_offload_contracts
+            .insert(language.to_string(), std::sync::Arc::clone(&contract));
+        contract
+    }
+
+    /// Turn an offloaded invoke's raw msgpack payload into the user's
+    /// `Result<T, string>` (ADR-019 §5 / #202).
+    ///
+    /// Runs on the interpreter thread at `await` time, through the same
+    /// `wrap_dynamic_result` the synchronous dispatch uses — so the Q13/OQ10
+    /// error channel, the `TypeConformanceError:` discriminator and the declared
+    /// return schema behave identically whether the call was awaited or not.
+    pub(crate) fn unmarshal_offloaded_foreign_result(
+        &mut self,
+        foreign_idx: usize,
+        result: Result<Vec<u8>, String>,
+    ) -> Result<KindedSlot, VMError> {
+        let entry = self
+            .program
+            .foreign_functions
+            .get(foreign_idx)
+            .ok_or_else(|| {
+                VMError::RuntimeError(format!(
+                    "Foreign function index {} out of bounds",
+                    foreign_idx
+                ))
+            })?;
+        let name = entry.name.clone();
+        let language = entry.language.clone();
+        let return_type = entry.return_type.clone().unwrap_or_default();
+        let schema_id = entry.return_type_schema_id;
+        foreign_marshal::wrap_dynamic_result(
+            result,
+            &name,
+            &language,
+            &return_type,
+            schema_id,
+            &self.program.type_schema_registry,
+            &self.builtin_schemas,
+        )
     }
 
     /// `(function, language)` of the innermost live foreign frame for the §4.5

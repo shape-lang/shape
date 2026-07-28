@@ -986,10 +986,7 @@ impl ConstraintSolver {
             if let Some(idx) = index_of(name) {
                 // Only a bare (unapplied) witness name is a witness leaf; an
                 // applied `W<..>` is handled by the Generic arm below.
-                if matches!(
-                    ann,
-                    TypeAnnotation::Basic(_) | TypeAnnotation::Reference(_)
-                ) {
+                if matches!(ann, TypeAnnotation::Basic(_) | TypeAnnotation::Reference(_)) {
                     return TypeAnnotation::Basic(format!("\u{1}witness:{idx}"));
                 }
             }
@@ -1806,7 +1803,8 @@ mod tests {
         let solver = ConstraintSolver::new();
         // `solve_constraint`'s concrete/concrete arm routes through
         // `unify_annotations` — the relation carrying existential introduction.
-        let unifies = |x: &TypeAnnotation, y: &TypeAnnotation| solver.unify_annotations(x, y).unwrap();
+        let unifies =
+            |x: &TypeAnnotation, y: &TypeAnnotation| solver.unify_annotations(x, y).unwrap();
 
         // Fully-erased introduction, both orientations (the B1 reflect payload:
         // `FrozenType` into `exists<T> FrozenType<T>`).
@@ -1820,7 +1818,10 @@ mod tests {
 
         // Precisely-typed introduction: non-witness position must match.
         let pair_pkg = existential(&["F"], generic("Pair", vec![b("int"), b("F")]));
-        assert!(unifies(&pair_pkg, &generic("Pair", vec![b("int"), b("bool")])));
+        assert!(unifies(
+            &pair_pkg,
+            &generic("Pair", vec![b("int"), b("bool")])
+        ));
         assert!(
             !unifies(&pair_pkg, &generic("Pair", vec![b("string"), b("bool")])),
             "a non-witness position mismatch must still reject"

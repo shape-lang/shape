@@ -623,8 +623,8 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                     let receiver_is_vm_only_heap = args
                         .first()
                         .map(|recv| {
-                            use shape_value::heap_value::HeapKind;
                             use shape_value::NativeKind;
+                            use shape_value::heap_value::HeapKind;
                             matches!(
                                 self.operand_slot_kind(recv),
                                 Some(NativeKind::Ptr(

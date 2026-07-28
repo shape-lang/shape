@@ -97,19 +97,16 @@ pub fn parse_annotation_def(pair: Pair<Rule>) -> Result<AnnotationDef> {
                         continue;
                     }
                     let mut param_inner = param_pair.into_inner();
-                    let ident_pair =
-                        param_inner.next().ok_or_else(|| ShapeError::ParseError {
-                            message: "Missing annotation config parameter name".to_string(),
-                            location: None,
-                        })?;
+                    let ident_pair = param_inner.next().ok_or_else(|| ShapeError::ParseError {
+                        message: "Missing annotation config parameter name".to_string(),
+                        location: None,
+                    })?;
                     let pattern = crate::ast::DestructurePattern::Identifier(
                         ident_pair.as_str().to_string(),
                         pair_span(&ident_pair),
                     );
-                    let type_annotation = param_inner
-                        .next()
-                        .map(parse_type_annotation)
-                        .transpose()?;
+                    let type_annotation =
+                        param_inner.next().map(parse_type_annotation).transpose()?;
                     params.push(FunctionParameter {
                         pattern,
                         is_const: false,

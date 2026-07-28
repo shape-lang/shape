@@ -1,9 +1,7 @@
 //! Result-bearing import setup for semantic and generated-query compilers.
 
 use shape_ast::ast::{ImportItems, Item, Program};
-use tower_lsp_server::ls_types::{
-    Diagnostic, DiagnosticSeverity, Position, Range,
-};
+use tower_lsp_server::ls_types::{Diagnostic, DiagnosticSeverity, Position, Range};
 
 use crate::module_cache::ModuleCache;
 use crate::util::offset_to_line_col;
@@ -73,11 +71,7 @@ pub fn validate_imports_and_register_items(
                     if let Err(error) = compiler
                         .register_imported_items(&import_stmt.from, &module_info.program.items)
                     {
-                        return Err(make_span_diagnostic(
-                            text,
-                            *import_span,
-                            error.to_string(),
-                        ));
+                        return Err(make_span_diagnostic(text, *import_span, error.to_string()));
                     }
                 } else {
                     diagnostics.push(unresolved_module_diagnostic(
@@ -101,11 +95,7 @@ pub fn validate_imports_and_register_items(
     })
 }
 
-fn unresolved_module_diagnostic(
-    text: &str,
-    span: shape_ast::ast::Span,
-    name: &str,
-) -> Diagnostic {
+fn unresolved_module_diagnostic(text: &str, span: shape_ast::ast::Span, name: &str) -> Diagnostic {
     make_span_diagnostic(
         text,
         span,
@@ -116,11 +106,7 @@ fn unresolved_module_diagnostic(
     )
 }
 
-fn make_span_diagnostic(
-    text: &str,
-    span: shape_ast::ast::Span,
-    message: String,
-) -> Diagnostic {
+fn make_span_diagnostic(text: &str, span: shape_ast::ast::Span, message: String) -> Diagnostic {
     let (start_line, start_col) = offset_to_line_col(text, span.start);
     let (end_line, end_col) = offset_to_line_col(text, span.end);
     Diagnostic {

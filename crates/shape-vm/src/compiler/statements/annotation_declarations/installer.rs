@@ -9,7 +9,7 @@ use shape_ast::error::{Result, ShapeError};
 use crate::bytecode::CompiledAnnotation;
 use crate::compiler::BytecodeCompiler;
 
-use super::planner::{handler_callable_name, PlannedAnnotation};
+use super::planner::{PlannedAnnotation, handler_callable_name};
 
 pub(super) fn install(
     compiler: &mut BytecodeCompiler,
@@ -195,10 +195,7 @@ fn inferred_handler_parameter_type(name: &str) -> Option<TypeAnnotation> {
     None
 }
 
-fn object_field(
-    name: &str,
-    type_annotation: TypeAnnotation,
-) -> shape_ast::ast::ObjectTypeField {
+fn object_field(name: &str, type_annotation: TypeAnnotation) -> shape_ast::ast::ObjectTypeField {
     shape_ast::ast::ObjectTypeField {
         name: name.to_string(),
         optional: false,
@@ -219,8 +216,7 @@ fn handler_identity_error(name: &str) -> ShapeError {
 
 fn function_id_capacity_error() -> ShapeError {
     ShapeError::RuntimeError {
-        message: "Annotation handler installation exceeds the u16 function-id capacity"
-            .to_string(),
+        message: "Annotation handler installation exceeds the u16 function-id capacity".to_string(),
         location: None,
     }
 }

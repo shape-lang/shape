@@ -545,11 +545,9 @@ impl SemanticFreeze {
                 enum_info
                     .variants
                     .iter()
-                    .map(|variant| {
-                        super::type_reflection::FrozenEnumVariantDef {
-                            name: variant.name.clone(),
-                            payload_arity: variant.payload_fields,
-                        }
+                    .map(|variant| super::type_reflection::FrozenEnumVariantDef {
+                        name: variant.name.clone(),
+                        payload_arity: variant.payload_fields,
                     })
                     .collect(),
             );
@@ -1732,9 +1730,14 @@ mod tests {
         // Base half: ADR-009 B5 — a base user nominal answers a positive
         // sealed shape descriptor (a multi-field struct is `Struct`).
         let point = freeze.identity_of("Point").expect("Point identity");
-        match freeze.payload_of(point).expect("Nominal must answer a shape") {
+        match freeze
+            .payload_of(point)
+            .expect("Nominal must answer a shape")
+        {
             FrozenPayloadDescriptor::Nominal(
-                super::super::type_reflection::payloads::NominalDescriptor::Struct { owner, .. },
+                super::super::type_reflection::payloads::NominalDescriptor::Struct {
+                    owner, ..
+                },
             ) => assert_eq!(owner, point),
             other => panic!("multi-field Point must be Struct, got {other:?}"),
         }

@@ -11,9 +11,7 @@ use shape_runtime::module_exports::{FrameInfo, ModuleContext, VmStateAccessor};
 use shape_runtime::snapshot::SerializableVMValue;
 use shape_runtime::type_schema::{TypeSchema, TypeSchemaRegistry};
 use shape_runtime::typed_module_exports::{ConcreteReturn, TypedReturn};
-use shape_value::heap_value::{
-    HashMapKindedRef, HeapValue, TypedObjectPtr, TypedObjectStorage,
-};
+use shape_value::heap_value::{HashMapKindedRef, HeapValue, TypedObjectPtr, TypedObjectStorage};
 use shape_value::{HeapKind, KindedSlot, NativeKind, ValueSlot};
 use std::sync::Arc;
 
@@ -249,7 +247,7 @@ fn delta_removed_len(ptr: &TypedObjectPtr) -> usize {
 }
 
 fn bytes_slot(bytes: &[u8]) -> KindedSlot {
-    use shape_value::v2::typed_array::{stamp_elem_type, TypedArray, ELEM_TYPE_I64};
+    use shape_value::v2::typed_array::{ELEM_TYPE_I64, TypedArray, stamp_elem_type};
 
     let widened: Vec<i64> = bytes.iter().map(|&b| b as i64).collect();
     let arr = TypedArray::<i64>::from_slice(&widened);
@@ -261,7 +259,7 @@ fn bytes_slot(bytes: &[u8]) -> KindedSlot {
 }
 
 fn i64_array_slot(values: &[i64]) -> KindedSlot {
-    use shape_value::v2::typed_array::{stamp_elem_type, TypedArray, ELEM_TYPE_I64};
+    use shape_value::v2::typed_array::{ELEM_TYPE_I64, TypedArray, stamp_elem_type};
 
     let arr = TypedArray::<i64>::from_slice(values);
     unsafe { stamp_elem_type(arr as *mut u8, ELEM_TYPE_I64) };
@@ -272,9 +270,7 @@ fn i64_array_slot(values: &[i64]) -> KindedSlot {
 }
 
 fn typed_object_array_slot() -> KindedSlot {
-    use shape_value::v2::typed_array::{
-        stamp_elem_type, TypedArray, ELEM_TYPE_TYPED_OBJECT,
-    };
+    use shape_value::v2::typed_array::{ELEM_TYPE_TYPED_OBJECT, TypedArray, stamp_elem_type};
 
     let object = TypedObjectStorage::_new(
         999,
@@ -409,7 +405,7 @@ fn test_state_fn_hash_non_function() {
 #[test]
 fn test_state_capture_call_returns_schema_backed_payload_for_inline_function_id() {
     use crate::executor::state_builtins::introspection::state_capture_call_stub;
-    use shape_value::v2::typed_array::{read_elem_type, TypedArray, ELEM_TYPE_I64};
+    use shape_value::v2::typed_array::{ELEM_TYPE_I64, TypedArray, read_elem_type};
 
     let schemas = state_schema_registry();
     let hashes = vec![None, Some([0xab; 32])];
@@ -423,7 +419,10 @@ fn test_state_capture_call_returns_schema_backed_payload_for_inline_function_id(
 
     assert_eq!(payload.schema_id, call_schema.id as u64);
     assert_eq!(typed_object_string_field(&payload, 0), "ab".repeat(32));
-    assert_eq!(payload.field_kinds[1], NativeKind::Ptr(HeapKind::TypedArray));
+    assert_eq!(
+        payload.field_kinds[1],
+        NativeKind::Ptr(HeapKind::TypedArray)
+    );
     assert_eq!(
         unsafe { read_elem_type(payload.slots()[1].raw() as *const u8) },
         ELEM_TYPE_I64
@@ -524,10 +523,7 @@ fn test_state_serialize_refuses_future_handle() {
 
     let schemas = TypeSchemaRegistry::default();
     let ctx = test_ctx(&schemas);
-    let future = KindedSlot::new(
-        ValueSlot::from_raw(123),
-        NativeKind::Ptr(HeapKind::Future),
-    );
+    let future = KindedSlot::new(ValueSlot::from_raw(123), NativeKind::Ptr(HeapKind::Future));
 
     let err = state_serialize(&[future], &ctx)
         .expect_err("Future handles are scheduler-owned, not serializable values");
@@ -949,12 +945,17 @@ fn test_state_capture_module_returns_bindings_and_schema_hashes() {
     let module_ptr = expect_opaque_typed_object(ret, "ModuleState");
     let module_schema = schemas.get("ModuleState").expect("ModuleState schema");
     assert_eq!(module_ptr.schema_id, module_schema.id as u64);
-    assert_eq!(module_ptr.field_kinds[0], NativeKind::Ptr(HeapKind::HashMap));
-    assert_eq!(module_ptr.field_kinds[1], NativeKind::Ptr(HeapKind::HashMap));
+    assert_eq!(
+        module_ptr.field_kinds[0],
+        NativeKind::Ptr(HeapKind::HashMap)
+    );
+    assert_eq!(
+        module_ptr.field_kinds[1],
+        NativeKind::Ptr(HeapKind::HashMap)
+    );
 
-    let schema_hashes = match unsafe {
-        &*(module_ptr.slots()[1].raw() as *const HashMapKindedRef)
-    } {
+    let schema_hashes = match unsafe { &*(module_ptr.slots()[1].raw() as *const HashMapKindedRef) }
+    {
         HashMapKindedRef::String(data) => data,
         other => panic!(
             "expected ModuleState.schemas to carry HashMapKindedRef::String, got {:?}",

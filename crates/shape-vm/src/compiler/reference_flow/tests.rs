@@ -18,17 +18,13 @@ pub(super) fn compiler_with_named_slots() -> BytecodeCompiler {
         .last_mut()
         .expect("compiler starts with a local scope")
         .insert("local_ref".to_string(), 3);
+    compiler.module_bindings.insert("module_ref".to_string(), 7);
     compiler
-        .module_bindings
-        .insert("module_ref".to_string(), 7);
-    compiler.type_tracker.set_local_binding_semantics(
-        3,
-        semantics(BindingStorageClass::Direct),
-    );
-    compiler.type_tracker.set_binding_semantics(
-        7,
-        semantics(BindingStorageClass::Direct),
-    );
+        .type_tracker
+        .set_local_binding_semantics(3, semantics(BindingStorageClass::Direct));
+    compiler
+        .type_tracker
+        .set_binding_semantics(7, semantics(BindingStorageClass::Direct));
     compiler
 }
 
@@ -58,21 +54,27 @@ fn snapshot_restore_roundtrips_classes_referents_and_storage() {
 
     compiler.set_reference_flow_class(BindingKey::Local(3), ReferenceClass::Value);
     compiler.set_reference_flow_class(BindingKey::ModuleBinding(7), ReferenceClass::Value);
-    assert!(!compiler
-        .reference_value_local_referent_concrete_type
-        .contains_key(&3));
-    assert!(!compiler
-        .reference_value_module_binding_referent_concrete_type
-        .contains_key(&7));
+    assert!(
+        !compiler
+            .reference_value_local_referent_concrete_type
+            .contains_key(&3)
+    );
+    assert!(
+        !compiler
+            .reference_value_module_binding_referent_concrete_type
+            .contains_key(&7)
+    );
     compiler.restore_reference_flow_snapshot(&expected);
 
     assert_eq!(compiler.reference_flow_snapshot(), expected);
     assert!(compiler.reference_value_locals.contains(&3));
     assert!(!compiler.exclusive_reference_value_locals.contains(&3));
     assert!(compiler.reference_value_module_bindings.contains(&7));
-    assert!(compiler
-        .exclusive_reference_value_module_bindings
-        .contains(&7));
+    assert!(
+        compiler
+            .exclusive_reference_value_module_bindings
+            .contains(&7)
+    );
     assert_eq!(
         compiler
             .reference_value_module_binding_referent_concrete_type
@@ -158,9 +160,9 @@ fn value_reference_join_is_named_and_deterministic() {
         "[C0912] exact reference-flow conflict at if merge for ModuleBinding(7) \
          (name 'module_ref')"
     ));
-    assert!(message.contains(
-        "predecessor 'a-reference' is SharedReference<?> [storage=Reference]"
-    ));
+    assert!(
+        message.contains("predecessor 'a-reference' is SharedReference<?> [storage=Reference]")
+    );
     assert!(message.contains("predecessor 'z-value' is Value [storage=Direct]"));
 }
 
@@ -273,9 +275,11 @@ fn restore_repairs_exclusive_subset_invariant() {
 
     assert!(compiler.reference_value_locals.contains(&3));
     assert!(compiler.exclusive_reference_value_locals.contains(&3));
-    assert!(compiler
-        .exclusive_reference_value_locals
-        .is_subset(&compiler.reference_value_locals));
+    assert!(
+        compiler
+            .exclusive_reference_value_locals
+            .is_subset(&compiler.reference_value_locals)
+    );
 }
 
 #[test]
@@ -285,10 +289,9 @@ fn pop_scope_evicts_exact_local_reference_state() {
     let scoped = compiler
         .declare_local("scoped_ref")
         .expect("local slot is available");
-    compiler.type_tracker.set_local_binding_semantics(
-        scoped,
-        semantics(BindingStorageClass::Direct),
-    );
+    compiler
+        .type_tracker
+        .set_local_binding_semantics(scoped, semantics(BindingStorageClass::Direct));
     compiler.set_reference_flow_class(
         BindingKey::Local(scoped),
         ReferenceClass::ExclusiveReference {
@@ -300,9 +303,11 @@ fn pop_scope_evicts_exact_local_reference_state() {
 
     assert!(!compiler.reference_value_locals.contains(&scoped));
     assert!(!compiler.exclusive_reference_value_locals.contains(&scoped));
-    assert!(!compiler
-        .reference_value_local_referent_concrete_type
-        .contains_key(&scoped));
+    assert!(
+        !compiler
+            .reference_value_local_referent_concrete_type
+            .contains_key(&scoped)
+    );
 }
 
 #[path = "tests/core_fixes.rs"]

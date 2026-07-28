@@ -144,7 +144,10 @@ fn rewrite_in_statement(stmt: &Statement, bound: &HashSet<String>, shadow: &str)
 
         Statement::VariableDecl(decl, span) => {
             let mut new_decl = decl.clone();
-            new_decl.value = decl.value.as_ref().map(|e| rewrite_in_expr(e, bound, shadow));
+            new_decl.value = decl
+                .value
+                .as_ref()
+                .map(|e| rewrite_in_expr(e, bound, shadow));
             Statement::VariableDecl(new_decl, *span)
         }
 
@@ -245,7 +248,10 @@ fn rewrite_in_expr(expr: &Expr, bound: &HashSet<String>, shadow: &str) -> Expr {
             Expr::FunctionCall {
                 name: shadow.to_string(),
                 const_args: Vec::new(),
-                args: args.iter().map(|a| rewrite_in_expr(a, bound, shadow)).collect(),
+                args: args
+                    .iter()
+                    .map(|a| rewrite_in_expr(a, bound, shadow))
+                    .collect(),
                 named_args: Vec::new(),
                 span: *span,
             }
@@ -346,7 +352,10 @@ fn rewrite_in_expr(expr: &Expr, bound: &HashSet<String>, shadow: &str) -> Expr {
                 .iter()
                 .map(|a| rewrite_in_expr(a, bound, shadow))
                 .collect(),
-            args: args.iter().map(|a| rewrite_in_expr(a, bound, shadow)).collect(),
+            args: args
+                .iter()
+                .map(|a| rewrite_in_expr(a, bound, shadow))
+                .collect(),
             named_args: named_args
                 .iter()
                 .map(|(k, v)| (k.clone(), rewrite_in_expr(v, bound, shadow)))
@@ -368,7 +377,10 @@ fn rewrite_in_expr(expr: &Expr, bound: &HashSet<String>, shadow: &str) -> Expr {
                 .iter()
                 .map(|a| rewrite_in_expr(a, bound, shadow))
                 .collect(),
-            args: args.iter().map(|a| rewrite_in_expr(a, bound, shadow)).collect(),
+            args: args
+                .iter()
+                .map(|a| rewrite_in_expr(a, bound, shadow))
+                .collect(),
             named_args: named_args
                 .iter()
                 .map(|(k, v)| (k.clone(), rewrite_in_expr(v, bound, shadow)))
@@ -387,7 +399,9 @@ fn rewrite_in_expr(expr: &Expr, bound: &HashSet<String>, shadow: &str) -> Expr {
             payload: match payload {
                 EnumConstructorPayload::Unit => EnumConstructorPayload::Unit,
                 EnumConstructorPayload::Tuple(args) => EnumConstructorPayload::Tuple(
-                    args.iter().map(|a| rewrite_in_expr(a, bound, shadow)).collect(),
+                    args.iter()
+                        .map(|a| rewrite_in_expr(a, bound, shadow))
+                        .collect(),
                 ),
                 EnumConstructorPayload::Struct(fields) => EnumConstructorPayload::Struct(
                     fields
@@ -435,7 +449,10 @@ fn rewrite_in_expr(expr: &Expr, bound: &HashSet<String>, shadow: &str) -> Expr {
         ),
 
         Expr::Array(items, span) => Expr::Array(
-            items.iter().map(|i| rewrite_in_expr(i, bound, shadow)).collect(),
+            items
+                .iter()
+                .map(|i| rewrite_in_expr(i, bound, shadow))
+                .collect(),
             *span,
         ),
 
@@ -470,8 +487,10 @@ fn rewrite_in_expr(expr: &Expr, bound: &HashSet<String>, shadow: &str) -> Expr {
                 let rewritten = match item {
                     BlockItem::VariableDecl(decl) => {
                         let mut new_decl = decl.clone();
-                        new_decl.value =
-                            decl.value.as_ref().map(|e| rewrite_in_expr(e, &scope, shadow));
+                        new_decl.value = decl
+                            .value
+                            .as_ref()
+                            .map(|e| rewrite_in_expr(e, &scope, shadow));
                         BlockItem::VariableDecl(new_decl)
                     }
                     BlockItem::Assignment(assign) => {
@@ -487,9 +506,7 @@ fn rewrite_in_expr(expr: &Expr, bound: &HashSet<String>, shadow: &str) -> Expr {
                     }
                 };
                 match item {
-                    BlockItem::VariableDecl(decl) => {
-                        scope.extend(decl.pattern.get_identifiers())
-                    }
+                    BlockItem::VariableDecl(decl) => scope.extend(decl.pattern.get_identifiers()),
                     BlockItem::Statement(s) => add_statement_bindings(&mut scope, s),
                     BlockItem::Expression(e) => add_expr_bindings(&mut scope, e),
                     BlockItem::Assignment(_) => {}
@@ -618,7 +635,10 @@ fn rewrite_in_expr(expr: &Expr, bound: &HashSet<String>, shadow: &str) -> Expr {
         } => Expr::MethodCall {
             receiver: Box::new(rewrite_in_expr(receiver, bound, shadow)),
             method: method.clone(),
-            args: args.iter().map(|a| rewrite_in_expr(a, bound, shadow)).collect(),
+            args: args
+                .iter()
+                .map(|a| rewrite_in_expr(a, bound, shadow))
+                .collect(),
             named_args: named_args
                 .iter()
                 .map(|(k, v)| (k.clone(), rewrite_in_expr(v, bound, shadow)))

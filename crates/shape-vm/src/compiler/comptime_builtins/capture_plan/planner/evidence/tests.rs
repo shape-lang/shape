@@ -50,11 +50,13 @@ fn compiler_with_direct_local() -> BytecodeCompiler {
         .last_mut()
         .expect("compiler starts with a local scope")
         .insert("captured".to_string(), LOCAL_SLOT);
-    compiler.type_tracker.set_local_binding_semantics(
-        LOCAL_SLOT,
-        semantics(BindingStorageClass::Direct),
-    );
-    compiler.program.functions.push(bytecode_function("evidence"));
+    compiler
+        .type_tracker
+        .set_local_binding_semantics(LOCAL_SLOT, semantics(BindingStorageClass::Direct));
+    compiler
+        .program
+        .functions
+        .push(bytecode_function("evidence"));
     compiler.current_function = Some(0);
     compiler.mir_storage_plans.insert(
         "evidence".to_string(),
@@ -117,8 +119,7 @@ fn stamped_polymorphic_capture() -> (shape_ast::ast::Program, GeneratedNodeOrigi
         .find_map(|statement| match statement {
             Statement::VariableDecl(declaration, _) => match declaration.value.as_ref() {
                 Some(Expr::FunctionExpr {
-                    generated_origin,
-                    ..
+                    generated_origin, ..
                 }) => generated_origin.as_deref().cloned(),
                 _ => None,
             },
@@ -253,10 +254,9 @@ fn module_true_reference_precedes_tracker_storage_semantics() {
     compiler
         .module_bindings
         .insert("module_ref".to_string(), MODULE_SLOT);
-    compiler.type_tracker.set_binding_semantics(
-        MODULE_SLOT,
-        semantics(BindingStorageClass::Direct),
-    );
+    compiler
+        .type_tracker
+        .set_binding_semantics(MODULE_SLOT, semantics(BindingStorageClass::Direct));
     compiler.set_reference_flow_class(
         BindingKey::ModuleBinding(MODULE_SLOT),
         ReferenceClass::SharedReference { referent: None },

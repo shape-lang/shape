@@ -48,7 +48,12 @@ fn assert_parses_within_timeout(input: String, what: &str) {
 }
 
 fn nested(open: &str, close: &str, depth: usize, core: &str) -> String {
-    format!("let x = {}{}{};", open.repeat(depth), core, close.repeat(depth))
+    format!(
+        "let x = {}{}{};",
+        open.repeat(depth),
+        core,
+        close.repeat(depth)
+    )
 }
 
 #[test]

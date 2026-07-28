@@ -1,7 +1,7 @@
 //! Read-only semantic-freeze projections for compiler-owned queries.
 
-use super::*;
 use super::super::type_reflection::CanonicalType;
+use super::*;
 use shape_runtime::type_system::{
     RecursiveCallableShape, SemanticPassingMode, SemanticTypeCandidate, SemanticTypePathSegment,
     Type, TypeVar, annotation_as_tyvar,

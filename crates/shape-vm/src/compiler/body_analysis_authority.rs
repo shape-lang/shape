@@ -182,14 +182,8 @@ impl BytecodeCompiler {
         }
 
         let function = &mut self.program.functions[emission_function_id];
-        function.ref_params = pass_modes
-            .iter()
-            .map(|mode| mode.is_reference())
-            .collect();
-        function.ref_mutates = pass_modes
-            .iter()
-            .map(|mode| mode.is_exclusive())
-            .collect();
+        function.ref_params = pass_modes.iter().map(|mode| mode.is_reference()).collect();
+        function.ref_mutates = pass_modes.iter().map(|mode| mode.is_exclusive()).collect();
 
         // A wrapper calls the impl by its emission id. Project only the
         // resolved return carrier needed by that direct-call boundary; MIR,

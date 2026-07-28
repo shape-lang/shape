@@ -6360,20 +6360,23 @@ impl BytecodeCompiler {
         // post-E3, so it is dropped here. If this wave needs `remote::call`
         // on the pre-annotation original from inside a `replace body`, route
         // it through `ctx.original` (compiler/original_body_rewrite.rs).
-        let (params, return_type): (Vec<FunctionParameter>, Option<TypeAnnotation>) =
-            if let Some(func_def) = self.function_defs.get(&fn_name).cloned() {
-                (func_def.params, func_def.return_type)
-            } else if let Some(peek) = self.remote_closure_peek(&fn_name) {
-                (peek.params, peek.return_type)
-            } else {
-                return Err(ShapeError::SemanticError {
-                    message: format!(
-                        "{surface_name}: '{}' is not a statically-known function or closure binding",
-                        fn_name
-                    ),
-                    location: Some(self.span_to_source_location(fn_ref_expr.span())),
-                });
-            };
+        let (params, return_type): (Vec<FunctionParameter>, Option<TypeAnnotation>) = if let Some(
+            func_def,
+        ) =
+            self.function_defs.get(&fn_name).cloned()
+        {
+            (func_def.params, func_def.return_type)
+        } else if let Some(peek) = self.remote_closure_peek(&fn_name) {
+            (peek.params, peek.return_type)
+        } else {
+            return Err(ShapeError::SemanticError {
+                message: format!(
+                    "{surface_name}: '{}' is not a statically-known function or closure binding",
+                    fn_name
+                ),
+                location: Some(self.span_to_source_location(fn_ref_expr.span())),
+            });
+        };
 
         // (2) Arity check.
         if call_args.len() != params.len() {
@@ -7040,9 +7043,10 @@ impl BytecodeCompiler {
             .zip(arg_cts.iter())
             .map(|(param, ct)| {
                 ct.clone().or_else(|| {
-                    param.type_annotation.as_ref().and_then(
-                        crate::compiler::v2_map_emission::concrete_type_from_annotation,
-                    )
+                    param
+                        .type_annotation
+                        .as_ref()
+                        .and_then(crate::compiler::v2_map_emission::concrete_type_from_annotation)
                 })
             })
             .collect();

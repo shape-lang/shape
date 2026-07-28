@@ -583,10 +583,14 @@ fn parse_block_entry(inner: Pair<Rule>) -> Result<BlockItem> {
         Rule::extend_items_stmt => {
             // `extend (expr)` — computed-generation directive (§4.5.7).
             let span = pair_span(&inner);
-            let expr_pair = inner.into_inner().next().ok_or_else(|| ShapeError::ParseError {
-                message: "expected expression in parenthesized `extend (...)` directive".to_string(),
-                location: None,
-            })?;
+            let expr_pair = inner
+                .into_inner()
+                .next()
+                .ok_or_else(|| ShapeError::ParseError {
+                    message: "expected expression in parenthesized `extend (...)` directive"
+                        .to_string(),
+                    location: None,
+                })?;
             let expression = super::super::parse_expression(expr_pair)?;
             Ok(BlockItem::Statement(
                 crate::ast::Statement::ExtendItemsExpr { expression, span },

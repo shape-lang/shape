@@ -558,8 +558,14 @@ fn callable_structural_descriptor_records_names_and_identity_significant_modes()
     assert_eq!(descriptor.params[0].name.as_deref(), Some("a"));
     // The borrow param's VALUE-type identity is the referent (int / string),
     // NOT the reference wrapper.
-    assert_eq!(descriptor.params[1].type_identity, overlay.identity_of("string").unwrap());
-    assert_eq!(descriptor.params[2].type_identity, overlay.identity_of("int").unwrap());
+    assert_eq!(
+        descriptor.params[1].type_identity,
+        overlay.identity_of("string").unwrap()
+    );
+    assert_eq!(
+        descriptor.params[2].type_identity,
+        overlay.identity_of("int").unwrap()
+    );
     assert_eq!(descriptor.returns, overlay.identity_of("bool").unwrap());
 
     // Renaming every parameter is identity-neutral (names insignificant) and
@@ -592,11 +598,9 @@ fn r2_callable_param_erased_to_any_is_the_named_rejection() {
     assert_eq!(array_any, CALLABLE_PARAM_ERASED_TO_ANY_DIAGNOSTIC);
 
     // Bare `Any` parameter — same rejection.
-    let bare_any = canonicalize_type_annotation(
-        &callable(vec![basic("Any")], basic("bool")),
-        &overlay,
-    )
-    .expect_err("a callable parameter typed Any must reject");
+    let bare_any =
+        canonicalize_type_annotation(&callable(vec![basic("Any")], basic("bool")), &overlay)
+            .expect_err("a callable parameter typed Any must reject");
     assert_eq!(bare_any, CALLABLE_PARAM_ERASED_TO_ANY_DIAGNOSTIC);
 
     // Lowercase `any` is the enabled Erased leaf — a callable param typed `any`
@@ -870,7 +874,10 @@ fn existential_package_descriptor_embeds_positional_witness_identities() {
     );
 
     // The package is distinct from the concrete instantiation Pair<Owner,Owner>.
-    let concrete = canon(&overlay, &applied("Pair", vec![basic("Owner"), basic("Owner")]));
+    let concrete = canon(
+        &overlay,
+        &applied("Pair", vec![basic("Owner"), basic("Owner")]),
+    );
     assert_ne!(package.identity, concrete.identity);
 }
 
@@ -1485,7 +1492,10 @@ mod payload_query {
         use super::payloads::{FrozenPayloadDescriptor, NominalDescriptor};
         let freeze = freeze_of(|compiler| add_struct(compiler, "Alpha"));
         let alpha = freeze.identity_of("Alpha").expect("Alpha identity");
-        match freeze.payload_of(alpha).expect("Nominal must answer a shape") {
+        match freeze
+            .payload_of(alpha)
+            .expect("Nominal must answer a shape")
+        {
             FrozenPayloadDescriptor::Nominal(NominalDescriptor::Opaque { owner }) => {
                 assert_eq!(owner, alpha, "the shape owner is the reflected identity");
             }
@@ -1565,7 +1575,7 @@ mod payload_query {
     #[test]
     fn site_interned_composites_answer_full_structural_payloads() {
         use super::payloads::{
-            FrozenPayloadDescriptor, ReferenceDescriptor, RecordDescriptor, TupleDescriptor,
+            FrozenPayloadDescriptor, RecordDescriptor, ReferenceDescriptor, TupleDescriptor,
             UnionDescriptor,
         };
         let overlay = module_overlay(|compiler| add_struct(compiler, "User"));
@@ -1641,7 +1651,10 @@ mod payload_query {
         let applied_identity = overlay
             .canonicalize_type(&applied("Option", vec![basic("int")]))
             .expect("applied nominal canonicalizes");
-        assert_eq!(overlay.category_of(applied_identity), Ok(FrozenTypeCategory::Nominal));
+        assert_eq!(
+            overlay.category_of(applied_identity),
+            Ok(FrozenTypeCategory::Nominal)
+        );
         match overlay
             .payload_of(applied_identity)
             .expect("Option<int> now descriptor-substitutes (CKPT-2 A8-OUT)")
@@ -1878,7 +1891,10 @@ mod payload_query {
         let identity = freeze
             .identity_of("Handler")
             .expect("alias fixpoint interns the callable target");
-        assert_eq!(freeze.category_of(identity), Ok(FrozenTypeCategory::Callable));
+        assert_eq!(
+            freeze.category_of(identity),
+            Ok(FrozenTypeCategory::Callable)
+        );
         let FrozenPayloadDescriptor::Callable(descriptor) =
             freeze.payload_of(identity).expect("callable payload")
         else {
@@ -1909,7 +1925,9 @@ mod payload_query {
             "param names must not affect the canonical identity"
         );
 
-        let identity = overlay.canonicalize_type(&named).expect("callable canonicalizes");
+        let identity = overlay
+            .canonicalize_type(&named)
+            .expect("callable canonicalizes");
         let FrozenPayloadDescriptor::Callable(descriptor) =
             overlay.payload_of(identity).expect("callable payload")
         else {
@@ -1924,7 +1942,9 @@ mod payload_query {
     fn callable_param_positions_are_stable_and_order_significant() {
         let overlay = module_overlay(|_| {});
         let annotation = callable(vec![basic("int"), basic("string")], basic("bool"));
-        let identity = overlay.canonicalize_type(&annotation).expect("canonicalizes");
+        let identity = overlay
+            .canonicalize_type(&annotation)
+            .expect("canonicalizes");
         let FrozenPayloadDescriptor::Callable(descriptor) =
             overlay.payload_of(identity).expect("callable payload")
         else {
@@ -1994,7 +2014,9 @@ mod payload_query {
     fn builder_produces_schema_correct_callable_descriptor() {
         let overlay = module_overlay(|_| {});
         let annotation = callable(vec![basic("int")], basic("bool"));
-        let identity = overlay.canonicalize_type(&annotation).expect("canonicalizes");
+        let identity = overlay
+            .canonicalize_type(&annotation)
+            .expect("canonicalizes");
 
         let frozen = payloads::build_frozen_type_heap_value(identity, &overlay)
             .expect("callable payload builds");
@@ -2198,8 +2220,8 @@ mod payload_query {
 
         let overlay = FreezeOverlay::new(freeze_of(|_| {}), "map", &["T".to_string()]);
         let t = overlay.identity_of("T").expect("T identity");
-        let frozen = payloads::build_frozen_type_heap_value(t, &overlay)
-            .expect("Parameter payload builds");
+        let frozen =
+            payloads::build_frozen_type_heap_value(t, &overlay).expect("Parameter payload builds");
         let frozen_storage = storage_of(&frozen);
         let (variant, payload) = variant_and_payload(frozen_storage);
         assert_eq!(variant, 2, "Parameter is catalog ordinal 2");
@@ -2442,7 +2464,11 @@ mod e1_s5_ckpt2_descriptor_substitution {
         // arg 1 = Err's), never stated in the descriptor.
         let int_id = overlay.identity_of("int").expect("int frozen");
         let string_id = overlay.identity_of("string").expect("string frozen");
-        assert_eq!(type_argument(&refined, 0), Ok(int_id), "Ok payload via type_argument");
+        assert_eq!(
+            type_argument(&refined, 0),
+            Ok(int_id),
+            "Ok payload via type_argument"
+        );
         assert_eq!(
             type_argument(&refined, 1),
             Ok(string_id),
@@ -2509,8 +2535,12 @@ mod e1_s5_ckpt2_descriptor_substitution {
             .expect("Result<string,int> canonicalizes");
         assert_ne!(ab, ba, "the two applied identities themselves differ");
 
-        let desc_ab = overlay.payload_of(ab).expect("Result<int,string> descriptor");
-        let desc_ba = overlay.payload_of(ba).expect("Result<string,int> descriptor");
+        let desc_ab = overlay
+            .payload_of(ab)
+            .expect("Result<int,string> descriptor");
+        let desc_ba = overlay
+            .payload_of(ba)
+            .expect("Result<string,int> descriptor");
         assert_eq!(
             desc_ab, desc_ba,
             "A8-OUT: the swap is NOT visible at the descriptor level (arity-only \
@@ -2539,13 +2569,16 @@ mod e1_s5_ckpt2_descriptor_substitution {
     #[test]
     fn e1_s5_ckpt2_sp6_user_enum_reuses_arity_only_base_descriptor() {
         let overlay = module_overlay(|compiler| {
-            compiler.type_tracker.schema_registry_mut().register_enum_scoped(
-                "Either",
-                vec![
-                    EnumVariantInfo::new("Left", 0, 1),
-                    EnumVariantInfo::new("Right", 1, 1),
-                ],
-            );
+            compiler
+                .type_tracker
+                .schema_registry_mut()
+                .register_enum_scoped(
+                    "Either",
+                    vec![
+                        EnumVariantInfo::new("Left", 0, 1),
+                        EnumVariantInfo::new("Right", 1, 1),
+                    ],
+                );
         });
         let applied_id = overlay
             .canonicalize_type(&applied("Either", vec![basic("int"), basic("string")]))
@@ -2555,7 +2588,9 @@ mod e1_s5_ckpt2_descriptor_substitution {
             .expect("Either<int,string> is a site-interned applied form");
         let base_id = overlay.identity_of("Either").expect("Either head frozen");
 
-        let applied_desc = overlay.payload_of(applied_id).expect("applied Either descriptor");
+        let applied_desc = overlay
+            .payload_of(applied_id)
+            .expect("applied Either descriptor");
         let base_desc = overlay.payload_of(base_id).expect("base Either descriptor");
         assert_eq!(
             applied_desc, base_desc,
@@ -2575,7 +2610,11 @@ mod e1_s5_ckpt2_descriptor_substitution {
         }
         let int_id = overlay.identity_of("int").expect("int frozen");
         let string_id = overlay.identity_of("string").expect("string frozen");
-        assert_eq!(type_argument(&refined, 0), Ok(int_id), "Left payload via type_argument");
+        assert_eq!(
+            type_argument(&refined, 0),
+            Ok(int_id),
+            "Left payload via type_argument"
+        );
         assert_eq!(
             type_argument(&refined, 1),
             Ok(string_id),
@@ -2618,9 +2657,16 @@ mod e1_s5_ckpt2_descriptor_substitution {
             arg0, result_id,
             "the outer arg IS the Result<int,string> applied identity (A2 identity-indirected)"
         );
-        match overlay.payload_of(arg0).expect("inner descriptor terminates") {
+        match overlay
+            .payload_of(arg0)
+            .expect("inner descriptor terminates")
+        {
             FrozenPayloadDescriptor::Nominal(NominalDescriptor::Enum { variants, .. }) => {
-                assert_eq!(variants.len(), 2, "the inner Result reflects its Enum shape");
+                assert_eq!(
+                    variants.len(),
+                    2,
+                    "the inner Result reflects its Enum shape"
+                );
             }
             other => panic!("payload_of(inner arg) must be the Result Enum, got {other:?}"),
         }
@@ -2634,14 +2680,17 @@ mod e1_s5_ckpt2_descriptor_substitution {
     #[test]
     fn e1_s5_ckpt2_sp8_nongeneric_enum_descriptor_unchanged() {
         let overlay = module_overlay(|compiler| {
-            compiler.type_tracker.schema_registry_mut().register_enum_scoped(
-                "Color",
-                vec![
-                    EnumVariantInfo::new("Red", 0, 0),
-                    EnumVariantInfo::new("Green", 1, 1),
-                    EnumVariantInfo::new("Blue", 2, 0),
-                ],
-            );
+            compiler
+                .type_tracker
+                .schema_registry_mut()
+                .register_enum_scoped(
+                    "Color",
+                    vec![
+                        EnumVariantInfo::new("Red", 0, 0),
+                        EnumVariantInfo::new("Green", 1, 1),
+                        EnumVariantInfo::new("Blue", 2, 0),
+                    ],
+                );
         });
         let color_id = overlay.identity_of("Color").expect("Color head frozen");
         let red = FrozenTypeIdentity::from_canonical_descriptor("member:Color:Red");
@@ -2650,9 +2699,17 @@ mod e1_s5_ckpt2_descriptor_substitution {
 
         match overlay.payload_of(color_id).expect("Color descriptor") {
             FrozenPayloadDescriptor::Nominal(NominalDescriptor::Enum { owner, variants }) => {
-                assert_eq!(owner, color_id, "a base enum's owner is its own head identity");
+                assert_eq!(
+                    owner, color_id,
+                    "a base enum's owner is its own head identity"
+                );
                 assert_eq!(variants.len(), 3, "Red + Green + Blue");
-                let arity = |m| variants.iter().find(|v| v.member == m).map(|v| v.payload_arity);
+                let arity = |m| {
+                    variants
+                        .iter()
+                        .find(|v| v.member == m)
+                        .map(|v| v.payload_arity)
+                };
                 assert_eq!(arity(red), Some(0), "Red is a unit variant");
                 assert_eq!(arity(green), Some(1), "Green carries one payload");
                 assert_eq!(arity(blue), Some(0), "Blue is a unit variant");
@@ -2749,7 +2806,9 @@ mod e1_s5_ckpt2_descriptor_substitution {
                 .env
                 .define_type_alias("PageOfInt", &target, None);
         });
-        let page_of_int = overlay.identity_of("PageOfInt").expect("PageOfInt resolves");
+        let page_of_int = overlay
+            .identity_of("PageOfInt")
+            .expect("PageOfInt resolves");
         let expected_items = overlay
             .canonicalize_type(&applied("Array", vec![basic("int")]))
             .expect("Array<int> canonicalizes");
@@ -3158,8 +3217,9 @@ mod b4 {
                 .expect_err("primitive head rejects");
             assert!(error.contains("nominal"), "{error}");
 
-            let error = build_type_constructor_ref_heap_value(FrozenTypeIdentity::INVALID, &overlay)
-                .expect_err("INVALID head rejects");
+            let error =
+                build_type_constructor_ref_heap_value(FrozenTypeIdentity::INVALID, &overlay)
+                    .expect_err("INVALID head rejects");
             assert!(error.contains("unknown semantic type identity"), "{error}");
         }
 
@@ -3180,8 +3240,9 @@ mod b4 {
             });
             let user_id = overlay.identity_of("User").expect("User identity");
 
-            let type_ref =
-                carrier_slot(build_frozen_type_ref_heap_value(user_id, &overlay).expect("type_ref"));
+            let type_ref = carrier_slot(
+                build_frozen_type_ref_heap_value(user_id, &overlay).expect("type_ref"),
+            );
             let access = carrier_slot(
                 build_representation_access_heap_value(user_id, &overlay).expect("access"),
             );
@@ -3197,8 +3258,9 @@ mod b4 {
 
             // A TypeRef in the authority position is NOT a RepresentationAccess:
             // schema-name check → named R6 rejection, never usable authority.
-            let type_ref2 =
-                carrier_slot(build_frozen_type_ref_heap_value(user_id, &overlay).expect("type_ref"));
+            let type_ref2 = carrier_slot(
+                build_frozen_type_ref_heap_value(user_id, &overlay).expect("type_ref"),
+            );
             let forged = carrier_slot(
                 build_frozen_type_ref_heap_value(user_id, &overlay).expect("forged authority"),
             );
@@ -3222,14 +3284,18 @@ mod b4 {
             let user_id = overlay.identity_of("User").expect("User identity");
             let other_id = overlay.identity_of("Other").expect("Other identity");
 
-            let other_ref =
-                carrier_slot(build_frozen_type_ref_heap_value(other_id, &overlay).expect("type_ref"));
+            let other_ref = carrier_slot(
+                build_frozen_type_ref_heap_value(other_id, &overlay).expect("type_ref"),
+            );
             let user_access = carrier_slot(
                 build_representation_access_heap_value(user_id, &overlay).expect("access"),
             );
             let error = frozen_type_from_repr_ref(&other_ref, &user_access, &overlay)
                 .expect_err("a User authority cannot reflect Other");
-            assert!(error.contains("bound to a different type identity"), "{error}");
+            assert!(
+                error.contains("bound to a different type identity"),
+                "{error}"
+            );
         }
 
         /// ADR-009 B5 (Dec 56): the mint re-validates the identity through the
@@ -3237,8 +3303,9 @@ mod b4 {
         #[test]
         fn representation_access_mint_rejects_unknown_identity() {
             let overlay = module_overlay(|_| {});
-            let error = build_representation_access_heap_value(FrozenTypeIdentity::INVALID, &overlay)
-                .expect_err("INVALID identity mints no authority");
+            let error =
+                build_representation_access_heap_value(FrozenTypeIdentity::INVALID, &overlay)
+                    .expect_err("INVALID identity mints no authority");
             assert!(error.contains("unknown semantic type identity"), "{error}");
         }
 
@@ -3278,7 +3345,10 @@ mod b4 {
             let refined = refine_application(&applied_slot, &constructor)
                 .expect("refine ok")
                 .expect("head matches");
-            assert_eq!(applied_identity_field(&carrier_slot(refined)), expected.identity);
+            assert_eq!(
+                applied_identity_field(&carrier_slot(refined)),
+                expected.identity
+            );
 
             let arg0 = carrier_slot(
                 applied_type_argument(&applied_slot, 0, &overlay).expect("type_argument(0)"),
@@ -3337,11 +3407,7 @@ mod b4 {
         #[test]
         fn const_generic_apply_over_carriers_round_trips() {
             let overlay = module_overlay(|compiler| {
-                add_mixed_generic_struct(
-                    compiler,
-                    "Matrix",
-                    &[type_param("T"), const_param("N")],
-                );
+                add_mixed_generic_struct(compiler, "Matrix", &[type_param("T"), const_param("N")]);
             });
             let int_id = overlay.identity_of("int").expect("int identity");
             let head = overlay.identity_of("Matrix").expect("Matrix identity");

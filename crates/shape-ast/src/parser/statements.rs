@@ -283,10 +283,14 @@ pub fn parse_statement(pair: Pair<Rule>) -> Result<Statement> {
             // `extend (expr)` — computed-generation directive (§4.5.7). The
             // single inner is the parenthesized payload expression.
             let inner_span = pair_span(&inner);
-            let expr_pair = inner.into_inner().next().ok_or_else(|| ShapeError::ParseError {
-                message: "expected expression in parenthesized `extend (...)` directive".to_string(),
-                location: Some(pair_loc),
-            })?;
+            let expr_pair = inner
+                .into_inner()
+                .next()
+                .ok_or_else(|| ShapeError::ParseError {
+                    message: "expected expression in parenthesized `extend (...)` directive"
+                        .to_string(),
+                    location: Some(pair_loc),
+                })?;
             let expression = expressions::parse_expression(expr_pair)?;
             Ok(Statement::ExtendItemsExpr {
                 expression,

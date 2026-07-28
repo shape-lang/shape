@@ -4,8 +4,8 @@ mod support;
 use shape_runtime::snapshot::SerializableVMValue;
 use shape_vm::bytecode::{BytecodeProgram, FunctionBlob, FunctionHash};
 use shape_vm::remote::{
-    build_call_request, BlobNegotiationRequest, RemoteCallError, RemoteCallRequest,
-    RemoteErrorKind, WireMessage,
+    BlobNegotiationRequest, RemoteCallError, RemoteCallRequest, RemoteErrorKind, WireMessage,
+    build_call_request,
 };
 use support::*;
 

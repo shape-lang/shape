@@ -229,7 +229,10 @@ pub fn record_environment_command(repo_root: &Path, node: Option<&Path>) -> Resu
     }
 
     std::fs::write(&manifest_path, serde_json::to_string_pretty(&value)? + "\n")?;
-    println!("pinned environment identity {identity} into {}", super::MANIFEST_PATH);
+    println!(
+        "pinned environment identity {identity} into {}",
+        super::MANIFEST_PATH
+    );
     Ok(())
 }
 
@@ -247,10 +250,7 @@ pub fn compare_command(first: &Path, second: &Path) -> Result<()> {
         let diffs = b.environment.diff(&a.environment);
         println!("comparison REFUSED — the two reports were taken on different environments:");
         for diff in &diffs {
-            println!(
-                "  {}: {:?} vs {:?}",
-                diff.field, diff.pinned, diff.captured
-            );
+            println!("  {}: {:?} vs {:?}", diff.field, diff.pinned, diff.captured);
         }
         bail!(
             "environment identities differ ({} vs {}); these reports are not comparable",

@@ -198,9 +198,8 @@ fn probe(value: int) -> int {{ value }}
 /// proof territory).
 #[test]
 fn failed_replace_body_edit_leaves_no_half_edited_hybrid() {
-    let program =
-        shape_ast::parse_program(&plain_edit_program("let z = 1; z = 2; return z"))
-            .expect("slice-4 fixture parses");
+    let program = shape_ast::parse_program(&plain_edit_program("let z = 1; z = 2; return z"))
+        .expect("slice-4 fixture parses");
     let mut compiler = BytecodeCompiler::new();
     let shadow = compiler.original_body_shadow_name(EDIT_TARGET_NAME);
 
@@ -302,11 +301,7 @@ fn replace_body_edit_capture_set_and_body_commit_together() {
         "B.iii: the edited fn body is published"
     );
     assert!(
-        compiler
-            .program
-            .functions
-            .iter()
-            .any(|f| f.is_closure),
+        compiler.program.functions.iter().any(|f| f.is_closure),
         "B.iii: the replacement's closure is published WITH the body"
     );
     assert!(
@@ -343,11 +338,7 @@ fn replace_body_edit_capture_set_and_body_roll_back_together() {
         "B.iii-inverse: a failed edit publishes no body"
     );
     assert!(
-        !compiler
-            .program
-            .functions
-            .iter()
-            .any(|f| f.is_closure),
+        !compiler.program.functions.iter().any(|f| f.is_closure),
         "B.iii-inverse: a failed edit publishes no closure (rolled back WITH the body)"
     );
     assert!(

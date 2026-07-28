@@ -54,6 +54,11 @@ shape_abi_v1::language_runtime_plugin! {
         language_id: runtime::python_language_id,
         get_lsp_config: runtime::python_get_lsp_config,
         generate_stubs: runtime::python_generate_stubs,
+        // ADR-019 §5 (#202): `PythonRuntime` is `&self`-only behind interior
+        // synchronization, so the host may invoke it from several threads at
+        // once — which is what lets two `async fn python` calls overlap while
+        // CPython has the GIL released across `time.sleep` and blocking IO.
+        instance_concurrency: shape_abi_v1::INSTANCE_CONCURRENCY_SHARED,
         free_buffer: runtime::python_free_buffer,
         drop: runtime::python_drop,
     }

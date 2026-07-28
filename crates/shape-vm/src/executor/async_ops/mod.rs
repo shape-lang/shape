@@ -462,11 +462,20 @@ impl VirtualMachine {
                 let config = self.config.clone();
                 let granted = self.granted_permissions.clone();
                 let scope = self.scope_constraints.clone();
+                // #202: the isolated task VM needs the parent's extension
+                // registry, or a foreign call inside the spawned body fails
+                // link-now with "no extension provides language".
+                let language_runtimes = self.language_runtimes.clone();
                 let (tx, rx) = std::sync::mpsc::channel();
                 let handle =
                     crate::executor::async_runtime::shared_runtime().spawn_blocking(move || {
                         let result = crate::executor::async_runtime::run_isolated_async_fn(
-                            program, config, granted, scope, func_id,
+                            program,
+                            config,
+                            granted,
+                            scope,
+                            language_runtimes,
+                            func_id,
                         );
                         // Receiver may be gone (VM torn down / task aborted);
                         // ignore the send error.
@@ -475,7 +484,7 @@ impl VirtualMachine {
                 self.task_scheduler.store_pending_async(
                     task_id,
                     crate::executor::task_scheduler::PendingAsyncTask {
-                        completion: rx,
+                        completion: crate::executor::task_scheduler::AsyncCompletion::Typed(rx),
                         abort: Some(handle.abort_handle()),
                     },
                 );
@@ -778,9 +787,7 @@ impl VirtualMachine {
         Self::materialize_join_all_slots(results)
     }
 
-    fn materialize_join_all_slots(
-        results: Vec<KindedSlot>,
-    ) -> Result<(u64, NativeKind), VMError> {
+    fn materialize_join_all_slots(results: Vec<KindedSlot>) -> Result<(u64, NativeKind), VMError> {
         let Some(first) = results.first() else {
             return Err(VMError::RuntimeError(
                 "join all cannot materialize an empty task list".to_string(),
@@ -815,49 +822,34 @@ impl VirtualMachine {
         }
     }
 
-    fn materialize_join_all_i64(
-        results: Vec<KindedSlot>,
-    ) -> Result<(u64, NativeKind), VMError> {
+    fn materialize_join_all_i64(results: Vec<KindedSlot>) -> Result<(u64, NativeKind), VMError> {
         let arr = TypedArray::<i64>::with_capacity(results.len() as u32);
         unsafe { stamp_elem_type(arr as *mut u8, ELEM_TYPE_I64) };
         for result in results {
             unsafe { TypedArray::push(arr, result.raw() as i64) };
             std::mem::forget(result);
         }
-        Ok((
-            arr as usize as u64,
-            NativeKind::Ptr(HeapKind::TypedArray),
-        ))
+        Ok((arr as usize as u64, NativeKind::Ptr(HeapKind::TypedArray)))
     }
 
-    fn materialize_join_all_f64(
-        results: Vec<KindedSlot>,
-    ) -> Result<(u64, NativeKind), VMError> {
+    fn materialize_join_all_f64(results: Vec<KindedSlot>) -> Result<(u64, NativeKind), VMError> {
         let arr = TypedArray::<f64>::with_capacity(results.len() as u32);
         unsafe { stamp_elem_type(arr as *mut u8, ELEM_TYPE_F64) };
         for result in results {
             unsafe { TypedArray::push(arr, f64::from_bits(result.raw())) };
             std::mem::forget(result);
         }
-        Ok((
-            arr as usize as u64,
-            NativeKind::Ptr(HeapKind::TypedArray),
-        ))
+        Ok((arr as usize as u64, NativeKind::Ptr(HeapKind::TypedArray)))
     }
 
-    fn materialize_join_all_bool(
-        results: Vec<KindedSlot>,
-    ) -> Result<(u64, NativeKind), VMError> {
+    fn materialize_join_all_bool(results: Vec<KindedSlot>) -> Result<(u64, NativeKind), VMError> {
         let arr = TypedArray::<u8>::with_capacity(results.len() as u32);
         unsafe { stamp_elem_type(arr as *mut u8, ELEM_TYPE_BOOL) };
         for result in results {
             unsafe { TypedArray::push(arr, if result.raw() != 0 { 1 } else { 0 }) };
             std::mem::forget(result);
         }
-        Ok((
-            arr as usize as u64,
-            NativeKind::Ptr(HeapKind::TypedArray),
-        ))
+        Ok((arr as usize as u64, NativeKind::Ptr(HeapKind::TypedArray)))
     }
 
     fn materialize_join_all_typed_object(
@@ -870,10 +862,7 @@ impl VirtualMachine {
             unsafe { TypedArray::push(arr, ptr) };
             std::mem::forget(result);
         }
-        Ok((
-            arr as usize as u64,
-            NativeKind::Ptr(HeapKind::TypedArray),
-        ))
+        Ok((arr as usize as u64, NativeKind::Ptr(HeapKind::TypedArray)))
     }
 
     /// `join race`: return the id + result of the first branch to SETTLE
@@ -885,10 +874,7 @@ impl VirtualMachine {
     /// completion channels until one settles — because they are all running
     /// concurrently on the shared runtime, this returns at roughly the
     /// shortest branch's duration, not their sum.
-    fn join_race_first_settled(
-        &mut self,
-        task_ids: &[u64],
-    ) -> Result<(u64, KindedSlot), VMError> {
+    fn join_race_first_settled(&mut self, task_ids: &[u64]) -> Result<(u64, KindedSlot), VMError> {
         for &id in task_ids {
             if !self.task_scheduler.has_pending_async(id) {
                 let result = self.resolve_spawned_task(id)?;
@@ -910,10 +896,7 @@ impl VirtualMachine {
     /// `join any`: return the id + result of the first branch to SUCCEED,
     /// skipping failures; if every branch fails, surface the last error
     /// (WF-2D real any).
-    fn join_any_first_success(
-        &mut self,
-        task_ids: &[u64],
-    ) -> Result<(u64, KindedSlot), VMError> {
+    fn join_any_first_success(&mut self, task_ids: &[u64]) -> Result<(u64, KindedSlot), VMError> {
         let mut last_err: Option<VMError> = None;
         // Synchronous branches settle immediately — try them in order first.
         for &id in task_ids {

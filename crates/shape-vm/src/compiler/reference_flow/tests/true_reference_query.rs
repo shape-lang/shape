@@ -98,17 +98,17 @@ fn same_spelled_local_and_module_bindings_do_not_cross_contaminate_slots() {
         .last_mut()
         .expect("compiler has a local scope")
         .insert("shadowed".to_string(), 3);
-    compiler
-        .module_bindings
-        .insert("shadowed".to_string(), 7);
+    compiler.module_bindings.insert("shadowed".to_string(), 7);
 
     compiler.set_reference_flow_class(
         BindingKey::Local(3),
         ReferenceClass::SharedReference { referent: None },
     );
-    assert!(compiler
-        .current_true_reference_class(BindingKey::Local(3))
-        .is_some());
+    assert!(
+        compiler
+            .current_true_reference_class(BindingKey::Local(3))
+            .is_some()
+    );
     assert_eq!(
         compiler.current_true_reference_class(BindingKey::ModuleBinding(7)),
         None
@@ -123,7 +123,9 @@ fn same_spelled_local_and_module_bindings_do_not_cross_contaminate_slots() {
         compiler.current_true_reference_class(BindingKey::Local(3)),
         None
     );
-    assert!(compiler
-        .current_true_reference_class(BindingKey::ModuleBinding(7))
-        .is_some());
+    assert!(
+        compiler
+            .current_true_reference_class(BindingKey::ModuleBinding(7))
+            .is_some()
+    );
 }

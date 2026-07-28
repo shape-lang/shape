@@ -147,9 +147,9 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use crate::ffi_refs::FFIFuncRefs;
+use shape_value::v2::ConcreteType;
 use shape_value::v2::closure_layout::ClosureLayout;
 use shape_value::v2::struct_layout::FieldKind;
-use shape_value::v2::ConcreteType;
 use shape_vm::bytecode::MirFunctionData;
 use shape_vm::mir::analysis::OwnershipDecision;
 use shape_vm::mir::types::*;
@@ -784,10 +784,7 @@ pub fn preflight(mir_data: &MirFunctionData) -> MirPreflightResult {
                 StatementKind::TaskBoundary(_, _) => {
                     // TaskBoundary is a borrow-checker annotation — no-op at codegen time.
                 }
-                StatementKind::ClosureCapture {
-                    function_id,
-                    ..
-                } => {
+                StatementKind::ClosureCapture { function_id, .. } => {
                     // ClosureCapture is supported when function_id has been patched
                     if function_id.is_none() {
                         blockers.push("ClosureCapture missing function_id".to_string());
@@ -798,9 +795,7 @@ pub fn preflight(mir_data: &MirFunctionData) -> MirPreflightResult {
         }
 
         match &block.terminator.kind {
-            TerminatorKind::Goto(_)
-            | TerminatorKind::Return
-            | TerminatorKind::Unreachable => {}
+            TerminatorKind::Goto(_) | TerminatorKind::Return | TerminatorKind::Unreachable => {}
             TerminatorKind::SwitchBool { .. } => {}
             TerminatorKind::Call { .. } => {
                 // Call terminators are now supported via FFI dispatch.
@@ -1611,9 +1606,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                         &mut exact_field_stamps,
                     );
                 }
-                TerminatorKind::Goto(_)
-                | TerminatorKind::Return
-                | TerminatorKind::Unreachable => {}
+                TerminatorKind::Goto(_) | TerminatorKind::Return | TerminatorKind::Unreachable => {}
             }
         }
 
@@ -1686,12 +1679,10 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                         });
                     continue;
                 };
-                let Some((field_name, field_shape)) =
-                    schema.fields.iter().find_map(|field| {
-                        object_store_alloc_surface(&field.field_type)
-                            .map(|shape| (field.name.as_str(), shape))
-                    })
-                else {
+                let Some((field_name, field_shape)) = schema.fields.iter().find_map(|field| {
+                    object_store_alloc_surface(&field.field_type)
+                        .map(|shape| (field.name.as_str(), shape))
+                }) else {
                     continue;
                 };
                 self.unsupported_object_store_schemas

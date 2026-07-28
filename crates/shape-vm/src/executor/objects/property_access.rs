@@ -298,9 +298,7 @@ impl VirtualMachine {
                 // SAFETY: mirrors `recv_temporal` in `datetime_methods.rs` —
                 // the slot bits are a live `Arc::into_raw::<TemporalData>`
                 // pointer; the borrow lives only for this component read.
-                let td = unsafe {
-                    &*(obj_bits as *const shape_value::heap_value::TemporalData)
-                };
+                let td = unsafe { &*(obj_bits as *const shape_value::heap_value::TemporalData) };
                 let value = temporal_property_i64(td, ks)?;
                 self.push_kinded_slot(KindedSlot::from_int(value))
             }

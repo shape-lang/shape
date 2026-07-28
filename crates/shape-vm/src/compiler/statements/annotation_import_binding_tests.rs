@@ -143,8 +143,10 @@ from pkg::support use { @same }
     let installed = import_only_compiler
         .imported_annotations
         .get("same")
-        .expect("without a local `annotation same()` the import installs — proving the \
-                 suppression above is caused by the local declaration");
+        .expect(
+            "without a local `annotation same()` the import installs — proving the \
+                 suppression above is caused by the local declaration",
+        );
     assert_eq!(installed._module_path, "pkg::support");
 
     let graph_program = parse("annotation same() on type { }");

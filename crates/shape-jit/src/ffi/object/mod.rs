@@ -81,14 +81,14 @@ pub use closure::{
     jit_read_owned_mut_cell_u64, jit_read_shared_cell_bool, jit_read_shared_cell_f64,
     jit_read_shared_cell_i8, jit_read_shared_cell_i16, jit_read_shared_cell_i32,
     jit_read_shared_cell_i64, jit_read_shared_cell_u8, jit_read_shared_cell_u16,
-    jit_read_shared_cell_u32, jit_read_shared_cell_u64,
-    jit_write_owned_mut_cell_bool, jit_write_owned_mut_cell_f64, jit_write_owned_mut_cell_i8,
-    jit_write_owned_mut_cell_i16, jit_write_owned_mut_cell_i32, jit_write_owned_mut_cell_i64,
-    jit_write_owned_mut_cell_ptr, jit_write_owned_mut_cell_u8, jit_write_owned_mut_cell_u16,
-    jit_write_owned_mut_cell_u32, jit_write_owned_mut_cell_u64, jit_write_shared_cell_bool,
-    jit_write_shared_cell_f64, jit_write_shared_cell_i8, jit_write_shared_cell_i16,
-    jit_write_shared_cell_i32, jit_write_shared_cell_i64, jit_write_shared_cell_u8,
-    jit_write_shared_cell_u16, jit_write_shared_cell_u32, jit_write_shared_cell_u64,
+    jit_read_shared_cell_u32, jit_read_shared_cell_u64, jit_write_owned_mut_cell_bool,
+    jit_write_owned_mut_cell_f64, jit_write_owned_mut_cell_i8, jit_write_owned_mut_cell_i16,
+    jit_write_owned_mut_cell_i32, jit_write_owned_mut_cell_i64, jit_write_owned_mut_cell_ptr,
+    jit_write_owned_mut_cell_u8, jit_write_owned_mut_cell_u16, jit_write_owned_mut_cell_u32,
+    jit_write_owned_mut_cell_u64, jit_write_shared_cell_bool, jit_write_shared_cell_f64,
+    jit_write_shared_cell_i8, jit_write_shared_cell_i16, jit_write_shared_cell_i32,
+    jit_write_shared_cell_i64, jit_write_shared_cell_u8, jit_write_shared_cell_u16,
+    jit_write_shared_cell_u32, jit_write_shared_cell_u64,
 };
 
 pub use shared_cell_payload::{jit_read_shared_cell_ptr, jit_write_shared_cell_ptr};

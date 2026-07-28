@@ -64,8 +64,7 @@ mod validation;
 pub(crate) use callable_semantics::*;
 pub(crate) use model::*;
 pub use query::{
-    CaptureSiteRole, GENERATED_CAPTURE_ARTIFACT_CONFLICT_CODE,
-    GeneratedCaptureBindingIdentity,
+    CaptureSiteRole, GENERATED_CAPTURE_ARTIFACT_CONFLICT_CODE, GeneratedCaptureBindingIdentity,
     GeneratedCaptureDescriptorView, GeneratedCaptureOccurrenceIdentity, GeneratedCapturePosition,
     GeneratedCaptureQuery, GeneratedCaptureQueryIssue, GeneratedCaptureSemanticType,
     GeneratedCaptureSite, GeneratedCaptureSlot, GeneratedCaptureSourceMap,

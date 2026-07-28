@@ -45,6 +45,20 @@ macro_rules! define_opcodes {
         }
 
         impl OpCode {
+    /// Whether this opcode dispatches a foreign function call, in either
+    /// flavour: the synchronous `CallForeign` or #202's `CallForeignAsync`.
+    ///
+    /// Every place that reasons about "this instruction reaches foreign code"
+    /// asks here rather than naming one variant — blob foreign-dependency
+    /// collection, the JIT's VM-only preflight, escape analysis. The async
+    /// flavour was added after all of those existed, and each one that named
+    /// `CallForeign` alone was a silent miscompile waiting to happen (the blob
+    /// assembler's was found by a runtime tripwire: an async stub linked with an
+    /// empty `foreign_dependencies` table and failed at load).
+    pub fn is_foreign_call(self) -> bool {
+        matches!(self, OpCode::CallForeign | OpCode::CallForeignAsync)
+    }
+
             /// Returns the category this opcode belongs to.
             pub const fn category(self) -> OpcodeCategory {
                 match self {
@@ -538,6 +552,16 @@ define_opcodes! {
     /// Operand: ForeignFunction(u16) — index into program.foreign_functions
     /// Stack: pops N args (count pushed as a constant by the stub), pushes 1 result
     CallForeign = 0xF5, Control, pops: 0, pushes: 0;
+
+    /// Start an `async fn <language>` foreign call and push its `Future(id)`.
+    /// ADR-019 §5 / #202 (POLY-ASYNC-OFFLOAD): the invoke runs off the
+    /// interpreter thread and `await` resolves it through the same pending-task
+    /// channel Shape's own async module calls use, so two async foreign calls
+    /// overlap instead of serializing.
+    /// Operand: ForeignFunction(u16) — index into program.foreign_functions
+    /// Stack: pops N args (count pushed as a constant by the stub), pushes one
+    /// `Future(id)` handle.
+    CallForeignAsync = 0x1CE, Control, pops: 0, pushes: 0;
 
     /// Store a local with width truncation.
     /// Operand: TypedLocal(u16, NumericWidth) — local index + width

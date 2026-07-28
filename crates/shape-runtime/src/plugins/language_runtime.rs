@@ -39,6 +39,42 @@ impl Drop for LanguageRuntimeState {
     }
 }
 
+/// How the host may drive one extension instance concurrently, as declared by
+/// the extension through `LanguageRuntimeVTable::instance_concurrency`.
+///
+/// ADR-019 §5 / #202. Real foreign async runs `invoke` off the interpreter
+/// thread, so the instance pointer becomes genuinely shared and the answer
+/// matters. It is READ from the vtable, never inferred from the language id —
+/// deciding a capability from a terminal name is the spelling-selected
+/// semantics this codebase forbids.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InstanceConcurrency {
+    /// Undeclared, or explicitly interpreter-thread-only: the host must not
+    /// touch this instance from any other thread. Async foreign calls into it
+    /// are refused, not offloaded.
+    InterpreterThreadOnly,
+    /// Every vtable entry takes `&self` on the far side and the instance is
+    /// interiorly synchronized: several threads may `invoke` at once.
+    Shared,
+    /// The instance is bound to the thread that created it. The host must give
+    /// the language dedicated worker threads, each owning its own instance
+    /// built through [`PluginLanguageRuntime::fresh_instance`].
+    ThreadAffine,
+}
+
+impl InstanceConcurrency {
+    fn from_declared(raw: u32) -> Self {
+        match raw {
+            shape_abi_v1::INSTANCE_CONCURRENCY_SHARED => Self::Shared,
+            shape_abi_v1::INSTANCE_CONCURRENCY_THREAD_AFFINE => Self::ThreadAffine,
+            // Covers INTERPRETER_THREAD_ONLY and any value from an extension
+            // speaking a newer vocabulary: an unrecognised declaration reads as
+            // the most restrictive model rather than being guessed at.
+            _ => Self::InterpreterThreadOnly,
+        }
+    }
+}
+
 /// Wrapper around a loaded language runtime extension.
 pub struct PluginLanguageRuntime {
     /// The self-declared language identifier (e.g., "python").
@@ -47,6 +83,8 @@ pub struct PluginLanguageRuntime {
     state: Arc<LanguageRuntimeState>,
     /// Error model declared by the runtime.
     error_model: ErrorModel,
+    /// Off-thread-invocation model declared by the runtime (ADR-019 §5 / #202).
+    instance_concurrency: InstanceConcurrency,
 }
 
 /// Host-consumable LSP configuration declared by a language runtime extension.
@@ -103,6 +141,13 @@ impl PluginLanguageRuntime {
         };
 
         let error_model = vtable.error_model;
+        // ADR-019 §5 (#202). Read once at construction: the declaration is a
+        // property of the runtime build, and an instance that changed its mind
+        // mid-run could invalidate an offload already in flight.
+        let instance_concurrency = match vtable.instance_concurrency {
+            Some(f) => InstanceConcurrency::from_declared(unsafe { f(instance) }),
+            None => InstanceConcurrency::InterpreterThreadOnly,
+        };
         let state = Arc::new(LanguageRuntimeState {
             vtable,
             instance,
@@ -113,7 +158,15 @@ impl PluginLanguageRuntime {
             language_id,
             state,
             error_model,
+            instance_concurrency,
         })
+    }
+
+    /// The off-thread-invocation model this runtime declares (ADR-019 §5 /
+    /// #202). Drives whether an `async fn <language>` call can be offloaded,
+    /// and if so onto what.
+    pub fn instance_concurrency(&self) -> InstanceConcurrency {
+        self.instance_concurrency
     }
 
     /// Create a new runtime instance using the same vtable and init config.

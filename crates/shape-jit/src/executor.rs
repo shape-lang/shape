@@ -1,9 +1,9 @@
 //! JIT executor implementing the ProgramExecutor trait
 
 use shape_ast::Program;
-use shape_vm::bytecode::{BytecodeProgram, OpCode, Operand};
 use shape_runtime::engine::{ExecutionType, ProgramExecutor, ShapeEngine};
 use shape_runtime::error::Result;
+use shape_vm::bytecode::{BytecodeProgram, OpCode, Operand};
 use shape_wire::WireValue;
 use std::time::Instant;
 
@@ -726,10 +726,7 @@ impl JITExecutor {
             // ffi-rebuild §4.11 / WF-2A: pass the bytecode executor's resolved
             // `[native-dependencies]` map + root package key so the JIT foreign
             // bridge resolves an `extern C` alias identically to `--mode vm`.
-            let native_resolutions = self
-                .bytecode_executor
-                .native_resolution_context()
-                .cloned();
+            let native_resolutions = self.bytecode_executor.native_resolution_context().cloned();
             let native_root_key = self
                 .bytecode_executor
                 .root_package_key()
