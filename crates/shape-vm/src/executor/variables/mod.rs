@@ -1830,6 +1830,8 @@ impl VirtualMachine {
     /// (kind goes to the no-op Bool sentinel) and push the bits +
     /// original kind onto the stack with no refcount change.
     fn op_load_local_move(&mut self, instruction: &Instruction) -> Result<(), VMError> {
+        #[cfg(feature = "rc-stats")]
+        crate::rc_stats::note_addressable();
         let Some(Operand::Local(idx)) = instruction.operand else {
             return Err(VMError::InvalidOperand);
         };
@@ -3905,6 +3907,8 @@ impl VirtualMachine {
         &mut self,
         instruction: &Instruction,
     ) -> Result<(), VMError> {
+        #[cfg(feature = "rc-stats")]
+        crate::rc_stats::note_addressable();
         let Some(Operand::Local(idx)) = instruction.operand else {
             return Err(VMError::InvalidOperand);
         };
@@ -3926,6 +3930,8 @@ impl VirtualMachine {
         &mut self,
         instruction: &Instruction,
     ) -> Result<(), VMError> {
+        #[cfg(feature = "rc-stats")]
+        crate::rc_stats::note_addressable();
         let Some(Operand::Local(idx)) = instruction.operand else {
             return Err(VMError::InvalidOperand);
         };
@@ -3948,6 +3954,8 @@ impl VirtualMachine {
         &mut self,
         instruction: &Instruction,
     ) -> Result<(), VMError> {
+        #[cfg(feature = "rc-stats")]
+        crate::rc_stats::note_addressable();
         let Some(Operand::Local(idx)) = instruction.operand else {
             return Err(VMError::InvalidOperand);
         };

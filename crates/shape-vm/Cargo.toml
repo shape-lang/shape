@@ -69,6 +69,16 @@ jit-trace = ["tracing/std", "tracing/release_max_level_debug"]
 # itself lives in the shape-jit crate; shape-vm carries no cranelift deps.
 jit = []
 gc_barrier_debug = [] # Debug-mode write barrier coverage counters
+# ADR-018 §3 (#190): forced-collection harness for the retain/release elision
+# differential. Turns every instruction boundary into a full Bacon-Rajan
+# trial-deletion collection so a collection is guaranteed to land INSIDE every
+# elided interval. Test-only and off by default; it is instrumentation, not a
+# gate on the elision, which ships on unconditionally.
+gc-stress = ["gc"]
+# ADR-018 §3 (#190): dynamic retain/release counters for the elision
+# measurement. Instrumentation only, off by default — the shipped refcount path
+# carries no counter.
+rc-stats = []
 # Cycle-collecting GC (real-gc-cycle-collection.md). Default ON for this crate
 # (see `default` above) — it is OFF in shape-jit, which is the split-feature
 # hazard the shape-cli manifest documents. Enables the

@@ -121,6 +121,61 @@ pub(crate) fn with_ownership_moves_flag<R>(enabled: bool, f: impl FnOnce() -> R)
     f()
 }
 
+/// ADR-018 §3 (#190): whether the compiler cancels dominated retain/release
+/// pairs using the MIR `RcElisionPlan`.
+///
+/// The shipped default is ON and there is no user-facing switch: this is a
+/// correctness-preserving emission choice, not a feature. The env var and the
+/// `#[cfg(test)]` thread-local exist for one reason — ADR-018 §3's correctness
+/// gate is a *differential*, and a differential needs both sides. Nothing in
+/// the language surface reads it.
+///
+/// Polarity matches `ownership_moves_enabled`: `0` / `false` / `off` / `no`
+/// (case-insensitive, trimmed) disable; anything else, including unset, keeps
+/// the default of `true`.
+pub(super) fn rc_elision_enabled() -> bool {
+    #[cfg(test)]
+    {
+        if let Some(v) = TEST_RC_ELISION_OVERRIDE.with(|cell| cell.get()) {
+            return v;
+        }
+    }
+    static CACHED: OnceLock<bool> = OnceLock::new();
+    *CACHED.get_or_init(|| match std::env::var("SHAPE_RC_ELISION") {
+        Ok(v) => !matches!(
+            v.trim(),
+            "0" | "false" | "FALSE" | "False" | "off" | "OFF" | "Off" | "no" | "NO" | "No"
+        ),
+        Err(_) => true,
+    })
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Per-thread override for `rc_elision_enabled()`, scoped by
+    /// `with_rc_elision_flag`. Same discipline as
+    /// `TEST_OWNERSHIP_MOVES_OVERRIDE`: thread-local so concurrent test
+    /// workers stay independent, restored on drop so state cannot leak.
+    pub(super) static TEST_RC_ELISION_OVERRIDE: std::cell::Cell<Option<bool>> =
+        const { std::cell::Cell::new(None) };
+}
+
+/// Run `f` with retain/release elision forced on or off. This is the toggle
+/// the ADR-018 §3 on/off differential drives.
+#[cfg(test)]
+#[allow(dead_code)]
+pub(crate) fn with_rc_elision_flag<R>(enabled: bool, f: impl FnOnce() -> R) -> R {
+    struct Guard(Option<bool>);
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            TEST_RC_ELISION_OVERRIDE.with(|cell| cell.set(self.0));
+        }
+    }
+    let prev = TEST_RC_ELISION_OVERRIDE.with(|cell| cell.replace(Some(enabled)));
+    let _guard = Guard(prev);
+    f()
+}
+
 /// Phase V1.2C/D: default-on compiler emission of `PromoteToShared`.
 ///
 /// When `true`, the compiler emits `PromoteToShared` (V1.2A/B) at escape
@@ -5953,6 +6008,14 @@ impl BytecodeCompiler {
                 if self.local_drop_kind(local_idx).is_some() {
                     continue;
                 }
+                // ADR-018 §3 (#190): the read already took this slot's share
+                // via `LoadLocalMove`, so the slot holds the cleared sentinel
+                // and owns nothing. This is the release half of the cancelled
+                // pair; emitting it would release a share the slot no longer
+                // has.
+                if self.rc_elided_move_slots.contains(&local_idx) {
+                    continue;
+                }
                 self.emit(Instruction::new(
                     OpCode::DropLocal,
                     Some(Operand::Local(local_idx)),
@@ -6093,6 +6156,20 @@ impl BytecodeCompiler {
     /// The type name is resolved from the type tracker and encoded as a
     /// Property operand so the executor can look up `TypeName::drop`.
     fn emit_drop_call_for_local(&mut self, local_idx: u16, is_async: bool) {
+        // ADR-018 §3 (#190): the read already took this slot's share via
+        // `LoadLocalMove`, so the slot holds the cleared sentinel. The
+        // `LoadLocal` this pass emits would read a moved-out slot and hand
+        // the sentinel to `DropCall`. Skipping it is the third and last half
+        // of the cancelled release — `emit_load_local_owned` only records a
+        // slot here when `local_drop_kind` is `None`, so no user `Drop::drop`
+        // can be skipped by this branch and no finalization order moves.
+        if self.rc_elided_move_slots.contains(&local_idx) {
+            debug_assert!(
+                self.local_drop_kind(local_idx).is_none(),
+                "a user-Drop slot must never have been elided"
+            );
+            return;
+        }
         let type_name_opt = self
             .type_tracker
             .get_local_type(local_idx)
@@ -6481,6 +6558,14 @@ impl BytecodeCompiler {
                         // it. See the companion comment in
                         // `pop_drop_scope` above for rationale.
                         if self.local_drop_kind(local_idx).is_some() {
+                            continue;
+                        }
+                        // ADR-018 §3 (#190): release half of a cancelled
+                        // pair — see the companion comment in
+                        // `pop_drop_scope`. Reachable only when the move
+                        // dominates this exit, which the MIR plan proved
+                        // before the move was emitted.
+                        if self.rc_elided_move_slots.contains(&local_idx) {
                             continue;
                         }
                         self.emit(Instruction::new(
@@ -8641,6 +8726,7 @@ mod call_return_kind_tests {
             local_typed_array_element_types: Default::default(),
             local_declared_scalar_types: Default::default(),
             binding_slots: Default::default(),
+            local_names: Vec::new(),
             var_binding_slots: Default::default(),
         }
     }
@@ -8742,6 +8828,7 @@ mod call_return_kind_tests {
             local_typed_array_element_types: Default::default(),
             local_declared_scalar_types: Default::default(),
             binding_slots: Default::default(),
+            local_names: Vec::new(),
             var_binding_slots: Default::default(),
         };
         let resolver = |name: &str| -> Option<ConcreteType> {
@@ -8823,6 +8910,7 @@ mod call_return_kind_tests {
             local_typed_array_element_types: Default::default(),
             local_declared_scalar_types: Default::default(),
             binding_slots: Default::default(),
+            local_names: Vec::new(),
             var_binding_slots: Default::default(),
         };
         let result = infer_top_level_concrete_types_from_mir(&mir);
@@ -8906,6 +8994,7 @@ mod call_return_kind_tests {
             local_typed_array_element_types: std::collections::HashMap::new(),
             local_declared_scalar_types: std::collections::HashMap::new(),
             binding_slots: Default::default(),
+            local_names: Vec::new(),
             var_binding_slots: Default::default(),
         };
         let method_returns = |type_name: &str, method_name: &str| -> Option<ConcreteType> {
@@ -9002,6 +9091,7 @@ mod call_return_kind_tests {
             local_typed_array_element_types: std::collections::HashMap::new(),
             local_declared_scalar_types: std::collections::HashMap::new(),
             binding_slots: Default::default(),
+            local_names: Vec::new(),
             var_binding_slots: Default::default(),
         };
         let method_returns = |type_name: &str, method_name: &str| -> Option<ConcreteType> {
@@ -9078,6 +9168,7 @@ mod call_return_kind_tests {
             local_typed_array_element_types: std::collections::HashMap::new(),
             local_declared_scalar_types: std::collections::HashMap::new(),
             binding_slots: Default::default(),
+            local_names: Vec::new(),
             var_binding_slots: Default::default(),
         };
         // No method_returns resolver — destination stays Void.
@@ -9133,6 +9224,7 @@ mod call_return_kind_tests {
             local_typed_array_element_types: std::collections::HashMap::new(),
             local_declared_scalar_types: std::collections::HashMap::new(),
             binding_slots: Default::default(),
+            local_names: Vec::new(),
             var_binding_slots: Default::default(),
         };
         let method_returns = |_type_name: &str, _method_name: &str| -> Option<ConcreteType> {

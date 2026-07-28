@@ -621,6 +621,10 @@ pub(crate) fn clone_with_kind(bits: u64, kind: NativeKind) {
             | NativeKind::Null => {}
         }
     }
+    // ADR-018 §3 (#190) measurement counter. Instrumentation only; absent
+    // from the default build.
+    #[cfg(feature = "rc-stats")]
+    crate::rc_stats::note_retain();
     // GC Phase 2 increment barrier (real-gc-cycle-collection.md §3.2): the
     // retain above completed, so the target is demonstrably in use — color it
     // Black. Additive `#[cfg]`-gated no-op when the `gc` feature is off; the RC
@@ -639,6 +643,10 @@ pub(crate) fn drop_with_kind(bits: u64, kind: NativeKind) {
     if bits == 0 {
         return;
     }
+    // ADR-018 §3 (#190) measurement counter. Instrumentation only; absent
+    // from the default build.
+    #[cfg(feature = "rc-stats")]
+    crate::rc_stats::note_release();
     // GC Phase 2 decrement barrier, pre-step (real-gc-cycle-collection.md §3.2):
     // read whether this is a cycle-capable header carrier that will SURVIVE the
     // imminent decrement (refcount currently > 1). Reading *before* the release

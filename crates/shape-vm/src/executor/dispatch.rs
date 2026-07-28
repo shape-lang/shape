@@ -189,6 +189,20 @@ impl VirtualMachine {
                 }
             }
 
+            // ADR-018 §3 (#190) forced-collection harness. The dispatch loop's
+            // ordinary safepoint fires on a 1024-instruction stride, which is
+            // far coarser than an elided retain/release interval — end-state
+            // comparison alone cannot catch a mid-interval free, and neither
+            // can a safepoint that never lands inside one. With `gc-stress` on,
+            // every instruction boundary becomes a full trial-deletion
+            // collection, so every elided interval is collected inside. This is
+            // test instrumentation: with the feature off (always, outside the
+            // differential) it compiles to nothing.
+            #[cfg(all(feature = "gc", feature = "gc-stress"))]
+            {
+                shape_value::gc_coordinator::collect_under_stop(shape_value::gc::collect_cycles);
+            }
+
             // Poll for completed tier promotions every 1024 instructions.
             if self.instruction_count & 0x3FF == 0 {
                 self.poll_tier_completions();
@@ -360,6 +374,20 @@ impl VirtualMachine {
                 // (design §4.4 no-skip rule).
                 self.ip -= 1;
                 return Err(VMError::Interrupted);
+            }
+
+            // ADR-018 §3 (#190) forced-collection harness. The dispatch loop's
+            // ordinary safepoint fires on a 1024-instruction stride, which is
+            // far coarser than an elided retain/release interval — end-state
+            // comparison alone cannot catch a mid-interval free, and neither
+            // can a safepoint that never lands inside one. With `gc-stress` on,
+            // every instruction boundary becomes a full trial-deletion
+            // collection, so every elided interval is collected inside. This is
+            // test instrumentation: with the feature off (always, outside the
+            // differential) it compiles to nothing.
+            #[cfg(all(feature = "gc", feature = "gc-stress"))]
+            {
+                shape_value::gc_coordinator::collect_under_stop(shape_value::gc::collect_cycles);
             }
 
             // Poll for completed tier promotions every 1024 instructions.

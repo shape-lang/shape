@@ -83,6 +83,7 @@ mod mutation_writeback;
 mod hashmap_readback_kind;
 mod pop_mutation;
 mod priority_queue_ops;
+mod rc_elision;
 mod seam_c_for_loop;
 mod set_ops;
 mod soak_tests;
