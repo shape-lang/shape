@@ -33,12 +33,32 @@ pub fn binding_storage_decisions(program: &Program, text: &str) -> Option<Bindin
     {
         return None;
     }
+    #[cfg(test)]
+    COMPILE_COUNT.with(|count| count.set(count.get() + 1));
+
     let mut compiler = shape_vm::BytecodeCompiler::new();
     compiler.set_type_diagnostic_mode(shape_vm::compiler::TypeDiagnosticMode::RecoverAll);
     compiler.set_compile_diagnostic_mode(shape_vm::compiler::CompileDiagnosticMode::RecoverAll);
     compiler.set_source(text);
     compiler.compile_in_place(program).ok()?;
     Some(compiler.binding_storage_query().clone())
+}
+
+#[cfg(test)]
+std::thread_local! {
+    /// Counts query-session compiles so tests can prove the hint does not pay
+    /// for one it does not need.
+    static COMPILE_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(crate) fn reset_compile_count() {
+    COMPILE_COUNT.with(|count| count.set(0));
+}
+
+#[cfg(test)]
+pub(crate) fn compile_count() -> usize {
+    COMPILE_COUNT.with(std::cell::Cell::get)
 }
 
 /// The tooltip shown for a storage-class inlay hint. Both the eager tooltip

@@ -195,11 +195,15 @@ struct HintContext<'a> {
     /// when the Visitor revisits inner MethodCall nodes of the chain spine
     /// (W2.4 / 1.27).
     chain_hint_offsets: std::collections::HashSet<usize>,
-    /// ADR-017 §2 / R23: the compiler's per-binding storage decisions, keyed
-    /// by the bound name's source offset. `None` when this document carries
-    /// no query authority — the storage-class hint is then not emitted at
-    /// all, rather than falling back to a guess.
-    binding_storage: Option<shape_vm::compiler::BindingStorageTable>,
+    /// ADR-017 §2 / R23: the compiler's per-binding storage decisions,
+    /// looked up by the bound name's source offset. The inner `None` means
+    /// this document carries no query authority — the storage-class hint is
+    /// then not emitted at all, rather than falling back to a guess.
+    ///
+    /// Filled on first use, not at construction: answering it costs a full
+    /// bytecode compile, and a request that emits no storage-class hint
+    /// (every `let`-only document with the toggle off) must not pay it.
+    binding_storage: Option<Option<shape_vm::compiler::BindingStorageTable>>,
 }
 
 impl<'a> HintContext<'a> {
@@ -301,7 +305,6 @@ impl<'a> HintContext<'a> {
         type_map: HashMap<String, String>,
         function_types: HashMap<String, FunctionTypeInfo>,
     ) -> Self {
-        let binding_storage = crate::binding_storage::binding_storage_decisions(program, text);
         Self {
             text,
             program,
@@ -311,8 +314,26 @@ impl<'a> HintContext<'a> {
             type_map,
             function_types,
             chain_hint_offsets: std::collections::HashSet::new(),
-            binding_storage,
+            binding_storage: None,
         }
+    }
+
+    /// The compiler's storage decision for the binding whose name starts at
+    /// `offset`, compiling the document on the first call that needs one.
+    fn storage_decision_at(
+        &mut self,
+        offset: usize,
+    ) -> Option<&shape_vm::compiler::BindingStorageDecision> {
+        if self.binding_storage.is_none() {
+            self.binding_storage = Some(crate::binding_storage::binding_storage_decisions(
+                self.program,
+                self.text,
+            ));
+        }
+        self.binding_storage
+            .as_ref()
+            .and_then(Option::as_ref)
+            .and_then(|table| table.at_name_offset(offset))
     }
 
     /// Collect type hint for a variable declaration without explicit type annotation.
@@ -460,25 +481,24 @@ impl<'a> HintContext<'a> {
         // (`SharedAtomic`, `SharedAtomicMut`) `BindingStorageClass` has no
         // variant for.
         if want_binding_hint
-            && let Some(decision) = self
-                .binding_storage
-                .as_ref()
-                .and_then(|table| table.at_name_offset(span.start))
+            && let Some((class, name)) = self
+                .storage_decision_at(span.start)
+                .map(|decision| (decision.storage_class.name(), decision.name.clone()))
         {
             self.hints.push(InlayHint {
                 position,
-                label: InlayHintLabel::String(format!("[{}]", decision.storage_class.name())),
+                label: InlayHintLabel::String(format!("[{class}]")),
                 kind: Some(InlayHintKind::TYPE),
                 text_edits: None,
                 tooltip: Some(tower_lsp_server::ls_types::InlayHintTooltip::String(
-                    crate::binding_storage::storage_class_tooltip(decision.storage_class.name()),
+                    crate::binding_storage::storage_class_tooltip(class),
                 )),
                 padding_left: Some(true),
                 padding_right: Some(true),
                 data: Some(serde_json::json!({
                     "kind": "binding-kind",
-                    "name": decision.name,
-                    "storageClass": decision.storage_class.name(),
+                    "name": name,
+                    "storageClass": class,
                 })),
             });
         }
@@ -1887,6 +1907,35 @@ let r = xs.filter(|x| x > 0).reverse().sort()
                 "{label} is not a BindingStorageClass variant"
             );
         }
+    }
+
+    /// The storage decision costs a full bytecode compile, so a request
+    /// that emits no storage-class hint must not pay for one.
+    #[test]
+    fn a_request_that_needs_no_storage_hint_does_not_compile_the_document() {
+        crate::binding_storage::reset_compile_count();
+        let code = "let x = 42\nlet y = x + 1\n";
+        let hints = get_inlay_hints(code, full_range(), &InlayHintConfig::default(), None);
+        assert!(!hints.is_empty(), "the type hints still render");
+        assert_eq!(
+            crate::binding_storage::compile_count(),
+            0,
+            "a `let`-only document with the storage-class toggle off must not \
+             trigger a query-session compile"
+        );
+
+        // The same document WITH the toggle on pays for exactly one.
+        crate::binding_storage::reset_compile_count();
+        let cfg = InlayHintConfig {
+            show_binding_kind_hints: true,
+            ..InlayHintConfig::default()
+        };
+        let _ = get_inlay_hints(code, full_range(), &cfg, None);
+        assert_eq!(
+            crate::binding_storage::compile_count(),
+            1,
+            "the decisions must be compiled once per request, not once per binding"
+        );
     }
 
     /// #181: `var` hands its storage decision to the compiler, so the
