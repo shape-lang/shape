@@ -83,6 +83,49 @@ A monotonic global cache would produce a constant positive slope. The measured
 slope is 9.2 KB/test and the curve flattens. Over the whole suite this is ~30 MB
 — real but three orders of magnitude away from the incident.
 
+### Real leaks that exist but are not this incident
+
+A static/teardown code sweep run alongside the measurements did find genuine
+leaks. They are recorded here because "the OOM was the build" must not be heard
+as "the runtime is clean". Each is real; none explains the incident, and the
+measurements above say why.
+
+**Headline — `box_column_result` leaks a whole `Vec<f64>` per call.**
+`crates/shape-jit/src/ffi/value_ffi.rs:510` does
+`Box::leak(data.into_boxed_slice())` with a doc comment saying the caller must
+free it. Verified: **no `free_column` / `drop_column` / `shape_free_column`
+exists anywhere in the workspace** (grep returns zero hits). Verified call
+sites: 7 in `crates/shape-jit/src/ffi_symbols/series/mod.rs`, 8 in
+`crates/shape-jit/src/ffi_symbols/intrinsics/mod.rs`. This leaks per **call**,
+not per test or per program, so a long-running JIT column-math workload leaks
+without bound. Tracked as **#208**.
+
+Why it does not show up in these measurements: the JIT tier thresholds
+(T1 @ 100 calls, T2 @ 10k) mean the large majority of unit tests never reach JIT
+compilation at all, and the series/intrinsic column API is a narrow path few
+tests touch. The suites do not exercise it at scale — which is exactly why a
+production-path leak can sit behind a flat RSS curve. The `jit` target's 313 MB
+against `operators`' 363 MB is evidence about *these suites*, not a clean bill
+of health for the JIT under sustained load.
+
+The correct contrast is `crates/shape-jit/src/jit_matrix.rs:59,79`, where
+`from_arc` leaks one strong reference and `Drop` reconstitutes it — balanced.
+
+**Second-order, bounded-growth statics** (none incident-relevant; worth a
+disposition when next touched):
+
+| site | shape | growth |
+|---|---|---|
+| `crates/shape-runtime/src/module_loader/mod.rs:54` | `PARSE_CACHE: OnceLock<Mutex<HashMap<String, Arc<Program>>>>` | insert-only; verified no remove/clear |
+| `crates/shape-jit/src/ffi/string.rs:175` | `intern_pool: OnceLock<Mutex<HashMap<String, Arc<String>>>>` | grows, bumps strong counts; documented as living for the program's lifetime |
+| `crates/shape-value/src/shape_graph_current.rs:106` | `DEFAULT_SHAPE_TABLE: LazyLock<Arc<ShapeTableHandle>>` | transition log drains only if the JIT tier manager polls |
+| `type_schema/registry.rs` schema-registry fallback surfaces | — | reported by the sweep; **not independently verified here** |
+
+A source-text-keyed parse cache and a string intern pool are precisely the
+shapes that would produce a constant positive slope. The measured slope is
+9.2 KB/test and *inverts* on a warm heap (next section), which bounds their
+real-world cost on these suites to noise.
+
 ### Per-module attribution, and why the residual slope is not retention
 
 Running each top-level module as its own slice (`--test-threads=1`) localises
