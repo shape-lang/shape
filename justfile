@@ -96,6 +96,15 @@ test-deep:
 test-integration:
 	ulimit -v {{test-mem-cap-kib}} && cargo test -p shape-test
 
+# Bounded-RSS tripwire (#206). Asserts the build-parallelism bound is still
+# configured AND that one process running the full shape-vm lib slice stays
+# under a declared peak/slope. Note the `test-mem-cap-kib` ulimit above cannot
+# catch the failure this guards: that OOM was ~32 concurrent ~1.8 GiB linkers,
+# no single one of which approaches a 48 GiB per-process cap.
+# See docs/program/test-infra/accumulation-diagnosis.md.
+rss-tripwire:
+	bash scripts/rss-tripwire.sh
+
 # Foreign-call (FFI) e2e tier (ffi-rebuild §7, WF-2A stage 5).
 #
 # `bin/shape-cli/tests/ffi_e2e.rs` drives the real `shape` binary end-to-end
