@@ -1,0 +1,18 @@
+// #189 (PERF-HOF-CARRIER) iterator customer class 2/4, committed per R15.
+//
+// CLASS: a `for` loop consuming an explicit `.iter()`.
+//
+// Distinct from `for x in xs` — the explicit `.iter()` materialises a
+// `Ptr(HeapKind::Iterator)` receiver, so the loop's iterator-protocol calls
+// hit the Wave 1b SEAM B refusal and the whole function bails to the
+// interpreter. Measured at 039be067; VM == JIT throughout, just never native.
+//
+// See `SYN__iterator-terminal-count.shape` for why these fixtures land before
+// the unification rather than with it.
+
+let xs = [10, 20, 30]
+let mut total = 0
+for x in xs.iter() {
+    total = total + x
+}
+print(total)

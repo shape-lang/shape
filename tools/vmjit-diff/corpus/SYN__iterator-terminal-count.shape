@@ -1,0 +1,25 @@
+// #189 (PERF-HOF-CARRIER) iterator customer class 1/4, committed per R15.
+//
+// CLASS: a terminal method directly on a bare `.iter()` receiver.
+//
+// `iter()` is stamped `Ptr(HeapKind::Iterator)` receiver-invariantly
+// (`mir_compiler/types.rs` `well_known_method_return_kind`), so `.count()`'s
+// receiver carries that kind and hits the Wave 1b SEAM B refusal at
+// `mir_compiler/terminators.rs`: iterator-receiver methods have no sound JIT
+// codegen, so the WHOLE function bails to the bytecode interpreter, whose
+// iterator handlers are carrier-correct.
+//
+// Measured at 039be067: `program_fallback` detail contains
+// "iterator-receiver method `.count()`". The program is CORRECT — VM == JIT —
+// it just never runs native.
+//
+// WHY THIS FILE EXISTS BEFORE THE FIX. The committed corpus contained ZERO
+// programs using `.iter()` at all (swept all 468 under `--mode jit`), so the
+// VM/JIT differential had no coverage of the carrier the unification is about
+// to change. Landing that change against zero coverage, on a carrier path
+// whose sibling defect (#219) is an open silent-wrong-output, is the shape
+// that produced the 841f92f7 revert. These fixtures pin correctness NOW and
+// become the per-class nativity evidence when the unification lands.
+
+let xs = [1, 2, 3, 4, 5]
+print(xs.iter().count())

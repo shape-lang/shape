@@ -6,7 +6,7 @@
   "counts": {
     "book": 240,
     "acceptance": 224,
-    "synthetic": 9
+    "synthetic": 13
   },
   "skippedCount": 0,
   "entries": [
@@ -2381,6 +2381,26 @@
       "id": "SYN__aliased-cow-push-reachability.shape",
       "tier": "synthetic",
       "source": "tools/vmjit-diff/synthetic/SYN__aliased-cow-push-reachability.shape (#189 aliased-cow-push reachability narrowing repro)"
+    },
+    {
+      "id": "SYN__iterator-adapter-chain.shape",
+      "tier": "synthetic",
+      "source": "tools/vmjit-diff/synthetic/SYN__iterator-adapter-chain.shape (#189 iterator customer class 3/4: multi-adapter chain, non-int elements)"
+    },
+    {
+      "id": "SYN__iterator-filter-count.shape",
+      "tier": "synthetic",
+      "source": "tools/vmjit-diff/synthetic/SYN__iterator-filter-count.shape (#189 iterator customer class 4/4: adapter + non-collecting terminal)"
+    },
+    {
+      "id": "SYN__iterator-for-consumption.shape",
+      "tier": "synthetic",
+      "source": "tools/vmjit-diff/synthetic/SYN__iterator-for-consumption.shape (#189 iterator customer class 2/4: for-loop over an explicit .iter())"
+    },
+    {
+      "id": "SYN__iterator-terminal-count.shape",
+      "tier": "synthetic",
+      "source": "tools/vmjit-diff/synthetic/SYN__iterator-terminal-count.shape (#189 iterator customer class 1/4: terminal on a bare .iter() receiver)"
     }
   ]
 }
