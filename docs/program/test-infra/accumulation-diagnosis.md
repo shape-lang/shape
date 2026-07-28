@@ -83,6 +83,91 @@ A monotonic global cache would produce a constant positive slope. The measured
 slope is 9.2 KB/test and the curve flattens. Over the whole suite this is ~30 MB
 — real but three orders of magnitude away from the incident.
 
+### Real leaks that exist but are not this incident
+
+A static/teardown code sweep run alongside the measurements did find genuine
+leaks. They are recorded here because "the OOM was the build" must not be heard
+as "the runtime is clean". Each is real; none explains the incident, and the
+measurements above say why.
+
+**Headline — `box_column_result` leaks a whole `Vec<f64>` per call.**
+`crates/shape-jit/src/ffi/value_ffi.rs:510` does
+`Box::leak(data.into_boxed_slice())` with a doc comment saying the caller must
+free it. Verified: **no `free_column` / `drop_column` / `shape_free_column`
+exists anywhere in the workspace** (grep returns zero hits). Verified call
+sites: 7 in `crates/shape-jit/src/ffi_symbols/series/mod.rs`, 8 in
+`crates/shape-jit/src/ffi_symbols/intrinsics/mod.rs`. This leaks per **call**,
+not per test or per program, so a long-running JIT column-math workload leaks
+without bound. Tracked as **#208**.
+
+Why it does not show up in these measurements: the JIT tier thresholds
+(T1 @ 100 calls, T2 @ 10k) mean the large majority of unit tests never reach JIT
+compilation at all, and the series/intrinsic column API is a narrow path few
+tests touch. The suites do not exercise it at scale — which is exactly why a
+production-path leak can sit behind a flat RSS curve. The `jit` target's 313 MB
+against `operators`' 363 MB is evidence about *these suites*, not a clean bill
+of health for the JIT under sustained load.
+
+The correct contrast is `crates/shape-jit/src/jit_matrix.rs:59,79`, where
+`from_arc` leaks one strong reference and `Drop` reconstitutes it — balanced.
+
+**Second-order, bounded-growth statics** (none incident-relevant; worth a
+disposition when next touched):
+
+| site | shape | growth |
+|---|---|---|
+| `crates/shape-runtime/src/module_loader/mod.rs:54` | `PARSE_CACHE: OnceLock<Mutex<HashMap<String, Arc<Program>>>>` | insert-only; verified no remove/clear |
+| `crates/shape-jit/src/ffi/string.rs:175` | `intern_pool: OnceLock<Mutex<HashMap<String, Arc<String>>>>` | grows, bumps strong counts; documented as living for the program's lifetime |
+| `crates/shape-value/src/shape_graph_current.rs:106` | `DEFAULT_SHAPE_TABLE: LazyLock<Arc<ShapeTableHandle>>` | transition log drains only if the JIT tier manager polls |
+| `type_schema/registry.rs` schema-registry fallback surfaces | — | reported by the sweep; **not independently verified here** |
+
+A source-text-keyed parse cache and a string intern pool are precisely the
+shapes that would produce a constant positive slope. The measured slope is
+9.2 KB/test and *inverts* on a warm heap (next section), which bounds their
+real-world cost on these suites to noise.
+
+### Per-module attribution, and why the residual slope is not retention
+
+Running each top-level module as its own slice (`--test-threads=1`) localises
+the whole residual to `executor::`:
+
+| module | tests | peak | slope |
+|---|---:|---:|---:|
+| `compiler::` | 1,753 | 97 MB | **−1,203 B/test** (releases) |
+| `executor::` | 1,148 | 92 MB | **+12,764 B/test** |
+| `mir::` / `bytecode::` / `tier::` / `feature_tests::` | 10–21 | 13–66 MB | too few samples |
+
+Two controls then establish that even this residual is not retention.
+
+**Control 1 — order independence.** The 1,256 `executor::` tests run from an
+explicit `--exact` list, forward and reversed:
+
+```
+executor fwd  peak=93 MB  slope=13736 B/test   (26.5s)
+executor rev  peak=93 MB  slope=13147 B/test   (19.3s)
+```
+
+Identical. The slope is not an artifact of heavier tests sorting later.
+
+**Control 2 — warm heap.** The *same* 1,256 tests, measured inside the full
+suite, where ~1,800 compiler tests have already run and freed their heap:
+
+```
+executor standalone (cold heap):      slope = +13736 B/test, peak  93 MB
+executor within full run (warm heap): slope =  -1448 B/test, peak 110 MB
+```
+
+The slope **inverts**. That is the signature of an allocator ramping to its
+working-set high-water mark, not of a leak: once the process already holds a
+heap, executor tests reuse memory freed by the compiler tests and RSS stops
+growing. This is the strongest single piece of evidence against the
+accumulation hypothesis, and it is why the full-suite peak sits at 113–124 MB
+rather than climbing.
+
+Consequence for the tripwire: the **peak** bound is the meaningful guard. The
+slope bound is a secondary signal that partly measures allocator warm-up, and
+should not be read as a leak rate.
+
 ### Confirmed — build-phase link fan-out
 
 `cargo test -p shape-test --no-run` after touching `tools/shape-test/src/lib.rs`
@@ -101,6 +186,40 @@ t=6.3  procs=161  tree=28.4 GB  top=ld/859MB      <-- +18 GB in one second
 The transition at t=5.2s is the whole defect: 5 processes become 157 as every
 test binary starts linking at once. Individual `ld` processes peak at ~1.7 GB;
 test binaries are ~230 MB each with full debuginfo (16 GB of `target/debug/deps`).
+
+### Corroborating live incident, 2026-07-28
+
+The measured runs in the table above are themselves the incident: a cold
+`cargo test -p shape-test --no-run` at default `jobs = nproc = 32`, issued from
+this worktree during Phase-1 prep, throttled the host. Independently observed
+from outside the run: **~49 GiB held in concurrent linker chains**
+(cc → collect2 → ld), one workspace-sized `ld` measured at **1.42 GiB live**,
+memory-pressure avg10 **99%**, host load **121**.
+
+That external 1.42 GiB/link figure and this investigation's 1.86 GB/job slope
+were arrived at separately and agree, which is what makes the extrapolation to
+~59 GB at `jobs = 32` trustworthy rather than a single-source estimate. Note the
+two figures measure different things and should not be conflated: 1.42 GiB is
+one `ld`'s live RSS, 1.86 GB is the per-job cost of the whole chain (rustc +
+cc + collect2 + ld) amortised across a build.
+
+**Reproducing the build-phase table is itself the hazard.** Anyone re-measuring
+it must do so under `scripts/rss-tree-profile.sh` with a cap well under free
+memory, and must not run it concurrently with any other cargo invocation.
+
+### Operational rules now binding on this workspace
+
+1. Never build all of shape-test at once. Build exactly the one target needed:
+   `cargo test -p shape-test --test <name> --no-run`. Measured cost of that
+   form after touching `tools/shape-test/src/lib.rs`: **1.9 GB peak, 6
+   processes**, of which a single `ld` is 1.72 GB. That one linker is the
+   irreducible floor for any shape-test build — but it is ~30x cheaper than the
+   all-targets form at default parallelism, and it stays flat regardless of the
+   `jobs` setting because there is only ever one link in flight.
+2. One cargo invocation at a time, per worktree and across worktrees.
+3. `.cargo/config.toml`'s `[build] jobs` bound is not optional and must not be
+   removed; the first build after it lands is a cold-ish rebuild and will be
+   slow at `jobs = 8`. That is the intended trade.
 
 ## Interventions measured
 
