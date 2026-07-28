@@ -128,15 +128,17 @@ pub enum EscapeVector {
 }
 
 /// Why a fact could not be decided either way.
+///
+/// One variant today, and only one producer: a function-level precondition
+/// failure. Every *statement*-level uncertainty resolves to a definite
+/// `Escapes` / `ForeignStore` instead, because the conservative direction of
+/// each product is a refusal, not an abstention.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum NotProvenReason {
     /// MIR lowering fell back for this function, so the MIR is not a faithful
     /// over-approximation of the program's dataflow. Mirrors the storage
     /// planner's `had_fallbacks` → `Deferred` rule (`storage_planning.rs:275`).
     MirLoweringIncomplete,
-    /// A store into this allocation came from a source this analysis cannot
-    /// classify as local-only. Inbound product only.
-    UnclassifiedStoreSource,
 }
 
 /// Outbound product: does this allocation die with the frame?
@@ -963,6 +965,12 @@ fn run_inbound(
                     }
                 }
                 StatementKind::Assign(place, rvalue) => {
+                    // Only projections write *into* an object. `Place::Local`
+                    // rebinds a slot, and a bare `Place::Deref` overwrites the
+                    // referent binding rather than storing into its contents —
+                    // the store-through-a-reference case is
+                    // `Place::Field(Deref(r), f)`, whose `root_local()` is `r`,
+                    // so it arrives here.
                     let (Place::Field(base, _) | Place::Index(base, _)) = place else {
                         continue;
                     };
