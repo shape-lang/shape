@@ -401,6 +401,71 @@ fn typescript_throw_becomes_catchable_err() {
     );
 }
 
+/// The #202 overlap assertion, measured INSIDE the foreign bodies.
+///
+/// Timing the subprocess from the outside cannot work here: under `cargo test`
+/// the `shape` binary is the DEBUG build, whose stdlib compilation takes tens of
+/// seconds and varies by seconds between runs — noise that swamps the
+/// sub-second sleeps being measured. So each call reports the wall-clock
+/// interval it actually occupied, as `[start, end]`, and the test asserts the
+/// two intervals OVERLAP. That is a direct observation of two foreign bodies
+/// being inside the runtime at the same moment, and no amount of startup cost or
+/// machine load can fake it or break it.
+///
+/// `program` must print `A0=<start> A1=<end>` and `B0=… B1=…`. Units are
+/// whatever the language's clock uses (seconds for Python's `time.time()`,
+/// milliseconds for JS `Date.now()`); `min_span` is the nap length in those
+/// units, and exists so a probe that returned instantly cannot pass vacuously.
+fn assert_foreign_calls_overlapped(
+    program: &str,
+    ext_dir: Option<&Path>,
+    min_span: f64,
+    label: &str,
+) {
+    let run = run_shape(program, "vm", ext_dir);
+    assert_eq!(run.exit_code, Some(0), "stderr={}", run.stderr);
+
+    let field = |name: &str| -> f64 {
+        let needle = format!("{name}=");
+        let rest = run.stdout.split(&needle).nth(1).unwrap_or_else(|| {
+            panic!(
+                "{label}: missing {name} in stdout={:?} stderr={}",
+                run.stdout, run.stderr
+            )
+        });
+        let text: String = rest
+            .chars()
+            .take_while(|c| c.is_ascii_digit() || *c == '.' || *c == '-')
+            .collect();
+        text.parse()
+            .unwrap_or_else(|e| panic!("{label}: {name} is not a number ({text:?}): {e}"))
+    };
+
+    let (a_start, a_end) = (field("A0"), field("A1"));
+    let (b_start, b_end) = (field("B0"), field("B1"));
+
+    assert!(
+        a_end - a_start >= min_span * 0.9 && b_end - b_start >= min_span * 0.9,
+        "{label}: each call must actually have occupied its nap — got spans {} and {}, \
+         expected about {min_span}",
+        a_end - a_start,
+        b_end - b_start
+    );
+
+    let overlap = a_end.min(b_end) - a_start.max(b_start);
+    assert!(
+        overlap > 0.0,
+        "{label}: the two foreign calls did not overlap — A ran [{a_start}, {a_end}] and \
+         B ran [{b_start}, {b_end}], which is serialization. The whole point of an async \
+         foreign call is that both are in flight before either is awaited."
+    );
+    assert!(
+        overlap >= min_span * 0.5,
+        "{label}: the calls overlapped by only {overlap}, less than half of {min_span} — \
+         they are mostly serialized"
+    );
+}
+
 // =========================================================================
 // async fn <language> — real offload (ADR-019 §5 / #202, POLY-ASYNC-OFFLOAD)
 // =========================================================================
@@ -428,32 +493,21 @@ fn typescript_throw_becomes_catchable_err() {
 #[ignore = "needs built python extension + CPython; run via `just test-ffi`"]
 fn python_two_async_calls_overlap() {
     let ext = extension_dir();
-    let program = "async fn python nap(ms: int) -> Result<int> {\n\
+    // Each call reports the interval it occupied. `time.sleep` is the right
+    // probe precisely because CPython releases the GIL across it — the property
+    // the extension's INSTANCE_CONCURRENCY_SHARED declaration is claiming.
+    let program = "async fn python nap(ms: int) -> Result<Array<number>> {\n\
                    \x20   import time\n\
+                   \x20   start = time.time()\n\
                    \x20   time.sleep(ms / 1000.0)\n\
-                   \x20   return ms\n\
+                   \x20   return [start, time.time()]\n\
                    }\n\
                    let a = nap(500)\n\
                    let b = nap(500)\n\
-                   match await a { Ok(v) => print(f\"A={v}\"), Err(e) => print(f\"ERR={e}\") }\n\
-                   match await b { Ok(v) => print(f\"B={v}\"), Err(e) => print(f\"ERR={e}\") }\n";
-
-    let start = std::time::Instant::now();
-    let run = run_shape(program, "vm", Some(&ext));
-    let elapsed = start.elapsed();
-
-    assert_eq!(run.exit_code, Some(0), "stderr={}", run.stderr);
-    assert!(
-        run.stdout.contains("A=500") && run.stdout.contains("B=500"),
-        "both awaits must produce their values; stdout={:?} stderr={}",
-        run.stdout,
-        run.stderr
-    );
-    assert!(
-        elapsed < Duration::from_millis(900),
-        "two overlapped 500ms `async fn python` sleeps must finish in well under the \
-         1000ms they would take serialized; took {elapsed:?}"
-    );
+                   match await a { Ok(v) => print(f\"A0={v[0]} A1={v[1]}\"), Err(e) => print(f\"ERR={e}\") }\n\
+                   match await b { Ok(v) => print(f\"B0={v[0]} B1={v[1]}\"), Err(e) => print(f\"ERR={e}\") }\n";
+    // `time.time()` is in seconds.
+    assert_foreign_calls_overlapped(program, Some(&ext), 0.5, "async fn python");
 }
 
 /// The overlap tripwire, typescript. The TypeScript runtime declares
@@ -472,32 +526,25 @@ fn python_two_async_calls_overlap() {
 #[ignore = "needs built typescript extension + V8; run via `just test-ffi`"]
 fn typescript_two_async_calls_overlap() {
     let ext = extension_dir();
-    let program = "async fn typescript nap(ms: int) -> Result<int> {\n\
-                   \x20   const end = Date.now() + ms;\n\
-                   \x20   while (Date.now() < end) {}\n\
-                   \x20   return ms;\n\
+    // A BUSY WAIT rather than a timer, for two reasons. The practical one: the
+    // extension embeds a bare `deno_core::JsRuntime` with no web extensions, so
+    // `setTimeout` is not defined (a pre-existing limitation of the TypeScript
+    // vertical, unrelated to #202 — the offload itself runs fine and surfaces
+    // the `ReferenceError` as a clean `Err`). The better one: a CPU-bound loop
+    // cannot be overlapped by event-loop interleaving on a single isolate, only
+    // by two isolates on two threads — which is exactly the claim being tested.
+    let program = "async fn typescript nap(ms: int) -> Result<Array<number>> {\n\
+                   \x20   const start = Date.now();\n\
+                   \x20   const stop = start + ms;\n\
+                   \x20   while (Date.now() < stop) {}\n\
+                   \x20   return [start, Date.now()];\n\
                    }\n\
                    let a = nap(500)\n\
                    let b = nap(500)\n\
-                   match await a { Ok(v) => print(f\"A={v}\"), Err(e) => print(f\"ERR={e}\") }\n\
-                   match await b { Ok(v) => print(f\"B={v}\"), Err(e) => print(f\"ERR={e}\") }\n";
-
-    let start = std::time::Instant::now();
-    let run = run_shape(program, "vm", Some(&ext));
-    let elapsed = start.elapsed();
-
-    assert_eq!(run.exit_code, Some(0), "stderr={}", run.stderr);
-    assert!(
-        run.stdout.contains("A=500") && run.stdout.contains("B=500"),
-        "both awaits must produce their values; stdout={:?} stderr={}",
-        run.stdout,
-        run.stderr
-    );
-    assert!(
-        elapsed < Duration::from_millis(900),
-        "two overlapped 500ms `async fn typescript` sleeps must finish in well under \
-         the 1000ms they would take serialized; took {elapsed:?}"
-    );
+                   match await a { Ok(v) => print(f\"A0={v[0]} A1={v[1]}\"), Err(e) => print(f\"ERR={e}\") }\n\
+                   match await b { Ok(v) => print(f\"B0={v[0]} B1={v[1]}\"), Err(e) => print(f\"ERR={e}\") }\n";
+    // `Date.now()` is in milliseconds.
+    assert_foreign_calls_overlapped(program, Some(&ext), 500.0, "async fn typescript");
 }
 
 /// An `async fn python` call delivers its VALUE, its body's own `await` still
