@@ -702,8 +702,23 @@ impl<'a, 'b> MirToIR<'a, 'b> {
     ) -> Option<shape_vm::type_tracking::NativeKind> {
         match place {
             Place::Local(slot) => super::types::slot_kind_for_local(&self.slot_kinds, slot.0),
-            Place::Field(_, field_idx) => {
+            Place::Field(base, field_idx) => {
                 let name = self.mir.field_name_table.get(field_idx)?;
+                // `arr.length` on a PROVEN typed-array receiver. `read_place`
+                // already carries a producer for this shape — an inline
+                // `v2_array_len` load sign-extended to i64 — but its kind was
+                // never projected here, so `i < arr.length` reached
+                // `compile_binop_dynamic_cmp` with an unproven operand and
+                // deopted the whole function. Every length-bounded loop was
+                // therefore invisible to the native tier, including every
+                // shape `bounds_elision` can prove. This arm mirrors that
+                // producer exactly (same receiver proof, same width): a
+                // consumer-side projection of an existing producer stamp,
+                // gated on the proven receiver — not a name-selected
+                // semantic.
+                if name == "length" && self.v2_typed_array_elem_kind(base).is_some() {
+                    return Some(shape_vm::type_tracking::NativeKind::Int64);
+                }
                 self.field_native_kinds.get(name).copied()
             }
             Place::Index(base, _) => {

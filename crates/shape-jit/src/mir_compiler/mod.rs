@@ -550,9 +550,10 @@ pub struct MirToIR<'a, 'b> {
     /// `compile_body` matches the scan order used by
     /// `scan_closure_placeholder_fids`, so this is a stable pairing.
     pub(crate) next_closure_placeholder_idx: std::cell::Cell<usize>,
-    /// Bounds-check elision plan: pairs `(arr_slot, iv_slot)` for which
-    /// `Place::Index(Local(arr), Operand::*(Local(iv)))` accesses can skip
-    /// the inline bounds check. Populated by callers via
+    /// Bounds-check elision plan: the `Place::Index` access **sites** proved
+    /// in-bounds, keyed by MIR statement position plus receiver/index shape
+    /// (the loop range fact does not survive outside the loop, so a
+    /// slot-pair key would be unsound). Populated by callers via
     /// `set_bounds_elision_plan` after running
     /// `bounds_elision::analyze(mir)`. Empty by default — falls back to
     /// the bounds-checked path, preserving the v2_array_tests OOB

@@ -1370,15 +1370,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
         self.builder.seal_block(in_bounds_block);
 
         // 4. Compute byte offset: index (u32) -> i64, then * elem_size
-        let index_i64 = self.builder.ins().uextend(types::I64, index);
-        let byte_offset = if (elem_size as u64).is_power_of_two() {
-            let shift = (elem_size as u64).trailing_zeros() as i64;
-            self.builder.ins().ishl_imm(index_i64, shift)
-        } else {
-            let size_val = self.builder.ins().iconst(types::I64, elem_size);
-            self.builder.ins().imul(index_i64, size_val)
-        };
-        let elem_addr = self.builder.ins().iadd(data_ptr, byte_offset);
+        let elem_addr = self.v2_elem_addr(data_ptr, index, elem_size);
 
         // 5. Load element with trusted flags (bounds already checked)
         let loaded = self
@@ -1393,6 +1385,64 @@ impl<'a, 'b> MirToIR<'a, 'b> {
         self.builder.seal_block(merge_block);
 
         self.builder.block_params(merge_block)[0]
+    }
+
+    /// Bounds-check-elided variant of `v2_array_get`.
+    ///
+    /// Identical except the length load, the `brif` and the out-of-bounds
+    /// early-return are removed. The caller must have proven BOTH
+    /// `0 <= index` and `index < len` — `index` is zero-extended from i32, so
+    /// a negative index becomes a huge offset rather than a trap. Only emit
+    /// when `bounds_elision::BoundsElisionPlan` trusts the site.
+    pub fn v2_array_get_unchecked(
+        &mut self,
+        arr_ptr: Value,
+        index: Value,
+        elem_type: NativeKind,
+    ) -> Value {
+        let (cl_type, elem_size) = elem_type_info(elem_type);
+        let data_ptr =
+            self.builder
+                .ins()
+                .load(types::I64, MemFlags::trusted(), arr_ptr, DATA_PTR_OFFSET);
+        let elem_addr = self.v2_elem_addr(data_ptr, index, elem_size);
+        self.builder
+            .ins()
+            .load(cl_type, MemFlags::trusted(), elem_addr, 0)
+    }
+
+    /// Bounds-check-elided variant of `v2_array_set`. Same caveats as
+    /// `v2_array_get_unchecked`.
+    pub fn v2_array_set_unchecked(
+        &mut self,
+        arr_ptr: Value,
+        index: Value,
+        val: Value,
+        elem_type: NativeKind,
+    ) {
+        let (_cl_type, elem_size) = elem_type_info(elem_type);
+        let data_ptr =
+            self.builder
+                .ins()
+                .load(types::I64, MemFlags::trusted(), arr_ptr, DATA_PTR_OFFSET);
+        let elem_addr = self.v2_elem_addr(data_ptr, index, elem_size);
+        self.builder
+            .ins()
+            .store(MemFlags::trusted(), val, elem_addr, 0);
+    }
+
+    /// `data_ptr + index * elem_size`, shared by the checked and elided paths
+    /// so the two cannot drift in their address arithmetic.
+    fn v2_elem_addr(&mut self, data_ptr: Value, index: Value, elem_size: i64) -> Value {
+        let index_i64 = self.builder.ins().uextend(types::I64, index);
+        let byte_offset = if (elem_size as u64).is_power_of_two() {
+            let shift = (elem_size as u64).trailing_zeros() as i64;
+            self.builder.ins().ishl_imm(index_i64, shift)
+        } else {
+            let size_val = self.builder.ins().iconst(types::I64, elem_size);
+            self.builder.ins().imul(index_i64, size_val)
+        };
+        self.builder.ins().iadd(data_ptr, byte_offset)
     }
 
     /// Inline typed array length.
@@ -1466,15 +1516,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
         self.builder.switch_to_block(in_bounds_block);
         self.builder.seal_block(in_bounds_block);
 
-        let index_i64 = self.builder.ins().uextend(types::I64, index);
-        let byte_offset = if (elem_size as u64).is_power_of_two() {
-            let shift = (elem_size as u64).trailing_zeros() as i64;
-            self.builder.ins().ishl_imm(index_i64, shift)
-        } else {
-            let size_val = self.builder.ins().iconst(types::I64, elem_size);
-            self.builder.ins().imul(index_i64, size_val)
-        };
-        let elem_addr = self.builder.ins().iadd(data_ptr, byte_offset);
+        let elem_addr = self.v2_elem_addr(data_ptr, index, elem_size);
 
         self.builder
             .ins()

@@ -59,6 +59,11 @@ pub mod worker;
 // behind `deep-tests` like the other whole-prelude JIT execution tests.
 #[cfg(all(test, feature = "deep-tests"))]
 mod witness_tripwires;
+// #191 / ADR-018 §5: runtime negative controls for bounds-check elision —
+// an out-of-range access of each widened index shape must still trap. Same
+// gating rationale as `witness_tripwires`.
+#[cfg(all(test, feature = "deep-tests"))]
+mod bounds_elision_traps;
 
 // Re-export commonly used items at module level
 pub use context::*;

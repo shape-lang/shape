@@ -1,216 +1,326 @@
-//! MIR-level bounds-check elision analysis.
+//! MIR-level bounds-check elision analysis (ADR-018 §5).
 //!
-//! This module identifies `Place::Index(Local(arr), Operand::*(Local(iv)))`
-//! sites where the bounds check inside `inline_array_get`/`inline_array_set`
-//! is provably redundant.
+//! Identifies indexed-access **sites** whose runtime bounds check inside
+//! `inline_array_get`/`inline_array_set` (legacy carrier) or
+//! `v2_array_get`/`v2_array_set` (v2 `TypedArray<T>` carrier) is provably
+//! redundant, and records them in a [`BoundsElisionPlan`] keyed by the exact
+//! MIR statement position plus the structural shape of the access.
 //!
-//! # Soundness Argument
+//! # Why the plan is site-keyed
 //!
-//! For an indexed access `arr[iv]` to be safe without a runtime bounds
-//! check we must show that at the access point both:
-//!   1. `iv >= 0` (a non-negative index)
-//!   2. `iv < arr.length`
-//!
-//! The MIR pattern we look for is the standard `for i in 0..n` /
-//! `while i < n` shape:
+//! The pre-widening plan was a set of `(arr_slot, iv_slot)` pairs consulted
+//! at *every* `arr[iv]` in the function. That key is unsound the moment the
+//! analyzer actually admits anything, because the loop's range fact does not
+//! hold outside the loop:
 //!
 //! ```text
-//!   bb_pre:
-//!     iv  = Use(Constant(Int(0)))                  // (1) iv starts at 0
-//!     bnd = arr.length                              // (2) bound = arr.length
-//!     ... goto bb_header ...
-//!
-//!   bb_header:
-//!     cond = iv < bnd                               // (3) loop test
-//!     SwitchBool(cond, bb_body, bb_after)
-//!
-//!   bb_body:
-//!     ... use arr[iv] ...                           // (4) elidable access
-//!     iv = iv + 1                                   // (5) non-negative step
-//!     goto bb_header
+//!   while i < arr.length { acc = acc + arr[i]; i = i + 1 }
+//!   acc = acc + arr[i]      // i == arr.length here — MUST stay checked
 //! ```
 //!
-//! When all five conditions hold, every dynamic access of `arr[iv]` inside
-//! `bb_body` is sound without a bounds check:
-//!   - From (1) and (5) by induction: `iv >= 0` at every iteration.
-//!   - From (3): `iv < bnd`, and since (2) bnd was set from `arr.length`,
-//!     `iv < arr.length` (the array can only grow inside the body, never
-//!     shrink — the only inline opcodes that grow it are pushes, but those
-//!     would invalidate the data pointer; we conservatively also require
-//!     that the array slot is not reassigned in the body).
+//! A pair-keyed plan trusts both accesses. The plan therefore keys on
+//! `(BasicBlockId, statement index, base shape, index shape)`; the consumer in
+//! `places.rs` reconstructs that key from `MirToIR::current_stmt_position`
+//! plus the `Place`/`Operand` it is lowering. `current_stmt_position` is
+//! `None` while terminators are lowered, so an index access embedded in a
+//! terminator operand is never trusted.
 //!
-//! The `arr` slot must also not be reassigned between the `bnd = arr.length`
-//! statement and the access. We enforce this by checking that `arr` is not
-//! the LHS of any `Assign(Local(arr), _)` between the bound capture and the
-//! header, nor inside the body.
+//! # Soundness argument
 //!
-//! This matches the conservative subset of `optimizer/bounds.rs::analyze_bounds`
-//! that the bytecode-side analyzer implements; here we run directly on MIR
-//! so the slot-numbering convention is irrelevant.
+//! An access `base[idx]` may skip the check only if BOTH
+//!   1. `idx >= 0` — the unchecked path also skips `normalize_index`, so
+//!      non-negativity is proven independently of the upper bound
+//!      (`places.rs:694`); and
+//!   2. `idx < base.length`.
+//!
+//! For a loop header `H` ending in `SwitchBool(cond, B, _)` where `cond` is
+//! defined in `H` as `iv < bnd` (or `iv <= bnd`), the analyzer proves:
+//!
+//! - **`bnd <= base.length - slack`** for a non-negative `slack`. The bound
+//!   is resolved through singly-assigned copy chains, accepting
+//!   `bnd = base.length` (slack 0) and `bnd = base.length - k` (slack `k`,
+//!   `k >= 0`), or the comparison reading `base.length` inline. `Le` headers
+//!   contribute `slack - 1`, since `iv <= bnd` admits `iv == bnd`.
+//! - **`iv >= s`** for a non-negative constant `s`: `iv` has exactly one
+//!   assignment outside the loop, resolving through copy chains to
+//!   `Constant(Int(s))` with `s >= 0`, and every assignment inside the loop
+//!   is `iv = iv + c` with `c >= 0` (directly, or through a singly-assigned
+//!   temporary — the shape MIR lowering actually emits).
+//! - **`base` is stable**: not reassigned, not borrowed, not escaped into a
+//!   container/closure/task/module binding, and not reachable by any call
+//!   inside the loop. Length-mutating operations would otherwise invalidate
+//!   the bound between its capture and the access.
+//!
+//! Wherever the header's fact still holds, `s <= iv <= bnd - 1 <=
+//! base.length - slack - 1`, hence `base.length >= s + slack + 1`. That yields
+//! the three admitted index shapes:
+//!
+//! | shape | admitted when | proof |
+//! |---|---|---|
+//! | `base[iv]` | `slack >= 0` | `0 <= s <= iv < length` |
+//! | `base[iv ± c]` | `s + o >= 0` and `o <= slack` (`o` = signed offset) | `iv + o >= s + o >= 0`; `iv + o <= length - 1 + (o - slack) < length` |
+//! | `base[c]` | `0 <= c <= s + slack` | `length >= s + slack + 1 > c` |
+//!
+//! The fact's scope is computed by `header_fact_blocks`: every loop block
+//! reachable from the header's true successor without passing through a block
+//! that steps `iv`, minus every block an `iv` step can reach without going
+//! back through the header. One clean path is not enough — a block a dirty
+//! path also reaches is excluded. This is what puts a **nested inner loop** in
+//! scope: the outer induction variable is invariant across the inner loop, so
+//! `cp[seg + 2]` inside an inner `while s < samples` body still carries the
+//! outer loop's fact. That is the bspline-class shape.
+//!
+//! Index temporaries carrying an `iv`-dependent value must be defined in the
+//! access's own block, before the access and before the first assignment to
+//! `iv` in that block, so the value they hold is the `iv` the header test
+//! constrained. Pure-constant index temporaries carry no such requirement.
+//!
+//! # Deliberate non-admissions
+//!
+//! - **`len(x)` call-sourced bounds.** `for x in arr` lowers its bound to a
+//!   `Call` on `MirConstant::Method("len")`. Trusting it would make a method
+//!   *spelling* select a memory-safety proof, which §Forbidden Patterns
+//!   refuses; it needs a resolved intrinsic identity (ADR-011) instead.
+//! - **Runtime preconditions / loop versioning.** A loop bounded by an
+//!   unrelated parameter (`while k < n { a[k] }`) carries no static relation
+//!   between `n` and `a.length`, so nothing is admitted. ADR-018 §5 requires
+//!   every elision to be a static proof.
 
 use std::collections::{HashMap, HashSet};
 
 use shape_vm::mir::types::{
-    BasicBlockId, BinOp, MirFunction, Operand, Place, Rvalue, SlotId, StatementKind, TerminatorKind,
+    BasicBlock, BasicBlockId, BinOp, FieldIdx, MirConstant, MirFunction, Operand, Place, Rvalue,
+    SlotId, StatementKind, TerminatorKind,
 };
 
-/// Result of bounds-elision analysis: per-MIR-function set of `(arr_slot, iv_slot)`
-/// pairs where `arr[iv]` accesses inside the corresponding loop are trusted.
+/// Maximum copy-chain / arithmetic-tree depth the resolvers will follow.
+const MAX_RESOLVE_DEPTH: usize = 8;
+
+/// The structural shape of an indexed access's receiver.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ElisionBase {
+    /// `arr[...]`
+    Local(SlotId),
+    /// `obj.field[...]` — the field-projected receiver of ADR-018 §5.
+    Field(SlotId, FieldIdx),
+}
+
+/// The structural shape of an indexed access's index operand.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ElisionIndex {
+    /// The index is read from a local slot (the induction variable itself, or
+    /// a temporary holding `iv ± c` / a constant).
+    Slot(SlotId),
+    /// The index is an inline integer constant operand.
+    Const(i64),
+}
+
+/// A single trusted access site.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct AccessSite {
+    pub block: BasicBlockId,
+    pub stmt: usize,
+    pub base: ElisionBase,
+    pub index: ElisionIndex,
+}
+
+/// Result of bounds-elision analysis: the set of access sites that may bypass
+/// the inline bounds check. Empty by default — an empty plan keeps every
+/// access on the checked path.
 #[derive(Debug, Clone, Default)]
 pub struct BoundsElisionPlan {
-    /// `(arr_slot, iv_slot)` pairs that may bypass the inline bounds check.
-    pub trusted_pairs: HashSet<(SlotId, SlotId)>,
+    trusted: HashSet<AccessSite>,
 }
 
 impl BoundsElisionPlan {
-    pub fn is_trusted(&self, arr: SlotId, iv: SlotId) -> bool {
-        self.trusted_pairs.contains(&(arr, iv))
+    pub fn is_trusted_site(&self, site: &AccessSite) -> bool {
+        self.trusted.contains(site)
+    }
+
+    pub fn len(&self) -> usize {
+        self.trusted.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.trusted.is_empty()
+    }
+
+    /// Trusted sites in a deterministic order — the assertion surface for
+    /// per-fixture elision-plan tests.
+    pub fn sites_sorted(&self) -> Vec<AccessSite> {
+        let mut v: Vec<AccessSite> = self.trusted.iter().copied().collect();
+        v.sort_by_key(|s| {
+            let (bk, bs, bf) = match s.base {
+                ElisionBase::Local(l) => (0u8, l.0, 0u16),
+                ElisionBase::Field(o, f) => (1u8, o.0, f.0),
+            };
+            let (ik, iv) = match s.index {
+                ElisionIndex::Slot(sl) => (0u8, sl.0 as i64),
+                ElisionIndex::Const(c) => (1u8, c),
+            };
+            (s.block.0, s.stmt, bk, bs, bf, ik, iv)
+        });
+        v
     }
 }
 
-/// Analyze a MIR function and return a `BoundsElisionPlan` listing trusted
-/// (arr, iv) slot pairs.
-pub fn analyze(mir: &MirFunction) -> BoundsElisionPlan {
-    let mut plan = BoundsElisionPlan::default();
+/// Project a lowered `Place::Index(base, index)` onto the plan's key space.
+///
+/// Shared by the analyzer and by the `places.rs` consumer so the two cannot
+/// disagree about what a site *is*. Returns `None` for receiver or index
+/// shapes the plan cannot name (nested indexing, deref receivers, non-integer
+/// constant indices).
+pub fn classify_access(base: &Place, index: &Operand) -> Option<(ElisionBase, ElisionIndex)> {
+    let b = match base {
+        Place::Local(s) => ElisionBase::Local(*s),
+        Place::Field(inner, f) => match inner.as_ref() {
+            Place::Local(s) => ElisionBase::Field(*s, *f),
+            _ => return None,
+        },
+        _ => return None,
+    };
+    let i = match index {
+        Operand::Copy(Place::Local(s))
+        | Operand::Move(Place::Local(s))
+        | Operand::MoveExplicit(Place::Local(s)) => ElisionIndex::Slot(*s),
+        Operand::Constant(MirConstant::Int(v)) => ElisionIndex::Const(*v),
+        _ => return None,
+    };
+    Some((b, i))
+}
 
-    // Build CFG predecessors so we can recognise loop headers (a header is
-    // a block that has a back-edge predecessor: a predecessor whose
-    // BasicBlockId is >= the header's id).
-    let mut preds: HashMap<BasicBlockId, Vec<BasicBlockId>> = HashMap::new();
-    for block in &mir.blocks {
-        for succ in successors(&block.terminator.kind) {
-            preds.entry(succ).or_default().push(block.id);
-        }
-    }
+// ── Function-wide index built once per analysis ───────────────────────────
 
-    // Resolve "length" FieldIdx — bound captures look like
-    // `Place::Field(arr, length_idx)`. We accept the field by name table
-    // lookup so this remains schema-agnostic.
-    let length_field_idxs: HashSet<u16> = mir
-        .field_name_table
-        .iter()
-        .filter_map(|(idx, name)| if name == "length" { Some(idx.0) } else { None })
-        .collect();
+/// Where a slot is assigned, and with what.
+struct SlotDef<'m> {
+    block: BasicBlockId,
+    stmt: usize,
+    rvalue: Option<&'m Rvalue>,
+}
 
-    if length_field_idxs.is_empty() {
-        // Without a known "length" field idx we cannot prove the bound came
-        // from the array.
-        return plan;
-    }
+struct Ctx<'m> {
+    mir: &'m MirFunction,
+    /// Every assignment to a slot: `Assign(Place::Local(s), rv)` statements
+    /// plus `Call { destination: Place::Local(s) }` terminators (recorded with
+    /// `rvalue: None` — an opaque producer we never resolve through).
+    defs: HashMap<SlotId, Vec<SlotDef<'m>>>,
+    /// Slots that are borrowed, escape into a container/closure/task/module
+    /// binding, or are written through a projection. Never a stable base.
+    unstable: HashSet<SlotId>,
+    /// Field indices written anywhere via `Assign(Place::Field(..), _)`.
+    written_fields: HashSet<FieldIdx>,
+    /// `FieldIdx`es named `length` in this function's field-name table.
+    length_fields: HashSet<FieldIdx>,
+    preds: HashMap<BasicBlockId, Vec<BasicBlockId>>,
+}
 
-    // Identify candidate loop headers: blocks whose terminator is a
-    // SwitchBool whose predicate matches `iv < bnd`. For each such block
-    // we want to verify that:
-    //   (a) bnd was last assigned `arr.length` on a path from entry to
-    //       the header, with no subsequent reassignment of arr, bnd, or iv
-    //       to non-monotone values.
-    //   (b) iv was initialized to a non-negative integer constant before
-    //       the header, with no negative reassignment between init and the
-    //       loop body.
-    //   (c) the body block contains accesses `arr[iv]` and the only
-    //       reassignment to iv inside the body is `iv = iv + <constant>`
-    //       with non-negative constant, AND arr is not reassigned in the
-    //       body, AND bnd is not reassigned in the body.
-    //
-    // We do all of this in a single pass per candidate header.
-    for header in &mir.blocks {
-        let TerminatorKind::SwitchBool {
-            operand: pred_op,
-            true_bb,
-            false_bb: _false_bb,
-        } = &header.terminator.kind
-        else {
-            continue;
+impl<'m> Ctx<'m> {
+    fn build(mir: &'m MirFunction) -> Self {
+        let mut defs: HashMap<SlotId, Vec<SlotDef<'m>>> = HashMap::new();
+        let mut unstable: HashSet<SlotId> = HashSet::new();
+        let mut written_fields: HashSet<FieldIdx> = HashSet::new();
+        let mut preds: HashMap<BasicBlockId, Vec<BasicBlockId>> = HashMap::new();
+
+        let mark_escape = |op: &Operand, set: &mut HashSet<SlotId>| {
+            if let Operand::Copy(p) | Operand::Move(p) | Operand::MoveExplicit(p) = op {
+                set.insert(p.root_local());
+            }
         };
 
-        // Predicate must be `Local(cond)` produced inside the same header
-        // by `Assign(Local(cond), BinaryOp(Lt, Copy/Move(Local(iv)),
-        // Copy/Move(Local(bnd))))`.
-        let Some(cond_slot) = operand_local(pred_op) else {
-            continue;
-        };
-        let Some((iv, bnd)) = find_lt_definition(header, cond_slot) else {
-            continue;
-        };
-
-        // Verify the header has at least one back-edge predecessor (to be
-        // a real loop header).
-        let header_preds = preds.get(&header.id).cloned().unwrap_or_default();
-        let has_back_edge = header_preds.iter().any(|p| p.0 >= header.id.0);
-        if !has_back_edge {
-            // Plain `if` rather than a loop. We still allow elision in this
-            // case if the body's accesses are a single straight-line path
-            // — but conservatively skip for now.
-            continue;
-        }
-
-        // Body block. We only inspect the `true` successor for accesses.
-        let Some(body) = mir.blocks.iter().find(|b| b.id == *true_bb) else {
-            continue;
-        };
-
-        // Check that bnd was assigned `arr.length` somewhere reachable
-        // before the header and not reassigned in the body. We scan all
-        // statements globally and collect every `Assign(Local(bnd),
-        // Use(Copy/Move(Place::Field(Place::Local(arr), len_idx))))`.
-        let bnd_array_sources: Vec<SlotId> = mir
-            .blocks
-            .iter()
-            .flat_map(|b| b.statements.iter())
-            .filter_map(|stmt| {
-                let StatementKind::Assign(Place::Local(lhs), rvalue) = &stmt.kind else {
-                    return None;
-                };
-                if *lhs != bnd {
-                    return None;
+        for block in &mir.blocks {
+            for succ in successors(&block.terminator.kind) {
+                preds.entry(succ).or_default().push(block.id);
+            }
+            for (idx, stmt) in block.statements.iter().enumerate() {
+                match &stmt.kind {
+                    StatementKind::Assign(place, rv) => {
+                        match place {
+                            Place::Local(s) => defs.entry(*s).or_default().push(SlotDef {
+                                block: block.id,
+                                stmt: idx,
+                                rvalue: Some(rv),
+                            }),
+                            Place::Field(_, f) => {
+                                written_fields.insert(*f);
+                                unstable.insert(place.root_local());
+                            }
+                            // `arr[i] = v` / `*r = v` do not change a length,
+                            // but they do mean the root is mutated through a
+                            // projection; treat the root as unstable only for
+                            // Deref (an aliasing write we cannot track).
+                            Place::Index(_, _) => {}
+                            Place::Deref(_) => {
+                                unstable.insert(place.root_local());
+                            }
+                        }
+                        if let Rvalue::Borrow(_, p) = rv {
+                            unstable.insert(p.root_local());
+                        }
+                    }
+                    StatementKind::TaskBoundary(ops, _)
+                    | StatementKind::ClosureCapture { operands: ops, .. }
+                    | StatementKind::ArrayStore { operands: ops, .. }
+                    | StatementKind::ObjectStore { operands: ops, .. }
+                    | StatementKind::EnumStore { operands: ops, .. }
+                    | StatementKind::ModuleBindingStore { operands: ops, .. } => {
+                        for op in ops {
+                            mark_escape(op, &mut unstable);
+                        }
+                    }
+                    StatementKind::Drop(_) | StatementKind::Nop => {}
                 }
-                let arr_slot = rvalue_field_length_source(rvalue, &length_field_idxs)?;
-                Some(arr_slot)
-            })
+            }
+            if let TerminatorKind::Call { destination, .. } = &block.terminator.kind {
+                match destination {
+                    Place::Local(s) => defs.entry(*s).or_default().push(SlotDef {
+                        block: block.id,
+                        stmt: usize::MAX,
+                        rvalue: None,
+                    }),
+                    other => {
+                        unstable.insert(other.root_local());
+                    }
+                }
+            }
+        }
+
+        let length_fields = mir
+            .field_name_table
+            .iter()
+            .filter_map(|(idx, name)| if name == "length" { Some(*idx) } else { None })
             .collect();
 
-        if bnd_array_sources.is_empty() {
-            continue;
+        Ctx {
+            mir,
+            defs,
+            unstable,
+            written_fields,
+            length_fields,
+            preds,
         }
-
-        // bnd must have a SINGLE consistent array source. If the analyser
-        // sees multiple distinct arrays writing to bnd, conservatively skip.
-        let arr = bnd_array_sources[0];
-        if bnd_array_sources.iter().any(|s| *s != arr) {
-            continue;
-        }
-
-        // The array slot must be stable across the function: either it is
-        // a parameter (no Assign at all is acceptable) with zero
-        // reassignments, or a local with at most one initial Assign and no
-        // subsequent reassignment. Either way, the maximum allowed count
-        // depends on whether the slot is a param.
-        let is_param = mir.param_slots.contains(&arr);
-        let max_assigns = if is_param { 0 } else { 1 };
-        if slot_assignment_count(mir, arr) > max_assigns {
-            continue;
-        }
-
-        // bnd must not be reassigned inside the body (so the runtime
-        // length check that already executes on the loop edge stays valid).
-        if block_assigns(body, bnd) {
-            continue;
-        }
-
-        // iv must be initialized to `0` before the header and only
-        // incremented inside the body by a non-negative constant.
-        if !iv_starts_non_negative(mir, iv, header.id) {
-            continue;
-        }
-        if !iv_only_monotonic_in_body(body, iv) {
-            continue;
-        }
-
-        // All conditions hold. Mark `(arr, iv)` as trusted.
-        plan.trusted_pairs.insert((arr, iv));
     }
 
-    plan
+    fn def_count(&self, slot: SlotId) -> usize {
+        self.defs.get(&slot).map_or(0, |v| v.len())
+    }
+
+    /// The single defining site of `slot`, or `None` when it is a parameter,
+    /// undefined, or assigned more than once.
+    fn single_def(&self, slot: SlotId) -> Option<&SlotDef<'m>> {
+        let sites = self.defs.get(&slot)?;
+        if sites.len() != 1 {
+            return None;
+        }
+        sites.first()
+    }
+
+    fn is_param(&self, slot: SlotId) -> bool {
+        self.mir.param_slots.contains(&slot)
+    }
+
+    fn block(&self, id: BasicBlockId) -> Option<&'m BasicBlock> {
+        self.mir.blocks.iter().find(|b| b.id == id)
+    }
 }
 
 fn successors(term: &TerminatorKind) -> Vec<BasicBlockId> {
@@ -233,344 +343,612 @@ fn operand_local(op: &Operand) -> Option<SlotId> {
     }
 }
 
-fn rvalue_field_length_source(rvalue: &Rvalue, length_field_idxs: &HashSet<u16>) -> Option<SlotId> {
-    let inner_op = match rvalue {
-        Rvalue::Use(op) | Rvalue::Clone(op) => op,
-        _ => return None,
-    };
-    let place = match inner_op {
-        Operand::Copy(p) | Operand::Move(p) | Operand::MoveExplicit(p) => p,
-        _ => return None,
-    };
-    let Place::Field(base, field_idx) = place else {
-        return None;
-    };
-    if !length_field_idxs.contains(&field_idx.0) {
-        return None;
-    }
-    if let Place::Local(arr_slot) = base.as_ref() {
-        Some(*arr_slot)
-    } else {
-        None
+fn operand_place(op: &Operand) -> Option<&Place> {
+    match op {
+        Operand::Copy(p) | Operand::Move(p) | Operand::MoveExplicit(p) => Some(p),
+        Operand::Constant(_) => None,
     }
 }
 
-/// Find a statement in `block` of the form
-/// `Assign(Local(cond), BinaryOp(Lt, Copy/Move(Local(iv)), Copy/Move(Local(bnd))))`
-/// and return `(iv, bnd)`.
-fn find_lt_definition(
-    block: &shape_vm::mir::types::BasicBlock,
-    cond_slot: SlotId,
-) -> Option<(SlotId, SlotId)> {
-    for stmt in &block.statements {
-        let StatementKind::Assign(Place::Local(lhs), Rvalue::BinaryOp(BinOp::Lt, l, r)) =
-            &stmt.kind
-        else {
-            continue;
+/// All blocks of the natural loops whose header is `header` — the union over
+/// back edges `T -> header` of `{header, T} ∪ {blocks reaching T without
+/// passing through header}`.
+fn natural_loop_blocks(ctx: &Ctx<'_>, header: BasicBlockId) -> HashSet<BasicBlockId> {
+    let mut body: HashSet<BasicBlockId> = HashSet::new();
+    body.insert(header);
+    let latches: Vec<BasicBlockId> = ctx
+        .preds
+        .get(&header)
+        .map(|ps| ps.iter().copied().filter(|p| p.0 >= header.0).collect())
+        .unwrap_or_default();
+    let mut stack: Vec<BasicBlockId> = Vec::new();
+    for latch in latches {
+        if body.insert(latch) {
+            stack.push(latch);
+        }
+    }
+    while let Some(b) = stack.pop() {
+        if let Some(ps) = ctx.preds.get(&b) {
+            for p in ps {
+                if *p != header && body.insert(*p) {
+                    stack.push(*p);
+                }
+            }
+        }
+    }
+    body
+}
+
+// ── Fact resolvers ────────────────────────────────────────────────────────
+
+/// `bnd <= base.length - slack`, `slack >= 0`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct BoundFact {
+    base: ElisionBase,
+    slack: i64,
+}
+
+/// Resolve an operand to a compile-time integer constant, following
+/// singly-assigned copy chains. Multiply-assigned slots (an induction
+/// variable, say) never resolve.
+fn resolve_const_int(ctx: &Ctx<'_>, op: &Operand, depth: usize) -> Option<i64> {
+    if depth > MAX_RESOLVE_DEPTH {
+        return None;
+    }
+    if let Operand::Constant(MirConstant::Int(v)) = op {
+        return Some(*v);
+    }
+    let slot = operand_local(op)?;
+    let def = ctx.single_def(slot)?;
+    const_int_of_rvalue(ctx, def.rvalue?, depth + 1)
+}
+
+/// Constant-fold an rvalue over singly-assigned integer copy chains.
+fn const_int_of_rvalue(ctx: &Ctx<'_>, rv: &Rvalue, depth: usize) -> Option<i64> {
+    if depth > MAX_RESOLVE_DEPTH {
+        return None;
+    }
+    match rv {
+        Rvalue::Use(inner) | Rvalue::Clone(inner) => resolve_const_int(ctx, inner, depth + 1),
+        Rvalue::BinaryOp(BinOp::Add, a, b) => {
+            resolve_const_int(ctx, a, depth + 1)?.checked_add(resolve_const_int(ctx, b, depth + 1)?)
+        }
+        Rvalue::BinaryOp(BinOp::Sub, a, b) => {
+            resolve_const_int(ctx, a, depth + 1)?.checked_sub(resolve_const_int(ctx, b, depth + 1)?)
+        }
+        _ => None,
+    }
+}
+
+/// Recognise `place` as `<base>.length` and project the receiver.
+fn length_of_place(ctx: &Ctx<'_>, place: &Place) -> Option<ElisionBase> {
+    let Place::Field(inner, f) = place else {
+        return None;
+    };
+    if !ctx.length_fields.contains(f) {
+        return None;
+    }
+    match inner.as_ref() {
+        Place::Local(s) => Some(ElisionBase::Local(*s)),
+        Place::Field(inner2, f2) => match inner2.as_ref() {
+            Place::Local(s) => Some(ElisionBase::Field(*s, *f2)),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// Resolve the loop's bound operand to `base.length - slack`.
+fn resolve_bound(ctx: &Ctx<'_>, op: &Operand, depth: usize) -> Option<BoundFact> {
+    if depth > MAX_RESOLVE_DEPTH {
+        return None;
+    }
+    if let Some(place) = operand_place(op) {
+        if let Some(base) = length_of_place(ctx, place) {
+            return Some(BoundFact { base, slack: 0 });
+        }
+    }
+    let slot = operand_local(op)?;
+    // A bound held in a local must be assigned exactly once — a recomputed or
+    // conditionally-assigned bound carries no invariant.
+    let def = ctx.single_def(slot)?;
+    match def.rvalue? {
+        Rvalue::Use(inner) | Rvalue::Clone(inner) => resolve_bound(ctx, inner, depth + 1),
+        Rvalue::BinaryOp(BinOp::Sub, a, b) => {
+            let inner = resolve_bound(ctx, a, depth + 1)?;
+            let k = resolve_const_int(ctx, b, depth + 1)?;
+            if k < 0 {
+                return None;
+            }
+            Some(BoundFact {
+                base: inner.base,
+                slack: inner.slack.checked_add(k)?,
+            })
+        }
+        _ => None,
+    }
+}
+
+/// What an index operand denotes at an access site.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum IndexFact {
+    Const(i64),
+    /// `iv + offset`
+    IvOffset(i64),
+}
+
+/// Positional constraints an `iv`-dependent temporary must satisfy: its
+/// definition must be in the body block, strictly before the use, and not
+/// after `iv` has been stepped in that block.
+#[derive(Clone, Copy)]
+struct PosLimit {
+    body: BasicBlockId,
+    before_stmt: usize,
+    iv_first_assign: usize,
+}
+
+/// Resolve an operand to `iv + offset`. Every hop must be a singly-assigned
+/// temporary defined in the body block ahead of the use and ahead of the
+/// induction step, so its value is the `iv` the header test constrained.
+fn resolve_iv_offset(
+    ctx: &Ctx<'_>,
+    op: &Operand,
+    iv: SlotId,
+    pos: PosLimit,
+    depth: usize,
+) -> Option<i64> {
+    if depth > MAX_RESOLVE_DEPTH {
+        return None;
+    }
+    let slot = operand_local(op)?;
+    if slot == iv {
+        // Reading `iv` itself: valid as long as the read is not after the
+        // induction step in this block. A read inside the stepping statement
+        // still observes the pre-step value, hence `<=`.
+        return if pos.before_stmt <= pos.iv_first_assign {
+            Some(0)
+        } else {
+            None
         };
-        if *lhs != cond_slot {
+    }
+    let def = ctx.single_def(slot)?;
+    if def.block != pos.body || def.stmt >= pos.before_stmt || def.stmt > pos.iv_first_assign {
+        return None;
+    }
+    let inner_pos = PosLimit {
+        before_stmt: def.stmt,
+        ..pos
+    };
+    match def.rvalue? {
+        Rvalue::Use(inner) | Rvalue::Clone(inner) => {
+            resolve_iv_offset(ctx, inner, iv, inner_pos, depth + 1)
+        }
+        Rvalue::BinaryOp(BinOp::Add, a, b) => {
+            if let Some(o) = resolve_iv_offset(ctx, a, iv, inner_pos, depth + 1) {
+                return o.checked_add(resolve_const_int(ctx, b, depth + 1)?);
+            }
+            let o = resolve_iv_offset(ctx, b, iv, inner_pos, depth + 1)?;
+            o.checked_add(resolve_const_int(ctx, a, depth + 1)?)
+        }
+        Rvalue::BinaryOp(BinOp::Sub, a, b) => {
+            let o = resolve_iv_offset(ctx, a, iv, inner_pos, depth + 1)?;
+            o.checked_sub(resolve_const_int(ctx, b, depth + 1)?)
+        }
+        _ => None,
+    }
+}
+
+fn resolve_index(ctx: &Ctx<'_>, op: &Operand, iv: SlotId, pos: PosLimit) -> Option<IndexFact> {
+    if let Some(c) = resolve_const_int(ctx, op, 0) {
+        return Some(IndexFact::Const(c));
+    }
+    resolve_iv_offset(ctx, op, iv, pos, 0).map(IndexFact::IvOffset)
+}
+
+// ── Stability and induction-variable proofs ───────────────────────────────
+
+/// Does any `Call` terminator inside `loop_blocks` mention `slot` in its
+/// callee or arguments?
+fn call_in_loop_mentions(ctx: &Ctx<'_>, loop_blocks: &HashSet<BasicBlockId>, slot: SlotId) -> bool {
+    ctx.mir.blocks.iter().any(|b| {
+        loop_blocks.contains(&b.id)
+            && match &b.terminator.kind {
+                TerminatorKind::Call { func, args, .. } => std::iter::once(func)
+                    .chain(args.iter())
+                    .any(|op| operand_place(op).is_some_and(|p| p.root_local() == slot)),
+                _ => false,
+            }
+    })
+}
+
+fn any_call_in_loop(ctx: &Ctx<'_>, loop_blocks: &HashSet<BasicBlockId>) -> bool {
+    ctx.mir.blocks.iter().any(|b| {
+        loop_blocks.contains(&b.id) && matches!(b.terminator.kind, TerminatorKind::Call { .. })
+    })
+}
+
+/// The receiver's length must be invariant from the bound's capture through
+/// every trusted access.
+fn base_is_stable(ctx: &Ctx<'_>, base: ElisionBase, loop_blocks: &HashSet<BasicBlockId>) -> bool {
+    let root = match base {
+        ElisionBase::Local(s) => s,
+        ElisionBase::Field(o, _) => o,
+    };
+    if ctx.unstable.contains(&root) {
+        return false;
+    }
+    let max_defs = if ctx.is_param(root) { 0 } else { 1 };
+    if ctx.def_count(root) > max_defs {
+        return false;
+    }
+    if ctx
+        .defs
+        .get(&root)
+        .is_some_and(|ds| ds.iter().any(|d| loop_blocks.contains(&d.block)))
+    {
+        return false;
+    }
+    if call_in_loop_mentions(ctx, loop_blocks, root) {
+        return false;
+    }
+    match base {
+        ElisionBase::Local(_) => true,
+        ElisionBase::Field(_, f) => {
+            // A field-projected receiver is reachable through any alias of the
+            // owning object, so require the field to be write-free in the
+            // whole function and the loop to be call-free.
+            !ctx.written_fields.contains(&f) && !any_call_in_loop(ctx, loop_blocks)
+        }
+    }
+}
+
+/// Prove `iv >= s` for a non-negative constant `s` everywhere inside the loop.
+///
+/// Requires exactly one initializing assignment, outside the loop and in an
+/// earlier block than the header, resolving to a non-negative constant; every
+/// other assignment must be inside the loop and step by a non-negative
+/// constant.
+fn iv_lower_bound(
+    ctx: &Ctx<'_>,
+    iv: SlotId,
+    header: BasicBlockId,
+    loop_blocks: &HashSet<BasicBlockId>,
+) -> Option<i64> {
+    if ctx.is_param(iv) {
+        // A parameter has no in-function initializer to inspect.
+        return None;
+    }
+    let defs = ctx.defs.get(&iv)?;
+    let mut init: Option<i64> = None;
+    for def in defs {
+        let rv = def.rvalue?; // an opaque call destination is never admissible
+        if loop_blocks.contains(&def.block) {
+            if !is_non_negative_step(ctx, rv, iv) {
+                return None;
+            }
+        } else {
+            if init.is_some() || def.block.0 >= header.0 {
+                return None; // ambiguous or non-dominating initializer
+            }
+            let s = const_int_of_rvalue(ctx, rv, 0)?;
+            if s < 0 {
+                return None;
+            }
+            init = Some(s);
+        }
+    }
+    init
+}
+
+/// `iv = iv + c` with `c >= 0`, directly or through a singly-assigned temp.
+fn is_non_negative_step(ctx: &Ctx<'_>, rv: &Rvalue, iv: SlotId) -> bool {
+    match rv {
+        Rvalue::BinaryOp(BinOp::Add, a, b) => {
+            (operand_local(a) == Some(iv) && resolve_const_int(ctx, b, 0).is_some_and(|c| c >= 0))
+                || (operand_local(b) == Some(iv)
+                    && resolve_const_int(ctx, a, 0).is_some_and(|c| c >= 0))
+        }
+        Rvalue::Use(op) | Rvalue::Clone(op) => {
+            let Some(t) = operand_local(op) else {
+                return false;
+            };
+            // `t = iv + c; iv = t` — the shape MIR lowering emits for
+            // `i = i + 1`.
+            ctx.single_def(t)
+                .and_then(|d| d.rvalue)
+                .is_some_and(|inner| match inner {
+                    Rvalue::BinaryOp(BinOp::Add, a, b) => {
+                        (operand_local(a) == Some(iv)
+                            && resolve_const_int(ctx, b, 0).is_some_and(|c| c >= 0))
+                            || (operand_local(b) == Some(iv)
+                                && resolve_const_int(ctx, a, 0).is_some_and(|c| c >= 0))
+                    }
+                    _ => false,
+                })
+        }
+        _ => false,
+    }
+}
+
+/// The loop blocks where the header's range fact on `iv` still holds.
+///
+/// The fact `s <= iv < bnd` is established by the header test and survives
+/// until `iv` is stepped. A block `B` qualifies when it is reachable from the
+/// header's true successor *without* passing through a block that steps `iv`,
+/// AND no `iv`-stepping block can reach `B` without going back through the
+/// header (which would re-establish the fact anyway). The second condition is
+/// what makes this sound: reachability by one clean path is not enough if a
+/// dirty path also arrives.
+///
+/// This is what puts a nested inner loop in scope — the outer induction
+/// variable is invariant across the inner loop, so `cp[seg + 2]` inside an
+/// inner `while s < samples` body carries the outer loop's fact. Blocks that
+/// step `iv` themselves are included; the per-statement index rule in
+/// `PosLimit` handles accesses before the step.
+fn header_fact_blocks(
+    ctx: &Ctx<'_>,
+    header: BasicBlockId,
+    true_bb: BasicBlockId,
+    iv: SlotId,
+    loop_blocks: &HashSet<BasicBlockId>,
+) -> Vec<BasicBlockId> {
+    let steps_iv: HashSet<BasicBlockId> = loop_blocks
+        .iter()
+        .copied()
+        .filter(|b| ctx.block(*b).is_some_and(|blk| block_assigns(blk, iv)))
+        .collect();
+
+    // Forward reachability from the body entry, never expanding through a
+    // block that steps `iv`.
+    let mut clean: HashSet<BasicBlockId> = HashSet::new();
+    let mut stack = vec![true_bb];
+    while let Some(b) = stack.pop() {
+        if !loop_blocks.contains(&b) || !clean.insert(b) {
             continue;
         }
-        let iv = operand_local(l)?;
-        let bnd = operand_local(r)?;
-        return Some((iv, bnd));
-    }
-    None
-}
-
-/// Count the number of `Assign(Local(slot), _)` statements in the function.
-fn slot_assignment_count(mir: &MirFunction, slot: SlotId) -> usize {
-    let mut count = 0usize;
-    for block in &mir.blocks {
-        for stmt in &block.statements {
-            if let StatementKind::Assign(Place::Local(s), _) = &stmt.kind {
-                if *s == slot {
-                    count += 1;
-                }
+        if steps_iv.contains(&b) {
+            continue; // reachable, but nothing past it is clean via this path
+        }
+        if let Some(blk) = ctx.block(b) {
+            for succ in successors(&blk.terminator.kind) {
+                stack.push(succ);
             }
         }
     }
-    count
-}
 
-fn block_assigns(block: &shape_vm::mir::types::BasicBlock, slot: SlotId) -> bool {
-    for stmt in &block.statements {
-        if let StatementKind::Assign(Place::Local(s), _) = &stmt.kind {
-            if *s == slot {
-                return true;
-            }
-        }
-    }
-    false
-}
-
-/// True iff `iv` was assigned `Constant(Int(c))` with `c >= 0` before
-/// reaching `header`, and not reassigned to a negative constant in between.
-fn iv_starts_non_negative(mir: &MirFunction, iv: SlotId, header: BasicBlockId) -> bool {
-    // Find the most recent Assign to iv on any block reaching the header
-    // (we use a simple block-id-ordering heuristic: scan all blocks with
-    // id < header.id, take the latest assignment).
-    let mut last_const_init: Option<i64> = None;
-    for block in &mir.blocks {
-        if block.id.0 >= header.0 {
+    // Anything a stepping block can reach without re-entering the header has
+    // seen an unguarded step.
+    let mut tainted: HashSet<BasicBlockId> = HashSet::new();
+    let mut stack: Vec<BasicBlockId> = steps_iv
+        .iter()
+        .filter_map(|b| ctx.block(*b))
+        .flat_map(|blk| successors(&blk.terminator.kind))
+        .collect();
+    while let Some(b) = stack.pop() {
+        if b == header || !loop_blocks.contains(&b) || !tainted.insert(b) {
             continue;
         }
-        for stmt in &block.statements {
-            let StatementKind::Assign(Place::Local(lhs), rv) = &stmt.kind else {
-                continue;
-            };
-            if *lhs != iv {
-                continue;
+        if let Some(blk) = ctx.block(b) {
+            for succ in successors(&blk.terminator.kind) {
+                stack.push(succ);
             }
-            // We only accept const Int initializers; anything else is
-            // potentially negative.
-            let value = match rv {
-                Rvalue::Use(Operand::Constant(shape_vm::mir::types::MirConstant::Int(v))) => {
-                    Some(*v)
-                }
-                _ => None,
-            };
-            last_const_init = value;
         }
     }
-    matches!(last_const_init, Some(v) if v >= 0)
+
+    let mut out: Vec<BasicBlockId> = clean.difference(&tainted).copied().collect();
+    out.sort_by_key(|b| b.0);
+    out
 }
 
-/// True iff every Assign to `iv` in `body` has the shape
-/// `Assign(Local(iv), BinaryOp(Add, Copy/Move(Local(iv)), Constant(Int(c))))`
-/// with `c >= 0`.
-fn iv_only_monotonic_in_body(body: &shape_vm::mir::types::BasicBlock, iv: SlotId) -> bool {
-    for stmt in &body.statements {
+/// The last `Assign(Local(cond), BinaryOp(Lt|Le, iv, bnd))` in `header`.
+fn find_guard_definition(header: &BasicBlock, cond: SlotId) -> Option<(BinOp, SlotId, Operand)> {
+    let mut found = None;
+    for stmt in &header.statements {
         let StatementKind::Assign(Place::Local(lhs), rv) = &stmt.kind else {
             continue;
         };
-        if *lhs != iv {
+        if *lhs != cond {
             continue;
         }
-        let Rvalue::BinaryOp(BinOp::Add, l, r) = rv else {
-            return false;
-        };
-        let l_is_iv = operand_local(l) == Some(iv);
-        let r_is_iv = operand_local(r) == Some(iv);
-        let const_step = match (l, r) {
-            (_, Operand::Constant(shape_vm::mir::types::MirConstant::Int(v))) => Some(*v),
-            (Operand::Constant(shape_vm::mir::types::MirConstant::Int(v)), _) => Some(*v),
+        found = match rv {
+            Rvalue::BinaryOp(op @ (BinOp::Lt | BinOp::Le), l, r) => {
+                operand_local(l).map(|iv| (*op, iv, r.clone()))
+            }
             _ => None,
         };
-        let Some(step) = const_step else {
-            return false;
-        };
-        if !(l_is_iv || r_is_iv) {
-            return false;
-        }
-        if step < 0 {
-            return false;
-        }
     }
-    true
+    found
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use shape_ast::ast::Span;
-    use shape_vm::mir::types::{
-        BasicBlock, BasicBlockId, BinOp, FieldIdx, LocalTypeInfo, MirConstant, MirFunction,
-        MirStatement, Place, Point, Rvalue, SlotId, StatementKind, Terminator, TerminatorKind,
-    };
+// ── Driver ────────────────────────────────────────────────────────────────
 
-    fn s(kind: StatementKind) -> MirStatement {
-        MirStatement {
-            kind,
-            span: Span { start: 0, end: 0 },
-            point: Point(0),
+/// Analyze a MIR function and return the set of trusted access sites.
+pub fn analyze(mir: &MirFunction) -> BoundsElisionPlan {
+    let mut plan = BoundsElisionPlan::default();
+    let ctx = Ctx::build(mir);
+    if ctx.length_fields.is_empty() {
+        return plan;
+    }
+
+    for header in &mir.blocks {
+        let TerminatorKind::SwitchBool {
+            operand: pred_op,
+            true_bb,
+            ..
+        } = &header.terminator.kind
+        else {
+            continue;
+        };
+        let Some(cond) = operand_local(pred_op) else {
+            continue;
+        };
+        let Some((cmp, iv, bnd_op)) = find_guard_definition(header, cond) else {
+            continue;
+        };
+
+        let loop_blocks = natural_loop_blocks(&ctx, header.id);
+        if loop_blocks.len() < 2 {
+            continue; // no back edge — a plain `if`, not a loop
+        }
+        if !loop_blocks.contains(true_bb) {
+            continue;
+        }
+        // The header must not perturb the induction variable between the test
+        // and the branch.
+        if block_assigns(header, iv) {
+            continue;
+        }
+
+        let Some(bound) = resolve_bound(&ctx, &bnd_op, 0) else {
+            continue;
+        };
+        // `iv <= bnd` admits `iv == bnd`, costing one element of headroom.
+        let slack = match cmp {
+            BinOp::Lt => bound.slack,
+            _ => bound.slack - 1,
+        };
+        if slack < 0 {
+            continue;
+        }
+        // The bound itself must not be recomputed inside the loop.
+        if let Some(bnd_slot) = operand_local(&bnd_op) {
+            if ctx
+                .defs
+                .get(&bnd_slot)
+                .is_some_and(|ds| ds.iter().any(|d| loop_blocks.contains(&d.block)))
+            {
+                continue;
+            }
+        }
+        if !base_is_stable(&ctx, bound.base, &loop_blocks) {
+            continue;
+        }
+        let Some(iv_lower) = iv_lower_bound(&ctx, iv, header.id, &loop_blocks) else {
+            continue;
+        };
+
+        for scope_block in header_fact_blocks(&ctx, header.id, *true_bb, iv, &loop_blocks) {
+            let Some(block) = ctx.block(scope_block) else {
+                continue;
+            };
+            let iv_first_assign = block
+                .statements
+                .iter()
+                .position(
+                    |s| matches!(&s.kind, StatementKind::Assign(Place::Local(x), _) if *x == iv),
+                )
+                .unwrap_or(usize::MAX);
+
+            for (stmt_idx, stmt) in block.statements.iter().enumerate() {
+                let pos = PosLimit {
+                    body: scope_block,
+                    before_stmt: stmt_idx,
+                    iv_first_assign,
+                };
+                for (base_place, index_op) in index_accesses_in_statement(&stmt.kind) {
+                    let Some((base_key, index_key)) = classify_access(base_place, index_op) else {
+                        continue;
+                    };
+                    if base_key != bound.base {
+                        continue;
+                    }
+                    let Some(fact) = resolve_index(&ctx, index_op, iv, pos) else {
+                        continue;
+                    };
+                    let admitted = match fact {
+                        // `length >= iv_lower + slack + 1`, so every index in
+                        // `0..=iv_lower + slack` is in range.
+                        IndexFact::Const(c) => c >= 0 && c <= iv_lower.saturating_add(slack),
+                        // `iv + o >= iv_lower + o >= 0` and `iv + o < length`.
+                        IndexFact::IvOffset(o) => iv_lower.saturating_add(o) >= 0 && o <= slack,
+                    };
+                    if admitted {
+                        plan.trusted.insert(AccessSite {
+                            block: scope_block,
+                            stmt: stmt_idx,
+                            base: base_key,
+                            index: index_key,
+                        });
+                    }
+                }
+            }
         }
     }
 
-    fn term(kind: TerminatorKind) -> Terminator {
-        Terminator {
-            kind,
-            span: Span { start: 0, end: 0 },
+    plan
+}
+
+fn block_assigns(block: &BasicBlock, slot: SlotId) -> bool {
+    block
+        .statements
+        .iter()
+        .any(|s| matches!(&s.kind, StatementKind::Assign(Place::Local(x), _) if *x == slot))
+}
+
+/// Every `Place::Index` reachable from a statement, as `(receiver, index)`.
+fn index_accesses_in_statement(kind: &StatementKind) -> Vec<(&Place, &Operand)> {
+    let mut out = Vec::new();
+    match kind {
+        StatementKind::Assign(place, rv) => {
+            collect_place(place, &mut out);
+            collect_rvalue(rv, &mut out);
+        }
+        StatementKind::Drop(p) => collect_place(p, &mut out),
+        StatementKind::TaskBoundary(ops, _)
+        | StatementKind::ClosureCapture { operands: ops, .. }
+        | StatementKind::ArrayStore { operands: ops, .. }
+        | StatementKind::ObjectStore { operands: ops, .. }
+        | StatementKind::EnumStore { operands: ops, .. }
+        | StatementKind::ModuleBindingStore { operands: ops, .. } => {
+            for op in ops {
+                collect_operand(op, &mut out);
+            }
+        }
+        StatementKind::Nop => {}
+    }
+    out
+}
+
+fn collect_place<'a>(place: &'a Place, out: &mut Vec<(&'a Place, &'a Operand)>) {
+    match place {
+        Place::Local(_) => {}
+        Place::Field(inner, _) | Place::Deref(inner) => collect_place(inner, out),
+        Place::Index(base, index) => {
+            out.push((base.as_ref(), index.as_ref()));
+            collect_place(base, out);
+            collect_operand(index, out);
         }
     }
+}
 
-    fn mir_for_loop_with_arr_index(
-        arr: SlotId,
-        iv: SlotId,
-        bnd: SlotId,
-        cond: SlotId,
-    ) -> MirFunction {
-        // bb0: arr param implicitly held in slot `arr`
-        //   bnd = arr.length
-        //   iv  = 0
-        //   goto bb1
-        // bb1: cond = iv < bnd
-        //      SwitchBool(cond, bb2, bb3)
-        // bb2: arr[iv] (no MIR statement in pure read; we encode as a
-        //      `Use(Copy(Place::Index(Local(arr), Copy(Local(iv)))))` assign
-        //      into a sink local).
-        //      iv = iv + 1
-        //      goto bb1
-        // bb3: return
-        let length_idx = FieldIdx(7);
-        let mut field_name_table = std::collections::HashMap::new();
-        field_name_table.insert(length_idx, "length".to_string());
+fn collect_operand<'a>(op: &'a Operand, out: &mut Vec<(&'a Place, &'a Operand)>) {
+    if let Some(p) = operand_place(op) {
+        collect_place(p, out);
+    }
+}
 
-        let bb0 = BasicBlock {
-            id: BasicBlockId(0),
-            statements: vec![
-                s(StatementKind::Assign(
-                    Place::Local(bnd),
-                    Rvalue::Use(Operand::Copy(Place::Field(
-                        Box::new(Place::Local(arr)),
-                        length_idx,
-                    ))),
-                )),
-                s(StatementKind::Assign(
-                    Place::Local(iv),
-                    Rvalue::Use(Operand::Constant(MirConstant::Int(0))),
-                )),
-            ],
-            terminator: term(TerminatorKind::Goto(BasicBlockId(1))),
-        };
-        let bb1 = BasicBlock {
-            id: BasicBlockId(1),
-            statements: vec![s(StatementKind::Assign(
-                Place::Local(cond),
-                Rvalue::BinaryOp(
-                    BinOp::Lt,
-                    Operand::Copy(Place::Local(iv)),
-                    Operand::Copy(Place::Local(bnd)),
-                ),
-            ))],
-            terminator: term(TerminatorKind::SwitchBool {
-                operand: Operand::Copy(Place::Local(cond)),
-                true_bb: BasicBlockId(2),
-                false_bb: BasicBlockId(3),
-            }),
-        };
-        let sink = SlotId(99);
-        let bb2 = BasicBlock {
-            id: BasicBlockId(2),
-            statements: vec![
-                s(StatementKind::Assign(
-                    Place::Local(sink),
-                    Rvalue::Use(Operand::Copy(Place::Index(
-                        Box::new(Place::Local(arr)),
-                        Box::new(Operand::Copy(Place::Local(iv))),
-                    ))),
-                )),
-                s(StatementKind::Assign(
-                    Place::Local(iv),
-                    Rvalue::BinaryOp(
-                        BinOp::Add,
-                        Operand::Copy(Place::Local(iv)),
-                        Operand::Constant(MirConstant::Int(1)),
-                    ),
-                )),
-            ],
-            terminator: term(TerminatorKind::Goto(BasicBlockId(1))),
-        };
-        let bb3 = BasicBlock {
-            id: BasicBlockId(3),
-            statements: vec![],
-            terminator: term(TerminatorKind::Return),
-        };
-
-        MirFunction {
-            name: "test_fn".to_string(),
-            blocks: vec![bb0, bb1, bb2, bb3],
-            num_locals: 100,
-            param_slots: vec![arr],
-            param_reference_kinds: vec![None],
-            local_types: (0..100).map(|_| LocalTypeInfo::Unknown).collect(),
-            span: Span { start: 0, end: 0 },
-            field_name_table,
-            local_struct_type_names: std::collections::HashMap::new(),
-            local_typed_array_element_types: std::collections::HashMap::new(),
-            local_declared_scalar_types: std::collections::HashMap::new(),
-            binding_slots: Default::default(),
-            var_binding_slots: Default::default(),
+fn collect_rvalue<'a>(rv: &'a Rvalue, out: &mut Vec<(&'a Place, &'a Operand)>) {
+    match rv {
+        Rvalue::Use(op) | Rvalue::Clone(op) | Rvalue::UnaryOp(_, op) => collect_operand(op, out),
+        Rvalue::BinaryOp(_, a, b) => {
+            collect_operand(a, out);
+            collect_operand(b, out);
         }
-    }
-
-    #[test]
-    fn detects_simple_for_loop_index_pattern() {
-        let arr = SlotId(1);
-        let iv = SlotId(2);
-        let bnd = SlotId(3);
-        let cond = SlotId(4);
-
-        let mir = mir_for_loop_with_arr_index(arr, iv, bnd, cond);
-        let plan = analyze(&mir);
-        assert!(
-            plan.is_trusted(arr, iv),
-            "expected (arr={:?}, iv={:?}) to be trusted; got {:?}",
-            arr,
-            iv,
-            plan.trusted_pairs,
-        );
-    }
-
-    #[test]
-    fn rejects_when_arr_is_reassigned() {
-        let arr = SlotId(1);
-        let iv = SlotId(2);
-        let bnd = SlotId(3);
-        let cond = SlotId(4);
-
-        let mut mir = mir_for_loop_with_arr_index(arr, iv, bnd, cond);
-        // Inject a second Assign to arr in bb0.
-        mir.blocks[0].statements.push(s(StatementKind::Assign(
-            Place::Local(arr),
-            Rvalue::Use(Operand::Constant(MirConstant::None)),
-        )));
-        let plan = analyze(&mir);
-        assert!(
-            !plan.is_trusted(arr, iv),
-            "expected access not to be trusted when arr is reassigned",
-        );
-    }
-
-    #[test]
-    fn rejects_when_iv_is_negative_initialized() {
-        let arr = SlotId(1);
-        let iv = SlotId(2);
-        let bnd = SlotId(3);
-        let cond = SlotId(4);
-
-        let mut mir = mir_for_loop_with_arr_index(arr, iv, bnd, cond);
-        // Replace the iv initialization with -1.
-        mir.blocks[0].statements[1] = s(StatementKind::Assign(
-            Place::Local(iv),
-            Rvalue::Use(Operand::Constant(MirConstant::Int(-1))),
-        ));
-        let plan = analyze(&mir);
-        assert!(
-            !plan.is_trusted(arr, iv),
-            "expected access not to be trusted when iv starts negative",
-        );
-    }
-
-    #[test]
-    fn rejects_when_no_back_edge() {
-        let arr = SlotId(1);
-        let iv = SlotId(2);
-        let bnd = SlotId(3);
-        let cond = SlotId(4);
-
-        let mut mir = mir_for_loop_with_arr_index(arr, iv, bnd, cond);
-        // Strip the back-edge: bb2 returns instead of jumping to bb1.
-        let bb2 = mir
-            .blocks
-            .iter_mut()
-            .find(|b| b.id == BasicBlockId(2))
-            .unwrap();
-        bb2.terminator = term(TerminatorKind::Return);
-        let plan = analyze(&mir);
-        assert!(
-            !plan.is_trusted(arr, iv),
-            "expected access not to be trusted without a back edge",
-        );
+        Rvalue::FuzzyComparison { lhs, rhs, .. } => {
+            collect_operand(lhs, out);
+            collect_operand(rhs, out);
+        }
+        Rvalue::Borrow(_, p) => collect_place(p, out),
+        Rvalue::Aggregate(ops) => {
+            for op in ops {
+                collect_operand(op, out);
+            }
+        }
+        Rvalue::EnumTest { operand, .. }
+        | Rvalue::EnumPayload { operand, .. }
+        | Rvalue::TypePatternTest { operand, .. }
+        | Rvalue::EnumDiscriminantTest { operand, .. }
+        | Rvalue::PrimitiveCast { operand, .. }
+        | Rvalue::FormatValue { operand, .. } => collect_operand(operand, out),
     }
 }
