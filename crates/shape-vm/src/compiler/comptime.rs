@@ -671,6 +671,7 @@ fn comptime_builtin_forwarders() -> Vec<Item> {
                     is_reference: false,
                     is_mut_reference: false,
                     is_out: false,
+                    buffer_share: shape_ast::ast::BufferShare::Copied,
                     type_annotation: param_annotations
                         .and_then(|annotations| annotations.get(i))
                         .map(|annotation| TypeAnnotation::Basic((*annotation).to_string()))
@@ -3111,6 +3112,7 @@ pub(crate) fn execute_comptime_with_annotation_handler(
             is_reference: false,
             is_mut_reference: false,
             is_out: false,
+            buffer_share: shape_ast::ast::BufferShare::Copied,
             type_annotation: if idx == 0 {
                 Some(comptime_target_param_type())
             } else if idx == 1 {
@@ -3221,6 +3223,7 @@ pub(crate) fn execute_comptime_with_annotation_handler(
                     is_reference: false,
                     is_mut_reference: false,
                     is_out: false,
+                    buffer_share: shape_ast::ast::BufferShare::Copied,
                     // ADR-009 C3 #14 (slice 4): the injected param carries the
                     // DECLARED config type annotation. A TypedConfig def's
                     // handler therefore sees `times: int, label: string` as
@@ -6000,6 +6003,7 @@ mod tests_deferred {
                 is_reference: false,
                 is_mut_reference: false,
                 is_out: false,
+                buffer_share: shape_ast::ast::BufferShare::Copied,
                 type_annotation: Some(TypeAnnotation::Basic("string".to_string())),
                 default_value: None,
             }],

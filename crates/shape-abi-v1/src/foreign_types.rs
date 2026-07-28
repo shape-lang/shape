@@ -84,6 +84,101 @@ impl ForeignScalar {
             ForeignScalar::Unit => "none",
         }
     }
+
+    /// The `BUFFER_ELEM_*` code for an `Array<Self>` that can be exported as a
+    /// zero-copy view, or `None` for a scalar whose array cannot be shared
+    /// (ADR-019 §2 / #199).
+    ///
+    /// The set is `int` and `number` and stops there, and the two exclusions are
+    /// soundness, not effort:
+    ///
+    /// - `bool` is stored one byte per element with only `0` and `1` valid. A
+    ///   mutable view would let foreign code write `7` into a slot the compiler
+    ///   has proven holds a Shape `bool`, producing a value that is neither
+    ///   `true` nor `false`. There is no read-only-only mode worth the
+    ///   asymmetry, so the element type is out entirely.
+    /// - `string` arrays hold `*const StringObj` — host pointers with host
+    ///   refcounts. Exporting the buffer would export the heap, and every
+    ///   pointer in it would outlive the call's pin.
+    pub fn buffer_elem(self) -> Option<u32> {
+        match self {
+            ForeignScalar::Int => Some(crate::BUFFER_ELEM_INT64),
+            ForeignScalar::Number => Some(crate::BUFFER_ELEM_FLOAT64),
+            ForeignScalar::Bool | ForeignScalar::String | ForeignScalar::Unit => None,
+        }
+    }
+}
+
+/// How one declared parameter's backing buffer crosses a foreign call
+/// (ADR-019 §2 / #199).
+///
+/// Written by the author in the Shape declaration, never inferred: sharing moves
+/// the memory-safety boundary from a handful of trusted extension crates to
+/// anyone who writes an inline fence, so ADR-019 §2 requires the widening to be
+/// visible in the source. That is why there is a spelling at all.
+///
+/// # Why this lives here and not in the AST
+///
+/// The three parties named at the top of this module all have to agree on it:
+/// the compiler decides which declarations may carry it, the marshal layer
+/// decides whether to build a view or walk the elements, and the stub renderers
+/// decide whether the foreign signature says `list[float]` or a buffer type. A
+/// second copy of the enum in the AST would be a parallel discriminator over the
+/// same three values.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+pub enum BufferShare {
+    /// The ordinary boundary: the value is deep-copied onto the MessagePack
+    /// wire. The default, and the only mode legal outside a `fn <language>`
+    /// declaration.
+    #[default]
+    Copied,
+    /// `shared x` — an immutable shared-borrow view over the host buffer,
+    /// valid for the duration of one call.
+    Shared,
+    /// `shared mut x` — an exclusive mutable-borrow view over the host buffer,
+    /// valid for the duration of one call.
+    SharedMut,
+}
+
+impl BufferShare {
+    /// Every mode. A value-level witness, so a new mode widens the per-mode
+    /// assertions instead of slipping past them.
+    pub const ALL: &'static [BufferShare] = &[
+        BufferShare::Copied,
+        BufferShare::Shared,
+        BufferShare::SharedMut,
+    ];
+
+    /// Whether this mode exports a view at all.
+    pub fn is_shared(self) -> bool {
+        !matches!(self, BufferShare::Copied)
+    }
+
+    /// Whether foreign code may write through the view.
+    pub fn is_mutable(self) -> bool {
+        matches!(self, BufferShare::SharedMut)
+    }
+
+    /// The source spelling that selects this mode. `None` for the default,
+    /// which has no spelling because it is what writing nothing means.
+    pub fn spelling(self) -> Option<&'static str> {
+        match self {
+            BufferShare::Copied => None,
+            BufferShare::Shared => Some("shared"),
+            BufferShare::SharedMut => Some("shared mut"),
+        }
+    }
+
+    /// The `BUFFER_MODE_*` bit this mode asks an extension for; `None` for the
+    /// copied default, which asks for nothing.
+    pub fn abi_mode(self) -> Option<u32> {
+        match self {
+            BufferShare::Copied => None,
+            BufferShare::Shared => Some(crate::BUFFER_MODE_SHARED),
+            BufferShare::SharedMut => Some(crate::BUFFER_MODE_SHARED_MUT),
+        }
+    }
 }
 
 /// A field of an object-shaped foreign type, carried so a stub renderer can
@@ -649,6 +744,13 @@ pub struct ForeignParamContract {
     pub name: String,
     /// The parameter's classified type.
     pub ty: ForeignType,
+    /// How the value crosses (ADR-019 §2 / #199).
+    ///
+    /// The renderer must honour it: a `shared` `Array<number>` reaches the body
+    /// as a buffer view, not as a list, and a stub that says `list[float]` for
+    /// it would document a type the body never receives.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub share: BufferShare,
 }
 
 /// One declared foreign function, classified for stub rendering.

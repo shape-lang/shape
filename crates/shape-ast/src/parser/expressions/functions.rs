@@ -170,6 +170,7 @@ pub fn parse_arrow_function(pair: Pair<Rule>) -> Result<Expr> {
                     is_reference: false,
                     is_mut_reference: false,
                     is_out: false,
+                    buffer_share: crate::ast::BufferShare::Copied,
                     type_annotation: None,
                     default_value: None,
                 });

@@ -113,6 +113,7 @@ pub fn parse_annotation_def(pair: Pair<Rule>) -> Result<AnnotationDef> {
                         is_reference: false,
                         is_mut_reference: false,
                         is_out: false,
+                        buffer_share: crate::ast::BufferShare::Copied,
                         type_annotation,
                         default_value: None,
                     });

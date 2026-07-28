@@ -59,6 +59,11 @@ shape_abi_v1::language_runtime_plugin! {
         // dedicated worker threads, each owning its own instance; nothing may
         // touch one instance from two threads, lock or no lock.
         instance_concurrency: shape_abi_v1::INSTANCE_CONCURRENCY_THREAD_AFFINE,
+        // ADR-019 §2 (#199): this runtime offers no optional protocols. In
+        // particular it declares NO buffer capability, so the host refuses
+        // `shared` parameters for `fn typescript` and says why — see the
+        // `BufferRefusal::NotOffered` path in `language_runtime.rs`.
+        capabilities: ::std::ptr::null(),
         free_buffer: runtime::ts_free_buffer,
         drop: runtime::ts_drop,
     }

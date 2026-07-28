@@ -504,7 +504,7 @@ function_params = {
 }
 
 function_param = {
-    param_const_keyword? ~ param_ref_keyword? ~ param_out_keyword? ~ destructure_pattern ~ (":" ~ type_annotation)? ~ ("=" ~ expression)?
+    param_const_keyword? ~ param_shared_keyword? ~ param_ref_keyword? ~ param_out_keyword? ~ destructure_pattern ~ (":" ~ type_annotation)? ~ ("=" ~ expression)?
 }
 
 // Closure params (pipe_lambda only). Structurally identical to function_param
@@ -534,6 +534,23 @@ param_const_keyword = { "const" }
 param_ref_keyword = { "&" ~ param_mut_keyword? }
 param_out_keyword = @{ "out" ~ !(ASCII_ALPHANUMERIC | "_") }
 param_mut_keyword = @{ "mut" ~ !(ASCII_ALPHANUMERIC | "_") }
+
+// Zero-copy buffer sharing on a foreign-function parameter (ADR-019 §2, #199):
+// `shared xs: Array<number>` exports the host buffer to foreign code as an
+// immutable view, `shared mut xs: Array<number>` as an exclusive mutable one.
+//
+// This is a declaration the AUTHOR makes, not an optimisation the compiler
+// applies, because it widens the memory-safety boundary from a handful of
+// trusted extension crates to anyone who writes an inline fence: foreign code
+// holding a view past the call would read reclaimed host memory. ADR-019 §2
+// requires the widening to be visible in the source, which is why there is a
+// spelling at all.
+//
+// `shared` is a keyword only in this position and only when followed by
+// whitespace, so `shared: int` and `shared_total: int` are still ordinary
+// parameters.
+param_shared_keyword = { shared_keyword ~ param_mut_keyword? }
+shared_keyword = @{ "shared" ~ &(" " | "\t" | "\r" | "\n") }
 
 function_body = { (statement_or_error)* }
 

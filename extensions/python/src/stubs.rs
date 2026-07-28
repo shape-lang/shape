@@ -12,7 +12,9 @@
 //! what the body actually receives. Saying `@dataclass` would type-check code
 //! that fails at runtime.
 
-use shape_abi_v1::foreign_types::{ForeignContractExport, ForeignScalar, ForeignType};
+use shape_abi_v1::foreign_types::{
+    BufferShare, ForeignContractExport, ForeignParamContract, ForeignScalar, ForeignType,
+};
 
 /// Render the `.pyi` stub document for a declared contract.
 pub fn render_stub(contract: &ForeignContractExport) -> String {
@@ -40,8 +42,26 @@ pub fn render_stub(contract: &ForeignContractExport) -> String {
         let params: Vec<String> = function
             .params
             .iter()
-            .map(|p| format!("{}: {}", p.name, python_type(&p.ty, &anon)))
+            .map(|p| format!("{}: {}", p.name, python_param_type(p, &anon)))
             .collect();
+        // ADR-019 §2 (#199): a shared parameter's mutability is real and has no
+        // Python type to carry it — `memoryview` is `memoryview` either way —
+        // so it is stated where the reader will look for it.
+        for param in &function.params {
+            match param.share {
+                BufferShare::Copied => {}
+                BufferShare::Shared => out.push_str(&format!(
+                    "# {}: read-only view over Shape memory; writing raises TypeError, \
+                     and it must not outlive the call\n",
+                    param.name
+                )),
+                BufferShare::SharedMut => out.push_str(&format!(
+                    "# {}: writable view over Shape memory; writes land in the caller's \
+                     array, and it must not outlive the call\n",
+                    param.name
+                )),
+            }
+        }
         out.push_str(&format!(
             "def {}({}) -> {}: ...\n",
             function.name,
@@ -147,6 +167,19 @@ fn render_inline_object(ty: &ForeignType, anon: &mut AnonNames, out: &mut String
         _ => out.push_str("    pass\n"),
     }
     out.push('\n');
+}
+
+/// The Python type one declared PARAMETER arrives as.
+///
+/// ADR-019 §2 (#199): a `shared` array is exported through the buffer protocol
+/// and reaches the body as a `memoryview`, not as a `list`. A stub that said
+/// `list[float]` for it would document a type the body never receives — and
+/// would type-check `xs.append(...)`, which is the one thing a view cannot do.
+pub fn python_param_type(param: &ForeignParamContract, anon: &AnonNames) -> String {
+    match param.share {
+        BufferShare::Copied => python_type(&param.ty, anon),
+        BufferShare::Shared | BufferShare::SharedMut => "memoryview".to_string(),
+    }
 }
 
 /// The Python type for a table entry.
@@ -298,10 +331,12 @@ mod tests {
                     ForeignParamContract {
                         name: "a".to_string(),
                         ty: ForeignType::Scalar(ForeignScalar::Int),
+                        share: BufferShare::Copied,
                     },
                     ForeignParamContract {
                         name: "b".to_string(),
                         ty: ForeignType::Scalar(ForeignScalar::Number),
+                        share: BufferShare::Copied,
                     },
                 ],
                 returns: ForeignType::Scalar(ForeignScalar::Int),
@@ -341,6 +376,7 @@ mod tests {
                         name: Some("Candle".to_string()),
                         fields: None,
                     },
+                    share: BufferShare::Copied,
                 }],
                 returns: ForeignType::Scalar(ForeignScalar::Number),
             }],

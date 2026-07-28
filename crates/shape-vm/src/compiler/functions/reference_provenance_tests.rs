@@ -12,6 +12,7 @@ fn parameter(is_reference: bool, is_mut_reference: bool) -> FunctionParameter {
         is_reference,
         is_mut_reference,
         is_out: false,
+        buffer_share: shape_ast::ast::BufferShare::Copied,
         type_annotation: None,
         default_value: None,
     }

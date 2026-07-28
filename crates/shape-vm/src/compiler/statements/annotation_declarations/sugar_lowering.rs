@@ -418,6 +418,7 @@ fn mint_hook_body_fn(
             is_reference: false,
             is_mut_reference: false,
             is_out: false,
+            buffer_share: shape_ast::ast::BufferShare::Copied,
             type_annotation: Some(TypeAnnotation::Basic(type_param_name.clone())),
             default_value: None,
         });
@@ -458,6 +459,7 @@ fn mint_hook_body_fn(
             is_reference: false,
             is_mut_reference: false,
             is_out: false,
+            buffer_share: shape_ast::ast::BufferShare::Copied,
             // The DECLARED annotation, verbatim (C3-G4/G5).
             type_annotation: Some(annotation.clone()),
             default_value: None,

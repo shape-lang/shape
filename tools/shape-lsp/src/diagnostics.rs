@@ -1618,6 +1618,28 @@ pub fn validate_foreign_function_types(program: &Program, source: &str) -> Vec<D
                 data: None,
             });
         }
+
+        // ADR-019 §2 (#199) — and the same for a `shared` parameter that cannot
+        // mean what it says. Same producer as the compiler, so the editor and
+        // `shape run` cannot disagree about whether a signature may share.
+        for rejection in foreign_fn.invalid_buffer_shares() {
+            let range = if rejection.span.is_dummy() {
+                span_to_range(source, &foreign_fn.name_span)
+            } else {
+                span_to_range(source, &rejection.span)
+            };
+            diagnostics.push(Diagnostic {
+                range,
+                severity: Some(DiagnosticSeverity::ERROR),
+                code: Some(NumberOrString::String("C0935".to_string())),
+                code_description: None,
+                source: Some("shape".to_string()),
+                message: format!("{}\n\nhelp: {}", rejection.message, rejection.fix_hint),
+                related_information: None,
+                tags: None,
+                data: None,
+            });
+        }
     }
 
     diagnostics

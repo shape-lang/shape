@@ -81,6 +81,15 @@ pub struct ForeignFunctionEntry {
     /// executor to construct `HeapValue::TypedObject` from msgpack Maps.
     #[serde(default)]
     pub return_type_schema_id: Option<u32>,
+    /// How each parameter's buffer crosses the boundary — the `shared` /
+    /// `shared mut` spelling (ADR-019 §2 / #199), positional with
+    /// `param_types`.
+    ///
+    /// Empty means every parameter copies, which is what an entry written
+    /// before #199 says and what it meant. Read at the call to decide whether to
+    /// build a view or walk the elements onto the wire.
+    #[serde(default)]
+    pub param_shares: Vec<shape_abi_v1::foreign_types::BufferShare>,
     /// Content hash for caching and deduplication.
     /// Computed from (language, body_text, param_types, return_type).
     #[serde(default)]
@@ -235,6 +244,24 @@ impl ForeignFunctionEntry {
         }
         hasher.update(b"\0async\0");
         hasher.update([self.is_async as u8]);
+        // ADR-019 §2 / #199: the share mode is semantics-affecting foreign
+        // identity, not a hint. A `shared` parameter reaches the body as a
+        // buffer view and a copied one as a list, so the same body text with a
+        // different share mode is a different function — and the permission
+        // surface differs too, since only the shared form hands out a pointer
+        // into host memory. Domain-separated for the same reason every run
+        // above it is. Written only when some parameter actually shares, so
+        // every pre-#199 hash is unchanged.
+        if self.param_shares.iter().any(|s| s.is_shared()) {
+            hasher.update(b"\0share\0");
+            for share in &self.param_shares {
+                hasher.update([match share {
+                    shape_abi_v1::foreign_types::BufferShare::Copied => 0u8,
+                    shape_abi_v1::foreign_types::BufferShare::Shared => 1u8,
+                    shape_abi_v1::foreign_types::BufferShare::SharedMut => 2u8,
+                }]);
+            }
+        }
         if let Some(ref rt) = self.return_type {
             hasher.update(rt.as_bytes());
         }

@@ -141,6 +141,30 @@ impl BytecodeCompiler {
             });
         }
 
+        // ADR-019 §2 / #199 (POLY-ZERO-COPY) — a `shared` / `shared mut`
+        // parameter that cannot mean what it says is refused here too, and for
+        // the same reason: the language, the pass mode and the element type are
+        // all readable from the signature.
+        //
+        // Ordered right after the type-table check because the two answer the
+        // author's question in sequence — "can this type cross at all", then
+        // "can it cross without a copy". `invalid_buffer_shares` stays silent on
+        // a parameter the first check already rejected, so one mistake never
+        // produces two diagnostics.
+        if let Some(rejection) = def.invalid_buffer_shares().into_iter().next() {
+            let span = if rejection.span.is_dummy() {
+                def.name_span
+            } else {
+                rejection.span
+            };
+            let mut location = self.span_to_source_location(span);
+            location.hints.push(rejection.fix_hint);
+            return Err(ShapeError::SemanticError {
+                message: rejection.message,
+                location: Some(location),
+            });
+        }
+
         // Foreign function bodies are opaque — require explicit type annotations.
         // Dynamic-language runtimes require Result<T> returns; native ABI
         // declarations (`extern "C"`) do not.
@@ -254,6 +278,10 @@ impl BytecodeCompiler {
             dynamic_errors: dynamic_language,
             // A5(ii): filled in below from the hash-derived schema name.
             return_type_schema_id: None,
+            // ADR-019 §2 / #199. Positional with `param_types`; already
+            // validated against the language, the pass mode and the element
+            // type by `invalid_buffer_shares` above.
+            param_shares: def.params.iter().map(|p| p.buffer_share).collect(),
             content_hash: None,
             native_abi,
         };
@@ -2701,6 +2729,272 @@ async fn python analyze(data: DataTable) -> Result<number> {
         assert!(
             !message.contains("C0932"),
             "the retired code must not reappear, got: {message}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod buffer_share_declaration_tests {
+    //! ADR-019 §2 / R25 (POLY-ZERO-COPY, issue #199) — the `shared` /
+    //! `shared mut` parameter spelling and the `[C0935]` refusals.
+    //!
+    //! Sharing exports a pointer into live host memory to foreign code. Whether
+    //! that is even expressible is decided by the declaration alone — the
+    //! language, the pass mode and the element type are all in the signature —
+    //! so it is decided there, and not at whichever call first takes the path.
+    //!
+    //! The producers (`ForeignFunctionDef::invalid_buffer_shares` and
+    //! `FunctionDef::misplaced_buffer_shares`) are shared with the LSP
+    //! (`diagnostics.rs`), so the editor and `shape run` cannot disagree about
+    //! whether a signature may share.
+    use crate::compiler::BytecodeCompiler;
+    use shape_abi_v1::foreign_types::BufferShare;
+
+    fn compile_err(code: &str) -> String {
+        let program = shape_ast::parser::parse_program(code).expect("parse failed");
+        let mut compiler = BytecodeCompiler::new();
+        compiler.source_text = Some(code.to_string());
+        match compiler.compile(&program) {
+            Ok(_) => panic!("expected a compile error, but the program compiled"),
+            Err(shape_ast::error::ShapeError::SemanticError { message, .. }) => message,
+            Err(other) => panic!("expected SemanticError, got {other:?}"),
+        }
+    }
+
+    fn compile_ok(code: &str) -> crate::bytecode::BytecodeProgram {
+        let program = shape_ast::parser::parse_program(code).expect("parse failed");
+        BytecodeCompiler::new()
+            .compile(&program)
+            .expect("fixture must compile")
+    }
+
+    // ── The spelling parses and reaches the entry ──────────────────────────
+
+    #[test]
+    fn shared_and_shared_mut_reach_the_foreign_entry() {
+        let program = compile_ok(
+            r#"
+fn python blur(shared src: Array<number>, shared mut dst: Array<number>, radius: int) -> Result<int> {
+    return 0
+}
+"#,
+        );
+        let entry = &program.foreign_functions[0];
+        assert_eq!(
+            entry.param_shares,
+            vec![
+                BufferShare::Shared,
+                BufferShare::SharedMut,
+                BufferShare::Copied
+            ],
+            "the declared mode is positional with the parameters and survives to the entry"
+        );
+    }
+
+    #[test]
+    fn shared_is_a_keyword_only_before_a_parameter() {
+        // `shared` reads as a keyword only when a parameter name follows it, so
+        // an ordinary parameter that happens to be called `shared` still
+        // compiles. A grammar that reserved the word outright would break this
+        // source for no gain.
+        let program = compile_ok(
+            r#"
+fn python tally(shared: int) -> Result<int> {
+    return shared
+}
+"#,
+        );
+        let entry = &program.foreign_functions[0];
+        assert_eq!(entry.param_names, vec!["shared".to_string()]);
+        assert_eq!(entry.param_shares, vec![BufferShare::Copied]);
+    }
+
+    #[test]
+    fn a_parameter_prefixed_shared_is_not_the_keyword() {
+        let program = compile_ok(
+            r#"
+fn python tally(shared_total: int) -> Result<int> {
+    return shared_total
+}
+"#,
+        );
+        assert_eq!(
+            program.foreign_functions[0].param_shares,
+            vec![BufferShare::Copied]
+        );
+    }
+
+    // ── The refusals ───────────────────────────────────────────────────────
+
+    #[test]
+    fn shared_on_an_ordinary_function_is_refused() {
+        let message = compile_err(
+            r#"
+fn scale(shared xs: Array<number>) -> int {
+    return 0
+}
+"#,
+        );
+        assert!(message.contains("[C0935]"), "got: {message}");
+        assert!(
+            message.contains("no foreign boundary"),
+            "the refusal says why the word means nothing here, got: {message}"
+        );
+    }
+
+    #[test]
+    fn shared_on_an_extern_c_declaration_is_refused() {
+        let message = compile_err(
+            r#"
+extern "C" fn blur(shared xs: Array<number>) -> number from "libm.so.6" as "cos";
+"#,
+        );
+        assert!(message.contains("[C0935]"), "got: {message}");
+        assert!(
+            message.contains("libffi") || message.contains("ptr"),
+            "the refusal names the native boundary's own vocabulary, got: {message}"
+        );
+    }
+
+    #[test]
+    fn shared_on_a_non_array_parameter_is_refused() {
+        let message = compile_err(
+            r#"
+fn python scale(shared factor: number) -> Result<int> {
+    return 0
+}
+"#,
+        );
+        assert!(message.contains("[C0935]"), "got: {message}");
+        assert!(
+            message.contains("no buffer to share"),
+            "the refusal says a scalar has no window to open, got: {message}"
+        );
+    }
+
+    #[test]
+    fn shared_over_a_bool_array_is_refused_as_unsound() {
+        // Not an omission: `Array<bool>` is one byte per element with only 0 and
+        // 1 valid, so a writable view could put a value in it that is neither
+        // `true` nor `false`.
+        let message = compile_err(
+            r#"
+fn python flip(shared mut flags: Array<bool>) -> Result<int> {
+    return 0
+}
+"#,
+        );
+        assert!(message.contains("[C0935]"), "got: {message}");
+        assert!(
+            message.contains("neither `true` nor `false`"),
+            "the refusal gives the soundness reason, not a TODO, got: {message}"
+        );
+    }
+
+    #[test]
+    fn shared_over_a_string_array_is_refused_as_exporting_the_heap() {
+        let message = compile_err(
+            r#"
+fn python shout(shared words: Array<string>) -> Result<int> {
+    return 0
+}
+"#,
+        );
+        assert!(message.contains("[C0935]"), "got: {message}");
+        assert!(
+            message.contains("export the heap"),
+            "the refusal names what sharing a pointer array would actually do, got: {message}"
+        );
+    }
+
+    #[test]
+    fn shared_combined_with_a_reference_sigil_is_refused() {
+        let message = compile_err(
+            r#"
+fn python blur(shared &xs: Array<number>) -> Result<int> {
+    return 0
+}
+"#,
+        );
+        assert!(message.contains("[C0935]"), "got: {message}");
+        assert!(
+            message.contains("already declares a pass mode"),
+            "the refusal says the two vocabularies collide, got: {message}"
+        );
+    }
+
+    #[test]
+    fn an_unmarshalable_type_reports_c0933_alone() {
+        // One mistake, one diagnostic: a type that cannot cross at all is a
+        // `[C0933]`, and `invalid_buffer_shares` stays silent on it rather than
+        // piling a second rejection onto the same parameter.
+        let message = compile_err(
+            r#"
+fn python analyze(shared t: DataTable) -> Result<int> {
+    return 0
+}
+"#,
+        );
+        assert!(message.contains("[C0933]"), "got: {message}");
+        assert!(
+            !message.contains("[C0935]"),
+            "the share rejection must not double up on a type that cannot cross at all, \
+             got: {message}"
+        );
+    }
+
+    // ── Identity ───────────────────────────────────────────────────────────
+
+    #[test]
+    fn the_share_mode_changes_the_content_hash() {
+        // The mode is semantics-affecting foreign identity, not a hint: the body
+        // receives a buffer view in one spelling and a list in the other, and
+        // only one of them hands out a pointer into host memory.
+        let copied = compile_ok(
+            r#"
+fn python total(xs: Array<number>) -> Result<number> {
+    return 0.0
+}
+"#,
+        );
+        let shared = compile_ok(
+            r#"
+fn python total(shared xs: Array<number>) -> Result<number> {
+    return 0.0
+}
+"#,
+        );
+        let a = copied.foreign_functions[0]
+            .content_hash
+            .expect("hash is computed at compile time");
+        let b = shared.foreign_functions[0]
+            .content_hash
+            .expect("hash is computed at compile time");
+        assert_ne!(
+            a, b,
+            "identical bodies with different share modes are different functions"
+        );
+    }
+
+    #[test]
+    fn a_copied_declaration_hashes_as_it_did_before_the_mode_existed() {
+        // The share run is written into the hash only when something actually
+        // shares, so every pre-#199 entry keeps its hash and no artifact is
+        // invalidated by this slice landing.
+        let program = compile_ok(
+            r#"
+fn python total(xs: Array<number>) -> Result<number> {
+    return 0.0
+}
+"#,
+        );
+        let mut entry = program.foreign_functions[0].clone();
+        let with_shares = entry.content_hash;
+        entry.param_shares = Vec::new();
+        entry.compute_content_hash();
+        assert_eq!(
+            with_shares, entry.content_hash,
+            "an all-copied share vector hashes identically to no share vector at all"
         );
     }
 }

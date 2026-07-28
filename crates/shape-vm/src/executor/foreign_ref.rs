@@ -302,7 +302,7 @@ mod tests {
                 generate_stubs: None,
                 instance_concurrency: Some(concurrency),
                 dispose_ref: disposer,
-                reserved3: None,
+                capabilities: None,
             }
         }
 

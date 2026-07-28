@@ -821,6 +821,24 @@ impl BytecodeCompiler {
             });
         }
 
+        // ADR-019 §2 / #199 (POLY-ZERO-COPY) — `shared` on an ordinary Shape
+        // function. The grammar accepts the word on any parameter so the author
+        // hears "there is no foreign boundary here" instead of a parse error
+        // pointing at the parameter name.
+        if let Some(rejection) = func_def.misplaced_buffer_shares().into_iter().next() {
+            let span = if rejection.span.is_dummy() {
+                func_def.name_span
+            } else {
+                rejection.span
+            };
+            let mut location = self.span_to_source_location(span);
+            location.hints.push(rejection.fix_hint);
+            return Err(ShapeError::SemanticError {
+                message: rejection.message,
+                location: Some(location),
+            });
+        }
+
         // Validate annotation target kinds before compilation
         self.validate_annotation_targets(func_def)?;
 
@@ -2720,6 +2738,7 @@ mod tests {
             is_reference,
             is_mut_reference,
             is_out: false,
+            buffer_share: shape_ast::ast::BufferShare::Copied,
             type_annotation: None,
             default_value: None,
         }

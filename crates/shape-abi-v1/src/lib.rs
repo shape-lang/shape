@@ -960,10 +960,201 @@ pub struct LanguageRuntimeVTable {
     /// struct layout — and therefore [`abi_build_fingerprint`] — is unchanged.
     pub dispose_ref: Option<unsafe extern "C" fn(instance: *mut c_void, handle: u64)>,
 
-    /// Reserved fn-pointer tail padding (null in v4). Lets additive vtable
-    /// functions land later (e.g. the ffi-rebuild §7 `request_cancel` hook)
-    /// without another ABI bump. Must be `None` when constructed by the macro.
-    pub reserved3: Option<unsafe extern "C" fn()>,
+    /// Return this instance's capability block — the extension's declaration of
+    /// which optional host protocols it speaks, and the entry points for each.
+    ///
+    /// ADR-019 §2 / #199. This is the LAST fn-pointer slot in the designated
+    /// additive tail, and it is deliberately spent on a *versioned struct
+    /// accessor* rather than on one more single-purpose entry point. Buffer
+    /// sharing alone needs two entries (invoke-with-views and the release
+    /// accounting query), which is already more than the tail had left; every
+    /// capability after it would have forced an ABI version bump apiece. A
+    /// capability block is size- and version-guarded, so it grows without
+    /// touching this struct at all — and [`abi_build_fingerprint`], which folds
+    /// this struct's layout, keeps meaning "the vtable is shaped as expected".
+    ///
+    /// The returned pointer must remain valid for the lifetime of the instance;
+    /// a `static` is the intended shape. Null means "no optional capabilities",
+    /// which is also what an `None` slot means — an extension built before this
+    /// existed is read as offering nothing, never mis-dispatched.
+    ///
+    /// Reading rule, and the reason `struct_size` is the first field of every
+    /// block: a host reads a field only after checking that the extension's
+    /// declared `struct_size` covers it. See [`ExtensionCapabilities`].
+    ///
+    /// Landed in the designated additive tail's former `reserved3` slot, so the
+    /// struct layout — and therefore [`abi_build_fingerprint`] — is unchanged.
+    pub capabilities:
+        Option<unsafe extern "C" fn(instance: *mut c_void) -> *const ExtensionCapabilities>,
+}
+
+// ============================================================================
+// Extension capability blocks (ADR-019 §2 / #199)
+// ============================================================================
+
+/// Wire version of [`ExtensionCapabilities`] and everything it points at.
+///
+/// A host that reads a version it does not know refuses the whole block rather
+/// than guessing: a misread capability table hands raw host memory to foreign
+/// code at an offset the extension did not mean.
+pub const EXTENSION_CAPABILITIES_VERSION: u32 = 1;
+
+/// The optional protocols one extension instance declares it speaks.
+///
+/// ADR-019 §2 / #199. Returned by [`LanguageRuntimeVTable::capabilities`].
+///
+/// # How this grows without an ABI bump
+///
+/// `struct_size` is the extension's own `size_of::<ExtensionCapabilities>()`.
+/// New capability pointers are appended to the end, never inserted, and a
+/// reader must check
+///
+/// ```text
+/// struct_size >= offset_of!(ExtensionCapabilities, field) + size_of_val(field)
+/// ```
+///
+/// before touching a field. An extension built against an older definition
+/// therefore declares a smaller `struct_size`, the host reads only the prefix
+/// both sides agree on, and the newer capabilities read as absent. The same
+/// rule applies recursively to every block hung off this one.
+///
+/// `version` is the semantic counterpart: `struct_size` says how much is
+/// physically there, `version` says what the fields mean. A bump to
+/// [`EXTENSION_CAPABILITIES_VERSION`] is for a *reinterpretation*, and the host
+/// refuses a version it does not recognise.
+#[repr(C)]
+pub struct ExtensionCapabilities {
+    /// `size_of::<ExtensionCapabilities>()` as the extension compiled it.
+    pub struct_size: u32,
+    /// [`EXTENSION_CAPABILITIES_VERSION`] at the time the extension was built.
+    pub version: u32,
+    /// Zero-copy buffer sharing, or null if this runtime does not offer it.
+    pub buffers: *const BufferCapability,
+}
+
+/// [`ForeignBufferView::elem_type`] / [`BufferCapability::elem_types`]: 64-bit
+/// signed integers — Shape `Array<int>`, a contiguous `i64` buffer.
+pub const BUFFER_ELEM_INT64: u32 = 0;
+
+/// [`ForeignBufferView::elem_type`] / [`BufferCapability::elem_types`]: 64-bit
+/// IEEE floats — Shape `Array<number>`, a contiguous `f64` buffer.
+pub const BUFFER_ELEM_FLOAT64: u32 = 1;
+
+/// [`BufferCapability::modes`]: the extension can export an immutable
+/// shared-borrow view — foreign code may read the host's memory and must not
+/// write it (ADR-006 borrow rules).
+pub const BUFFER_MODE_SHARED: u32 = 1 << 0;
+
+/// [`BufferCapability::modes`]: the extension can export an exclusive
+/// mutable-borrow view — foreign code may write the host's memory in place, and
+/// no other view of the same buffer exists for the duration of the call.
+pub const BUFFER_MODE_SHARED_MUT: u32 = 1 << 1;
+
+/// One host buffer exported to foreign code for the duration of a single call.
+///
+/// ADR-019 §2 / #199. The pointer is into live host memory. It is valid ONLY
+/// between entry to and return from
+/// [`BufferCapability::invoke_with_buffers`]; the host pins the buffer for that
+/// window and reclaims it immediately after, which is why
+/// [`BufferCapability::outstanding_exports`] exists.
+#[repr(C)]
+pub struct ForeignBufferView {
+    /// Which declared parameter this view stands in for — an index into the
+    /// function's argument list. The msgpack argument array carries nil at this
+    /// position; the view is the real value.
+    pub arg_index: u32,
+    /// One of the `BUFFER_ELEM_*` constants.
+    pub elem_type: u32,
+    /// Exactly one of [`BUFFER_MODE_SHARED`] / [`BUFFER_MODE_SHARED_MUT`].
+    pub mode: u32,
+    /// Padding; zero.
+    pub _reserved: u32,
+    /// Element count (NOT bytes). Byte length is `len * elem_size(elem_type)`.
+    pub len: u64,
+    /// Base address of the first element, naturally aligned for `elem_type`.
+    pub data: *mut c_void,
+}
+
+/// The zero-copy buffer-sharing capability (ADR-019 §2 / #199).
+///
+/// Hung off [`ExtensionCapabilities::buffers`]. Same size-guard rule: read a
+/// field only if `struct_size` covers it.
+#[repr(C)]
+pub struct BufferCapability {
+    /// `size_of::<BufferCapability>()` as the extension compiled it.
+    pub struct_size: u32,
+    /// Bitmask of the `BUFFER_MODE_*` constants this runtime implements. A mode
+    /// the host asks for and this does not advertise is refused at the call, in
+    /// the host, before any pointer is handed over.
+    pub modes: u32,
+    /// Bitmask of `1 << BUFFER_ELEM_*` for the element types this runtime can
+    /// project. An element type outside it is refused the same way.
+    pub elem_types: u32,
+    /// Padding; zero.
+    pub _reserved: u32,
+    /// Invoke a compiled function with `views` substituted for the argument
+    /// positions they name.
+    ///
+    /// `args` is the ordinary MessagePack argument array with nil in every
+    /// position covered by a view. Result handling is identical to
+    /// [`LanguageRuntimeVTable::invoke`]: MessagePack to `out_ptr`/`out_len`,
+    /// freed by the caller through `free_buffer`, non-zero return on error.
+    ///
+    /// Every view's pointer is dead the instant this returns. An extension that
+    /// cannot guarantee its foreign side has dropped every reference by then
+    /// must report that through [`Self::outstanding_exports`].
+    pub invoke_with_buffers: Option<
+        unsafe extern "C" fn(
+            instance: *mut c_void,
+            handle: *mut c_void,
+            args: *const u8,
+            args_len: usize,
+            views: *const ForeignBufferView,
+            views_len: usize,
+            out_ptr: *mut *mut u8,
+            out_len: *mut usize,
+        ) -> i32,
+    >,
+    /// Which views from the most recent [`Self::invoke_with_buffers`] on this
+    /// instance were STILL exported when the foreign body returned, as a bitmask
+    /// of view indices (bit `i` = `views[i]`).
+    ///
+    /// Zero means every view was released and the host may reclaim the memory.
+    ///
+    /// **Absent (`None`) means this runtime has no release accounting, and the
+    /// host refuses buffer sharing for it entirely** — ADR-019 §2 fixes that as
+    /// refusal rather than a weaker guarantee, because the failure it prevents
+    /// is memory corruption attributable to an ordinary-looking Shape source
+    /// file. This is the one capability slot whose absence disables the
+    /// capability rather than degrading it.
+    ///
+    /// Called on the interpreter thread immediately after the invoke returns,
+    /// before the host unpins anything.
+    pub outstanding_exports: Option<unsafe extern "C" fn(instance: *mut c_void) -> u64>,
+}
+
+// SAFETY: both blocks are immutable descriptors. The only pointer either holds
+// aims at another descriptor with the same lifetime — a `static` in the
+// extension binary — and nothing reads or writes through them except the host's
+// size-guarded field reads. Declaring `Sync` is what lets an extension spell its
+// capability block as the `static` this design assumes.
+unsafe impl Sync for ExtensionCapabilities {}
+unsafe impl Sync for BufferCapability {}
+
+/// The most views one call may export.
+///
+/// Set by [`BufferCapability::outstanding_exports`]'s return type: the release
+/// accounting is a `u64` bitmask over view indices, and the host will not accept
+/// a view it could not ask about afterwards. The limit is checked at the
+/// DECLARATION, so a signature that could not be accounted for never compiles.
+pub const MAX_SHARED_VIEWS: usize = 64;
+
+/// Byte width of a `BUFFER_ELEM_*` element type.
+pub const fn buffer_elem_size(elem_type: u32) -> usize {
+    match elem_type {
+        BUFFER_ELEM_INT64 | BUFFER_ELEM_FLOAT64 => 8,
+        _ => 0,
+    }
 }
 
 /// [`LanguageRuntimeVTable::instance_concurrency`]: the instance may only be
@@ -1730,9 +1921,13 @@ pub const fn abi_build_fingerprint() -> u64 {
         h,
         core::mem::offset_of!(LanguageRuntimeVTable, generate_stubs) as u64,
     );
+    // Formerly `reserved3` — the last tail slot, assigned to the versioned
+    // capability-block accessor by ADR-019 §2 (#199). Same offset, same
+    // fingerprint; from here on optional protocols grow inside the block, so
+    // this struct's layout is expected to stay fixed.
     h = abi_fingerprint_mix(
         h,
-        core::mem::offset_of!(LanguageRuntimeVTable, reserved3) as u64,
+        core::mem::offset_of!(LanguageRuntimeVTable, capabilities) as u64,
     );
 
     // PluginInfo: the other struct the host dereferences by offset.
@@ -1780,6 +1975,11 @@ pub const fn abi_build_fingerprint() -> u64 {
 ///         dispose_function: runtime::python_dispose_function,
 ///         language_id: runtime::python_language_id,
 ///         get_lsp_config: runtime::python_get_lsp_config,
+///         generate_stubs: runtime::python_generate_stubs,
+///         instance_concurrency: shape_abi_v1::INSTANCE_CONCURRENCY_SHARED,
+///         // ADR-019 §2 (#199): the optional-protocol block, or
+///         // `::std::ptr::null()` for a runtime that offers none.
+///         capabilities: runtime::python_capabilities(),
 ///         free_buffer: runtime::python_free_buffer,
 ///         drop: runtime::python_drop,
 ///     }
@@ -1803,6 +2003,7 @@ macro_rules! language_runtime_plugin {
             get_lsp_config: $get_lsp_config:expr,
             generate_stubs: $generate_stubs:expr,
             instance_concurrency: $instance_concurrency:expr,
+            capabilities: $capabilities:expr,
             free_buffer: $free_buffer:expr,
             drop: $drop_fn:expr $(,)?
         } $(,)?
@@ -1822,6 +2023,7 @@ macro_rules! language_runtime_plugin {
                 get_lsp_config: $get_lsp_config,
                 generate_stubs: $generate_stubs,
                 instance_concurrency: $instance_concurrency,
+                capabilities: $capabilities,
                 free_buffer: $free_buffer,
                 drop: $drop_fn,
             }
@@ -1843,6 +2045,7 @@ macro_rules! language_runtime_plugin {
             get_lsp_config: $get_lsp_config:expr,
             generate_stubs: $generate_stubs:expr,
             instance_concurrency: $instance_concurrency:expr,
+            capabilities: $capabilities:expr,
             free_buffer: $free_buffer:expr,
             drop: $drop_fn:expr $(,)?
         } $(,)?
@@ -1862,6 +2065,7 @@ macro_rules! language_runtime_plugin {
                 get_lsp_config: $get_lsp_config,
                 generate_stubs: $generate_stubs,
                 instance_concurrency: $instance_concurrency,
+                capabilities: $capabilities,
                 free_buffer: $free_buffer,
                 drop: $drop_fn,
             }
@@ -1884,6 +2088,7 @@ macro_rules! language_runtime_plugin {
             get_lsp_config: $get_lsp_config:expr,
             generate_stubs: $generate_stubs:expr,
             instance_concurrency: $instance_concurrency:expr,
+            capabilities: $capabilities:expr,
             free_buffer: $free_buffer:expr,
             drop: $drop_fn:expr $(,)?
         } $(,)?
@@ -2109,6 +2314,21 @@ macro_rules! language_runtime_plugin {
             $instance_concurrency
         }
 
+        /// ADR-019 §2 (#199): this extension's capability block, or null.
+        ///
+        /// A pointer to `static` data — which optional protocols a runtime
+        /// speaks is a property of the extension BUILD, not of one instance, so
+        /// the instance argument is unused here and exists only so a future
+        /// runtime could vary it per instance without another ABI change.
+        unsafe extern "C" fn __shape_pc_capabilities(
+            _instance: *mut ::std::ffi::c_void,
+        ) -> *const $crate::ExtensionCapabilities {
+            match ::std::panic::catch_unwind(::std::panic::AssertUnwindSafe(|| $capabilities)) {
+                Ok(v) => v,
+                Err(_) => ::std::ptr::null(),
+            }
+        }
+
         unsafe extern "C" fn __shape_pc_free_buffer(ptr: *mut u8, len: usize) {
             let _ = ::std::panic::catch_unwind(::std::panic::AssertUnwindSafe(|| unsafe {
                 $free_buffer(ptr, len)
@@ -2157,7 +2377,11 @@ macro_rules! language_runtime_plugin {
                 // that accepts a disposer lands with the first extension that
                 // returns one (#163 / #164).
                 dispose_ref: None,
-                reserved3: None,
+                // ADR-019 §2 (#199): the versioned capability-block accessor,
+                // landed in the former `reserved3` slot — the last one, spent on
+                // a block rather than an entry point precisely so nothing after
+                // it has to compete for a slot.
+                capabilities: Some(__shape_pc_capabilities),
             };
             &VTABLE
         }

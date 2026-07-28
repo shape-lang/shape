@@ -9,6 +9,12 @@ use serde::{Deserialize, Serialize};
 // Re-export TypeParam from types to avoid duplication
 pub use super::types::TypeParam;
 
+/// ADR-019 §2 (#199). Defined in the ABI crate, not here: the compiler, the
+/// marshal layer and the extension stub renderers all decide on it, and
+/// `shape-abi-v1` is the only crate all three can see. Re-exported so the AST
+/// reads as if it owned it.
+pub use shape_abi_v1::foreign_types::BufferShare;
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FunctionDef {
     pub name: String,
@@ -152,6 +158,47 @@ pub struct ForeignTypeRejection {
     pub fix_hint: String,
 }
 
+/// A `[C0935]` rejection: a `shared` / `shared mut` parameter spelling that
+/// cannot mean what it says (ADR-019 §2 / #199).
+///
+/// Produced by [`ForeignFunctionDef::invalid_buffer_shares`] and
+/// [`FunctionDef::misplaced_buffer_shares`], and consumed by both the compiler
+/// and the LSP, so the editor and `shape run` cannot disagree about whether a
+/// signature may share.
+#[derive(Debug, Clone, PartialEq)]
+pub struct BufferShareRejection {
+    /// Full diagnostic sentence, `[C0935]`-tagged.
+    pub message: String,
+    /// The parameter's own span.
+    pub span: Span,
+    /// The remedy, rendered as a diagnostic hint.
+    pub fix_hint: String,
+}
+
+/// The reason one `shared` parameter is refused. Kept separate from the message
+/// so the compiler and the LSP can classify without parsing prose.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BufferShareRefusal {
+    /// `shared` on an ordinary Shape function, closure, or method — there is no
+    /// foreign boundary for a view to cross.
+    NotAForeignDeclaration,
+    /// `shared` on an `extern "C"` declaration. Native calls marshal through
+    /// libffi against C types, where a buffer is spelled `ptr` and the
+    /// lifetime rules are the C ones.
+    NativeAbi,
+    /// The parameter's declared type is not an array at all.
+    NotAnArray,
+    /// An array whose element type has no shareable buffer projection.
+    ElementNotShareable,
+    /// A parameter with no type annotation — nothing to classify.
+    Unannotated,
+    /// `shared` combined with `&` / `&mut` / `out`.
+    ConflictingPassMode,
+    /// More than [`shape_abi_v1::MAX_SHARED_VIEWS`] shared parameters on one
+    /// declaration.
+    TooManyViews,
+}
+
 /// Native ABI link metadata attached to a foreign function declaration.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct NativeAbiBinding {
@@ -253,6 +300,41 @@ impl FunctionDef {
                 name = self.name,
             ),
         })
+    }
+}
+
+impl FunctionDef {
+    /// ADR-019 §2 / R25 (POLY-ZERO-COPY, issue #199) — the `[C0935]` rejections
+    /// for `shared` / `shared mut` on an ordinary Shape function.
+    ///
+    /// The grammar accepts the word on any parameter deliberately. Refusing it
+    /// in the parser would report "expected pattern" under the parameter name
+    /// and leave the author to work out that the word they wrote is the problem;
+    /// accepting it and refusing it here reports what they actually did.
+    ///
+    /// Shape-to-Shape calls never had the copy this word removes, so there is
+    /// nothing here for it to buy — which is what the diagnostic says.
+    pub fn misplaced_buffer_shares(&self) -> Vec<BufferShareRejection> {
+        let mut rejections = Vec::new();
+        for param in &self.params {
+            let share = param.buffer_share;
+            if !share.is_shared() {
+                continue;
+            }
+            rejections.push(buffer_share_rejection(
+                BufferShareRefusal::NotAForeignDeclaration,
+                &format!("fn {}", self.name),
+                param.simple_name().unwrap_or("_"),
+                share.spelling().unwrap_or("shared"),
+                &param
+                    .type_annotation
+                    .as_ref()
+                    .map(|a| a.to_type_string())
+                    .unwrap_or_else(|| "?".to_string()),
+                param.span(),
+            ));
+        }
+        rejections
     }
 }
 
@@ -408,6 +490,197 @@ impl ForeignFunctionDef {
 
         errors
     }
+
+    /// ADR-019 §2 / R25 (POLY-ZERO-COPY, issue #199) — the `[C0935]` rejections
+    /// for `shared` / `shared mut` parameters that cannot mean what they say.
+    ///
+    /// Sharing exports a pointer into live host memory to foreign code for the
+    /// duration of the call. Whether that is even expressible is decided by the
+    /// declaration alone — the language, the pass mode, and the element type are
+    /// all right there — so the answer belongs at the declaration and not at the
+    /// first call that happens to take the path.
+    ///
+    /// The element set is `int` and `number`, and the exclusions are soundness
+    /// rather than effort; [`shape_abi_v1::foreign_types::ForeignScalar::buffer_elem`]
+    /// carries the reasons.
+    ///
+    /// Whether the LOADED extension can actually honour the mode is a different
+    /// question with a different answer per host, and it is checked at the call
+    /// against the negotiated capability. This check is the part that is true
+    /// everywhere.
+    ///
+    /// Shared by the compiler and the LSP — one text, so the editor and
+    /// `shape run` cannot disagree, the same seam as
+    /// [`Self::unmapped_foreign_types`].
+    pub fn invalid_buffer_shares(&self) -> Vec<BufferShareRejection> {
+        use shape_abi_v1::foreign_types::{ForeignDirection, ForeignType};
+
+        let mut rejections = Vec::new();
+        let mut shared_seen = 0usize;
+
+        for param in &self.params {
+            let share = param.buffer_share;
+            if !share.is_shared() {
+                continue;
+            }
+            let spelling = share.spelling().unwrap_or("shared");
+            let param_name = param.simple_name().unwrap_or("_");
+            shared_seen += 1;
+
+            let refusal = if self.is_native_abi() {
+                BufferShareRefusal::NativeAbi
+            } else if param.is_reference || param.is_out {
+                BufferShareRefusal::ConflictingPassMode
+            } else if shared_seen > shape_abi_v1::MAX_SHARED_VIEWS {
+                BufferShareRefusal::TooManyViews
+            } else {
+                match &param.type_annotation {
+                    None => BufferShareRefusal::Unannotated,
+                    Some(annotation) => {
+                        let declared = annotation.to_type_string();
+                        match ForeignType::classify(&declared, ForeignDirection::Argument) {
+                            Ok(ForeignType::Array(elem)) if elem.buffer_elem().is_some() => {
+                                continue;
+                            }
+                            Ok(ForeignType::Array(_)) => BufferShareRefusal::ElementNotShareable,
+                            // A type that cannot cross at all is already a
+                            // `[C0933]`; reporting the share on top of it would
+                            // be two diagnostics for one mistake.
+                            Err(_) => continue,
+                            Ok(_) => BufferShareRefusal::NotAnArray,
+                        }
+                    }
+                }
+            };
+
+            let declared = param
+                .type_annotation
+                .as_ref()
+                .map(|a| a.to_type_string())
+                .unwrap_or_else(|| "?".to_string());
+            rejections.push(buffer_share_rejection(
+                refusal,
+                &format!("fn {} {}", self.language, self.name),
+                param_name,
+                spelling,
+                &declared,
+                param.span(),
+            ));
+        }
+
+        rejections
+    }
+}
+
+/// Build one `[C0935]` rejection. Shared by the foreign and the ordinary
+/// declaration checks so the two cannot drift into different words for the same
+/// refusal.
+fn buffer_share_rejection(
+    refusal: BufferShareRefusal,
+    subject: &str,
+    param_name: &str,
+    spelling: &str,
+    declared: &str,
+    span: Span,
+) -> BufferShareRejection {
+    let (why, fix_hint) = match refusal {
+        BufferShareRefusal::NotAForeignDeclaration => (
+            "there is no foreign boundary here for a view to cross. `shared` declares that \
+             a buffer is exported to foreign code instead of copied onto the MessagePack \
+             wire, which is only a question a `fn python` / `fn typescript` declaration \
+             asks. Shape-to-Shape calls already pass arrays without copying."
+                .to_string(),
+            format!(
+                "delete `{spelling}` from '{param_name}'. Shape's own calls do not copy an \
+                 array to pass it, so removing the word costs nothing and changes nothing. \
+                 If you meant to take a reference, that is `&` / `&mut`."
+            ),
+        ),
+        BufferShareRefusal::NativeAbi => (
+            "an `extern \"C\"` declaration marshals through libffi against C types, where \
+             a buffer is spelled `ptr` and its lifetime is the C contract's business. \
+             `shared` is the language-runtime boundary's word (ADR-019 §2) and has no \
+             meaning on the native one."
+                .to_string(),
+            format!(
+                "delete `{spelling}` from '{param_name}' and declare the parameter as `ptr` \
+                 if the C function takes a buffer, passing the length alongside it as the \
+                 C signature requires."
+            ),
+        ),
+        BufferShareRefusal::NotAnArray => (
+            format!(
+                "'{param_name}' is declared `{declared}`, which has no buffer to share. A \
+                 view is a window onto a contiguous native array; a scalar, an object or a \
+                 map has no such window."
+            ),
+            format!(
+                "delete `{spelling}` from '{param_name}'. `{declared}` crosses by copy, and \
+                 for a value of that size the copy is not what costs you anything."
+            ),
+        ),
+        BufferShareRefusal::ElementNotShareable => (
+            format!(
+                "'{param_name}' is declared `{declared}`, whose element type has no \
+                 shareable buffer. `Array<int>` and `Array<number>` are contiguous `i64` / \
+                 `f64` that foreign code can read directly. `Array<bool>` is one byte per \
+                 element with only 0 and 1 valid, so a writable view could put a value in \
+                 it that is neither `true` nor `false`; `Array<string>` holds host pointers \
+                 with host refcounts, so sharing it would export the heap."
+            ),
+            format!(
+                "delete `{spelling}` from '{param_name}', or change the element type to \
+                 `int` or `number` if the data is numeric — those are the two that cross \
+                 without a copy."
+            ),
+        ),
+        BufferShareRefusal::Unannotated => (
+            format!(
+                "'{param_name}' has no type annotation, so there is nothing to decide the \
+                 buffer layout from."
+            ),
+            format!(
+                "annotate '{param_name}' — `shared {param_name}: Array<number>` or \
+                 `Array<int>` — or delete `{spelling}`."
+            ),
+        ),
+        BufferShareRefusal::ConflictingPassMode => (
+            format!(
+                "'{param_name}' already declares a pass mode. `shared` IS the borrow: \
+                 `shared` is the immutable view and `shared mut` the exclusive one, both \
+                 scoped to the call, so combining it with `&`, `&mut` or `out` would be \
+                 declaring the same thing twice in two vocabularies."
+            ),
+            format!(
+                "keep one: write `{spelling} {param_name}: Array<number>` and drop the \
+                 sigil."
+            ),
+        ),
+        BufferShareRefusal::TooManyViews => (
+            format!(
+                "this declaration shares more than {max} parameters. The host asks the \
+                 extension which views were released when the body returned, and that \
+                 answer is a {max}-bit mask — a view past the limit could not be accounted \
+                 for, and an unaccounted view is exactly what sharing must never leave \
+                 behind.",
+                max = shape_abi_v1::MAX_SHARED_VIEWS,
+            ),
+            format!(
+                "share at most {max} parameters per declaration; pack the rest into fewer, \
+                 longer arrays, or copy them.",
+                max = shape_abi_v1::MAX_SHARED_VIEWS,
+            ),
+        ),
+    };
+
+    BufferShareRejection {
+        message: format!(
+            "[C0935] `{subject}`: parameter '{param_name}' is declared `{spelling}`, but \
+             {why}"
+        ),
+        span,
+        fix_hint,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -426,6 +699,17 @@ pub struct FunctionParameter {
     /// cell allocation, C call, value readback, and cell cleanup.
     #[serde(default)]
     pub is_out: bool,
+    /// How this parameter's buffer crosses a foreign call — the `shared` /
+    /// `shared mut` spelling (ADR-019 §2 / #199).
+    ///
+    /// Legal only on a `fn <language>` declaration, and only over a buffer the
+    /// marshaling table can project natively; everywhere else a non-default
+    /// value is a `[C0935]` rejection. It lives on the shared parameter type
+    /// rather than on a foreign-only one so that "you wrote `shared` where it
+    /// means nothing" is a diagnostic rather than a parse error the author has
+    /// to decode.
+    #[serde(default)]
+    pub buffer_share: BufferShare,
     pub type_annotation: Option<TypeAnnotation>,
     pub default_value: Option<Expr>,
 }
