@@ -20,7 +20,6 @@ use shape_runtime::context::ExecutionContext;
 use shape_value::{HeapKind, NativeKind};
 
 // Module declarations
-pub mod array;
 pub mod duration;
 pub mod matrix;
 pub mod number;
@@ -29,7 +28,6 @@ pub mod string;
 pub mod time;
 
 // Re-export the individual method handlers
-pub use array::call_array_method;
 pub use duration::call_duration_method;
 pub use matrix::call_matrix_method;
 pub use number::call_number_method;
@@ -1235,7 +1233,53 @@ pub extern "C" fn jit_call_method(ctx: *mut JITContext, stack_count: usize) -> u
                             ctx_ref.pending_call_error = 1;
                             return TAG_NULL;
                         }
-                        HK_ARRAY => call_array_method(receiver_bits, &method_name, &args),
+                        // #189: this arm used to call `call_array_method`,
+                        // whose entire body was a `todo!()`. A `todo!()` in a
+                        // production dispatch table is a process ABORT, not a
+                        // refusal: nothing above it can catch it, the VM never
+                        // gets the chance to run the construct correctly, and
+                        // the user sees SIGABRT instead of a program. That is a
+                        // crash bug independent of any performance question,
+                        // which is why it is fixed before the carrier work.
+                        //
+                        // It is now the same structured per-function bail its
+                        // siblings above use (legacy Result/Option carrier,
+                        // malformed receiver bits): name the reason, raise
+                        // `pending_call_error` so the MIR-emitted check deopts
+                        // the JIT frame, and let the W12 fall-through run the
+                        // method on the interpreter, whose array handlers are
+                        // carrier-correct. VM == JIT, never an abort.
+                        //
+                        // Reaching here means an array receiver arrived on the
+                        // legacy `UInt64` JIT-format path carrying the deleted
+                        // `unified_box(HK_ARRAY, ..)` shape rather than being
+                        // stamped `Ptr(HeapKind::TypedArray)` and delegated to
+                        // the VM trampoline earlier. No ordinary Shape source
+                        // was found that reaches it (every array method probed
+                        // under `--mode jit` takes the stamped path), so this
+                        // is defence in depth on a path that must not abort if
+                        // a producer-side stamp ever regresses.
+                        HK_ARRAY => {
+                            tracing::debug!(
+                                target: "shape_jit",
+                                method_name = %method_name,
+                                receiver_bits,
+                                "jit-call-method SURFACE: array receiver reached \
+                                 the legacy UInt64 JIT-format dispatch path \
+                                 (deleted `unified_box(HK_ARRAY, ..)` carrier). \
+                                 Strict array receivers must be stamped \
+                                 Ptr(HeapKind::TypedArray) and delegated to the \
+                                 VM trampoline; deopting to the interpreter \
+                                 instead of aborting.",
+                            );
+                            super::control::set_jit_runtime_error(format!(
+                                "JIT method dispatch for `.{}()` reached a \
+                                 legacy array carrier — deopting to interpreter",
+                                method_name,
+                            ));
+                            ctx_ref.pending_call_error = 1;
+                            return TAG_NULL;
+                        }
                         HK_STRING => call_string_method(receiver_bits, &method_name, &args),
                         HK_JIT_OBJECT => call_object_method(receiver_bits, &method_name, &args),
                         HK_DURATION => {
@@ -1324,5 +1368,79 @@ pub extern "C" fn jit_call_method(ctx: *mut JITContext, stack_count: usize) -> u
         // classification.
 
         builtin_result
+    }
+}
+
+#[cfg(test)]
+mod legacy_array_carrier_bail_tests {
+    use super::*;
+    use crate::context::JITContext;
+    use crate::ffi::jit_kinds::unified_box;
+    use crate::ffi::stack_kind_code;
+    use crate::ffi::value_ffi::HK_ARRAY;
+    use crate::ffi::value_ffi::box_string;
+    use shape_value::NativeKind;
+
+    /// #189: the repaired `HK_ARRAY` arm, DRIVEN.
+    ///
+    /// Before this change the arm called `call_array_method`, whose whole body
+    /// was `todo!()` — reaching it aborted the process, so there was no
+    /// behaviour to assert and nothing upstream could recover. This test
+    /// reaches the arm on purpose and asserts the structured bail its siblings
+    /// use: `TAG_NULL` returned, `pending_call_error` raised so the
+    /// MIR-emitted check deopts the JIT frame, and a message left for
+    /// `JITExecutor` to surface. The test completing at all is the load-bearing
+    /// half — under the old code the process would not survive to assert.
+    ///
+    /// The path is not reachable from ordinary Shape source today (array
+    /// receivers are stamped `Ptr(HeapKind::TypedArray)` and delegated to the
+    /// VM trampoline long before this cascade; every array method probed under
+    /// `--mode jit` takes that path). This drives it directly, which is the
+    /// only way to prove the arm behaves rather than aborts.
+    #[test]
+    fn a_legacy_array_carrier_deopts_instead_of_aborting() {
+        let mut ctx = JITContext::default();
+        // Stack contract (`jit_call_method`): [receiver, method_name, arg_count].
+        // The receiver carries the deleted `unified_box(HK_ARRAY, ..)` shape on
+        // the legacy `UInt64` JIT-format path — exactly the classification that
+        // used to land in `todo!()`.
+        let receiver = unified_box(HK_ARRAY, 0u64);
+        ctx.stack[0] = receiver;
+        ctx.stack_kinds[0] = stack_kind_code::encode(NativeKind::UInt64);
+        ctx.stack[1] = box_string("reverse".to_string());
+        ctx.stack_kinds[1] = stack_kind_code::encode(NativeKind::String);
+        ctx.stack[2] = 0; // arg_count
+        ctx.stack_kinds[2] = stack_kind_code::encode(NativeKind::UInt64);
+        ctx.stack_ptr = 3;
+
+        let _ = super::super::control::take_jit_runtime_error();
+        let result = jit_call_method(&mut ctx as *mut JITContext, 3);
+
+        assert_eq!(
+            result, TAG_NULL,
+            "the bail returns the null carrier, not a fabricated value"
+        );
+        assert_eq!(
+            ctx.pending_call_error, 1,
+            "pending_call_error must be raised so the MIR-emitted check deopts \
+             the JIT frame and the interpreter runs the method"
+        );
+        let message = super::super::control::take_jit_runtime_error()
+            .expect("the bail must leave a message for JITExecutor to surface");
+        assert!(
+            message.contains("reverse"),
+            "the surfaced message must name the method that could not be \
+             dispatched, got {message:?}"
+        );
+        // Non-vacuity: several bails in this cascade raise
+        // `pending_call_error` and name the method, so a test that only
+        // checked those two facts would pass without ever reaching the
+        // repaired arm. The malformed-receiver-bits bail earlier in the
+        // cascade is the specific near-miss. Pin the arm's own wording.
+        assert!(
+            message.contains("legacy array carrier"),
+            "the test must reach the repaired HK_ARRAY arm, not the \
+             malformed-receiver-bits bail that precedes it; got {message:?}"
+        );
     }
 }
