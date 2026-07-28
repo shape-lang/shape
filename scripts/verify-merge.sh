@@ -618,6 +618,30 @@ fi
 echo
 
 # -----------------------------------------------------------------------------
+# CHECK 17 — ADR-016 public feature manifest contract (#112, R19)
+# -----------------------------------------------------------------------------
+# The PublicFeatureManifest is Shape's inventory of user-observable features, and
+# this check is what stops a coverage gate being made green by editing the
+# denominator. A row's status is derived from its evidence rather than asserted
+# beside it; status moves forward only, so a public feature cannot be relabelled
+# `planned` to shed its runnable-evidence obligation; every published feature_id
+# stays in the inventory forever, as a live row or a tombstoned removed row, so
+# identities are never reused and features never silently disappear; and no
+# source revision, counterpart SHA, attestation or mutable verification state may
+# enter — the gate rejects a SCHEMA declaring such a field, not only a manifest
+# carrying one. --self-test runs the forced negatives, each of which also asserts
+# its unmutated positive control is accepted.
+echo "=== CHECK 17: public feature manifest contract (ADR-016) ==="
+if node scripts/check-adr011-012-public-feature-manifest.mjs --self-test; then
+  record_pass "public feature manifest"
+  echo "  -> clean"
+else
+  record_fail "public feature manifest" "a status moved backward, an identity was reused or dropped, pair-evidence state entered the manifest, or a tripwire stopped firing"
+  echo "  -> FAILED (backward status, reused/dropped identity, pair-evidence state, or a dead tripwire)"
+fi
+echo
+
+# -----------------------------------------------------------------------------
 # REPORT
 # -----------------------------------------------------------------------------
 echo "=== SUMMARY ==="

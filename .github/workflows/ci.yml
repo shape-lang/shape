@@ -36,11 +36,13 @@ jobs:
       - name: VM vs JIT differential gate
         run: bash scripts/differential-gate.sh
 
-  # ADR-011..016 migration guards. Legacy authority may only shrink, and a new
-  # privileged identity may not appear unlisted (R14, ten-step steps 4 and 5).
-  # These are source-only greps: seconds to run, no Rust build, so they gate
-  # every PR rather than waiting for a pre-merge script. `verify-merge.sh`
-  # CHECK 15/16 run the same two commands locally.
+  # ADR-011..016 migration and inventory guards. Legacy authority may only shrink
+  # and a new privileged identity may not appear unlisted (R14, ten-step steps 4
+  # and 5); the public feature inventory may not lose a row, reuse an identity,
+  # demote a status, or absorb pair-evidence state (ADR-016 §2, #112). These are
+  # source-only checks: seconds to run, no Rust build, so they gate every PR
+  # rather than waiting for a pre-merge script. `verify-merge.sh` CHECK 15/16/17
+  # run the same three commands locally.
   legacy-authority:
     name: Legacy authority (shrink-only)
     runs-on: ubuntu-latest
@@ -58,6 +60,14 @@ jobs:
 
       - name: Step-5 legacy identity manifest (#136) — no unlisted privilege
         run: node scripts/check-adr011-012-legacy-identity-manifest.mjs
+
+      # ADR-016 §2 / R19 (#112). Same rationale as the two guards above: a
+      # source-only check that runs in seconds, so it gates every PR rather than
+      # a pre-merge script. It lives in this job rather than a new one because
+      # this job is already a required check — a new job would not gate until
+      # branch protection was updated separately.
+      - name: ADR-016 public feature manifest (#112) — forward-only, no reused identity
+        run: node scripts/check-adr011-012-public-feature-manifest.mjs --self-test
 
   # Foreign-call (FFI) end-to-end tier. The `rust` job above runs
   # `cargo test --workspace --all-targets`, which exercises the always-on

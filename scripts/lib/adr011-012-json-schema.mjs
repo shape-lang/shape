@@ -4,13 +4,18 @@ const SUPPORTED_KEYWORDS = new Set([
   "$defs",
   "$ref",
   "title",
+  "description",
   "type",
   "const",
   "enum",
   "properties",
+  "propertyNames",
   "required",
   "additionalProperties",
+  "minProperties",
+  "maxProperties",
   "items",
+  "contains",
   "minItems",
   "maxItems",
   "uniqueItems",
@@ -19,7 +24,19 @@ const SUPPORTED_KEYWORDS = new Set([
   "minimum",
   "maximum",
   "oneOf",
+  "anyOf",
+  "allOf",
+  "not",
+  "if",
+  "then",
+  "else",
 ]);
+
+// Applicator keywords holding a single subschema, and those holding an array of
+// subschemas. Both the schema audit and the instance validator walk these
+// generically so adding a keyword above is a one-line change here.
+const SUBSCHEMA_KEYWORDS = ["items", "contains", "propertyNames", "not", "if", "then", "else"];
+const SUBSCHEMA_LIST_KEYWORDS = ["oneOf", "anyOf", "allOf"];
 
 const JSON_TYPES = new Set([
   "array",
@@ -109,9 +126,14 @@ function auditSchema(schema, root, path, errors, activeReferences = []) {
       }
     }
   }
-  for (const keyword of ["$schema", "$id", "title"]) {
+  for (const keyword of ["$schema", "$id", "title", "description"]) {
     if (keyword in schema && typeof schema[keyword] !== "string") {
       errors.push(`${path}/${keyword}: must be a string`);
+    }
+  }
+  for (const keyword of ["then", "else"]) {
+    if (keyword in schema && !("if" in schema)) {
+      errors.push(`${path}/${keyword}: is inert without a sibling if`);
     }
   }
   if ("type" in schema) {
@@ -133,7 +155,7 @@ function auditSchema(schema, root, path, errors, activeReferences = []) {
   if ("required" in schema && !uniqueStrings(schema.required)) {
     errors.push(`${path}/required: must contain unique strings`);
   }
-  for (const keyword of ["minItems", "maxItems", "minLength"]) {
+  for (const keyword of ["minItems", "maxItems", "minLength", "minProperties", "maxProperties"]) {
     if (
       keyword in schema &&
       (!Number.isInteger(schema[keyword]) || schema[keyword] < 0)
@@ -175,17 +197,18 @@ function auditSchema(schema, root, path, errors, activeReferences = []) {
       auditSchema(additional, root, `${path}/additionalProperties`, errors);
     }
   }
-  if ("items" in schema) {
-    auditSchema(schema.items, root, `${path}/items`, errors);
+  for (const keyword of SUBSCHEMA_KEYWORDS) {
+    if (keyword in schema) auditSchema(schema[keyword], root, `${path}/${keyword}`, errors);
   }
-  if ("oneOf" in schema) {
-    if (!Array.isArray(schema.oneOf) || !schema.oneOf.length) {
-      errors.push(`${path}/oneOf: must be a nonempty array`);
-    } else {
-      schema.oneOf.forEach((child, index) => {
-        auditSchema(child, root, `${path}/oneOf/${index}`, errors);
-      });
+  for (const keyword of SUBSCHEMA_LIST_KEYWORDS) {
+    if (!(keyword in schema)) continue;
+    if (!Array.isArray(schema[keyword]) || !schema[keyword].length) {
+      errors.push(`${path}/${keyword}: must be a nonempty array`);
+      continue;
     }
+    schema[keyword].forEach((child, index) => {
+      auditSchema(child, root, `${path}/${keyword}/${index}`, errors);
+    });
   }
 }
 
@@ -278,8 +301,37 @@ function validateNode(schema, value, root, instancePath, schemaPath, refStack = 
         );
       });
     }
+    if ("contains" in schema) {
+      const matched = value.some(
+        (item, index) =>
+          validateNode(schema.contains, item, root, `${instancePath}/${index}`, `${schemaPath}/contains`, refStack)
+            .length === 0,
+      );
+      if (!matched) errors.push(`${instancePath}: no item matches ${schemaPath}/contains`);
+    }
   }
   if (isObject(value)) {
+    const propertyCount = Object.keys(value).length;
+    if ("minProperties" in schema && propertyCount < schema.minProperties) {
+      errors.push(`${instancePath}: fewer than ${schema.minProperties} properties`);
+    }
+    if ("maxProperties" in schema && propertyCount > schema.maxProperties) {
+      errors.push(`${instancePath}: more than ${schema.maxProperties} properties`);
+    }
+    if ("propertyNames" in schema) {
+      for (const name of Object.keys(value)) {
+        errors.push(
+          ...validateNode(
+            schema.propertyNames,
+            name,
+            root,
+            `${instancePath}/${name}`,
+            `${schemaPath}/propertyNames`,
+            refStack,
+          ).map((error) => `${error} (property name)`),
+        );
+      }
+    }
     for (const required of schema.required ?? []) {
       if (!Object.hasOwn(value, required)) {
         errors.push(`${instancePath}: missing required property ${required}`);
@@ -316,20 +368,33 @@ function validateNode(schema, value, root, instancePath, schemaPath, refStack = 
       }
     }
   }
+  const branchPasses = (keyword, child, index) =>
+    validateNode(child, value, root, instancePath, `${schemaPath}/${keyword}/${index}`, refStack).length === 0;
   if ("oneOf" in schema) {
-    const matches = schema.oneOf.filter(
-      (child, index) =>
-        validateNode(
-          child,
-          value,
-          root,
-          instancePath,
-          `${schemaPath}/oneOf/${index}`,
-          refStack,
-        ).length === 0,
-    ).length;
+    const matches = schema.oneOf.filter((child, index) => branchPasses("oneOf", child, index)).length;
     if (matches !== 1) {
       errors.push(`${instancePath}: oneOf matched ${matches} branches, expected 1`);
+    }
+  }
+  if ("anyOf" in schema && !schema.anyOf.some((child, index) => branchPasses("anyOf", child, index))) {
+    errors.push(`${instancePath}: anyOf matched no branch`);
+  }
+  if ("allOf" in schema) {
+    schema.allOf.forEach((child, index) => {
+      errors.push(...validateNode(child, value, root, instancePath, `${schemaPath}/allOf/${index}`, refStack));
+    });
+  }
+  if ("not" in schema && validateNode(schema.not, value, root, instancePath, `${schemaPath}/not`, refStack).length === 0) {
+    errors.push(`${instancePath}: matches ${schemaPath}/not, which must not match`);
+  }
+  if ("if" in schema) {
+    const conditionHolds =
+      validateNode(schema.if, value, root, instancePath, `${schemaPath}/if`, refStack).length === 0;
+    const branch = conditionHolds ? "then" : "else";
+    if (branch in schema) {
+      errors.push(
+        ...validateNode(schema[branch], value, root, instancePath, `${schemaPath}/${branch}`, refStack),
+      );
     }
   }
   return errors;

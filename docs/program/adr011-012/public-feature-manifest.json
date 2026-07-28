@@ -1,0 +1,88 @@
+{
+  "$schema": "./public-feature-manifest.schema.json",
+  "manifest_version": 1,
+  "identity_migration": {
+    "kind": "initial"
+  },
+  "features": {
+    "language.pipe-operator": {
+      "public_name": "Pipe operator",
+      "family": "language-operators",
+      "status": "public",
+      "status_basis": {
+        "classification": "current-executable",
+        "evidence": [
+          {
+            "kind": "source",
+            "reference": "crates/shape-vm/src/compiler/expressions/function_calls.rs::w27_implicit_generic_tests::pipe_chain_preserves_float64_implicit_generic_callsite — executes `5.0 |> double |> add_one` on the VM and asserts 11.0; passing at wave2-spine"
+          },
+          {
+            "kind": "source",
+            "reference": "crates/shape-vm/src/compiler/expressions/function_calls.rs::w27_implicit_generic_tests::pipe_call_does_not_default_unproven_numeric_specialization — asserts `\"oops\" |> add_one` is a compile error rather than a coerced call; passing at wave2-spine"
+          },
+          {
+            "kind": "source",
+            "reference": "crates/shape-ast/src/parser/tests/grammar_coverage.rs::test_pipe_expression — parses a two-stage chain with closure arguments"
+          },
+          {
+            "kind": "source",
+            "reference": "tools/shape-lsp/src/completion/mod.rs::test_pipe_target_completions and ::test_pipe_chain_type_tracking — the LSP offers pipe-target completions and tracks the piped type across a chain"
+          }
+        ]
+      },
+      "authority": [
+        {
+          "kind": "source",
+          "reference": "crates/shape-ast/src/shape.pest rule `pipe_expr` — surface syntax and left-associativity"
+        },
+        {
+          "kind": "source",
+          "reference": "crates/shape-vm/src/compiler/expressions/binary_ops.rs `BinaryOp::Pipe` arm — the meaning: `a |> f` is `f(a)` and `a |> f(x)` is `f(a, x)`"
+        },
+        {
+          "kind": "source",
+          "reference": "crates/shape-vm/src/mir/lowering/expr.rs `lower_pipe_expr` — the same meaning on the MIR path the JIT consumes"
+        },
+        {
+          "kind": "source",
+          "reference": "crates/shape-runtime/src/type_system/inference/operators.rs `BinaryOp::Pipe` arm — the piped value's type flows into the callee's first parameter"
+        }
+      ],
+      "owner": {
+        "repository": "shape-lang/shape",
+        "component": "language operators — parser, bytecode compiler, MIR lowering, LSP type inference"
+      },
+      "surfaces": [
+        "language-syntax",
+        "language-semantics",
+        "lsp"
+      ],
+      "targets": [
+        "expression"
+      ],
+      "required_modes": [
+        "compile",
+        "vm",
+        "jit",
+        "lsp"
+      ],
+      "required_evidence_classes": [
+        "positive-execution",
+        "negative-rejection",
+        "vm-jit-parity",
+        "lsp-projection"
+      ],
+      "required_semantic_dimensions": [
+        "user-model",
+        "syntax-or-callable-surface",
+        "types",
+        "success",
+        "failure",
+        "unsupported-use",
+        "vm-jit",
+        "compiler-diagnostics"
+      ],
+      "distributed_semantics_required": false
+    }
+  }
+}

@@ -15,7 +15,9 @@
       "type": "string"
     },
     "manifest_version": {
-      "const": 1
+      "description": "Schema major. Not pinned by const: a const would make the schema-major identityMigration branch unreachable, because previous_manifest.schema_major could never be lower than the only permitted current value. scripts/check-adr011-012-public-feature-manifest.mjs pins the expected major for the committed manifest.",
+      "type": "integer",
+      "minimum": 1
     },
     "identity_migration": {
       "$ref": "#/$defs/identityMigration"
@@ -100,7 +102,26 @@
         }
       ]
     },
+    "declaredLimit": {
+      "description": "One declared limit or unsupported mode of an experimental feature. ADR-016 §2 requires structured negative evidence for each, so each limit is a separate reviewable row rather than one prose sentence.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "limit",
+        "authority"
+      ],
+      "properties": {
+        "limit": {
+          "type": "string",
+          "minLength": 1
+        },
+        "authority": {
+          "$ref": "#/$defs/authorityReference"
+        }
+      }
+    },
     "statusBasis": {
+      "description": "The evidence from which status is derived. classification plus declared_limits determine status exactly: never-current => planned, current-executable with limits => experimental, current-executable without limits => public, deprecation-transition => deprecated, removal-transition => removed. status is therefore a restatement the validator checks, never an independent claim.",
       "type": "object",
       "additionalProperties": false,
       "required": [
@@ -115,6 +136,14 @@
             "deprecation-transition",
             "removal-transition"
           ]
+        },
+        "declared_limits": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/declaredLimit"
+          }
         },
         "evidence": {
           "type": "array",
@@ -177,6 +206,24 @@
         }
       ]
     },
+    "priorManifestIdentity": {
+      "description": "Content identity of the previous accepted manifest. This is the manifest's own SHA-256, not a source revision: ADR-016 §2 requires the prior identity for comparison while §3 forbids exact source or counterpart revisions inside a source manifest.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_major",
+        "sha256"
+      ],
+      "properties": {
+        "schema_major": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "sha256": {
+          "$ref": "#/$defs/sha256"
+        }
+      }
+    },
     "identityMigration": {
       "oneOf": [
         {
@@ -188,6 +235,23 @@
           "properties": {
             "kind": {
               "const": "initial"
+            }
+          }
+        },
+        {
+          "description": "An ordinary revision at the same schema major. It names the prior content identity but carries no identity migration map: identity changes within a major are expressed as ordinary removed-status rows with tombstones.",
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "previous_manifest"
+          ],
+          "properties": {
+            "kind": {
+              "const": "revision"
+            },
+            "previous_manifest": {
+              "$ref": "#/$defs/priorManifestIdentity"
             }
           }
         },
@@ -204,21 +268,7 @@
               "const": "schema-major"
             },
             "previous_manifest": {
-              "type": "object",
-              "additionalProperties": false,
-              "required": [
-                "schema_major",
-                "sha256"
-              ],
-              "properties": {
-                "schema_major": {
-                  "type": "integer",
-                  "minimum": 1
-                },
-                "sha256": {
-                  "$ref": "#/$defs/sha256"
-                }
-              }
+              "$ref": "#/$defs/priorManifestIdentity"
             },
             "feature_ids": {
               "type": "object",
@@ -433,7 +483,11 @@
       },
       "allOf": [
         {
+          "description": "planned: never current, and no evidence class that would assert successful execution of an unavailable feature (ADR-016 §2).",
           "if": {
+            "required": [
+              "status"
+            ],
             "properties": {
               "status": {
                 "const": "planned"
@@ -447,6 +501,11 @@
                   "classification": {
                     "const": "never-current"
                   }
+                },
+                "not": {
+                  "required": [
+                    "declared_limits"
+                  ]
                 }
               },
               "required_evidence_classes": {
@@ -474,13 +533,49 @@
           }
         },
         {
+          "description": "experimental: current and executable, but with at least one declared limit or unsupported mode, each carrying structured negative evidence (ADR-016 §2).",
           "if": {
+            "required": [
+              "status"
+            ],
             "properties": {
               "status": {
-                "enum": [
-                  "experimental",
-                  "public"
-                ]
+                "const": "experimental"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "status_basis": {
+                "required": [
+                  "declared_limits"
+                ],
+                "properties": {
+                  "classification": {
+                    "const": "current-executable"
+                  }
+                }
+              },
+              "required_evidence_classes": {
+                "contains": {
+                  "enum": [
+                    "negative-rejection",
+                    "structured-diagnostic"
+                  ]
+                }
+              }
+            }
+          }
+        },
+        {
+          "description": "public: current and executable with no declared limit. A limit would make the feature experimental, so declared_limits is what separates the two current-executable statuses and keeps status derivable from the basis alone.",
+          "if": {
+            "required": [
+              "status"
+            ],
+            "properties": {
+              "status": {
+                "const": "public"
               }
             }
           },
@@ -491,13 +586,22 @@
                   "classification": {
                     "const": "current-executable"
                   }
+                },
+                "not": {
+                  "required": [
+                    "declared_limits"
+                  ]
                 }
               }
             }
           }
         },
         {
+          "description": "deprecated: still supported in every required mode, plus migration/removal evidence (ADR-016 §2).",
           "if": {
+            "required": [
+              "status"
+            ],
             "properties": {
               "status": {
                 "const": "deprecated"
@@ -512,31 +616,20 @@
                     "const": "deprecation-transition"
                   }
                 }
-              }
-            }
-          }
-        },
-        {
-          "if": {
-            "properties": {
-              "status": {
-                "const": "removed"
-              }
-            }
-          },
-          "then": {
-            "properties": {
-              "status_basis": {
-                "properties": {
-                  "classification": {
-                    "const": "removal-transition"
-                  }
+              },
+              "required_semantic_dimensions": {
+                "contains": {
+                  "enum": [
+                    "migration",
+                    "deprecation"
+                  ]
                 }
               }
             }
           }
         },
         {
+          "description": "removed: a tombstone row that does not silently disappear, carrying migration or structured-rejection evidence (ADR-016 §2, §9).",
           "if": {
             "required": [
               "status"
@@ -550,7 +643,25 @@
           "then": {
             "required": [
               "tombstone"
-            ]
+            ],
+            "properties": {
+              "status_basis": {
+                "properties": {
+                  "classification": {
+                    "const": "removal-transition"
+                  }
+                }
+              },
+              "required_evidence_classes": {
+                "contains": {
+                  "enum": [
+                    "negative-rejection",
+                    "structured-diagnostic",
+                    "cross-version-refusal"
+                  ]
+                }
+              }
+            }
           },
           "else": {
             "not": {
