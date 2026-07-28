@@ -44,6 +44,7 @@ fn return_only_mir_data(
             local_typed_array_element_types: HashMap::new(),
             local_declared_scalar_types: HashMap::new(),
             binding_slots: HashSet::new(),
+            local_names: Vec::new(),
             var_binding_slots: HashSet::new(),
         },
         storage_plan: StoragePlan {

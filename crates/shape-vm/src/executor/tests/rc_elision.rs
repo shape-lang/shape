@@ -298,7 +298,10 @@ r
     let (on, off) = compile_both(source);
     let ops_on: Vec<OpCode> = on.instructions.iter().map(|i| i.opcode).collect();
     let ops_off: Vec<OpCode> = off.instructions.iter().map(|i| i.opcode).collect();
-    assert_eq!(ops_on, ops_off, "a many-moves-per-definition read must not elide");
+    assert_eq!(
+        ops_on, ops_off,
+        "a many-moves-per-definition read must not elide"
+    );
     assert_same_i64(source);
     let (on_v, _) = eval_both(source);
     assert_eq!(on_v.as_i64(), Some(12));
@@ -546,7 +549,6 @@ r
     }
 }
 
-
 /// Finalization order, observed directly. Each `Drop` body appends its id to a
 /// module-scope log, so the program's value *is* the finalization sequence.
 /// ADR-018 §3's gate demands identical order with the pass on and off, and the
@@ -627,7 +629,10 @@ log
     for source in cases {
         let (on, off) = eval_both(source);
         let on_log = on.as_str().map(String::from).expect("drop log is a string");
-        let off_log = off.as_str().map(String::from).expect("drop log is a string");
+        let off_log = off
+            .as_str()
+            .map(String::from)
+            .expect("drop log is a string");
         assert_eq!(
             on_log, off_log,
             "finalization order changed with the pass on:\n{source}"
@@ -722,4 +727,65 @@ r
     /// weaker source-level restatement of it here.
     #[allow(dead_code)]
     const CYCLE_COMPLETENESS_EVIDENCE: () = ();
+}
+
+// ── Measured dynamic retain/release reduction ────────────────────────
+
+/// The ticket's "no measurement, no close" clause, run against the committed
+/// allocation-heavy workloads themselves (#186's charter suite) rather than a
+/// hand-written stand-in. Built only with `--features rc-stats`, which is what
+/// compiles the counters into `clone_with_kind` / `drop_with_kind`.
+///
+/// The benchmark files are read, never modified — the workload is whatever
+/// `benchmarks/charter/shape/` currently holds.
+#[cfg(feature = "rc-stats")]
+mod measured {
+    use super::*;
+    use crate::rc_stats;
+
+    fn run_counted(source: &str, elision: bool) -> (u64, u64) {
+        rc_stats::reset();
+        let _ = with_rc_elision_flag(elision, || eval(source));
+        rc_stats::snapshot()
+    }
+
+    #[test]
+    fn allocation_heavy_workloads_run_fewer_refcount_operations() {
+        let root = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../benchmarks/charter/shape/"
+        );
+        let mut any_reduction = false;
+        for name in ["alloc_object_graph.shape", "alloc_tree.shape"] {
+            let path = format!("{root}{name}");
+            let source = std::fs::read_to_string(&path)
+                .unwrap_or_else(|e| panic!("charter workload {path} unreadable: {e}"));
+
+            let (on_retain, on_release) = run_counted(&source, true);
+            let (off_retain, off_release) = run_counted(&source, false);
+
+            let on_total = on_retain + on_release;
+            let off_total = off_retain + off_release;
+            let pct = if off_total == 0 {
+                0.0
+            } else {
+                100.0 * (off_total as f64 - on_total as f64) / off_total as f64
+            };
+            println!(
+                "{name}: retains {off_retain} -> {on_retain}, releases {off_release} -> {on_release}, \
+                 total {off_total} -> {on_total} ({pct:.2}% fewer)"
+            );
+
+            assert!(
+                on_total <= off_total,
+                "{name}: the elision increased refcount traffic"
+            );
+            any_reduction |= on_total < off_total;
+        }
+        assert!(
+            any_reduction,
+            "no allocation-heavy workload lost a single refcount operation — \
+             the pass does not reach this suite and the ticket cannot close on it"
+        );
+    }
 }

@@ -196,9 +196,7 @@ fn unique_binding_name(mir: &MirFunction, slot: SlotId) -> Option<String> {
         .local_names
         .iter()
         .enumerate()
-        .filter(|(idx, n)| {
-            *n == name && mir.binding_slots.contains(&SlotId(*idx as u16))
-        })
+        .filter(|(idx, n)| *n == name && mir.binding_slots.contains(&SlotId(*idx as u16)))
         .count();
     (occurrences == 1).then(|| name.clone())
 }
@@ -255,9 +253,17 @@ fn slot_shape_qualifies(
     if !mir.binding_slots.contains(&slot) {
         return false;
     }
-    if !matches!(
+    // `Copy` slots hold inline scalars: they never take the ownership-aware
+    // read this pass rewrites, so admitting them would buy nothing. `Unknown`
+    // is admitted — it is what lowering records for an inferred binding such as
+    // `let g = build_graph(n)`, which is the dominant shape in allocation-heavy
+    // code, and the ownership proof this pass makes does not rest on the
+    // classification: the read is rewritten only where the compiler was
+    // already emitting a retain, and what replaces it transfers the slot's
+    // share whatever kind that share has.
+    if matches!(
         mir.local_types.get(slot.0 as usize),
-        Some(LocalTypeInfo::NonCopy)
+        Some(LocalTypeInfo::Copy) | None
     ) {
         return false;
     }
@@ -397,7 +403,8 @@ fn post_dominates(
     candidate: BasicBlockId,
     target: BasicBlockId,
 ) -> bool {
-    pdom.get(&target).is_some_and(|set| set.contains(&candidate))
+    pdom.get(&target)
+        .is_some_and(|set| set.contains(&candidate))
 }
 
 // ── Use census ───────────────────────────────────────────────────────
@@ -533,11 +540,7 @@ fn census_rvalue(census: &mut HashMap<SlotId, SlotUses>, rvalue: &Rvalue, site: 
     }
 }
 
-fn census_terminator(
-    census: &mut HashMap<SlotId, SlotUses>,
-    kind: &TerminatorKind,
-    site: UseSite,
-) {
+fn census_terminator(census: &mut HashMap<SlotId, SlotUses>, kind: &TerminatorKind, site: UseSite) {
     match kind {
         TerminatorKind::Call {
             func,

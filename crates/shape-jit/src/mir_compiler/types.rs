@@ -2261,6 +2261,7 @@ mod tests {
             local_typed_array_element_types: Default::default(),
             local_declared_scalar_types: Default::default(),
             binding_slots: Default::default(),
+            local_names: Vec::new(),
             var_binding_slots: Default::default(),
         }
     }
@@ -2715,6 +2716,7 @@ mod tests {
             local_typed_array_element_types: Default::default(),
             local_declared_scalar_types: Default::default(),
             binding_slots: Default::default(),
+            local_names: Vec::new(),
             var_binding_slots: Default::default(),
         };
         let concrete_types = vec![
@@ -2936,6 +2938,7 @@ mod tests {
             local_typed_array_element_types: Default::default(),
             local_declared_scalar_types: Default::default(),
             binding_slots: Default::default(),
+            local_names: Vec::new(),
             var_binding_slots: Default::default(),
         };
         // No ConcreteType seeds — every slot is Void, mirroring the
@@ -3304,6 +3307,7 @@ mod tests {
             local_typed_array_element_types: Default::default(),
             local_declared_scalar_types: Default::default(),
             binding_slots: Default::default(),
+            local_names: Vec::new(),
             var_binding_slots: Default::default(),
         }
     }
@@ -3430,6 +3434,7 @@ mod tests {
             local_typed_array_element_types: Default::default(),
             local_declared_scalar_types: Default::default(),
             binding_slots: Default::default(),
+            local_names: Vec::new(),
             var_binding_slots: Default::default(),
         };
         let concrete_types = vec![
@@ -3564,6 +3569,7 @@ mod tests {
             local_typed_array_element_types: Default::default(),
             local_declared_scalar_types: Default::default(),
             binding_slots: Default::default(),
+            local_names: Vec::new(),
             var_binding_slots: Default::default(),
         };
         // Simulate post-T1' upstream state: `concrete_types[1]` is

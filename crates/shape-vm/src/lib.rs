@@ -43,6 +43,8 @@ pub mod module_resolution;
 // shape-vm rather than shape-jit so the interpreter tier and a jit-feature-off
 // CLI can produce a truthful (non-native) witness through the same type.
 pub mod native_witness;
+#[cfg(feature = "rc-stats")]
+pub mod rc_stats;
 pub mod remote;
 pub mod resource_limits;
 pub mod stdlib;
