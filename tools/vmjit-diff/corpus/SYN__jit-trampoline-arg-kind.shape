@@ -1,0 +1,56 @@
+// #188 (PERF-CLOSURE-NATIVE) reproducer, committed per R15.
+//
+// A native JIT frame calling a DEMOTED callee through a function-typed
+// parameter routes through `jit_call_value` ->
+// `dispatch_call_via_trampoline_vm`, which used to discard every argument's
+// producing-site `NativeKind` and re-stamp it `UInt64`. The callee frame then
+// received the arg's raw bits under an integer label and its first typed read
+// converted the bit pattern instead of the value.
+//
+// Measured at e12c82d2 BEFORE the fix, with no other patch applied:
+//     vm  -> Ok(0.5)   jit -> Ok(4602678819172647000)   (raw f64 bits of 0.5)
+//     vm  -> Ok("hi")  jit -> a raw Arc<String> pointer read as an int
+//
+// `?` demotes each `d_*` callee (an Owner-scoped TryUnwrap residual), and the
+// hot loop keeps top-level on the native path so the trampoline is actually
+// reached. The int case is included deliberately: it passes even when the
+// handoff is broken, because raw i64 bits happen to be the right bits — which
+// is exactly why an int-only fixture is not evidence here.
+
+fn make_ok() -> Result<int, string> { return Ok(1) }
+
+fn d_num(t: number) -> Result<number, string> {
+    let v = make_ok()?
+    return Ok(t * (v as number))
+}
+
+fn d_str(s: string) -> Result<string, string> {
+    let v = make_ok()?
+    return Ok(s)
+}
+
+fn d_bool(b: bool) -> Result<bool, string> {
+    let v = make_ok()?
+    return Ok(b)
+}
+
+fn d_int(i: int) -> Result<int, string> {
+    let v = make_ok()?
+    return Ok(i + 1)
+}
+
+fn ap_n(g: (number) => Result<number, string>, t: number) -> Result<number, string> { return g(t) }
+fn ap_s(g: (string) => Result<string, string>, s: string) -> Result<string, string> { return g(s) }
+fn ap_b(g: (bool) => Result<bool, string>, b: bool) -> Result<bool, string> { return g(b) }
+fn ap_i(g: (int) => Result<int, string>, i: int) -> Result<int, string> { return g(i) }
+
+let mut total = 0
+for i in 0..200 {
+    total = total + i
+}
+print(total)
+
+print(ap_n(d_num, 0.5))
+print(ap_s(d_str, "hello"))
+print(ap_b(d_bool, true))
+print(ap_i(d_int, 41))

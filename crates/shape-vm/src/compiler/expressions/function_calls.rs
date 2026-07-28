@@ -1916,10 +1916,38 @@ impl BytecodeCompiler {
             // Restrict to user-space main compilation (see
             // `compile_module_builtin_function_call` below for the
             // dep-module-bootstrap rationale).
-            if self.resolve_scoped_module_binding_name(name).is_some()
+            //
+            // #188 narrowing (2026-07-28). The condition above was "the name
+            // resolves to ANY module binding", but a module binding is created
+            // for every module-scope `let` — so `let f = |x| x * k` followed by
+            // `f(i)` recorded a "direct call to an imported stdlib function"
+            // residual and bailed the WHOLE program to the interpreter. Measured
+            // at e12c82d2: a top-level capturing closure called through a
+            // variable, and one returned from a function, both produced
+            // `program_fallback: w17-marshal-residual` and never reached the JIT
+            // at all. That is the opposite of what this residual guards.
+            //
+            // The narrowing is a POSITIVE proof of user-ness, not a weakened
+            // guard: `module_binding_callable_closure_bodies` is populated by
+            // `update_callable_binding_from_expr` only when the binding's
+            // initializer was a closure literal in this compilation (or a call
+            // to a function whose body returns one). A native module export
+            // never has a `ClosureBodyPeek`, so no `Ptr(HeapKind::ModuleFn)`
+            // callee can lose its guard here; a binding the compiler cannot
+            // prove is a user closure keeps the bail.
+            if let Some(scoped) = self.resolve_scoped_module_binding_name(name)
                 && self.module_scope_stack.is_empty()
             {
-                self.record_jit_residual(crate::bytecode::JitResidual::ModuleFnMarshalReturn);
+                let holds_proven_user_closure =
+                    self.module_bindings
+                        .get(&scoped)
+                        .is_some_and(|binding_idx| {
+                            self.module_binding_callable_closure_bodies
+                                .contains_key(binding_idx)
+                        });
+                if !holds_proven_user_closure {
+                    self.record_jit_residual(crate::bytecode::JitResidual::ModuleFnMarshalReturn);
+                }
             }
             let expected_param_modes = if let Some(local_idx) = self.resolve_local(name) {
                 self.local_callable_pass_modes.get(&local_idx).cloned()

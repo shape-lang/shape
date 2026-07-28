@@ -1,0 +1,40 @@
+// #188 (PERF-CLOSURE-NATIVE) reproducer, committed per R15.
+//
+// Two of the three first-class closure call shapes the ticket's acceptance
+// criteria name: a capturing closure called through a VARIABLE, and one called
+// through a PARAMETER. (The third, a closure returned from a function, has a
+// different blocker and lives in `SYN__first-class-closure-return.shape`.)
+//
+// Measured at e12c82d2 BEFORE the fix, via
+// `shape run --mode jit --native-witness w.json`:
+//   * variable  -> `program_fallback: w17-marshal-residual` — the WHOLE program
+//                  left the native path. A module-scope `let` creates a module
+//                  binding, and calling any module binding was classified as
+//                  "a direct call to an imported stdlib function".
+//   * parameter -> the program stayed native, but the closure body reported
+//                  `installed-not-dispatched` with 0 interpreter dispatches
+//                  while running 200 times on the interpreter.
+//
+// After: no program fallback in either shape; `__main__` / `apply` /
+// `hot_double` are `native-dispatched`, and `__closure_0` reads
+// `interpreter-fallback` with 200 interpreter dispatches — the truthful record
+// that the closure BODY is still interpreted. This file is the differential
+// anchor: it must keep producing identical output under vm and jit, and it must
+// keep reaching the native path at all (a re-introduced whole-program bail is
+// invisible to a fixture that already bails).
+
+fn hot_double(n: int) -> int { return n * 2 }
+
+fn apply(g: (int) => int, n: int) -> int { return g(n) }
+
+let k = 3
+let via_variable = |x: int| x * k
+
+let mut a = 0
+let mut b = 0
+for i in 0..200 {
+    a = a + via_variable(i) + hot_double(i)
+    b = b + apply(via_variable, i)
+}
+print(a)
+print(b)

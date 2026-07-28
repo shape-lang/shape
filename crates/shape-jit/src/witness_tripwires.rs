@@ -96,24 +96,22 @@ fn a_hot_function_produces_a_real_native_dispatch_count() {
 
 #[test]
 fn a_deopted_function_cannot_produce_a_native_dispatch_witness() {
-    // Tripwire 1. Force the fallback and confirm no native claim survives for
-    // EITHER function, and that the refused one carries its exact reason.
+    // Tripwire 1, POST-FLIP (#188). Force the fallback and confirm no native
+    // claim survives for the refused function, that it carries its exact
+    // reason, and that its SIBLING keeps a real native dispatch count.
     //
-    // #117 wrote this to flip when #187 landed per-function granularity, and
-    // #187 tried: making the direct call to the non-compiled `cold` lower
-    // through the trampoline does flip it, and `hot` becomes a real native
-    // claim with 200 dispatches. That change was REVERTED, because the
-    // indirect path stores the trampoline's raw `u64` without converting it by
-    // the callee's return kind, and the VM/JIT differential immediately caught
-    // two silent-wrong-output corpus programs — a `number`-returning callee
-    // printing `91747331608791740000` for `1.0`, and a `Result`-returning one
-    // printing `Ok(106498971113408)` for `Ok(42)`. An `int`-returning callee
-    // like `cold` survives only because raw i64 bits are the right bits.
+    // #117 wrote this to flip when #187 landed per-function granularity. #187
+    // flipped it and was reverted at `841f92f7`, because letting the direct
+    // call to the non-compiled `cold` lower through the trampoline turned two
+    // corpus programs into silent-wrong-output. #188 found the actual cause —
+    // the trampoline discarded per-ARGUMENT kinds, not the return kind — fixed
+    // it in `dispatch_call_via_trampoline_vm`, confirmed both corpus programs
+    // are MATCH again, and restored the flip. See the history block at the
+    // refusal site in `mir_compiler/terminators.rs`.
     //
-    // So this tripwire still reads the pre-flip way, and that is the truthful
-    // reading at HEAD rather than an unmet target. It flips when the indirect
-    // path gains a kind-correct return handoff (PERF-HOF-CARRIER /
-    // PERF-CLOSURE-NATIVE), not when someone deletes the refusal.
+    // The load-bearing half is `hot`: top-level calls the demoted `cold`
+    // directly and the program STAYS native, so `hot`'s 200 dispatches are a
+    // count no installation-only record could produce.
     let witness = jit_witness(TWO_FUNCTION_FIXTURE);
 
     // `cold` is refused with the exact opcode class, not a vague "not native".
@@ -133,20 +131,30 @@ fn a_deopted_function_cannot_produce_a_native_dispatch_witness() {
         "a refused function must never satisfy a native claim"
     );
 
-    // Top-level calls `cold` directly, and a direct call to a non-compiled
-    // callee is still a whole-program bail, so `hot` does not stay native
-    // either. The witness must say so rather than reporting a native `hot` it
-    // cannot support.
+    // The flip: one unsupported construct no longer costs the whole program its
+    // native code, even when top-level calls the demoted function directly.
     assert!(
-        witness.program_fallback.is_some(),
-        "the fixture must record why the program left the native path"
+        witness.program_fallback.is_none(),
+        "a direct call to a demoted callee must no longer bail the whole \
+         program — got {:?}",
+        witness.program_fallback
     );
+    let hot = assert_native_dispatch(&witness, "hot")
+        .expect("`hot` must be a native claim once the program stays native");
+    assert_eq!(
+        hot.native_dispatches, 200,
+        "the loop calls `hot` 200 times; the count comes from inside the \
+         emitted body, so it cannot be produced without running it"
+    );
+    assert_eq!(hot.interpreter_dispatches, 0);
+    assert_eq!(hot.disposition, Disposition::NativeDispatched);
+
+    // And the demoted callee's own execution is recorded as what it is: the
+    // trampoline hands it to the interpreter, once, for the single call.
     assert!(
-        matches!(
-            assert_native_dispatch(&witness, "hot"),
-            Err(WitnessAssertion::ProgramFellBack { .. })
-        ),
-        "with the whole program deopted, `hot` is not a native claim either"
+        cold.interpreter_dispatches > 0,
+        "`cold` ran somewhere — the trampoline dispatch must be recorded \
+         rather than leaving the unit looking unreached"
     );
 }
 

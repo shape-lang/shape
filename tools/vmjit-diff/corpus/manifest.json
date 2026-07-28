@@ -6,7 +6,7 @@
   "counts": {
     "book": 240,
     "acceptance": 224,
-    "synthetic": 3
+    "synthetic": 6
   },
   "skippedCount": 0,
   "entries": [
@@ -2351,6 +2351,21 @@
       "id": "SYN__jit-double-execution.shape",
       "tier": "synthetic",
       "source": "tools/vmjit-diff/synthetic/SYN__jit-double-execution.shape"
+    },
+    {
+      "id": "SYN__first-class-closure-dispatch.shape",
+      "tier": "synthetic",
+      "source": "tools/vmjit-diff/synthetic/SYN__first-class-closure-dispatch.shape (#188 PERF-CLOSURE-NATIVE first-class closure dispatch repro)"
+    },
+    {
+      "id": "SYN__first-class-closure-return.shape",
+      "tier": "synthetic",
+      "source": "tools/vmjit-diff/synthetic/SYN__first-class-closure-return.shape (#188 PERF-CLOSURE-NATIVE returned-closure repro)"
+    },
+    {
+      "id": "SYN__jit-trampoline-arg-kind.shape",
+      "tier": "synthetic",
+      "source": "tools/vmjit-diff/synthetic/SYN__jit-trampoline-arg-kind.shape (#188 PERF-CLOSURE-NATIVE trampoline arg-kind repro)"
     }
   ]
 }

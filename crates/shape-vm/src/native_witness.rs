@@ -667,12 +667,23 @@ pub fn finish() -> Option<NativeExecutionWitness> {
         .units
         .iter()
         .map(|unit| {
+            // #188: interpreter dispatches outrank installation. A function
+            // can be compiled and installed and still have every call routed
+            // to the interpreter — a closure reached only through
+            // `jit_call_value`'s trampoline is exactly that shape. Ordering
+            // `installed` ahead of `interpreter_dispatches > 0` labelled such
+            // a function `installed-not-dispatched`, which reads as "never
+            // called" while it was called 200 times, none of them native.
+            // The ordering below can only ever move a unit AWAY from a native
+            // reading, so it cannot manufacture an R15 claim: the
+            // `NativeDispatched` arm is unchanged and still requires
+            // installation plus a nonzero native count.
             let disposition = if unit.installed && unit.native_dispatches > 0 {
                 Disposition::NativeDispatched
-            } else if unit.installed {
-                Disposition::InstalledNotDispatched
             } else if unit.interpreter_dispatches > 0 {
                 Disposition::InterpreterFallback
+            } else if unit.installed {
+                Disposition::InstalledNotDispatched
             } else {
                 Disposition::NotReached
             };
