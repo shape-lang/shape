@@ -539,6 +539,16 @@ define_opcodes! {
     /// Stack: pops N args (count pushed as a constant by the stub), pushes 1 result
     CallForeign = 0xF5, Control, pops: 0, pushes: 0;
 
+    /// Start an `async fn <language>` foreign call and push its `Future(id)`.
+    /// ADR-019 §5 / #202 (POLY-ASYNC-OFFLOAD): the invoke runs off the
+    /// interpreter thread and `await` resolves it through the same pending-task
+    /// channel Shape's own async module calls use, so two async foreign calls
+    /// overlap instead of serializing.
+    /// Operand: ForeignFunction(u16) — index into program.foreign_functions
+    /// Stack: pops N args (count pushed as a constant by the stub), pushes one
+    /// `Future(id)` handle.
+    CallForeignAsync = 0x1CE, Control, pops: 0, pushes: 0;
+
     /// Store a local with width truncation.
     /// Operand: TypedLocal(u16, NumericWidth) — local index + width
     /// Pops one value, truncates to declared width, stores to local.

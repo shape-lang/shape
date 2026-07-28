@@ -21,7 +21,7 @@
     ]
   },
   "step": "docs/design/typed-comptime/adr011-012-execution-rulings.md — ten required steps, step 4",
-  "source_revision": "8b9a9fbc5075b86c448ca01caa114c633f8f6ca9",
+  "source_revision": "fa3f9a8446a545fb950d8cf1a41c404987d4c32a",
   "regenerate_with": "node scripts/generate-adr011-012-legacy-baselines.mjs --ticket 135",
   "check_with": "node scripts/check-adr011-012-legacy-baselines.mjs --ticket 135",
   "direction_rule": "Monotonic non-increasing. A set count may fall (migration progress) and may never rise. A new owner path is growth even when the total is unchanged, because it is a new surface carrying old authority.",
@@ -29,9 +29,9 @@
     "source_revision",
     "description"
   ],
-  "total_count": 549,
+  "total_count": 546,
   "total_count_note": "Sum of the set counts. Sets may deliberately overlap (a narrowly scoped set can re-count sites a broader set already counts), so this is a ratchet aggregate for reporting movement — never a count of distinct legacy sites.",
-  "sets_sha256": "e3fd56c701801ebb629887504fc6037d25285a9bf43373ccae68f074fac63a95",
+  "sets_sha256": "2a576a11d8974a93e2988e4b034e6dd1c641ffdec7e22d0c2ba600639c66e855",
   "sets": [
     {
       "id": "lsp-parallel-validators",
@@ -42,7 +42,7 @@
       ],
       "exclude": [],
       "pattern": "fn validate_\\w+",
-      "count": 25,
+      "count": 24,
       "owner_count": 4,
       "owners": [
         {
@@ -51,7 +51,7 @@
         },
         {
           "path": "tools/shape-lsp/src/diagnostics.rs",
-          "count": 13
+          "count": 12
         },
         {
           "path": "tools/shape-lsp/src/doc_diagnostics.rs",
@@ -72,7 +72,7 @@
       ],
       "exclude": [],
       "pattern": "(message|msg|text|diagnostic)\\s*\\.\\s*contains\\(",
-      "count": 76,
+      "count": 74,
       "owner_count": 11,
       "owners": [
         {
@@ -93,7 +93,7 @@
         },
         {
           "path": "tools/shape-lsp/src/diagnostics.rs",
-          "count": 31
+          "count": 29
         },
         {
           "path": "tools/shape-lsp/src/doc_actions.rs",

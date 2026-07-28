@@ -62,6 +62,8 @@ impl VirtualMachine {
             task_scheduler: task_scheduler::TaskScheduler::new(),
             foreign_fn_handles: Vec::new(),
             language_runtimes: HashMap::new(),
+            foreign_async_offloads: Default::default(),
+            foreign_offload_contracts: HashMap::new(),
             registered_foreign_contracts: std::collections::HashSet::new(),
             foreign_stub_documents: HashMap::new(),
             native_library_cache: HashMap::new(),

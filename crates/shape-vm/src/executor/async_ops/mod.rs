@@ -462,11 +462,20 @@ impl VirtualMachine {
                 let config = self.config.clone();
                 let granted = self.granted_permissions.clone();
                 let scope = self.scope_constraints.clone();
+                // #202: the isolated task VM needs the parent's extension
+                // registry, or a foreign call inside the spawned body fails
+                // link-now with "no extension provides language".
+                let language_runtimes = self.language_runtimes.clone();
                 let (tx, rx) = std::sync::mpsc::channel();
                 let handle =
                     crate::executor::async_runtime::shared_runtime().spawn_blocking(move || {
                         let result = crate::executor::async_runtime::run_isolated_async_fn(
-                            program, config, granted, scope, func_id,
+                            program,
+                            config,
+                            granted,
+                            scope,
+                            language_runtimes,
+                            func_id,
                         );
                         // Receiver may be gone (VM torn down / task aborted);
                         // ignore the send error.
@@ -475,7 +484,7 @@ impl VirtualMachine {
                 self.task_scheduler.store_pending_async(
                     task_id,
                     crate::executor::task_scheduler::PendingAsyncTask {
-                        completion: rx,
+                        completion: crate::executor::task_scheduler::AsyncCompletion::Typed(rx),
                         abort: Some(handle.abort_handle()),
                     },
                 );

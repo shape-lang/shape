@@ -11,6 +11,7 @@ mod comparison;
 mod control_flow;
 pub(crate) mod dispatch;
 mod exceptions;
+pub(crate) mod foreign_async;
 pub(crate) mod ic_fast_paths;
 mod jit_ops;
 mod logical;
@@ -471,6 +472,18 @@ pub struct VirtualMachine {
     /// the extension side; this memo keeps the payload build off the per-call
     /// path.
     pub(crate) registered_foreign_contracts: std::collections::HashSet<String>,
+
+    /// Off-thread offload strategies for `async fn <language>` calls, one per
+    /// language, started lazily on the first such call (ADR-019 §5 / #202).
+    pub(crate) foreign_async_offloads: crate::executor::foreign_async::ForeignAsyncOffloads,
+
+    /// Declared contracts built for the offload path, memoised per language
+    /// (ADR-019 §5 / #202). A thread-affine worker owns a private extension
+    /// instance and must receive the contract before its first compile.
+    pub(crate) foreign_offload_contracts: HashMap<
+        String,
+        std::sync::Arc<shape_abi_v1::foreign_types::ForeignContractExport>,
+    >,
 
     /// Interface stub documents (`.pyi`, `.d.ts`) each language's extension
     /// generated for the contract delivered above, keyed by language id.

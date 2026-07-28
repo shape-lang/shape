@@ -909,13 +909,63 @@ pub struct LanguageRuntimeVTable {
         ) -> i32,
     >,
 
+    /// Declare how the host may drive this instance concurrently — one of the
+    /// `INSTANCE_CONCURRENCY_*` constants.
+    ///
+    /// ADR-019 §5 / #202 (POLY-ASYNC-OFFLOAD). Real foreign async runs `invoke`
+    /// off the interpreter thread, which makes the instance pointer genuinely
+    /// shared. Whether that is sound is a property only the extension knows: a
+    /// CPython instance behind interior synchronization tolerates concurrent
+    /// invokes, a V8 isolate must never leave the thread that created it. The
+    /// host cannot infer it, and deciding it from the language id would be a
+    /// terminal-name switch selecting a capability — so it is DECLARED here.
+    ///
+    /// Absent (`None`) means the extension has not been audited for off-thread
+    /// invocation: the host treats it as
+    /// [`INSTANCE_CONCURRENCY_INTERPRETER_THREAD_ONLY`] and refuses to offload
+    /// an async foreign call to it, naming this slot in the diagnostic. That is
+    /// the safe reading of silence — an unaudited extension keeps exactly the
+    /// synchronous behaviour it had before #202.
+    ///
+    /// Landed in the designated additive tail's former `reserved1` slot, so the
+    /// struct layout — and therefore [`abi_build_fingerprint`] — is unchanged.
+    pub instance_concurrency: Option<unsafe extern "C" fn(instance: *mut c_void) -> u32>,
+
     /// Reserved fn-pointer tail padding (null in v4). Lets additive vtable
     /// functions land later (e.g. the ffi-rebuild §7 `request_cancel` hook)
     /// without another ABI bump. Must be `None` when constructed by the macro.
-    pub reserved1: Option<unsafe extern "C" fn()>,
     pub reserved2: Option<unsafe extern "C" fn()>,
     pub reserved3: Option<unsafe extern "C" fn()>,
 }
+
+/// [`LanguageRuntimeVTable::instance_concurrency`]: the instance may only be
+/// touched from the host's interpreter thread. Async foreign calls into this
+/// runtime are refused rather than offloaded (ADR-019 §5 / #202).
+///
+/// The default reading of an undeclared (`None`) slot.
+pub const INSTANCE_CONCURRENCY_INTERPRETER_THREAD_ONLY: u32 = 0;
+
+/// [`LanguageRuntimeVTable::instance_concurrency`]: every vtable entry takes
+/// `&self` on the far side and the instance is interiorly synchronized, so the
+/// host may call `invoke` from several threads at once while the interpreter
+/// thread is inside `compile` / `register_types`.
+///
+/// Declared by the Python runtime: `PythonRuntime`'s state is behind `RwLock` /
+/// `AtomicUsize`, and CPython's own GIL is released across `time.sleep` and
+/// blocking IO, which is what makes two `async fn python` calls overlap.
+pub const INSTANCE_CONCURRENCY_SHARED: u32 = 1;
+
+/// [`LanguageRuntimeVTable::instance_concurrency`]: the instance is bound to
+/// the thread that created it and must never be touched from another, even
+/// under a lock.
+///
+/// Declared by the TypeScript runtime: a V8 isolate is thread-affine. The host
+/// honours this by giving the language dedicated worker threads, each owning
+/// its own instance built with a fresh `init` (ADR-019 §5's
+/// "dedicated worker thread owning the V8 isolate" pattern). Overlap between
+/// two such calls comes from there being several workers, not from one instance
+/// being re-entered.
+pub const INSTANCE_CONCURRENCY_THREAD_AFFINE: u32 = 2;
 
 /// LSP configuration for a language runtime, returned by `get_lsp_config`.
 #[derive(Debug, Clone, PartialEq)]
@@ -1724,6 +1774,7 @@ macro_rules! language_runtime_plugin {
             language_id: $language_id:expr,
             get_lsp_config: $get_lsp_config:expr,
             generate_stubs: $generate_stubs:expr,
+            instance_concurrency: $instance_concurrency:expr,
             free_buffer: $free_buffer:expr,
             drop: $drop_fn:expr $(,)?
         } $(,)?
@@ -1742,6 +1793,7 @@ macro_rules! language_runtime_plugin {
                 language_id: $language_id,
                 get_lsp_config: $get_lsp_config,
                 generate_stubs: $generate_stubs,
+                instance_concurrency: $instance_concurrency,
                 free_buffer: $free_buffer,
                 drop: $drop_fn,
             }
@@ -1762,6 +1814,7 @@ macro_rules! language_runtime_plugin {
             language_id: $language_id:expr,
             get_lsp_config: $get_lsp_config:expr,
             generate_stubs: $generate_stubs:expr,
+            instance_concurrency: $instance_concurrency:expr,
             free_buffer: $free_buffer:expr,
             drop: $drop_fn:expr $(,)?
         } $(,)?
@@ -1780,6 +1833,7 @@ macro_rules! language_runtime_plugin {
                 language_id: $language_id,
                 get_lsp_config: $get_lsp_config,
                 generate_stubs: $generate_stubs,
+                instance_concurrency: $instance_concurrency,
                 free_buffer: $free_buffer,
                 drop: $drop_fn,
             }
@@ -1801,6 +1855,7 @@ macro_rules! language_runtime_plugin {
             language_id: $language_id:expr,
             get_lsp_config: $get_lsp_config:expr,
             generate_stubs: $generate_stubs:expr,
+            instance_concurrency: $instance_concurrency:expr,
             free_buffer: $free_buffer:expr,
             drop: $drop_fn:expr $(,)?
         } $(,)?
@@ -2017,6 +2072,15 @@ macro_rules! language_runtime_plugin {
             }
         }
 
+        /// ADR-019 §5 (#202): the extension's declared instance-concurrency
+        /// model. A constant per runtime, surfaced through the vtable so the
+        /// host reads a declaration instead of guessing from the language id.
+        unsafe extern "C" fn __shape_pc_instance_concurrency(
+            _instance: *mut ::std::ffi::c_void,
+        ) -> u32 {
+            $instance_concurrency
+        }
+
         unsafe extern "C" fn __shape_pc_free_buffer(ptr: *mut u8, len: usize) {
             let _ = ::std::panic::catch_unwind(::std::panic::AssertUnwindSafe(|| unsafe {
                 $free_buffer(ptr, len)
@@ -2054,7 +2118,10 @@ macro_rules! language_runtime_plugin {
                 // ADR-019 §1 (#196): the stub channel's return half, landed in
                 // the former `reserved0` slot — same layout, same fingerprint.
                 generate_stubs: Some(__shape_pc_generate_stubs),
-                reserved1: None,
+                // ADR-019 §5 (#202): the off-thread-invocation declaration,
+                // landed in the former `reserved1` slot — same layout, same
+                // fingerprint.
+                instance_concurrency: Some(__shape_pc_instance_concurrency),
                 reserved2: None,
                 reserved3: None,
             };

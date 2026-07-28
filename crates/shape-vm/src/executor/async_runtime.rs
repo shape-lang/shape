@@ -104,10 +104,24 @@ pub(crate) fn run_isolated_async_fn(
     config: crate::executor::VMConfig,
     granted: Option<shape_abi_v1::PermissionSet>,
     scope: Option<shape_abi_v1::ScopeConstraints>,
+    language_runtimes: std::collections::HashMap<
+        String,
+        std::sync::Arc<shape_runtime::plugins::language_runtime::PluginLanguageRuntime>,
+    >,
     func_id: u16,
 ) -> Result<TypedReturn, String> {
     let mut vm = crate::executor::VirtualMachine::new(config);
     vm.set_permissions(granted, scope);
+    // ADR-019 §5 / #202. The isolated task VM is built from scratch, so without
+    // this it has an EMPTY language-runtime registry and any `fn python` inside
+    // a spawned user `async fn` fails link-now with "no extension provides
+    // language 'python'" — a live bug, and a confusing one, because the same
+    // call works from the parent VM. The registry is `Arc`-shared extension
+    // handles, not VM state: sharing it crosses no heap value and no `!Send`
+    // field, and the extension instances behind it are the same ones the parent
+    // uses, which is what makes a foreign module's state consistent across the
+    // boundary.
+    vm.set_language_runtimes(language_runtimes);
     vm.load_program(program);
     // Populate the stdlib module-binding objects (the `time` / `math` / …
     // TypedObjects whose fields are `ModuleFn` references) WITHOUT running the

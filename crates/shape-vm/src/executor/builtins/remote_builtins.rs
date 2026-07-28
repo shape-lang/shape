@@ -963,7 +963,7 @@ impl RemoteDispatcher for ProgramRemoteDispatcher<'_, '_> {
         vm.task_scheduler.store_pending_async(
             task_id,
             crate::executor::task_scheduler::PendingAsyncTask {
-                completion: rx,
+                completion: crate::executor::task_scheduler::AsyncCompletion::Typed(rx),
                 abort,
             },
         );

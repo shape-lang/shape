@@ -109,26 +109,6 @@ impl BytecodeCompiler {
             });
         }
 
-        // ADR-019 §5 step 1 (POLY-ASYNC-TRUTH, #201) — `async` on a
-        // language-runtime foreign declaration is a compile error until offload
-        // parity (#202) lands. Placed AHEAD of the opaque-body annotation
-        // requirements below because the declaration FORM is what does not
-        // exist: telling an author to annotate parameters on a declaration that
-        // can never compile buries the load-bearing sentence. Deliberately
-        // BEHIND the #68/#74 annotation loop above, whose documented precedence
-        // this slice does not disturb.
-        //
-        // TRANSITIONAL — this block and its producer are deleted when #202
-        // lands. `grep -rn "C0932"` returns the full deletion set.
-        if let Some(rejection) = def.unsupported_async_rejection() {
-            let mut location = self.span_to_source_location(rejection.span);
-            location.hints.push(rejection.fix_hint);
-            return Err(ShapeError::SemanticError {
-                message: rejection.message,
-                location: Some(location),
-            });
-        }
-
         // Validate `out` params: only allowed on extern C, must be ptr, no const/&/default.
         self.validate_out_params(def)?;
 
@@ -376,8 +356,19 @@ impl BytecodeCompiler {
                 OpCode::PushConst,
                 Some(Operand::Const(arg_count_const)),
             ));
+            // ADR-019 §5 / #202 (POLY-ASYNC-OFFLOAD). An `async fn <language>`
+            // stub starts the invoke off-thread and returns a `Future(id)`;
+            // `await` resolves it through the same pending-task channel Shape's
+            // own async module calls use. `extern "C"` is never async (refused
+            // below), so the async opcode is reachable only from a
+            // language-runtime declaration.
+            let call_op = if def.is_async && !def.is_native_abi() {
+                OpCode::CallForeignAsync
+            } else {
+                OpCode::CallForeign
+            };
             self.emit(Instruction::new(
-                OpCode::CallForeign,
+                call_op,
                 Some(Operand::ForeignFunction(foreign_idx)),
             ));
             self.emit(Instruction::simple(OpCode::ReturnValue));
@@ -2203,45 +2194,43 @@ print(labs(0 - 42))
 }
 
 #[cfg(test)]
-mod foreign_async_truthfulness_tests {
-    //! ADR-019 §5 step 1 (POLY-ASYNC-TRUTH, issue #201) — an `async` foreign
-    //! declaration is a compile error until offload parity lands.
+mod foreign_async_offload_tests {
+    //! ADR-019 §5 (POLY-ASYNC-OFFLOAD, issue #202) — an `async` foreign
+    //! declaration compiles to a real offload.
     //!
-    //! MEASURED before the fix (this same fixture set, run red at the head of
-    //! the slice): `async fn python` / `async fn typescript` COMPILED — at
-    //! top level, in `pub` position, and nested in a `mod` block. Nothing on
-    //! the Shape side consumed the `async`: `predeclare_foreign_function`
-    //! (`shape-runtime/.../inference/items.rs:117`) resolves the declared
-    //! return annotation verbatim with no `Future<T>` wrapping, and the
-    //! executor's `CallForeign` arm
-    //! (`executor/control_flow/mod.rs:968`) forwards `is_async` to
-    //! `runtime.compile` and then invokes SYNCHRONOUSLY on the VM thread. The
-    //! declaration therefore promised concurrency the runtime never provided —
-    //! the untruthful contract ADR-019 §5 forbids.
+    //! # What this module used to be
     //!
-    //! What the rejection DOES take away, stated honestly: the extensions act
-    //! on `is_async` (python `async def` + `asyncio.run`,
-    //! `extensions/python/src/runtime.rs:203`; typescript `async function` on
-    //! a cached tokio runtime, `extensions/typescript/src/runtime.rs:90`), so
-    //! an async body's `await`s really do run today. They run to completion
-    //! while the VM thread blocks — a value, never overlap. That is why the
-    //! remedy is NOT a bare "delete `async`" for bodies that `await`; see
-    //! `async_rejection_remedy_is_not_flattened_to_bare_keyword_deletion`.
+    //! It was `foreign_async_truthfulness_tests`, #201's rejection suite: every
+    //! `async fn python` / `async fn typescript` fixture below asserted a
+    //! `[C0932]` compile error. #201 wrote that suite as #202's designated
+    //! flip-to-green control, and this is the flip. The fixtures are the same
+    //! declarations; only the expected outcome moved from "rejected, naming
+    //! issue #202" to "compiles, emits `CallForeignAsync`". The `[C0932]`
+    //! producer, its LSP validator and its diagnostic code are deleted.
     //!
-    //! **TRANSITIONAL — this whole module is #202's flip-to-green control.**
-    //! When POLY-ASYNC-OFFLOAD (issue #202) lands, the `..._is_rejected_*`
-    //! tests below flip to assert real offload behaviour (the stub returns a
-    //! future; two async foreign calls overlap) and the `[C0932]` producer is
-    //! deleted. The differential tests (sync foreign declarations unaffected)
-    //! survive that flip unchanged.
+    //! # What replaced the rejection
+    //!
+    //! The stub emitter now emits `CallForeignAsync` for a language-runtime
+    //! declaration marked `async`, so the call starts the invoke off the
+    //! interpreter thread and pushes a `Future(id)`; `await` resolves it through
+    //! the same `PendingAsyncTask` channel Shape's own async module calls use.
+    //! Type inference wraps the declared return in `Future<T>`
+    //! (`inference/items.rs::predeclare_foreign_function`) so the type says what
+    //! the call actually produces and a missing `await` is a type error.
+    //!
+    //! The differential tests (sync foreign declarations unaffected) survived
+    //! the flip unchanged, which is the point of having had them.
+    //!
+    //! `extern "C" fn` async keeps its own, older rejection: the native-ABI path
+    //! is not a language runtime, #202 does not make it async, and the two
+    //! messages must not collapse.
+    use crate::bytecode::OpCode;
     use crate::compiler::BytecodeCompiler;
 
     fn compile_err_with_location(code: &str) -> (String, Option<shape_ast::error::SourceLocation>) {
         let program = shape_ast::parser::parse_program(code).expect("parse failed");
         let mut compiler = BytecodeCompiler::new();
         compiler.allow_internal_builtins = true;
-        // `source_text` gives real span→line mapping (the span-asserting
-        // harness shape used by the sibling rejection tests above).
         compiler.source_text = Some(code.to_string());
         match compiler.compile(&program) {
             Ok(_) => panic!("expected a compile error, but the program compiled"),
@@ -2259,128 +2248,74 @@ mod foreign_async_truthfulness_tests {
         compiler.compile(&program).expect("fixture must compile")
     }
 
-    /// Tripwire (1), python — the rejection fires, carries the stable code,
-    /// and names the owning issue so the reader knows the surface is planned,
-    /// not refused.
+    fn emits(bytecode: &crate::bytecode::BytecodeProgram, opcode: OpCode) -> bool {
+        bytecode.instructions.iter().any(|i| i.opcode == opcode)
+    }
+
+    /// The flipped control, python: the exact fixture #201 rejected now
+    /// compiles, and its stub carries the offload opcode.
     #[test]
-    fn async_fn_python_is_rejected_naming_the_owning_issue() {
-        let (message, location) = compile_err_with_location(
+    fn async_fn_python_compiles_to_the_offload_opcode() {
+        let bytecode = compile_ok(
             r#"
 async fn python fetch(url: string) -> Result<string> {
     return url
 }
 "#,
         );
+        let entry = bytecode
+            .foreign_functions
+            .iter()
+            .find(|e| e.name == "fetch")
+            .expect("the async declaration registers a foreign entry");
+        assert_eq!(entry.language, "python");
+        assert!(entry.is_async, "the entry carries the async declaration");
         assert!(
-            message.contains("[C0932]"),
-            "the rejection carries its stable code, got: {message}"
-        );
-        assert!(
-            message.contains("`async fn python fetch`"),
-            "the rejection renders the language and the function name, got: {message}"
-        );
-        assert!(
-            message.contains("issue #202"),
-            "the rejection names the owning issue, got: {message}"
-        );
-        assert!(
-            message.contains("ADR-019 §5"),
-            "the rejection cites the binding rule, got: {message}"
-        );
-        let location = location.expect("the rejection carries a source location");
-        assert_eq!(
-            location.line, 2,
-            "the rejection anchors at the declaration, got line {}",
-            location.line
-        );
-        assert!(
-            location
-                .hints
-                .iter()
-                .any(|h| h.contains("remove the `async` keyword")),
-            "the rejection offers the fix-it, got hints: {:?}",
-            location.hints
+            emits(&bytecode, OpCode::CallForeignAsync),
+            "an async foreign stub must emit CallForeignAsync — emitting CallForeign would \
+             put the invoke back on the interpreter thread, which is the untruthful contract \
+             ADR-019 §5 forbids"
         );
     }
 
-    /// REMEDY WORDING IS LOAD-BEARING (the S2b precedent in the sibling
-    /// annotation-rejection module). "Delete `async`, it changes nothing" is
-    /// FALSE for a body that `await`s: the python extension compiles an async
-    /// declaration to `async def` + `asyncio.run(...)` and the typescript one
-    /// to an `async function`, so the keyword is what makes an `await` inside
-    /// the body legal at all. Dropping it from such a body produces a foreign
-    /// syntax error, not identical semantics. The hint must keep saying so.
+    /// The flipped control, typescript.
     #[test]
-    fn async_rejection_remedy_is_not_flattened_to_bare_keyword_deletion() {
-        let (_, location) = compile_err_with_location(
-            r#"
-async fn python fetch(url: string) -> Result<string> {
-    return url
-}
-"#,
-        );
-        let hint = location
-            .expect("location")
-            .hints
-            .first()
-            .cloned()
-            .expect("the rejection carries a hint");
-        assert!(
-            hint.contains("does not") && hint.contains("await"),
-            "the remedy must fence the semantics-preserving claim on the body not awaiting, got: \
-             {hint}"
-        );
-        assert!(
-            hint.contains("asyncio.run"),
-            "the remedy must tell an awaiting python body what to do instead, got: {hint}"
-        );
-        assert!(
-            hint.contains("#202"),
-            "the remedy must scope itself to the transitional window, got: {hint}"
-        );
-    }
-
-    /// Tripwire (1), typescript — same rejection, language rendered.
-    #[test]
-    fn async_fn_typescript_is_rejected_naming_the_owning_issue() {
-        let (message, _) = compile_err_with_location(
+    fn async_fn_typescript_compiles_to_the_offload_opcode() {
+        let bytecode = compile_ok(
             r#"
 async fn typescript fetch(url: string) -> Result<string> {
     return url
 }
 "#,
         );
-        assert!(
-            message.contains("[C0932]") && message.contains("issue #202"),
-            "got: {message}"
-        );
-        assert!(
-            message.contains("`async fn typescript fetch`"),
-            "the rejection renders the typescript language tag, got: {message}"
-        );
+        let entry = bytecode
+            .foreign_functions
+            .iter()
+            .find(|e| e.name == "fetch")
+            .expect("the async declaration registers a foreign entry");
+        assert_eq!(entry.language, "typescript");
+        assert!(entry.is_async);
+        assert!(emits(&bytecode, OpCode::CallForeignAsync));
     }
 
-    /// Tripwire (1), export position — `pub async fn python` reaches the same
-    /// chokepoint (`ExportItem::ForeignFunction` → `compile_foreign_function`).
+    /// Export position reaches the same chokepoint
+    /// (`ExportItem::ForeignFunction` → `compile_foreign_function`).
     #[test]
-    fn pub_async_fn_python_is_rejected() {
-        let (message, _) = compile_err_with_location(
+    fn pub_async_fn_python_compiles_to_the_offload_opcode() {
+        let bytecode = compile_ok(
             r#"
 pub async fn python fetch(url: string) -> Result<string> {
     return url
 }
 "#,
         );
-        assert!(
-            message.contains("[C0932]"),
-            "the export position must reach the same rejection, got: {message}"
-        );
+        assert!(emits(&bytecode, OpCode::CallForeignAsync));
     }
 
-    /// Tripwire (1), module-nested position.
+    /// Module-nested position.
     #[test]
-    fn async_fn_python_nested_in_a_mod_block_is_rejected() {
-        let (message, _) = compile_err_with_location(
+    fn async_fn_python_nested_in_a_mod_block_compiles_to_the_offload_opcode() {
+        let bytecode = compile_ok(
             r#"
 mod net {
     pub async fn python fetch(url: string) -> Result<string> {
@@ -2389,26 +2324,50 @@ mod net {
 }
 "#,
         );
-        assert!(
-            message.contains("[C0932]"),
-            "the module-nested position must reach the same rejection, got: {message}"
-        );
+        assert!(emits(&bytecode, OpCode::CallForeignAsync));
     }
 
-    /// The declaration form is rejected before the opaque-body annotation
-    /// requirements are, so an author who also omitted annotations is told the
-    /// load-bearing thing first — the form itself does not exist.
+    /// The `[C0932]` code is retired with its producer. Nothing on the async
+    /// path may still mint it — a stale rejection surviving somewhere upstream
+    /// would make the surface work in one position and refuse in another.
     #[test]
-    fn async_rejection_precedes_the_missing_annotation_errors() {
+    fn no_async_foreign_position_still_mints_c0932() {
+        // `compile_ok` panics with the compiler's own error text, so a
+        // surviving `[C0932]` producer fails this test AND names itself.
+        // Deliberately routed through the shared helper rather than a private
+        // compiler setup: a fourth internal-builtin opt-in site in this file
+        // would raise the #133 legacy census, which is monotonic non-increasing.
+        for fixture in [
+            "async fn python fetch(url: string) -> Result<string> { return url }",
+            "async fn typescript fetch(url: string) -> Result<string> { return url }",
+            "pub async fn python fetch(url: string) -> Result<string> { return url }",
+        ] {
+            let bytecode = compile_ok(fixture);
+            assert!(
+                emits(&bytecode, OpCode::CallForeignAsync),
+                "every async foreign position must reach the offload emitter: {fixture}"
+            );
+        }
+    }
+
+    /// The opaque-body annotation requirements are unchanged: an async foreign
+    /// declaration with unannotated parameters is still an error, and now it is
+    /// the RIGHT error. Before the flip, the `[C0932]` form rejection ran first
+    /// and buried it.
+    #[test]
+    fn async_foreign_still_requires_its_opaque_body_annotations() {
         let (message, _) = compile_err_with_location("async fn python fetch(url) { return url }");
         assert!(
-            message.contains("[C0932]"),
-            "the unsupported-form rejection wins over the annotation errors, got: {message}"
+            !message.contains("C0932"),
+            "the form is supported now; the author must hear about the annotations, got: \
+             {message}"
         );
     }
 
     /// Tripwire (2), differential — a sync `fn python` declaration compiles
-    /// exactly as before, and still registers its foreign entry.
+    /// exactly as before, registers its foreign entry, and emits the
+    /// SYNCHRONOUS opcode. The last clause is what stops the offload from
+    /// leaking onto calls that never asked for it.
     #[test]
     fn sync_fn_python_is_unaffected() {
         let bytecode = compile_ok(
@@ -2425,6 +2384,11 @@ fn python add(a: int, b: int) -> Result<int> {
             .expect("sync fn python still registers a foreign entry");
         assert_eq!(entry.language, "python");
         assert!(!entry.is_async, "the sync declaration stays sync");
+        assert!(emits(&bytecode, OpCode::CallForeign));
+        assert!(
+            !emits(&bytecode, OpCode::CallForeignAsync),
+            "a sync declaration must keep the synchronous opcode"
+        );
     }
 
     /// Tripwire (2), differential — same for typescript.
@@ -2444,6 +2408,8 @@ fn typescript add(a: int, b: int) -> Result<int> {
             .expect("sync fn typescript still registers a foreign entry");
         assert_eq!(entry.language, "typescript");
         assert!(!entry.is_async);
+        assert!(emits(&bytecode, OpCode::CallForeign));
+        assert!(!emits(&bytecode, OpCode::CallForeignAsync));
     }
 
     /// Tripwire (2), differential — the sync path through the module-nested and
@@ -2463,18 +2429,37 @@ mod net {
 }
 "#,
         );
-        // Module-nested declarations register under their qualified path.
         for name in ["top", "net::nested"] {
             assert!(
                 bytecode.foreign_functions.iter().any(|e| e.name == name),
                 "sync foreign fn `{name}` must still register"
             );
         }
+        assert!(!emits(&bytecode, OpCode::CallForeignAsync));
+    }
+
+    /// A program mixing both flavours keeps them apart — the emitter's choice is
+    /// per declaration, not per program.
+    #[test]
+    fn sync_and_async_foreign_declarations_coexist_with_distinct_opcodes() {
+        let bytecode = compile_ok(
+            r#"
+fn python add(a: int, b: int) -> Result<int> {
+    return a + b
+}
+
+async fn python fetch(url: string) -> Result<string> {
+    return url
+}
+"#,
+        );
+        assert!(emits(&bytecode, OpCode::CallForeign));
+        assert!(emits(&bytecode, OpCode::CallForeignAsync));
     }
 
     /// `extern "C" fn` async keeps its OWN, older rejection — the native-ABI
-    /// path is not a language runtime and is not what #202 will make work, so
-    /// the two must not collapse into one message.
+    /// path is not a language runtime and #202 does not make it async, so the
+    /// two must not collapse into one message.
     #[test]
     fn extern_c_async_keeps_its_distinct_native_abi_rejection() {
         let (message, _) =
@@ -2484,9 +2469,9 @@ mod net {
             "extern C async keeps its own sentence, got: {message}"
         );
         assert!(
-            !message.contains("[C0932]"),
-            "the native-ABI rejection must not be re-labelled as the foreign-async one, got: \
-             {message}"
+            !message.contains("C0932"),
+            "the native-ABI rejection must not be re-labelled with the retired foreign-async \
+             code, got: {message}"
         );
     }
 }
@@ -2689,11 +2674,14 @@ fn python unit_return(a: int) -> Result<none> {
         );
     }
 
-    /// The rejection must not swallow the async one: an `async fn python` with
-    /// an unmappable type reports [C0932] first, because the declaration FORM
-    /// is what does not exist.
+    /// #202 retired the `[C0932]` form rejection that used to run ahead of this
+    /// one, so an `async fn python` with an unmappable parameter now reports the
+    /// TYPE problem — which is the only thing still wrong with it. The
+    /// precedence question this test used to guard is gone with the rejection;
+    /// what it guards now is that removing that gate did not leave the async
+    /// path with no type check at all.
     #[test]
-    fn async_rejection_still_precedes_the_marshal_type_rejection() {
+    fn async_foreign_declarations_still_reach_the_marshal_type_rejection() {
         let (message, _) = compile_err_with_location(
             r#"
 async fn python analyze(data: DataTable) -> Result<number> {
@@ -2702,8 +2690,13 @@ async fn python analyze(data: DataTable) -> Result<number> {
 "#,
         );
         assert!(
-            message.contains("[C0932]"),
-            "the async rejection keeps its precedence, got: {message}"
+            message.contains("[C0933]"),
+            "an async declaration is checked against the marshaling table like any other, \
+             got: {message}"
+        );
+        assert!(
+            !message.contains("C0932"),
+            "the retired code must not reappear, got: {message}"
         );
     }
 }

@@ -24,7 +24,7 @@
     ]
   },
   "step": "docs/design/typed-comptime/adr011-012-execution-rulings.md — ten required steps, step 4",
-  "source_revision": "8b9a9fbc5075b86c448ca01caa114c633f8f6ca9",
+  "source_revision": "fa3f9a8446a545fb950d8cf1a41c404987d4c32a",
   "regenerate_with": "node scripts/generate-adr011-012-legacy-baselines.mjs --ticket 134",
   "check_with": "node scripts/check-adr011-012-legacy-baselines.mjs --ticket 134",
   "direction_rule": "Monotonic non-increasing. A set count may fall (migration progress) and may never rise. A new owner path is growth even when the total is unchanged, because it is a new surface carrying old authority.",

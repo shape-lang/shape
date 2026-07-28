@@ -644,7 +644,8 @@ impl VirtualMachine {
         self.task_scheduler.store_pending_async(
             task_id,
             crate::executor::task_scheduler::PendingAsyncTask {
-                completion: rx,
+                completion:
+                    crate::executor::task_scheduler::AsyncCompletion::Typed(rx),
                 abort: Some(handle.abort_handle()),
             },
         );
@@ -729,14 +730,29 @@ impl VirtualMachine {
     fn project_and_cache_pending_async(
         &mut self,
         task_id: u64,
-        body_result: Result<shape_runtime::typed_module_exports::TypedReturn, String>,
+        outcome: crate::executor::task_scheduler::AsyncTaskOutcome,
     ) -> Result<shape_value::KindedSlot, VMError> {
-        let typed_return = body_result.map_err(VMError::RuntimeError)?;
-        let slot = project_typed_return(
-            &self.builtin_schemas,
-            &self.program.type_schema_registry,
-            typed_return,
-        )?;
+        use crate::executor::task_scheduler::AsyncTaskOutcome;
+        let slot = match outcome {
+            AsyncTaskOutcome::Typed(body_result) => {
+                let typed_return = body_result.map_err(VMError::RuntimeError)?;
+                project_typed_return(
+                    &self.builtin_schemas,
+                    &self.program.type_schema_registry,
+                    typed_return,
+                )?
+            }
+            // ADR-019 §5 / #202. The offloaded invoke returned raw msgpack; the
+            // wrap into the user's `Result<T, string>` happens HERE, on the
+            // interpreter thread, through the same `wrap_dynamic_result` the
+            // synchronous foreign path uses. One unmarshal implementation means
+            // a sync and an async foreign call cannot disagree about what the
+            // extension returned.
+            AsyncTaskOutcome::Foreign {
+                foreign_idx,
+                result,
+            } => self.unmarshal_offloaded_foreign_result(foreign_idx, result)?,
+        };
         // Cache a clone so the scheduler entry and the returned slot each own
         // an independent share (same discipline as `resolve_spawned_task`).
         crate::executor::vm_impl::stack::clone_with_kind(slot.raw(), slot.kind());

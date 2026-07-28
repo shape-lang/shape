@@ -11,6 +11,8 @@ use crate::marshaling;
 use shape_abi_v1::{LanguageRuntimeLspConfig, PluginError};
 use std::collections::HashMap;
 use std::ffi::c_void;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, RwLock};
 
 /// Opaque handle to a compiled Python function.
 pub struct CompiledFunction {
@@ -56,15 +58,32 @@ pub struct CompiledFunction {
 }
 
 /// The Python runtime instance. One per `init()` call.
+///
+/// ADR-019 §5 / #202. Every method takes `&self` and every field is interiorly
+/// synchronized. The host holds this instance behind a `Send + Sync` pointer
+/// and, since #202, calls `invoke` from blocking-pool worker threads while the
+/// interpreter thread may be inside `compile` / `register_types` — so a method
+/// taking `&mut self` through that shared pointer would be an aliasing
+/// violation on a live path (the hazard #196's `register_types` exposure note
+/// recorded). The cure is structural: `&mut *(instance as *mut PythonRuntime)`
+/// no longer appears anywhere in this extension.
+///
+/// Guards are never held across a Python call. `invoke` clones the
+/// `Arc<CompiledFunction>` out under a short read guard and releases it before
+/// attaching the GIL, so a foreign body that re-enters Shape and compiles
+/// another `fn python` cannot deadlock against its own invoke.
 pub struct PythonRuntime {
     /// Compiled function handles, keyed by an incrementing ID.
-    functions: HashMap<usize, CompiledFunction>,
+    ///
+    /// Values are `Arc` so a caller can take one out of the map and drop the
+    /// guard before running Python with it.
+    functions: RwLock<HashMap<usize, Arc<CompiledFunction>>>,
     /// Next handle ID.
-    next_id: usize,
+    next_id: AtomicUsize,
     /// The `.pyi` document generated from the contract most recently delivered
     /// through `register_types` (ADR-019 §1 / #196). Empty until the host
     /// delivers one.
-    stub_document: String,
+    stub_document: RwLock<String>,
 }
 
 impl PythonRuntime {
@@ -83,9 +102,9 @@ impl PythonRuntime {
         }
 
         Ok(PythonRuntime {
-            functions: HashMap::new(),
-            next_id: 1,
-            stub_document: String::new(),
+            functions: RwLock::new(HashMap::new()),
+            next_id: AtomicUsize::new(1),
+            stub_document: RwLock::new(String::new()),
         })
     }
 
@@ -181,22 +200,37 @@ impl PythonRuntime {
     /// A payload from a host speaking a newer contract version is refused
     /// rather than guessed at — a misread contract yields a confidently wrong
     /// stub, which is worse than none.
-    pub fn register_types(&mut self, types_msgpack: &[u8]) -> Result<(), String> {
+    pub fn register_types(&self, types_msgpack: &[u8]) -> Result<(), String> {
         if types_msgpack.is_empty() {
-            self.stub_document.clear();
+            self.write_stub_document(String::new());
             return Ok(());
         }
         let contract: shape_abi_v1::foreign_types::ForeignContractExport =
             rmp_serde::from_slice(types_msgpack)
                 .map_err(|e| format!("register_types: undecodable contract payload: {e}"))?;
         contract.check_version()?;
-        self.stub_document = crate::stubs::render_stub(&contract);
+        self.write_stub_document(crate::stubs::render_stub(&contract));
         Ok(())
     }
 
+    fn write_stub_document(&self, doc: String) {
+        let mut guard = self
+            .stub_document
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        *guard = doc;
+    }
+
     /// The `.pyi` document generated from the last delivered contract.
-    pub fn stub_document(&self) -> &str {
-        &self.stub_document
+    ///
+    /// Returns an owned copy: the document lives behind the interior lock that
+    /// keeps this runtime `&self`-only (see the type doc), so there is no
+    /// borrow to hand out.
+    pub fn stub_document(&self) -> String {
+        self.stub_document
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
     }
 
     /// Compile a foreign function body into a callable Python function.
@@ -218,7 +252,7 @@ impl PythonRuntime {
     ///
     /// Returns a handle that can be passed to `invoke()`.
     pub fn compile(
-        &mut self,
+        &self,
         name: &str,
         source: &str,
         param_names: &[String],
@@ -264,8 +298,7 @@ impl PythonRuntime {
             format!("def __shape_fn__({params_str}) -> {return_hint}:\n{indented_body}")
         };
 
-        let id = self.next_id;
-        self.next_id += 1;
+        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
 
         let func = CompiledFunction {
             name: name.to_string(),
@@ -279,7 +312,10 @@ impl PythonRuntime {
             module_name: format!("shape_foreign_{name}_{id}"),
         };
 
-        self.functions.insert(id, func);
+        self.functions
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(id, Arc::new(func));
 
         // The handle is the function ID cast to a pointer.
         Ok(id as *mut c_void)
@@ -288,12 +324,25 @@ impl PythonRuntime {
     /// Invoke a previously compiled function with msgpack-encoded arguments.
     ///
     /// Returns msgpack-encoded result on success.
+    ///
+    /// #202: callable from any thread, concurrently. The handle lookup takes a
+    /// read guard that is released before the GIL is attached, so two overlapped
+    /// `async fn python` invokes never contend on host state — only on the GIL,
+    /// which Python releases across `time.sleep` and blocking IO.
     pub fn invoke(&self, handle: *mut c_void, args_msgpack: &[u8]) -> Result<Vec<u8>, String> {
         let id = handle as usize;
-        let func = self
-            .functions
-            .get(&id)
-            .ok_or_else(|| format!("invalid function handle: {id}"))?;
+        let func = {
+            let functions = self
+                .functions
+                .read()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            Arc::clone(
+                functions
+                    .get(&id)
+                    .ok_or_else(|| format!("invalid function handle: {id}"))?,
+            )
+        };
+        let func = &*func;
 
         #[cfg(feature = "pyo3")]
         {
@@ -382,10 +431,26 @@ impl PythonRuntime {
         }
     }
 
+    /// The compiled function behind a live handle, if any.
+    ///
+    /// Returns an `Arc` rather than a borrow so the interior lock is released
+    /// before the caller uses it (see the type doc).
+    pub fn compiled(&self, handle: *mut c_void) -> Option<Arc<CompiledFunction>> {
+        self.functions
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get(&(handle as usize))
+            .map(Arc::clone)
+    }
+
     /// Dispose a compiled function handle, freeing associated resources.
-    pub fn dispose_function(&mut self, handle: *mut c_void) {
+    pub fn dispose_function(&self, handle: *mut c_void) {
         let id = handle as usize;
-        let removed = self.functions.remove(&id);
+        let removed = self
+            .functions
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(&id);
 
         // Each handle owns a module in `sys.modules` (see
         // `CompiledFunction::module_name`); dropping the handle without
@@ -456,7 +521,7 @@ pub unsafe extern "C" fn python_register_types(
     if instance.is_null() {
         return PluginError::NotInitialized as i32;
     }
-    let runtime = unsafe { &mut *(instance as *mut PythonRuntime) };
+    let runtime = unsafe { &*(instance as *const PythonRuntime) };
     let types_slice = if types_msgpack.is_null() || types_len == 0 {
         &[]
     } else {
@@ -514,7 +579,7 @@ pub unsafe extern "C" fn python_compile(
     if instance.is_null() {
         return std::ptr::null_mut();
     }
-    let runtime = unsafe { &mut *(instance as *mut PythonRuntime) };
+    let runtime = unsafe { &*(instance as *const PythonRuntime) };
 
     let name_str = match str_from_raw(name, name_len) {
         Some(s) => s,
@@ -657,7 +722,7 @@ pub unsafe extern "C" fn python_dispose_function(instance: *mut c_void, handle: 
     if instance.is_null() {
         return;
     }
-    let runtime = unsafe { &mut *(instance as *mut PythonRuntime) };
+    let runtime = unsafe { &*(instance as *const PythonRuntime) };
     runtime.dispose_function(handle);
 }
 
@@ -800,7 +865,7 @@ mod module_setup_tests {
     use super::*;
 
     fn runtime_with(body: &str, name: &str) -> (PythonRuntime, *mut c_void) {
-        let mut runtime = PythonRuntime::new(&[]).expect("runtime initializes");
+        let runtime = PythonRuntime::new(&[]).expect("runtime initializes");
         let handle = runtime
             .compile(name, body, &[], &[], "Result<int>", false)
             .expect("compile succeeds");
@@ -843,7 +908,7 @@ mod module_setup_tests {
     /// clobbered another's, and this test read 2 where it should read 1.
     #[test]
     fn two_functions_in_one_runtime_do_not_share_a_module() {
-        let mut runtime = PythonRuntime::new(&[]).expect("runtime initializes");
+        let runtime = PythonRuntime::new(&[]).expect("runtime initializes");
         let first = runtime
             .compile("counter_a", COUNTING_BODY, &[], &[], "Result<int>", false)
             .expect("first compiles");
@@ -865,11 +930,11 @@ mod module_setup_tests {
     /// host leaks one `sys.modules` entry per compiled foreign function.
     #[test]
     fn disposing_a_handle_removes_its_module() {
-        let mut runtime = PythonRuntime::new(&[]).expect("runtime initializes");
+        let runtime = PythonRuntime::new(&[]).expect("runtime initializes");
         let handle = runtime
             .compile("disposable", COUNTING_BODY, &[], &[], "Result<int>", false)
             .expect("compiles");
-        let module_name = runtime.functions[&(handle as usize)].module_name.clone();
+        let module_name = runtime.compiled(handle).expect("handle is live").module_name.clone();
         invoke_int(&runtime, handle);
 
         let registered = |name: &str| -> bool {
@@ -893,22 +958,22 @@ mod module_setup_tests {
     #[test]
     fn the_compiled_callable_is_resolved_once_and_reused() {
         let (runtime, handle) = runtime_with("return 1\n", "identity");
-        let id = handle as usize;
 
+        let compiled = runtime.compiled(handle).expect("handle is live");
         assert!(
-            runtime.functions[&id].compiled_fn.get().is_none(),
+            compiled.compiled_fn.get().is_none(),
             "nothing is compiled before the first call — compilation stays lazy"
         );
 
         invoke_int(&runtime, handle);
-        let first = runtime.functions[&id]
+        let first = compiled
             .compiled_fn
             .get()
             .expect("the first call populates the cache")
             .as_ptr();
 
         invoke_int(&runtime, handle);
-        let second = runtime.functions[&id]
+        let second = compiled
             .compiled_fn
             .get()
             .expect("still populated")
@@ -970,7 +1035,7 @@ mod contract_wire_tests {
         let contract = sample_contract("python");
         let bytes = rmp_serde::to_vec_named(&contract).expect("encode as the host does");
 
-        let mut runtime = PythonRuntime::new(&[]).expect("runtime initializes");
+        let runtime = PythonRuntime::new(&[]).expect("runtime initializes");
         runtime
             .register_types(&bytes)
             .expect("the extension decodes the host's payload");
@@ -986,7 +1051,7 @@ mod contract_wire_tests {
         contract.version = 999;
         let bytes = rmp_serde::to_vec_named(&contract).expect("encode");
 
-        let mut runtime = PythonRuntime::new(&[]).expect("runtime initializes");
+        let runtime = PythonRuntime::new(&[]).expect("runtime initializes");
         let err = runtime
             .register_types(&bytes)
             .expect_err("an unknown contract version must be refused");
@@ -999,7 +1064,7 @@ mod contract_wire_tests {
 
     #[test]
     fn an_empty_payload_clears_the_stub() {
-        let mut runtime = PythonRuntime::new(&[]).expect("runtime initializes");
+        let runtime = PythonRuntime::new(&[]).expect("runtime initializes");
         let bytes = rmp_serde::to_vec_named(&sample_contract("python")).expect("encode");
         runtime.register_types(&bytes).expect("accepted");
         assert!(!runtime.stub_document().is_empty());

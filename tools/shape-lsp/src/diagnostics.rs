@@ -1623,64 +1623,6 @@ pub fn validate_foreign_function_types(program: &Program, source: &str) -> Vec<D
     diagnostics
 }
 
-/// ADR-019 §5 step 1 (POLY-ASYNC-TRUTH, issue #201) — surface the `[C0932]`
-/// foreign-async rejection in the editor.
-///
-/// The compiler refuses `async fn python` / `async fn typescript` at
-/// `compile_foreign_function`. Without this, an editor would show a clean file
-/// for a program `shape run` rejects — the editor being untruthful about the
-/// same surface the rejection exists to make truthful.
-///
-/// Uses `ForeignFunctionDef::unsupported_async_rejection()`, the producer the
-/// compiler uses, so the two texts and the two codes cannot drift apart.
-///
-/// TRANSITIONAL — deleted with the producer when issue #202 lands.
-pub fn validate_foreign_function_async(program: &Program, source: &str) -> Vec<Diagnostic> {
-    fn collect<'a>(items: &'a [Item], out: &mut Vec<&'a shape_ast::ast::ForeignFunctionDef>) {
-        for item in items {
-            match item {
-                Item::ForeignFunction(f, _) => out.push(f),
-                Item::Export(export, _) => {
-                    if let shape_ast::ast::ExportItem::ForeignFunction(f) = &export.item {
-                        out.push(f);
-                    }
-                }
-                // The compiler's chokepoint reaches module-nested foreign
-                // declarations (`compile_module_decl` → `compile_item_*`), so
-                // the editor must too, or the two disagree inside `mod`.
-                Item::Module(module, _) => collect(&module.items, out),
-                _ => {}
-            }
-        }
-    }
-
-    let mut foreign_fns = Vec::new();
-    collect(&program.items, &mut foreign_fns);
-
-    foreign_fns
-        .into_iter()
-        .filter_map(|f| f.unsupported_async_rejection().map(|r| (f, r)))
-        .map(|(f, rejection)| {
-            let range = if rejection.span.is_dummy() {
-                span_to_range(source, &f.name_span)
-            } else {
-                span_to_range(source, &rejection.span)
-            };
-            Diagnostic {
-                range,
-                severity: Some(DiagnosticSeverity::ERROR),
-                code: Some(NumberOrString::String("C0932".to_string())),
-                code_description: None,
-                source: Some("shape".to_string()),
-                message: format!("{}\n\nhelp: {}", rejection.message, rejection.fix_hint),
-                related_information: None,
-                tags: None,
-                data: None,
-            }
-        })
-        .collect()
-}
-
 // ─── MIR borrow analysis → LSP diagnostics ─────────────────────────────────
 //
 // The compiler already converts MIR `BorrowError`/`MutabilityError` into
@@ -2228,74 +2170,36 @@ mod tests {
         );
     }
 
-    // ── ADR-019 §5 (#201) — foreign-async rejection, editor side ───────────
+    // ── ADR-019 §5 (#202) — foreign async is a real surface, editor side ──
     //
-    // TRANSITIONAL: these flip to green (zero diagnostics) when issue #202
-    // lands and the producer is deleted.
+    // The `[C0932]` rejection and its `validate_foreign_function_async`
+    // validator are DELETED: `async fn python` / `async fn typescript` compile
+    // to a real off-thread offload (POLY-ASYNC-OFFLOAD). The four tests that
+    // asserted an editor error here went with them — an editor that still
+    // flagged the declaration would be the untruthful surface the deleted
+    // validator existed to prevent, only inverted.
+    //
+    // What survives is the claim that matters after the flip: the editor
+    // reports NOTHING about `async` on a foreign declaration, in every position
+    // the deleted validator used to cover.
 
     #[test]
-    fn test_async_foreign_fn_is_an_editor_error_naming_the_owning_issue() {
+    fn test_async_foreign_declarations_produce_no_editor_diagnostics() {
         use shape_ast::parser::parse_program;
 
-        let source = "async fn python fetch(url: string) -> Result<string> {\n    return url\n}\n";
-        let program = parse_program(source).unwrap();
-        let diagnostics = validate_foreign_function_async(&program, source);
-        assert_eq!(diagnostics.len(), 1, "got: {diagnostics:?}");
-        let d = &diagnostics[0];
-        assert_eq!(
-            d.code,
-            Some(NumberOrString::String("C0932".to_string())),
-            "the editor must carry the compiler's stable code"
-        );
-        assert_eq!(d.severity, Some(DiagnosticSeverity::ERROR));
-        assert!(
-            d.message.contains("issue #202") && d.message.contains("help:"),
-            "the editor message carries the owning issue and the fix-it, got: {}",
-            d.message
-        );
-        assert_eq!(d.range.start.line, 0, "anchored at the declaration line");
-    }
-
-    #[test]
-    fn test_async_foreign_fn_nested_in_a_mod_is_an_editor_error() {
-        use shape_ast::parser::parse_program;
-
-        // The compiler reaches module-nested foreign declarations; so must the
-        // editor, or `shape run` and the editor disagree inside `mod`.
-        let source = "mod net {\n    pub async fn python fetch(u: string) -> Result<string> {\n        return u\n    }\n}\n";
-        let program = parse_program(source).unwrap();
-        let diagnostics = validate_foreign_function_async(&program, source);
-        assert_eq!(
-            diagnostics.len(),
-            1,
-            "module-nested async foreign fn must be flagged, got: {diagnostics:?}"
-        );
-    }
-
-    #[test]
-    fn test_sync_foreign_fn_produces_no_async_diagnostic() {
-        use shape_ast::parser::parse_program;
-
-        let source = "fn python add(a: int, b: int) -> Result<int> {\n    return a + b\n}\n";
-        let program = parse_program(source).unwrap();
-        assert!(
-            validate_foreign_function_async(&program, source).is_empty(),
-            "sync foreign declarations are unaffected"
-        );
-    }
-
-    #[test]
-    fn test_async_extern_c_is_not_claimed_by_the_foreign_async_diagnostic() {
-        use shape_ast::parser::parse_program;
-
-        // Native ABI is not a language runtime and keeps its own compiler-side
-        // rejection; C0932 must not claim it.
-        let source = r#"async extern "C" fn labs(x: int) -> int from "c";"#;
-        let program = parse_program(source).unwrap();
-        assert!(
-            validate_foreign_function_async(&program, source).is_empty(),
-            "extern C async is out of C0932's scope"
-        );
+        for source in [
+            "async fn python fetch(url: string) -> Result<string> {\n    return url\n}\n",
+            "async fn typescript fetch(url: string) -> Result<string> {\n    return url\n}\n",
+            "mod net {\n    pub async fn python fetch(u: string) -> Result<string> {\n        return u\n    }\n}\n",
+        ] {
+            let program = parse_program(source).unwrap();
+            let diagnostics = validate_foreign_function_types(&program, source);
+            assert!(
+                diagnostics.is_empty(),
+                "an async foreign declaration with mappable types is clean in the editor, \
+                 got: {diagnostics:?}"
+            );
+        }
     }
 
     #[test]

@@ -70,15 +70,74 @@ type Kinded = (u64, NativeKind);
 /// `race`/`any` losers and `async scope` exit genuinely cancel the underlying
 /// tokio task rather than let it run to completion unobserved.
 pub struct PendingAsyncTask {
-    /// Delivers the async body result from the worker thread. Projection of
-    /// `TypedReturn` into a `KindedSlot` happens on the interpreter thread
-    /// (it needs the VM's schema registry), so the channel carries the raw
-    /// `TypedReturn` rather than a projected kinded pair.
-    pub completion: Receiver<Result<TypedReturn, String>>,
+    /// Delivers the async body result from the worker thread. Projection into a
+    /// `KindedSlot` happens on the interpreter thread (it needs the VM's schema
+    /// registry), so the channel carries the body's own payload rather than a
+    /// projected kinded pair.
+    pub completion: AsyncCompletion,
     /// Cancels an abortable in-flight tokio task. Detached remote socket
     /// workers use `None`; their receiver-side cancellation is driven by the
     /// companion hook.
+    ///
+    /// For an offloaded foreign invoke this aborts the blocking-pool task, which
+    /// does NOT interrupt a closure that has already started: the foreign body
+    /// runs to completion and its result is discarded. It is a discard, never a
+    /// confirmation that the foreign runtime stopped (ADR-019 §5 / #202).
     pub abort: Option<AbortHandle>,
+}
+
+/// The completion channel of an in-flight async task, by what crosses back.
+///
+/// Two payloads share one pending-task table so `await`, `join`, `race` and
+/// `any` need no knowledge of which kind of body they are collecting.
+pub enum AsyncCompletion {
+    /// A module or user async body: an owned, `Send` `TypedReturn`.
+    Typed(Receiver<Result<TypedReturn, String>>),
+    /// An `async fn <language>` foreign invoke (ADR-019 §5 / #202): the
+    /// extension's raw msgpack return payload. Unmarshalling is deferred to the
+    /// interpreter thread, which owns the schema registry and the declared
+    /// return type that `foreign_idx` names.
+    Foreign {
+        foreign_idx: usize,
+        bytes: Receiver<Result<Vec<u8>, String>>,
+    },
+}
+
+/// A completed async body, still in its own payload form.
+pub enum AsyncTaskOutcome {
+    Typed(Result<TypedReturn, String>),
+    Foreign {
+        foreign_idx: usize,
+        result: Result<Vec<u8>, String>,
+    },
+}
+
+impl AsyncCompletion {
+    /// Block until the body completes.
+    pub fn recv(&self) -> Result<AsyncTaskOutcome, std::sync::mpsc::RecvError> {
+        match self {
+            Self::Typed(rx) => rx.recv().map(AsyncTaskOutcome::Typed),
+            Self::Foreign { foreign_idx, bytes } => {
+                bytes.recv().map(|result| AsyncTaskOutcome::Foreign {
+                    foreign_idx: *foreign_idx,
+                    result,
+                })
+            }
+        }
+    }
+
+    /// Poll without blocking (the `race` / `any` first-completion spin).
+    pub fn try_recv(&self) -> Result<AsyncTaskOutcome, std::sync::mpsc::TryRecvError> {
+        match self {
+            Self::Typed(rx) => rx.try_recv().map(AsyncTaskOutcome::Typed),
+            Self::Foreign { foreign_idx, bytes } => {
+                bytes.try_recv().map(|result| AsyncTaskOutcome::Foreign {
+                    foreign_idx: *foreign_idx,
+                    result,
+                })
+            }
+        }
+    }
 }
 
 /// Completion status of a spawned task.
@@ -241,7 +300,7 @@ impl TaskScheduler {
     pub fn peek_pending_async_try_recv(
         &mut self,
         task_id: u64,
-    ) -> Option<Result<Result<TypedReturn, String>, std::sync::mpsc::TryRecvError>> {
+    ) -> Option<Result<AsyncTaskOutcome, std::sync::mpsc::TryRecvError>> {
         self.pending_async
             .get_mut(&task_id)
             .map(|task| task.completion.try_recv())
@@ -765,7 +824,7 @@ mod tests {
         sched.store_pending_async(
             12,
             PendingAsyncTask {
-                completion: rx,
+                completion: crate::executor::task_scheduler::AsyncCompletion::Typed(rx),
                 abort: None,
             },
         );

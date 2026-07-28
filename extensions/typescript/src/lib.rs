@@ -54,6 +54,11 @@ shape_abi_v1::language_runtime_plugin! {
         language_id: runtime::ts_language_id,
         get_lsp_config: runtime::ts_get_lsp_config,
         generate_stubs: runtime::ts_generate_stubs,
+        // ADR-019 §5 (#202): a V8 isolate is bound to the thread that created
+        // it. The host honours this by running `async fn typescript` on
+        // dedicated worker threads, each owning its own instance; nothing may
+        // touch one instance from two threads, lock or no lock.
+        instance_concurrency: shape_abi_v1::INSTANCE_CONCURRENCY_THREAD_AFFINE,
         free_buffer: runtime::ts_free_buffer,
         drop: runtime::ts_drop,
     }

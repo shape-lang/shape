@@ -448,6 +448,13 @@ mod tests {
 
         unsafe extern "C" fn drop_instance(_instance: *mut c_void) {}
 
+        /// ADR-019 §5 (#202): this fake keeps its state in `Mutex` statics and
+        /// its shims take no `&mut` through the instance pointer, so it declares
+        /// the shared model — the same declaration the real Python runtime makes.
+        unsafe extern "C" fn instance_concurrency(_instance: *mut c_void) -> u32 {
+            shape_abi_v1::INSTANCE_CONCURRENCY_SHARED
+        }
+
         pub static VTABLE: LanguageRuntimeVTable = LanguageRuntimeVTable {
             init: Some(init),
             register_types: Some(register_types),
@@ -463,7 +470,7 @@ mod tests {
             runtime_descriptor: None,
             state_model: STATE_MODEL_STATEFUL_OPAQUE,
             generate_stubs: Some(generate_stubs),
-            reserved1: None,
+            instance_concurrency: Some(instance_concurrency),
             reserved2: None,
             reserved3: None,
         };
@@ -485,7 +492,9 @@ mod tests {
             get_shape_source: None,
             runtime_descriptor: None,
             state_model: STATE_MODEL_STATEFUL_OPAQUE,
-            reserved1: None,
+            // A pre-#202 extension declares nothing here; the host reads that
+            // as interpreter-thread-only and refuses to offload into it.
+            instance_concurrency: None,
             reserved2: None,
             reserved3: None,
         };
