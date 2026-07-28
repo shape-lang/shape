@@ -4,15 +4,15 @@
 //! Substance per supervisor 2026-05-26 Decision 2 ratify:
 //!   (a) Single LSP setting `shape.inlayHints.bindingStorageClass.enable: bool`.
 //!   (b) Default OFF — users opt in.
-//!   (d) Hint surface covers all five ADR-006 §2 categories:
-//!       `Direct`, `UniqueHeap`, `SharedCow`, `SharedAtomic`, `SharedAtomicMut`.
+//!   (d) Post-#181 (ERGO-VAR-TRUTH): the hint is a PROJECTION of the
+//!       compiler's own per-binding storage decision — real classes only
+//!       (`Direct` / `UniqueHeap` / `SharedCow` / `Reference` /
+//!       `LocalMutablePtr`), no `approx` qualifier. The retired heuristic's
+//!       `SharedAtomic` / `SharedAtomicMut` spellings never existed in the
+//!       compiler and are pinned here as never-rendered.
 //!
-//! Cross-product = {ON, OFF} × {Direct, UniqueHeap, SharedCow,
-//! SharedAtomic, SharedAtomicMut} = 10 tests.
-//!
-//! When ON, each test asserts the corresponding `[<class> approx]` (or
-//! `[<class> mut approx]` for `_mut` variants) label is rendered.
-//! When OFF, the same program is asserted to NOT render any such label.
+//! `let` bindings stay opt-in behind the toggle; `var` is always hinted
+//! (covered in shape-lsp's own inlay_hints tests).
 
 use shape_lsp::inlay_hints::InlayHintConfig;
 use shape_test::shape_test::ShapeTest;
@@ -37,77 +37,61 @@ fn cfg(storage_class_on: bool) -> InlayHintConfig {
 fn inlay_storage_class_direct_on_renders_label() {
     // Primitive value type → Direct (ADR-006 §2 line 91).
     let code = "let x = 42\n";
-    ShapeTest::new(code).expect_type_hint_label_with_config("[Direct approx]", &cfg(true));
+    ShapeTest::new(code).expect_type_hint_label_with_config("[Direct]", &cfg(true));
 }
 
 #[test]
 fn inlay_storage_class_direct_off_renders_nothing() {
     let code = "let x = 42\n";
-    ShapeTest::new(code).expect_no_type_hint_label_with_config("[Direct approx]", &cfg(false));
+    ShapeTest::new(code).expect_no_type_hint_label_with_config("[Direct]", &cfg(false));
 }
 
-// ---------- UniqueHeap ----------
+// ---------- Usage decides, not type (post-#181) ----------
+//
+// The retired heuristic guessed by TYPE: a string was `[UniqueHeap approx]`,
+// a closure `[SharedCow approx]`. The compiler's real planner decides by
+// USAGE: an unaliased, unmutated binding is Direct regardless of its type.
+// These pins are the observable proof the type-based heuristic is gone.
 
 #[test]
-fn inlay_storage_class_unique_heap_on_renders_label() {
-    // Heap type (string) with no closure capture / no concurrency primitive →
-    // UniqueHeap (ADR-006 §2 line 92 + default).
+fn inlay_storage_class_unaliased_string_is_direct_not_type_guessed() {
     let code = "let s = \"hello\"\n";
-    ShapeTest::new(code).expect_type_hint_label_with_config("[UniqueHeap approx]", &cfg(true));
+    ShapeTest::new(code).expect_type_hint_label_with_config("[Direct]", &cfg(true));
 }
 
 #[test]
-fn inlay_storage_class_unique_heap_off_renders_nothing() {
+fn inlay_storage_class_unaliased_string_off_renders_nothing() {
     let code = "let s = \"hello\"\n";
-    ShapeTest::new(code).expect_no_type_hint_label_with_config("[UniqueHeap approx]", &cfg(false));
+    ShapeTest::new(code).expect_no_type_hint_label_with_config("[Direct]", &cfg(false));
 }
 
-// ---------- SharedCow ----------
-
 #[test]
-fn inlay_storage_class_shared_cow_on_renders_label() {
-    // Closure binding → SharedCow (ADR-006 §2 line 117 — escape via capture).
+fn inlay_storage_class_unaliased_closure_is_direct_not_type_guessed() {
     let code = "let f = |x| x + 1\n";
-    ShapeTest::new(code).expect_type_hint_label_with_config("[SharedCow approx]", &cfg(true));
+    ShapeTest::new(code).expect_type_hint_label_with_config("[Direct]", &cfg(true));
 }
 
 #[test]
-fn inlay_storage_class_shared_cow_off_renders_nothing() {
+fn inlay_storage_class_unaliased_closure_off_renders_nothing() {
     let code = "let f = |x| x + 1\n";
-    ShapeTest::new(code).expect_no_type_hint_label_with_config("[SharedCow approx]", &cfg(false));
+    ShapeTest::new(code).expect_no_type_hint_label_with_config("[Direct]", &cfg(false));
 }
 
-// ---------- SharedAtomic ----------
+// ---------- Retired classes never render (post-#181 truth pin) ----------
+//
+// The pre-#181 heuristic could spell `SharedAtomic` / `SharedAtomicMut` and an
+// `approx` qualifier; neither exists in the compiler's BindingStorageClass.
+// Post-#181 the hint is a projection of the compiler's own decision, so these
+// labels must never be rendered for any program, toggle on or off.
 
 #[test]
-fn inlay_storage_class_shared_atomic_on_renders_label() {
-    // Atomic constructor → SharedAtomic (ADR-006 §2 line 118 — cross-thread
-    // read-shared).
-    let code = "let a = Atomic.new(0)\n";
-    ShapeTest::new(code).expect_type_hint_label_with_config("[SharedAtomic approx]", &cfg(true));
-}
-
-#[test]
-fn inlay_storage_class_shared_atomic_off_renders_nothing() {
-    let code = "let a = Atomic.new(0)\n";
-    ShapeTest::new(code)
-        .expect_no_type_hint_label_with_config("[SharedAtomic approx]", &cfg(false));
-}
-
-// ---------- SharedAtomicMut ----------
-
-#[test]
-fn inlay_storage_class_shared_atomic_mut_on_renders_label() {
-    // Channel constructor + mutable binding → SharedAtomicMut (ADR-006 §2
-    // line 119 + 143 — cross-task mutation).
-    let code = "let mut q = Channel.new()\n";
-    ShapeTest::new(code)
-        .expect_type_hint_label_with_config("[SharedAtomicMut mut approx]", &cfg(true));
+fn inlay_storage_class_never_renders_retired_shared_atomic_labels() {
+    let code = "let a = 42\nlet mut q = \"queue\"\n";
+    ShapeTest::new(code).expect_no_type_hint_label_with_config("SharedAtomic", &cfg(true));
 }
 
 #[test]
-fn inlay_storage_class_shared_atomic_mut_off_renders_nothing() {
-    let code = "let mut q = Channel.new()\n";
-    ShapeTest::new(code)
-        .expect_no_type_hint_label_with_config("[SharedAtomicMut mut approx]", &cfg(false));
+fn inlay_storage_class_never_renders_the_approx_qualifier() {
+    let code = "let x = 42\nlet s = \"hello\"\nlet f = |x| x + 1\n";
+    ShapeTest::new(code).expect_no_type_hint_label_with_config("approx", &cfg(true));
 }
