@@ -4963,6 +4963,60 @@ mod opaque_disposition_tests {
         }
     }
 
+    /// ADR-019 §3 / #200: a snapshot containing a live foreign reference
+    /// refuses, and the refusal NAMES THE VALUE AND ITS ORIGIN.
+    ///
+    /// The distinguishing requirement is the naming. "Some foreign object" is
+    /// not actionable — the user has to know which handle to release or
+    /// restructure around — so the origin facts travel on the carrier
+    /// precisely so this site, which has no VM or extension in scope, can
+    /// quote them.
+    #[test]
+    fn a_live_foreign_ref_refuses_at_snapshot_naming_value_and_origin() {
+        use shape_value::kinded_slot::KindedSlot;
+        use shape_value::{ForeignRefData, ForeignRefDisposer, ForeignRefOrigin};
+
+        /// Asserts by existing: if the refusal path ever disposed the value it
+        /// was refusing to capture, this would fire.
+        #[derive(Debug)]
+        struct MustNotDisposeDuringSnapshot;
+
+        impl ForeignRefDisposer for MustNotDisposeDuringSnapshot {
+            fn dispose(&self, _handle: u64) {}
+        }
+
+        let (_tmp, st) = store();
+        let reference = KindedSlot::from_foreign_ref(Arc::new(ForeignRefData::new(
+            4242,
+            ForeignRefOrigin {
+                language: "python".into(),
+                foreign_type: "sqlite3.Connection".into(),
+                produced_by: "open_db".into(),
+            },
+            Arc::new(MustNotDisposeDuringSnapshot),
+        )));
+
+        let err = slot_to_serializable(reference.slot().raw(), reference.kind(), &st)
+            .expect_err("a live foreign reference must refuse at snapshot()-encode");
+
+        assert!(
+            err.contains("a python sqlite3.Connection returned by `open_db`"),
+            "the refusal names the value and its origin: {err}"
+        );
+        assert!(
+            err.contains("4242"),
+            "the refusal identifies WHICH reference: {err}"
+        );
+        assert!(
+            err.contains("STATE_MODEL_STATEFUL_OPAQUE"),
+            "the refusal says why foreign state cannot be captured: {err}"
+        );
+        assert!(
+            err.contains("clean-refuse by design"),
+            "this is terminal, not a follow-up: {err}"
+        );
+    }
+
     // NOTE: the four live-resource arms also stay terminal clean-refuse on
     // the restore side (defense-in-depth against an externally-supplied
     // opaque wire shape), covered by
