@@ -505,8 +505,10 @@ impl FunctionBlobBuilder {
             .collect();
 
         // integration A6 (§4.2.0): `foreign_dependencies` is ordered,
-        // first-use-deduped (was sorted+deduped), and every `CallForeign`
-        // operand in the blob's instruction stream is rewritten from the
+        // first-use-deduped (was sorted+deduped), and every foreign-call
+        // operand in the blob's instruction stream — `CallForeign` and #202's
+        // `CallForeignAsync` alike, which is what `is_foreign_call` exists to
+        // keep in step — is rewritten from the
         // program-level foreign index to the blob-local ordinal — the position
         // of that entry's content hash in this blob's `foreign_dependencies`.
         // This mirrors how `Call` / `Constant::Function` references are
@@ -527,7 +529,7 @@ impl FunctionBlobBuilder {
         let mut foreign_deps: Vec<[u8; 32]> = Vec::new();
         let mut foreign_hash_to_ordinal: HashMap<[u8; 32], u16> = HashMap::new();
         for instr in &mut local_instructions {
-            if instr.opcode == crate::bytecode::OpCode::CallForeign {
+            if instr.opcode.is_foreign_call() {
                 if let Some(Operand::ForeignFunction(prog_idx)) = instr.operand {
                     let entry = program
                         .foreign_functions

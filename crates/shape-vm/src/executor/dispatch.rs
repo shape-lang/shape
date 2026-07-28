@@ -716,7 +716,8 @@ impl VirtualMachine {
 
             // Control flow
             Jump | JumpIfFalse | JumpIfTrue | JumpIfFalseTrusted | Call | CallValue
-            | CallClosure | CallFunctionIndirect | CallForeign | Return | ReturnValue
+            | CallClosure | CallFunctionIndirect | CallForeign | CallForeignAsync | Return
+            | ReturnValue
             | ReturnValueI64 | ReturnValueU64 | ReturnValueF64 | ReturnValueI32
             | ReturnValueU32 | ReturnValueI16 | ReturnValueU16 | ReturnValueI8
             | ReturnValueU8 | ReturnValueBool | ReturnValuePtr => {

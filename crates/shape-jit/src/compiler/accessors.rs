@@ -717,13 +717,16 @@ fn vm_only_opcode_reason(opcode: OpCode) -> Option<&'static str> {
         // the bytecode preflight routes the whole program / function to the
         // interpreter via the documented `[jit-fallback]` path — surface-and-
         // stop, NOT a dynamic-fallback shim.
-        OpCode::CallForeign => Some(
-            "ffi-rebuild §4.9 J1: `CallForeign` runs on the shared interpreter \
+        OpCode::CallForeign | OpCode::CallForeignAsync => Some(
+            "ffi-rebuild §4.9 J1: foreign calls run on the shared interpreter \
              core `VirtualMachine::invoke_foreign_kinded`; the JIT refuses to \
              compile foreign-bearing functions so `--mode jit` and `--mode vm` \
              cannot diverge (J2 out-of-line lowering is a deferred pure-perf \
              follow-up). Whole-program/function deopt to the bytecode \
-             interpreter via the `[jit-fallback]` path.",
+             interpreter via the `[jit-fallback]` path. ADR-019 §5 (#202): the \
+             async flavour is refused for the same reason and by the same rule \
+             — it dispatches through the same core, and letting it through here \
+             would put the one opcode that must not run on a JIT frame on one.",
         ),
         _ => None,
     }
@@ -1188,6 +1191,43 @@ mod tests {
             vm_only_opcode_reason(OpCode::CallForeign).is_some(),
             "ffi-rebuild §4.9 J1: CallForeign must be VM-only so the JIT \
              refuses to compile foreign-bearing functions"
+        );
+    }
+
+    /// ADR-019 §5 (#202): the async foreign opcode is VM-only for exactly the
+    /// same reason as its synchronous sibling, and this is asserted separately
+    /// because it is a NEW opcode added long after the J1 gate was written —
+    /// the class of miss where a new variant quietly escapes an old rule.
+    #[test]
+    fn call_foreign_async_is_vm_only_j1() {
+        assert!(
+            vm_only_opcode_reason(OpCode::CallForeignAsync).is_some(),
+            "ADR-019 §5 / #202: CallForeignAsync dispatches through the same \
+             shared interpreter core and must be VM-only too"
+        );
+        assert!(
+            OpCode::CallForeignAsync.is_foreign_call() && OpCode::CallForeign.is_foreign_call(),
+            "both flavours must answer the one foreign-call predicate that blob \
+             assembly, escape analysis and this preflight all consult"
+        );
+    }
+
+    /// A `CallForeignAsync`-bearing instruction stream must deopt the whole
+    /// function to the interpreter, the same as a `CallForeign`-bearing one.
+    #[test]
+    fn a_call_foreign_async_bearing_stream_is_refused_by_the_preflight() {
+        let instructions = vec![
+            Instruction::new(OpCode::CallForeignAsync, Some(Operand::ForeignFunction(0))),
+            Instruction::simple(OpCode::ReturnValue),
+        ];
+        let report = preflight_instructions(&instructions);
+        assert!(
+            !report.can_jit(),
+            "a foreign-bearing stream must not reach Cranelift codegen"
+        );
+        assert!(
+            report.vm_only_opcodes.contains(&OpCode::CallForeignAsync),
+            "the preflight report must name CallForeignAsync as the VM-only blocker"
         );
     }
 

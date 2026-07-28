@@ -100,6 +100,7 @@ fn is_escaping_call(op: OpCode) -> bool {
             | OpCode::BuiltinCall
             | OpCode::DynMethodCall
             | OpCode::CallForeign
+            | OpCode::CallForeignAsync
             | OpCode::DropCall
             | OpCode::DropCallAsync
     )

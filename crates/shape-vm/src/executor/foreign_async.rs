@@ -330,3 +330,522 @@ pub(crate) fn start_offloaded_invoke(
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    //! Runtime tripwires for ADR-019 §5 / #202 (POLY-ASYNC-OFFLOAD).
+    //!
+    //! These drive the REAL VM path (`invoke_foreign_async_kinded` → offload →
+    //! `resolve_pending_async_task`) against an in-process fake extension whose
+    //! `invoke` sleeps and records the threads it ran on. A fake rather than the
+    //! built `.so` on purpose, for the same reason the #196 stub-channel tests
+    //! use one: what is under test is the HOST's behaviour, and it must fail if
+    //! the host stops offloading — independently of whether a Python
+    //! interpreter or a V8 build is present on the machine. The end-to-end
+    //! proof against the real extensions is a separate, environment-dependent
+    //! exercise; this is the one that runs everywhere and gates merges.
+
+    use super::*;
+    use crate::executor::{VMConfig, VirtualMachine};
+    use shape_abi_v1::LanguageRuntimeVTable;
+    use std::time::{Duration, Instant};
+
+    /// A sleep long enough that serialization is unmistakable and short enough
+    /// that the suite stays fast. Two of these overlapped finish in about one
+    /// of them; serialized they take two.
+    const SLEEP: Duration = Duration::from_millis(200);
+
+    /// A fake language runtime whose `invoke` sleeps, so wall-clock is a direct
+    /// readout of whether calls overlapped.
+    mod sleepy_extension {
+        use super::SLEEP;
+        use shape_abi_v1::{ErrorModel, LanguageRuntimeVTable, STATE_MODEL_STATEFUL_OPAQUE};
+        use std::collections::HashSet;
+        use std::ffi::{c_char, c_void};
+        use std::sync::Mutex;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        /// How many invokes are inside the sleep RIGHT NOW, and the high-water
+        /// mark. The high-water mark is the direct evidence of overlap — a wall
+        /// clock can be fooled by a slow machine, a concurrency peak of 2
+        /// cannot be reached by serialized calls.
+        pub static IN_FLIGHT: AtomicUsize = AtomicUsize::new(0);
+        pub static PEAK_IN_FLIGHT: AtomicUsize = AtomicUsize::new(0);
+        /// Total completed invokes, including ones whose result nobody collected.
+        pub static COMPLETED: AtomicUsize = AtomicUsize::new(0);
+        /// How many distinct `init` instances exist (one per thread-affine
+        /// worker, one for a shared runtime).
+        pub static INSTANCES: AtomicUsize = AtomicUsize::new(0);
+        /// Thread ids that ran an `invoke`, as strings.
+        pub static INVOKE_THREADS: Mutex<Vec<String>> = Mutex::new(Vec::new());
+        /// Instances that received `register_types`.
+        pub static REGISTERED_INSTANCES: Mutex<Option<HashSet<usize>>> = Mutex::new(None);
+
+        pub fn reset() {
+            IN_FLIGHT.store(0, Ordering::SeqCst);
+            PEAK_IN_FLIGHT.store(0, Ordering::SeqCst);
+            COMPLETED.store(0, Ordering::SeqCst);
+            INSTANCES.store(0, Ordering::SeqCst);
+            INVOKE_THREADS.lock().unwrap().clear();
+            *REGISTERED_INSTANCES.lock().unwrap() = Some(HashSet::new());
+        }
+
+        pub fn peak() -> usize {
+            PEAK_IN_FLIGHT.load(Ordering::SeqCst)
+        }
+
+        pub fn completed() -> usize {
+            COMPLETED.load(Ordering::SeqCst)
+        }
+
+        pub fn distinct_invoke_threads() -> usize {
+            INVOKE_THREADS
+                .lock()
+                .unwrap()
+                .iter()
+                .collect::<HashSet<_>>()
+                .len()
+        }
+
+        pub fn registered_instance_count() -> usize {
+            REGISTERED_INSTANCES
+                .lock()
+                .unwrap()
+                .as_ref()
+                .map(|s| s.len())
+                .unwrap_or(0)
+        }
+
+        unsafe extern "C" fn init(_config: *const u8, _len: usize) -> *mut c_void {
+            // Distinct non-null instance pointers so a per-worker instance is
+            // distinguishable from the shared one.
+            (INSTANCES.fetch_add(1, Ordering::SeqCst) + 1) as *mut c_void
+        }
+
+        unsafe extern "C" fn register_types(
+            instance: *mut c_void,
+            _types: *const u8,
+            _types_len: usize,
+        ) -> i32 {
+            if let Some(set) = REGISTERED_INSTANCES.lock().unwrap().as_mut() {
+                set.insert(instance as usize);
+            }
+            0
+        }
+
+        unsafe extern "C" fn generate_stubs(
+            _instance: *mut c_void,
+            out_ptr: *mut *mut u8,
+            out_len: *mut usize,
+        ) -> i32 {
+            unsafe {
+                *out_ptr = std::ptr::null_mut();
+                *out_len = 0;
+            }
+            0
+        }
+
+        #[allow(clippy::too_many_arguments)]
+        unsafe extern "C" fn compile(
+            _instance: *mut c_void,
+            _name: *const u8,
+            _name_len: usize,
+            _source: *const u8,
+            _source_len: usize,
+            _param_names: *const u8,
+            _param_names_len: usize,
+            _param_types: *const u8,
+            _param_types_len: usize,
+            _return_type: *const u8,
+            _return_type_len: usize,
+            _is_async: bool,
+            _out_error: *mut *mut u8,
+            _out_error_len: *mut usize,
+        ) -> *mut c_void {
+            1usize as *mut c_void
+        }
+
+        unsafe extern "C" fn invoke(
+            _instance: *mut c_void,
+            _handle: *mut c_void,
+            _args: *const u8,
+            _args_len: usize,
+            out_ptr: *mut *mut u8,
+            out_len: *mut usize,
+        ) -> i32 {
+            INVOKE_THREADS
+                .lock()
+                .unwrap()
+                .push(format!("{:?}", std::thread::current().id()));
+            let now = IN_FLIGHT.fetch_add(1, Ordering::SeqCst) + 1;
+            PEAK_IN_FLIGHT.fetch_max(now, Ordering::SeqCst);
+            std::thread::sleep(SLEEP);
+            IN_FLIGHT.fetch_sub(1, Ordering::SeqCst);
+            COMPLETED.fetch_add(1, Ordering::SeqCst);
+
+            // msgpack for the integer 7.
+            let mut buf = vec![7u8];
+            let len = buf.len();
+            let ptr = buf.as_mut_ptr();
+            std::mem::forget(buf);
+            unsafe {
+                *out_ptr = ptr;
+                *out_len = len;
+            }
+            0
+        }
+
+        unsafe extern "C" fn dispose_function(_instance: *mut c_void, _handle: *mut c_void) {}
+
+        unsafe extern "C" fn language_id(_instance: *mut c_void) -> *const c_char {
+            c"python".as_ptr()
+        }
+
+        unsafe extern "C" fn free_buffer(ptr: *mut u8, len: usize) {
+            if !ptr.is_null() {
+                unsafe { drop(Vec::from_raw_parts(ptr, len, len)) };
+            }
+        }
+
+        unsafe extern "C" fn drop_instance(_instance: *mut c_void) {}
+
+        unsafe extern "C" fn declare_shared(_instance: *mut c_void) -> u32 {
+            shape_abi_v1::INSTANCE_CONCURRENCY_SHARED
+        }
+
+        unsafe extern "C" fn declare_thread_affine(_instance: *mut c_void) -> u32 {
+            shape_abi_v1::INSTANCE_CONCURRENCY_THREAD_AFFINE
+        }
+
+        const fn base(
+            concurrency: Option<unsafe extern "C" fn(*mut c_void) -> u32>,
+        ) -> LanguageRuntimeVTable {
+            LanguageRuntimeVTable {
+                init: Some(init),
+                register_types: Some(register_types),
+                compile: Some(compile),
+                invoke: Some(invoke),
+                dispose_function: Some(dispose_function),
+                language_id: Some(language_id),
+                get_lsp_config: None,
+                free_buffer: Some(free_buffer),
+                drop: Some(drop_instance),
+                error_model: ErrorModel::Dynamic,
+                get_shape_source: None,
+                runtime_descriptor: None,
+                state_model: STATE_MODEL_STATEFUL_OPAQUE,
+                generate_stubs: Some(generate_stubs),
+                instance_concurrency: concurrency,
+                reserved2: None,
+                reserved3: None,
+            }
+        }
+
+        /// Declares the shared model, like the real Python runtime.
+        pub static SHARED: LanguageRuntimeVTable = base(Some(declare_shared));
+        /// Declares the thread-affine model, like the real TypeScript runtime.
+        pub static THREAD_AFFINE: LanguageRuntimeVTable = base(Some(declare_thread_affine));
+        /// Declares nothing — the shape of an extension built before #202.
+        pub static UNDECLARED: LanguageRuntimeVTable = base(None);
+    }
+
+    /// The fake's counters are process-global statics, so the tests that read
+    /// them run one at a time.
+    static SLEEPY_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    const ASYNC_PROGRAM: &str = r#"
+async fn python slow(a: int) -> Result<int> {
+    return a
+}
+"#;
+
+    const SYNC_PROGRAM: &str = r#"
+fn python quick(a: int) -> Result<int> {
+    return a
+}
+"#;
+
+    fn vm_with(code: &str, vtable: &'static LanguageRuntimeVTable) -> VirtualMachine {
+        use crate::compiler::BytecodeCompiler;
+
+        let program = shape_ast::parser::parse_program(code).expect("parse failed");
+        let bytecode = BytecodeCompiler::new()
+            .compile(&program)
+            .expect("compile failed");
+        let runtime = PluginLanguageRuntime::new(vtable, &serde_json::Value::Null)
+            .expect("fake runtime initializes");
+        let mut runtimes = std::collections::HashMap::new();
+        runtimes.insert("python".to_string(), std::sync::Arc::new(runtime));
+
+        let mut vm = VirtualMachine::new(VMConfig::default());
+        vm.load_program(bytecode);
+        vm.foreign_fn_handles = vec![None];
+        vm.set_language_runtimes(runtimes);
+        vm
+    }
+
+    fn future_id(slot: &shape_value::KindedSlot) -> u64 {
+        assert_eq!(
+            slot.kind(),
+            shape_value::NativeKind::Ptr(shape_value::heap_value::HeapKind::Future),
+            "an async foreign call must yield a Future handle"
+        );
+        slot.raw()
+    }
+
+    /// TRIPWIRE 1 — two async foreign calls overlap.
+    ///
+    /// Both are started before either is awaited, which is the whole point of
+    /// returning a `Future(id)` from the call rather than the result. Two 200ms
+    /// invokes must finish in about 200ms, not 400ms; and the fake's in-flight
+    /// high-water mark must reach 2, which serialized calls cannot do however
+    /// slow the machine is.
+    #[test]
+    fn two_async_foreign_calls_overlap_instead_of_serializing() {
+        let _guard = SLEEPY_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        sleepy_extension::reset();
+
+        let mut vm = vm_with(ASYNC_PROGRAM, &sleepy_extension::SHARED);
+        let start = Instant::now();
+
+        let first = vm
+            .invoke_foreign_async_kinded(0, &[])
+            .expect("the first async call starts");
+        let second = vm
+            .invoke_foreign_async_kinded(0, &[])
+            .expect("the second async call starts");
+
+        // Both are in flight now: starting them cost nothing like the sleep.
+        assert!(
+            start.elapsed() < SLEEP,
+            "starting two async foreign calls must not block the interpreter thread \
+             for the length of the work; took {:?}",
+            start.elapsed()
+        );
+
+        vm.resolve_pending_async_task(future_id(&first))
+            .expect("the first result arrives");
+        vm.resolve_pending_async_task(future_id(&second))
+            .expect("the second result arrives");
+        let elapsed = start.elapsed();
+
+        assert_eq!(
+            sleepy_extension::peak(),
+            2,
+            "both invokes must have been inside the extension at the same time"
+        );
+        assert!(
+            elapsed < SLEEP * 2,
+            "two overlapped {SLEEP:?} calls must finish in well under twice that; \
+             took {elapsed:?} (serialized would be ~{:?})",
+            SLEEP * 2
+        );
+        assert_eq!(sleepy_extension::completed(), 2);
+    }
+
+    /// TRIPWIRE 2 — a SYNC foreign call is unchanged: it runs on the
+    /// interpreter thread, returns the value itself (not a future), and blocks
+    /// for its own duration. The offload must not leak onto declarations that
+    /// never asked for it.
+    #[test]
+    fn a_sync_foreign_call_still_runs_inline_and_returns_its_value() {
+        let _guard = SLEEPY_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        sleepy_extension::reset();
+
+        let mut vm = vm_with(SYNC_PROGRAM, &sleepy_extension::SHARED);
+        let interpreter_thread = format!("{:?}", std::thread::current().id());
+        let start = Instant::now();
+        let result = vm.invoke_foreign_kinded(0, &[]).expect("sync call runs");
+        let elapsed = start.elapsed();
+
+        assert_ne!(
+            result.kind(),
+            shape_value::NativeKind::Ptr(shape_value::heap_value::HeapKind::Future),
+            "a sync foreign call must return its value, not a future"
+        );
+        assert!(
+            elapsed >= SLEEP,
+            "a sync call blocks the caller for its own duration; took {elapsed:?}"
+        );
+        let threads = sleepy_extension::INVOKE_THREADS.lock().unwrap().clone();
+        assert_eq!(
+            threads,
+            vec![interpreter_thread],
+            "the sync invoke must run on the interpreter thread"
+        );
+    }
+
+    /// TRIPWIRE 4 — cancellation is run-to-completion-then-discard, and it is
+    /// never reported as confirmed foreign termination.
+    ///
+    /// Cancelling an in-flight foreign await does not and cannot interrupt code
+    /// running inside the extension. What it does is stop waiting and drop the
+    /// result. The evidence that this is what happened, rather than a silent
+    /// leak: the invoke still COMPLETES exactly once, and no second completion
+    /// is ever delivered.
+    #[test]
+    fn cancelling_an_in_flight_foreign_await_discards_without_double_completion() {
+        let _guard = SLEEPY_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        sleepy_extension::reset();
+
+        let mut vm = vm_with(ASYNC_PROGRAM, &sleepy_extension::SHARED);
+        let handle = vm
+            .invoke_foreign_async_kinded(0, &[])
+            .expect("the async call starts");
+        let task_id = future_id(&handle);
+
+        // Cancel while the extension is still inside the sleep.
+        assert!(vm.task_scheduler.has_pending_async(task_id));
+        vm.task_scheduler.cancel(task_id);
+        assert!(
+            !vm.task_scheduler.has_pending_async(task_id),
+            "a cancelled task is no longer awaitable"
+        );
+
+        // The foreign body was NOT stopped: it runs to completion on its own
+        // schedule. Give it time to do so, then assert it ran exactly once.
+        std::thread::sleep(SLEEP * 2);
+        assert_eq!(
+            sleepy_extension::completed(),
+            1,
+            "the foreign body runs to completion exactly once after cancellation — \
+             cancellation discards the result, it does not terminate the foreign runtime"
+        );
+
+        // And nothing re-delivers it: a second await of the cancelled id does
+        // not produce a value.
+        assert!(
+            vm.resolve_pending_async_task(task_id).is_err(),
+            "a cancelled task must not later yield a result — that would be the \
+             double completion this tripwire exists to catch"
+        );
+    }
+
+    /// TRIPWIRE 5 — concurrent invokes on ONE instance are serialized against
+    /// the mutating vtable calls, and the contract delivery is inside that
+    /// discipline (the #196 exposure note: `register_types` is now on a live
+    /// path and takes the instance pointer like `invoke` does).
+    ///
+    /// For the SHARED model the extension has declared that concurrent invokes
+    /// are sound on its own state, so what the host must guarantee is that the
+    /// instance received its contract before any offloaded invoke reached it.
+    #[test]
+    fn the_shared_instance_receives_its_contract_before_any_offloaded_invoke() {
+        let _guard = SLEEPY_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        sleepy_extension::reset();
+
+        let mut vm = vm_with(ASYNC_PROGRAM, &sleepy_extension::SHARED);
+        let handles: Vec<_> = (0..4)
+            .map(|_| {
+                vm.invoke_foreign_async_kinded(0, &[])
+                    .expect("async call starts")
+            })
+            .collect();
+        for handle in &handles {
+            vm.resolve_pending_async_task(future_id(handle))
+                .expect("result arrives");
+        }
+
+        assert_eq!(
+            sleepy_extension::registered_instance_count(),
+            1,
+            "the one shared instance received the declared contract"
+        );
+        assert_eq!(sleepy_extension::completed(), 4);
+        assert!(
+            sleepy_extension::peak() > 1,
+            "the shared model must actually overlap; peak was {}",
+            sleepy_extension::peak()
+        );
+    }
+
+    /// TRIPWIRE 5, thread-affine half — a thread-affine runtime never has one
+    /// instance touched by two threads. Each worker builds its OWN instance and
+    /// delivers the contract to it before its first compile, so overlap comes
+    /// from there being several workers rather than from one isolate being
+    /// re-entered.
+    #[test]
+    fn a_thread_affine_runtime_gives_each_worker_its_own_instance() {
+        let _guard = SLEEPY_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        sleepy_extension::reset();
+
+        let mut vm = vm_with(ASYNC_PROGRAM, &sleepy_extension::THREAD_AFFINE);
+        let handles: Vec<_> = (0..2)
+            .map(|_| {
+                vm.invoke_foreign_async_kinded(0, &[])
+                    .expect("async call starts")
+            })
+            .collect();
+        for handle in &handles {
+            vm.resolve_pending_async_task(future_id(handle))
+                .expect("result arrives");
+        }
+
+        assert_eq!(
+            sleepy_extension::distinct_invoke_threads(),
+            2,
+            "two concurrent thread-affine calls must run on two different workers"
+        );
+        assert!(
+            sleepy_extension::registered_instance_count() >= 2,
+            "each worker's own instance must receive the declared contract before its \
+             first compile; only {} did",
+            sleepy_extension::registered_instance_count()
+        );
+        assert_eq!(
+            sleepy_extension::peak(),
+            2,
+            "the dedicated workers must overlap"
+        );
+    }
+
+    /// An extension that declares no off-thread model is REFUSED, not quietly
+    /// run on the interpreter thread. Running it there is exactly the
+    /// untruthful `async` contract ADR-019 §5 forbids, and it is the failure
+    /// mode a permissive default would produce.
+    #[test]
+    fn an_undeclared_runtime_refuses_the_offload_instead_of_faking_it() {
+        let _guard = SLEEPY_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        sleepy_extension::reset();
+
+        let mut vm = vm_with(ASYNC_PROGRAM, &sleepy_extension::UNDECLARED);
+        let err = vm
+            .invoke_foreign_async_kinded(0, &[])
+            .expect_err("an undeclared runtime must refuse");
+        let message = err.to_string();
+        assert!(
+            message.contains("instance_concurrency"),
+            "the refusal names the declaration slot the extension is missing, got: {message}"
+        );
+        assert_eq!(
+            sleepy_extension::completed(),
+            0,
+            "the refusal must happen BEFORE any foreign code runs"
+        );
+    }
+
+    /// The strategy is chosen once per language and reused, so a second async
+    /// call does not start a second worker pool.
+    #[test]
+    fn the_offload_strategy_is_built_once_per_language() {
+        let runtime = std::sync::Arc::new(
+            PluginLanguageRuntime::new(&sleepy_extension::THREAD_AFFINE, &serde_json::Value::Null)
+                .expect("fake runtime initializes"),
+        );
+        let mut offloads = ForeignAsyncOffloads::default();
+        let first = offloads.strategy("python", &runtime).expect("declared") as *const _;
+        let second = offloads.strategy("python", &runtime).expect("declared") as *const _;
+        assert_eq!(
+            first, second,
+            "the same strategy value must be handed out, not a fresh worker pool"
+        );
+    }
+
+    /// Guards the worker count against being silently raised: each affine
+    /// worker owns a V8-class isolate, so the number is a memory decision, not
+    /// a tuning knob to reach for when a benchmark looks slow.
+    #[test]
+    fn the_affine_worker_count_is_deliberate() {
+        assert_eq!(AFFINE_WORKERS, 4);
+    }
+}

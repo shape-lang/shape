@@ -45,6 +45,20 @@ macro_rules! define_opcodes {
         }
 
         impl OpCode {
+    /// Whether this opcode dispatches a foreign function call, in either
+    /// flavour: the synchronous `CallForeign` or #202's `CallForeignAsync`.
+    ///
+    /// Every place that reasons about "this instruction reaches foreign code"
+    /// asks here rather than naming one variant — blob foreign-dependency
+    /// collection, the JIT's VM-only preflight, escape analysis. The async
+    /// flavour was added after all of those existed, and each one that named
+    /// `CallForeign` alone was a silent miscompile waiting to happen (the blob
+    /// assembler's was found by a runtime tripwire: an async stub linked with an
+    /// empty `foreign_dependencies` table and failed at load).
+    pub fn is_foreign_call(self) -> bool {
+        matches!(self, OpCode::CallForeign | OpCode::CallForeignAsync)
+    }
+
             /// Returns the category this opcode belongs to.
             pub const fn category(self) -> OpcodeCategory {
                 match self {

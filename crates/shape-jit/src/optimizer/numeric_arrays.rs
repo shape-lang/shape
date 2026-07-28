@@ -130,6 +130,7 @@ fn is_unknown_stack_effect(op: OpCode) -> bool {
             | OpCode::BuiltinCall
             | OpCode::DynMethodCall
             | OpCode::CallForeign
+            | OpCode::CallForeignAsync
     )
 }
 
