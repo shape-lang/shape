@@ -75,6 +75,43 @@ fn no_bool_default_slot_fabrication() {
     );
 }
 
+/// ADR-006 §2.7.32 / Q26 (ADR-019 §3 POLY-FOREIGN-REF #200): the
+/// foreign-reference carrier is a PURE-DISCRIMINATOR kind, which is precisely
+/// the statement that `as_heap_value()` is unsound on ForeignRef-labelled bits
+/// — the bits are `Arc::into_raw(Arc<ForeignRefData>)`, not a `HeapValue`
+/// pointer, so reinterpreting them reads a `HeapValue` discriminant out of the
+/// handle field and dispatches on garbage.
+///
+/// Rust cannot enforce the absence of an enum variant, so this pins the two
+/// source shapes that would introduce one. The `FilterExpr` / `SharedCell`
+/// precedents earned this guard the hard way: the pre-amendment filter branch
+/// labelled `Arc<FilterNode>` payloads `HeapKind::NativeView` and the
+/// retain/release tables dispatched them as `Arc<NativeViewData>` — a
+/// wrong-type retain that the type system was happy with.
+#[test]
+fn foreign_ref_stays_a_pure_discriminator_kind() {
+    // Reassembled so this file does not itself contain the needle.
+    let variant = ["HeapValue", "::ForeignRef"].concat();
+    let hits: Vec<PathBuf> = source_rs_contents()
+        .into_iter()
+        .filter(|(path, src)| {
+            // This sentinel names the shape it forbids.
+            !path.ends_with("no_dynamic.rs") && src.contains(&variant)
+        })
+        .map(|(p, _)| p)
+        .collect();
+
+    assert!(
+        hits.is_empty(),
+        "`{variant}` found in: {hits:#?}. `HeapKind::ForeignRef` is a \
+         pure-discriminator kind (ADR-006 §2.7.32 / §2.7.9 FilterExpr \
+         precedent): slot bits are `Arc::into_raw(Arc<ForeignRefData>)` and \
+         never a `HeapValue` pointer, so `as_heap_value()` on them is \
+         undefined. Recover the payload with `Arc::from_raw::<ForeignRefData>` \
+         through the kind label instead of adding a `HeapValue` arm."
+    );
+}
+
 /// Returns a matcher for the forbidden shape, allowing any whitespace after
 /// the comma — equivalent to the baseline PCRE. The two fragments are kept
 /// separate so this very file never contains the forbidden literal

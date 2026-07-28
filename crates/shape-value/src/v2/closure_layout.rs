@@ -571,6 +571,18 @@ impl Drop for SharedCell {
                     HeapKind::FilterExpr => {
                         Arc::decrement_strong_count(bits as *const crate::value::FilterNode);
                     }
+                    // ADR-006 §2.7.32 / Q26 (ADR-019 §3 POLY-FOREIGN-REF
+                    // #200, 2026-07-28): a `SharedCell` whose single-slot
+                    // payload is a `NativeKind::Ptr(HeapKind::ForeignRef)`
+                    // carries `Arc::into_raw(Arc<ForeignRefData>) as u64`
+                    // directly — the shape a `var` binding holding a foreign
+                    // reference takes once it is captured. Retires one share;
+                    // the last one disposes the foreign object.
+                    HeapKind::ForeignRef => {
+                        Arc::decrement_strong_count(
+                            bits as *const crate::foreign_ref::ForeignRefData,
+                        );
+                    }
                     // Wave 8 W8-T26 (ADR-006 §2.7.13 / Q14, 2026-05-10):
                     // a `SharedCell` whose single-slot payload is a
                     // `NativeKind::Ptr(HeapKind::Reference)` carries

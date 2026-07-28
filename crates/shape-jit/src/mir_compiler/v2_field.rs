@@ -70,6 +70,7 @@ fn heap_ptr_slot_to_clif_type(heap_kind: HeapKind) -> types::Type {
         | HeapKind::Char
         | HeapKind::HashMap
         | HeapKind::FilterExpr
+        | HeapKind::ForeignRef
         | HeapKind::Reference
         | HeapKind::SharedCell
         | HeapKind::HashSet
@@ -112,6 +113,7 @@ fn heap_ptr_slot_byte_width(heap_kind: HeapKind) -> u32 {
         | HeapKind::Char
         | HeapKind::HashMap
         | HeapKind::FilterExpr
+        | HeapKind::ForeignRef
         | HeapKind::Reference
         | HeapKind::SharedCell
         | HeapKind::HashSet

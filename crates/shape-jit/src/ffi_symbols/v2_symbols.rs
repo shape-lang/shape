@@ -477,6 +477,14 @@ pub fn register_v2_symbols(builder: &mut JITBuilder) {
         "jit_arc_lazy_release",
         collection_arc::jit_arc_lazy_release as *const u8,
     );
+    builder.symbol(
+        "jit_arc_foreign_ref_retain",
+        collection_arc::jit_arc_foreign_ref_retain as *const u8,
+    );
+    builder.symbol(
+        "jit_arc_foreign_ref_release",
+        collection_arc::jit_arc_foreign_ref_release as *const u8,
+    );
 
     // Typed HashMap<string, ...> access — SURFACE per ADR-006 §2.7.4 /
     // W10 jit-playbook §5. The deleted ValueWord-shape map FFI
@@ -1115,6 +1123,8 @@ pub fn declare_v2_functions(module: &mut JITModule, ffi_funcs: &mut HashMap<Stri
         "jit_arc_atomic_release",
         "jit_arc_lazy_retain",
         "jit_arc_lazy_release",
+        "jit_arc_foreign_ref_retain",
+        "jit_arc_foreign_ref_release",
     ] {
         let mut sig = module.make_signature();
         sig.params.push(AbiParam::new(types::I64));

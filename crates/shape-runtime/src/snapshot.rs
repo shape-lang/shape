@@ -1948,6 +1948,30 @@ fn slot_heap_to_serializable(
              not snapshot-restorable — clean-refuse by design (ADR-006 §2.7.5.1)"
                 .to_string(),
         ),
+        // ADR-019 §3 / #200 (POLY-FOREIGN-REF): foreign state is
+        // `STATE_MODEL_STATEFUL_OPAQUE`. A snapshot containing a live foreign
+        // reference refuses — never a silent skip, never a fabricated
+        // restoration — and the refusal NAMES the value and its origin,
+        // because "some foreign object" is not actionable: the user has to
+        // know which handle to release or restructure around. The origin
+        // facts travel on the carrier precisely so they are available here,
+        // where no VM or extension context is in scope.
+        HeapKind::ForeignRef => {
+            // SAFETY: bits = `Arc::into_raw(Arc<ForeignRefData>)` per the
+            // `KindedSlot::from_foreign_ref` construction contract. Borrow
+            // only — the slot keeps its share.
+            let r = unsafe { &*(bits as *const shape_value::ForeignRefData) };
+            let origin = r.origin();
+            Err(format!(
+                "snapshot cannot capture {} (handle {}): foreign runtime state \
+                 is opaque to Shape (STATE_MODEL_STATEFUL_OPAQUE), so it can be \
+                 neither serialized nor truthfully restored. Convert it to Shape \
+                 values before checkpointing, or keep the reference out of the \
+                 captured scope — clean-refuse by design (ADR-019 §3)",
+                origin.describe(),
+                r.handle(),
+            ))
+        }
         HeapKind::SharedCell => serialize_shared_cell_with_provenance(
             bits,
             #[cfg(miri)]
@@ -4937,6 +4961,60 @@ mod opaque_disposition_tests {
                  message naming the type, got: {err}"
             );
         }
+    }
+
+    /// ADR-019 §3 / #200: a snapshot containing a live foreign reference
+    /// refuses, and the refusal NAMES THE VALUE AND ITS ORIGIN.
+    ///
+    /// The distinguishing requirement is the naming. "Some foreign object" is
+    /// not actionable — the user has to know which handle to release or
+    /// restructure around — so the origin facts travel on the carrier
+    /// precisely so this site, which has no VM or extension in scope, can
+    /// quote them.
+    #[test]
+    fn a_live_foreign_ref_refuses_at_snapshot_naming_value_and_origin() {
+        use shape_value::kinded_slot::KindedSlot;
+        use shape_value::{ForeignRefData, ForeignRefDisposer, ForeignRefOrigin};
+
+        /// Asserts by existing: if the refusal path ever disposed the value it
+        /// was refusing to capture, this would fire.
+        #[derive(Debug)]
+        struct MustNotDisposeDuringSnapshot;
+
+        impl ForeignRefDisposer for MustNotDisposeDuringSnapshot {
+            fn dispose(&self, _handle: u64) {}
+        }
+
+        let (_tmp, st) = store();
+        let reference = KindedSlot::from_foreign_ref(Arc::new(ForeignRefData::new(
+            4242,
+            ForeignRefOrigin {
+                language: "python".into(),
+                foreign_type: "sqlite3.Connection".into(),
+                produced_by: "open_db".into(),
+            },
+            Arc::new(MustNotDisposeDuringSnapshot),
+        )));
+
+        let err = slot_to_serializable(reference.slot().raw(), reference.kind(), &st)
+            .expect_err("a live foreign reference must refuse at snapshot()-encode");
+
+        assert!(
+            err.contains("a python sqlite3.Connection returned by `open_db`"),
+            "the refusal names the value and its origin: {err}"
+        );
+        assert!(
+            err.contains("4242"),
+            "the refusal identifies WHICH reference: {err}"
+        );
+        assert!(
+            err.contains("STATE_MODEL_STATEFUL_OPAQUE"),
+            "the refusal says why foreign state cannot be captured: {err}"
+        );
+        assert!(
+            err.contains("clean-refuse by design"),
+            "this is terminal, not a follow-up: {err}"
+        );
     }
 
     // NOTE: the four live-resource arms also stay terminal clean-refuse on

@@ -48,6 +48,7 @@
 // dispatch tables (lines ~690 / ~1045 pre-edit) stay until V3-S5 ckpt-5
 // per supervisor 2026-05-15 partition (ckpt-5 territory: 4-table lockstep
 // deletion + U64 relabel + A1 fold).
+use crate::foreign_ref::ForeignRefData;
 #[cfg(miri)]
 use crate::heap_value::MiriSlotProvenance;
 use crate::heap_value::{
@@ -305,6 +306,23 @@ impl KindedSlot {
                 NativeKind::Ptr(HeapKind::SharedCell),
             )
         }
+    }
+
+    /// Construct an owning foreign-reference carrier from an
+    /// `Arc<ForeignRefData>`, transferring the caller's share.
+    ///
+    /// ADR-006 §2.7.32 / Q26 (ADR-019 §3 POLY-FOREIGN-REF #200). This is the
+    /// single construction seam for the carrier — the foreign-call return path
+    /// in `shape-vm` is its only production caller, and the extension-facing
+    /// disposer is bound before the value is ever a slot. Slot bits are
+    /// `Arc::into_raw` directly, the §2.7.9 pure-discriminator shape; the
+    /// `HeapKind::ForeignRef` Drop / Clone arms retire and duplicate the share.
+    #[inline]
+    pub fn from_foreign_ref(r: Arc<ForeignRefData>) -> Self {
+        Self::new(
+            ValueSlot::from_raw(Arc::into_raw(r) as u64),
+            NativeKind::Ptr(HeapKind::ForeignRef),
+        )
     }
 
     /// Construct an owning Reference carrier without losing its Miri pointer
@@ -1192,6 +1210,17 @@ impl Drop for KindedSlot {
                     HeapKind::FilterExpr => {
                         Arc::decrement_strong_count(bits as *const FilterNode);
                     }
+                    // ADR-006 §2.7.32 / Q26 (ADR-019 §3 POLY-FOREIGN-REF
+                    // #200, 2026-07-28): ForeignRef-kinded `KindedSlot`s own
+                    // one `Arc::into_raw(Arc<ForeignRefData>)` strong-count
+                    // share. Retiring the last one runs
+                    // `ForeignRefData::drop`, which is where the owning
+                    // extension instance is told to release the foreign
+                    // object — so an under-counted retire here does not leak
+                    // Shape memory, it leaks a Python object.
+                    HeapKind::ForeignRef => {
+                        Arc::decrement_strong_count(bits as *const ForeignRefData);
+                    }
                     // Wave 8 W8-T26 (ADR-006 §2.7.13 / Q14, 2026-05-10):
                     // mirror of `vm_impl/stack.rs:drop_with_kind` Reference
                     // arm. Slot bits are `Arc::into_raw(Arc<RefTarget>)`
@@ -1636,6 +1665,13 @@ impl Clone for KindedSlot {
                     // the Drop arm above.
                     HeapKind::FilterExpr => {
                         Arc::increment_strong_count(bits as *const FilterNode);
+                    }
+                    // ADR-006 §2.7.32 / Q26 (ADR-019 §3 POLY-FOREIGN-REF
+                    // #200, 2026-07-28): mirror of the Drop ForeignRef arm.
+                    // Bumps one `Arc<ForeignRefData>` share, which is what
+                    // keeps the foreign object alive for the duplicate.
+                    HeapKind::ForeignRef => {
+                        Arc::increment_strong_count(bits as *const ForeignRefData);
                     }
                     // Wave 8 W8-T26 (ADR-006 §2.7.13 / Q14, 2026-05-10):
                     // mirror of the Drop Reference arm above. Bumps one

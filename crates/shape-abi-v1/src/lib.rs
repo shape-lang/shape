@@ -931,10 +931,38 @@ pub struct LanguageRuntimeVTable {
     /// struct layout — and therefore [`abi_build_fingerprint`] — is unchanged.
     pub instance_concurrency: Option<unsafe extern "C" fn(instance: *mut c_void) -> u32>,
 
+    /// Release a foreign object this instance previously handed the host as an
+    /// opaque reference.
+    ///
+    /// ADR-019 §3 / #200 (POLY-FOREIGN-REF). `handle` is the extension's own
+    /// identifier, echoed back exactly as it was minted; the host never
+    /// interprets it. Called once, when the last Shape share of the reference
+    /// is retired.
+    ///
+    /// Returns nothing, and cannot: this runs from a `Drop`, where there is no
+    /// caller to report to and a partial teardown would be worse than none.
+    /// ADR-019 §3 fixes disposal as synchronous and infallible in v1 for
+    /// exactly that reason — a disposer that could fail or suspend is a later
+    /// design under ADR-010 §6's finalization contract. An extension that
+    /// cannot honour a handle should treat it as already gone.
+    ///
+    /// **Which instance.** The handle belongs to the instance that minted it,
+    /// not to the language. For a
+    /// [`INSTANCE_CONCURRENCY_THREAD_AFFINE`] runtime the host gives each
+    /// worker its own instance, so a reference minted inside worker 2's
+    /// isolate is disposed on worker 2 and nowhere else; the host routes it.
+    ///
+    /// Absent (`None`) means the extension mints no foreign references. The
+    /// host refuses to build one against a runtime that cannot release it,
+    /// rather than minting a reference that would leak by construction.
+    ///
+    /// Landed in the designated additive tail's former `reserved2` slot, so the
+    /// struct layout — and therefore [`abi_build_fingerprint`] — is unchanged.
+    pub dispose_ref: Option<unsafe extern "C" fn(instance: *mut c_void, handle: u64)>,
+
     /// Reserved fn-pointer tail padding (null in v4). Lets additive vtable
     /// functions land later (e.g. the ffi-rebuild §7 `request_cancel` hook)
     /// without another ABI bump. Must be `None` when constructed by the macro.
-    pub reserved2: Option<unsafe extern "C" fn()>,
     pub reserved3: Option<unsafe extern "C" fn()>,
 }
 
@@ -2122,7 +2150,13 @@ macro_rules! language_runtime_plugin {
                 // landed in the former `reserved1` slot — same layout, same
                 // fingerprint.
                 instance_concurrency: Some(__shape_pc_instance_concurrency),
-                reserved2: None,
+                // ADR-019 §3 (#200): a macro-generated runtime mints no
+                // foreign references yet, and `None` is the truthful
+                // declaration of that — the host refuses to build a reference
+                // against a runtime that could not release it. The macro arm
+                // that accepts a disposer lands with the first extension that
+                // returns one (#163 / #164).
+                dispose_ref: None,
                 reserved3: None,
             };
             &VTABLE

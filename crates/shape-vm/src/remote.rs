@@ -1439,6 +1439,7 @@ fn capture_type_surface(kind: shape_value::NativeKind) -> &'static str {
         NativeKind::Ptr(HeapKind::IoHandle) => "an open resource handle",
         NativeKind::Ptr(HeapKind::Future) => "a pending async value",
         NativeKind::Ptr(HeapKind::TaskGroup) => "a task group",
+        NativeKind::Ptr(HeapKind::ForeignRef) => "a foreign object reference",
         NativeKind::Ptr(HeapKind::String) => "a string",
         _ => "an unsupported value",
     }
@@ -1576,6 +1577,23 @@ fn validate_remote_closure_captures(
             | NativeKind::Ptr(HeapKind::Future)
             | NativeKind::Ptr(HeapKind::TaskGroup) => Some(format!(
                 "is {} — open resources have no meaningful remote identity",
+                capture_type_surface(*kind),
+            )),
+            // ADR-019 §3 / #200: a foreign reference names an object inside an
+            // extension's runtime on THIS node. The handle is meaningless
+            // anywhere else, and serializing it would produce a value the
+            // receiver could neither use nor honestly refuse later. §3 admits a
+            // remote foreign reference only where the receiving placement
+            // admits the same extension, version and environment digest, and
+            // even then only through an explicit re-establishment protocol —
+            // never by shipping the handle. No admission machinery exists to
+            // consult yet (#160 / #167), so the answer here is refusal, at
+            // artifact construction, before anything is sent.
+            NativeKind::Ptr(HeapKind::ForeignRef) => Some(format!(
+                "is {} — the handle only means something inside the extension \
+                 instance on this node, and a foreign object is never \
+                 serialized; call the foreign function on the remote node \
+                 instead, or convert the object to Shape values before sending",
                 capture_type_surface(*kind),
             )),
             _ => None,
@@ -4110,6 +4128,72 @@ mod tests {
                 assert!(
                     !e.message.contains("slot") && !e.message.contains("index"),
                     "no slot-index jargon: {}",
+                    e.message
+                );
+            }
+            Ok(v) => panic!("expected UnsupportedCapture refusal, got Ok({v:?})"),
+        }
+    }
+
+    #[test]
+    fn remote_closure_foreign_ref_capture_refused_at_artifact_construction() {
+        // ADR-019 §3 / #200. A closure that captures a foreign object
+        // reference is refused BEFORE anything is sent: the handle names an
+        // object inside an extension instance on this node, so it is
+        // meaningless on the receiver and is never serialized. §3 admits a
+        // remote foreign reference only against a placement that admits the
+        // same extension, version and environment digest, and even then only by
+        // explicit re-establishment — machinery that does not exist yet
+        // (#160 / #167), which is why the answer is refusal rather than a
+        // conditional.
+        let mut blob = mk_blob("holds_model", mk_hash(1), vec![]);
+        blob.is_closure = true;
+        blob.captures_count = 1;
+        blob.capture_kinds = vec![shape_value::NativeKind::Ptr(
+            shape_value::HeapKind::ForeignRef,
+        )];
+        blob.mutable_captures = vec![false];
+        blob.capture_names = vec!["model".to_string()];
+        blob.finalize();
+        let hash = blob.content_hash;
+        let mut store = HashMap::new();
+        store.insert(hash, blob);
+        let mut program = BytecodeProgram::default();
+        program.content_addressed = Some(mk_ca_program(hash, store));
+
+        let mut request = mk_ca_request(program, hash, "holds_model");
+        request.upvalues = Some(vec![SerializableVMValue::Int(0)]);
+        request.upvalue_kinds = Some(vec![shape_value::NativeKind::Ptr(
+            shape_value::HeapKind::ForeignRef,
+        )]);
+
+        let resp = execute_remote_call(request, &temp_store(), &PermissionSet::pure());
+        match resp.result {
+            Err(e) => {
+                assert_eq!(
+                    e.kind,
+                    RemoteErrorKind::UnsupportedCapture,
+                    "msg={}",
+                    e.message
+                );
+                assert!(
+                    e.message.contains("'model'"),
+                    "names the captured variable: {}",
+                    e.message
+                );
+                assert!(
+                    e.message.contains("foreign object reference"),
+                    "names what kind of value it refused: {}",
+                    e.message
+                );
+                assert!(
+                    e.message.contains("extension instance on this node"),
+                    "says why it cannot travel: {}",
+                    e.message
+                );
+                assert!(
+                    e.message.contains("remote node") || e.message.contains("convert"),
+                    "gives remediation: {}",
                     e.message
                 );
             }

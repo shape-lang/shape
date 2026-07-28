@@ -41,6 +41,7 @@
 //! matrix is unchanged.
 
 use shape_value::ValueSlot;
+use shape_value::foreign_ref::ForeignRefData;
 use shape_value::heap_value::{
     AtomicData, ChannelData, DequeData, HashSetData, LazyData, MutexData, PriorityQueueData,
 };
@@ -420,6 +421,38 @@ pub extern "C" fn jit_arc_lazy_release(bits: u64) {
     }
     unsafe {
         Arc::decrement_strong_count(bits as *const LazyData);
+    }
+}
+
+/// Retain (clone) an `Arc<ForeignRefData>` strong-count share.
+///
+/// ADR-019 §3 / #200 (POLY-FOREIGN-REF). A JIT-compiled function never
+/// *produces* a foreign reference — functions containing `CallForeign` are
+/// interpreter-only — but one can flow through JIT code as an ordinary value,
+/// and the standard Rust `Arc` layout (refcount at offset -16) is the wrong
+/// shape for the legacy `jit_arc_retain` HeapHeader fallback. This is the
+/// explicit arm that keeps the carrier off that fallback (the class behind
+/// three documented segfault families; see the module carrier-shape rule).
+#[unsafe(no_mangle)]
+pub extern "C" fn jit_arc_foreign_ref_retain(bits: u64) {
+    if bits == 0 {
+        return;
+    }
+    unsafe {
+        Arc::increment_strong_count(bits as *const ForeignRefData);
+    }
+}
+
+/// Release an `Arc<ForeignRefData>` strong-count share. Reaching refcount
+/// zero runs `ForeignRefData::Drop`, which disposes the foreign object
+/// through its owning extension instance (ADR-019 §3).
+#[unsafe(no_mangle)]
+pub extern "C" fn jit_arc_foreign_ref_release(bits: u64) {
+    if bits == 0 {
+        return;
+    }
+    unsafe {
+        Arc::decrement_strong_count(bits as *const ForeignRefData);
     }
 }
 

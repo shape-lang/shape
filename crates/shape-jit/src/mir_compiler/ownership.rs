@@ -702,6 +702,8 @@ impl<'a, 'b> MirToIR<'a, 'b> {
             Some(NativeKind::Ptr(HeapKind::Mutex)) => self.ffi.arc_mutex_retain,
             Some(NativeKind::Ptr(HeapKind::Atomic)) => self.ffi.arc_atomic_retain,
             Some(NativeKind::Ptr(HeapKind::Lazy)) => self.ffi.arc_lazy_retain,
+            // ADR-019 §3 / #200 — the opaque foreign-reference carrier.
+            Some(NativeKind::Ptr(HeapKind::ForeignRef)) => self.ffi.arc_foreign_ref_retain,
             // W12-jit-string-carrier-unification (Phase 3 cluster-0 Round 12
             // T2/T3, 2026-05-13). ADR-006 §2.7.5 `NativeKind::String` slots
             // carry `Arc::into_raw(Arc<String>) as u64`; retain bumps the
@@ -752,6 +754,8 @@ impl<'a, 'b> MirToIR<'a, 'b> {
             Some(NativeKind::Ptr(HeapKind::Mutex)) => self.ffi.arc_mutex_release,
             Some(NativeKind::Ptr(HeapKind::Atomic)) => self.ffi.arc_atomic_release,
             Some(NativeKind::Ptr(HeapKind::Lazy)) => self.ffi.arc_lazy_release,
+            // Mirror of the `Ptr(HeapKind::ForeignRef)` retain arm above.
+            Some(NativeKind::Ptr(HeapKind::ForeignRef)) => self.ffi.arc_foreign_ref_release,
             // W12-jit-string-carrier-unification: mirror of the
             // `retain_func_for_place` String arm.
             Some(NativeKind::String) => self.ffi.arc_string_release,

@@ -27,6 +27,7 @@ use shape_value::v2::typed_array::{
     ELEM_TYPE_I64, TypedArray, release_v2_typed_array, stamp_elem_type,
 };
 use shape_value::value::{FilterLiteral, FilterNode, FilterOp, VTable};
+use shape_value::{ForeignRefData, ForeignRefDisposer, ForeignRefOrigin};
 use shape_value::{HeapKind, KindedSlot, NativeKind, ValueSlot};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -135,6 +136,29 @@ fn filter(value: i64) -> FilterNode {
         op: FilterOp::Eq,
         value: FilterLiteral::Int(value),
     }
+}
+
+/// A disposer that does nothing: this matrix proves the *carrier's* share
+/// accounting, and a disposer with side effects would make a lifecycle failure
+/// look like a disposal failure. Disposal behaviour has its own fixtures
+/// (`shape-vm`'s finalization-observing fake extension).
+#[derive(Debug)]
+struct InertDisposer;
+
+impl ForeignRefDisposer for InertDisposer {
+    fn dispose(&self, _handle: u64) {}
+}
+
+fn foreign_ref(handle: u64) -> ForeignRefData {
+    ForeignRefData::new(
+        handle,
+        ForeignRefOrigin {
+            language: "python".into(),
+            foreign_type: "object".into(),
+            produced_by: "fixture".into(),
+        },
+        Arc::new(InertDisposer),
+    )
 }
 
 fn closure_value(function_id: u16) -> HeapValue {
@@ -303,6 +327,10 @@ fn assert_ptr_kind_lifecycle(kind: HeapKind) -> OwnershipClass {
             HashMapKindedRef::I64(Arc::new(HashMapData::<i64>::new()))
         ),
         HeapKind::FilterExpr => arc_case!(kind, filter(1), filter(2)),
+        // ADR-019 §3 / #200: the foreign-reference carrier is an ordinary
+        // typed `Arc` payload, so it must prove the same StdArc lifecycle as
+        // the other pure-discriminator kinds.
+        HeapKind::ForeignRef => arc_case!(kind, foreign_ref(1), foreign_ref(2)),
         HeapKind::Reference => arc_case!(
             kind,
             RefTarget::Local {
@@ -419,7 +447,11 @@ fn every_accepted_shared_carrier_balances_a_nonzero_lifecycle() {
     assert_eq!(classes.len(), HeapKind::ALL.len());
     for (class, expected) in [
         (OwnershipClass::Inline, 3),
-        (OwnershipClass::StdArc, 28),
+        // 28 → 29: `HeapKind::ForeignRef` joins the standard-`Arc` class
+        // (ADR-019 §3 / #200, 2026-07-28). Its payload is a plain
+        // `Arc<ForeignRefData>`, so it must never drift into a HeapHeader
+        // class — that mismatch is the documented segfault family.
+        (OwnershipClass::StdArc, 29),
         (OwnershipClass::ClosureArc, 1),
         (OwnershipClass::TypedArrayHeader, 1),
         (OwnershipClass::TypedObjectHeader, 1),
@@ -441,8 +473,9 @@ fn every_accepted_shared_carrier_balances_a_nonzero_lifecycle() {
                 .iter()
                 .filter(|(_, class)| *class != OwnershipClass::Refused)
                 .count(),
-        38,
-        "three scalar refcounted carriers plus 35 accepted Ptr carriers"
+        // 38 → 39 with `HeapKind::ForeignRef` (ADR-019 §3 / #200, 2026-07-28).
+        39,
+        "three scalar refcounted carriers plus 36 accepted Ptr carriers"
     );
     assert_eq!(
         classes

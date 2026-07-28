@@ -3964,6 +3964,7 @@ pub(in crate::compiler) fn read_typed_object_field(
                 | HeapKind::Char
                 | HeapKind::HashMap
                 | HeapKind::FilterExpr
+                | HeapKind::ForeignRef
                 | HeapKind::Reference
                 | HeapKind::SharedCell
                 | HeapKind::HashSet

@@ -169,6 +169,34 @@ impl PluginLanguageRuntime {
         self.instance_concurrency
     }
 
+    /// Whether this runtime can release foreign objects it hands out as opaque
+    /// references (ADR-019 §3 / #200).
+    ///
+    /// `false` means the extension declares no `dispose_ref` entry. The host
+    /// refuses to mint a foreign reference against such a runtime rather than
+    /// creating one that would leak by construction.
+    pub fn can_dispose_refs(&self) -> bool {
+        self.state.vtable.dispose_ref.is_some()
+    }
+
+    /// Release a foreign object this instance minted (ADR-019 §3 / #200).
+    ///
+    /// Called from the foreign-reference carrier's `Drop`, so it neither
+    /// returns nor reports: disposal is infallible in v1 and there is no caller
+    /// to tell. A runtime with no `dispose_ref` entry never minted a reference
+    /// in the first place ([`Self::can_dispose_refs`] gates that), so the
+    /// no-entry case is unreachable rather than silently skipped.
+    ///
+    /// **This must be called on `self` = the instance that minted `handle`.**
+    /// For a thread-affine runtime that is a specific worker's private
+    /// instance, and calling it on any other — including the interpreter
+    /// thread's — enters an isolate from the wrong thread.
+    pub fn dispose_ref(&self, handle: u64) {
+        if let Some(dispose) = self.state.vtable.dispose_ref {
+            unsafe { dispose(self.state.instance, handle) };
+        }
+    }
+
     /// Create a new runtime instance using the same vtable and init config.
     ///
     /// Some embedded runtimes are thread-affine (notably V8/deno_core). Serve

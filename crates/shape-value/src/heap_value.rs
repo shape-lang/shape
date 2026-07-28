@@ -4705,6 +4705,17 @@ impl TypedObjectStorage {
                             bits as *const crate::value::FilterNode,
                         );
                     }
+                    // ADR-006 §2.7.32 / Q26 (ADR-019 §3 POLY-FOREIGN-REF
+                    // #200, 2026-07-28): a TypedObject field holding a
+                    // foreign reference stores `Arc::into_raw(Arc<
+                    // ForeignRefData>) as u64`. Retires one share, so an
+                    // object owning a foreign handle disposes it when the
+                    // object dies.
+                    HeapKind::ForeignRef => {
+                        std::sync::Arc::decrement_strong_count(
+                            bits as *const crate::foreign_ref::ForeignRefData,
+                        );
+                    }
                     HeapKind::Reference => {
                         std::sync::Arc::decrement_strong_count(
                             bits as *const crate::reference::RefTarget,

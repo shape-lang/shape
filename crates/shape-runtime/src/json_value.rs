@@ -859,6 +859,23 @@ fn slot_ptr_to_json_value(
         // so introducing a new HeapKind variant is a compile error here and
         // forces a conscious JSON-serialization decision (HeapKind-wildcard
         // guard, `scripts/check-heapkind-wildcards.sh`).
+        // ADR-019 §3 / #200: a foreign reference has no JSON projection —
+        // its representation lives in another runtime. The refusal names the
+        // value and its origin rather than reporting a bare kind, because a
+        // user who hits this needs to know *which* foreign object they tried
+        // to serialize (the same refusal discipline as the snapshot path).
+        HeapKind::ForeignRef => {
+            // SAFETY: bits = `Arc::into_raw(Arc<ForeignRefData>)` per the
+            // `KindedSlot::from_foreign_ref` construction contract. Read
+            // through a borrow; no share is taken or released.
+            let r = unsafe { &*(bits as *const shape_value::ForeignRefData) };
+            Err(format!(
+                "slot_to_json_value: cannot serialize {} — a foreign object \
+                 lives in its own runtime and has no JSON representation; \
+                 convert it to Shape values inside the foreign body instead",
+                r.origin().describe()
+            ))
+        }
         HeapKind::Closure
         | HeapKind::DataTable
         | HeapKind::Future

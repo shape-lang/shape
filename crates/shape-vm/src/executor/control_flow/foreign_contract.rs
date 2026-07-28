@@ -471,7 +471,7 @@ mod tests {
             state_model: STATE_MODEL_STATEFUL_OPAQUE,
             generate_stubs: Some(generate_stubs),
             instance_concurrency: Some(instance_concurrency),
-            reserved2: None,
+            dispose_ref: None,
             reserved3: None,
         };
 
@@ -495,7 +495,7 @@ mod tests {
             // A pre-#202 extension declares nothing here; the host reads that
             // as interpreter-thread-only and refuses to offload into it.
             instance_concurrency: None,
-            reserved2: None,
+            dispose_ref: None,
             reserved3: None,
         };
     }

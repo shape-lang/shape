@@ -32,8 +32,9 @@
 //! exactly the synchronous behaviour it had before this module existed.
 
 use std::collections::HashMap;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
 use std::sync::mpsc::{Receiver, Sender};
-use std::sync::{Arc, Mutex};
 
 use shape_abi_v1::foreign_types::ForeignContractExport;
 use shape_runtime::plugins::language_runtime::{
@@ -84,6 +85,28 @@ impl ForeignCompileSpec {
     }
 }
 
+/// Which worker inside a thread-affine pool owns something.
+///
+/// ADR-019 §3 / #200: a foreign object minted inside worker 2's isolate can
+/// only ever be released by worker 2, because that isolate belongs to that
+/// thread. So the reference records where it was born and disposal is
+/// addressed, not broadcast.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AffineWorkerId(pub(crate) usize);
+
+/// What a dedicated worker can be asked to do.
+///
+/// Invokes and disposals share one per-worker queue so that a disposal is
+/// ordered against that instance's other work rather than racing it — an
+/// object is released after the calls that were already queued against it, in
+/// the order the program retired them.
+enum AffineCommand {
+    Invoke(Box<AffineJob>),
+    /// Release a foreign object this worker's own instance minted
+    /// (ADR-019 §3 / #200).
+    DisposeRef(u64),
+}
+
 /// One unit of work handed to a thread-affine worker.
 struct AffineJob {
     /// Identifies the function within the program, and therefore within the
@@ -109,25 +132,96 @@ struct AffineJob {
 /// construction rather than by a lock — a lock would make the calls safe from
 /// each other but would not stop the isolate from being entered from the wrong
 /// thread.
-pub(crate) struct AffineWorkerPool {
-    submit: Sender<AffineJob>,
+pub struct AffineWorkerPool {
+    workers: Vec<AffineWorker>,
+}
+
+/// One worker's submission side, plus the depth its own queue is carrying.
+struct AffineWorker {
+    submit: Sender<AffineCommand>,
+    /// Commands sent but not yet completed. Only used to pick a worker for the
+    /// next invoke; it is advisory, and a stale read costs a slightly worse
+    /// placement, never correctness.
+    queued: Arc<AtomicUsize>,
 }
 
 impl AffineWorkerPool {
-    fn start(language: &str, template: Arc<PluginLanguageRuntime>) -> Self {
-        let (submit, jobs) = std::sync::mpsc::channel::<AffineJob>();
-        let jobs = Arc::new(Mutex::new(jobs));
+    pub(crate) fn start(language: &str, template: Arc<PluginLanguageRuntime>) -> Self {
+        let mut workers = Vec::with_capacity(AFFINE_WORKERS);
         for worker in 0..AFFINE_WORKERS {
-            let jobs = Arc::clone(&jobs);
+            // Per-worker queue rather than one shared one. #202 landed a shared
+            // queue with every worker racing to receive, which balances load
+            // but makes a worker unaddressable — and ADR-019 §3 disposal has to
+            // reach one specific instance. Placement is by shortest queue,
+            // which recovers most of what the shared queue gave: work still
+            // lands on an idle worker when one exists.
+            let (submit, commands) = std::sync::mpsc::channel::<AffineCommand>();
+            let queued = Arc::new(AtomicUsize::new(0));
             let template = Arc::clone(&template);
-            let language = language.to_string();
+            let language_name = language.to_string();
+            let worker_queued = Arc::clone(&queued);
             // Detached: the pool lives as long as the VM that owns it, and the
-            // worker exits when the submit side is dropped.
+            // worker exits when its submit side is dropped — after draining
+            // every command already queued, which is what keeps a disposal sent
+            // just before teardown from being lost.
             let _ = std::thread::Builder::new()
-                .name(format!("shape-foreign-{language}-{worker}"))
-                .spawn(move || affine_worker_loop(&template, &jobs));
+                .name(format!("shape-foreign-{language_name}-{worker}"))
+                .spawn(move || affine_worker_loop(&template, &commands, &worker_queued));
+            workers.push(AffineWorker { submit, queued });
         }
-        Self { submit }
+        Self { workers }
+    }
+
+    /// The worker with the shortest queue.
+    fn least_loaded(&self) -> AffineWorkerId {
+        let mut best = 0;
+        let mut best_depth = usize::MAX;
+        for (index, worker) in self.workers.iter().enumerate() {
+            let depth = worker.queued.load(AtomicOrdering::Relaxed);
+            if depth < best_depth {
+                best = index;
+                best_depth = depth;
+            }
+        }
+        AffineWorkerId(best)
+    }
+
+    /// Ask the worker that minted `handle` to release it (ADR-019 §3 / #200).
+    ///
+    /// Does not wait. The disposal runs synchronously *on the only thread that
+    /// may run it* — the owning worker — and blocking a Shape scope exit until
+    /// that worker finishes whatever unrelated foreign call it is inside would
+    /// turn an ordinary drop into an unbounded pause. The command cannot be
+    /// lost: `std::sync::mpsc` delivers everything already queued before the
+    /// receiver reports disconnection, so a worker shutting down still drains
+    /// it.
+    ///
+    /// A worker whose thread never started has no instance and therefore no
+    /// object to release; the send fails and there is nothing to do.
+    pub(crate) fn dispose_ref(&self, worker: AffineWorkerId, handle: u64) {
+        let Some(worker) = self.workers.get(worker.0) else {
+            return;
+        };
+        worker.queued.fetch_add(1, AtomicOrdering::Relaxed);
+        if worker
+            .submit
+            .send(AffineCommand::DisposeRef(handle))
+            .is_err()
+        {
+            worker.queued.fetch_sub(1, AtomicOrdering::Relaxed);
+        }
+    }
+}
+
+/// Decrements a worker's queue depth however the current command ends —
+/// including the several `continue` paths that report a failure and move on.
+struct QueueDepthGuard<'a> {
+    queued: &'a AtomicUsize,
+}
+
+impl Drop for QueueDepthGuard<'_> {
+    fn drop(&mut self) {
+        self.queued.fetch_sub(1, AtomicOrdering::Relaxed);
     }
 }
 
@@ -136,22 +230,39 @@ impl AffineWorkerPool {
 /// A failure to build the instance is reported to every job the worker would
 /// have taken rather than logged and forgotten — a silently dead worker would
 /// look exactly like a slow one.
-fn affine_worker_loop(template: &PluginLanguageRuntime, jobs: &Mutex<Receiver<AffineJob>>) {
+fn affine_worker_loop(
+    template: &PluginLanguageRuntime,
+    commands: &Receiver<AffineCommand>,
+    queued: &AtomicUsize,
+) {
     let runtime = template.fresh_instance();
     let mut compiled: HashMap<usize, CompiledForeignFunction> = HashMap::new();
     let mut contract_delivered = false;
 
     loop {
-        // The lock covers only the receive, so workers block on the queue, not
-        // on each other's foreign calls.
-        let job = {
-            let Ok(guard) = jobs.lock() else { return };
-            match guard.recv() {
-                Ok(job) => job,
-                // Submit side dropped: the VM is gone.
-                Err(_) => return,
+        let command = match commands.recv() {
+            Ok(command) => command,
+            // Submit side dropped and the queue is drained: the VM is gone.
+            Err(_) => return,
+        };
+
+        let job = match command {
+            AffineCommand::Invoke(job) => job,
+            // ADR-019 §3 / #200: release an object this instance minted. Runs
+            // here and only here — the isolate belongs to this thread. If the
+            // instance failed to build there is no foreign heap to release
+            // into, so there is nothing to do.
+            AffineCommand::DisposeRef(handle) => {
+                if let Ok(runtime) = &runtime {
+                    runtime.dispose_ref(handle);
+                }
+                queued.fetch_sub(1, AtomicOrdering::Relaxed);
+                continue;
             }
         };
+
+        // Every remaining path replies and finishes this command.
+        let _completed = QueueDepthGuard { queued };
 
         let runtime = match &runtime {
             Ok(runtime) => runtime,
@@ -201,7 +312,7 @@ fn affine_worker_loop(template: &PluginLanguageRuntime, jobs: &Mutex<Receiver<Af
 }
 
 /// The offload strategies, chosen per language from the extension's declaration.
-pub(crate) enum ForeignOffload {
+pub enum ForeignOffload {
     /// The instance tolerates concurrent invokes: run on tokio's blocking pool
     /// against the shared instance and the handle compiled at link-now.
     Shared,
@@ -256,7 +367,7 @@ impl ForeignAsyncOffloads {
 }
 
 /// A foreign invoke that is now genuinely in flight off the interpreter thread.
-pub(crate) struct InFlightForeignCall {
+pub struct InFlightForeignCall {
     /// Delivers the extension's raw msgpack return payload. Unmarshalling waits
     /// for the interpreter thread, which owns the schema registry.
     pub completion: Receiver<Result<Vec<u8>, String>>,
@@ -268,6 +379,14 @@ pub(crate) struct InFlightForeignCall {
     /// no foreign code runs at all.) Neither outcome is a confirmation that the
     /// foreign runtime stopped, and nothing in this module reports one as such.
     pub abort: Option<tokio::task::AbortHandle>,
+    /// Which dedicated worker is running this call, for a thread-affine
+    /// language.
+    ///
+    /// ADR-019 §3 / #200: any foreign reference this call returns was minted
+    /// inside *that worker's* isolate, so the reference must record it in order
+    /// to be disposable. `None` for the shared-instance strategy, where every
+    /// call and every disposal goes to the one instance.
+    pub origin_worker: Option<AffineWorkerId>,
 }
 
 /// Start a foreign invoke off the interpreter thread.
@@ -301,22 +420,39 @@ pub(crate) fn start_offloaded_invoke(
             InFlightForeignCall {
                 completion: rx,
                 abort: Some(handle.abort_handle()),
+                // The shared instance is the only one; there is no worker to
+                // name.
+                origin_worker: None,
             }
         }
         ForeignOffload::Affine(pool) => {
-            let job = AffineJob {
+            let job = Box::new(AffineJob {
                 foreign_idx,
                 spec: spec.clone(),
                 contract: Arc::clone(contract),
                 args_bytes,
                 reply: tx.clone(),
+            });
+            let chosen = pool.least_loaded();
+            let sent = match pool.workers.get(chosen.0) {
+                Some(worker) => {
+                    worker.queued.fetch_add(1, AtomicOrdering::Relaxed);
+                    match worker.submit.send(AffineCommand::Invoke(job)) {
+                        Ok(()) => true,
+                        Err(_) => {
+                            worker.queued.fetch_sub(1, AtomicOrdering::Relaxed);
+                            false
+                        }
+                    }
+                }
+                None => false,
             };
-            if pool.submit.send(job).is_err() {
-                // Every worker is gone. Report it through the same channel the
+            if !sent {
+                // The worker is gone. Report it through the same channel the
                 // caller is about to await, so the failure surfaces at the
                 // await point like any other.
                 let _ = tx.send(Err(format!(
-                    "foreign function '{}': the dedicated async worker pool for this \
+                    "foreign function '{}': the dedicated async worker for this \
                      language is not running",
                     spec.name
                 )));
@@ -328,6 +464,9 @@ pub(crate) fn start_offloaded_invoke(
                 // foreign body, and pretending otherwise would misreport
                 // cancellation as confirmed termination.
                 abort: None,
+                // ADR-019 §3 / #200: a reference this call returns belongs to
+                // this worker's isolate and nowhere else.
+                origin_worker: Some(chosen),
             }
         }
     }
@@ -539,7 +678,7 @@ pub(crate) mod tests {
                 state_model: STATE_MODEL_STATEFUL_OPAQUE,
                 generate_stubs: Some(generate_stubs),
                 instance_concurrency: concurrency,
-                reserved2: None,
+                dispose_ref: None,
                 reserved3: None,
             }
         }

@@ -369,6 +369,10 @@ impl JITCompiler {
             arc_lazy_retain: r!("jit_arc_lazy_retain"),
             arc_lazy_release: r!("jit_arc_lazy_release"),
 
+            // ADR-019 §3 / #200 — the opaque foreign-reference carrier.
+            arc_foreign_ref_retain: r!("jit_arc_foreign_ref_retain"),
+            arc_foreign_ref_release: r!("jit_arc_foreign_ref_release"),
+
             // ADR-006 §2.7.5 — `Arc<String>` strict-typed carrier
             // retain/release (W12-jit-string-carrier-unification, Phase 3
             // cluster-0 Round 12 T2/T3, 2026-05-13). Bodies in

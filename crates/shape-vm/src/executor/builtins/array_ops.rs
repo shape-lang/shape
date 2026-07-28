@@ -129,6 +129,7 @@ pub(in crate::executor) fn ptr_slot_to_heap_arc(
         | HeapKind::NativeView
         | HeapKind::HashMap
         | HeapKind::FilterExpr
+        | HeapKind::ForeignRef
         | HeapKind::Reference
         | HeapKind::SharedCell
         | HeapKind::HashSet

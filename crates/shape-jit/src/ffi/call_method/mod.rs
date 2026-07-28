@@ -63,6 +63,7 @@ fn classify_kinded_ptr_receiver_for_jit_format_surface(hk: HeapKind) {
         | HeapKind::Char
         | HeapKind::HashMap
         | HeapKind::FilterExpr
+        | HeapKind::ForeignRef
         | HeapKind::Reference
         | HeapKind::SharedCell
         | HeapKind::HashSet
@@ -229,6 +230,7 @@ unsafe fn receiver_type_name(
         // ADR-006 §2.7.9 (FilterExpr), §2.7.12 (SharedCell), §2.7.13
         // (Reference), §2.7.14 (NativeScalar / NativeView).
         NativeKind::Ptr(HeapKind::FilterExpr)
+        | NativeKind::Ptr(HeapKind::ForeignRef)
         | NativeKind::Ptr(HeapKind::Reference)
         | NativeKind::Ptr(HeapKind::SharedCell)
         | NativeKind::Ptr(HeapKind::NativeScalar)
