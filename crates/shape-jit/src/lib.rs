@@ -55,6 +55,10 @@ mod numeric_compiler;
 mod optimizer;
 pub mod osr_compiler;
 pub mod worker;
+// #117 / R15: execution-level tripwires for the NativeExecutionWitness. Gated
+// behind `deep-tests` like the other whole-prelude JIT execution tests.
+#[cfg(all(test, feature = "deep-tests"))]
+mod witness_tripwires;
 
 // Re-export commonly used items at module level
 pub use context::*;

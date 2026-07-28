@@ -33,6 +33,8 @@ pub mod string;
 pub mod typed_object;
 pub mod v2;
 pub mod value_ffi;
+// #117 / R15: the native-entry callback the witness reads dispatch from.
+pub mod witness;
 // V2.b: v2_array (v1 TypedArrayHeader FFI) deleted — canonical FFI is `v2/mod.rs`
 pub mod v2_core;
 pub mod v2_math;

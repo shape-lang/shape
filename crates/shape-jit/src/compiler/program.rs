@@ -168,6 +168,11 @@ impl JITCompiler {
                 user_func_refs.insert(fn_idx, func_ref);
             }
 
+            // #117 / R15: announce native entry for this unit before any body
+            // instruction, so a body that early-returns still counts as
+            // dispatched. No-op unless a witness session is collecting.
+            self.emit_native_witness_entry(&mut builder, func_idx)?;
+
             let ffi = self.build_ffi_refs(&mut builder)?;
 
             let func_end = func.entry_point + func.body_length;
@@ -517,6 +522,13 @@ impl JITCompiler {
 
         let module_binding_accesses = function_body_module_binding_accesses(program);
         if let Some(first) = module_binding_accesses.first() {
+            shape_vm::native_witness::record_program_fallback(
+                shape_vm::native_witness::FallbackReasonClass::ModuleBindingFunctionBody,
+                format!(
+                    "function `{}` contains {:?} at instruction {}",
+                    first.function_name, first.opcode, first.instruction_index
+                ),
+            );
             return Err(format!(
                 "W39 F1 module-binding function-body SURFACE (ADR-006 §2.7.14): \
                  function '{}' contains {:?} at bytecode instruction {}. \
@@ -544,6 +556,13 @@ impl JITCompiler {
 
         for (_idx, func) in program.functions.iter().enumerate() {
             if func.body_length == 0 && func.mir_data.is_none() {
+                // #117 / R15: a covered fallback is a truthful record, not a
+                // missing witness — say which function and why.
+                shape_vm::native_witness::record_function_fallback(
+                    _idx,
+                    shape_vm::native_witness::FallbackReasonClass::NoCompilableBody,
+                    format!("`{}` has neither a bytecode body nor MIR data", func.name),
+                );
                 jit_compatible.push(false);
                 continue;
             }
@@ -596,6 +615,22 @@ impl JITCompiler {
             //     `LoadSharedModuleBinding`,
             //     `StoreSharedModuleBinding`) — per-module side-table,
             //     separate lowering (A.1C.3 follow-up).
+            if !(bytecode_ok || mir_ok) {
+                // #117 / R15. `vm_only_opcodes` is the dominant class: it names
+                // the opcode the JIT deliberately does not lower (`CallForeign`,
+                // an `as` cast, an outer-scope `var` cell). An unsupported
+                // builtin is reported when that is the only blocker.
+                let class = if report.vm_only_opcodes.is_empty() {
+                    shape_vm::native_witness::FallbackReasonClass::UnsupportedBuiltin
+                } else {
+                    shape_vm::native_witness::FallbackReasonClass::VmOnlyOpcode
+                };
+                shape_vm::native_witness::record_function_fallback(
+                    _idx,
+                    class,
+                    format!("`{}`: {}", func.name, report.blockers_summary()),
+                );
+            }
             jit_compatible.push(bytecode_ok || mir_ok);
         }
 
@@ -612,6 +647,10 @@ impl JITCompiler {
                 .collect();
             let main_report = preflight_instructions(&main_instructions);
             if !main_report.can_jit() {
+                shape_vm::native_witness::record_program_fallback(
+                    shape_vm::native_witness::FallbackReasonClass::MainCodeUnsupportedConstruct,
+                    main_report.blockers_summary(),
+                );
                 return Err(format!(
                     "Main code contains unsupported constructs: {:?}",
                     main_report
@@ -640,6 +679,11 @@ impl JITCompiler {
             .iter()
             .any(|func| func.name.contains("::struct_"))
         {
+            shape_vm::native_witness::record_program_fallback(
+                shape_vm::native_witness::FallbackReasonClass::GenericStructSpecialization,
+                "a generic free function is specialized on a struct type argument \
+                 (`<base>::struct_<name>`)",
+            );
             return Err(
                 "WS-6 surface-and-stop: program uses a generic free function \
                  specialized on a struct type argument; the JIT struct-value \
@@ -732,6 +776,11 @@ impl JITCompiler {
                 // Leave the failed body undefined. Finalization distinguishes an
                 // unreferenced demotion from a reachable compile-stage refusal;
                 // see `program_finalize` for the exactly-once rationale.
+                shape_vm::native_witness::record_function_fallback(
+                    idx,
+                    shape_vm::native_witness::FallbackReasonClass::FunctionCodegenFailed,
+                    format!("`{}`: {}", func.name, e),
+                );
                 compile_failures.push((func_name, e));
                 jit_compatible[idx] = false;
             }
@@ -745,6 +794,11 @@ impl JITCompiler {
         let main_code_ptr = self.module.get_finalized_function(main_func_id);
         self.compiled_functions
             .insert(name.to_string(), main_code_ptr);
+        // #117 / R15 installation event for the top-level unit, taken at the
+        // finalization site rather than inferred from "compilation succeeded".
+        // The witness stores no code address, so #209's per-module page leak
+        // cannot make a recorded installation outlive its meaning.
+        shape_vm::native_witness::record_installation(program.functions.len());
 
         // Phase 5: Build the MixedFunctionTable.
         let mut mixed_table = MixedFunctionTable::with_capacity(program.functions.len());
@@ -761,6 +815,9 @@ impl JITCompiler {
                     let func_name = format!("{}_f{}_{}", name, idx, func.name.replace("::", "__"));
                     self.compiled_functions.insert(func_name, ptr);
                     mixed_table.insert(idx, FunctionEntry::Native(ptr));
+                    // #117 / R15 installation event: native code for this unit
+                    // is finalized and linked into the function table.
+                    shape_vm::native_witness::record_installation(idx);
                 }
             } else {
                 while self.function_table.len() <= idx {

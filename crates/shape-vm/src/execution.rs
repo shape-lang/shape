@@ -693,6 +693,19 @@ impl BytecodeExecutor {
         // projection consult `current_registry()`.
         let _schema_scope = engine.runtime.enter_schema_scope();
 
+        // #117 / R15: register this program's compilation units for the witness.
+        // `begin_program` is idempotent, so on the JIT `[jit-fallback]` path —
+        // where `JITExecutor` already registered the SAME bytecode and recorded
+        // its refusal reason — this does not overwrite those records. Under
+        // `--mode vm` this is the only registration, and the run is then marked
+        // as making no native claim at all.
+        crate::native_witness::begin_program(&bytecode);
+        crate::native_witness::record_program_fallback(
+            crate::native_witness::FallbackReasonClass::ModeVm,
+            "executed by the bytecode interpreter; no native code was installed \
+             or dispatched",
+        );
+
         // Build a VM and prime extensions / foreign-function links.
         // These steps don't reach into the deleted ValueWord carrier
         // themselves; the host-boundary persistence + completion-value

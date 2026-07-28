@@ -51,6 +51,20 @@ pub struct Cli {
     #[arg(long, value_name = "DIR")]
     pub extension_dir: Option<PathBuf>,
 
+    /// Write a `NativeExecutionWitness` JSON record for this run (#117, R15).
+    ///
+    /// The record names, per compilation unit, the verified artifact digest,
+    /// whether native code was installed, how many times the installed native
+    /// body actually ran, and any covered fallback or deoptimization with a
+    /// machine-readable reason class. Use `-` for stdout.
+    ///
+    /// Enabling it makes the JIT emit one native-entry announcement per compiled
+    /// function, so an instrumented run is not byte-identical to a normal one;
+    /// the record says so in its `instrumentation` field. Under `--mode vm` the
+    /// record is still written and truthfully claims no native execution.
+    #[arg(long, value_name = "PATH", global = true)]
+    pub native_witness: Option<PathBuf>,
+
     /// Enable structured JIT diagnostic tracing (requires the `jit-trace`
     /// feature). Accepts an `EnvFilter` directive: empty string enables
     /// `shape_jit=debug`; an explicit directive overrides the default
