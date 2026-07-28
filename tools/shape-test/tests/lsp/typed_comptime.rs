@@ -150,12 +150,6 @@ fn nested_unresolved_type_ref_has_semantic_diagnostic() {
 }
 
 #[test]
-fn legacy_type_descriptor_has_semantic_diagnostic() {
-    ShapeTest::new("let category = comptime { type_category(type_info(int).type_ref) }\n")
-        .expect_semantic_diagnostic_contains("TypeRef");
-}
-
-#[test]
 fn raw_type_ref_escape_has_semantic_diagnostic() {
     ShapeTest::new("let reflected = comptime { type_ref(int) }\nprint(reflected)\n")
         .expect_semantic_diagnostic_contains("comptime-only compiler capability");
@@ -609,12 +603,12 @@ fn find_impl_string_lookup_has_semantic_diagnostic() {
     .expect_semantic_diagnostic_contains("trait lookup cannot use text");
 }
 
-/// R4 twin: a boolean (including the legacy `implements(...)` result) can
-/// never authorize an operation that requires implementation evidence.
+/// R4 twin: a boolean can never authorize an operation that requires
+/// implementation evidence.
 #[test]
 fn boolean_authorized_generation_has_semantic_diagnostic() {
     ShapeTest::new(
-        "trait Greetable {\n  method greet() -> string\n}\n\ntype User { id: int }\n\nimpl Greetable for User {\n  method greet() -> string {\n    return \"hi\"\n  }\n}\n\nlet r = comptime {\n  match find_impl(type_ref(User), implements(User, Greetable)) {\n    Some(proof) => \"some\"\n    None => \"none\"\n  }\n}\n",
+        "trait Greetable {\n  method greet() -> string\n}\n\ntype User { id: int }\n\nimpl Greetable for User {\n  method greet() -> string {\n    return \"hi\"\n  }\n}\n\nlet r = comptime {\n  match find_impl(type_ref(User), true) {\n    Some(proof) => \"some\"\n    None => \"none\"\n  }\n}\n",
     )
     .expect_semantic_diagnostic_contains(
         "a boolean cannot authorize an operation that requires implementation evidence",

@@ -516,7 +516,8 @@ impl TypeRegistry {
     pub fn trait_impl_keys(&self) -> std::collections::HashSet<String> {
         let mut keys = std::collections::HashSet::new();
         for entry in self.trait_impls.values() {
-            // Legacy key (still used by comptime implements() callers/tests)
+            // Legacy key form (retained for the comptime trait-evidence key
+            // snapshot that feeds `find_impl`'s post-barrier ordering diagnostic)
             keys.insert(format!("{}::{}", entry.trait_name, entry.target_type));
             // Canonical key with impl selector (default or named)
             keys.insert(Self::trait_impl_key(

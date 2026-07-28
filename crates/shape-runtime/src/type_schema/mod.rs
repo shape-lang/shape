@@ -244,7 +244,7 @@ pub fn typed_object_from_pairs(fields: &[(&str, KindedSlot)]) -> KindedSlot {
 ///
 /// This is the collision-free construction path for the comptime
 /// introspection contract (`__ComptimeTarget`, `__ComptimeFieldDescriptor`,
-/// `__ComptimeBuildConfig`, `__ComptimeTypeInfo`, …). Unlike
+/// `__ComptimeBuildConfig`, …). Unlike
 /// [`typed_object_from_pairs`], the schema is never *inferred* from the
 /// field set (which can alias an unrelated named type at the same field
 /// signature, or an unrelated schema reusing the same numeric id in a

@@ -400,172 +400,51 @@ self-ref `Tree` resolves to the bare-name leaf `Basic("Tree")` (via
 bare-name arg and stops (A2 identity-indirected recursion on a nominal self-ref,
 distinct from the anonymous-record nesting pin).
 
-### Gate (FAILED-name sets vs Step-0 baseline — ZERO regressions)
+### Census shrink (#133 SEMANTIC-LEGACY-INVENTORY)
 
-| Gate | Baseline (`f5b46958`) | Post-CKPT-4 | Verdict |
-|---|---|---|---|
-| `shape-vm --lib` | 3587 pass / 7 fail | 3589 pass / 7 fail (+2 new pins) | same 7 pre-existing; ZERO new |
-| `e1_s5` filter | 29 / 0 | 31 / 0 (+2 pins) | green |
-| `no_json` | 2 / 0 | 2 / 0 | green |
-| `comptime` | 271 / 3 | 271 / 3 | exact 3 pre-existing; ZERO flips |
-| `annotations_comptime` | 117 / 10 | 117 / 10 | exact 10 pre-existing; ZERO flips |
-| `just check-clean` | exit 0 | exit 0 | green (1 pre-existing warning) |
-| `just check-no-dynamic` | success | success | green |
+The deletion is the reason the `legacy-reflection-call-forms` set collapses. Regenerated
+in this commit (`just regen-legacy-baselines`):
 
-Pre-existing `shape-vm --lib` fails (all comptime-unrelated): `test_async_let_
-binding_is_immutable`, `test_match_arm_empty_array_unprovable_element_is_clean_
-compile_error`, `monomorphization::cache::route_tests::{inlined_closure_keeps_
-outer_authored_type_ref, nested_exact_calls_close_outer_arguments, unavailable_
-and_missing_callsite_evidence}`, `monomorphization::type_resolution::tests::{ws6_
-generic_id_ok_arg, ws6b_inferred_result_variable_arg}`. No TP rebaselines were
-needed (no producer flipped a test: the concrete-typed emit tests still stamp →
-resolve identically; the class-E reject that WOULD have flipped ~19 tests was
-reverted and surfaced instead).
+| Set | Before | After |
+|---|---|---|
+| `legacy-reflection-call-forms` (#133) | 138 occurrences / 27 owners | **4 / 3** |
+| `tests-asserting-legacy-mechanisms` (#135) | 70 / 15 | 7 / 7 |
+| `any-typed-carriers` (#134) | 224 / 36 | 223 / 36 |
 
-`.source`/reparse machinery UNTOUCHED (grep-confirmed byte-identical): schema
-`.string_field("source")` (builtin_schemas.rs), `parse_type_annotation_payload`
-+ the `fn __type_probe` snippet + the `.source` arm (`string_field_from_typed_
-object(storage, &schema, "source")` → `parse_type_annotation_payload(&source)`).
+The four surviving `legacy-reflection-call-forms` occurrences are all tombstones, not call
+sites: the deletion sentinel's own needle strings in
+`comptime_builtins/type_reflection/tests.rs`, the F2 tombstone in
+`comptime/flagship_wf3d.rs`, and the producerless-record note in `core/types.shape`. No
+`type_info(` or `implements("` call site survives anywhere in `crates` / `bin` / `tools` /
+`extensions`.
 
----
+`docs/check-no-dynamic-baseline.txt` also records the `capture_as_value` ratchet at its
+real level, 12 → 4 (disposition §3 `aa2b472a`). That is pre-existing deletion progress the
+gate had been reporting advisorily; it is unrelated to this deletion, which does not move
+the count.
 
-## CKPT-5 (+ E5 CLOSE) — the `.source` reparse-fallback DELETION
+### Gate
 
-**This is THE deletion the CLAUDE.md Forbidden-Patterns apparatus exists to
-protect: a DYNAMIC-REPARSE FALLBACK removed TOTALLY — no shim, no rename.**
-CKPT-1/2/3/4 made every reconstructable type STAMP and every producer
-stamp-or-reject-LOUD, so the `.source` reparse arm was already runtime-UNREACHED
-(retained byte-for-byte as the E1-D8 residual). CKPT-5 deletes it.
+Measured on the re-land branch. Every failure below is pre-existing and in territory this
+change does not touch.
 
-### The precise deletion (user ruling #61, 2026-07-24 — Option 1)
+| Suite | Result | Failures |
+|---|---|---|
+| `shape-vm --lib` | 3609 pass / 6 fail / 36 ignored | subset of #204's seven (the documented 6↔7 flap: 4 `compiler::monomorphization` C0911 + `test_async_let_binding_is_immutable` + `test_match_arm_empty_array_unprovable_element_…`) |
+| `shape-test comptime` | 245 / 3 | `annotations::b6_annotation_{iterates_callable_parameters,reads_callable_param_modes}_on_vm_and_jit`, `callable::hash_tracer_does_not_disturb_formatted_strings` |
+| `shape-test annotations_comptime` | 117 / 10 | 8 × `executed_extend_authority::*`, 2 × `generated_method_runtime::*` — annotation surface untouched |
+| `shape-test lsp` | 501 / 5 | 5 × `inlay_storage_class::*`, all asserting the pre-#181 `[… approx]` hint label against the post-#181 `[…]` label — #181 / ergo-lane territory |
+| `shape-test regression` | 136 / 1 | `language_surface::empty_array_call_arg_unconstructible_element_…` (documented empty-array cluster) |
+| `just check-clean` | exit 0 | — |
+| `just check-no-dynamic` | exit 0 | — |
 
-Three targets DELETED (grep-proven 0 hits across `crates/ bin/ tools/ extensions/`,
-sentinel-fragment assemblies excepted):
+The deletion sentinel `legacy_type_info_vocabulary_is_gone` passes, and reintroducing any
+one deleted definition form was verified to fail it.
 
-1. **the `.source` SCHEMA FIELD** — `builtin_schemas.rs` `__ComptimeTypeRef`
-   `.string_field("source")` (between `kind` and `identity_high`). Field offsets
-   are now `name=0, kind=1, identity_high=2, identity_low=3`; every reader is
-   name-keyed (`schema.get_field(name)`) so no reader shifted.
-2. **the PRODUCER EMIT** — `comptime_target.rs` `build_type_ref_descriptor`'s
-   `("source", nb_string(source.to_string()))` pair. The `source: &str` param is
-   **renamed `spelling: &str`** and PRESERVED — it is load-bearing for the
-   surviving `name`/`kind` reflect-only fields (`type_ref_name_from_source` /
-   `type_ref_kind_from_source`), which the U02 corpus reads (serde `derive.shape`:
-   `field.type_ref.kind`) and the consumer's INVALID rejection reads. Dropping it
-   entirely (as the task text's literal wording suggested) was mechanically
-   IMPOSSIBLE without also deleting `name`/`kind`, which are out of CKPT-5 scope
-   and user-facing. It is NOT a renamed `.source` fallback (no field is stored for
-   reparse); the rename kills the walk-back-attractor name. **Surfaced deviation
-   from the literal "drop the param" wording — see the CKPT-5 report.**
-3. **the `.source` REPARSE ARM** — `comptime_builtins.rs`
-   `type_annotation_from_string_or_type_ref_slot` tail: the
-   `let source = string_field_from_typed_object(storage, &schema, "source")?;
-   parse_type_annotation_payload(&source)` pair. The preceding `if identity !=
-   INVALID { return reconstruct… }` guard collapses to an unconditional
-   `reconstruct_type_annotation(overlay, identity)` (identity is proven != INVALID
-   by the INVALID arm's early return above it). The identity short-circuit — the
-   stamped route — is KEPT.
+### Book — outstanding
 
-### PRESERVED (sanctioned, #88 — over-deletion would be a REVIEW FAIL)
-
-`parse_type_annotation_payload`, `fn __type_probe`, and the bare-string
-type-payload arm (`comptime_builtins.rs`, the `item_fn` / `extend_method` caller).
-These are the SANCTIONED item-generation carrier (`item_fn(name, return_type:
-string | TypeRef, value)` — the `string` half is contract; there is no non-parse
-path from `"Array<int>"` to an AST). They are NOT the fallback. **Two-sided
-precision requirement met: the `.source` fallback DELETED AND the item_fn parser
-PRESERVED.** Over-deletion tripwire lives in pin (g)
-(`e1_s5_ckpt4_typeref_producers_stamp_invalid_rejects_loud_string_arm_surfaced`),
-now asserting the bare-string arm parses BOTH `"int"` (leaf) AND `"Array<int>"`
-(applied generic).
-
-### Walk-back now STRUCTURALLY IMPOSSIBLE (anti-walk-back)
-
-- The `.source`-built route-proof pins were REWRITTEN, not left referencing a
-  deleted field. The primary anti-walk-back pin
-  `e1_s5_stamped_unresolvable_ref_errs_through_full_consumer_never_reparses_valid_source`
-  STRENGTHENED: its trap ("a stamped-unresolvable ref silently reparses its valid
-  `.source = "int"`") is now impossible — no `.source` field exists to read, no arm
-  exists to reparse from. The `"int"` first-arg now feeds only `name`/`kind`; the
-  pin proves the stamped-unresolvable identity Errs through the FULL consumer via
-  the identity route, guarding against RE-INTRODUCTION of the deleted arm. Pins
-  (a)/(b)/(d)/(f) similarly reframed ("###unparseable###"/"string" first args are
-  now garbage spellings feeding only name/kind; the identity route is the SOLE
-  route). Pin (c)
-  (`e1_s5_stamped_unresolvable_identity_is_named_semantic_error_no_fallback`)
-  survives unchanged (no `.source` fixture — the invariant that holds before AND
-  after).
-- **A `.source`-FIXTURE in a shape-test corpus was found + rewritten:**
-  `tools/shape-test/tests/annotations_comptime/type_mutation.rs::target_params_and_
-  return_expose_type_refs` read `target.return_type_ref.source` from USER Shape
-  code (embedded in a Rust raw string, missed by an initial `.shape`-only grep).
-  Rewritten to read `target.return_type_ref.kind == "String"` (mirroring the param
-  assertion directly above it). This was the sole live `.source` READER outside the
-  deleted arm; all other repo `.source` hits are the unrelated `FromQuery.source`
-  query-DSL field, `metadata.source_hash`, or historical doc/comment narrative.
-
-### Sentinel extended (`no_json_comptime_protocol.rs`)
-
-Header note (c) FLIPPED — the old "`__type_probe` source-reparse remainder SURVIVES
-(E1-D8 residual)" is now the CKPT-5 deletion note. Two NEW needles (assembled from
-fragments so the sentinel never spells them contiguously; **precise — they do NOT
-ban the preserved `parse_type_annotation_payload`/`__type_probe` item_fn parser**):
-
-- `no_source_field_on_comptime_type_ref_schema` — forbids re-intro of the
-  `.string_field("source")` schema field → 0 across `crates/ bin/ tools/
-  extensions/`. Structural guard: no field declared ⇒ no name-keyed reader can
-  resolve a `.source` field.
-- `no_reparse_from_type_ref_source_field` — forbids re-intro of the
-  `&schema, "source")` field-read arm shape → 0.
-
-Docstrings corrected (the CKPT-4 MEDIUM finding + collateral): `comptime_target.rs`
-`build_type_ref_descriptor` + `stamp_for` + `build_field_descriptor_array` +
-`from_module` + `to_nanboxed` no longer assert a LIVE `.source` fall-through;
-`comptime_builtins.rs` consumer comments + `reconstruct_type_annotation` docstring +
-the `Parameter` variant's error MESSAGE (was "an unstamped ref reparses .source",
-now "no `.source` reparse — the fallback is deleted") + the STAGE-2/STAGE-1
-historical narrative headers + `type_reflection.rs` reflection comment +
-`e5_spelling.rs` module docstring all reflect the deletion.
-
-### Gate (FAILED-name sets vs Step-0 baseline `f5c51332` — ZERO real regressions)
-
-| Gate | Step-0 baseline | Post-CKPT-5 | Verdict |
-|---|---|---|---|
-| `shape-vm --lib` (parallel) | 3590 pass / 6 fail | 3591 pass / 7 fail | +2 pass sentinel tests; the +1 fail is `route_tests::nested_exact_calls` — a documented pre-existing FLAP (see below); ZERO new in comptime blast radius |
-| `shape-vm --lib` (`--threads=1`) | — | run A: 3592/6 · run B: 3591/7 | same binary, two serial runs → `nested_exact_calls` flaps 6↔7: it is NON-DETERMINISTIC, not a regression |
-| `e1_s5` filter | 31 / 0 | 31 / 0 | green (all rewritten pins pass) |
-| `no_json` | 2 / 0 | 4 / 0 (+2 needles) | green |
-| `comptime` | 271 / 3 | 271 / 3 | exact 3 pre-existing named; ZERO flips |
-| `annotations_comptime` | 117 / 10 | 117 / 10 (after type_mutation fix) | exact 10 pre-existing; ZERO flips |
-| `just check-clean` | exit 0 | exit 0 | green (pre-existing warnings only) |
-| `just check-no-dynamic` | success | success | green |
-| `just verify-merge` | — | 15 pass / 0 fail | ALL CHECKS PASSED |
-
-**`nested_exact_calls_close_outer_arguments_before_inner_compilation` is a
-KNOWN pre-existing flaky `monomorphization::cache::route_tests` — the CKPT-4
-decisions gate table above ALREADY lists it among the pre-existing comptime-
-unrelated `shape-vm --lib` fails.** It is non-hermetic (fails ALONE with a
-cache-empty 0-passed run) and its pass/fail flaps run-to-run even at
-`--test-threads=1` (proven: two serial runs of the SAME post-CKPT-5 binary gave 6
-then 7 failures). My only new tests are the 2 sentinel needle tests, which are
-pure `.rs`-file scanners (compile/execute NO Shape code) and therefore cannot
-behaviorally affect the monomorphization cache — they only shift the harness's
-parallel test-scheduling, reshuffling the non-hermetic route_tests. The `.source`
-deletion touches the comptime `__ComptimeTypeRef` carrier, orthogonal to
-`int`/`string` monomorphization evidence. Comptime blast radius (e1_s5, no_json,
-comptime, annotations_comptime) is 100% green.
-
-### E5 CLOSE
-
-All type reconstruction landed (CKPT-1 applied-generic + bare-nominal spelling,
-CKPT-2 applied-generic descriptor substitution, CKPT-3 record field-name +
-spelling, CKPT-4 A/B/D producer migration + INVALID-LOUD ruling), and CKPT-5
-DELETED the `.source` reparse fallback totally. The stamped identity route is the
-SOLE resolution path for a `__ComptimeTypeRef`; an unstamped/unresolvable ref is a
-NAMED surface-and-stop; the stamped->reparse walk-back is structurally impossible.
-
-**Residuals (out of E5, tracked):**
-- **#87** — (as filed; unchanged by CKPT-5).
-- **#88** — item_fn/extend_method typed-carrier migration. Until it lands, the
-  bare-string type-payload arm + `parse_type_annotation_payload`/`__type_probe`
-  remain the sanctioned carrier (PRESERVED here, pinned by the pin-(g) tripwire).
+`shape-web` is a separate repository and was not touched by this change. The book still
+documents `implements` in the comptime builtins table (`advanced/comptime.mdx`) and
+`type_info` in the comptime surface list (`fundamentals/functions.mdx`). Both need to be
+repointed at `find_impl(type_ref(T), trait_ref(Tr))` and `reflect` / `type_category`
+respectively. No runnable fence used the deleted builtins, so no snippet needs migrating.

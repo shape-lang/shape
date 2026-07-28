@@ -98,11 +98,11 @@ fn completion_inside_comptime_block_offers_builtins() {
 }
 
 #[test]
-fn completion_inside_comptime_block_offers_implements() {
+fn completion_inside_comptime_block_offers_find_impl() {
     let code = "comptime {\n    \n}\n";
     ShapeTest::new(code)
         .at(pos(1, 4))
-        .expect_completion("implements");
+        .expect_completion("find_impl");
 }
 
 #[test]

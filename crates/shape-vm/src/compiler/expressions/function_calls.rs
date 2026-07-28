@@ -1828,15 +1828,6 @@ impl BytecodeCompiler {
         });
         let args: &[Expr] = widened_args.as_deref().unwrap_or(args);
 
-        // W7 (2026-05-17): `type_info(T)` is a comptime-only builtin per
-        // `docs/cluster-audits/v0.3-w7-type_info-comptime-typed-return.md`
-        // §4 recommendation (b) — TypeInfo struct return — and §8 Q1-Q5
-        // user dispositions. The previous hard-error gate ("type_info has
-        // been removed") is replaced by routing through the standard
-        // comptime-only-builtin path; bare type-identifier arguments are
-        // rewritten to string literals in `comptime::rewrite_type_info_ident_args`
-        // mirroring the `implements` precedent.
-
         // Reject comptime-only builtins outside of comptime blocks.
         // These functions are only available inside `comptime { }` blocks.
         if Self::is_comptime_only_builtin(name) && !self.comptime_mode {

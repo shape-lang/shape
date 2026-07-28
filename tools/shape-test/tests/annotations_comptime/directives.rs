@@ -191,7 +191,7 @@ fn extend_item_fragment_generates_free_function_without_source_string() {
         r#"
 annotation typed_label() on type {
   comptime post(target, ctx) {
-    extend (item_fn(f"{target.name}_label", type_info("string").type_ref, "typed fragment"))
+    extend (item_fn(f"{target.name}_label", "string", "typed fragment"))
   }
 }
 

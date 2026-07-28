@@ -28,10 +28,10 @@ from std::core::ord use { Ord }
 from std::core::shift use { Shl, Shr, ShlAssign, ShrAssign }
 from std::core::eq use { Eq }
 
-// W7 (2026-05-17) — `type_info(T)` comptime builtin returns `TypeInfo`;
-// the struct + `FieldInfo` + `TypeKind` enum live in `std::core::types`
-// and are auto-imported here per Q4 disposition so comptime user code
-// can name them without an explicit `use`.
+// `TypeInfo` + `FieldInfo` + `TypeKind` live in `std::core::types` and are
+// auto-imported here so comptime user code can name them without an explicit
+// `use`. Their producer (the legacy reflection builtin) was deleted in ADR-009
+// E5 (#21); the types themselves remain exported.
 from std::core::types use { TypeInfo, FieldInfo, TypeKind }
 
 // Method definition modules — extend blocks register methods on builtin types.

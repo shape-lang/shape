@@ -21,7 +21,7 @@
     ]
   },
   "step": "docs/design/typed-comptime/adr011-012-execution-rulings.md — ten required steps, step 4",
-  "source_revision": "8b9a9fbc5075b86c448ca01caa114c633f8f6ca9",
+  "source_revision": "fa3f9a8446a545fb950d8cf1a41c404987d4c32a",
   "regenerate_with": "node scripts/generate-adr011-012-legacy-baselines.mjs --ticket 133",
   "check_with": "node scripts/check-adr011-012-legacy-baselines.mjs --ticket 133",
   "direction_rule": "Monotonic non-increasing. A set count may fall (migration progress) and may never rise. A new owner path is growth even when the total is unchanged, because it is a new surface carrying old authority.",
@@ -29,9 +29,9 @@
     "source_revision",
     "description"
   ],
-  "total_count": 381,
+  "total_count": 247,
   "total_count_note": "Sum of the set counts. Sets may deliberately overlap (a narrowly scoped set can re-count sites a broader set already counts), so this is a ratchet aggregate for reporting movement — never a count of distinct legacy sites.",
-  "sets_sha256": "3a44f9d7ed4a653e33b6c33fda2f86c27be801e8b542279e8342d55a7a29aa8c",
+  "sets_sha256": "173f1cdad7ad6f7821593a5bc9e19afab6ad59bcc83c349d12203f53399d4a7d",
   "sets": [
     {
       "id": "ambient-builtin-name-selection",
@@ -274,115 +274,19 @@
       ],
       "exclude": [],
       "pattern": "\\btype_info\\s*\\(|\\bimplements\\s*\\(\\s*\"",
-      "count": 138,
-      "owner_count": 27,
+      "count": 4,
+      "owner_count": 3,
       "owners": [
         {
-          "path": "crates/shape-runtime/src/builtin_metadata.rs",
-          "count": 3
-        },
-        {
-          "path": "crates/shape-runtime/src/type_schema/builtin_schemas.rs",
-          "count": 1
-        },
-        {
-          "path": "crates/shape-runtime/src/type_system/inference/access.rs",
-          "count": 3
-        },
-        {
-          "path": "crates/shape-runtime/stdlib-src/core/prelude.shape",
-          "count": 1
-        },
-        {
           "path": "crates/shape-runtime/stdlib-src/core/types.shape",
-          "count": 3
-        },
-        {
-          "path": "crates/shape-vm/src/compiler/comptime.rs",
-          "count": 46
-        },
-        {
-          "path": "crates/shape-vm/src/compiler/comptime_builtins.rs",
-          "count": 3
-        },
-        {
-          "path": "crates/shape-vm/src/compiler/comptime_builtins/type_reflection.rs",
           "count": 1
         },
         {
-          "path": "crates/shape-vm/src/compiler/comptime_concrete.rs",
+          "path": "crates/shape-vm/src/compiler/comptime_builtins/type_reflection/tests.rs",
           "count": 2
-        },
-        {
-          "path": "crates/shape-vm/src/compiler/comptime_target.rs",
-          "count": 3
-        },
-        {
-          "path": "crates/shape-vm/src/compiler/expressions/function_calls.rs",
-          "count": 1
-        },
-        {
-          "path": "tools/shape-lsp/src/diagnostics.rs",
-          "count": 1
-        },
-        {
-          "path": "tools/shape-lsp/src/hover.rs",
-          "count": 1
-        },
-        {
-          "path": "tools/shape-test/tests/annotations_comptime/directives.rs",
-          "count": 1
         },
         {
           "path": "tools/shape-test/tests/comptime/flagship_wf3d.rs",
-          "count": 8
-        },
-        {
-          "path": "tools/shape-test/tests/comptime/frozen_type.rs",
-          "count": 2
-        },
-        {
-          "path": "tools/shape-test/tests/comptime/functions.rs",
-          "count": 1
-        },
-        {
-          "path": "tools/shape-test/tests/comptime/reflect.rs",
-          "count": 2
-        },
-        {
-          "path": "tools/shape-test/tests/comptime/trait_evidence.rs",
-          "count": 1
-        },
-        {
-          "path": "tools/shape-test/tests/comptime/type_info_chained.rs",
-          "count": 47
-        },
-        {
-          "path": "tools/shape-test/tests/lsp/typed_comptime.rs",
-          "count": 1
-        },
-        {
-          "path": "tools/shape-test/tests/regression/language_surface.rs",
-          "count": 1
-        },
-        {
-          "path": "tools/vmjit-diff/corpus/ACC__comptime__b3.shape",
-          "count": 1
-        },
-        {
-          "path": "tools/vmjit-diff/corpus/ACC__comptime__pif2.shape",
-          "count": 1
-        },
-        {
-          "path": "tools/vmjit-diff/corpus/ACC__comptime__probe7.shape",
-          "count": 1
-        },
-        {
-          "path": "tools/vmjit-diff/corpus/ACC__comptime__probe7b.shape",
-          "count": 1
-        },
-        {
-          "path": "tools/vmjit-diff/corpus/ACC__comptime__probe7c.shape",
           "count": 1
         }
       ]

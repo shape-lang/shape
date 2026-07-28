@@ -313,12 +313,6 @@ pub(crate) const WHITELIST: &[WhitelistEntry] = &[
         permanent: true,
         reason: "comptime introspection contract schema; builtin_schemas.rs (S2)",
     },
-    WhitelistEntry {
-        rule: WhitelistRule::SchemaName("__ComptimeTypeInfo"),
-        section: "§4.D.11",
-        permanent: true,
-        reason: "comptime introspection contract schema; builtin_schemas.rs (S2)",
-    },
     // ADR-009 B1 S1 — `FrozenErased` bound-set carrier. The unspellable
     // (SOH-prefixed, unforgeable from source) comptime-only descriptor
     // schema's `bounds` array is reachable today ONLY as the empty set

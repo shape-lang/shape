@@ -99,7 +99,7 @@ fn hover_comptime_field_in_type_alias_override() {
 
 #[test]
 fn hover_comptime_block_shows_builtin_info() {
-    let code = "comptime {\n    let has = implements(\"Foo\", \"Display\")\n}\n";
+    let code = "comptime {\n    let cfg = build_config()\n}\n";
     ShapeTest::new(code)
         .at(pos(0, 4))
         .expect_hover_contains("Compile-Time Block");

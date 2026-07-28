@@ -29,25 +29,6 @@ print(add(5, 6))
 }
 
 #[test]
-fn comptime_type_info_is_available_and_suggested_by_lsp() {
-    let code = r#"
-let TAG: string = comptime {
-  let info = type_info("Point")
-  "type-info-ok"
-}
-print(TAG)
-"#;
-
-    ShapeTest::new(code)
-        .expect_no_semantic_diagnostics()
-        .expect_output("type-info-ok");
-
-    ShapeTest::new("comptime {\n    \n}\n")
-        .at(pos(1, 4))
-        .expect_completion("type_info");
-}
-
-#[test]
 fn trait_bound_method_dispatch_resolves_at_runtime() {
     let code = r#"
 trait Displayable {

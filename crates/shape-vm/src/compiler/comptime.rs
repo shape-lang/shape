@@ -152,13 +152,6 @@ const COMPTIME_BUILTIN_FORWARDERS: &[(
     Option<&str>,
     Option<&[&str]>,
 )] = &[
-    // `implements` declares its real `bool` return (S5): the R4 rejection
-    // ("a boolean cannot authorize...") needs the legacy boolean's type to
-    // be CONCRETE at the `find_impl` argument position in the mini-VM —
-    // an unannotated fresh var would silently unify with the TraitRef
-    // carrier schema. Typing truth only; the legacy string-key semantics
-    // in `comptime_builtins.rs` are untouched (E5 deletes them).
-    ("implements", 2, "implements", None, Some("bool"), None),
     ("warning", 1, "warning", None, None, None),
     ("error", 1, "error", None, None, None),
     (
@@ -177,22 +170,6 @@ const COMPTIME_BUILTIN_FORWARDERS: &[(
             "target_os",
             "version",
         ]),
-        None,
-        None,
-    ),
-    // W7 (2026-05-17) — `type_info(T)` comptime builtin per
-    // `docs/cluster-audits/v0.3-w7-type_info-comptime-typed-return.md`
-    // §4 (b) recommendation. Bare type-identifier arguments are
-    // rewritten to string literals by `rewrite_type_info_ident_args`
-    // before this forwarder dispatches into `__comptime__.type_info`.
-    // Return-fields hint covers the legacy TypeInfo fields plus the additive
-    // TypeRef descriptor so the comptime compiler can resolve field access on
-    // the result (`ti.name` / `ti.kind` / `ti.fields` / `ti.type_ref`).
-    (
-        "type_info",
-        1,
-        "type_info",
-        Some(&["kind", "name", "fields", "type_ref"]),
         None,
         None,
     ),
@@ -471,7 +448,7 @@ fn comptime_representation_access_param_type() -> TypeAnnotation {
 }
 
 /// The `FieldDescriptor` row shape (comptime-excellence §4.1.1) as a concrete
-/// object annotation, so `target.fields[i]` / `type_info(T).fields[i]`
+/// object annotation, so `target.fields[i]`
 /// subscript access resolves to a real object type with `.name` / `.type` /
 /// `.optional` / `.annotations` fields. An `unknown`-element array is iterable
 /// but not indexable, which regressed the flagship `fields[0].name` form.
@@ -745,7 +722,7 @@ fn comptime_builtin_forwarders() -> Vec<Item> {
                                 .map(|f| ObjectTypeField {
                                     name: f.to_string(),
                                     optional: false,
-                                    // `type_info(T)` result fields carry their real
+                                    // Reflection result fields carry their real
                                     // types (comptime-excellence §4.1.2), not `unknown`.
                                     type_annotation: match *f {
                                         "fields" => TypeAnnotation::Array(Box::new(
@@ -1233,11 +1210,10 @@ fn ensure_tail_return(body: &mut Vec<Statement>) {
 /// Rewrite bare type/trait-name identifier arguments to comptime reflection
 /// payloads at any nesting depth.
 ///
-/// `type_info(User)`, `type_ref(User)`, and `implements(Dog, Speak)` name types
-/// or traits directly. Legacy reflection receives names; `type_ref` receives a
-/// compiler-issued identity. The walk is fully recursive so natural nested forms
-/// work too — `print(type_info(User).name)`, `if implements(T, "Ord") { ... }`,
-/// `let n = type_info(field.type).name`, etc. — not only a bare top-level
+/// `type_ref(User)` and `trait_ref(Greetable)` name a type or trait directly and
+/// receive a compiler-issued identity. The walk is fully recursive so natural
+/// nested forms work too — `reflect(type_ref(User))`,
+/// `find_impl(type_ref(T), trait_ref(Ord))`, etc. — not only a bare top-level
 /// statement. The outer type-checker accepts exactly the same `type_ref`
 /// argument shapes — a bare identifier OR the checked type-expression carrier
 /// `Expr::TypeSyntax` (inference/access.rs `is_type_ref_builtin` gate) — so
@@ -1670,13 +1646,7 @@ fn rewrite_comptime_type_symbol_args_expr_scoped(
 
     // Rewrite this call's own bare-identifier args if it is a reflection call.
     if let Expr::FunctionCall { name, args, .. } = expr {
-        if name == "type_info" || name == "implements" {
-            for arg in args.iter_mut() {
-                if let Expr::Identifier(ident, span) = arg {
-                    *arg = Expr::Literal(shape_ast::ast::Literal::String(ident.clone()), *span);
-                }
-            }
-        } else if name == "type_ref" {
+        if name == "type_ref" {
             // ADR-009 A2 (S4): two accepted argument shapes, one identity
             // scheme. A bare identifier resolves through the freeze's
             // name-keyed query (A1 behavior, unchanged — unresolved names
@@ -1757,7 +1727,7 @@ fn rewrite_comptime_type_symbol_args_expr_scoped(
     }
 
     // Recurse into every child expression so nested reflection calls
-    // (`print(type_info(User).name)`) are rewritten too. The callable scope
+    // (`reflect(type_ref(User))`) are rewritten too. The callable scope
     // flows unchanged into children EXCEPT match arms, whose per-arm bindings
     // extend it (handled explicitly below).
     let recur = |child: &mut Expr| -> Result<()> {
@@ -1886,7 +1856,7 @@ fn rewrite_comptime_type_symbol_args_expr_scoped(
         // Control-flow EXPRESSION forms (`for`/`while`/`if`/`loop` used as block
         // items or tail values) embed a reflection call in natural comptime code
         // — e.g. `for p in c.parameters { … }` inside a comptime match arm, or
-        // `if implements(T, Ord) { … }`. Recurse into their sub-expressions so
+        // `if type_category(type_ref(T)) == ... { … }`. Recurse into their sub-expressions so
         // the accessor/reflection rewrites reach them (statement forms are
         // covered by `rewrite_comptime_type_symbol_args`).
         Expr::For(for_expr, _) => {
@@ -2627,8 +2597,8 @@ pub(crate) fn execute_comptime_with_context(
     // S5: the site-time key set for the Dec 52 ordering diagnostic is the
     // live key snapshot PLUS the J-CT.2 `comptime impl` pairs threaded into
     // this mini-program (those register only in the mini-VM's env, so the
-    // outer live keys never see them). Diagnostic-only — the legacy
-    // `implements` set is passed through unchanged, and no evidence is ever
+    // outer live keys never see them). Diagnostic-only — the trait-impl
+    // key set is passed through unchanged, and no evidence is ever
     // produced from either set.
     let mut site_time_impl_keys = trait_impl_keys.clone();
     for impl_block in comptime_impl_blocks {
@@ -2643,7 +2613,6 @@ pub(crate) fn execute_comptime_with_context(
         site_time_impl_keys.insert(format!("{trait_name}::{type_name}"));
     }
     let comptime_builtins = super::comptime_builtins::create_comptime_builtins_module(
-        trait_impl_keys,
         site_time_impl_keys,
         freeze,
     );
@@ -3012,7 +2981,7 @@ pub(crate) fn execute_comptime_with_target(
 /// — the barrier runs before the first comptime site of the unit, including
 /// the two speculative annotation pre-passes. The `__comptime__` builtins
 /// module is built here from that handle, and the handler body receives the
-/// same `type_ref`/`type_info`/`implements` type-symbol rewrite as comptime
+/// same `type_ref`/`trait_ref` type-symbol rewrite as comptime
 /// blocks (`rewrite_comptime_type_symbol_args`), so frozen reflection
 /// resolves inside annotation handlers too. No default/empty snapshot, no
 /// `Option<freeze>`, exists on any path (rejection-matrix row 9).
@@ -3338,7 +3307,6 @@ pub(crate) fn execute_comptime_with_annotation_handler(
     // the live key snapshot (diagnostic-only; never evidence).
     let site_time_impl_keys = trait_impl_keys.clone();
     let comptime_builtins = super::comptime_builtins::create_comptime_builtins_module(
-        trait_impl_keys,
         site_time_impl_keys,
         freeze,
     );
@@ -4833,9 +4801,7 @@ annotation reflect() on type {
     // populated module-binding TypedObject + ModuleFn field-reference
     // chain.
     use super::execute_comptime;
-    use shape_ast::ast::{
-        DestructurePattern, Expr, Literal, Span, Statement, VarKind, VariableDecl,
-    };
+    use shape_ast::ast::{Expr, Literal, Span, Statement};
 
     /// Sanity baseline: arithmetic-only comptime path still works after
     /// the W17 populate_module_objects rebuild. Catches regressions
@@ -5014,62 +4980,6 @@ annotation reflect() on type {
         );
     }
 
-    /// `comptime { implements("T", "Trait") }` dispatches end-to-end
-    /// through typed string arguments. Empty keyspace returns false; a
-    /// matching registered trait key returns true.
-    #[test]
-    fn w17_comptime_implements_dispatches_end_to_end() {
-        let stmts = vec![Statement::Return(
-            Some(Expr::FunctionCall {
-                name: "implements".to_string(),
-                const_args: Vec::new(),
-                args: vec![
-                    Expr::Literal(Literal::String("int".to_string()), Span::DUMMY),
-                    Expr::Literal(Literal::String("Add".to_string()), Span::DUMMY),
-                ],
-                named_args: Vec::new(),
-                span: Span::DUMMY,
-            }),
-            Span::DUMMY,
-        )];
-        let result = execute_comptime(
-            &stmts,
-            &[],
-            &[],
-            Default::default(),
-            Default::default(),
-            super::test_freeze_overlay(),
-        )
-        .expect("implements() should dispatch end-to-end");
-        assert_eq!(result.value.as_bool(), Some(false));
-
-        let stmts = vec![Statement::Return(
-            Some(Expr::FunctionCall {
-                name: "implements".to_string(),
-                const_args: Vec::new(),
-                args: vec![
-                    Expr::Literal(Literal::String("Dog".to_string()), Span::DUMMY),
-                    Expr::Literal(Literal::String("Speak".to_string()), Span::DUMMY),
-                ],
-                named_args: Vec::new(),
-                span: Span::DUMMY,
-            }),
-            Span::DUMMY,
-        )];
-        let mut trait_impl_keys = std::collections::HashSet::new();
-        trait_impl_keys.insert("Speak::Dog".to_string());
-        let result = execute_comptime(
-            &stmts,
-            &[],
-            &[],
-            trait_impl_keys,
-            Default::default(),
-            super::test_freeze_overlay(),
-        )
-        .expect("implements() should see typed string args and registered impl keys");
-        assert_eq!(result.value.as_bool(), Some(true));
-    }
-
     /// `comptime { warning("hello") }` dispatches end-to-end and
     /// returns Unit. The body emits to stderr (captured by the test
     /// runner but not asserted on).
@@ -5146,780 +5056,6 @@ annotation reflect() on type {
             err_msg.contains("[comptime error]") || err_msg.contains("W17 test error"),
             "error message should surface the comptime-error path: {}",
             err_msg
-        );
-    }
-
-    /// W7 (2026-05-17) — `type_info` is restored as a comptime-only
-    /// builtin per `docs/cluster-audits/v0.3-w7-type_info-comptime-typed-return.md`
-    /// §4 recommendation (b) + §8 user dispositions Q1-Q5. Calling
-    /// `type_info()` outside a `comptime { }` block must now fail with
-    /// the standard comptime-only-builtin error message (the previous
-    /// "type_info has been removed" gate is retired).
-    #[test]
-    fn w7_type_info_comptime_only_contract() {
-        let code = r#"let x = type_info("Point")"#;
-        let program = shape_ast::parser::parse_program(code).expect("parse");
-        let result = crate::compiler::BytecodeCompiler::new().compile(&program);
-        assert!(
-            result.is_err(),
-            "type_info() outside comptime should fail (comptime-only gate)"
-        );
-        let err_msg = format!("{}", result.unwrap_err());
-        assert!(
-            err_msg.contains("comptime-only builtin") || err_msg.contains("comptime { }"),
-            "Error should surface the comptime-only-builtin gate (W7): {}",
-            err_msg
-        );
-    }
-
-    // =====================================================================
-    // W14.2-C1 comptime-builtin coverage (Phase 4b Round 5a, 2026-05-19).
-    // =====================================================================
-    //
-    // Per `docs/cluster-audits/v0.3-w14-test-coverage-audit.md` §4 W7 row:
-    //
-    // > W7 TypeInfo struct return | (b) PARTIAL | comptime-builtin
-    // > TypedObject return carrier is a NEW class (draft §2.7.27 deferred
-    // > per close summary §2). Coverage gap: chained `type_info(...).field
-    // > .subfield` access patterns + interaction with `build_config`
-    // > precedent.
-    //
-    // The tests below mirror the existing `w17_comptime_*_dispatches_end_to_end`
-    // shape — they assert the comptime dispatch chain (LoadModuleBinding +
-    // GetFieldTyped + CallValue → ModuleFn body) reaches the body and
-    // returns cleanly. Body-side runtime values are intentionally NOT
-    // asserted because the upstream `register_typed_function` marshal-layer
-    // string-arg transmission is a documented pre-existing constraint
-    // (`comptime_builtins.rs:469-484` — first arg always arrives as kind
-    // `Bool` when arg-types are `vec![]`). The W7 close-out documents this
-    // shape and routes diagnosis through `__type_info_marshal_pending__`.
-    //
-    // Coverage focuses on:
-    //   (1) chained_access — `type_info(T).kind`, `.name` patterns
-    //   (2) build_config_interaction — both builtins composed
-    //   (3) nested_generic — Array<int>, Option<T>, Result<T,E> name strings
-    //   (4) enum_payload_chained — `type_info` on enum names
-    //   (5) error_path — undefined type, structured fallback
-    //
-    // Pattern: build statements via AST, call `execute_comptime`, assert
-    // dispatch returns Ok OR a structured Err that does NOT mention the
-    // pre-§2.7.26 `populate_module_objects NotImplemented` stub or the
-    // `type_info has been removed` legacy gate (which is now retired).
-
-    use shape_ast::ast::TypeAnnotation as TypeAnn;
-
-    /// Helper: assert dispatch reaches body — accept Ok(_) OR an Err
-    /// whose body shape does not surface the pre-§2.7.26 NotImplemented
-    /// stub. Mirrors the `w17_comptime_build_config_dispatches_end_to_end`
-    /// soft-path discipline. Also catches the `type_info has been removed`
-    /// legacy gate (now retired per W7 close).
-    fn assert_dispatch_reached(
-        stmts: Vec<Statement>,
-        trait_impl_keys: std::collections::HashSet<String>,
-        (freeze, known_types): (
-            std::sync::Arc<crate::compiler::comptime_builtins::FreezeOverlay>,
-            std::collections::HashSet<String>,
-        ),
-        ctx: &str,
-    ) {
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            execute_comptime(&stmts, &[], &[], trait_impl_keys, known_types, freeze)
-        }));
-        match result {
-            Ok(Ok(_)) => {}
-            Ok(Err(e)) => {
-                let msg = format!("{:?}", e);
-                assert!(
-                    !msg.contains("populate_module_objects") && !msg.contains("NotImplemented"),
-                    "{ctx}: dispatch chain must not surface the pre-§2.7.26 \
-                     NotImplemented stub: {msg}",
-                );
-                assert!(
-                    !msg.contains("type_info has been removed"),
-                    "{ctx}: must not surface the retired \
-                     `type_info has been removed` legacy gate: {msg}",
-                );
-            }
-            Err(_) => {
-                // Body-side panic — pre-existing typed_object_from_pairs
-                // debug_assert or ckpt-2 receiver-recovery surface,
-                // documented in C2-comptime-rebuild close. The dispatch
-                // chain still reached the body, which is what this
-                // assertion gates.
-            }
-        }
-    }
-
-    /// S2 fabricator: populate a real compiler with one struct and freeze
-    /// it through the single barrier (replaces the deleted field-poked
-    /// snapshot construction). Returns the freeze handle plus the
-    /// known-type-symbol set the sites derive from compiler tables.
-    fn freeze_with_struct(
-        name: &str,
-        fields: &[(&str, TypeAnn)],
-    ) -> (
-        std::sync::Arc<crate::compiler::comptime_builtins::FreezeOverlay>,
-        std::collections::HashSet<String>,
-    ) {
-        let mut compiler = crate::compiler::BytecodeCompiler::new();
-        compiler.struct_types.insert(
-            name.to_string(),
-            (
-                fields.iter().map(|(n, _)| n.to_string()).collect(),
-                Span::DUMMY,
-            ),
-        );
-        compiler.struct_generic_info.insert(
-            name.to_string(),
-            crate::compiler::StructGenericInfo {
-                type_params: Vec::new(),
-                runtime_field_types: fields
-                    .iter()
-                    .map(|(n, t)| (n.to_string(), t.clone()))
-                    .collect(),
-            },
-        );
-        let overlay =
-            crate::compiler::comptime_builtins::semantic_freeze::overlay_for_tests(&compiler);
-        (overlay, [name.to_string()].into_iter().collect())
-    }
-
-    /// S2 fabricator: enum variant of `freeze_with_struct` — the enum goes
-    /// through the canonical schema registry (named freeze input 3).
-    fn freeze_with_enum(
-        name: &str,
-        variants: &[&str],
-    ) -> (
-        std::sync::Arc<crate::compiler::comptime_builtins::FreezeOverlay>,
-        std::collections::HashSet<String>,
-    ) {
-        let mut compiler = crate::compiler::BytecodeCompiler::new();
-        compiler
-            .type_tracker
-            .schema_registry_mut()
-            .register_enum_scoped(
-                name,
-                variants
-                    .iter()
-                    .enumerate()
-                    .map(|(id, variant)| {
-                        shape_runtime::type_schema::EnumVariantInfo::new(*variant, id as u16, 0)
-                    })
-                    .collect(),
-            );
-        let overlay =
-            crate::compiler::comptime_builtins::semantic_freeze::overlay_for_tests(&compiler);
-        (overlay, [name.to_string()].into_iter().collect())
-    }
-
-    // -------- (1) chained_access -----------------------------------------
-
-    /// W14.2-C1 (1) chained: `comptime { type_info(Point).kind }` —
-    /// dispatch reaches the GetFieldTyped on the TypedObject result and
-    /// completes the property-access lowering without surfacing the
-    /// pre-§2.7.26 stub or the retired legacy `type_info has been removed`
-    /// gate.
-    #[test]
-    fn w14_2_c1_chained_kind_access_on_struct() {
-        let stmts = vec![Statement::Return(
-            Some(Expr::PropertyAccess {
-                object: Box::new(Expr::FunctionCall {
-                    name: "type_info".to_string(),
-                    const_args: Vec::new(),
-                    args: vec![Expr::Literal(
-                        Literal::String("Point".to_string()),
-                        Span::DUMMY,
-                    )],
-                    named_args: Vec::new(),
-                    span: Span::DUMMY,
-                }),
-                property: "kind".to_string(),
-                optional: false,
-                span: Span::DUMMY,
-            }),
-            Span::DUMMY,
-        )];
-        let snapshot = freeze_with_struct(
-            "Point",
-            &[
-                ("x", TypeAnn::Basic("int".to_string())),
-                ("y", TypeAnn::Basic("int".to_string())),
-            ],
-        );
-        assert_dispatch_reached(
-            stmts,
-            Default::default(),
-            snapshot,
-            "w14_2_c1_chained_kind_access_on_struct",
-        );
-    }
-
-    /// W14.2-C1 (1) chained: `comptime { type_info(Point).name }` —
-    /// mirror of the kind-access shape; verifies the `.name` field arm
-    /// of the registered 2-field TypeInfo schema dispatches.
-    #[test]
-    fn w14_2_c1_chained_name_access_on_struct() {
-        let stmts = vec![Statement::Return(
-            Some(Expr::PropertyAccess {
-                object: Box::new(Expr::FunctionCall {
-                    name: "type_info".to_string(),
-                    const_args: Vec::new(),
-                    args: vec![Expr::Literal(
-                        Literal::String("Point".to_string()),
-                        Span::DUMMY,
-                    )],
-                    named_args: Vec::new(),
-                    span: Span::DUMMY,
-                }),
-                property: "name".to_string(),
-                optional: false,
-                span: Span::DUMMY,
-            }),
-            Span::DUMMY,
-        )];
-        let snapshot = freeze_with_struct("Point", &[("x", TypeAnn::Basic("int".to_string()))]);
-        assert_dispatch_reached(
-            stmts,
-            Default::default(),
-            snapshot,
-            "w14_2_c1_chained_name_access_on_struct",
-        );
-    }
-
-    /// W14.2-C1 (1) chained: bind-then-access via local variable —
-    /// `comptime { let info = type_info(Point); info.kind }`. Exercises
-    /// the `let info = ...` binding-store path + subsequent property
-    /// access on the TypedObject-typed local (mirror of the audit-cited
-    /// `vision/distributed-comptime-async-vision.md:86` shape).
-    #[test]
-    fn w14_2_c1_chained_bind_then_access() {
-        let stmts = vec![
-            Statement::VariableDecl(
-                VariableDecl {
-                    kind: VarKind::Let,
-                    is_mut: false,
-                    pattern: DestructurePattern::Identifier("info".to_string(), Span::DUMMY),
-                    type_annotation: None,
-                    value: Some(Expr::FunctionCall {
-                        name: "type_info".to_string(),
-                        const_args: Vec::new(),
-                        args: vec![Expr::Literal(
-                            Literal::String("Point".to_string()),
-                            Span::DUMMY,
-                        )],
-                        named_args: Vec::new(),
-                        span: Span::DUMMY,
-                    }),
-                    ownership: Default::default(),
-                },
-                Span::DUMMY,
-            ),
-            Statement::Return(
-                Some(Expr::PropertyAccess {
-                    object: Box::new(Expr::Identifier("info".to_string(), Span::DUMMY)),
-                    property: "kind".to_string(),
-                    optional: false,
-                    span: Span::DUMMY,
-                }),
-                Span::DUMMY,
-            ),
-        ];
-        let snapshot = freeze_with_struct("Point", &[("x", TypeAnn::Basic("int".to_string()))]);
-        assert_dispatch_reached(
-            stmts,
-            Default::default(),
-            snapshot,
-            "w14_2_c1_chained_bind_then_access",
-        );
-    }
-
-    // -------- (2) build_config_interaction -------------------------------
-
-    /// W14.2-C1 (2) interaction: both `build_config()` and `type_info(T)`
-    /// dispatch in the same comptime block via locals. Verifies the
-    /// `__comptime__` module-binding chain is reusable across multiple
-    /// comptime-builtin invocations within one execute_comptime call
-    /// (W17-comptime-vm-dispatch ADR-006 §2.7.26 — multi-call dispatch).
-    #[test]
-    fn w14_2_c1_build_config_and_type_info_in_same_block() {
-        let stmts = vec![
-            Statement::VariableDecl(
-                VariableDecl {
-                    kind: VarKind::Let,
-                    is_mut: false,
-                    pattern: DestructurePattern::Identifier("cfg".to_string(), Span::DUMMY),
-                    type_annotation: None,
-                    value: Some(Expr::FunctionCall {
-                        name: "build_config".to_string(),
-                        const_args: Vec::new(),
-                        args: Vec::new(),
-                        named_args: Vec::new(),
-                        span: Span::DUMMY,
-                    }),
-                    ownership: Default::default(),
-                },
-                Span::DUMMY,
-            ),
-            Statement::Return(
-                Some(Expr::FunctionCall {
-                    name: "type_info".to_string(),
-                    const_args: Vec::new(),
-                    args: vec![Expr::Literal(
-                        Literal::String("Point".to_string()),
-                        Span::DUMMY,
-                    )],
-                    named_args: Vec::new(),
-                    span: Span::DUMMY,
-                }),
-                Span::DUMMY,
-            ),
-        ];
-        let snapshot = freeze_with_struct("Point", &[("x", TypeAnn::Basic("int".to_string()))]);
-        assert_dispatch_reached(
-            stmts,
-            Default::default(),
-            snapshot,
-            "w14_2_c1_build_config_and_type_info_in_same_block",
-        );
-    }
-
-    /// W14.2-C1 (2) interaction: chained property access on
-    /// `build_config()` and `type_info(T)` in the same block. The
-    /// `build_config().target_arch` path is the existing precedent that
-    /// `type_info(T).kind` mirrors; the test verifies BOTH chained-access
-    /// forms compile + dispatch in one execute_comptime call.
-    #[test]
-    fn w14_2_c1_chained_access_on_both_builtins() {
-        let stmts = vec![
-            Statement::VariableDecl(
-                VariableDecl {
-                    kind: VarKind::Let,
-                    is_mut: false,
-                    pattern: DestructurePattern::Identifier("arch".to_string(), Span::DUMMY),
-                    type_annotation: None,
-                    value: Some(Expr::PropertyAccess {
-                        object: Box::new(Expr::FunctionCall {
-                            name: "build_config".to_string(),
-                            const_args: Vec::new(),
-                            args: Vec::new(),
-                            named_args: Vec::new(),
-                            span: Span::DUMMY,
-                        }),
-                        property: "target_arch".to_string(),
-                        optional: false,
-                        span: Span::DUMMY,
-                    }),
-                    ownership: Default::default(),
-                },
-                Span::DUMMY,
-            ),
-            Statement::Return(
-                Some(Expr::PropertyAccess {
-                    object: Box::new(Expr::FunctionCall {
-                        name: "type_info".to_string(),
-                        const_args: Vec::new(),
-                        args: vec![Expr::Literal(
-                            Literal::String("Point".to_string()),
-                            Span::DUMMY,
-                        )],
-                        named_args: Vec::new(),
-                        span: Span::DUMMY,
-                    }),
-                    property: "kind".to_string(),
-                    optional: false,
-                    span: Span::DUMMY,
-                }),
-                Span::DUMMY,
-            ),
-        ];
-        let snapshot = freeze_with_struct("Point", &[("x", TypeAnn::Basic("int".to_string()))]);
-        assert_dispatch_reached(
-            stmts,
-            Default::default(),
-            snapshot,
-            "w14_2_c1_chained_access_on_both_builtins",
-        );
-    }
-
-    // -------- (3) nested_generic ----------------------------------------
-
-    /// W14.2-C1 (3) nested generic: `type_info("Array<int>")` dispatches
-    /// — the marshal-layer fallback path defaults to a sentinel kind
-    /// (`__type_info_marshal_pending__` → `Unknown`) regardless of the
-    /// actual name. The test asserts the dispatch chain reaches the
-    /// body cleanly for a parameterized type-name string. Once the
-    /// marshal layer is fixed, `classify_bare_type_name` will see
-    /// "Array<int>" and classify per the audit-doc §4.6 discriminator
-    /// table. Until then the dispatch path is the gate.
-    #[test]
-    fn w14_2_c1_type_info_on_array_generic() {
-        let stmts = vec![Statement::Return(
-            Some(Expr::FunctionCall {
-                name: "type_info".to_string(),
-                const_args: Vec::new(),
-                args: vec![Expr::Literal(
-                    Literal::String("Array<int>".to_string()),
-                    Span::DUMMY,
-                )],
-                named_args: Vec::new(),
-                span: Span::DUMMY,
-            }),
-            Span::DUMMY,
-        )];
-        assert_dispatch_reached(
-            stmts,
-            Default::default(),
-            (super::test_freeze_overlay(), Default::default()),
-            "w14_2_c1_type_info_on_array_generic",
-        );
-    }
-
-    /// W14.2-C1 (3) nested generic: `type_info("Option<Point>")` — the
-    /// Option-wrapped struct shape, with snapshot pre-populated so the
-    /// inner Point name is reachable when the marshal layer lands.
-    #[test]
-    fn w14_2_c1_type_info_on_option_of_struct() {
-        let stmts = vec![Statement::Return(
-            Some(Expr::FunctionCall {
-                name: "type_info".to_string(),
-                const_args: Vec::new(),
-                args: vec![Expr::Literal(
-                    Literal::String("Option<Point>".to_string()),
-                    Span::DUMMY,
-                )],
-                named_args: Vec::new(),
-                span: Span::DUMMY,
-            }),
-            Span::DUMMY,
-        )];
-        let snapshot = freeze_with_struct("Point", &[("x", TypeAnn::Basic("int".to_string()))]);
-        assert_dispatch_reached(
-            stmts,
-            Default::default(),
-            snapshot,
-            "w14_2_c1_type_info_on_option_of_struct",
-        );
-    }
-
-    /// W14.2-C1 (3) nested generic: `type_info("Result<int, string>")` —
-    /// the Result two-param shape. Same dispatch contract as the Array
-    /// and Option cases; covers the third audit-doc §4.6 builtin kind
-    /// in the TypeInfo coverage matrix.
-    #[test]
-    fn w14_2_c1_type_info_on_result_two_params() {
-        let stmts = vec![Statement::Return(
-            Some(Expr::FunctionCall {
-                name: "type_info".to_string(),
-                const_args: Vec::new(),
-                args: vec![Expr::Literal(
-                    Literal::String("Result<int, string>".to_string()),
-                    Span::DUMMY,
-                )],
-                named_args: Vec::new(),
-                span: Span::DUMMY,
-            }),
-            Span::DUMMY,
-        )];
-        assert_dispatch_reached(
-            stmts,
-            Default::default(),
-            (super::test_freeze_overlay(), Default::default()),
-            "w14_2_c1_type_info_on_result_two_params",
-        );
-    }
-
-    /// W14.2-C1 (3) nested generic: chained `type_info("HashMap<...>").kind`
-    /// — verifies property access on the generic-payload-named return
-    /// dispatches via the same `kind: string` schema slot as the simple
-    /// struct case.
-    #[test]
-    fn w14_2_c1_chained_kind_on_hashmap_generic() {
-        let stmts = vec![Statement::Return(
-            Some(Expr::PropertyAccess {
-                object: Box::new(Expr::FunctionCall {
-                    name: "type_info".to_string(),
-                    const_args: Vec::new(),
-                    args: vec![Expr::Literal(
-                        Literal::String("HashMap<string, int>".to_string()),
-                        Span::DUMMY,
-                    )],
-                    named_args: Vec::new(),
-                    span: Span::DUMMY,
-                }),
-                property: "kind".to_string(),
-                optional: false,
-                span: Span::DUMMY,
-            }),
-            Span::DUMMY,
-        )];
-        assert_dispatch_reached(
-            stmts,
-            Default::default(),
-            (super::test_freeze_overlay(), Default::default()),
-            "w14_2_c1_chained_kind_on_hashmap_generic",
-        );
-    }
-
-    // -------- (4) enum_payload_chained ----------------------------------
-
-    /// W14.2-C1 (4) enum-payload: `type_info("Color")` where Color is a
-    /// snapshot-registered enum — verifies the enum_defs lookup path in
-    /// `classify_bare_type_name` reaches the TypedObject return arm
-    /// (audit-doc §4.6 flat-discriminator: enums and structs share
-    /// `TypeKind::TypedObject` until a dedicated Enum variant lands).
-    #[test]
-    fn w14_2_c1_type_info_on_registered_enum() {
-        let stmts = vec![Statement::Return(
-            Some(Expr::FunctionCall {
-                name: "type_info".to_string(),
-                const_args: Vec::new(),
-                args: vec![Expr::Literal(
-                    Literal::String("Color".to_string()),
-                    Span::DUMMY,
-                )],
-                named_args: Vec::new(),
-                span: Span::DUMMY,
-            }),
-            Span::DUMMY,
-        )];
-        let snapshot = freeze_with_enum("Color", &["Red", "Green", "Blue"]);
-        assert_dispatch_reached(
-            stmts,
-            Default::default(),
-            snapshot,
-            "w14_2_c1_type_info_on_registered_enum",
-        );
-    }
-
-    /// W14.2-C1 (4) enum-payload chained: `type_info("Color").kind` —
-    /// chained property access on the enum-resolved TypeInfo. Verifies
-    /// the snapshot.enum_defs branch of classify_bare_type_name +
-    /// downstream GetFieldTyped dispatch on the TypedObject result.
-    #[test]
-    fn w14_2_c1_chained_kind_on_registered_enum() {
-        let stmts = vec![Statement::Return(
-            Some(Expr::PropertyAccess {
-                object: Box::new(Expr::FunctionCall {
-                    name: "type_info".to_string(),
-                    const_args: Vec::new(),
-                    args: vec![Expr::Literal(
-                        Literal::String("Color".to_string()),
-                        Span::DUMMY,
-                    )],
-                    named_args: Vec::new(),
-                    span: Span::DUMMY,
-                }),
-                property: "kind".to_string(),
-                optional: false,
-                span: Span::DUMMY,
-            }),
-            Span::DUMMY,
-        )];
-        let snapshot = freeze_with_enum("Color", &["Red", "Green", "Blue"]);
-        assert_dispatch_reached(
-            stmts,
-            Default::default(),
-            snapshot,
-            "w14_2_c1_chained_kind_on_registered_enum",
-        );
-    }
-
-    // -------- (5) error_path ---------------------------------------------
-
-    /// W14.2-C1 (5) error path: `type_info("UndefinedXYZ")` on a type
-    /// name that is NOT in struct_defs/alias_defs/enum_defs — the
-    /// `classify_bare_type_name` unrecognized-name fallback arm returns
-    /// `TypeKindLabel::Unknown` and `build_type_info_heap_value`
-    /// constructs a valid TypeInfo TypedObject with that label. Dispatch
-    /// MUST NOT panic; this is the structured-error fallback per the
-    /// audit-doc §4 (b) ergonomic contract.
-    #[test]
-    fn w14_2_c1_type_info_on_undefined_type_returns_unknown() {
-        let stmts = vec![Statement::Return(
-            Some(Expr::FunctionCall {
-                name: "type_info".to_string(),
-                const_args: Vec::new(),
-                args: vec![Expr::Literal(
-                    Literal::String("UndefinedXYZ".to_string()),
-                    Span::DUMMY,
-                )],
-                named_args: Vec::new(),
-                span: Span::DUMMY,
-            }),
-            Span::DUMMY,
-        )];
-        // Empty snapshot — "UndefinedXYZ" hits the unrecognized-name arm.
-        assert_dispatch_reached(
-            stmts,
-            Default::default(),
-            (super::test_freeze_overlay(), Default::default()),
-            "w14_2_c1_type_info_on_undefined_type_returns_unknown",
-        );
-    }
-
-    /// W14.2-C1 (5) error path: `type_info(UndefinedXYZ)` with a bare
-    /// type-identifier (not string-quoted). The `rewrite_type_info_in_expr`
-    /// path at `comptime.rs:278-288` rewrites the bare identifier to a
-    /// string literal before dispatch. Verifies the rewriter applies
-    /// even for unknown identifiers — the closure still receives a
-    /// string and returns Unknown-labeled TypeInfo, no compile-time
-    /// "Undefined variable" error.
-    #[test]
-    fn w14_2_c1_type_info_bare_ident_rewrites_for_unknown() {
-        let stmts = vec![Statement::Return(
-            Some(Expr::FunctionCall {
-                name: "type_info".to_string(),
-                const_args: Vec::new(),
-                args: vec![Expr::Identifier("UndefinedXYZ".to_string(), Span::DUMMY)],
-                named_args: Vec::new(),
-                span: Span::DUMMY,
-            }),
-            Span::DUMMY,
-        )];
-        // No struct/enum registered — the rewriter still converts the
-        // bare ident to a string literal; classify returns Unknown.
-        assert_dispatch_reached(
-            stmts,
-            Default::default(),
-            (super::test_freeze_overlay(), Default::default()),
-            "w14_2_c1_type_info_bare_ident_rewrites_for_unknown",
-        );
-    }
-
-    // -------- compile-only / contract surfaces ---------------------------
-
-    /// W14.2-C1 contract: chained `type_info(...).kind` inside `comptime
-    /// { }` block at the SOURCE level — verifies the chained property
-    /// access on a `type_info` result PARSES cleanly. The Bytecode compile
-    /// step is permitted to fail with the documented marshal-pending /
-    /// bare-ident-rewriter gap (`Undefined variable: Point` —
-    /// `rewrite_type_info_ident_args` is wired into the `execute_comptime`
-    /// path but not the source-level comptime-block lowering path; see
-    /// `comptime.rs:254-288` + `comptime_builtins.rs:469-484`). The
-    /// must-not-surface contract is exactly the two retired legacy
-    /// gates: `type_info has been removed` and the user-facing
-    /// `comptime-only builtin` gate inside a comptime block. Both
-    /// retirement contracts are verified here.
-    #[test]
-    fn w14_2_c1_chained_type_info_source_level_parse_and_gates() {
-        let code = r#"
-type Point {
-  x: int,
-  y: int
-}
-
-const KIND = comptime {
-  type_info(Point).kind
-}
-"#;
-        let program = shape_ast::parser::parse_program(code);
-        assert!(
-            program.is_ok(),
-            "W14.2-C1: chained `type_info(Point).kind` must parse: {:?}",
-            program.err()
-        );
-        let result = crate::compiler::BytecodeCompiler::new().compile(&program.unwrap());
-        // Compile may fail due to documented pre-existing gaps; but it
-        // MUST NOT surface either retired legacy gate.
-        if let Err(e) = result {
-            let msg = format!("{}", e);
-            assert!(
-                !msg.contains("type_info has been removed"),
-                "W14.2-C1: chained type_info().kind must not surface the \
-                 retired `type_info has been removed` gate: {msg}",
-            );
-            assert!(
-                !msg.contains("comptime-only builtin"),
-                "W14.2-C1: type_info inside a comptime block must not \
-                 trigger the comptime-only-builtin gate: {msg}",
-            );
-        }
-    }
-
-    /// W14.2-C1 contract: `build_config()` + `type_info(...)` in the
-    /// same comptime block PARSES cleanly at the source level and the
-    /// compile step does not surface either retired legacy gate.
-    /// Mirrors the `ct_49_build_config_fields` pattern at
-    /// `tools/shape-test/tests/comptime/blocks.rs:312`, extended with
-    /// `type_info()` in the same scope.
-    #[test]
-    fn w14_2_c1_build_config_plus_type_info_source_level_parse_and_gates() {
-        let code = r#"
-type Point {
-  x: int
-}
-
-const COMBO = comptime {
-  let cfg = build_config()
-  let info = type_info(Point)
-  info.name
-}
-"#;
-        let program = shape_ast::parser::parse_program(code);
-        assert!(
-            program.is_ok(),
-            "W14.2-C1: build_config + type_info combo must parse: {:?}",
-            program.err()
-        );
-        let result = crate::compiler::BytecodeCompiler::new().compile(&program.unwrap());
-        if let Err(e) = result {
-            let msg = format!("{}", e);
-            assert!(
-                !msg.contains("type_info has been removed"),
-                "W14.2-C1: must not surface retired legacy gate: {msg}",
-            );
-            assert!(
-                !msg.contains("comptime-only builtin"),
-                "W14.2-C1: builtins inside comptime block must not gate: {msg}",
-            );
-        }
-    }
-
-    /// W14.2-C1 contract: `type_info("Array<int>")` (string-quoted
-    /// generic shape) PARSES cleanly at source level. The compile step
-    /// is permitted to fail on the pre-existing SIGSEGV class
-    /// (`ct_17_build_config` family — TypedObject printing /
-    /// receiver-recovery via `__type_info_marshal_pending__`); we gate
-    /// only the parse step here to avoid the documented SIGSEGV anchor.
-    /// The runtime-level coverage for this shape is wired via the
-    /// `w14_2_c1_type_info_on_array_generic` test above which uses the
-    /// pure `execute_comptime` API and asserts dispatch reaches the body.
-    #[test]
-    fn w14_2_c1_type_info_on_generic_string_source_level_parse() {
-        let code = r#"
-const INFO = comptime {
-  type_info("Array<int>").kind
-}
-"#;
-        let program = shape_ast::parser::parse_program(code);
-        assert!(
-            program.is_ok(),
-            "W14.2-C1: generic-string `type_info(\"Array<int>\").kind` must \
-             parse: {:?}",
-            program.err()
-        );
-    }
-
-    /// W14.2-C1 contract: source-level parser preserves the chained
-    /// `type_info(...).name.kind` (multi-level field projection) shape
-    /// even though it's semantically invalid at runtime (TypeInfo's
-    /// `name` is a string, not a TypedObject). This guards the
-    /// audit-doc §4.6 "chained `type_info(...).field.subfield`" gap —
-    /// the parser MUST accept the multi-level chain so a future
-    /// FieldInfo-recursive shape can land without grammar work.
-    #[test]
-    fn w14_2_c1_chained_multi_level_property_parses() {
-        let code = r#"
-const X = comptime {
-  type_info("Point").name.length
-}
-"#;
-        let program = shape_ast::parser::parse_program(code);
-        assert!(
-            program.is_ok(),
-            "W14.2-C1: multi-level chained property access on type_info() \
-             must parse (future-proofing for recursive FieldInfo): {:?}",
-            program.err()
         );
     }
 
@@ -6315,8 +5451,7 @@ match reflect(type_ref(int)) {
 
     /// R4: reflect's argument forms are rejected with NAMED diagnostics at
     /// the outer type-check (mirroring the type_ref arg-form rejections) —
-    /// wrong arity, string arg, int arg, and the legacy `__ComptimeTypeRef`
-    /// descriptor (`type_info(T).type_ref`).
+    /// wrong arity, string arg, int arg.
     #[test]
     fn reflect_arg_forms_are_rejected_with_named_diagnostics() {
         for (code, expected) in [
@@ -6334,10 +5469,6 @@ match reflect(type_ref(int)) {
             ),
             (
                 "let x = comptime { reflect(42) }",
-                "reflect expects a TypeRef value",
-            ),
-            (
-                "let x = comptime { reflect(type_info(int).type_ref) }",
                 "reflect expects a TypeRef value",
             ),
         ] {
@@ -6745,19 +5876,7 @@ mod tests_deferred {
 
     #[test]
     fn test_comptime_only_builtins_rejected_outside_comptime() {
-        // type_info() is removed entirely and should produce a migration error.
-        let code = r#"let x = type_info("Point")"#;
-        let program = shape_ast::parser::parse_program(code).expect("parse");
-        let result = BytecodeCompiler::new().compile(&program);
-        assert!(result.is_err(), "type_info() outside comptime should fail");
-        let err_msg = format!("{}", result.unwrap_err());
-        assert!(
-            err_msg.contains("type_info has been removed"),
-            "Error should mention removal: {}",
-            err_msg
-        );
-
-        // implements()/build_config() remain comptime-only.
+        // build_config() remains comptime-only and must fail outside a block.
         let code2 = r#"let y = build_config()"#;
         let program2 = shape_ast::parser::parse_program(code2).expect("parse");
         let result2 = BytecodeCompiler::new().compile(&program2);

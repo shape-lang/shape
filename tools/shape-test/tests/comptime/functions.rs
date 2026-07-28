@@ -2,7 +2,7 @@
 //!
 //! Tests cover: comptime fn definitions, comptime fn chaining,
 //! string operations, recursive comptime fns, multiple/no params,
-//! and implements checks.
+//! and trait-evidence checks (`find_impl`).
 
 use shape_test::shape_test::ShapeTest;
 
@@ -155,31 +155,6 @@ print(FACT5)
     ShapeTest::new(code).expect_run_ok().expect_output("120");
 }
 
-#[test]
-fn ct_18b_implements_strings() {
-    let code = r#"
-type Dog {
-  name: string
-}
-
-trait Speak {
-  method speak() -> string;
-}
-
-impl Speak for Dog {
-  method speak() -> string {
-    f"{self.name} says woof"
-  }
-}
-
-let DOG_SPEAKS: bool = comptime {
-  implements("Dog", "Speak")
-}
-print(DOG_SPEAKS)
-"#;
-    ShapeTest::new(code).expect_run_ok().expect_output("true");
-}
-
 // ============================================================================
 // EXPECTED ERROR tests
 // ============================================================================
@@ -216,12 +191,12 @@ print(SUM)
 // FAILING tests (TDD) -- document expected behavior for unimplemented features
 // ============================================================================
 
-/// `implements()` accepts bare type/trait identifiers inside comptime blocks;
-/// the comptime evaluator rewrites those identifiers to string literals before
-/// dispatching the statically typed builtin.
+/// Comptime trait-evidence check via the typed `find_impl(type_ref(T),
+/// trait_ref(Tr))` successor (the legacy `implements(...)` builtin was deleted
+/// in ADR-009 E5 #21): an implemented `(type, trait)` pair resolves to
+/// `Some(_)` at compile time.
 #[test]
-
-fn ct_18_implements_check() {
+fn ct_18_find_impl_check() {
     let code = r#"
 type Dog {
   name: string
@@ -238,7 +213,10 @@ impl Speak for Dog {
 }
 
 let DOG_SPEAKS: bool = comptime {
-  implements(Dog, Speak)
+  match find_impl(type_ref(Dog), trait_ref(Speak)) {
+    Some(_) => true
+    None => false
+  }
 }
 print(DOG_SPEAKS)
 "#;

@@ -21,7 +21,7 @@
     ]
   },
   "step": "docs/design/typed-comptime/adr011-012-execution-rulings.md — ten required steps, step 4",
-  "source_revision": "8b9a9fbc5075b86c448ca01caa114c633f8f6ca9",
+  "source_revision": "fa3f9a8446a545fb950d8cf1a41c404987d4c32a",
   "regenerate_with": "node scripts/generate-adr011-012-legacy-baselines.mjs --ticket 135",
   "check_with": "node scripts/check-adr011-012-legacy-baselines.mjs --ticket 135",
   "direction_rule": "Monotonic non-increasing. A set count may fall (migration progress) and may never rise. A new owner path is growth even when the total is unchanged, because it is a new surface carrying old authority.",
@@ -29,9 +29,9 @@
     "source_revision",
     "description"
   ],
-  "total_count": 549,
+  "total_count": 486,
   "total_count_note": "Sum of the set counts. Sets may deliberately overlap (a narrowly scoped set can re-count sites a broader set already counts), so this is a ratchet aggregate for reporting movement — never a count of distinct legacy sites.",
-  "sets_sha256": "e3fd56c701801ebb629887504fc6037d25285a9bf43373ccae68f074fac63a95",
+  "sets_sha256": "13d40b31f6a6c6a3798492f2e6b2164580dd7659fadeddb219d70584aa842464",
   "sets": [
     {
       "id": "lsp-parallel-validators",
@@ -256,8 +256,8 @@
       ],
       "exclude": [],
       "pattern": "HookDecision|ComptimeTarget|\\bstring_lit\\b|pseudo_tuple|\\btype_info\\s*\\(|\\bimplements\\s*\\(\\s*\"",
-      "count": 70,
-      "owner_count": 15,
+      "count": 7,
+      "owner_count": 7,
       "owners": [
         {
           "path": "bin/shape-cli/tests/cli/jit_c3_carrier_native.rs",
@@ -265,10 +265,6 @@
         },
         {
           "path": "bin/shape-cli/tests/cli/jit_e4_hook_decision_native.rs",
-          "count": 1
-        },
-        {
-          "path": "tools/shape-test/tests/annotations_comptime/directives.rs",
           "count": 1
         },
         {
@@ -289,34 +285,6 @@
         },
         {
           "path": "tools/shape-test/tests/comptime/flagship_wf3d.rs",
-          "count": 8
-        },
-        {
-          "path": "tools/shape-test/tests/comptime/frozen_type.rs",
-          "count": 2
-        },
-        {
-          "path": "tools/shape-test/tests/comptime/functions.rs",
-          "count": 1
-        },
-        {
-          "path": "tools/shape-test/tests/comptime/reflect.rs",
-          "count": 2
-        },
-        {
-          "path": "tools/shape-test/tests/comptime/trait_evidence.rs",
-          "count": 1
-        },
-        {
-          "path": "tools/shape-test/tests/comptime/type_info_chained.rs",
-          "count": 47
-        },
-        {
-          "path": "tools/shape-test/tests/lsp/typed_comptime.rs",
-          "count": 1
-        },
-        {
-          "path": "tools/shape-test/tests/regression/language_surface.rs",
           "count": 1
         }
       ]

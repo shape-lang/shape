@@ -24,7 +24,7 @@
     ]
   },
   "step": "docs/design/typed-comptime/adr011-012-execution-rulings.md — ten required steps, step 4",
-  "source_revision": "8b9a9fbc5075b86c448ca01caa114c633f8f6ca9",
+  "source_revision": "fa3f9a8446a545fb950d8cf1a41c404987d4c32a",
   "regenerate_with": "node scripts/generate-adr011-012-legacy-baselines.mjs --ticket 134",
   "check_with": "node scripts/check-adr011-012-legacy-baselines.mjs --ticket 134",
   "direction_rule": "Monotonic non-increasing. A set count may fall (migration progress) and may never rise. A new owner path is growth even when the total is unchanged, because it is a new surface carrying old authority.",
@@ -32,9 +32,9 @@
     "source_revision",
     "description"
   ],
-  "total_count": 1064,
+  "total_count": 1063,
   "total_count_note": "Sum of the set counts. Sets may deliberately overlap (a narrowly scoped set can re-count sites a broader set already counts), so this is a ratchet aggregate for reporting movement — never a count of distinct legacy sites.",
-  "sets_sha256": "fe2924e51dd89ece1069cced94e593156fe645bdd717bd2c44b5f1f2b873bee0",
+  "sets_sha256": "49a2c46947d1dca553555947a5f45c1d92f1c4980076650308a50812a74a4cc0",
   "sets": [
     {
       "id": "universal-comptime-target",
@@ -288,7 +288,7 @@
       ],
       "exclude": [],
       "pattern": "FieldType::Any",
-      "count": 224,
+      "count": 223,
       "owner_count": 36,
       "owners": [
         {
@@ -313,7 +313,7 @@
         },
         {
           "path": "crates/shape-runtime/src/type_schema/builtin_schemas.rs",
-          "count": 14
+          "count": 13
         },
         {
           "path": "crates/shape-runtime/src/type_schema/field_types.rs",

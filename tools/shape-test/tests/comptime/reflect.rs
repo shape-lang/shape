@@ -937,15 +937,13 @@ fn reflect_requires_exactly_one_type_ref_argument() {
     }
 }
 
-/// R4 non-TypeRef arguments: string, int, and the legacy
-/// `__ComptimeTypeRef` descriptor (`type_info(T).type_ref` — also the R7
-/// forge attempt, mirroring `legacy_reflection_descriptors_cannot_forge_type_refs`).
+/// R4 non-TypeRef arguments: a string and an int are named rejections (the
+/// opaque frozen TypeRef carrier never unifies with scalars).
 #[test]
 fn reflect_rejects_non_type_ref_arguments() {
     for source in [
         r#"let reflected = comptime { reflect("int") }"#,
         "let reflected = comptime { reflect(42) }",
-        "let reflected = comptime { reflect(type_info(int).type_ref) }",
     ] {
         ShapeTest::new(source).expect_run_err_contains("reflect expects a TypeRef value");
     }
