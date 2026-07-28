@@ -22,4 +22,5 @@ truthful, and a fuzzy apply can land the claim next to contradicting text.
 | Patch | Ticket | Applies to |
 |---|---|---|
 | `201-foreign-async-truthfulness.patch` | POLY-ASYNC-TRUTH (#201) | 4 pages documenting `async fn python` / `async fn typescript`, now a `[C0932]` compile error owned by #202 |
+| `202-foreign-async-real.patch` | POLY-ASYNC-OFFLOAD (#202) | The REVERSAL of `201-…`: the same 4 pages, now documenting real off-thread async — futures at the call, `await` for the value, the per-language overlap model and its limits, and cancellation as discard-not-termination (generated against `cfa540e`) |
 | `196-stub-channel.patch` | POLY-STUB-CHANNEL (#196) | `tooling/polyglot.mdx` + the two extension pages — the real marshaling table, the `[C0933]` declaration-site rejection, generated `.pyi` / `.d.ts` stubs, and per-declaration Python module namespacing (generated against `ca7cda8`) |
