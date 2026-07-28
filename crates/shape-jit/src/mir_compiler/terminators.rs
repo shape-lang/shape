@@ -182,6 +182,53 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                 // be a closure, got kind UInt64`, and a SIGSEGV on the
                 // let-bound `iter().count()` drive).
                 //
+                // #189 (b2) ATTEMPTED AND REVERTED (2026-07-28). Read this
+                // before trying again; the plumbing below is necessary but
+                // NOT sufficient.
+                //
+                // `dc8ab904` named two blockers. The first — "JIT-format
+                // closure arg can't cross to the VM's v2-raw Ptr(Closure)
+                // ABI" — is only PARTLY discharged by #188: #188 fixed the
+                // value-call argument handoff, but a zero-capture closure
+                // like `|x| x > 3` still reaches an iterator transform as a
+                // `MirConstant::Function` (NaN-boxed function ref, kind
+                // `UInt64`) and the VM's transform handlers require
+                // `Ptr(HeapKind::Closure)`. Delegating it reproduces the
+                // original symptom verbatim, and worse than this bail:
+                // "Iterator transform argument must be a closure, got kind
+                // UInt64" as a HARD runtime error rather than a clean
+                // fall-through.
+                //
+                // The second — "iterator-state share crossing races the JIT
+                // frame's receiver retain/release" — was correctly diagnosed
+                // as a missing-plumbing gap: `Ptr(HeapKind::Iterator)` was the
+                // only kind in the VM-delegation set with no
+                // `retain_func_for_place` arm and no retain/release FFI, so
+                // the delegation contract's "the JIT pre-incremented each
+                // share" precondition could not hold. Adding
+                // `jit_arc_iterator_retain` / `_release` plus both dispatch
+                // arms closes THAT gap.
+                //
+                // It is still not enough. With the plumbing in, the bail
+                // removed, and delegation gated down to zero-argument
+                // iterator terminals only, the attempt passed all four b1
+                // fixtures AND the full 470-program corpus differential —
+                // and broke `.iter()` on an array local inside a function:
+                //
+                //     fn run() { let xs = [..]; xs.iter().count() }
+                //     vm 2400000 / jit "Array.iter(): receiver failed v2
+                //     TypedArray detection", exit 1, core dumped at higher
+                //     iteration counts. Correct at 23842649.
+                //
+                // Note what that means: enabling delegation for ITERATOR
+                // receivers perturbed the receiver-detection path for the
+                // ARRAY receiver of `iter()` itself. The next attempt owns
+                // that interaction, not just the two named blockers. The
+                // shape is now committed as
+                // `SYN__iterator-in-function.shape` — the b1 fixtures are all
+                // top-level single-call and could not see it, and neither
+                // could any of the 470 corpus programs.
+                //
                 // The honest fix is the W12 COMPILE-FAILURE → interpreter
                 // fall-through (NOT a runtime `pending_call_error`, which
                 // surfaces as a hard error per `executor.rs::

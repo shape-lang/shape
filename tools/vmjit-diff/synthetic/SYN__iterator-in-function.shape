@@ -1,0 +1,34 @@
+// #189 (PERF-HOF-CARRIER) iterator customer class 5, committed per R15.
+//
+// CLASS: `.iter()` on an array LOCAL, inside a function, called in a loop.
+//
+// This fixture exists because it is the one that caught a regression the
+// other four could not. The (b2) delegation attempt (see the record at the
+// refusal site in `mir_compiler/terminators.rs`) passed all four b1 fixtures
+// AND the full 470-program corpus differential, and still broke this shape:
+//
+//     vm  2400000        jit  Runtime error: "Array.iter(): receiver failed
+//                             v2 TypedArray detection"  (exit 1, core dumped
+//                             at higher iteration counts)
+//
+// The four b1 fixtures are all TOP-LEVEL and call `.iter()` exactly once, so
+// none of them exercises an array local inside a function body. No corpus
+// program did either — that is why 470 MATCH programs said nothing.
+//
+// Correct in both modes at 23842649 (16 at n=2, 2400000 at n=300000). Keep it
+// that way: this is the anchor for the receiver-detection path that the
+// iterator-carrier work has to preserve, not just the iterator-receiver path
+// it is trying to change.
+
+fn run(iterations: int) -> int {
+    let xs = [1, 2, 3, 4, 5, 6, 7, 8]
+    let mut acc = 0
+    let mut i = 0
+    while i < iterations {
+        acc = acc + xs.iter().count()
+        i = i + 1
+    }
+    return acc
+}
+
+print(run(300))
