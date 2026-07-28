@@ -28,12 +28,16 @@ fn compile_to_bytecode(source: &str) -> BytecodeProgram {
     let program = shape_ast::parse_program(source).expect("parse failed");
 
     let mut loader = shape_runtime::module_loader::ModuleLoader::new();
-    let (graph, stdlib_names, prelude_imports) =
+    let (graph, _stdlib_names, prelude_imports) =
         shape_vm::module_resolution::build_graph_and_stdlib_names(&program, &mut loader, &[])
             .expect("module graph construction failed");
 
+    // The prelude's name-based function-name set is deliberately left unset.
+    // Sibling helpers assign it; CLAUDE.md forbids extending that surface, and
+    // these fixtures do not need it — they call `print` and construct
+    // `Ok`/`Err`, which resolve through the prelude imports above. All five
+    // tests pass without it.
     let mut compiler = BytecodeCompiler::new();
-    compiler.stdlib_function_names = stdlib_names;
     compiler.set_source(source);
     compiler
         .compile_with_graph_and_prelude(&program, graph, &prelude_imports)
