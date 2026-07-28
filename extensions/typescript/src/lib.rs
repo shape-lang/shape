@@ -12,6 +12,7 @@
 
 pub mod error_mapping;
 pub mod marshaling;
+pub mod modules;
 pub mod runtime;
 pub mod stubs;
 

@@ -699,6 +699,29 @@ pub fn extension_environment_config(
         else {
             continue;
         };
+        // The locked module table, with each vendored path resolved against the
+        // environment root (ADR-019 §4 / #198). Absolute, because the extension
+        // resolves imports without a working directory of its own — and a
+        // relative path there would reintroduce exactly the "depends on where
+        // you ran it from" property this ticket removed from Python.
+        let modules: serde_json::Map<String, serde_json::Value> = digest
+            .lockfile()
+            .modules
+            .iter()
+            .map(|(specifier, module)| {
+                let path = match root {
+                    Some(root) => root.join(&module.path),
+                    None => PathBuf::from(&module.path),
+                };
+                (
+                    specifier.clone(),
+                    serde_json::json!({
+                        "path": path.display().to_string(),
+                        "integrity": module.integrity,
+                    }),
+                )
+            })
+            .collect();
         map.insert(
             language.clone(),
             serde_json::json!({
@@ -710,6 +733,7 @@ pub fn extension_environment_config(
                     .iter()
                     .map(|p| p.display().to_string())
                     .collect::<Vec<_>>(),
+                "modules": modules,
             }),
         );
     }

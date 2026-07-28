@@ -51,11 +51,22 @@ pub struct TsRuntime {
 impl TsRuntime {
     /// Initialize a new TypeScript runtime backed by V8.
     ///
-    /// `_config_msgpack` is the MessagePack-encoded configuration from the
-    /// host. Currently unused -- reserved for future settings like
-    /// tsconfig overrides, module resolution paths, etc.
-    pub fn new(_config_msgpack: &[u8]) -> Result<Self, String> {
+    /// `config_msgpack` is the MessagePack-encoded configuration from the host.
+    /// The key this runtime reads is `shape_foreign_environments.typescript` —
+    /// specifically its locked `modules` table, which becomes the ONLY thing a
+    /// `fn typescript` body may import (ADR-019 §4 / #198).
+    ///
+    /// The loader is installed even when the lock declares nothing. An empty
+    /// lock refuses every import with a sentence explaining the rule, which is
+    /// a strict improvement on the previous state: with no loader at all, an
+    /// import failed inside V8 with a message about the embedder, which told a
+    /// user nothing about lockfiles.
+    pub fn new(config_msgpack: &[u8]) -> Result<Self, String> {
+        let modules = crate::modules::LockedModules::from_config(config_msgpack);
         let js_runtime = deno_core::JsRuntime::new(deno_core::RuntimeOptions {
+            module_loader: Some(std::rc::Rc::new(crate::modules::LockfileModuleLoader::new(
+                modules,
+            ))),
             ..Default::default()
         });
 
@@ -633,6 +644,88 @@ fn str_from_raw<'a>(ptr: *const u8, len: usize) -> Option<&'a str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── The lockfile-backed module loader, end to end (ADR-019 §4 / #198) ──
+    //
+    // `modules.rs` tests resolution without an isolate. These two go through
+    // V8, because "the loader is wired into RuntimeOptions" is a claim about
+    // the runtime, not about the resolver.
+
+    fn staged_module(contents: &str) -> std::path::PathBuf {
+        let path = std::env::temp_dir().join(format!(
+            "shape-198-ts-mod-{}-{}.js",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::write(&path, contents).expect("write");
+        path
+    }
+
+    fn runtime_with_module(specifier: &str, path: &std::path::Path) -> TsRuntime {
+        let config = rmp_serde::to_vec(&serde_json::json!({
+            crate::modules::FOREIGN_ENVIRONMENTS_CONFIG_KEY: {
+                "typescript": {
+                    "runtime": "deno",
+                    "modules": { specifier: { "path": path.display().to_string() } }
+                }
+            }
+        }))
+        .expect("encodes");
+        TsRuntime::new(&config).expect("runtime")
+    }
+
+    #[test]
+    fn a_locked_import_resolves_inside_v8() {
+        let path = staged_module("export const answer = 42;\n");
+        let mut runtime = runtime_with_module("./answer", &path);
+        let handle = runtime
+            .compile(
+                "ask",
+                "const m = await import('./answer'); return m.answer;",
+                &[],
+                &[],
+                "Result<int>",
+                true,
+            )
+            .expect("compiles");
+        let outcome = runtime.invoke(handle, &[]);
+        let _ = std::fs::remove_file(&path);
+        let bytes = outcome.expect("a locked import resolves");
+        let value: rmpv::Value = rmp_serde::from_slice(&bytes).expect("decodes");
+        assert_eq!(
+            value.as_i64(),
+            Some(42),
+            "the vendored module's export must reach the body, got: {value:?}"
+        );
+    }
+
+    #[test]
+    fn an_unlocked_import_is_refused_naming_the_lockfile() {
+        // The negative control: same runtime, same spelling, a specifier the
+        // lock does not declare. Nothing is searched for.
+        let path = staged_module("export const answer = 42;\n");
+        let mut runtime = runtime_with_module("./answer", &path);
+        let handle = runtime
+            .compile(
+                "ask",
+                "const m = await import('lodash'); return 0;",
+                &[],
+                &[],
+                "Result<int>",
+                true,
+            )
+            .expect("compiles");
+        let outcome = runtime.invoke(handle, &[]);
+        let _ = std::fs::remove_file(&path);
+        let message = format!("{outcome:?}");
+        assert!(
+            message.contains("lodash") && message.contains("lockfile"),
+            "the refusal must name the specifier and the rule, got: {message}"
+        );
+    }
 
     #[test]
     fn lsp_config_exposes_typescript_defaults() {
