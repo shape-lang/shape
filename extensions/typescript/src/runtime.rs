@@ -682,12 +682,14 @@ mod contract_wire_tests {
     };
 
     fn sample_contract(language: &str) -> ForeignContractExport {
+        use shape_abi_v1::foreign_types::BufferShare;
         let mut contract = ForeignContractExport::new(language);
         contract.functions.push(ForeignFunctionContract {
             name: "add".to_string(),
             params: vec![ForeignParamContract {
                 name: "a".to_string(),
                 ty: ForeignType::Scalar(ForeignScalar::Int),
+                share: BufferShare::Copied,
             }],
             returns: ForeignType::Optional(Box::new(ForeignType::Scalar(ForeignScalar::String))),
         });

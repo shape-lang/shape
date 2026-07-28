@@ -679,7 +679,7 @@ pub(crate) mod tests {
                 generate_stubs: Some(generate_stubs),
                 instance_concurrency: concurrency,
                 dispose_ref: None,
-                reserved3: None,
+                capabilities: None,
             }
         }
 

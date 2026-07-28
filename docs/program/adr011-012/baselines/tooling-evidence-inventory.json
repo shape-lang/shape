@@ -21,7 +21,7 @@
     ]
   },
   "step": "docs/design/typed-comptime/adr011-012-execution-rulings.md — ten required steps, step 4",
-  "source_revision": "c825daca5cda73b725033c88fac765e3f1c26bf1",
+  "source_revision": "7e54d2c2908b6b6bd8aaad4f89d7865256aa5447",
   "regenerate_with": "node scripts/generate-adr011-012-legacy-baselines.mjs --ticket 135",
   "check_with": "node scripts/check-adr011-012-legacy-baselines.mjs --ticket 135",
   "direction_rule": "Monotonic non-increasing. A set count may fall (migration progress) and may never rise. A new owner path is growth even when the total is unchanged, because it is a new surface carrying old authority.",
@@ -29,9 +29,9 @@
     "source_revision",
     "description"
   ],
-  "total_count": 487,
+  "total_count": 492,
   "total_count_note": "Sum of the set counts. Sets may deliberately overlap (a narrowly scoped set can re-count sites a broader set already counts), so this is a ratchet aggregate for reporting movement — never a count of distinct legacy sites.",
-  "sets_sha256": "42c9fac15ef76e56531015b94d742c537b8df139541543ebc497947e98991023",
+  "sets_sha256": "8b6b2abaa7512312d6746956454826c671d89de35f49709a4887aa1d4dcc50e9",
   "sets": [
     {
       "id": "lsp-parallel-validators",
@@ -133,7 +133,7 @@
       ],
       "exclude": [],
       "pattern": "#\\[ignore",
-      "count": 145,
+      "count": 150,
       "owner_count": 27,
       "owners": [
         {
@@ -154,7 +154,7 @@
         },
         {
           "path": "bin/shape-cli/tests/ffi_e2e.rs",
-          "count": 14
+          "count": 19
         },
         {
           "path": "crates/shape-jit/src/core.rs",

@@ -70,6 +70,7 @@ pub fn parse_function_param(pair: Pair<Rule>) -> Result<FunctionParameter> {
     let mut is_reference = false;
     let mut is_mut_reference = false;
     let mut is_out = false;
+    let mut buffer_share = crate::ast::BufferShare::Copied;
     let mut type_annotation = None;
     let mut default_value = None;
 
@@ -77,6 +78,17 @@ pub fn parse_function_param(pair: Pair<Rule>) -> Result<FunctionParameter> {
         match inner_pair.as_rule() {
             Rule::param_const_keyword => {
                 is_const = true;
+            }
+            // ADR-019 §2 (#199): `shared x` / `shared mut x`. The `mut` nests
+            // inside the keyword rule, exactly as `&mut` nests it in
+            // `param_ref_keyword` below.
+            Rule::param_shared_keyword => {
+                buffer_share = crate::ast::BufferShare::Shared;
+                for child in inner_pair.into_inner() {
+                    if child.as_rule() == Rule::param_mut_keyword {
+                        buffer_share = crate::ast::BufferShare::SharedMut;
+                    }
+                }
             }
             Rule::param_ref_keyword => {
                 is_reference = true;
@@ -133,6 +145,7 @@ pub fn parse_function_param(pair: Pair<Rule>) -> Result<FunctionParameter> {
         is_reference,
         is_mut_reference,
         is_out,
+        buffer_share,
         type_annotation,
         default_value,
     })

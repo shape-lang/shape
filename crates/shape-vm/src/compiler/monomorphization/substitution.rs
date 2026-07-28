@@ -3091,6 +3091,7 @@ mod tests {
             is_reference: false,
             is_mut_reference: false,
             is_out: false,
+            buffer_share: shape_ast::ast::BufferShare::Copied,
             type_annotation: Some(ty),
             default_value: None,
         }

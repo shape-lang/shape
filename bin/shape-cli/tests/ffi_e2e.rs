@@ -626,3 +626,144 @@ fn python_foreign_call_inside_a_spawned_async_fn_succeeds() {
         run.stderr
     );
 }
+
+// =========================================================================
+// #199 POLY-ZERO-COPY — `shared` buffers through the real extension `.so`
+// =========================================================================
+
+/// The whole path, end to end: a `shared` declaration, a negotiated capability
+/// in a loaded `.so`, a `memoryview` over Shape's own array, and the release
+/// accounting on the way back.
+///
+/// The in-process fakes in `shape-vm` assert the host's behaviour and the
+/// `shape-ext-python` unit tests assert CPython's; this is the one that proves
+/// they meet — that the capability block survives the dlopen, the ABI
+/// fingerprint still matches, and the pointer the body reads is the array the
+/// Shape program built.
+#[test]
+#[ignore = "needs built python extension + CPython; run via `just test-ffi`"]
+fn python_shared_buffer_reads_the_shape_arrays_own_memory() {
+    let ext = extension_dir();
+    let program = "fn python total(shared xs: Array<number>) -> Result<number> {\n\
+                   \x20   assert xs.format == 'd'\n\
+                   \x20   return float(sum(xs))\n\
+                   }\n\
+                   match total([1.5, 2.5, 3.0]) { Ok(v) => print(f\"RESULT={v}\"), Err(e) => print(f\"ERR={e}\") }\n";
+    assert_vm_jit_stdout(program, Some(&ext), "RESULT=7.0");
+}
+
+/// The half a copy could not fake: `shared mut` writes land in the CALLER's
+/// array, so the Shape side sees them after the call returns.
+#[test]
+#[ignore = "needs built python extension + CPython; run via `just test-ffi`"]
+fn python_shared_mut_writes_are_visible_to_shape_after_the_call() {
+    let ext = extension_dir();
+    let program = "fn python double(shared mut xs: Array<number>) -> Result<int> {\n\
+                   \x20   for i in range(len(xs)):\n\
+                   \x20       xs[i] = xs[i] * 2.0\n\
+                   \x20   return len(xs)\n\
+                   }\n\
+                   let mut xs = [1.0, 2.0, 3.0]\n\
+                   match double(xs) { Ok(n) => print(f\"N={n}\"), Err(e) => print(f\"ERR={e}\") }\n\
+                   print(f\"AFTER={xs[0]},{xs[1]},{xs[2]}\")\n";
+    let run = run_shape(program, "vm", Some(&ext));
+    assert!(
+        run.stdout.contains("N=3"),
+        "the call ran; stdout={:?} stderr={}",
+        run.stdout,
+        run.stderr
+    );
+    assert!(
+        run.stdout.contains("AFTER=2.0,4.0,6.0"),
+        "the body wrote into Shape's own buffer, with no copy back; stdout={:?} stderr={}",
+        run.stdout,
+        run.stderr
+    );
+}
+
+/// #199 tripwire (1) through the real interpreter: a write through a
+/// read-only view is refused by CPython itself, and Shape's array is untouched.
+#[test]
+#[ignore = "needs built python extension + CPython; run via `just test-ffi`"]
+fn python_write_through_a_shared_view_is_refused_by_cpython() {
+    let ext = extension_dir();
+    let program = "fn python poke(shared xs: Array<number>) -> Result<int> {\n\
+                   \x20   xs[0] = 99.0\n\
+                   \x20   return 0\n\
+                   }\n\
+                   let xs = [1.0, 2.0]\n\
+                   match poke(xs) { Ok(v) => print(f\"OK={v}\"), Err(e) => print(\"REFUSED\") }\n\
+                   print(f\"AFTER={xs[0]}\")\n";
+    let run = run_shape(program, "vm", Some(&ext));
+    assert!(
+        run.stdout.contains("REFUSED"),
+        "writing through an immutable view raises; stdout={:?} stderr={}",
+        run.stdout,
+        run.stderr
+    );
+    assert!(
+        run.stdout.contains("AFTER=1.0"),
+        "and Shape's buffer is unchanged; stdout={:?} stderr={}",
+        run.stdout,
+        run.stderr
+    );
+}
+
+/// #199 tripwire (2), the named corruption class, through the real path: a body
+/// that stashes a live view of the buffer fails the call with a structured
+/// boundary error naming the parameter — instead of leaving foreign code
+/// pointing at memory Shape is about to reuse.
+#[test]
+#[ignore = "needs built python extension + CPython; run via `just test-ffi`"]
+fn python_a_stashed_live_view_fails_the_call_at_the_boundary() {
+    let ext = extension_dir();
+    // A memoryview slice is the stdlib shape of `numpy.asarray(xs)` kept in a
+    // global: the view object goes away, a live export of the buffer does not.
+    let program = "fn python leak(shared xs: Array<number>) -> Result<int> {\n\
+                   \x20   global KEPT\n\
+                   \x20   KEPT = xs[0:2]\n\
+                   \x20   return 0\n\
+                   }\n\
+                   match leak([1.0, 2.0, 3.0]) { Ok(v) => print(f\"OK={v}\"), Err(e) => print(f\"ERR={e}\") }\n";
+    let run = run_shape(program, "vm", Some(&ext));
+    let combined = format!("{}{}", run.stdout, run.stderr);
+    assert!(
+        combined.contains("still held a view"),
+        "the boundary fails the call rather than reclaiming under a live view; \
+         stdout={:?} stderr={}",
+        run.stdout,
+        run.stderr
+    );
+    assert!(
+        combined.contains("'xs'"),
+        "and names the parameter; stdout={:?} stderr={}",
+        run.stdout,
+        run.stderr
+    );
+}
+
+/// The negative control ADR-019 §2 asks for: TypeScript declares no buffer
+/// capability, so a `shared` parameter there is REFUSED rather than quietly
+/// deep-copied. A silent fallback would make the declaration untrue.
+#[test]
+#[ignore = "needs built typescript extension; run via `just test-ffi`"]
+fn typescript_shared_is_refused_because_the_runtime_offers_no_buffers() {
+    let ext = extension_dir();
+    let program = "fn typescript total(shared xs: Array<number>) -> Result<number> {\n\
+                   \x20   return xs.reduce((a, b) => a + b, 0);\n\
+                   }\n\
+                   match total([1.0, 2.0]) { Ok(v) => print(f\"OK={v}\"), Err(e) => print(f\"ERR={e}\") }\n";
+    let run = run_shape(program, "vm", Some(&ext));
+    let combined = format!("{}{}", run.stdout, run.stderr);
+    assert!(
+        combined.contains("does not offer buffer sharing"),
+        "the refusal names the missing capability; stdout={:?} stderr={}",
+        run.stdout,
+        run.stderr
+    );
+    assert!(
+        !combined.contains("OK="),
+        "and the call does not quietly succeed by copying; stdout={:?}",
+        run.stdout
+    );
+}

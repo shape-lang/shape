@@ -294,6 +294,7 @@ mod tests {
             is_reference: !matches!(mode, ParamPassMode::ByValue),
             is_mut_reference: matches!(mode, ParamPassMode::ByRefExclusive),
             is_out: false,
+            buffer_share: shape_ast::ast::BufferShare::Copied,
             type_annotation: None,
             default_value: optional.then(|| {
                 shape_ast::ast::Expr::Literal(shape_ast::ast::Literal::Int(1), Span::new(3, 4))

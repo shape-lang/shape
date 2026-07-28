@@ -155,6 +155,7 @@ fn lifecycle_function(
         is_reference: false,
         is_mut_reference: false,
         is_out: false,
+        buffer_share: shape_ast::ast::BufferShare::Copied,
         type_annotation: None,
         default_value: None,
     }];
@@ -165,6 +166,7 @@ fn lifecycle_function(
         is_reference: false,
         is_mut_reference: false,
         is_out: false,
+        buffer_share: shape_ast::ast::BufferShare::Copied,
         type_annotation: inferred_handler_parameter_type(parameter.name.as_str()),
         default_value: None,
     }));

@@ -1112,10 +1112,12 @@ impl VirtualMachine {
             // over the stable msgpack ABI → wrap the outcome into the user's
             // `Result<T,string>` per the Q13/OQ10 error channel (§4.5).
             Some(ForeignFunctionHandle::Runtime { runtime, compiled }) => {
-                let (param_types, return_type, schema_id) = {
+                let (param_names, param_types, param_shares, return_type, schema_id) = {
                     let entry = &self.program.foreign_functions[foreign_idx];
                     (
+                        entry.param_names.clone(),
                         entry.param_types.clone(),
+                        entry.param_shares.clone(),
                         entry.return_type.clone().unwrap_or_default(),
                         entry.return_type_schema_id,
                     )
@@ -1128,11 +1130,29 @@ impl VirtualMachine {
                 // panics are contained by the stage-0 `language_runtime_plugin!`
                 // `catch_unwind`; `runtime.invoke` returns them as `Err`.
                 let guarded = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    let args_bytes =
-                        foreign_marshal::marshal_args_typed(args, &param_types, schemas)?;
-                    let outcome = runtime
-                        .invoke(&compiled, &args_bytes)
-                        .map_err(|e| e.to_string());
+                    // ADR-019 §2 (#199): when the declaration shares a
+                    // parameter, the outcome comes from the buffer path
+                    // instead — the element-wise MessagePack walk is exactly
+                    // what `shared` exists to remove.
+                    let outcome = if param_shares.iter().any(|s| s.is_shared()) {
+                        Self::invoke_foreign_with_views(
+                            &runtime,
+                            &compiled,
+                            args,
+                            &param_names,
+                            &param_types,
+                            &param_shares,
+                            &name,
+                            &language,
+                            schemas,
+                        )?
+                    } else {
+                        let args_bytes =
+                            foreign_marshal::marshal_args_typed(args, &param_types, schemas)?;
+                        runtime
+                            .invoke(&compiled, &args_bytes)
+                            .map_err(|e| e.to_string())
+                    };
                     foreign_marshal::wrap_dynamic_result(
                         outcome,
                         &name,
@@ -1159,6 +1179,139 @@ impl VirtualMachine {
         self.foreign_reentry_depth -= 1;
         self.foreign_frame_stack.pop();
         dispatch_result
+    }
+
+    /// Run one foreign call with its `shared` parameters exported as call-scoped
+    /// views instead of copied onto the wire (ADR-019 §2 / #199).
+    ///
+    /// The order is the whole safety argument, so it is fixed here:
+    ///
+    /// 1. negotiate — a runtime whose extension cannot honour the declared mode
+    ///    is refused BEFORE any pointer exists, and the refusal names which half
+    ///    is missing;
+    /// 2. plan — classify, aliasing-check and measure every view, still before
+    ///    any pointer leaves the host;
+    /// 3. invoke — the caller's own slots hold a share of each array for the
+    ///    whole call, so the memory is pinned by the reference that made the
+    ///    call rather than by a separate mechanism that could drift from it;
+    /// 4. account — ask which views survived the body, unconditionally,
+    ///    including when the invoke failed;
+    /// 5. refuse — a retained view fails the call, and that verdict outranks the
+    ///    invoke's own result.
+    ///
+    /// Step 5 outranking step 3 is deliberate. A body that both raised an
+    /// exception and left a view alive has two problems, and only one of them
+    /// gets worse if the program continues.
+    ///
+    /// Returns the runtime's `Result<msgpack, String>` in the same shape the
+    /// copied path returns, so `wrap_dynamic_result` cannot tell the two apart:
+    /// the error channel is the language's, not the transport's.
+    #[allow(clippy::too_many_arguments)]
+    fn invoke_foreign_with_views(
+        runtime: &std::sync::Arc<shape_runtime::plugins::language_runtime::PluginLanguageRuntime>,
+        compiled: &shape_runtime::plugins::language_runtime::CompiledForeignFunction,
+        args: &[KindedSlot],
+        param_names: &[String],
+        param_types: &[String],
+        param_shares: &[shape_abi_v1::foreign_types::BufferShare],
+        name: &str,
+        language: &str,
+        schemas: &shape_runtime::type_schema::TypeSchemaRegistry,
+    ) -> Result<Result<Vec<u8>, String>, VMError> {
+        // (1) Negotiate. A declared `shared` that this host cannot honour is an
+        // error, never a quiet deep copy: the spelling exists to be visible, and
+        // silently copying would make it a lie about what the boundary did.
+        let capability = runtime.buffer_capability().map_err(|refusal| {
+            VMError::RuntimeError(format!(
+                "foreign function '{name}' ({language}): a parameter is declared `shared`, \
+                 but {}. The call is refused rather than quietly deep-copied — `shared` is \
+                 a claim about what crosses the boundary, and honouring it silently as a \
+                 copy would make the declaration untrue.",
+                refusal.explain()
+            ))
+        })?;
+
+        // (2) Plan.
+        let planned = foreign_marshal::plan_views(
+            args,
+            param_names,
+            param_types,
+            param_shares,
+            name,
+            language,
+        )?;
+
+        let mut views = Vec::with_capacity(planned.len());
+        for view in &planned {
+            let mode = view
+                .share
+                .abi_mode()
+                .expect("a planned view always carries a sharing mode");
+            if !capability.supports_mode(mode) {
+                return Err(VMError::RuntimeError(format!(
+                    "foreign function '{name}' ({language}): parameter '{}' is declared \
+                     `{}`, which this runtime's extension does not implement. It \
+                     advertises only the modes it can honour, and the host does not \
+                     substitute one for another — a read-only view where a writable one \
+                     was declared would silently discard the body's writes.",
+                    view.param_name,
+                    view.share.spelling().unwrap_or("shared"),
+                )));
+            }
+            if !capability.supports_elem(view.elem_type) {
+                return Err(VMError::RuntimeError(format!(
+                    "foreign function '{name}' ({language}): parameter '{}' has an element \
+                     type this runtime's extension cannot project as a buffer.",
+                    view.param_name,
+                )));
+            }
+            views.push(shape_abi_v1::ForeignBufferView {
+                arg_index: view.arg_index as u32,
+                elem_type: view.elem_type,
+                mode,
+                _reserved: 0,
+                len: view.len,
+                data: view.data,
+            });
+        }
+
+        let shared_positions: Vec<usize> = planned.iter().map(|v| v.arg_index).collect();
+        let args_bytes = foreign_marshal::marshal_args_with_views(
+            args,
+            param_types,
+            &shared_positions,
+            schemas,
+        )?;
+
+        // (3) + (4). `invoke_with_buffers` queries the release accounting itself,
+        // immediately after the raw call and before the result buffer is even
+        // interpreted, so an error return cannot skip it.
+        //
+        // SAFETY: every pointer in `views` was measured in (2) from a
+        // `Ptr(HeapKind::TypedArray)` argument whose share the caller's slot
+        // still holds, so each is live and correctly sized for the whole call.
+        // Exclusivity for the mutable mode is the aliasing check in
+        // `plan_views`.
+        let outcome = unsafe { runtime.invoke_with_buffers(compiled, &args_bytes, &views) };
+        let outcome = outcome.map_err(|refusal| {
+            VMError::RuntimeError(format!(
+                "foreign function '{name}' ({language}): the buffer capability disappeared \
+                 between negotiation and the call ({})",
+                refusal.explain()
+            ))
+        })?;
+
+        // (5) Refuse. Outranks the invoke's own verdict.
+        if outcome.retained != 0 {
+            return Err(foreign_marshal::retained_view_error(
+                outcome.retained,
+                &planned,
+                name,
+                language,
+            ));
+        }
+
+        Ok(outcome.result.map_err(|e| e.to_string()))
     }
 
     /// Start an `async fn <language>` foreign call and return its `Future(id)`
@@ -1199,6 +1352,33 @@ impl VirtualMachine {
                  (native ABI calls are synchronous); the async offload path is for \
                  language-runtime declarations only",
                 name
+            )));
+        }
+        // ADR-019 §2 (#199): a view is valid for the DURATION OF THE CALL, and
+        // an offloaded call has no such duration on this thread. The interpreter
+        // returns a `Future(id)` immediately and runs on — the caller's slot can
+        // be reassigned, the array's last share dropped and the buffer freed
+        // while the worker is still inside the foreign body, holding a pointer
+        // into it. Refused rather than raced: the two features compose only
+        // through a pin that outlives the interpreter frame, which is a design
+        // this slice does not have and will not fake.
+        if entry.param_shares.iter().any(|s| s.is_shared()) {
+            let shared: Vec<String> = entry
+                .param_names
+                .iter()
+                .zip(entry.param_shares.iter())
+                .filter(|(_, s)| s.is_shared())
+                .map(|(n, _)| format!("'{n}'"))
+                .collect();
+            return Err(VMError::RuntimeError(format!(
+                "foreign function '{name}': parameter{} {} {} declared `shared`, which an \
+                 `async` declaration cannot honour. A shared view lives exactly as long as \
+                 the call, and an async foreign call returns to Shape immediately while the \
+                 body runs on a worker — the array could be freed underneath it. Drop \
+                 `async` to share, or drop `shared` to stay async.",
+                if shared.len() == 1 { "" } else { "s" },
+                shared.join(", "),
+                if shared.len() == 1 { "is" } else { "are" },
             )));
         }
         let param_types = entry.param_types.clone();

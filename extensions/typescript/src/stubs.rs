@@ -16,7 +16,9 @@
 //! `number` — tsc will not enforce integrality — but it keeps the declaration
 //! readable and carries the i64 range caveat where an author will see it.
 
-use shape_abi_v1::foreign_types::{ForeignContractExport, ForeignScalar, ForeignType};
+use shape_abi_v1::foreign_types::{
+    BufferShare, ForeignContractExport, ForeignParamContract, ForeignScalar, ForeignType,
+};
 
 /// The alias name emitted for Shape's `int`.
 pub const SHAPE_INT: &str = "ShapeInt";
@@ -47,7 +49,7 @@ pub fn render_stub(contract: &ForeignContractExport) -> String {
         let params: Vec<String> = function
             .params
             .iter()
-            .map(|p| format!("{}: {}", p.name, ts_type(&p.ty, &anon)))
+            .map(|p| format!("{}: {}", p.name, ts_param_type(p, &anon)))
             .collect();
         out.push_str(&format!(
             "declare function {}({}): {};\n",
@@ -58,6 +60,24 @@ pub fn render_stub(contract: &ForeignContractExport) -> String {
     }
 
     out
+}
+
+/// The TypeScript type one declared PARAMETER arrives as.
+///
+/// ADR-019 §2 (#199): this runtime declares no buffer capability, so the host
+/// REFUSES a call whose declaration shares a parameter — it never reaches a
+/// TypeScript body at all. `never` says exactly that: any body that names the
+/// parameter fails tsc, which is the editor-time echo of the runtime refusal.
+/// Rendering the copied type instead would document a call that cannot happen.
+///
+/// If this runtime later exports `ArrayBuffer` views with release accounting,
+/// this is the one place that changes, alongside the capability block in
+/// `lib.rs`.
+pub fn ts_param_type(param: &ForeignParamContract, anon: &AnonNames) -> String {
+    match param.share {
+        BufferShare::Copied => ts_type(&param.ty, anon),
+        BufferShare::Shared | BufferShare::SharedMut => "never".to_string(),
+    }
 }
 
 /// Names assigned to inline object literals, keyed by their Shape spelling so
@@ -318,10 +338,12 @@ mod tests {
                     ForeignParamContract {
                         name: "a".to_string(),
                         ty: ForeignType::Scalar(ForeignScalar::Int),
+                        share: BufferShare::Copied,
                     },
                     ForeignParamContract {
                         name: "xs".to_string(),
                         ty: ForeignType::Array(ForeignScalar::Number),
+                        share: BufferShare::Copied,
                     },
                 ],
                 returns: ForeignType::Scalar(ForeignScalar::Int),
@@ -365,6 +387,7 @@ mod tests {
                         name: Some("Candle".to_string()),
                         fields: None,
                     },
+                    share: BufferShare::Copied,
                 }],
                 returns: ForeignType::Scalar(ForeignScalar::Number),
             }],

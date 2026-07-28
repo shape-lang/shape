@@ -21,7 +21,7 @@ shape-diagnostics = { workspace = true }
 # dependency-free leaf crate, and it is the only crate the compiler, the
 # marshal layer and the language-runtime extensions can all see — so the
 # declaration-site check reads the table from there instead of restating it.
-shape-abi-v1 = { workspace = true }
+shape-abi-v1 = { workspace = true, features = ["serde"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 chrono = { workspace = true }

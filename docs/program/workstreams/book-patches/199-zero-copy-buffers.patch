@@ -1,0 +1,113 @@
+--- a/book/book-site/src/content/docs/tooling/polyglot.mdx
++++ b/book/book-site/src/content/docs/tooling/polyglot.mdx
+@@ -194,6 +194,95 @@
+   lacks a registered schema_id`. Named types work fine as **parameters**; for
+   returns, declare the object inline as above.
+ 
++## Sharing Buffers Without Copying
++
++By default every value crosses by copy: a `Vec<number>` is walked element by
++element onto the MessagePack wire and rebuilt on the other side. For a handful
++of numbers that is nothing. For a million it is most of the call.
++
++A numeric array parameter can instead be **shared** — exported to the foreign
++body as a view over Shape's own memory, with no copy in either direction:
++
++```shape runnable=false
++fn python total(shared xs: Vec<number>) -> Result<number> {
++    return float(sum(xs))
++}
++
++fn python normalise(shared mut xs: Vec<number>) -> Result<int> {
++    top = max(xs)
++    for i in range(len(xs)):
++        xs[i] = xs[i] / top
++    return len(xs)
++}
++```
++
++`shared` gives the body a read-only view. `shared mut` gives it a writable one,
++and the writes land in the caller's array directly — `normalise` returns a count,
++not an array, because the data never left.
++
++In Python a shared parameter arrives as a `memoryview`, not a `list`. It
++indexes and iterates like a sequence and NumPy wraps it without copying:
++
++```shape runnable=false
++fn python correlation(shared xs: Vec<number>, shared ys: Vec<number>) -> Result<number> {
++    import numpy as np
++    return float(np.corrcoef(np.asarray(xs), np.asarray(ys))[0, 1])
++}
++```
++
++### Why you have to ask for it
++
++Sharing is spelled in the source rather than applied by the compiler, because
++it widens what a mistake in a foreign body can do. An ordinary fence can only
++corrupt its own copy of the data; a body holding a shared view past the end of
++the call would be reading Shape's memory after Shape has reused it. Writing
++`shared` is how you take that on, and it is visible to everyone who reads the
++declaration afterwards.
++
++Shape makes the window as small as it can:
++
++- **The view lives exactly as long as the call.** When the body returns, Shape
++  asks Python whether every view was released. If anything still holds one, the
++  call FAILS with a boundary error naming the parameter — before the memory is
++  reused. A body that does `GLOBAL.append(numpy.asarray(xs))` gets an error, not
++  a crash three seconds later somewhere else.
++- **A read-only view really is read-only.** `xs[0] = 1.0` inside a `shared`
++  body raises `TypeError: cannot modify read-only memory`. That is CPython
++  refusing, not Shape checking afterwards.
++- **A stashed view is dead, not dangling.** Shape releases every view on the way
++  out, so if one escaped anyway, reading it raises `ValueError: operation
++  forbidden on released memoryview`.
++
++If you need to keep the data, copy it: `numpy.array(xs)` copies where
++`numpy.asarray(xs)` does not, and `bytes(xs)` or `list(xs)` work too.
++
++### What can be shared
++
++| | |
++|---|---|
++| `Vec<int>` and `Vec<number>` | shareable — contiguous `i64` / `f64` |
++| `Vec<bool>` | not shareable: one byte per element with only two valid values, so a writable view could store something that is neither `true` nor `false` |
++| `Vec<string>` | not shareable: the array holds pointers into Shape's heap |
++| anything not an array | there is no buffer to share |
++| `fn typescript` | not shareable today — see below |
++| `async fn python` | not shareable: see [Async foreign functions](#async-foreign-functions) |
++
++Everything in that table is a `[C0935]` compile error at the declaration, with
++the reason in the message. `shared` on an ordinary Shape function is one too:
++Shape's own calls never copied an array to pass it, so the word buys nothing
++there.
++
++`fn typescript` declarations cannot share yet. The TypeScript runtime can build
++an `ArrayBuffer` over external memory, but it has no way to tell Shape whether
++the body let go of it, and Shape will not hand out a pointer it cannot ask
++about. A `shared` TypeScript parameter is refused at the call, and the generated
++`.d.ts` types it `never`, so the editor says so first.
++
++`async` and `shared` do not combine. An async foreign call returns to Shape
++immediately and runs the body on a worker thread, so "as long as the call" stops
++meaning anything on the Shape side — the array could be freed while the body is
++still reading it. Drop one keyword or the other.
++
+ ## Async Foreign Functions
+ 
+ `async fn python` and `async fn typescript` run the foreign body **off the
+@@ -334,7 +423,13 @@
+ 
+ ## Using NumPy
+ 
+-Python packages like NumPy work seamlessly inside polyglot functions. `Vec<number>` is marshaled to a Python `list`, and `np.array(...)` constructs an `ndarray` from that list (an O(n) copy — there is no zero-copy buffer path today; see [DataTable Bridge Status](#datatable-bridge-status) for the Arrow IPC bridge that is planned but not yet implemented):
++Python packages like NumPy work seamlessly inside polyglot functions. A plain
++`Vec<number>` parameter is marshaled to a Python `list`, and `np.array(...)`
++constructs an `ndarray` from that list — an O(n) copy. Declare the parameter
++`shared` and NumPy wraps Shape's own buffer instead, with no copy at all; see
++[Sharing Buffers Without Copying](#sharing-buffers-without-copying). (The Arrow
++IPC bridge for tabular data is a separate, still-unimplemented path — see
++[DataTable Bridge Status](#datatable-bridge-status).)
+ 
+ ```shape runnable=false
+ fn python correlation(xs: Vec<number>, ys: Vec<number>) -> Result<number> {

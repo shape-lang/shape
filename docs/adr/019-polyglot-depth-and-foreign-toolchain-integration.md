@@ -117,6 +117,57 @@ time, never assumed:
   declared adapter contract, and the element-wise MessagePack walk is
   replaced for bulk native arrays in both modes.
 
+#### 2.1 Implementation amendment — the capability block (#199, 2026-07-28)
+
+The §2 design says "the reserved ABI tail is the designated slot". At
+implementation time exactly ONE reserved fn-pointer slot remained in
+`LanguageRuntimeVTable` (#196, #202 and #200 having taken the other three),
+and buffer sharing needs two entry points by itself: the invoke that carries
+views, and the release-accounting query §2 requires. Spending the last slot
+on either would have left the other needing an ABI version bump, and every
+capability after it one apiece.
+
+**Decision:** the slot becomes `capabilities` — an accessor returning a
+versioned, size-guarded `ExtensionCapabilities` block. Each block's first
+field is its own `struct_size`, and a reader touches a field only when that
+size covers it, so later capabilities are appended to the block rather than
+to the vtable. `#198`'s environment facts and anything after them grow the
+same way.
+
+The alternative considered was taking the ABI version bump, which the
+no-users ruling makes cheap. It was rejected because it only postpones the
+same question one slot-set later, and because `abi_build_fingerprint` — which
+folds this struct's layout to catch silent skew — keeps its meaning only
+while the vtable stops changing. The block's offset and the fingerprint are
+unchanged by this amendment, so an extension built before #199 reads as
+"offers no optional capabilities" rather than being mis-dispatched.
+
+Four scope decisions taken with it, each narrower than §2's text and each
+for a reason §2 already implies:
+
+1. **The shareable element set is `int` and `number`.** `Array<bool>` is one
+   byte per element with only 0 and 1 valid, so a writable view could store a
+   value that is neither `true` nor `false` — a soundness hole, not a missing
+   projection. `Array<string>` holds host pointers with host refcounts, so
+   sharing the buffer would export the heap. Both are refused at the
+   declaration with those reasons, not deferred.
+2. **`shared` and `async` do not compose.** A view is valid for the duration
+   of the call; an offloaded call (§5) returns to Shape immediately and runs
+   the body on a worker, so the caller's last share of the array can be
+   dropped while foreign code still holds the pointer. Composition needs a pin
+   that outlives the interpreter frame, which is a separate design. Until
+   then the combination is refused at the call, naming both ways out.
+3. **Aliasing is checked by address at the call.** ADR-006 makes a mutable
+   view an exclusive borrow, and Shape's borrow solver does not see through a
+   foreign call's argument list, so passing one array to two shared positions
+   where either is mutable is refused before any pointer is exported.
+4. **TypeScript declares no buffer capability.** Its ArrayBuffer path has no
+   release accounting wired, and §2 fixes that case as refusal rather than a
+   weaker guarantee. The `.d.ts` renderer types a shared parameter `never`,
+   so a TypeScript body that names one fails tsc — the editor-time echo of the
+   runtime refusal. Wiring deno's external backing store with accounting is a
+   later slice; the refusal is the truthful state until it lands.
+
 ### 3. Foreign references are a first-class opaque carrier
 
 Shape gains a foreign-ref carrier: an opaque, refcounted handle to a foreign

@@ -15,6 +15,7 @@ pub(super) fn substitute_function_parameter(
         is_reference: p.is_reference,
         is_mut_reference: p.is_mut_reference,
         is_out: p.is_out,
+        buffer_share: p.buffer_share,
         type_annotation: p
             .type_annotation
             .as_ref()

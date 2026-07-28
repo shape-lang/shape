@@ -84,6 +84,19 @@ pub struct PythonRuntime {
     /// through `register_types` (ADR-019 §1 / #196). Empty until the host
     /// delivers one.
     stub_document: RwLock<String>,
+    /// Which views from the most recent `invoke_with_views` were still exported
+    /// when the body returned, as a bitmask of view indices (ADR-019 §2 / #199).
+    ///
+    /// Written by `invoke_with_views` before it returns and read by the host
+    /// immediately after, on the same thread, so an interleaved second call
+    /// cannot answer for the first: the host asks before it lets go of the
+    /// interpreter. `AtomicU64` rather than a lock because the read happens
+    /// while nothing may block.
+    ///
+    /// Starts at `u64::MAX` — "every view retained" — so a host that somehow
+    /// asks before any buffer invoke ran gets the answer that refuses, not the
+    /// answer that reclaims.
+    last_retained: std::sync::atomic::AtomicU64,
 }
 
 impl PythonRuntime {
@@ -105,6 +118,7 @@ impl PythonRuntime {
             functions: RwLock::new(HashMap::new()),
             next_id: AtomicUsize::new(1),
             stub_document: RwLock::new(String::new()),
+            last_retained: std::sync::atomic::AtomicU64::new(u64::MAX),
         })
     }
 
@@ -424,6 +438,176 @@ impl PythonRuntime {
             let _ = args_msgpack;
             let _ = &func.python_source;
             let _ = error_mapping::parse_traceback;
+            Err(format!(
+                "python runtime: pyo3 feature not enabled (function: {})",
+                func.name
+            ))
+        }
+    }
+
+    /// Which views from the most recent [`Self::invoke_with_views`] were still
+    /// exported when the body returned (ADR-019 §2 / #199).
+    pub fn last_retained_views(&self) -> u64 {
+        self.last_retained
+            .load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    /// Invoke with host buffers exported as call-scoped `memoryview`s
+    /// (ADR-019 §2 / #199).
+    ///
+    /// `args_msgpack` is the ordinary argument array with nil at every position
+    /// a view stands in for; each view names its own position. What the body
+    /// receives at those positions is a `memoryview` over the caller's array —
+    /// read-only for `shared`, writable for `shared mut` — cast to the element's
+    /// `struct` format so `xs[3]` is the fourth number and not the fourth byte.
+    ///
+    /// Before returning, every view is released and the retained mask recorded.
+    /// The order matters and is the reason this is not a loop over `drop`:
+    ///
+    /// 1. drop the argument tuple and the argument vector, so the only
+    ///    remaining reference to each view is this function's own;
+    /// 2. read each view's reference count — anything above 1 means the BODY
+    ///    kept the object;
+    /// 3. release the cast view, then the base view. `release()` raises
+    ///    `BufferError` while any export is outstanding, which catches the
+    ///    `numpy.asarray` case where the object was dropped but a consumer
+    ///    still holds a buffer over it.
+    ///
+    /// Step 3 runs even when step 2 already found the view retained, so a
+    /// stashed view is left POISONED rather than dangling: a later read through
+    /// it raises `ValueError: operation forbidden on released memoryview`
+    /// instead of reading memory the host has reclaimed.
+    ///
+    /// # Safety
+    ///
+    /// Each `view.data` must point to `view.len` correctly-aligned elements of
+    /// `view.elem_type` that stay valid until this returns. The host guarantees
+    /// that by holding the caller's own share of the array for the whole call.
+    pub fn invoke_with_views(
+        &self,
+        handle: *mut c_void,
+        args_msgpack: &[u8],
+        views: &[shape_abi_v1::ForeignBufferView],
+    ) -> Result<Vec<u8>, String> {
+        use std::sync::atomic::Ordering;
+
+        if views.len() > shape_abi_v1::MAX_SHARED_VIEWS {
+            // The mask has one bit per view; more views than bits would make the
+            // accounting silently incomplete, which is the one thing it must
+            // never be.
+            self.last_retained.store(u64::MAX, Ordering::Release);
+            return Err(format!(
+                "python runtime: {} shared views exceeds the {} the release accounting can \
+                 report on",
+                views.len(),
+                shape_abi_v1::MAX_SHARED_VIEWS
+            ));
+        }
+
+        // Pessimistic until proven otherwise: if anything below fails before the
+        // accounting runs, the host reads "retained" and refuses rather than
+        // reclaiming memory on the strength of an answer nobody computed.
+        self.last_retained.store(u64::MAX, Ordering::Release);
+
+        let id = handle as usize;
+        let func = {
+            let functions = self
+                .functions
+                .read()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            Arc::clone(
+                functions
+                    .get(&id)
+                    .ok_or_else(|| format!("invalid function handle: {id}"))?,
+            )
+        };
+        let func = &*func;
+
+        #[cfg(feature = "pyo3")]
+        {
+            use pyo3::prelude::*;
+            use pyo3::types::PyModule;
+
+            Python::attach(|py| {
+                let shape_fn = match func.compiled_fn.get() {
+                    Some(cached) => cached.bind(py).clone(),
+                    None => {
+                        let source_cstring = std::ffi::CString::new(func.python_source.as_str())
+                            .map_err(|e| format!("Invalid source (contains null byte): {}", e))?;
+                        let module_name = std::ffi::CString::new(func.module_name.as_str())
+                            .map_err(|e| format!("Invalid module name: {}", e))?;
+                        let code =
+                            PyModule::from_code(py, &source_cstring, c"<shape>", &module_name)
+                                .map_err(|e| error_mapping::format_python_error(py, &e, func))?;
+                        let resolved = code
+                            .getattr("__shape_fn__")
+                            .map_err(|e| error_mapping::format_python_error(py, &e, func))?;
+                        let _ = func.compiled_fn.set(resolved.clone().unbind());
+                        resolved
+                    }
+                };
+
+                let args_values: Vec<rmpv::Value> = if args_msgpack.is_empty() {
+                    Vec::new()
+                } else {
+                    rmp_serde::from_slice(args_msgpack)
+                        .map_err(|e| format!("Failed to deserialize args: {}", e))?
+                };
+                let mut py_args: Vec<pyo3::Py<pyo3::PyAny>> = args_values
+                    .iter()
+                    .map(|v| marshaling::msgpack_to_pyobject(py, v))
+                    .collect::<Result<_, _>>()?;
+
+                // Build one view per exported buffer and substitute it for the
+                // nil the host left in its place. Each goes through a
+                // `ShapeBuffer` exporter this extension owns, which is where
+                // CPython's export accounting lives (see `buffers.rs`).
+                let mut built: Vec<crate::buffers::LentView<'_>> = Vec::with_capacity(views.len());
+                for view in views {
+                    // SAFETY: the host measured `data`/`len` from a live Shape
+                    // array whose share the caller holds for the whole call —
+                    // this function's documented safety contract.
+                    let lent = unsafe { crate::buffers::LentView::new(py, view) }?;
+                    let slot = view.arg_index as usize;
+                    if slot >= py_args.len() {
+                        return Err(format!(
+                            "python runtime: view names argument {slot}, but the call has {} \
+                             arguments",
+                            py_args.len()
+                        ));
+                    }
+                    py_args[slot] = lent.for_body();
+                    built.push(lent);
+                }
+
+                let py_tuple = pyo3::types::PyTuple::new(py, &py_args)
+                    .map_err(|e| format!("Failed to create args tuple: {}", e))?;
+                let call_result = shape_fn.call1(&py_tuple);
+
+                // Drop every reference this function handed out, so what the
+                // export count reports afterwards is the BODY's doing alone.
+                drop(py_tuple);
+                py_args.clear();
+
+                let mut retained: u64 = 0;
+                for (i, lent) in built.iter().enumerate() {
+                    if lent.reclaim() {
+                        retained |= 1u64 << i;
+                    }
+                }
+                self.last_retained.store(retained, Ordering::Release);
+
+                let result =
+                    call_result.map_err(|e| error_mapping::format_python_error(py, &e, func))?;
+                let result_value = marshaling::pyobject_to_msgpack(py, &result)?;
+                rmp_serde::to_vec(&result_value)
+                    .map_err(|e| format!("Failed to serialize result: {}", e))
+            })
+        }
+
+        #[cfg(not(feature = "pyo3"))]
+        {
+            let _ = (args_msgpack, views, &func.python_source);
             Err(format!(
                 "python runtime: pyo3 feature not enabled (function: {})",
                 func.name
@@ -1082,12 +1266,14 @@ mod contract_wire_tests {
     };
 
     fn sample_contract(language: &str) -> ForeignContractExport {
+        use shape_abi_v1::foreign_types::BufferShare;
         let mut contract = ForeignContractExport::new(language);
         contract.functions.push(ForeignFunctionContract {
             name: "add".to_string(),
             params: vec![ForeignParamContract {
                 name: "a".to_string(),
                 ty: ForeignType::Scalar(ForeignScalar::Int),
+                share: BufferShare::Copied,
             }],
             returns: ForeignType::Optional(Box::new(ForeignType::Scalar(ForeignScalar::String))),
         });

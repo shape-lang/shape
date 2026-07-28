@@ -70,11 +70,21 @@ pub fn build_contract(
 /// outside the marshaling table.
 fn classify_entry(entry: &ForeignFunctionEntry) -> Option<ForeignFunctionContract> {
     let mut params = Vec::with_capacity(entry.param_names.len());
-    for (name, declared) in entry.param_names.iter().zip(entry.param_types.iter()) {
+    for (i, (name, declared)) in entry
+        .param_names
+        .iter()
+        .zip(entry.param_types.iter())
+        .enumerate()
+    {
         let ty = ForeignType::classify(declared, ForeignDirection::Argument).ok()?;
         params.push(ForeignParamContract {
             name: name.clone(),
             ty,
+            // ADR-019 §2 (#199): the renderer needs the share mode, because a
+            // `shared` `Array<number>` reaches the body as a buffer view and a
+            // stub calling it `list[float]` would document a type the body
+            // never receives.
+            share: entry.param_shares.get(i).copied().unwrap_or_default(),
         });
     }
     let returns = ForeignType::classify(
@@ -222,6 +232,7 @@ mod tests {
             return_type_schema_id: None,
             content_hash: None,
             native_abi: None,
+            param_shares: Vec::new(),
         }
     }
 
@@ -472,7 +483,7 @@ mod tests {
             generate_stubs: Some(generate_stubs),
             instance_concurrency: Some(instance_concurrency),
             dispose_ref: None,
-            reserved3: None,
+            capabilities: None,
         };
 
         /// A vtable identical to [`VTABLE`] except that it declares no stub
@@ -496,7 +507,7 @@ mod tests {
             // as interpreter-thread-only and refuses to offload into it.
             instance_concurrency: None,
             dispose_ref: None,
-            reserved3: None,
+            capabilities: None,
         };
     }
 
