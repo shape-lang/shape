@@ -1,0 +1,15 @@
+fn apply(f: (int) => int, x: int) -> int { return f(x) }
+fn run(iterations: int) -> int {
+    let k = 2
+    let direct = |x: int| x * k + 1
+    let mut acc = 0
+    let mut i = 0
+    while i < iterations {
+        let v = i % 64
+        acc = acc + direct(v)
+        acc = acc + apply(direct, v)
+        i = i + 1
+    }
+    return acc
+}
+print(run(3000000))

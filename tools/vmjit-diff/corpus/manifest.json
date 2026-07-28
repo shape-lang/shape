@@ -2371,6 +2371,11 @@
       "id": "SYN__jit-trampoline-arg-kind.shape",
       "tier": "synthetic",
       "source": "tools/vmjit-diff/synthetic/SYN__jit-trampoline-arg-kind.shape (#188 PERF-CLOSURE-NATIVE trampoline arg-kind repro)"
+    },
+    {
+      "id": "SYN__closure-infn-tagnull.shape",
+      "tier": "synthetic",
+      "source": "tools/vmjit-diff/synthetic/SYN__closure-infn-tagnull.shape (#219 in-function closure passed to fn yields TAG_NULL per call; known-red)"
     }
   ]
 }
