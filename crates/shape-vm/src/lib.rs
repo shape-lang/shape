@@ -38,6 +38,11 @@ pub mod memory;
 pub mod metrics;
 pub mod module_graph;
 pub mod module_resolution;
+// #117 / R15: NativeExecutionWitness — per-function evidence of verified
+// artifact, installation, later native dispatch, and covered fallback. Lives in
+// shape-vm rather than shape-jit so the interpreter tier and a jit-feature-off
+// CLI can produce a truthful (non-native) witness through the same type.
+pub mod native_witness;
 pub mod remote;
 pub mod resource_limits;
 pub mod stdlib;

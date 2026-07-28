@@ -328,11 +328,18 @@ impl VirtualMachine {
     /// Poll the tier manager for completed background JIT compilations.
     ///
     /// Completed compilations are applied by `TierManager::poll_completions()`,
-    /// which updates its internal `native_code_table`. The JIT dispatch fast
-    /// path in `op_call` reads from `tier_mgr.get_native_code()`.
+    /// which updates its internal `native_code_table`.
     ///
     /// Called every 1024 instructions from the dispatch loop (same cadence as
     /// interrupt and GC safepoint checks).
+    ///
+    /// This is inert at HEAD and does nothing: `tier_manager` is `None` in
+    /// every build because commit 3e26c02a ("WF-4 D4: delete inert
+    /// tiered-compilation machinery") removed the only writer, and no
+    /// interpreter call path reads `get_native_code()` — `op_call` records a
+    /// call count and then dispatches to the interpreter unconditionally. This
+    /// doc comment previously claimed a native fast path in `op_call` that does
+    /// not exist (corrected under #187, measured 2026-07-28).
     pub(crate) fn poll_tier_completions(&mut self) {
         if let Some(ref mut tier_mgr) = self.tier_manager {
             // poll_completions() reads from the compilation_rx channel and

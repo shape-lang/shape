@@ -22,6 +22,13 @@ use super::super::ffi::iterator::{jit_iter_done, jit_iter_next};
 
 /// Register control flow FFI symbols with the JIT builder
 pub fn register_control_symbols(builder: &mut JITBuilder) {
+    // #117 / R15 native-entry callback. Registered unconditionally so a witness
+    // session can be activated at any point without a second JIT build shape;
+    // the call is only EMITTED while a session collects.
+    builder.symbol(
+        "jit_witness_native_entry",
+        super::super::ffi::witness::jit_witness_native_entry as *const u8,
+    );
     builder.symbol("jit_call_function", jit_call_function as *const u8);
     builder.symbol("jit_call_value", jit_call_value as *const u8);
     builder.symbol("jit_call_foreign", jit_call_foreign as *const u8);
@@ -88,6 +95,19 @@ pub fn register_control_symbols(builder: &mut JITBuilder) {
 
 /// Declare control flow FFI function signatures in the module
 pub fn declare_control_functions(module: &mut JITModule, ffi_funcs: &mut HashMap<String, FuncId>) {
+    // jit_witness_native_entry(unit_index: i64) -> void
+    // #117 / R15: emitted as the first instruction of an instrumented function
+    // entry block so the witness observes native dispatch rather than inferring
+    // it from installation.
+    {
+        let mut sig = module.make_signature();
+        sig.params.push(AbiParam::new(types::I64)); // unit_index
+        let func_id = module
+            .declare_function("jit_witness_native_entry", Linkage::Import, &sig)
+            .expect("Failed to declare jit_witness_native_entry");
+        ffi_funcs.insert("jit_witness_native_entry".to_string(), func_id);
+    }
+
     // jit_call_function(ctx: *mut JITContext, function_id: u16, args: *const u64, arg_count: usize) -> u64
     {
         let mut sig = module.make_signature();

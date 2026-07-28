@@ -154,6 +154,11 @@ fn dispatch_call_via_trampoline_vm(
     // own FrameDescriptor when it begins execution; the §2.7.5 stable-
     // FFI handoff doesn't need per-arg semantic kind, only the slot-
     // size discipline (I64 here).
+    // #117 / R15: the covered-fallback dispatch event. Reaching this function
+    // means a native frame handed `function_id` to the bytecode interpreter,
+    // which is exactly the observation that must never be relabelled native.
+    shape_vm::native_witness::record_interpreter_dispatch(function_id as usize);
+
     let arg_pairs: Vec<(u64, NativeKind)> = jit_args
         .iter()
         .copied()

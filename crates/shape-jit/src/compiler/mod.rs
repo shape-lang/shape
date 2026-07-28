@@ -16,6 +16,9 @@ mod program_finalize;
 mod program_metrics;
 mod setup;
 mod strategy;
+// #117 / R15: emits the native-entry callback that turns "installed" into
+// "dispatched". Inert unless a witness session is collecting.
+mod witness_emit;
 
 #[cfg(test)]
 mod strategy_preflight_tests;

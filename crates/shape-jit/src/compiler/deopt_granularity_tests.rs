@@ -80,6 +80,10 @@ fn function_index(program: &BytecodeProgram, name: &str) -> usize {
 
 /// The two-function fixture: one function holds the unsupported construct
 /// (`?`, an `Owner`-scoped residual), the other is ordinary hot arithmetic.
+///
+/// Top-level calls BOTH, so the fixture exercises the call site as well as the
+/// classification: a direct call to the demoted `uses_try` must lower through
+/// the trampoline rather than costing top-level its own native code.
 const TWO_FUNCTION_FIXTURE: &str = r#"
 fn make_ok() -> Result<int, string> {
     return Ok(42)
@@ -94,7 +98,12 @@ fn hot_double(n: int) -> int {
     return n * 2
 }
 
-print(hot_double(21))
+let mut total = 0
+for i in 0..200 {
+    total = total + hot_double(i)
+}
+print(total)
+print(uses_try())
 "#;
 
 #[test]
@@ -159,26 +168,56 @@ fn one_unsupported_construct_keeps_every_other_function_native() {
     );
 }
 
-/// The R15 obligation this fixture does not yet discharge.
+/// The R15 obligation, discharged.
 ///
-/// `FunctionEntry::Native` proves installation, not execution. Asserting that
-/// `hot_double` actually ran in a native frame requires the
-/// `NativeExecutionWitness` collector from #117. When that lands, this test
-/// gains the witness assertion (tier-up event, native dispatch on the covered
-/// path, zero covered fallback events) and stops being a placeholder. Until
-/// then #187 makes no nativity claim.
+/// The test above reads the JIT's classification, which proves installation,
+/// not execution. This one runs the program under a `NativeExecutionWitness`
+/// session (#117) and asserts the execution-side facts: `hot_double` announced
+/// native entry from inside its own emitted body, 200 times, with zero
+/// interpreter dispatches and no whole-program deopt — while `uses_try` carries
+/// a covered fallback naming the `?` residual. The dispatch count cannot be
+/// produced without actually running the native body, which is what makes the
+/// claim non-vacuous.
 #[cfg(feature = "deep-tests")]
 #[test]
-fn two_function_fixture_pending_native_execution_witness() {
-    let bytecode = compile_to_bytecode(TWO_FUNCTION_FIXTURE);
-    let table = mixed_table_for(&bytecode).expect("fixture must compile");
-    let hot_double = function_index(&bytecode, "hot_double");
+fn one_unsupported_construct_keeps_every_other_function_natively_dispatched() {
+    use shape_runtime::engine::{ProgramExecutor, ShapeEngine};
+    use shape_vm::native_witness::{
+        self, Disposition, FallbackReasonClass, WitnessMode, assert_fallback,
+        assert_native_dispatch,
+    };
 
-    // The installation-side fact, which is all this slice may claim.
-    assert!(matches!(
-        table.get(hot_double),
-        Some(FunctionEntry::Native(_))
-    ));
+    shape_runtime::initialize_shared_runtime().ok();
+    native_witness::activate(WitnessMode::JitWholeProgram);
+    let mut engine = ShapeEngine::new().expect("engine creation failed");
+    let program = shape_ast::parse_program(TWO_FUNCTION_FIXTURE).expect("parse failed");
+    let _ = crate::executor::JITExecutor::new().execute_program(&mut engine, &program);
+    let witness = native_witness::finish().expect("a session was active");
+
+    assert!(
+        witness.program_fallback.is_none(),
+        "the `?` in `uses_try` must not cost the whole program its native \
+         execution; got {:?}",
+        witness.program_fallback
+    );
+
+    let hot = assert_native_dispatch(&witness, "hot_double")
+        .expect("`hot_double` must be natively dispatched despite its sibling's residual");
+    assert_eq!(
+        hot.native_dispatches, 200,
+        "the loop calls `hot_double` 200 times, so its native body must announce \
+         entry 200 times — a count only running it can produce"
+    );
+    assert_eq!(hot.interpreter_dispatches, 0);
+    assert_eq!(hot.disposition, Disposition::NativeDispatched);
+
+    let cold = assert_fallback(&witness, "uses_try", FallbackReasonClass::TryUnwrapResidual)
+        .expect("`uses_try` must carry a covered fallback naming the `?` residual");
+    assert_eq!(cold.native_dispatches, 0);
+    assert!(
+        assert_native_dispatch(&witness, "uses_try").is_err(),
+        "a residual-bearing function must never satisfy a native claim"
+    );
 }
 
 #[test]

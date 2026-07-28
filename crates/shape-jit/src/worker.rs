@@ -15,7 +15,13 @@ use crate::osr_compiler;
 /// JIT compilation backend that compiles hot loops to native code via Cranelift.
 ///
 /// Owns a `JITCompiler` instance and implements the `CompilationBackend` trait.
-/// The `TierManager::set_backend()` spawns a worker thread that drives this.
+///
+/// Nothing constructs this outside tests. `TierManager::set_backend()`, which
+/// this comment used to name as the thing that spawns a worker thread to drive
+/// it, was deleted by commit 3e26c02a ("WF-4 D4: delete inert
+/// tiered-compilation machinery") and exists nowhere. The type is retained
+/// against a future tiering rebuild; it is not on any execution path today
+/// (corrected under #187, measured 2026-07-28).
 pub struct JitCompilationBackend {
     jit: JITCompiler,
 }

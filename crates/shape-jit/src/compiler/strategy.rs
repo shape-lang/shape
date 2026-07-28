@@ -231,6 +231,11 @@ impl JITCompiler {
         // contains a `comptime { ... }` block, so VM == JIT.
         // WHOLE-PROGRAM-BAIL[construct]: top-level-comptime-strategy-user-funcs — same as top-level-comptime-strategy, on the user-function-aware route
         if program.top_level_has_comptime {
+            shape_vm::native_witness::record_program_fallback(
+                shape_vm::native_witness::FallbackReasonClass::TopLevelComptime,
+                "top-level `comptime { ... }`: the borrow-solver top-level MIR \
+                 re-lowers the body rather than the baked literal",
+            );
             return Err("v0.3.3 comptime SURFACE (ADR-006 §2.7.14): top-level code \
                  contains a `comptime { ... }` block; the borrow-solver \
                  top-level MIR re-lowers the comptime body rather than the \
@@ -242,13 +247,20 @@ impl JITCompiler {
         }
 
         // MirToIR is the ONLY JIT compilation path (Phase 4: BytecodeToIR removed).
-        let mir_data = program
-            .top_level_mir
-            .as_ref()
-            .ok_or_else(|| "MirToIR: top-level code has no MIR data".to_string())?;
+        let mir_data = program.top_level_mir.as_ref().ok_or_else(|| {
+            shape_vm::native_witness::record_program_fallback(
+                shape_vm::native_witness::FallbackReasonClass::TopLevelMirPreflight,
+                "top-level code has no MIR data",
+            );
+            "MirToIR: top-level code has no MIR data".to_string()
+        })?;
         let preflight = crate::mir_compiler::preflight(mir_data);
         // WHOLE-PROGRAM-BAIL[construct]: top-level-preflight-strategy-user-funcs — same as top-level-preflight-strategy, on the user-function-aware route
         if !preflight.can_compile {
+            shape_vm::native_witness::record_program_fallback(
+                shape_vm::native_witness::FallbackReasonClass::TopLevelMirPreflight,
+                preflight.blockers.join("; "),
+            );
             return Err(format!(
                 "MirToIR: top-level preflight failed: {}",
                 preflight.blockers.join("; ")
@@ -264,6 +276,11 @@ impl JITCompiler {
             builder.seal_block(entry_block);
 
             let ctx_ptr = builder.block_params(entry_block)[0];
+
+            // #117 / R15: the top-level unit is registered at index
+            // `functions.len()` by `native_witness::begin_program`; announce its
+            // native entry on the same terms as a user function.
+            self.emit_native_witness_entry(&mut builder, program.functions.len())?;
 
             let mut user_func_refs: HashMap<u16, FuncRef> = HashMap::new();
             for (&fn_idx, &fn_id) in user_func_ids {

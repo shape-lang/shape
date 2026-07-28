@@ -25,6 +25,7 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::mir::analysis::{BorrowAnalysis, FunctionBorrowSummary};
+use crate::mir::escape::EscapeFacts;
 use crate::mir::types::*;
 use crate::type_tracking::{
     Aliasability, BindingOwnershipClass, BindingSemantics, BindingStorageClass, EscapeStatus,
@@ -85,6 +86,22 @@ pub struct StoragePlan {
     /// `var` binding is also `SharedCow` but must NOT get the def-site cell
     /// for a reference escape it never had).
     pub reference_escape_promotion_slots: HashSet<SlotId>,
+    /// PERF-ESCAPE (#193, ADR-018 §4 prerequisites 1+2): per-allocation-site
+    /// outbound value-escape and inbound-reference facts.
+    ///
+    /// Distinct from every slot-level field above. `escape_status` on
+    /// `slot_semantics` answers the sink-blind "does this slot reach the return
+    /// slot" question (`detect_escape_status`) that Rule 3c explicitly refuses
+    /// to consume; `non_escaping_closure_slots` answers the same escape-vector
+    /// question but only for closure slots and only as a slot-level bit. This
+    /// field carries a per-allocation proof with the disproving vector, plus
+    /// the separate inbound obligation the arena exemption needs.
+    ///
+    /// No consumer acts on it today — PERF-ESCAPE lands the analysis inert.
+    /// Consumers: PERF-RC-ELISION (#190) breadth, stack promotion, PERF-ARENA
+    /// (#195), which must go through
+    /// [`EscapeFacts::region_exemption_candidates`] for the combined proof.
+    pub escape: EscapeFacts,
 }
 
 /// Input bundle for the storage planner.
@@ -294,6 +311,11 @@ pub fn plan_storage(input: &StoragePlannerInput<'_>) -> StoragePlan {
             inline_array_sizes: HashMap::new(),
             non_escaping_closure_slots: HashSet::new(),
             reference_escape_promotion_slots: HashSet::new(),
+            // Still runs: `analyze_escapes` reads `had_fallbacks` itself and
+            // marks every allocation `NotProven(MirLoweringIncomplete)`, so a
+            // consumer sees the sites and their undecidedness rather than an
+            // empty set indistinguishable from "no allocations".
+            escape: escape_facts_for(input),
         };
     }
 
@@ -361,7 +383,19 @@ pub fn plan_storage(input: &StoragePlannerInput<'_>) -> StoragePlan {
         inline_array_sizes,
         non_escaping_closure_slots,
         reference_escape_promotion_slots,
+        escape: escape_facts_for(input),
     }
+}
+
+/// PERF-ESCAPE (#193): run the per-allocation escape products over the same
+/// inputs the planner already holds.
+fn escape_facts_for(input: &StoragePlannerInput<'_>) -> EscapeFacts {
+    crate::mir::escape::analyze_escapes(&crate::mir::escape::EscapeInput {
+        mir: input.mir,
+        analysis: Some(input.analysis),
+        had_fallbacks: input.had_fallbacks,
+        callee_summaries: input.callee_summaries,
+    })
 }
 
 /// Phase D — promote outer-slot storage class to `LocalMutablePtr` when the

@@ -1788,25 +1788,47 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                     }
                 }
 
-                // Surface-and-stop guard, part 2: a `MirConstant::Function`
-                // resolved to a `func_id` but with no `user_func_ref`
-                // (declaration race / function not in the JIT-compiled set)
-                // would otherwise fall into the indirect `jit_call_value` path,
-                // which reads a bogus callee value from the stack and silently
-                // returns garbage — the same BRANCH-DROP failure as an
-                // unresolved name. A Function constant is never an indirect
-                // callable, so bail the whole-function JIT to the interpreter.
+                // A `MirConstant::Function` with no `user_func_ref` means the
+                // callee was not JIT-compiled — the ordinary consequence of
+                // #187 demoting a function that holds an unsupported construct.
+                //
+                // This used to refuse outright, which is what made ONE
+                // unsupported construct cost every caller its native code: the
+                // demoted callee's siblings compiled fine, but the moment
+                // top-level called it directly the whole program left the
+                // native path. The stated hazard was real but narrower than the
+                // refusal — falling into the indirect path *accidentally* can
+                // push a null callee, because `compile_constant` emits
+                // `iconst 0` for a name absent from `function_indices`, and
+                // `jit_call_value` can only refuse null bits.
+                //
+                // So the condition is the exact map `compile_constant`
+                // consults. When the name is in `function_indices`, the
+                // indirect path pushes a real `box_function(idx)` callee with
+                // its `NativeKind::UInt64` stamp, and `jit_call_value`'s
+                // inline-function arm sees a null function-table slot and
+                // routes to `dispatch_call_via_trampoline_vm` — the callee runs
+                // on the interpreter, the caller stays native. That is
+                // per-function granularity at the call site.
+                //
+                // `func_id` may also come from `resolve_scoped_function_index`,
+                // which `compile_constant` does NOT consult; such a name would
+                // still box to null, so it keeps the refusal.
                 if func_ref.is_none() {
                     if let Operand::Constant(MirConstant::Function(name)) = func {
-                        return Err(format!(
-                            "Route A surface-and-stop: SURFACE — direct call to \
-                             `{}` resolved to a function index but has no JIT \
-                             FuncRef (callee not in the compiled set). Whole- \
-                             function JIT bail so the W12 fall-through runs under \
-                             the bytecode interpreter (VM == JIT). ADR-006 \
-                             §2.7.5.",
-                            name
-                        ));
+                        if !self.function_indices.contains_key(name.as_str()) {
+                            return Err(format!(
+                                "Route A surface-and-stop: SURFACE — direct call \
+                                 to `{}` has no JIT FuncRef AND no entry in \
+                                 `function_indices`, so the indirect path would \
+                                 push a null callee (`compile_constant` emits \
+                                 `iconst 0`) and `jit_call_value` would return \
+                                 TAG_NULL — a silent BRANCH-DROP. Bail so the \
+                                 fall-through runs under the bytecode \
+                                 interpreter (VM == JIT). ADR-006 §2.7.5.",
+                                name
+                            ));
+                        }
                     }
                 }
 

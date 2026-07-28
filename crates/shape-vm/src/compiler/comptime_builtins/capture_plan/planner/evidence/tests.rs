@@ -69,6 +69,7 @@ fn compiler_with_direct_local() -> BytecodeCompiler {
             inline_array_sizes: HashMap::new(),
             non_escaping_closure_slots: HashSet::new(),
             reference_escape_promotion_slots: HashSet::new(),
+            escape: Default::default(),
         },
     );
     compiler

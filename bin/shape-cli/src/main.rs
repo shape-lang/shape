@@ -105,6 +105,7 @@ async fn main() -> Result<()> {
         snapshot_store,
         providers_config,
         extension_dir,
+        native_witness,
         #[cfg(feature = "jit-trace")]
             trace_jit: _,
     } = cli;
@@ -159,6 +160,7 @@ async fn main() -> Result<()> {
                     snapshot_store.clone(),
                     cli_limits,
                     eager_link,
+                    native_witness,
                 )
                 .await?;
             }
@@ -387,6 +389,7 @@ async fn main() -> Result<()> {
                     snapshot_store.clone(),
                     shape_vm::resource_limits::ResourceLimits::unlimited(),
                     false,
+                    native_witness,
                 )
                 .await?;
             }
@@ -403,6 +406,7 @@ async fn main() -> Result<()> {
                 snapshot_store.clone(),
                 shape_vm::resource_limits::ResourceLimits::unlimited(),
                 false,
+                native_witness,
             )
             .await?;
         }
@@ -425,6 +429,7 @@ async fn main() -> Result<()> {
                             snapshot_store.clone(),
                             shape_vm::resource_limits::ResourceLimits::unlimited(),
                             false,
+                            native_witness,
                         )
                         .await?;
                     } else {

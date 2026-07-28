@@ -51,6 +51,20 @@ pub struct Cli {
     #[arg(long, value_name = "DIR")]
     pub extension_dir: Option<PathBuf>,
 
+    /// Write a `NativeExecutionWitness` JSON record for this run (#117, R15).
+    ///
+    /// The record names, per compilation unit, the verified artifact digest,
+    /// whether native code was installed, how many times the installed native
+    /// body actually ran, and any covered fallback or deoptimization with a
+    /// machine-readable reason class. Use `-` for stdout.
+    ///
+    /// Enabling it makes the JIT emit one native-entry announcement per compiled
+    /// function, so an instrumented run is not byte-identical to a normal one;
+    /// the record says so in its `instrumentation` field. Under `--mode vm` the
+    /// record is still written and truthfully claims no native execution.
+    #[arg(long, value_name = "PATH", global = true)]
+    pub native_witness: Option<PathBuf>,
+
     /// Enable structured JIT diagnostic tracing (requires the `jit-trace`
     /// feature). Accepts an `EnvFilter` directive: empty string enables
     /// `shape_jit=debug`; an explicit directive overrides the default
@@ -75,14 +89,15 @@ pub struct Cli {
 pub enum ExecutionModeArg {
     /// Use bytecode VM (interpreter only).
     Vm,
-    /// Use JIT compilation (tiered: interpreter → baseline @ T1=100 calls →
-    /// optimizing @ T2=10k calls). The toplevel script and every reachable
-    /// function attempt JIT-compile when possible; on JIT-compile failure
-    /// the executor falls through to the bytecode interpreter (NOT
-    /// silent-no-output) and emits a `[jit-fallback]` diagnostic to stderr.
-    /// Use `--trace-jit=shape_jit=debug` to promote per-function diagnostics.
-    /// See `book/advanced/jit-compilation` "--mode jit semantics" for the
-    /// full path (3) binding.
+    /// Compile ahead of time with Cranelift, before the program runs. The
+    /// toplevel script and every reachable function attempt JIT-compile; a
+    /// function the JIT cannot lower runs interpreted while the rest stay
+    /// native, and a whole-program refusal falls through to the bytecode
+    /// interpreter (NOT silent-no-output) with a `[jit-fallback]` diagnostic
+    /// on stderr. Use `--trace-jit=shape_jit=debug` for per-function
+    /// diagnostics. Note there is no call-count promotion: a function is
+    /// native from its first call or interpreted for every call. See
+    /// `book/advanced/jit-compilation`.
     Jit,
 }
 

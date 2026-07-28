@@ -100,15 +100,26 @@ impl ProgramExecutor for JITExecutor {
         // locals which never reach that context, so a JIT-executed cell
         // would silently drop every binding the next cell needs.
         //
-        // This is not a fallback or a degradation hatch: a REPL cell is
-        // a one-shot interactive line for which ahead-of-time native
-        // codegen yields no measurable benefit, and the interpreter's
-        // own tiered JIT (T1@100 / T2@10k) still promotes any function
-        // that genuinely runs hot across cells. The `--mode jit` flag
-        // continues to drive AOT compilation for `shape run` scripts;
-        // only the interactive REPL routes through the interpreter, so
-        // cross-cell correctness is identical to `--mode vm`.
+        // This is not a degradation hatch: a REPL cell is a one-shot
+        // interactive line for which ahead-of-time native codegen yields
+        // no measurable benefit. The `--mode jit` flag continues to drive
+        // AOT compilation for `shape run` scripts; only the interactive
+        // REPL routes through the interpreter, so cross-cell correctness
+        // is identical to `--mode vm`.
+        //
+        // This rationale previously also claimed "the interpreter's own
+        // tiered JIT (T1@100 / T2@10k) still promotes any function that
+        // genuinely runs hot across cells". That is false and always was:
+        // `tier_manager` is `None` in every build, so no promotion occurs
+        // and REPL code is interpreted for its whole life. The cost is
+        // real but bounded to interactive cells (corrected under #187,
+        // measured 2026-07-28).
         if engine.repl_persistence() {
+            shape_vm::native_witness::record_program_fallback(
+                shape_vm::native_witness::FallbackReasonClass::ReplPersistence,
+                "REPL cross-cell persistence routes each cell through the bytecode \
+                 interpreter so cross-cell bindings survive",
+            );
             return self.bytecode_executor.execute_program(engine, program);
         }
 
@@ -137,6 +148,11 @@ impl ProgramExecutor for JITExecutor {
         // now without the wasted double-compile.
         // WHOLE-PROGRAM-BAIL[construct]: top-level-comptime-preexec — a top-level `comptime { .. }` block; deopt before the first compile keeps its side effects exactly-once
         if shape_vm::compiler::program_has_top_level_comptime(program) {
+            shape_vm::native_witness::record_program_fallback(
+                shape_vm::native_witness::FallbackReasonClass::TopLevelComptime,
+                "top-level `comptime { ... }`: deopt before compile so comptime \
+                 side-effects fire exactly once (VM == JIT)",
+            );
             tracing::info!(
                 target: "shape_jit::fallback",
                 function = "main",
@@ -208,6 +224,12 @@ impl ProgramExecutor for JITExecutor {
             })?;
         let bytecode_compile_ms = bytecode_compile_start.elapsed().as_millis();
 
+        // #117 / R15: register the exact compilation units the JIT is about to
+        // consume. Every later installation / dispatch / fallback record is
+        // keyed by an index in this registration, so the witness can never name
+        // a function the tier did not actually see.
+        shape_vm::native_witness::begin_program(&bytecode);
+
         // WHOLE-PROGRAM-BAIL[construct]: user-trait-or-impl-declared — native trait-method dispatch can diverge from the VM for ordinary trait calls
         if program_declares_user_trait_or_impl(program) {
             let reason = "Wave-20A user-trait-method JIT SURFACE \
@@ -220,6 +242,10 @@ impl ProgramExecutor for JITExecutor {
                           bytecode interpreter preserves VM == JIT until \
                           trait-method dispatch and return-kind recovery are \
                           proven on the JIT path.";
+            shape_vm::native_witness::record_program_fallback(
+                shape_vm::native_witness::FallbackReasonClass::UserTraitOrImpl,
+                reason,
+            );
             eprintln!(
                 "[jit-fallback] function main failed JIT compile: {reason}; \
                  running under interpreter"
@@ -262,6 +288,14 @@ impl ProgramExecutor for JITExecutor {
             Ok(Ok(result)) => Ok(result),
             Ok(Err(runtime_err)) => Err(runtime_err),
             Err(jit_err) => {
+                // #117 / R15: a catch-all so no JIT-compile-stage refusal can
+                // reach the interpreter without a recorded reason. Specific
+                // sites record their own class first and win — this only fires
+                // for a refusal that has no dedicated class yet.
+                shape_vm::native_witness::record_program_fallback(
+                    shape_vm::native_witness::FallbackReasonClass::JitCompileError,
+                    jit_err.to_string(),
+                );
                 // Emit the structured fall-through diagnostic. Use `eprintln!`
                 // so the diagnostic is visible even when the user has not
                 // wired up a tracing subscriber (the default `shape run`
@@ -356,6 +390,10 @@ impl JITExecutor {
                 .first()
                 .map(|e| e.to_string())
                 .unwrap_or_else(|| "<none>".to_string());
+            shape_vm::native_witness::record_program_fallback(
+                shape_vm::native_witness::FallbackReasonClass::V2VerifierUnverified,
+                format!("{total} V2 typed-opcode violation(s); first: {first}"),
+            );
             return Err(shape_runtime::error::ShapeError::RuntimeError {
                 message: format!(
                     "V2 bytecode verification failed: {} violation(s); first: {}. \
@@ -401,6 +439,10 @@ impl JITExecutor {
         // removing one is what shrinks the #187 whole-program-bail baseline.
         // WHOLE-PROGRAM-BAIL[construct]: program-scoped-residual — a residual whose scope is Program; see `JitResidual::program_scope_reason` for the per-residual hazard
         if let Some(residual) = bytecode.jit_residuals.program_scoped().next() {
+            shape_vm::native_witness::record_program_fallback(
+                residual.witness_class(),
+                residual.reason(),
+            );
             return Err(shape_runtime::error::ShapeError::RuntimeError {
                 message: format!(
                     "ADR-018 §2 whole-program JIT residual `{}`: the program \
@@ -419,6 +461,12 @@ impl JITExecutor {
         }
         // WHOLE-PROGRAM-BAIL[construct]: unattributed-residual — residuals present but the linker/deserialize path dropped the per-function attribution
         if bytecode.has_unattributed_jit_residual() {
+            shape_vm::native_witness::record_program_fallback(
+                shape_vm::native_witness::FallbackReasonClass::Unclassified,
+                "residual constructs present but the linker or deserialize path \
+                 dropped the per-function attribution, so the JIT cannot name \
+                 which function is unsound",
+            );
             return Err(shape_runtime::error::ShapeError::RuntimeError {
                 message: "ADR-018 §2 unattributed JIT residual: the program \
                           contains a construct the JIT cannot lower soundly, but \
@@ -434,12 +482,18 @@ impl JITExecutor {
             });
         }
         // WHOLE-PROGRAM-BAIL[construct]: top-level-residual — the residual is in top-level code, which IS the entry the JIT compiles as `main`
-        if bytecode.jit_residuals.top_level_is_residual_bearing() {
+        if let Some(first) = bytecode.jit_residuals.top_level().next() {
             let reasons: Vec<&str> = bytecode
                 .jit_residuals
                 .top_level()
                 .map(|r| r.reason())
                 .collect();
+            // The class names the construct; top-level is the SCOPE, which the
+            // program-level record already carries.
+            shape_vm::native_witness::record_program_fallback(
+                first.witness_class(),
+                format!("top-level code contains {}", reasons.join("; and ")),
+            );
             return Err(shape_runtime::error::ShapeError::RuntimeError {
                 message: format!(
                     "ADR-018 §2 top-level JIT residual: top-level code contains \
@@ -457,6 +511,10 @@ impl JITExecutor {
 
         // WHOLE-PROGRAM-BAIL[construct]: scalar-move-lift-surface — legacy NewObject / `clone` / `diff` / operator-trait dispatch lowering is unproven
         if let Some(surface) = scalar_move_lift_exposed_jit_surface(bytecode) {
+            shape_vm::native_witness::record_program_fallback(
+                shape_vm::native_witness::FallbackReasonClass::ScalarMoveLift,
+                format!("`{surface}` depends on an unproven JIT lowering path"),
+            );
             return Err(shape_runtime::error::ShapeError::RuntimeError {
                 message: format!(
                     "Wave-17 scalar-move-lift JIT SURFACE (ADR-006 §2.7.14): \
@@ -504,6 +562,11 @@ impl JITExecutor {
             .any(|k| k.starts_with("Drop::"));
         // WHOLE-PROGRAM-BAIL[construct]: user-drop-impl — JIT `emit_drop` has no user-Drop trait-method dispatch and would elide the user `Drop::drop` body
         if has_user_drop_impl {
+            shape_vm::native_witness::record_program_fallback(
+                shape_vm::native_witness::FallbackReasonClass::UserDropImpl,
+                "the program registers one or more `impl Drop for T` impls; the JIT \
+                 has no user-Drop trait-method dispatch",
+            );
             return Err(shape_runtime::error::ShapeError::RuntimeError {
                 message: "R8 W9 B3 Drop-bearing-scope-exit SURFACE \
                           (ADR-006 §2.7.14): the program registers one or more \
@@ -527,6 +590,10 @@ impl JITExecutor {
         // JIT compile the bytecode
         let jit_config = JITConfig::default();
         let mut jit = JITCompiler::new(jit_config).map_err(|e| {
+            shape_vm::native_witness::record_program_fallback(
+                shape_vm::native_witness::FallbackReasonClass::JitCompilerInit,
+                e.to_string(),
+            );
             shape_runtime::error::ShapeError::RuntimeError {
                 message: format!("JIT compiler initialization failed: {}", e),
                 location: None,
@@ -565,6 +632,10 @@ impl JITExecutor {
         let (jit_fn, _mixed_table) = match compile_result {
             Ok(Ok(result)) => result,
             Ok(Err(e)) => {
+                shape_vm::native_witness::record_program_fallback(
+                    shape_vm::native_witness::FallbackReasonClass::JitCompileError,
+                    e.to_string(),
+                );
                 // WHOLE-PROGRAM-BAIL[infra]: selective-compile-failed — propagates a refusal raised inside `compile_program_selective`; the construct-driven bails there carry their own markers
                 return Err(shape_runtime::error::ShapeError::RuntimeError {
                     message: format!("JIT compilation failed: {}", e),
@@ -579,6 +650,10 @@ impl JITExecutor {
                 } else {
                     "unknown panic".to_string()
                 };
+                shape_vm::native_witness::record_program_fallback(
+                    shape_vm::native_witness::FallbackReasonClass::JitCompilePanic,
+                    msg.clone(),
+                );
                 // WHOLE-PROGRAM-BAIL[infra]: selective-compile-panicked — a panic escaped the JIT pipeline; the program runs interpreted rather than on a half-built module
                 return Err(shape_runtime::error::ShapeError::RuntimeError {
                     message: format!("JIT compilation panicked: {}", msg),
@@ -603,9 +678,15 @@ impl JITExecutor {
                 native_resolutions.as_ref(),
                 native_root_key.as_deref(),
             )
-            .map_err(|e| shape_runtime::error::ShapeError::RuntimeError {
-                message: format!("JIT foreign-function linking failed: {}", e),
-                location: None,
+            .map_err(|e| {
+                shape_vm::native_witness::record_program_fallback(
+                    shape_vm::native_witness::FallbackReasonClass::ForeignLinkFailed,
+                    e.to_string(),
+                );
+                shape_runtime::error::ShapeError::RuntimeError {
+                    message: format!("JIT foreign-function linking failed: {}", e),
+                    location: None,
+                }
             })?
         };
 
@@ -957,6 +1038,13 @@ impl JITExecutor {
                     .as_ref()
                     .and_then(|fd| fd.return_kind.or_else(|| fd.slots.last().copied()));
                 let _ = return_hint;
+                shape_vm::native_witness::record_program_fallback(
+                    shape_vm::native_witness::FallbackReasonClass::ReturnKindGap,
+                    format!(
+                        "RETURN_TAG_NANBOXED reached the host boundary without a \
+                         stamped NativeKind (raw_bits={raw_result:#x})"
+                    ),
+                );
                 // WHOLE-PROGRAM-BAIL[infra]: return-tag-nanboxed-kind-gap — the return tag was never stamped from the call signature; fires after execution, so it is a kind-source gap in JIT emission rather than a construct refusal
                 return Err(shape_runtime::error::ShapeError::RuntimeError {
                     message: format!(

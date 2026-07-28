@@ -133,6 +133,21 @@ impl JitResidual {
         }
     }
 
+    /// The `NativeExecutionWitness` reason class for this residual (#117).
+    ///
+    /// Derived here rather than chosen at each refusal site, so a residual and
+    /// the class a witness consumer asserts against cannot drift apart.
+    pub fn witness_class(&self) -> crate::native_witness::FallbackReasonClass {
+        use crate::native_witness::FallbackReasonClass as C;
+        match self {
+            JitResidual::TryUnwrap => C::TryUnwrapResidual,
+            JitResidual::NullCoalesce => C::NullCoalesceResidual,
+            JitResidual::ImportedConstInline => C::ImportedConstInline,
+            JitResidual::ModuleFnMarshalReturn => C::W17MarshalResidual,
+            JitResidual::ReferenceEscapePromotion => C::ReferenceEscapePromotion,
+        }
+    }
+
     /// One-line reason for the `[jit-fallback]` diagnostic.
     pub fn reason(&self) -> &'static str {
         match self {
