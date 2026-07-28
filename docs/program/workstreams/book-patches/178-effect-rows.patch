@@ -1,0 +1,98 @@
+--- a/book/book-site/src/content/docs/advanced/security-permissions.mdx
++++ b/book/book-site/src/content/docs/advanced/security-permissions.mdx
+@@ -523,6 +523,95 @@
+ // - Cannot exceed 10M instructions, 256MB memory, 30s wall time (Tier 3)
+ ```
+ 
++## Effect Rows (Type-Level)
++
++An **effect row** describes what a callable may *do*: `{FsRead}`, `{NetConnect,
++FsWrite}`, or `{}` for nothing at all. Rows are part of the function *type*,
++not part of the permission system described above -- and the distinction is
++load-bearing. A row is a claim about behaviour that the compiler checks. A
++permission is authority the *host* grants. Proving that a callback only reads
++files does not give it the right to read one, and holding `FsRead` does not
++make a function's declared row wider. They are separate facts and neither
++substitutes for the other.
++
++### Rows in type position
++
++A function type carries its row after the return type:
++
++```shape runnable=false
++fn(string) -> string ! {FsRead}    // may read files
++fn() -> int ! {}                   // does nothing observable
++```
++
++Subsumption is subset: a value whose row is `E1` fits where `E2` is expected
++exactly when `E1` is a subset of `E2`. A pure callback is therefore accepted
++anywhere an effectful one is, and never the reverse. Two function types that
++differ only in their row are different types.
++
++```shape
++fn twice(f: fn() -> int ! {}) -> int {
++    return f() + f()
++}
++
++print(twice(|| 21))
++```
++
++Generic code binds rows with an `effect` parameter, which closes to a concrete
++row at each instantiation:
++
++```shape runnable=false
++fn apply<T, effect F>(f: fn() -> T ! F) -> T ! F {
++    return f()
++}
++```
++
++### What is checked today, and what is not
++
++Shape is candid about the boundary here, because an effect system that is
++believed to be enforced but is not is worse than none at all.
++
++**Live now.** The row is a component of the function type. It participates in
++type identity, unification, and subtyping; the subset judgment runs in the
++constraint solver; and `effect` binders substitute to closed rows at
++instantiation. Where both sides of a comparison have a known row, the subset
++check is real.
++
++**Not live yet.** Shape does not yet walk a function *body* to derive what it
++actually does. Closure and function bodies therefore have no inferred row, so
++in ordinary code the checker frequently has nothing to compare a declared row
++against.
++
++That gap is why an effect clause on a function **declaration** is currently a
++compile error:
++
++```shape runnable=false
++fn sneaky(path: string) -> string ! {} {
++    return file::read_text(path)     // reads a file
++}
++```
++
++```
++[C0934] the effect clause `! {}` on `fn sneaky` is not enforced yet, so it
++cannot be declared here.
++help: delete the `! {}` clause from `fn sneaky`. That preserves today's
++semantics exactly -- nothing was checking the row, so removing it removes no
++guarantee.
++```
++
++Before this rejection existed, that program compiled and ran, happily printing
++the file it had just declared it would not read. Rather than ship a contract
++that can lie, Shape refuses the declaration until the body walk lands -- the
++same call the language made for `async` foreign declarations. Rows in *type*
++position are unaffected, because those are checked evidence rather than an
++unchecked claim.
++
++:::note[Arriving in a later release]
++Declaration-position rows, body row inference, and the resulting
++declaration-vs-body enforcement are planned work, tracked as EFFECT-CONTRACT.
++When it lands, `[C0934]` disappears and a declared row becomes a checked
++promise: a body that exceeds it fails with the excess effects named.
++:::
++
+ ## See Also
+ 
+ - [Content-Addressed Bytecode](/advanced/content-addressed-bytecode/) -- how `FunctionBlob` content hashes incorporate permissions

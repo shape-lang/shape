@@ -71,7 +71,6 @@ use crate::compiler::{BindingConcreteFact, BindingConcreteFactSource};
 use shape_ast::Spanned;
 use shape_ast::ast::{Expr, Span, Statement, TypeAnnotation};
 use shape_runtime::type_system::Type;
-use shape_runtime::type_system::effects::EffectRow;
 use shape_value::v2::ConcreteType;
 use shape_value::v2::concrete_type::ClosureTypeId;
 use std::collections::HashMap;
@@ -4100,7 +4099,7 @@ mod tests {
         Type::Function {
             params,
             returns: Box::new(returns),
-            effects: EffectRow::Unproven,
+            effects: shape_runtime::type_system::effects::EffectRow::Unproven,
         }
     }
 
@@ -4189,7 +4188,7 @@ mod tests {
             Type::Function {
                 params: vec![fact_generic("Array", vec![fact_basic("int")])],
                 returns: Box::new(fact_basic("void")),
-                effects: EffectRow::Unproven,
+                effects: shape_runtime::type_system::effects::EffectRow::Unproven,
             },
         );
         install_inference_facts(&mut compiler, top_level_types, HashMap::new());

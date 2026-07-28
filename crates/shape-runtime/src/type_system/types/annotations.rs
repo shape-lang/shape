@@ -3,7 +3,6 @@
 //! Handles conversions between TypeAnnotation (AST) and SemanticType.
 
 use super::builtins::BuiltinTypes;
-use crate::type_system::effects::EffectRow;
 use crate::type_system::semantic::{EnumVariant, FunctionParam, FunctionSignature, SemanticType};
 use shape_ast::ast::TypeAnnotation;
 

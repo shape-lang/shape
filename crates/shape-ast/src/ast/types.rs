@@ -27,6 +27,25 @@ pub enum EffectRowAnnotation {
     },
 }
 
+impl EffectRowAnnotation {
+    /// The clause's source span, common to both spellings.
+    pub fn span(&self) -> &Span {
+        match self {
+            EffectRowAnnotation::Atoms { span, .. } | EffectRowAnnotation::Param { span, .. } => {
+                span
+            }
+        }
+    }
+
+    /// The clause as the author wrote it, for diagnostics that quote it back.
+    pub fn render(&self) -> String {
+        match self {
+            EffectRowAnnotation::Atoms { names, .. } => format!("! {{{}}}", names.join(", ")),
+            EffectRowAnnotation::Param { name, .. } => format!("! {name}"),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum TypeAnnotation {
     /// Basic types: number, string, bool, row, pattern, etc.

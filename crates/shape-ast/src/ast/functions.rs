@@ -85,6 +85,22 @@ pub struct ForeignAsyncRejection {
     pub fix_hint: String,
 }
 
+/// The `[C0934]` unenforced-effect-row rejection produced by
+/// [`FunctionDef::unenforced_effect_row_rejection`].
+///
+/// TRANSITIONAL — deleted with its producer when declaration-vs-body effect
+/// enforcement lands (issue #143, EFFECT-CONTRACT).
+#[derive(Debug, Clone, PartialEq)]
+pub struct UnenforcedEffectRowRejection {
+    /// Full diagnostic sentence, `[C0934]`-tagged.
+    pub message: String,
+    /// The clause's own span, so the squiggle sits under the `!` clause and
+    /// not under the function name.
+    pub span: Span,
+    /// The semantics-preserving fix-it, rendered as a diagnostic hint.
+    pub fix_hint: String,
+}
+
 /// The remedy for a `[C0933]` rejection, per the reason the type is unmapped.
 ///
 /// Each hint names a concrete rewrite that keeps the call — none of them say
@@ -165,6 +181,77 @@ pub struct NativeAbiBinding {
     /// This is compiler/runtime metadata, not source syntax.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub package_key: Option<String>,
+}
+
+impl FunctionDef {
+    /// ADR-014 §8.2 / R21 (issue #178) — an effect clause on a function
+    /// DECLARATION is a compile error until declaration-vs-body enforcement
+    /// lands.
+    ///
+    /// MEASURED before this guard, at the CLI:
+    ///
+    /// ```shape
+    /// use std::core::file
+    /// fn sneaky(path: string) -> string ! {} {
+    ///     return file::read_text(path)
+    /// }
+    /// ```
+    ///
+    /// compiled, ran, and printed the file. The row-in-type slice landed the
+    /// type component, the subset judgment and the boundary check, but not the
+    /// body walk that derives a callable's ACTUAL row from its call edges
+    /// (§8.2's monotone least-fixpoint). With nothing computing the actual
+    /// row, a declared row is compared against nothing — so `! {}` was a
+    /// purity claim the compiler never checked and the runtime never enforced.
+    ///
+    /// The program's precedent for exactly this shape is the grill Q3 ruling
+    /// (POLY-ASYNC-TRUTH, issue #201): reject the unenforceable spelling until
+    /// the enforcement is real, rather than ship a contract that lies.
+    ///
+    /// Scope is deliberately the DECLARATION position only. Rows on function
+    /// TYPES — parameters, higher-order signatures, and `effect F` binders —
+    /// stay live, because those the solver genuinely checks through the
+    /// subset judgment whenever a function value meets a declared parameter.
+    /// A type-position row is checked evidence; a declaration-position row was
+    /// an unchecked claim. Only the claim is refused.
+    ///
+    /// Shared by the compiler and the editor — the LSP surfaces this through
+    /// the compile path it already runs rather than through a second
+    /// hand-written validator, so the two texts cannot drift.
+    ///
+    /// TRANSITIONAL — this producer is deleted when #143 lands.
+    /// `grep -rn "C0934"` returns the full deletion set.
+    pub fn unenforced_effect_row_rejection(&self) -> Option<UnenforcedEffectRowRejection> {
+        let row = self.effect_row.as_ref()?;
+        Some(UnenforcedEffectRowRejection {
+            message: format!(
+                "[C0934] the effect clause `{clause}` on `fn {name}` is not enforced yet, so it \
+                 cannot be declared here. Effect rows are live as a TYPE component — on \
+                 parameters, on higher-order signatures, and as `effect F` binders — and those \
+                 are really checked by subset subsumption. What does not exist yet is the body \
+                 walk that derives what `{name}` actually does and compares it against this \
+                 clause (ADR-014 §8.2). Until it does, a declared row is a promise nothing \
+                 verifies: `! {{}}` on a function that reads a file would compile and run. \
+                 Rather than ship a contract that can lie, the declaration is refused — the same \
+                 call the program made for `async` foreign declarations in issue #201. \
+                 Declaration-vs-body enforcement is planned, not refused: see issue #143 \
+                 (EFFECT-CONTRACT). This rejection is transitional and is deleted when that \
+                 lands.",
+                clause = row.render(),
+                name = self.name,
+            ),
+            span: *row.span(),
+            fix_hint: format!(
+                "delete the `{clause}` clause from `fn {name}`. That preserves today's semantics \
+                 exactly — nothing was checking the row, so removing it removes no guarantee. \
+                 Effect rows you want checked NOW go in type position instead: a callback \
+                 parameter typed `f: fn() -> T ! {{FsRead}}` is enforced against the closure you \
+                 pass it.",
+                clause = row.render(),
+                name = self.name,
+            ),
+        })
+    }
 }
 
 impl ForeignFunctionDef {

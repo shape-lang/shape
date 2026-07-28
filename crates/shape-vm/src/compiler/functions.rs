@@ -640,9 +640,8 @@ impl BytecodeCompiler {
             return Some(annotation.clone());
         }
 
-        let shape_runtime::type_system::Type::Function { params, .. } = self
-            .inference_facts
-            .function_signature(semantic_owner_key)?
+        let shape_runtime::type_system::Type::Function { params, .. } =
+            self.inference_facts.function_signature(semantic_owner_key)?
         else {
             return None;
         };
@@ -671,9 +670,7 @@ impl BytecodeCompiler {
             TypeAnnotation::Object(fields) => fields.iter().any(|field| {
                 Self::destructure_context_annotation_is_unknown(&field.type_annotation)
             }),
-            TypeAnnotation::Function {
-                params, returns, ..
-            } => {
+            TypeAnnotation::Function { params, returns, .. } => {
                 params.iter().any(|param| {
                     Self::destructure_context_annotation_is_unknown(&param.type_annotation)
                 }) || Self::destructure_context_annotation_is_unknown(returns)
@@ -699,7 +696,11 @@ impl BytecodeCompiler {
         self.last_expr_type_info = None;
 
         let Some(annotation) =
-            self.param_annotation_for_destructure_context(semantic_owner_key, param_idx, param)
+            self.param_annotation_for_destructure_context(
+                semantic_owner_key,
+                param_idx,
+                param,
+            )
         else {
             return;
         };
@@ -799,6 +800,28 @@ impl BytecodeCompiler {
         func_def: &FunctionDef,
         generated_origin: Option<GeneratedNodeOrigin>,
     ) -> Result<()> {
+        // ADR-014 §8.2 / R21 (#178) — an effect clause on a function
+        // DECLARATION is refused until declaration-vs-body enforcement (#143)
+        // lands, because until then the clause is a promise nothing checks.
+        //
+        // Placed AHEAD of every early return below — the `comptime fn` skip and
+        // the generic-body skip — on purpose. A generic declaration's own row
+        // (`fn apply<T, effect F>(..) -> T ! F`) is exactly as unverified as a
+        // concrete one, and letting it through because its body is compiled
+        // later would make the guard depend on which compilation path a
+        // declaration happens to take.
+        //
+        // TRANSITIONAL — this block and its producer are deleted when #143
+        // lands. `grep -rn "C0934"` returns the full deletion set.
+        if let Some(rejection) = func_def.unenforced_effect_row_rejection() {
+            let mut location = self.span_to_source_location(rejection.span);
+            location.hints.push(rejection.fix_hint);
+            return Err(ShapeError::SemanticError {
+                message: rejection.message,
+                location: Some(location),
+            });
+        }
+
         // Validate annotation target kinds before compilation
         self.validate_annotation_targets(func_def)?;
 
@@ -886,7 +909,8 @@ impl BytecodeCompiler {
             |compiler| compiler.compile_function_inner(func_def, generated_origin),
         );
         self.current_function_saw_drop_obligated_local = saved_saw_drop_obligated_local;
-        self.inherited_capture_parameter_evidence = saved_inherited_capture_parameter_evidence;
+        self.inherited_capture_parameter_evidence =
+            saved_inherited_capture_parameter_evidence;
         self.deferring_uninstantiated_template_body = saved_deferring_template;
         result
     }
@@ -906,8 +930,10 @@ impl BytecodeCompiler {
         // modes rewrite the cloned parameter flags. This slot-aligned value is
         // the only authority for distinguishing an inferred reference
         // optimization from an explicit shared/exclusive reference parameter.
-        let inferred_reference_optimizations =
-            Self::inferred_reference_optimizations(&func_def.params, &effective_pass_modes);
+        let inferred_reference_optimizations = Self::inferred_reference_optimizations(
+            &func_def.params,
+            &effective_pass_modes,
+        );
         for (idx, param) in effective_def.params.iter_mut().enumerate() {
             let effective_mode = effective_pass_modes
                 .get(idx)
@@ -1108,9 +1134,7 @@ impl BytecodeCompiler {
         // successfully AND carries authenticated generated provenance reaches a
         // rejection, which rides the driver-level install transaction's atomic
         // no-publish.
-        let effective_origin = replacement_body_origin
-            .as_ref()
-            .or(generated_origin.as_ref());
+        let effective_origin = replacement_body_origin.as_ref().or(generated_origin.as_ref());
         self.reject_generated_drop_obligated_across_suspension(
             &effective_def,
             effective_origin,
@@ -1875,7 +1899,11 @@ impl BytecodeCompiler {
                 });
 
             if param.pattern.as_identifier().is_none() {
-                self.seed_param_destructure_context(&semantic_owner_key, idx, param);
+                self.seed_param_destructure_context(
+                    &semantic_owner_key,
+                    idx,
+                    param,
+                );
             }
 
             // Load parameter value from its slot
@@ -2159,8 +2187,8 @@ impl BytecodeCompiler {
                     self.exclusive_ref_locals.insert(idx as u16);
                 }
             }
-            let was_inferred =
-                inferred_reference_optimizations[idx].is_some_and(ParamPassMode::is_reference);
+            let was_inferred = inferred_reference_optimizations[idx]
+                .is_some_and(ParamPassMode::is_reference);
             if was_inferred {
                 self.inferred_ref_locals.insert(idx as u16);
             }
@@ -2482,7 +2510,8 @@ impl BytecodeCompiler {
         self.boxed_locals = saved_boxed_locals;
         self.shared_locals = saved_shared_locals;
         self.shared_drop_locals = saved_shared_drop_locals;
-        self.inherited_capture_parameter_evidence = saved_inherited_capture_parameter_evidence;
+        self.inherited_capture_parameter_evidence =
+            saved_inherited_capture_parameter_evidence;
         self.closure_escape_drop_skip_locals = saved_closure_escape_drop_skip_locals;
         self.closure_binding_capture_drop_locals = saved_closure_binding_capture_drop_locals;
         self.closure_capture_drop_locals = saved_closure_capture_drop_locals;
@@ -6454,5 +6483,207 @@ fn bar(&y) { foo(y) }
             !has_composed,
             "module binding shadow should prevent composition with global foo"
         );
+    }
+}
+
+#[cfg(test)]
+mod effect_row_declaration_guard_tests {
+    //! ADR-014 §8.2 / R21 (issue #178) — an effect clause on a function
+    //! DECLARATION is a compile error until declaration-vs-body enforcement
+    //! lands.
+    //!
+    //! MEASURED before the guard, at the CLI, not in a harness:
+    //!
+    //! ```shape
+    //! use std::core::file
+    //! fn sneaky(path: string) -> string ! {} {
+    //!     return file::read_text(path)
+    //! }
+    //! print(sneaky("/etc/hostname"))
+    //! ```
+    //!
+    //! compiled, ran, and printed the file's contents. The row-in-type slice
+    //! landed the type component, the subset judgment and the boundary check,
+    //! but not the body walk that derives a callable's ACTUAL row from its
+    //! call edges (§8.2's monotone least-fixpoint). With nothing computing the
+    //! actual row, the declared row was compared against nothing — `! {}` was
+    //! a purity claim the compiler never checked and the runtime never
+    //! enforced.
+    //!
+    //! The remedy follows the program's own precedent for an unenforceable
+    //! spelling: grill Q3 / POLY-ASYNC-TRUTH (issue #201) rejected `async`
+    //! foreign declarations rather than ship a contract that lies.
+    //!
+    //! What the rejection does NOT take away, stated honestly: rows in TYPE
+    //! position are untouched and really are checked. A callback parameter
+    //! typed `fn() -> int ! {FsRead}` flows through the subset judgment
+    //! against whatever closure is passed. Only the declaration-position claim
+    //! is refused, because only that one had no checker. The
+    //! `..._still_compiles` differentials below pin that line.
+    //!
+    //! **TRANSITIONAL — this whole module is #143's flip-to-green control.**
+    //! When EFFECT-CONTRACT (issue #143) lands the body walk, the
+    //! `..._is_rejected_*` tests flip to assert real enforcement — a declared
+    //! row the body exceeds fails with the §8.1 boundary violation
+    //! (`EffectRowExceedsBoundary`, carrying the inferred row), and a declared
+    //! row the body respects COMPILES — and the `[C0934]` producer is deleted.
+    //! The differential tests survive that flip unchanged. Each rejection test
+    //! names, in one line, what it becomes after the flip.
+
+    use crate::compiler::BytecodeCompiler;
+
+    /// Compile and return the semantic-error message.
+    ///
+    /// Deliberately does NOT arm the internal-builtin privilege flag: these
+    /// fixtures need no such privilege, and inheriting a sibling helper's
+    /// setup wholesale is how that migration debt spreads. (The flag is not
+    /// named literally here — #133's frozen set counts occurrences of the
+    /// identifier, and a comment must not inflate the census.)
+    fn compile_err(code: &str) -> String {
+        let program = shape_ast::parser::parse_program(code).expect("parse failed");
+        let mut compiler = BytecodeCompiler::new();
+        compiler.source_text = Some(code.to_string());
+        match compiler.compile(&program) {
+            Ok(_) => panic!("expected a compile error, but the program compiled:\n{code}"),
+            Err(shape_ast::error::ShapeError::SemanticError { message, .. }) => message,
+            Err(other) => panic!("expected SemanticError, got {other:?}"),
+        }
+    }
+
+    fn compiles(code: &str) {
+        let program = shape_ast::parser::parse_program(code).expect("parse failed");
+        let mut compiler = BytecodeCompiler::new();
+        compiler.source_text = Some(code.to_string());
+        if let Err(e) = compiler.compile(&program) {
+            panic!("expected a clean compile, got {e:?}\n{code}");
+        }
+    }
+
+    // ── rejections (flip to enforcement assertions when #143 lands) ────────
+
+    #[test]
+    fn a_declared_row_on_a_function_declaration_is_rejected() {
+        // AFTER THE FLIP: this compiles — the body is pure and `{FsRead}`
+        // permits a pure body by subset.
+        let message = compile_err(r#"fn read_it(p: string) -> string ! {FsRead} { return p }"#);
+        assert!(message.contains("[C0934]"), "got: {message}");
+        assert!(
+            message.contains("! {FsRead}") && message.contains("read_it"),
+            "the diagnostic must quote the clause and name the function: {message}"
+        );
+    }
+
+    #[test]
+    fn explicit_purity_is_rejected_like_any_other_row() {
+        // `! {}` is the most dangerous spelling to leave unenforced, because
+        // it is the one that claims the strongest guarantee.
+        //
+        // AFTER THE FLIP: this compiles — the body really is pure.
+        let message = compile_err(r#"fn hash(s: string) -> int ! {} { return 1 }"#);
+        assert!(message.contains("[C0934]"), "got: {message}");
+        assert!(message.contains("! {}"), "got: {message}");
+    }
+
+    #[test]
+    fn the_declaration_form_the_probe_used_is_refused() {
+        // The CLI probe declared `! {}` and then read a file. This harness has
+        // no stdlib, so the IO body cannot be written here — an
+        // undefined-function error would preempt the guard and the test would
+        // pass for the wrong reason. What IS provable here is the part that
+        // actually stops the probe: the declaration FORM is refused,
+        // regardless of body.
+        //
+        // The end-to-end behaviour was verified at the CLI by hand, both
+        // directions: the probe now fails with `[C0934]` under the clause, and
+        // the clause-free rewrite the fix-it recommends still prints the file
+        // — byte-identical to the pre-guard output, which is what makes
+        // "deleting the clause removes no guarantee" a measured claim.
+        //
+        // AFTER THE FLIP: this fixture compiles (a pure body satisfies `! {}`)
+        // and the probe's real IO body becomes the interesting case, failing
+        // with the §8.1 boundary violation naming `FsRead` as excess. The
+        // program is rejected either way; only the reason improves.
+        let message = compile_err(r#"fn sneaky(path: string) -> string ! {} { return path }"#);
+        assert!(
+            message.contains("[C0934]"),
+            "the probe's declaration form must not compile: {message}"
+        );
+    }
+
+    #[test]
+    fn a_binder_row_on_a_declaration_is_rejected_too() {
+        // A generic's own row is exactly as unverified as a concrete one, and
+        // the guard sits ahead of the generic-body early return so the two
+        // cannot diverge by compilation path.
+        //
+        // AFTER THE FLIP: this compiles, and `F` closes at each instantiation.
+        let message =
+            compile_err(r#"fn apply<T, effect F>(f: fn() -> T ! F) -> T ! F { return f() }"#);
+        assert!(message.contains("[C0934]"), "got: {message}");
+        assert!(message.contains("! F"), "got: {message}");
+    }
+
+    #[test]
+    fn a_declaration_with_no_return_type_but_a_row_is_rejected() {
+        // AFTER THE FLIP: compiles.
+        let message = compile_err(r#"fn touch(p: string) ! {FsWrite} { return }"#);
+        assert!(message.contains("[C0934]"), "got: {message}");
+    }
+
+    #[test]
+    fn module_nested_declarations_are_reached_by_the_guard() {
+        // The compiler's chokepoint reaches `mod`-nested functions, so the
+        // guard must too — otherwise `mod` is a hole straight back to the
+        // unenforced claim.
+        //
+        // AFTER THE FLIP: compiles.
+        let message = compile_err(
+            r#"
+            mod inner {
+                fn nested(p: string) -> string ! {} { return p }
+            }
+            "#,
+        );
+        assert!(message.contains("[C0934]"), "got: {message}");
+    }
+
+    #[test]
+    fn the_diagnostic_names_the_owning_lane_and_says_it_is_transitional() {
+        // A rejection that does not say when it goes away reads as a refusal.
+        let message = compile_err(r#"fn f() -> int ! {} { return 1 }"#);
+        assert!(message.contains("#143"), "must name the owning lane: {message}");
+        assert!(
+            message.contains("transitional"),
+            "must say it is transitional: {message}"
+        );
+    }
+
+    // ── differentials (survive the #143 flip unchanged) ───────────────────
+
+    #[test]
+    fn the_fix_it_is_semantics_preserving() {
+        // The hint says "delete the clause"; this asserts the hint is true.
+        // Nothing was checking the row, so the clause-free program is exactly
+        // the program the author had before.
+        compiles(r#"fn hash(s: string) -> int { return 1 }"#);
+    }
+
+    #[test]
+    fn a_row_in_parameter_type_position_still_compiles() {
+        // The line the guard draws: TYPE-position rows are checked evidence
+        // and stay live.
+        compiles(r#"fn hof(f: fn() -> int ! {FsRead}) -> int { return f() }"#);
+    }
+
+    #[test]
+    fn an_effect_binder_in_a_parameter_type_still_compiles() {
+        // `effect F` binders and their use in parameter position survive; only
+        // the declaration's OWN row is refused.
+        compiles(r#"fn hof<T, effect F>(f: fn() -> T ! F) -> T { return f() }"#);
+    }
+
+    #[test]
+    fn a_function_with_no_clause_anywhere_is_untouched() {
+        compiles(r#"fn add(a: int, b: int) -> int { return a + b }"#);
     }
 }

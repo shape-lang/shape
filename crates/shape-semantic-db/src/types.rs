@@ -23,8 +23,8 @@ use crate::identity::{CanonicalDigest, DigestWriter};
 /// [`NormalizedEffectRow::is_closed_fact`] is the predicate that separates
 /// them, and ADR-010 §13 requires every fact to pass it.
 ///
-/// Atom names are sorted at construction. Nothing here iterates an unordered
-/// container, so the rendered row and the digest are stable across runs.
+/// Atom names are sorted at construction, so the rendered row and the digest
+/// are stable across runs.
 #[derive(Clone, PartialEq, Eq, Hash, Debug, PartialOrd, Ord)]
 pub enum NormalizedEffectRow {
     /// A closed row: sorted, deduplicated canonical atom names. The empty
@@ -32,8 +32,8 @@ pub enum NormalizedEffectRow {
     Closed(Vec<String>),
     /// An `effect F` binder. Legal in a published schema, never in a fact.
     Param(String),
-    /// The declaration spelled no row. Distinct from `Closed(vec![])`: it is
-    /// the absence of a claim, not a claim of purity.
+    /// The declaration spelled no row. Distinct from `Closed(vec![])`: the
+    /// absence of a claim, not a claim of purity.
     Undeclared,
 }
 
@@ -467,17 +467,17 @@ mod tests {
 
 #[cfg(test)]
 mod effect_row_contract_tests {
-    //! Tracer case (c) at the layer where it actually matters (issue #178,
-    //! ADR-014 §8.3, ADR-010 §13): the PUBLISHED contract.
+    //! Tracer case (c) at the layer where it matters (issue #178, ADR-014
+    //! §8.3, ADR-010 §13): the PUBLISHED contract.
     //!
     //! The acceptance criterion asks for proof on the persisted
     //! representation, not merely for the absence of errors during checking.
-    //! `NormalizedType` is that representation — it is what a base contract
+    //! `NormalizedType` is that representation — what a base contract
     //! publishes and what the canonical digest covers — so these assertions
     //! read the published row itself.
 
     use super::*;
-    use shape_ast::ast::{EffectRowAnnotation, FunctionParam, TypeAnnotation};
+    use shape_ast::ast::{EffectRowAnnotation, TypeAnnotation};
 
     fn callback(row: Option<EffectRowAnnotation>) -> TypeAnnotation {
         TypeAnnotation::Function {
@@ -510,12 +510,12 @@ mod effect_row_contract_tests {
 
     #[test]
     fn a_generic_schema_may_publish_an_unclosed_binder() {
-        // `fn apply<T, effect F>(f: fn() -> T ! F)` — the generic
-        // DEFINITION's contract is a schema, and §8.3 lets it persist with
-        // its binders exactly as it persists type binders.
+        // `fn apply<T, effect F>(f: fn() -> T ! F)` — the generic DEFINITION's
+        // contract is a schema, and §8.3 lets it persist with its binders
+        // exactly as it persists type binders.
         let row = published_row(&callback(binder("F")));
         assert_eq!(row.unbound_parameter(), Some("F"));
-        assert!(row.is_closed_fact() == false);
+        assert!(!row.is_closed_fact());
     }
 
     #[test]
@@ -533,7 +533,6 @@ mod effect_row_contract_tests {
         assert!(instantiated.is_closed_fact());
         assert!(pure.is_closed_fact());
 
-        // And the closed forms carry no residual parameter at all.
         assert_eq!(instantiated.unbound_parameter(), None);
         assert_eq!(pure.unbound_parameter(), None);
     }

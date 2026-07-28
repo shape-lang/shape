@@ -3,7 +3,6 @@
 //! Implements unification algorithm for type inference,
 //! maintaining substitutions and applying them to types.
 
-use crate::type_system::effects::EffectRow;
 use crate::type_system::{Type, TypeVar, annotation_as_tyvar, tyvar_to_annotation};
 use shape_ast::ast::TypeAnnotation;
 use std::collections::HashMap;

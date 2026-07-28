@@ -1,7 +1,7 @@
 //! Read-only semantic-freeze projections for compiler-owned queries.
 
-use super::super::type_reflection::CanonicalType;
 use super::*;
+use super::super::type_reflection::CanonicalType;
 use shape_runtime::type_system::{
     RecursiveCallableShape, SemanticPassingMode, SemanticTypeCandidate, SemanticTypePathSegment,
     Type, TypeVar, annotation_as_tyvar,
@@ -147,9 +147,7 @@ impl FreezeOverlay {
                     self.memoize_composite_subtree(item);
                 }
             }
-            TypeAnnotation::Function {
-                params, returns, ..
-            } => {
+            TypeAnnotation::Function { params, returns, .. } => {
                 for param in params {
                     self.memoize_composite_subtree(&param.type_annotation);
                 }
@@ -295,9 +293,9 @@ impl FreezeOverlay {
                     })
                 }
             }
-            Type::Function {
-                params, returns, ..
-            } => self.semantic_callable_annotation(params, returns, shape, path),
+            Type::Function { params, returns, .. } => {
+                self.semantic_callable_annotation(params, returns, shape, path)
+            }
         }
     }
 
@@ -311,9 +309,7 @@ impl FreezeOverlay {
             return self.semantic_variable_annotation(&variable);
         }
         match annotation {
-            TypeAnnotation::Function {
-                params, returns, ..
-            } => {
+            TypeAnnotation::Function { params, returns, .. } => {
                 let parameter_types: Vec<Type> = params
                     .iter()
                     .map(|parameter| Type::Concrete(parameter.type_annotation.clone()))
@@ -534,9 +530,9 @@ pub(crate) fn annotation_has_lossy_unknown_sentinel(annotation: &TypeAnnotation)
         TypeAnnotation::Basic(name) => name == "unknown",
         TypeAnnotation::Reference(path) => path.as_str() == "unknown",
         // An effect row carries catalog identities, never a type sentinel, so
-        // the row cannot make an annotation lossy — but the arm must still be
-        // written out rather than left to a wildcard that would hide a future
-        // row-shaped component.
+        // the row cannot make an annotation lossy — but the arm is written out
+        // rather than left to a wildcard that would hide a future row-shaped
+        // component.
         TypeAnnotation::Function {
             params,
             returns,
@@ -558,11 +554,7 @@ pub(crate) fn annotation_has_lossy_unknown_sentinel(annotation: &TypeAnnotation)
         TypeAnnotation::Object(fields) => fields
             .iter()
             .any(|field| annotation_has_lossy_unknown_sentinel(&field.type_annotation)),
-        TypeAnnotation::Function {
-            params,
-            returns,
-            effects: None,
-        } => {
+        TypeAnnotation::Function { params, returns, effects: None } => {
             params
                 .iter()
                 .any(|param| annotation_has_lossy_unknown_sentinel(&param.type_annotation))

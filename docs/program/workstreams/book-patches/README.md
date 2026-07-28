@@ -23,3 +23,4 @@ truthful, and a fuzzy apply can land the claim next to contradicting text.
 |---|---|---|
 | `201-foreign-async-truthfulness.patch` | POLY-ASYNC-TRUTH (#201) | 4 pages documenting `async fn python` / `async fn typescript`, now a `[C0932]` compile error owned by #202 |
 | `196-stub-channel.patch` | POLY-STUB-CHANNEL (#196) | `tooling/polyglot.mdx` + the two extension pages — the real marshaling table, the `[C0933]` declaration-site rejection, generated `.pyi` / `.d.ts` stubs, and per-declaration Python module namespacing (generated against `ca7cda8`) |
+| `178-effect-rows.patch` | EFFECT-ROW-IN-TYPE (#178) | `advanced/security-permissions.mdx` — effect rows as a type component distinct from permissions, subset subsumption, `effect F` binders, and an explicit what-is-checked-today section covering the `[C0934]` declaration-position rejection owned by #143 (generated against `dd60b00`) |
