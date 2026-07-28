@@ -14,6 +14,7 @@ pub mod arrow_bridge;
 pub mod error_mapping;
 pub mod marshaling;
 pub mod runtime;
+pub mod stubs;
 
 /// Bundled `.shape` module artifact for the `python` namespace.
 ///
@@ -52,6 +53,7 @@ shape_abi_v1::language_runtime_plugin! {
         dispose_function: runtime::python_dispose_function,
         language_id: runtime::python_language_id,
         get_lsp_config: runtime::python_get_lsp_config,
+        generate_stubs: runtime::python_generate_stubs,
         free_buffer: runtime::python_free_buffer,
         drop: runtime::python_drop,
     }

@@ -1537,26 +1537,41 @@ pub fn validate_color_rgb_range(program: &Program, source: &str) -> Vec<Diagnost
     validator.diagnostics
 }
 
-/// Validate that foreign function parameters and return types are explicitly annotated.
+/// Validate a foreign function's declared types against the compiler's own
+/// producers: annotations must be explicit, and every declared type must be one
+/// the foreign marshaling table can carry.
 ///
-/// Foreign function bodies are opaque — the type system cannot infer types from them.
-/// Uses `ForeignFunctionDef::validate_type_annotations()` (shared with the compiler).
+/// Foreign function bodies are opaque — the type system cannot infer types from
+/// them. Both checks come from `ForeignFunctionDef` (shared with the compiler):
+/// `validate_type_annotations()` for the annotation and `Result<T>` mandates,
+/// and `unmapped_foreign_types()` for the `[C0933]` marshaling-table rejection
+/// (ADR-019 §1 / R25, issue #196). One validator rather than two: they check the
+/// same declaration from the same producers, and the LSP should not grow a
+/// parallel pass per rule.
 pub fn validate_foreign_function_types(program: &Program, source: &str) -> Vec<Diagnostic> {
-    let mut diagnostics = Vec::new();
-
-    for item in &program.items {
-        let foreign_fn = match item {
-            Item::ForeignFunction(f, _) => f,
-            Item::Export(export, _) => {
-                if let shape_ast::ast::ExportItem::ForeignFunction(f) = &export.item {
-                    f
-                } else {
-                    continue;
+    fn collect<'a>(items: &'a [Item], out: &mut Vec<&'a shape_ast::ast::ForeignFunctionDef>) {
+        for item in items {
+            match item {
+                Item::ForeignFunction(f, _) => out.push(f),
+                Item::Export(export, _) => {
+                    if let shape_ast::ast::ExportItem::ForeignFunction(f) = &export.item {
+                        out.push(f);
+                    }
                 }
+                // The compiler's chokepoint reaches module-nested foreign
+                // declarations (`compile_module_decl` → `compile_item_*`), so
+                // the editor must too, or the two disagree inside `mod`.
+                Item::Module(module, _) => collect(&module.items, out),
+                _ => {}
             }
-            _ => continue,
-        };
+        }
+    }
 
+    let mut diagnostics = Vec::new();
+    let mut foreign_fns = Vec::new();
+    collect(&program.items, &mut foreign_fns);
+
+    for foreign_fn in foreign_fns {
         // Mirror the compiler oracle (functions_foreign.rs:30): native-ABI
         // declarations (`extern C fn ... from "lib" as "sym"`) do NOT require a
         // Result<T> return — their resolution is deferred to runtime dlopen.
@@ -1576,6 +1591,28 @@ pub fn validate_foreign_function_types(program: &Program, source: &str) -> Vec<D
                 code_description: None,
                 source: Some("shape".to_string()),
                 message: msg,
+                related_information: None,
+                tags: None,
+                data: None,
+            });
+        }
+
+        // ADR-019 §1 (#196) — the editor must refuse a declared type that
+        // cannot cross the foreign boundary, for the same reason `shape run`
+        // does, and with the same text.
+        for rejection in foreign_fn.unmapped_foreign_types() {
+            let range = if rejection.span.is_dummy() {
+                span_to_range(source, &foreign_fn.name_span)
+            } else {
+                span_to_range(source, &rejection.span)
+            };
+            diagnostics.push(Diagnostic {
+                range,
+                severity: Some(DiagnosticSeverity::ERROR),
+                code: Some(NumberOrString::String("C0933".to_string())),
+                code_description: None,
+                source: Some("shape".to_string()),
+                message: format!("{}\n\nhelp: {}", rejection.message, rejection.fix_hint),
                 related_information: None,
                 tags: None,
                 data: None,
@@ -2125,6 +2162,69 @@ mod tests {
             diagnostics.is_empty(),
             "Expected zero diagnostics for valid extern C fn, got: {:?}",
             diagnostics
+        );
+    }
+
+    // ── ADR-019 §1 (#196) — unmapped foreign types, editor side ───────────
+
+    #[test]
+    fn test_unmapped_foreign_type_is_an_editor_error_carrying_the_compilers_text() {
+        use shape_ast::parser::parse_program;
+
+        let source = "fn python analyze(data: DataTable) -> Result<number> {\n    return 1.0\n}\n";
+        let program = parse_program(source).unwrap();
+        let diagnostics = validate_foreign_function_types(&program, source);
+        let c0933: Vec<_> = diagnostics
+            .iter()
+            .filter(|d| d.code == Some(NumberOrString::String("C0933".to_string())))
+            .collect();
+        assert_eq!(c0933.len(), 1, "got: {diagnostics:?}");
+        let d = c0933[0];
+        assert_eq!(d.severity, Some(DiagnosticSeverity::ERROR));
+
+        // Single-sourcing asserted against the producer itself rather than by
+        // scraping the rendered prose: the editor's text must BE the
+        // compiler's, so a reworded diagnostic cannot drift between them.
+        let Item::ForeignFunction(foreign_fn, _) = &program.items[0] else {
+            panic!("fixture declares a foreign function");
+        };
+        let rejections = foreign_fn.unmapped_foreign_types();
+        assert_eq!(rejections.len(), 1);
+        assert_eq!(
+            d.message,
+            format!("{}\n\nhelp: {}", rejections[0].message, rejections[0].fix_hint),
+            "the editor must render the compiler's producer output verbatim"
+        );
+    }
+
+    #[test]
+    fn test_unmapped_foreign_type_nested_in_a_mod_is_an_editor_error() {
+        use shape_ast::parser::parse_program;
+
+        // The compiler reaches module-nested foreign declarations; so must the
+        // editor, or `shape run` and the editor disagree inside `mod`.
+        let source = "mod io {\n    pub fn python load(t: DataTable) -> Result<int> {\n        return 1\n    }\n}\n";
+        let program = parse_program(source).unwrap();
+        let diagnostics = validate_foreign_function_types(&program, source);
+        assert!(
+            diagnostics
+                .iter()
+                .any(|d| d.code == Some(NumberOrString::String("C0933".to_string()))),
+            "module-nested unmapped type must be flagged, got: {diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn test_mapped_foreign_types_produce_no_marshal_diagnostic() {
+        use shape_ast::parser::parse_program;
+
+        // Differential control: the shapes the table does carry stay clean, so
+        // the check cannot pass by rejecting everything.
+        let source = "fn python f(a: int, xs: Array<number>, m: HashMap<string, int>, o: int?)                       -> Result<string> {\n    return \"x\"\n}\n";
+        let program = parse_program(source).unwrap();
+        assert!(
+            validate_foreign_function_types(&program, source).is_empty(),
+            "mapped declarations must produce no diagnostic"
         );
     }
 
