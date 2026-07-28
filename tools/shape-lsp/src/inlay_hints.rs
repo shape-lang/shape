@@ -34,13 +34,13 @@ pub struct InlayHintConfig {
     /// call in a method chain (e.g. `xs.map(f).filter(g).sum()` → hint after
     /// `.map(f)` and `.filter(g)`).
     pub show_chain_hints: bool,
-    /// Render the compiler's `BindingStorageClass` decision after a `let`
-    /// binding — `[Direct]`, `[UniqueHeap]`, `[SharedCow]`, `[Reference]`,
-    /// `[LocalMutablePtr]`. The label is
-    /// `BindingStorageClass::name()` projected from the compiler's own
-    /// `binding_storage_query()` table (ADR-017 §2 / R23), so it can only
-    /// spell a class the compiler actually has. It carries no `approx`
-    /// qualifier because it is no longer an approximation.
+    /// Render the compiler's `BindingStorageClass` decision after a binding
+    /// — `[Direct]`, `[UniqueHeap]`, `[SharedCow]`, `[Reference]`,
+    /// `[LocalMutablePtr]`. The label is `BindingStorageClass::name()`
+    /// projected from the compiler's own `binding_storage_query()` table
+    /// (ADR-017 §2 / R23), so it can only spell a class the compiler
+    /// actually has. It carries no `approx` qualifier because it is no
+    /// longer an approximation.
     ///
     /// **Standing pattern (binding 2026-05-26):** Shape-unique inlay hints
     /// (chain hints, binding-storage-class hints, anything not Rust/TS
