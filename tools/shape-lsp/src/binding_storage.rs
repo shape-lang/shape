@@ -41,6 +41,17 @@ pub fn binding_storage_decisions(program: &Program, text: &str) -> Option<Bindin
     Some(compiler.binding_storage_query().clone())
 }
 
+/// The tooltip shown for a storage-class inlay hint. Both the eager tooltip
+/// (`inlay_hints.rs`) and the lazy `inlayHint/resolve` tooltip
+/// (`server.rs`) render this, so the two can never drift into describing the
+/// hint differently.
+pub fn storage_class_tooltip(class: &str) -> String {
+    format!(
+        "BindingStorageClass::{class} — the storage class the compiler decided for this \
+         binding (ADR-006 §2)."
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -113,6 +124,16 @@ mod tests {
         assert!(
             binding_storage_decisions(&program, src).is_none(),
             "an imported document must not answer from a different module environment"
+        );
+    }
+
+    #[test]
+    fn the_tooltip_names_the_class_and_never_calls_itself_an_approximation() {
+        let tooltip = storage_class_tooltip("SharedCow");
+        assert!(tooltip.contains("BindingStorageClass::SharedCow"));
+        assert!(
+            !tooltip.to_lowercase().contains("approx"),
+            "the hint is the compiler's decision, not an approximation: {tooltip}"
         );
     }
 

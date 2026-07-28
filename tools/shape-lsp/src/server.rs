@@ -1612,11 +1612,16 @@ impl LanguageServer for ShapeLanguageServer {
             Some("chain") => Some(
                 "Inferred type of the intermediate method-chain step (W2.4 / 1.27).".to_string(),
             ),
-            Some("binding-kind") => Some(
-                "LSP-side approximation of BindingStorageClass (ADR-006 §2). \
-                 The compiler at crates/shape-vm/src/type_tracking.rs:286 is authoritative."
-                    .to_string(),
-            ),
+            // ADR-017 §2 / R23: `inlay_hints.rs` stamps the class the
+            // compiler decided into the hint's data, so the resolved tooltip
+            // names it instead of describing an approximation — #181 retired
+            // the LSP-side heuristic this text used to disclaim.
+            Some("binding-kind") => hint
+                .data
+                .as_ref()
+                .and_then(|v| v.get("storageClass"))
+                .and_then(|v| v.as_str())
+                .map(crate::binding_storage::storage_class_tooltip),
             _ => None,
         };
 

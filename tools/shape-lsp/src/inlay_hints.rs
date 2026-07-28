@@ -471,10 +471,7 @@ impl<'a> HintContext<'a> {
                 kind: Some(InlayHintKind::TYPE),
                 text_edits: None,
                 tooltip: Some(tower_lsp_server::ls_types::InlayHintTooltip::String(
-                    format!(
-                        "BindingStorageClass::{} — the storage class the compiler decided for this binding (ADR-006 §2).",
-                        decision.storage_class.name()
-                    ),
+                    crate::binding_storage::storage_class_tooltip(decision.storage_class.name()),
                 )),
                 padding_left: Some(true),
                 padding_right: Some(true),
