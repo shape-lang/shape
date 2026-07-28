@@ -131,54 +131,51 @@ where
 /// and producing `Null` on return.
 fn dispatch_call_via_trampoline_vm(
     function_id: u32,
-    upvalue_bits: Option<&[u64]>,
-    jit_args: &[u64],
+    upvalue_pairs: Option<&[(u64, shape_value::NativeKind)]>,
+    arg_pairs: &[(u64, shape_value::NativeKind)],
     jit_ctx: *mut JITContext,
 ) -> u64 {
     use shape_value::NativeKind;
 
     // §2.7.5 stable-FFI raw-pair shape: each arg / capture pair is
-    // `(u64, NativeKind)`. The JIT MIR emitter widened every arg to
-    // I64 at terminators.rs:651-671 without an associated kind track;
-    // we stamp `NativeKind::UInt64` here (the §2.7.11 callee-
-    // classification kind for function-id-shaped slots, also used as
-    // the "I64-wide raw bits without further classification" carrier
-    // kind at the §2.7.5 stable-FFI boundary). This is NOT a Bool-
-    // default fallback — it is the documented function-id-class kind
-    // shape per ADR-006 §2.7.11/Q12.
+    // `(u64, NativeKind)`, and the kind is the one the PRODUCING site
+    // stamped into `JITContext.stack_kinds` — read back out by
+    // `jit_call_value` in lockstep with the bits (§2.7.7 / Q9).
+    //
+    // #188: this function used to discard the caller's kinds and
+    // re-stamp every argument `NativeKind::UInt64`. That is the
+    // "I64-wide raw bits without further classification" carrier kind,
+    // which is correct for a function-id-shaped CALLEE and wrong for an
+    // ordinary argument: the callee's frame receives the arg's kind
+    // verbatim through `stack_write_kinded`, so an `f64` argument
+    // arrived labelled as an integer and the callee's first typed read
+    // converted the raw bit pattern instead of the value. Measured at
+    // e12c82d2 with a native `apply(demoted, 0.5)` — VM `Ok(0.5)`,
+    // JIT `Ok(4602678819172647000)` (= the raw f64 bits of 0.5 read as
+    // an int); a `string` argument produced the same class with its
+    // `Arc<String>` pointer. Both are the c4-4B silent-wrong-output
+    // class. The kinds exist at every push site, so the fix is to carry
+    // them, not to re-derive or default them.
     //
     // The kind companion is consumed by `jit_trampoline_call_closure`
     // which wraps each pair as a `KindedSlot` and threads it into the
-    // new frame's locals via `stack_write_kinded`. The VM-side
-    // runtime-tier per-slot kind track is established by the callee's
-    // own FrameDescriptor when it begins execution; the §2.7.5 stable-
-    // FFI handoff doesn't need per-arg semantic kind, only the slot-
-    // size discipline (I64 here).
+    // new frame's locals via `stack_write_kinded`, and by
+    // `call_value_immediate_nb` for the bare-function shape.
+    //
     // #117 / R15: the covered-fallback dispatch event. Reaching this function
     // means a native frame handed `function_id` to the bytecode interpreter,
     // which is exactly the observation that must never be relabelled native.
     shape_vm::native_witness::record_interpreter_dispatch(function_id as usize);
 
-    let arg_pairs: Vec<(u64, NativeKind)> = jit_args
-        .iter()
-        .copied()
-        .map(|bits| (bits, NativeKind::UInt64))
-        .collect();
-
     with_trampoline_vm_mut(|vm| {
         let func_id = function_id as u16;
-        match upvalue_bits {
-            Some(caps) => {
+        match upvalue_pairs {
+            Some(capture_pairs) => {
                 // Shape 2 / 3: closure-with-captures. Route through
                 // `jit_trampoline_call_closure` which materializes a
-                // fresh `OwnedClosureBlock` from `upvalue_bits` and
+                // fresh `OwnedClosureBlock` from the capture pairs and
                 // dispatches via `call_closure_with_nb_args_keepalive`.
-                let capture_pairs: Vec<(u64, NativeKind)> = caps
-                    .iter()
-                    .copied()
-                    .map(|bits| (bits, NativeKind::UInt64))
-                    .collect();
-                match vm.jit_trampoline_call_closure(func_id, &capture_pairs, &arg_pairs, None) {
+                match vm.jit_trampoline_call_closure(func_id, capture_pairs, arg_pairs, None) {
                     Ok(bits) => bits,
                     Err(e) => {
                         raise_trampoline_error(jit_ctx, e.to_string());
@@ -258,6 +255,24 @@ fn dispatch_borrowed_closure_via_trampoline_vm(
     jit_ctx: *mut JITContext,
 ) -> u64 {
     use shape_value::{KindedSlot, ValueSlot};
+
+    // #117 / R15 (#188 close): the raw-Arc closure trampoline is a
+    // covered-fallback dispatch event exactly like
+    // `dispatch_call_via_trampoline_vm`, and it was the only trampoline
+    // entry that did not announce one. Without this, a program whose
+    // closure body runs entirely on the interpreter reported
+    // `disposition: installed-not-dispatched` with 0 interpreter
+    // dispatches — a witness that cannot distinguish "never called" from
+    // "called, but never native", which is precisely the relabelling R15
+    // forbids. Measured at e12c82d2 with a closure passed as a parameter
+    // and called 200 times: `__closure_0` showed 0/0.
+    //
+    // SAFETY: `closure_block` is a live `OwnedClosureBlock` borrowed from
+    // the caller's `Arc<HeapValue::ClosureRaw>`; `as_ptr()` addresses its
+    // `TypedClosureHeader` per the construction invariant.
+    let closure_function_id =
+        unsafe { shape_value::v2::closure_raw::typed_closure_function_id(closure_block.as_ptr()) };
+    shape_vm::native_witness::record_interpreter_dispatch(closure_function_id as usize);
 
     let kinded_args: Vec<KindedSlot> = arg_pairs
         .iter()
@@ -543,7 +558,7 @@ pub extern "C" fn jit_call_value(ctx: *mut JITContext) -> u64 {
         // shrunk to a narrow legacy compatibility surface; the principled
         // dispatch is by kind.
         let function_id: u16;
-        let mut vm_captures: Option<Vec<u64>> = None;
+        let mut vm_captures: Option<Vec<(u64, NativeKind)>> = None;
 
         match callee_kind {
             NativeKind::Ptr(HeapKind::Closure) => {
@@ -616,7 +631,14 @@ pub extern "C" fn jit_call_value(ctx: *mut JITContext) -> u64 {
                         }
                     }
                     // Fall through to trampoline VM for the bare-fn case.
-                    return dispatch_call_via_trampoline_vm(function_id as u32, None, &args, ctx);
+                    // #188: `arg_pairs` (not the kind-stripped `args`) —
+                    // the trampoline threads each kind into the callee frame.
+                    return dispatch_call_via_trampoline_vm(
+                        function_id as u32,
+                        None,
+                        &arg_pairs,
+                        ctx,
+                    );
                 }
                 // Take ownership of the callee share that was pushed onto
                 // the JIT stack. `compile_operand` retained for Copy
@@ -689,9 +711,19 @@ pub extern "C" fn jit_call_value(ctx: *mut JITContext) -> u64 {
                     let closure = unified_unbox::<JITClosure>(callee_bits);
                     function_id = closure.function_id;
                     let count = closure.captures_count as usize;
-                    let mut caps: Vec<u64> = Vec::with_capacity(count);
+                    // Legacy `unified_box(HK_CLOSURE, JITClosure)` carrier
+                    // (`jit_make_closure`, only reachable when the program
+                    // carries no `ClosureLayout` for this function — see
+                    // `mir_compiler/statements.rs` "LEGACY HEAP PATH"). That
+                    // carrier has no parallel-kind track of its own: the
+                    // `JITClosure.captures_ptr` array is bare `u64`. `UInt64`
+                    // here is the §2.7.5 I64-wide-raw-bits carrier kind for
+                    // that source, and it is the ONLY remaining kind-source
+                    // gap on this path (#188 removed the argument one). It is
+                    // not extended to arguments, which do have a kind track.
+                    let mut caps: Vec<(u64, NativeKind)> = Vec::with_capacity(count);
                     for i in 0..count {
-                        caps.push(*closure.captures_ptr.add(i));
+                        caps.push((*closure.captures_ptr.add(i), NativeKind::UInt64));
                     }
                     vm_captures = Some(caps);
                 } else {
@@ -774,8 +806,8 @@ pub extern "C" fn jit_call_value(ctx: *mut JITContext) -> u64 {
         //   - HK_CLOSURE callees (captures threaded into the new frame).
         //   - Raw-Arc HeapKind::Closure callees (Case 3 closed via the
         //     §2.7.11/Q12 kind dispatch above).
-        let upvalues: Option<&[u64]> = vm_captures.as_deref();
-        dispatch_call_via_trampoline_vm(function_id as u32, upvalues, &args, ctx)
+        let upvalues: Option<&[(u64, NativeKind)]> = vm_captures.as_deref();
+        dispatch_call_via_trampoline_vm(function_id as u32, upvalues, &arg_pairs, ctx)
     }
 }
 

@@ -1,0 +1,38 @@
+// #188 (PERF-CLOSURE-NATIVE) reproducer, committed per R15.
+//
+// The third first-class closure call shape: a capturing closure RETURNED from a
+// function and then called.
+//
+// Measured at e12c82d2 BEFORE the fix this shape produced
+// `program_fallback: w17-marshal-residual` — the same module-binding
+// misclassification the sibling file documents, which masked everything behind
+// it. With that removed the real blocker is now visible and named:
+//
+//     program_fallback: jit-compile-error
+//     Route A surface-and-stop: SURFACE — direct call to `mk` resolved to
+//     function index N but has no compile-time-proven
+//     FrameDescriptor.return_kind.
+//
+// A declared function-type return annotation (`(int) => int`) falls through
+// `classify_type_annotation_metadata` in `shape-vm compiler/helpers.rs` to
+// `FrameReturnMetadata::unknown()`, so the W36 named-function callgraph has no
+// return-kind proof for `mk` and refuses the whole program. `ConcreteType::
+// Function` already maps to `Ptr(HeapKind::Closure)` in
+// `shape-value v2/capture_native_kind.rs`; the annotation arm is what is
+// missing. Deliberately NOT fixed here — a function-typed slot has a documented
+// dual carrier (`Arc<HeapValue::ClosureRaw>` vs a NaN-boxed `box_function`
+// ref), so stamping a return kind is a soundness-sensitive change that needs
+// its own slice and its own differential.
+//
+// The value of this file meanwhile is the VM==JIT anchor: whichever tier runs
+// it, the output must be identical, and the bail must stay a bail rather than
+// becoming silent wrong output.
+
+fn mk(k: int) -> (int) => int { return |x: int| x * k }
+
+let f = mk(3)
+let mut total = 0
+for i in 0..200 {
+    total = total + f(i)
+}
+print(total)

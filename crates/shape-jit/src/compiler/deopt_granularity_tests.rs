@@ -81,11 +81,13 @@ fn function_index(program: &BytecodeProgram, name: &str) -> usize {
 /// The two-function fixture: one function holds the unsupported construct
 /// (`?`, an `Owner`-scoped residual), the other is ordinary hot arithmetic.
 ///
-/// Top-level deliberately calls only `hot_double`. A direct call to a
-/// non-compiled callee is still a whole-program bail (see the reverted
-/// attempt documented at `mir_compiler/terminators.rs`), so calling `uses_try`
-/// from top-level would deopt the program and this fixture would be measuring
-/// that bail instead of per-function granularity.
+/// Top-level calls BOTH, so the fixture exercises the call site as well as the
+/// classification: a direct call to the demoted `uses_try` must lower through
+/// the trampoline rather than costing top-level its own native code. (#187
+/// tried this, was reverted at `841f92f7` for a silent-wrong-output the
+/// differential caught, and #188 restored it after fixing the trampoline's
+/// per-argument kind handoff — see the history block at the refusal site in
+/// `mir_compiler/terminators.rs`.)
 const TWO_FUNCTION_FIXTURE: &str = r#"
 fn make_ok() -> Result<int, string> {
     return Ok(42)
@@ -105,6 +107,7 @@ for i in 0..200 {
     total = total + hot_double(i)
 }
 print(total)
+print(uses_try())
 "#;
 
 #[test]
