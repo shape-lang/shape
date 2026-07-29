@@ -93,11 +93,14 @@ impl VirtualMachine {
             // parallel kinds track.
             match constant {
                 crate::bytecode::Constant::Number(n) => {
-                    let bits = if n.is_nan() {
-                        f64::NAN.to_bits()
-                    } else {
-                        n.to_bits()
-                    };
+                    // A NaN literal is pushed as the canonical quiet NaN from
+                    // the normative table (ADR-020 §2.1 / #223) rather than a
+                    // restated `f64::NAN.to_bits()`. This is the plain
+                    // `Float64` constant path — distinct from the nullable
+                    // construction-site canonicalization ADR-020 §3.1 rules,
+                    // which #225 emits and which is what keeps `Some(NaN)`
+                    // disjoint from `NULL_NUMBER_BITS`.
+                    let bits = shape_value::encoding::canonicalize_nullable_f64(n.to_bits());
                     return self.push_kinded(bits, NativeKind::Float64);
                 }
                 crate::bytecode::Constant::Int(i) => {

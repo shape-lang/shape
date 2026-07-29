@@ -1526,17 +1526,20 @@ pub fn slot_to_serializable(
         | NativeKind::NullableIntSize
         | NativeKind::NullableUIntSize
         | NativeKind::NullableFloat64 => {
-            // Nullable scalar wire-format: surface-and-stop. The
-            // canonical None sentinel (NaN for Float, MIN for signed,
-            // MAX for unsigned) differs per kind; the §2.7.5.1
-            // post-proof shape needs an explicit `Nullable<T>`
-            // amendment with the sentinel rule. Tracked as
-            // W17-snapshot-nullable follow-up.
+            // Nullable scalar wire-format: surface-and-stop. The sentinel
+            // rule this arm was waiting for now exists — it is
+            // `shape_value::encoding` (ADR-020 §3.1 / #223): the reserved
+            // NaN for `number?`, `i64::MIN` for signed 64-bit, `1 << width`
+            // for the narrow widths. (The pre-#223 comment here guessed
+            // "MAX for unsigned"; §3.1 rules no unsigned 64-bit sentinel at
+            // all, so that row stays `NullEncoding::Unruled` and a producer
+            // must surface rather than guess.) Wiring the arms is #225's,
+            // once the encodings are live rather than merely written down.
             Err(format!(
                 "slot_to_serializable: W17-snapshot-roundtrip surface — \
                  nullable-scalar kind {kind:?} has no SerializableVMValue \
-                 arm at landing. The post-proof sentinel-rule amendment \
-                 is the W17-snapshot-nullable follow-up. \
+                 arm at landing. The sentinel rule is \
+                 `shape_value::encoding` (ADR-020 §3.1); wiring it is #225. \
                  ADR-006 §2.7.5.1.",
             ))
         }

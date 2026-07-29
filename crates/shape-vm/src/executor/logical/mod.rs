@@ -79,49 +79,6 @@ fn heap_ptr_is_truthy(bits: u64, heap_kind: HeapKind) -> bool {
     }
 }
 
-#[inline]
-fn heap_ptr_is_null(bits: u64, heap_kind: HeapKind) -> bool {
-    match heap_kind {
-        HeapKind::String
-        | HeapKind::TypedObject
-        | HeapKind::Closure
-        | HeapKind::Decimal
-        | HeapKind::BigInt
-        | HeapKind::DataTable
-        | HeapKind::Future
-        | HeapKind::TaskGroup
-        | HeapKind::TypedArray
-        | HeapKind::Temporal
-        | HeapKind::TableView
-        | HeapKind::Content
-        | HeapKind::Instant
-        | HeapKind::IoHandle
-        | HeapKind::NativeScalar
-        | HeapKind::NativeView
-        | HeapKind::Char
-        | HeapKind::HashMap
-        | HeapKind::FilterExpr
-        | HeapKind::ForeignRef
-        | HeapKind::Reference
-        | HeapKind::SharedCell
-        | HeapKind::HashSet
-        | HeapKind::Iterator
-        | HeapKind::Deque
-        | HeapKind::Channel
-        | HeapKind::PriorityQueue
-        | HeapKind::Range
-        | HeapKind::Result
-        | HeapKind::Option
-        | HeapKind::TraitObject
-        | HeapKind::Mutex
-        | HeapKind::Atomic
-        | HeapKind::Lazy
-        | HeapKind::ModuleFn
-        | HeapKind::Matrix
-        | HeapKind::MatrixSlice => bits == 0,
-    }
-}
-
 /// Wave 6: bool truthiness from raw bits + kind. Inline-scalar arms read
 /// the bits directly; heap arms are non-null → truthy. The deleted
 /// `is_truthy()` probe walked tag bits — Wave 6 dispatches on `kind`.
@@ -280,35 +237,18 @@ impl VirtualMachine {
 }
 
 /// Wave 6: null detection from raw bits + kind. Replaces the deleted
-/// `ValueWord::is_none()`. Heap-bearing kinds are null when the pointer
-/// bits are zero; nullable scalar arms encode null as zero bits.
+/// `ValueWord::is_none()`.
+///
+/// Delegates to `shape_value::encoding::is_none_bits_pre_adr020`, the single
+/// normative table (ADR-020 §2.1 / #223). Before #223 this was a
+/// byte-identical copy of `comparison/mod.rs::is_null_kinded`.
 ///
 /// R5b-2-bool-null-sentinel-cluster (ADR-006 §2.7 + §2.7.7/Q9,
-/// 2026-05-19): mirror of `comparison/mod.rs::is_null_kinded` —
-/// `NativeKind::Null` is the canonical absence-of-value discriminator;
-/// `NativeKind::Bool` slots carry only legitimate `{0, 1}` bit patterns
-/// and are NEVER null.
+/// 2026-05-19): `NativeKind::Null` is the canonical absence-of-value
+/// discriminator; `NativeKind::Bool` slots carry only legitimate `{0, 1}`
+/// bit patterns and are NEVER null. The table's rows preserve both arms
+/// verbatim (`Null` is `KindDiscriminated`, `Bool` is `NotNullable`).
 #[inline]
 fn is_null_kinded(bits: u64, kind: NativeKind) -> bool {
-    match kind {
-        // R5b-2 disposition: Null IS the absence-of-value discriminator.
-        NativeKind::Null => true,
-        NativeKind::String => bits == 0,
-        NativeKind::Ptr(heap_kind) => heap_ptr_is_null(bits, heap_kind),
-        NativeKind::NullableFloat64 => f64::from_bits(bits).is_nan(),
-        NativeKind::NullableInt8
-        | NativeKind::NullableInt16
-        | NativeKind::NullableInt32
-        | NativeKind::NullableInt64
-        | NativeKind::NullableIntSize
-        | NativeKind::NullableUInt8
-        | NativeKind::NullableUInt16
-        | NativeKind::NullableUInt32
-        | NativeKind::NullableUInt64
-        | NativeKind::NullableUIntSize => bits == 0,
-        // Non-nullable scalar kinds are never null. R5b-2 disposition:
-        // Bool slots carry only `{0, 1}` real bool bit patterns —
-        // `false` is NOT null.
-        _ => false,
-    }
+    shape_value::encoding::is_none_bits_pre_adr020(kind, bits)
 }

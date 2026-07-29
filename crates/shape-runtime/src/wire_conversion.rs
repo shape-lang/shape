@@ -27,6 +27,7 @@
 use crate::Context;
 use crate::marshal::MarshalError;
 use arrow_ipc::{reader::FileReader, writer::FileWriter};
+use shape_value::encoding::{CANON_NAN_BITS, NULL_POINTER_BITS};
 use shape_value::heap_value::{HeapValue, OptionData, ResultData};
 use shape_value::{DataTable, HeapKind, KindedSlot, NativeKind, TypedObjectStorage, ValueSlot};
 use shape_wire::{DurationUnit as WireDurationUnit, ValueEnvelope, WireTable, WireValue};
@@ -42,15 +43,20 @@ use std::sync::Arc;
 pub fn slot_to_wire(bits: u64, kind: NativeKind, ctx: &Context) -> WireValue {
     match kind {
         NativeKind::Float64 => WireValue::Number(f64::from_bits(bits)),
+        // Null test from the normative encoding table (ADR-020 §2.1 / #223).
         NativeKind::NullableFloat64 => {
-            let v = f64::from_bits(bits);
-            if v.is_nan() {
+            if shape_value::encoding::is_none_bits_pre_adr020(kind, bits) {
                 WireValue::Null
             } else {
-                WireValue::Number(v)
+                WireValue::Number(f64::from_bits(bits))
             }
         }
         NativeKind::Int64 => WireValue::Integer(bits as i64),
+        // MISMATCH, transcribed not normalized (#223): this arm never
+        // projects `Null`, while the interpreter's null test says a nullable
+        // integer slot with zero bits IS null (`encoding.rs`, the
+        // `NullEncoding::ZeroBits` row). Left as-is here — #225 owns the
+        // sentinel flip that makes both sides agree on `NULL_INT_BITS`.
         NativeKind::NullableInt64 => WireValue::Integer(bits as i64),
         NativeKind::Int8 => WireValue::I8(bits as i8),
         NativeKind::Int16 => WireValue::I16(bits as i16),
@@ -109,7 +115,7 @@ pub fn slot_to_wire(bits: u64, kind: NativeKind, ctx: &Context) -> WireValue {
         // `Arc<T>` pointer — `StringObj` is a manually-allocated `repr(C)`
         // 24-byte carrier per `v2/string_obj.rs`.
         NativeKind::StringV2 => {
-            if bits == 0 {
+            if bits == NULL_POINTER_BITS {
                 return WireValue::Null;
             }
             // SAFETY: per the §2.7.5 amendment construction contract,
@@ -126,7 +132,7 @@ pub fn slot_to_wire(bits: u64, kind: NativeKind, ctx: &Context) -> WireValue {
         // carrier's `value` accessor reading the inline `rust_decimal::Decimal`
         // at offset 8 of the `repr(C)` struct.
         NativeKind::DecimalV2 => {
-            if bits == 0 {
+            if bits == NULL_POINTER_BITS {
                 return WireValue::Null;
             }
             // SAFETY: per the §2.7.5 amendment construction contract,
@@ -144,7 +150,7 @@ pub fn slot_to_wire(bits: u64, kind: NativeKind, ctx: &Context) -> WireValue {
 /// dispatching on the pre-known `HeapKind` rather than probing the
 /// heap object's self-reported `kind()`.
 fn heap_to_wire(bits: u64, hk: HeapKind, ctx: &Context) -> WireValue {
-    if bits == 0 {
+    if bits == NULL_POINTER_BITS {
         return WireValue::Null;
     }
     // Defensive: `HeapKind::Char` is an inline-codepoint label, NOT an
@@ -200,7 +206,7 @@ fn heap_to_wire(bits: u64, hk: HeapKind, ctx: &Context) -> WireValue {
     // body at L270-301 below — schema-driven field projection into
     // `WireValue::Object(map)`.
     if hk == HeapKind::TypedObject {
-        if bits == 0 {
+        if bits == NULL_POINTER_BITS {
             return WireValue::Null;
         }
         // SAFETY: per the `KindedSlot::from_typed_object_raw` /
@@ -295,7 +301,7 @@ fn legacy_option_data_to_wire(o: &OptionData, ctx: &Context) -> WireValue {
 }
 
 fn hashmap_to_wire(bits: u64, ctx: &Context) -> WireValue {
-    if bits == 0 {
+    if bits == NULL_POINTER_BITS {
         return WireValue::Null;
     }
     // SAFETY: `KindedSlot::from_hashmap` stores
@@ -408,7 +414,7 @@ fn v2_typed_array_to_wire(bits: u64, ctx: &Context) -> WireValue {
     };
     use shape_value::v2::{decimal_obj::DecimalObj, string_obj::StringObj};
 
-    if bits == 0 {
+    if bits == NULL_POINTER_BITS {
         return WireValue::Null;
     }
 
@@ -600,7 +606,9 @@ fn typed_object_field_to_wire(
         return WireValue::Null;
     };
     let field_bits = slot.raw();
-    if field_is_heap_like(field_kind) && ((storage.heap_mask >> idx) & 1 == 0 || field_bits == 0) {
+    if field_is_heap_like(field_kind)
+        && ((storage.heap_mask >> idx) & 1 == 0 || field_bits == NULL_POINTER_BITS)
+    {
         return WireValue::Null;
     }
     slot_to_wire(field_bits, field_kind, ctx)
@@ -868,7 +876,11 @@ pub fn wire_to_slot(wire: &WireValue, expected_kind: NativeKind) -> Result<u64, 
         (WireValue::Number(n), NativeKind::Float64) => Ok(f64::to_bits(*n)),
         (WireValue::Integer(i), NativeKind::Int64) => Ok(*i as u64),
         (WireValue::Bool(b), NativeKind::Bool) => Ok(*b as u64),
-        (WireValue::Null, NativeKind::NullableFloat64) => Ok(f64::to_bits(f64::NAN)),
+        // Producer side of the `number?` None encoding. Pre-#225 the
+        // consumer treats ANY NaN as None, so emitting the canonical
+        // quiet NaN is the current behavior; #225 flips this to
+        // `encoding::NULL_NUMBER_BITS` in lockstep with the consumer.
+        (WireValue::Null, NativeKind::NullableFloat64) => Ok(CANON_NAN_BITS),
         (WireValue::Null, NativeKind::Null) => Ok(0),
         (WireValue::String(s), NativeKind::String) => {
             let arc = Arc::new(s.clone());
@@ -1064,7 +1076,7 @@ pub fn slot_extract_content(
     let NativeKind::Ptr(hk) = kind else {
         return (None, None, None);
     };
-    if bits == 0 {
+    if bits == NULL_POINTER_BITS {
         return (None, None, None);
     }
     // SAFETY: `Ptr(HeapKind::*)` contract — bits is a valid typed pointer

@@ -614,51 +614,12 @@ fn char_value(bits: u64, kind: NativeKind) -> Option<char> {
     char::from_u32(bits as u32)
 }
 
-/// Exhaustive HeapKind sink for pointer-null checks.
-#[inline]
-fn heap_ptr_is_null(bits: u64, heap_kind: HeapKind) -> bool {
-    match heap_kind {
-        HeapKind::String
-        | HeapKind::TypedObject
-        | HeapKind::Closure
-        | HeapKind::Decimal
-        | HeapKind::BigInt
-        | HeapKind::DataTable
-        | HeapKind::Future
-        | HeapKind::TaskGroup
-        | HeapKind::TypedArray
-        | HeapKind::Temporal
-        | HeapKind::TableView
-        | HeapKind::Content
-        | HeapKind::Instant
-        | HeapKind::IoHandle
-        | HeapKind::NativeScalar
-        | HeapKind::NativeView
-        | HeapKind::Char
-        | HeapKind::HashMap
-        | HeapKind::FilterExpr
-        | HeapKind::ForeignRef
-        | HeapKind::Reference
-        | HeapKind::SharedCell
-        | HeapKind::HashSet
-        | HeapKind::Iterator
-        | HeapKind::Deque
-        | HeapKind::Channel
-        | HeapKind::PriorityQueue
-        | HeapKind::Range
-        | HeapKind::Result
-        | HeapKind::Option
-        | HeapKind::TraitObject
-        | HeapKind::Mutex
-        | HeapKind::Atomic
-        | HeapKind::Lazy
-        | HeapKind::ModuleFn
-        | HeapKind::Matrix
-        | HeapKind::MatrixSlice => bits == 0,
-    }
-}
-
 /// Test whether a `(bits, kind)` pair encodes the null/unit sentinel.
+///
+/// Delegates to `shape_value::encoding::is_none_bits_pre_adr020`, the single
+/// normative table (ADR-020 §2.1 / #223). Before #223 this file, `logical/`
+/// and `exceptions/` each carried a byte-identical copy of the encoding —
+/// including a 40-arm `heap_ptr_is_null` that said `bits == 0` three times.
 ///
 /// R5b-2-bool-null-sentinel-cluster (ADR-006 §2.7 + §2.7.5 + §2.7.7/Q9,
 /// 2026-05-19): pre-disposition `(0u64, NativeKind::Bool)` was the
@@ -670,32 +631,11 @@ fn heap_ptr_is_null(bits: u64, heap_kind: HeapKind) -> bool {
 /// JIT path. Post-disposition: `NativeKind::Bool` slots NEVER carry the
 /// null sentinel — kind IS the discriminator per §2.7.7/Q9. Null is
 /// pushed with `NativeKind::Null` discriminator at `PushNull` +
-/// `Constant::Null` + `Constant::Unit` producer sites.
+/// `Constant::Null` + `Constant::Unit` producer sites. The table preserves
+/// that arm verbatim (`Bool` is `NotNullable`).
 #[inline]
 fn is_null_kinded(bits: u64, kind: NativeKind) -> bool {
-    match kind {
-        // R5b-2 disposition: Null IS the absence-of-value discriminator;
-        // kind alone is decisive, bits unused.
-        NativeKind::Null => true,
-        // R5b-2 disposition: Bool slots carry only `{0, 1}` bit
-        // patterns for real bool values — `false` is NOT null.
-        NativeKind::Bool => false,
-        NativeKind::String => bits == 0,
-        NativeKind::Ptr(heap_kind) => heap_ptr_is_null(bits, heap_kind),
-        NativeKind::NullableFloat64 => f64::from_bits(bits).is_nan(),
-        NativeKind::NullableInt8
-        | NativeKind::NullableInt16
-        | NativeKind::NullableInt32
-        | NativeKind::NullableInt64
-        | NativeKind::NullableIntSize
-        | NativeKind::NullableUInt8
-        | NativeKind::NullableUInt16
-        | NativeKind::NullableUInt32
-        | NativeKind::NullableUInt64
-        | NativeKind::NullableUIntSize => bits == 0,
-        // Non-nullable scalar kinds are never null.
-        _ => false,
-    }
+    shape_value::encoding::is_none_bits_pre_adr020(kind, bits)
 }
 
 /// `&'static str` description of a `NativeKind` for `VMError::TypeError`.
