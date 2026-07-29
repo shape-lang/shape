@@ -170,15 +170,20 @@ impl FromSlot for f64 {
     }
 }
 
-// NaN-sentinel discrimination matches NullableFloat64's documented contract
-// (native_kind.rs:36). Reusing an already-declared sentinel kind is consumer-side
-// adoption, not a new sentinel introduction.
+// NaN-sentinel discrimination reads from the normative encoding table
+// (`shape_value::encoding`, ADR-020 §2.1 / #223) rather than restating it.
+// The table's `NullableFloat64` row is `AnyNaN` pre-#225 and narrows to the
+// reserved `NULL_NUMBER_BITS` sentinel when #225 lands, at which point this
+// call site picks the change up for free.
 impl FromSlot for Option<f64> {
     const NATIVE_KIND: NativeKind = NativeKind::NullableFloat64;
     #[inline]
     fn from_slot(bits: u64) -> Self {
-        let v = f64::from_bits(bits);
-        if v.is_nan() { None } else { Some(v) }
+        if shape_value::encoding::is_none_bits_pre_adr020(NativeKind::NullableFloat64, bits) {
+            None
+        } else {
+            Some(f64::from_bits(bits))
+        }
     }
 
     /// Nullable `number?` class (ADR-006 §4.2.2a): a stamped

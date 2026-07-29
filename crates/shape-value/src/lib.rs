@@ -17,6 +17,9 @@ pub mod aligned_vec;
 pub mod content;
 pub mod context;
 pub mod datatable;
+/// The single normative `NativeKind` → bit-encoding table (ADR-020 §2.1).
+/// Owns the null sentinels; no other crate may define a private encoding.
+pub mod encoding;
 /// The opaque foreign-reference carrier (ADR-019 §3 / #200; ADR-006 §2.7.32).
 pub mod foreign_ref;
 /// GC cycle-collection metadata + accessors (Phase 0). Gated behind the

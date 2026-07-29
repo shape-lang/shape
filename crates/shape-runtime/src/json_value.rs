@@ -763,12 +763,12 @@ pub fn slot_to_json_value(
         NativeKind::Bool => Ok(JsonValue::Bool(bits != 0)),
         NativeKind::Float64 => Ok(JsonValue::Number(f64::from_bits(bits))),
         NativeKind::Float32 => Ok(JsonValue::Number(f32::from_bits(bits as u32) as f64)),
+        // Null test from the normative encoding table (ADR-020 §2.1 / #223).
         NativeKind::NullableFloat64 => {
-            let v = f64::from_bits(bits);
-            if v.is_nan() {
+            if shape_value::encoding::is_none_bits_pre_adr020(slot.kind(), bits) {
                 Ok(JsonValue::Null)
             } else {
-                Ok(JsonValue::Number(v))
+                Ok(JsonValue::Number(f64::from_bits(bits)))
             }
         }
         NativeKind::Char => {

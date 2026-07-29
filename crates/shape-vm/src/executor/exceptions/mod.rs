@@ -1157,50 +1157,6 @@ fn read_option<'a>(
     result_option_carrier::read_option(&vm.builtin_schemas, slot)
 }
 
-/// Exhaustive HeapKind sink for pointer-null checks.
-#[inline]
-fn heap_ptr_is_null(bits: u64, heap_kind: HeapKind) -> bool {
-    match heap_kind {
-        HeapKind::String
-        | HeapKind::TypedObject
-        | HeapKind::Closure
-        | HeapKind::Decimal
-        | HeapKind::BigInt
-        | HeapKind::DataTable
-        | HeapKind::Future
-        | HeapKind::TaskGroup
-        | HeapKind::TypedArray
-        | HeapKind::Temporal
-        | HeapKind::TableView
-        | HeapKind::Content
-        | HeapKind::Instant
-        | HeapKind::IoHandle
-        | HeapKind::NativeScalar
-        | HeapKind::NativeView
-        | HeapKind::Char
-        | HeapKind::HashMap
-        | HeapKind::FilterExpr
-        | HeapKind::ForeignRef
-        | HeapKind::Reference
-        | HeapKind::SharedCell
-        | HeapKind::HashSet
-        | HeapKind::Iterator
-        | HeapKind::Deque
-        | HeapKind::Channel
-        | HeapKind::PriorityQueue
-        | HeapKind::Range
-        | HeapKind::Result
-        | HeapKind::Option
-        | HeapKind::TraitObject
-        | HeapKind::Mutex
-        | HeapKind::Atomic
-        | HeapKind::Lazy
-        | HeapKind::ModuleFn
-        | HeapKind::Matrix
-        | HeapKind::MatrixSlice => bits == 0,
-    }
-}
-
 /// Whether a kinded carrier represents the `null` sentinel — used by
 /// `op_unwrap_option`, `op_try_unwrap`, and `op_error_context` to
 /// recognise the legacy null-coded Option half
@@ -1217,33 +1173,15 @@ fn heap_ptr_is_null(bits: u64, heap_kind: HeapKind) -> bool {
 /// which the pre-fix arm-set did not classify as null and so fell
 /// through to the bare-value branch.
 ///
-/// Mirrors `comparison/mod.rs::is_null_kinded` exactly — `NativeKind::Null`
-/// is decisive (bits unused per R5b-2); nullable kinds qualify on
-/// zero-bits / NaN-bits; non-nullable scalars (including `0i64` and
-/// `false`) are never null.
+/// Delegates to `shape_value::encoding::is_none_bits_pre_adr020`, the single
+/// normative table (ADR-020 §2.1 / #223) — `NativeKind::Null` is decisive
+/// (bits unused per R5b-2); nullable kinds qualify on zero-bits / NaN-bits;
+/// non-nullable scalars (including `0i64` and `false`) are never null.
+/// Before #223 this was a byte-identical copy of
+/// `comparison/mod.rs::is_null_kinded`.
 #[inline]
 fn is_null_sentinel(slot: &KindedSlot) -> bool {
-    let bits = slot.slot.raw();
-    let kind = slot.kind;
-    match kind {
-        // R5b-2 disposition: Null IS the absence-of-value discriminator;
-        // kind alone is decisive, bits unused.
-        NativeKind::Null => true,
-        NativeKind::String => bits == 0,
-        NativeKind::Ptr(heap_kind) => heap_ptr_is_null(bits, heap_kind),
-        NativeKind::NullableFloat64 => f64::from_bits(bits).is_nan(),
-        NativeKind::NullableInt8
-        | NativeKind::NullableInt16
-        | NativeKind::NullableInt32
-        | NativeKind::NullableInt64
-        | NativeKind::NullableIntSize
-        | NativeKind::NullableUInt8
-        | NativeKind::NullableUInt16
-        | NativeKind::NullableUInt32
-        | NativeKind::NullableUInt64
-        | NativeKind::NullableUIntSize => bits == 0,
-        _ => false,
-    }
+    shape_value::encoding::is_none_bits_pre_adr020(slot.kind, slot.slot.raw())
 }
 
 /// Match a kinded carrier against a TypeAnnotation. Covers the common
