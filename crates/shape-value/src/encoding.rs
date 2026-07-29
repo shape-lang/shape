@@ -451,26 +451,37 @@ pub const fn encoding_of(kind: NativeKind) -> Encoding {
             provenance: "shape-vm/src/executor/comparison/mod.rs:682 (String => bits == 0)",
         },
         // v2-raw `repr(C)` carrier, NOT an Arc<String> (ADR-006 §2.7.5, H-c).
-        // MISMATCH transcribed, not normalized (#223): the interpreter's null
-        // test has no StringV2 arm and falls through to `false` (never null),
-        // while `wire_conversion.rs:112` projects bits == 0 to WireValue::Null.
+        //
+        // #223 transcribed a MISMATCH here: the interpreter's null test had no
+        // StringV2 arm and fell through to `_ => false` (never null), while
+        // `wire_conversion.rs:118` already projected `bits == 0` to
+        // `WireValue::Null`. The same value was null on the wire and non-null
+        // to `==`. #225 gives it ONE answer, and the table is where that answer
+        // lives: a v2-raw carrier is a pointer, so it takes the same
+        // null-pointer niche as every other pointer row.
+        //
+        // Safe by construction on the comparison path: `str_ref`
+        // (`comparison/mod.rs:589`) already returns `None` for `bits == 0`
+        // before any deref, so recognizing null here cannot introduce one.
         NativeKind::StringV2 => Encoding {
             kind,
             payload: Payload::Pointer(PointerOwner::V2StringObj),
             null_adr020: NullEncoding::NullPointer,
-            null_pre_adr020: NullEncoding::NotNullable,
+            null_pre_adr020: NullEncoding::NullPointer,
             adr_clause: "ADR-020 §3.1 clause 1 bullet 1 (heap T? = null pointer)",
-            provenance: "shape-vm/src/executor/comparison/mod.rs:700 (_ => false) \
-                         vs shape-runtime/src/wire_conversion.rs:112 (bits == 0 => Null)",
+            provenance: "#225: normalized to the null-pointer niche; was \
+                         comparison/mod.rs `_ => false` vs \
+                         wire_conversion.rs:118 `bits == 0 => Null`",
         },
-        // Same shape and same transcribed mismatch as StringV2.
+        // Same carrier shape, same resolved mismatch as StringV2.
         NativeKind::DecimalV2 => Encoding {
             kind,
             payload: Payload::Pointer(PointerOwner::V2DecimalObj),
             null_adr020: NullEncoding::NullPointer,
-            null_pre_adr020: NullEncoding::NotNullable,
+            null_pre_adr020: NullEncoding::NullPointer,
             adr_clause: "ADR-020 §3.1 clause 1 bullet 1 (heap T? = null pointer)",
-            provenance: "shape-vm/src/executor/comparison/mod.rs:700 (_ => false)",
+            provenance: "#225: normalized to the null-pointer niche; was \
+                         comparison/mod.rs `_ => false`",
         },
         // Arc<HeapValue> raw pointer; `hk` is the HeapValue discriminant and
         // the sole discriminator for the pointee (ADR-005 §1). The null test
@@ -752,9 +763,11 @@ mod tests {
     #[test]
     fn pre_adr020_delta_is_the_225_work_list() {
         let delta = pre_adr020_delta();
-        // Exactly the nullable scalars plus the two v2-raw pointer carriers
-        // whose interpreter arm is missing. Everything else is already
-        // normative — no silent divergence hides in the table.
+        // The remaining nullable scalars. The two v2-raw pointer carriers
+        // (`StringV2` / `DecimalV2`) left this list in #225 slice (a) — they
+        // now take the same null-pointer niche as every other pointer row, so
+        // the interpreter and the wire projection give one answer. Everything
+        // else is already normative — no silent divergence hides in the table.
         let expected = [
             NativeKind::NullableFloat64,
             NativeKind::NullableInt8,
@@ -767,13 +780,34 @@ mod tests {
             NativeKind::NullableUInt64,
             NativeKind::NullableIntSize,
             NativeKind::NullableUIntSize,
-            NativeKind::StringV2,
-            NativeKind::DecimalV2,
         ];
         for kind in expected {
             assert!(delta.contains(&kind), "{kind:?} missing from delta");
         }
         assert_eq!(delta.len(), expected.len(), "delta = {delta:?}");
+    }
+
+    #[test]
+    fn v2_raw_pointer_carriers_are_null_at_zero_in_both_columns() {
+        // #225 slice (a). The defect this pins was a DISAGREEMENT, not a
+        // missing feature: `wire_conversion.rs:118` projected `bits == 0` to
+        // `WireValue::Null` while the interpreter's null test fell through to
+        // `_ => false`, so one value was null on the wire and non-null to
+        // `==`. Asserting both columns is the point — a future edit that
+        // re-splits them fails here rather than in a differential.
+        for kind in [NativeKind::StringV2, NativeKind::DecimalV2] {
+            let e = encoding_of(kind);
+            assert_eq!(e.null_adr020, NullEncoding::NullPointer, "{kind:?}");
+            assert_eq!(e.null_pre_adr020, NullEncoding::NullPointer, "{kind:?}");
+            assert!(
+                is_none_bits_pre_adr020(kind, NULL_POINTER_BITS),
+                "{kind:?}: a zero v2-raw carrier pointer must read as None"
+            );
+            assert!(
+                !is_none_bits_pre_adr020(kind, 0x1000),
+                "{kind:?}: a live carrier pointer must not read as None"
+            );
+        }
     }
 
     #[test]
