@@ -9,8 +9,8 @@
   },
   "counts": {
     "pages": 102,
-    "sections": 1385,
-    "fences_all_languages": 993,
+    "sections": 1387,
+    "fences_all_languages": 996,
     "fences_by_language": {
       "(none)": 54,
       "bash": 69,
@@ -20,14 +20,14 @@
       "python": 1,
       "rust": 37,
       "sh": 2,
-      "shape": 774,
+      "shape": 777,
       "text": 17,
       "toml": 19,
       "typescript": 1,
       "vim": 3
     },
-    "shape_fences": 774,
-    "shape_runnable_gated_candidates": 387,
+    "shape_fences": 777,
+    "shape_runnable_gated_candidates": 390,
     "shape_illustrative_only_candidates": 387,
     "shape_deferred": 0,
     "shape_with_expected_value": 21,
@@ -37,9 +37,9 @@
   },
   "executed_subset_note": "shape_runnable_gated_candidates is the set book/book-site/scripts/run-book-truth-gate.mjs actually executes (it keeps runnable === true && !deferred). It is a subset of shape_fences, which is itself a subset of fences_all_languages. ADR-016 §6 rejects a percentage over a curated subset, so all three are reported and none is called the universe on its own.",
   "marker_counts": {
-    "missing-stable-identity": 774,
+    "missing-stable-identity": 777,
     "expectation-is-a-rendered-substring": 10,
-    "no-declared-expected-value": 356,
+    "no-declared-expected-value": 359,
     "no-illustrative-reason": 387,
     "no-illustrative-citation": 387,
     "no-owning-section": 11
@@ -73,8 +73,8 @@
       "owner_hint": "#116 plus the R15 / PERF-CLOSURE-NATIVE witness lane"
     }
   ],
-  "sections_sha256": "3870d7dd72642fd24325e16340dfca6e8b826d6033009567e0f7e4ab3b1a0e42",
-  "fences_sha256": "8c37ed98521248b1c04b48450b2c8ba89d2dba774e3fdb978379fdbac9a78baf",
+  "sections_sha256": "23b77e33b249cd4b2921349a0cc94b0707f2e300edb4115a5663e24b4464eac4",
+  "fences_sha256": "f9b29a1fa7cd7fa96cb881baeaa5e4f6c0f916bb29df71a7bb8013762793d631",
   "sections": [
     {
       "page": "advanced/annotations.mdx",
@@ -2684,6 +2684,20 @@
       "page": "fundamentals/builtin-types.mdx",
       "anchor": "width-specific-integers",
       "title": "Width-Specific Integers",
+      "depth": 3,
+      "markers": []
+    },
+    {
+      "page": "fundamentals/builtin-types.mdx",
+      "anchor": "number-is-ieee-754",
+      "title": "number is IEEE-754",
+      "depth": 3,
+      "markers": []
+    },
+    {
+      "page": "fundamentals/builtin-types.mdx",
+      "anchor": "nan-in-an-optionnumber",
+      "title": "NaN in an Option<number>",
       "depth": 3,
       "markers": []
     },
@@ -14569,6 +14583,72 @@
         "no-declared-expected-value",
         "missing-stable-identity",
         "no-owning-section"
+      ]
+    },
+    {
+      "harness_id": "A__fundamentals__builtin-types__2__L74.shape",
+      "page": "fundamentals/builtin-types.mdx",
+      "slice": "A",
+      "fence_position": 2,
+      "language": "shape",
+      "declared_id": null,
+      "section_anchor": "number-is-ieee-754",
+      "section_title": "number is IEEE-754",
+      "classification_candidate": "runnable-gated",
+      "runnable_flag": null,
+      "declared_modes": [
+        "vm",
+        "jit"
+      ],
+      "expectation_kind": "exit-success-and-vm-jit-equality",
+      "body_lines": 6,
+      "markers": [
+        "no-declared-expected-value",
+        "missing-stable-identity"
+      ]
+    },
+    {
+      "harness_id": "A__fundamentals__builtin-types__3__L87.shape",
+      "page": "fundamentals/builtin-types.mdx",
+      "slice": "A",
+      "fence_position": 3,
+      "language": "shape",
+      "declared_id": null,
+      "section_anchor": "number-is-ieee-754",
+      "section_title": "number is IEEE-754",
+      "classification_candidate": "runnable-gated",
+      "runnable_flag": null,
+      "declared_modes": [
+        "vm",
+        "jit"
+      ],
+      "expectation_kind": "exit-success-and-vm-jit-equality",
+      "body_lines": 9,
+      "markers": [
+        "no-declared-expected-value",
+        "missing-stable-identity"
+      ]
+    },
+    {
+      "harness_id": "A__fundamentals__builtin-types__4__L105.shape",
+      "page": "fundamentals/builtin-types.mdx",
+      "slice": "A",
+      "fence_position": 4,
+      "language": "shape",
+      "declared_id": null,
+      "section_anchor": "nan-in-an-optionnumber",
+      "section_title": "NaN in an Option<number>",
+      "classification_candidate": "runnable-gated",
+      "runnable_flag": null,
+      "declared_modes": [
+        "vm",
+        "jit"
+      ],
+      "expectation_kind": "exit-success-and-vm-jit-equality",
+      "body_lines": 5,
+      "markers": [
+        "no-declared-expected-value",
+        "missing-stable-identity"
       ]
     },
     {
