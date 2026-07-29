@@ -287,11 +287,11 @@ pub const fn box_number(n: f64) -> u64 {
     f64::to_bits(n)
 }
 
-/// Box a boolean into a NaN-boxed u64 (shared scheme).
-#[inline]
-pub const fn box_bool(b: bool) -> u64 {
-    if b { TAG_BOOL_TRUE } else { TAG_BOOL_FALSE }
-}
+// `box_bool` was here — deleted per ADR-020 §3 clause 2 (#226). A bool is
+// bare 0/1 in an integer slot, so there is nothing to box: the encoding is
+// `shape_value::encoding::{BOOL_FALSE_BITS, BOOL_TRUE_BITS}` and the JIT
+// produces it directly (a Cranelift `icmp` result, zero-extended). The
+// helper had no callers outside its own test.
 
 /// Box an inline function reference (shared TAG_FUNCTION, payload = function_id).
 #[inline]
@@ -609,11 +609,10 @@ mod tests {
         assert_eq!(unbox_number(boxed), n);
     }
 
-    #[test]
-    fn test_box_unbox_bool() {
-        assert_eq!(box_bool(true), TAG_BOOL_TRUE);
-        assert_eq!(box_bool(false), TAG_BOOL_FALSE);
-    }
+    // `test_box_unbox_bool` was here — deleted with `box_bool` (ADR-020
+    // §3 clause 2 / #226). The bool encoding is asserted where it now
+    // lives: `shape_value::encoding` (the normative table) and the
+    // `SYN__bool-*` corpus fixtures (both tiers, end to end).
 
     #[test]
     fn test_box_function() {

@@ -284,42 +284,12 @@ pub extern "C" fn jit_load_col_i64(ctx: *mut JITContext, col_id: u32, row_ref: u
     }
 }
 
-/// Load a boolean value from a column (stored as f64: 0.0=false, else true).
-///
-/// Returns TAG_BOOL_TRUE or TAG_BOOL_FALSE.
-pub extern "C" fn jit_load_col_bool(ctx: *mut JITContext, col_id: u32, row_ref: u64) -> u64 {
-    unsafe {
-        if ctx.is_null() {
-            return TAG_NULL;
-        }
-        let ctx_ref = &*ctx;
-
-        let row_idx = if is_data_row(row_ref) {
-            unbox_data_row(row_ref)
-        } else {
-            ctx_ref.current_row
-        };
-
-        if row_idx >= ctx_ref.row_count || col_id as usize >= ctx_ref.column_count {
-            return TAG_NULL;
-        }
-        if ctx_ref.column_ptrs.is_null() {
-            return TAG_NULL;
-        }
-
-        let col_ptr = *ctx_ref.column_ptrs.add(col_id as usize);
-        if col_ptr.is_null() {
-            return TAG_NULL;
-        }
-
-        let value = *col_ptr.add(row_idx);
-        if value != 0.0 {
-            TAG_BOOL_TRUE
-        } else {
-            TAG_BOOL_FALSE
-        }
-    }
-}
+// `jit_load_col_bool` was here — deleted per ADR-020 §3 clause 2 (#226).
+// It returned a `TAG_BOOL_*` word and was unreachable: never registered as
+// a Cranelift symbol, absent from the `build_ffi_refs` `r!()` set, and with
+// no Rust caller. Its siblings that ARE reachable (`jit_load_col_*`) return
+// their values through kind-typed channels; a bool column would take the
+// same shape, loading bare 0/1.
 
 /// Load a string value from a column.
 ///

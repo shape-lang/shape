@@ -1,0 +1,60 @@
+// ADR-020 §3 clause 2 (#226) — the discrimination case the bare encoding
+// makes load-bearing.
+//
+// Once `true` is the bit pattern `1`, a bool and the integer `1` are
+// INDISTINGUISHABLE from their bits. Nothing may recover "this is a bool"
+// by inspecting a value: only the static kind (opcode, signature, slot-kind
+// track) can say so. This program puts a bool and an int `1` through the
+// same shapes — return position, parameter position, local, print, and
+// string interpolation — so that any site which tries to classify by bits
+// prints `1` where `true` belongs (or `true` where `1` belongs) in exactly
+// one tier.
+//
+// The kind-static side is what this fixture pins. The kind-BLIND JIT FFI
+// dialect (`jit_typeof` / `jit_to_string` and siblings, which still probe
+// bits) is #239's territory and is unreachable from JIT-emitted code at
+// this commit — no `r!()` entry in `build_ffi_refs` declares it.
+fn yes() -> bool { return true }
+fn no() -> bool { return false }
+fn one() -> int { return 1 }
+fn zero() -> int { return 0 }
+
+fn show_bool(b: bool) { print(b) }
+fn show_int(x: int) { print(x) }
+
+// Same shape, different static kind: the pair must print differently even
+// though the payloads are identical bit patterns.
+print(yes())
+print(one())
+print(no())
+print(zero())
+
+show_bool(yes())
+show_int(one())
+show_bool(no())
+show_int(zero())
+
+let b = yes()
+let i = one()
+print(b)
+print(i)
+print(f"{b}|{i}")
+print(f"{no()}|{zero()}")
+
+// A bool and an int flowing through the same arithmetic-adjacent context:
+// `acc` stays an int, the flags stay bools, and neither adopts the other's
+// rendering.
+fn count_true(n: int) -> int {
+    let mut acc = 0
+    let mut i = 0
+    while i < n {
+        let flag = i > 1
+        if flag {
+            acc = acc + 1
+        }
+        i = i + 1
+    }
+    return acc
+}
+print(count_true(5))
+print(count_true(5) > 2)

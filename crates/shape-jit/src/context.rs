@@ -1024,11 +1024,16 @@ mod tests {
     #[test]
     fn test_closure_dynamic_captures_5() {
         // Typical case: 5 captures
+        // Slot 3 is a captured `bool`: bare `1` (ADR-020 §3 clause 2), not
+        // a boolean tag. What this test covers is that the capture array
+        // round-trips 64-bit payloads verbatim, which is exactly what the
+        // bare encoding needs — the capture's kind lives in the closure's
+        // static capture-kind track, never in its bits.
         let captures = [
             box_number(1.0),
             box_number(2.0),
             box_number(3.0),
-            TAG_BOOL_TRUE,
+            shape_value::encoding::BOOL_TRUE_BITS,
             TAG_NULL,
         ];
         let closure = JITClosure::new(7, &captures);
@@ -1039,7 +1044,10 @@ mod tests {
             assert_eq!(unbox_number(closure.get_capture(0)), 1.0);
             assert_eq!(unbox_number(closure.get_capture(1)), 2.0);
             assert_eq!(unbox_number(closure.get_capture(2)), 3.0);
-            assert_eq!(closure.get_capture(3), TAG_BOOL_TRUE);
+            assert_eq!(
+                closure.get_capture(3),
+                shape_value::encoding::BOOL_TRUE_BITS
+            );
             assert_eq!(closure.get_capture(4), TAG_NULL);
         }
     }
@@ -1112,7 +1120,8 @@ mod tests {
     #[test]
     fn test_closure_jit_box_roundtrip_via_heap_kind_prefix() {
         // Verify JITClosure survives jit_box/jit_unbox roundtrip
-        let captures = [box_number(42.0), TAG_BOOL_FALSE];
+        // Capture 1 is a `bool`: bare `0` per ADR-020 §3 clause 2.
+        let captures = [box_number(42.0), shape_value::encoding::BOOL_FALSE_BITS];
         let closure = JITClosure::new(10, &captures);
         let bits = jit_box(HK_CLOSURE, *closure);
 
@@ -1135,7 +1144,10 @@ mod tests {
         assert_eq!(recovered.captures_count, 2);
         unsafe {
             assert_eq!(unbox_number(recovered.get_capture(0)), 42.0);
-            assert_eq!(recovered.get_capture(1), TAG_BOOL_FALSE);
+            assert_eq!(
+                recovered.get_capture(1),
+                shape_value::encoding::BOOL_FALSE_BITS
+            );
         }
 
         // Clean up the JitAlloc allocation directly. The deleted

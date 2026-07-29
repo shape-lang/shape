@@ -66,33 +66,18 @@ pub extern "C" fn jit_make_err(inner_bits: u64) -> u64 {
 // ============================================================================
 // Result Type Checking
 // ============================================================================
-
-/// Check if a value is Ok (returns TAG_BOOL_TRUE or TAG_BOOL_FALSE)
-pub extern "C" fn jit_is_ok(bits: u64) -> u64 {
-    if is_ok_tag(bits) {
-        TAG_BOOL_TRUE
-    } else {
-        TAG_BOOL_FALSE
-    }
-}
-
-/// Check if a value is Err (returns TAG_BOOL_TRUE or TAG_BOOL_FALSE)
-pub extern "C" fn jit_is_err(bits: u64) -> u64 {
-    if is_err_tag(bits) {
-        TAG_BOOL_TRUE
-    } else {
-        TAG_BOOL_FALSE
-    }
-}
-
-/// Check if a value is any Result type (Ok or Err)
-pub extern "C" fn jit_is_result(bits: u64) -> u64 {
-    if is_result_tag(bits) {
-        TAG_BOOL_TRUE
-    } else {
-        TAG_BOOL_FALSE
-    }
-}
+//
+// ADR-020 §3 clause 2 (#226): `jit_is_ok` / `jit_is_err` / `jit_is_result`
+// were deleted here, and `jit_is_some` / `jit_is_none` below. All five were
+// `(u64) -> u64` helpers returning a `TAG_BOOL_*` word, and all five were
+// unreachable: no JIT-emitted code could call them (they are absent from
+// both `ffi_symbols/` registration and the `build_ffi_refs` `r!()` set that
+// is the complete FFI surface reachable from Cranelift-emitted code), and no
+// Rust caller existed outside their own tests. The reachable equivalents are
+// the kind-typed `jit_arc_result_is_ok` / `jit_arc_result_is_err` /
+// `jit_arc_option_is_some` / `jit_arc_option_is_none`, which return bare
+// 0/1. Deleting rather than converting: a dead helper's `TAG_BOOL_*` word
+// has no consumer to keep in step, and greenfield keeps no compat surface.
 
 // ============================================================================
 // Result Type Unwrapping
@@ -172,23 +157,8 @@ pub extern "C" fn jit_make_some(inner_bits: u64) -> u64 {
     box_some(inner_bits)
 }
 
-/// Check if a value is Some (returns TAG_BOOL_TRUE or TAG_BOOL_FALSE)
-pub extern "C" fn jit_is_some(bits: u64) -> u64 {
-    if is_some_tag(bits) {
-        TAG_BOOL_TRUE
-    } else {
-        TAG_BOOL_FALSE
-    }
-}
-
-/// Check if a value is None (returns TAG_BOOL_TRUE or TAG_BOOL_FALSE)
-pub extern "C" fn jit_is_none(bits: u64) -> u64 {
-    if is_none_tag(bits) {
-        TAG_BOOL_TRUE
-    } else {
-        TAG_BOOL_FALSE
-    }
-}
+// `jit_is_some` / `jit_is_none` deleted per ADR-020 §3 clause 2 (#226) —
+// see the Result Type Checking block above for the reachability evidence.
 
 /// Unwrap a Some value, returning the inner value.
 /// Consumes the Some wrapper (frees the wrapper, caller owns inner).
@@ -476,21 +446,10 @@ mod tests {
         assert_eq!(unbox_number(result), 999.0);
     }
 
-    #[test]
-    fn test_option_none() {
-        // TAG_NULL represents None
-        assert_eq!(jit_is_none(TAG_NULL), TAG_BOOL_TRUE);
-        assert_eq!(jit_is_some(TAG_NULL), TAG_BOOL_FALSE);
-    }
-
-    #[test]
-    fn test_non_result_values() {
-        // Regular numbers should not be results
-        let num = box_number(42.0);
-        assert_eq!(jit_is_result(num), TAG_BOOL_FALSE);
-        assert_eq!(jit_is_ok(num), TAG_BOOL_FALSE);
-        assert_eq!(jit_is_err(num), TAG_BOOL_FALSE);
-    }
+    // `test_option_none` and `test_non_result_values` were here — deleted
+    // with the five `jit_is_*` helpers they were the only callers of
+    // (ADR-020 §3 clause 2 / #226). Both asserted only that a dead helper
+    // returned a `TAG_BOOL_*` word; neither covered a reachable path.
 
     // `test_result_inner` was here — DELETED per the block above (same
     // production-code consumer migration gap: `jit_result_inner` gates on
