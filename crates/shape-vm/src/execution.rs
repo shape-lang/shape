@@ -1117,7 +1117,7 @@ fn bytecode_function_returns_option(bytecode: &BytecodeProgram, name: &str) -> b
         .find(|func| func.name == name)
         .and_then(|func| func.frame_descriptor.as_ref())
         .is_some_and(|frame| {
-            frame.effective_return_wrapper() == crate::type_tracking::FrameReturnWrapper::Option
+            frame.return_wrapper == crate::type_tracking::FrameReturnWrapper::Option
         })
 }
 
@@ -1173,9 +1173,8 @@ mod tests {
     }
 
     fn option_returning_function(name: &str) -> Function {
-        let mut frame = FrameDescriptor::new();
+        let mut frame = FrameDescriptor::new(FrameReturnWrapper::Option);
         frame.return_kind = Some(NativeKind::Ptr(HeapKind::TypedObject));
-        frame.return_wrapper = FrameReturnWrapper::Option;
         Function {
             name: name.to_string(),
             arity: 0,

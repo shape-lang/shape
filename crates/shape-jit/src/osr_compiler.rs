@@ -153,13 +153,17 @@ fn is_osr_supported_opcode(opcode: OpCode, operand: &Option<Operand>) -> bool {
 /// * `function` - The function containing the target loop.
 /// * `instructions` - The full instruction stream of the function.
 /// * `loop_info` - Analysis results for the target loop (from `analyze_loops`).
-/// * `frame_descriptor` - Typed frame layout for slot marshaling.
+/// * `frame_slots` - Proven per-slot `NativeKind`s for slot marshaling
+///   (the enclosing function's `FrameDescriptor::slots`, or empty when it
+///   carries no descriptor). #233: OSR consumes only the slot kinds, so it
+///   takes the slice rather than a synthesized descriptor whose return
+///   metadata would be fabricated.
 pub fn compile_osr_loop(
     jit: &mut crate::compiler::JITCompiler,
     function: &shape_vm::bytecode::Function,
     instructions: &[Instruction],
     loop_info: &LoopInfo,
-    frame_descriptor: &FrameDescriptor,
+    frame_slots: &[NativeKind],
 ) -> Result<OsrCompilationResult, String> {
     // Validate the loop bounds are within the instruction stream.
     if loop_info.header_idx >= instructions.len() {
@@ -215,8 +219,7 @@ pub fn compile_osr_loop(
     let local_kinds: Vec<NativeKind> = live_locals
         .iter()
         .map(|&slot| {
-            frame_descriptor
-                .slots
+            frame_slots
                 .get(slot as usize)
                 .copied()
                 .unwrap_or(NativeKind::Int64)

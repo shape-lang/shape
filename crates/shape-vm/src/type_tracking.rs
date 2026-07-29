@@ -116,12 +116,59 @@ pub fn native_kind_from_storage_type(st: &StorageType) -> Option<NativeKind> {
 /// while `return_wrapper` tells the `?` operator whether a `None`
 /// early-return should be propagated as `None` or lifted into
 /// `Err(AnyError { code: "OPTION_NONE", ... })`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+///
+/// # No runtime inference (#233)
+///
+/// `Plain`, `Option` and `Result` are POSITIVE facts about the function's
+/// static return type. Nothing re-derives them at runtime: the deleted
+/// `effective_return_wrapper()` used to read an unstamped descriptor's
+/// `return_kind = Ptr(Option/Result)` back as wrapper semantics, and the
+/// deleted `abi_return_kind()` normalized that overload the other way.
+/// Both consumers now ask a positive question —
+/// `propagate_none_early_return` (`executor/exceptions/mod.rs`) matches
+/// `Some(Result)`, `bytecode_function_returns_option` (`execution.rs`)
+/// matches `Option` — so no consumer branches on an absence.
+///
+/// `Unknown` is the RESIDUAL of #233, not a supported state. It has no
+/// `#[default]` and no `#[serde(default)]` on the field that carries it,
+/// and it is stamped at exactly ONE site: the descriptor builder in
+/// `compiler/helpers.rs` when no classification source resolved the
+/// function's return type. Deleting the variant outright is blocked on
+/// four producer classes whose static return type never reaches that
+/// builder (measured 2026-07-29 on `cargo test -p shape-vm --lib`, 338
+/// tests):
+///
+///   1. Generic trait-impl methods (130 hits, e.g.
+///      `Into::int::number::into` in the prelude). `desugar_impl_method`
+///      (`compiler/statements.rs`) backfills the trait's declared return
+///      type, but does NOT substitute the impl's trait arguments, so the
+///      annotation arrives as the trait's type PARAMETER (`Target`),
+///      which no resolver can reduce. A `Target` bound to `Option<T>` in
+///      some impl is exactly why the head spelling cannot be read as
+///      `Plain`.
+///   2. Closures (72 hits, `__closure_N`). `compile_closure`'s
+///      `proto_def` (`compiler/expressions/closures.rs`) is built with
+///      `return_type: None` — a closure literal has no declared return
+///      type and the inferred one is not threaded to the builder.
+///   3. Compiler-generated functions (~50 hits: `\u{1}hygienic:…`,
+///      `__w27_implicit_*`, `__w24_method_*`) whose synthesized headers
+///      carry no return annotation.
+///   4. Unannotated `impl Drop` / plain methods (`Conn::drop`,
+///      `X::greet`, …) that resolve through neither source.
+///
+/// Each is a compiler wiring gap — the static type EXISTS in the source
+/// (trait signature, impl arguments, inferred closure type, generator
+/// intent) and simply does not reach `FrameDescriptor` construction.
+/// Closing them is the prerequisite for deleting this variant; see #233
+/// and the #227 (REP-FN) return-metadata rework.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum FrameReturnWrapper {
-    /// Missing metadata. New compiler producers should stamp `Plain`,
-    /// `Option`, or `Result`; this variant exists for old serialized
-    /// descriptors and partially migrated producers.
-    #[default]
+    /// #233 RESIDUAL — no classification source resolved this frame's
+    /// return type. Stamped only by the descriptor builder in
+    /// `compiler/helpers.rs`; never fabricated at runtime, never
+    /// defaulted, and never re-derived from `return_kind`. Consumers
+    /// must ask positive questions (`== Option`, `== Result`) so this
+    /// variant can only ever fall out of a non-match.
     Unknown,
     /// The frame does not return a fallible wrapper.
     Plain,
@@ -210,8 +257,12 @@ pub struct FrameDescriptor {
     pub return_kind: Option<NativeKind>,
 
     /// Source-level fallible wrapper semantics for the returned value.
-    /// Defaults to `Unknown` for old serialized descriptors.
-    #[serde(default)]
+    ///
+    /// Required on the wire and carries no serde default (#233,
+    /// CLAUDE.md §Greenfield): the wrapper is stamped by the compiler,
+    /// so a descriptor that omits it is a stale artifact that must fail
+    /// to load and be regenerated, not one that decodes as some assumed
+    /// wrapper.
     pub return_wrapper: FrameReturnWrapper,
 
     /// ADR-020 §3.3: how many values this frame returns. `Zero` means the
@@ -229,22 +280,29 @@ impl FrameDescriptor {
     /// Create an empty descriptor with no slots and an unset return
     /// kind. Callers stamp `return_kind` to `Some(kind)` once the
     /// function's return type is proven.
-    pub fn new() -> Self {
+    ///
+    /// `return_wrapper` is a required argument (#233): the wrapper is
+    /// never defaulted, so every construction site names the
+    /// fallible-wrapper semantics it claims. Only the compiler's
+    /// descriptor builder may pass `Unknown`, and only as the documented
+    /// residual.
+    pub fn new(return_wrapper: FrameReturnWrapper) -> Self {
         Self {
             slots: Vec::new(),
             return_kind: None,
-            return_wrapper: FrameReturnWrapper::Unknown,
+            return_wrapper,
             return_arity: FrameReturnArity::One,
         }
     }
 
     /// Build a descriptor from an existing `Vec<NativeKind>` of proven
-    /// slot kinds. `return_kind` is left `None` for the caller to stamp.
-    pub fn from_slots(slots: Vec<NativeKind>) -> Self {
+    /// slot kinds. `return_kind` is left `None` for the caller to stamp;
+    /// `return_wrapper` is stamp-required for the reason in [`new`].
+    pub fn from_slots(slots: Vec<NativeKind>, return_wrapper: FrameReturnWrapper) -> Self {
         Self {
             slots,
             return_kind: None,
-            return_wrapper: FrameReturnWrapper::Unknown,
+            return_wrapper,
             return_arity: FrameReturnArity::One,
         }
     }
@@ -269,22 +327,6 @@ impl FrameDescriptor {
         self.slots.get(index).copied()
     }
 
-    /// Return wrapper semantics, with compatibility for descriptors
-    /// written before the metadata split. New descriptors should stamp
-    /// `return_wrapper` directly; legacy descriptors overloaded
-    /// `return_kind = Ptr(HeapKind::Option/Result)` for this purpose.
-    #[inline]
-    pub fn effective_return_wrapper(&self) -> FrameReturnWrapper {
-        match self.return_wrapper {
-            FrameReturnWrapper::Unknown => match self.return_kind {
-                Some(NativeKind::Ptr(shape_value::HeapKind::Option)) => FrameReturnWrapper::Option,
-                Some(NativeKind::Ptr(shape_value::HeapKind::Result)) => FrameReturnWrapper::Result,
-                _ => FrameReturnWrapper::Unknown,
-            },
-            wrapper => wrapper,
-        }
-    }
-
     /// ADR-020 §3.3: whether this frame returns no value at all.
     ///
     /// Read this — never `return_kind.is_none()` — to decide whether a call
@@ -293,30 +335,6 @@ impl FrameDescriptor {
     #[inline]
     pub fn returns_no_value(&self) -> bool {
         self.return_arity == FrameReturnArity::Zero
-    }
-
-    /// Return the ABI carrier kind for this frame's return value. New
-    /// descriptors store this directly in `return_kind`. Old descriptors
-    /// could overload `return_kind = Ptr(Option/Result)` as wrapper
-    /// semantics; normalize those to the canonical typed-object carrier
-    /// for ABI consumers.
-    #[inline]
-    pub fn abi_return_kind(&self) -> Option<NativeKind> {
-        match (self.return_wrapper, self.return_kind) {
-            (
-                FrameReturnWrapper::Unknown,
-                Some(NativeKind::Ptr(
-                    shape_value::HeapKind::Option | shape_value::HeapKind::Result,
-                )),
-            ) => Some(NativeKind::Ptr(shape_value::HeapKind::TypedObject)),
-            _ => self.return_kind,
-        }
-    }
-}
-
-impl Default for FrameDescriptor {
-    fn default() -> Self {
-        Self::new()
     }
 }
 
@@ -1548,60 +1566,77 @@ mod tests {
     }
 
     #[test]
-    fn frame_descriptor_default_return_wrapper_is_unknown() {
-        let fd = FrameDescriptor::new();
+    fn frame_descriptor_construction_is_return_wrapper_stamp_required() {
+        // #233: there is no descriptor state that means "wrapper not
+        // decided yet". Both constructors take the wrapper, so a producer
+        // that has not classified the return type cannot build a
+        // descriptor at all — it has to surface at the compiler.
+        let fd = FrameDescriptor::new(FrameReturnWrapper::Plain);
         assert_eq!(fd.return_kind, None);
-        assert_eq!(fd.return_wrapper, FrameReturnWrapper::Unknown);
-        assert_eq!(fd.effective_return_wrapper(), FrameReturnWrapper::Unknown);
-        assert_eq!(fd.abi_return_kind(), None);
+        assert_eq!(fd.return_wrapper, FrameReturnWrapper::Plain);
+
+        let fd = FrameDescriptor::from_slots(vec![NativeKind::Int64], FrameReturnWrapper::Result);
+        assert_eq!(fd.slots, vec![NativeKind::Int64]);
+        assert_eq!(fd.return_wrapper, FrameReturnWrapper::Result);
     }
 
     #[test]
-    fn frame_descriptor_legacy_result_kind_implies_wrapper_only() {
-        let mut fd = FrameDescriptor::new();
-        fd.return_kind = Some(NativeKind::Ptr(HeapKind::Result));
-
-        assert_eq!(fd.return_wrapper, FrameReturnWrapper::Unknown);
-        assert_eq!(fd.effective_return_wrapper(), FrameReturnWrapper::Result);
-        assert_eq!(
-            fd.abi_return_kind(),
-            Some(NativeKind::Ptr(HeapKind::TypedObject))
-        );
-    }
-
-    #[test]
-    fn frame_descriptor_explicit_wrapper_keeps_abi_kind_authoritative() {
-        let mut fd = FrameDescriptor::new();
-        fd.return_kind = Some(NativeKind::Ptr(HeapKind::TypedObject));
-        fd.return_wrapper = FrameReturnWrapper::Option;
-
-        assert_eq!(fd.effective_return_wrapper(), FrameReturnWrapper::Option);
-        assert_eq!(
-            fd.abi_return_kind(),
-            Some(NativeKind::Ptr(HeapKind::TypedObject))
-        );
-    }
-
-    #[test]
-    fn frame_descriptor_normalizes_unstamped_wrapper_from_return_kind() {
-        // A descriptor whose wrapper was never stamped still normalizes the
-        // `return_kind = Ptr(Result)` overload for ABI consumers.
+    fn frame_descriptor_return_kind_never_re_derives_the_wrapper() {
+        // The deleted `effective_return_wrapper` / `abi_return_kind`
+        // normalization read `return_kind = Ptr(Option/Result)` as wrapper
+        // semantics for unstamped descriptors — runtime inference off an ABI
+        // carrier. The wrapper is now whatever the compiler stamped, full
+        // stop, and the ABI kind is read straight off `return_kind`.
         //
-        // Built in-process, not decoded from a stored descriptor: this used to
-        // deserialize a field-light JSON blob and assert it still loaded, which
-        // is a wire-compatibility guarantee. CLAUDE.md §Greenfield keeps none —
-        // a stored artifact missing a field fails to load and is regenerated.
-        // `Unknown` is reachable without any of that: it is what
-        // `FrameDescriptor::new()` starts from.
-        let mut fd = FrameDescriptor::new();
+        // `Ptr(HeapKind::Option/Result)` cannot even be produced as a return
+        // carrier: `prove_native_kind` rejects it (see
+        // `prove_native_kind_rejects_old_jit_option_result_carriers` above), and
+        // `native_kind_from_concrete_type` maps both to `Ptr(TypedObject)`.
+        let mut fd = FrameDescriptor::new(FrameReturnWrapper::Plain);
         fd.return_kind = Some(NativeKind::Ptr(HeapKind::Result));
+        assert_eq!(fd.return_wrapper, FrameReturnWrapper::Plain);
 
-        assert_eq!(fd.return_wrapper, FrameReturnWrapper::Unknown);
-        assert_eq!(fd.effective_return_wrapper(), FrameReturnWrapper::Result);
-        assert_eq!(
-            fd.abi_return_kind(),
-            Some(NativeKind::Ptr(HeapKind::TypedObject))
-        );
+        let mut fd = FrameDescriptor::new(FrameReturnWrapper::Option);
+        fd.return_kind = Some(NativeKind::Ptr(HeapKind::TypedObject));
+        assert_eq!(fd.return_wrapper, FrameReturnWrapper::Option);
+        assert_eq!(fd.return_kind, Some(NativeKind::Ptr(HeapKind::TypedObject)));
+    }
+
+    #[test]
+    fn runtime_consumers_of_the_wrapper_ask_positive_questions() {
+        // Sentinel for #233. Both runtime consumers must phrase their read
+        // as "is this frame Option/Result-returning", so the residual
+        // `Unknown` can only ever fall out of a non-match — never select
+        // behavior of its own, and never get re-derived from `return_kind`.
+        //
+        //   `bytecode_function_returns_option`  (execution.rs)
+        //   `propagate_none_early_return`       (executor/exceptions/mod.rs)
+        let asks_option = |w: FrameReturnWrapper| w == FrameReturnWrapper::Option;
+        let asks_result = |w: FrameReturnWrapper| matches!(w, FrameReturnWrapper::Result);
+
+        for w in [FrameReturnWrapper::Unknown, FrameReturnWrapper::Plain] {
+            assert!(!asks_option(w), "{w:?} must not read as Option-returning");
+            assert!(!asks_result(w), "{w:?} must not read as Result-returning");
+        }
+        assert!(asks_option(FrameReturnWrapper::Option));
+        assert!(asks_result(FrameReturnWrapper::Result));
+    }
+
+    #[test]
+    fn frame_return_wrapper_has_no_default() {
+        // #233: `Unknown` lost `#[default]` and the field lost
+        // `#[serde(default)]`. Nothing outside the compiler's descriptor
+        // builder can produce it implicitly — the constructors below take
+        // the wrapper by value, and there is no `Default` impl to fall back
+        // on (`FrameDescriptor::default()` was deleted with it).
+        //
+        // This is a documentation anchor, not a behavioural assertion: the
+        // real enforcement is that `impl Default for FrameReturnWrapper`
+        // and `impl Default for FrameDescriptor` do not exist, which the
+        // deleted `FrameDescriptor::default()` call sites proved at compile
+        // time.
+        let fd = FrameDescriptor::new(FrameReturnWrapper::Plain);
+        assert_eq!(fd.return_wrapper, FrameReturnWrapper::Plain);
     }
 
     #[test]

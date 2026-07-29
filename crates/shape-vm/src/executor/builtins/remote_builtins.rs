@@ -413,7 +413,7 @@ fn mixed_array_err(other: &SerializableVMValue, elem_ty: &str) -> String {
 
 /// Map a remote-call reply value to a `TypedReturn`. The `SerializableVMValue`
 /// variant faithfully reflects the receiver's runtime slot kind (the receiver
-/// cross-checks it against the callee's `abi_return_kind` before replying), so
+/// cross-checks it against the callee's `return_kind` before replying), so
 /// scalar / string returns project directly.
 ///
 /// **R3 (heap-shaped return typed projection).** `SV::Array` (a scalar-element

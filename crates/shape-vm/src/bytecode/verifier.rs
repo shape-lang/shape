@@ -380,7 +380,10 @@ mod tests {
             ref_params: vec![],
             ref_mutates: vec![],
             mutable_captures: vec![],
-            frame_descriptor: Some(FrameDescriptor::from_slots(vec![NativeKind::Int64])),
+            frame_descriptor: Some(FrameDescriptor::from_slots(
+                vec![NativeKind::Int64],
+                crate::type_tracking::FrameReturnWrapper::Plain,
+            )),
             osr_entry_points: vec![],
             mir_data: None,
         };
@@ -414,10 +417,10 @@ mod tests {
             ref_params: vec![],
             ref_mutates: vec![],
             mutable_captures: vec![],
-            frame_descriptor: Some(FrameDescriptor::from_slots(vec![
-                NativeKind::Int64,
-                NativeKind::Int64,
-            ])),
+            frame_descriptor: Some(FrameDescriptor::from_slots(
+                vec![NativeKind::Int64, NativeKind::Int64],
+                crate::type_tracking::FrameReturnWrapper::Plain,
+            )),
             osr_entry_points: vec![],
             mir_data: None,
         };
@@ -527,7 +530,10 @@ mod tests {
             ref_params: vec![],
             ref_mutates: vec![],
             mutable_captures: vec![],
-            frame_descriptor: Some(FrameDescriptor::from_slots(vec![NativeKind::Int64])),
+            frame_descriptor: Some(FrameDescriptor::from_slots(
+                vec![NativeKind::Int64],
+                crate::type_tracking::FrameReturnWrapper::Plain,
+            )),
             osr_entry_points: vec![],
             mir_data: None,
         };
@@ -555,7 +561,10 @@ mod tests {
             ref_params: vec![],
             ref_mutates: vec![],
             mutable_captures: vec![],
-            frame_descriptor: Some(FrameDescriptor::from_slots(vec![NativeKind::Int64])),
+            frame_descriptor: Some(FrameDescriptor::from_slots(
+                vec![NativeKind::Int64],
+                crate::type_tracking::FrameReturnWrapper::Plain,
+            )),
             osr_entry_points: vec![],
             mir_data: None,
         };
@@ -583,7 +592,10 @@ mod tests {
             ref_params: vec![],
             ref_mutates: vec![],
             mutable_captures: vec![],
-            frame_descriptor: Some(FrameDescriptor::from_slots(vec![NativeKind::Int64])),
+            frame_descriptor: Some(FrameDescriptor::from_slots(
+                vec![NativeKind::Int64],
+                crate::type_tracking::FrameReturnWrapper::Plain,
+            )),
             osr_entry_points: vec![],
             mir_data: None,
         };
@@ -615,7 +627,10 @@ mod tests {
             ref_params: vec![],
             ref_mutates: vec![],
             mutable_captures: vec![],
-            frame_descriptor: Some(FrameDescriptor::from_slots(vec![NativeKind::Int64])),
+            frame_descriptor: Some(FrameDescriptor::from_slots(
+                vec![NativeKind::Int64],
+                crate::type_tracking::FrameReturnWrapper::Plain,
+            )),
             osr_entry_points: vec![],
             mir_data: None,
         };

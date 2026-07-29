@@ -83,7 +83,7 @@ fn execute_chart_for_bound_table(
     registry: shape_runtime::type_schema::TypeSchemaRegistry,
     schema_id: u32,
 ) -> Result<KindedSlot, VMError> {
-    let mut frame = FrameDescriptor::new();
+    let mut frame = FrameDescriptor::new(crate::type_tracking::FrameReturnWrapper::Plain);
     frame.return_kind = Some(NativeKind::Ptr(HeapKind::Content));
     let mut program = BytecodeProgram {
         instructions: vec![

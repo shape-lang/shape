@@ -247,8 +247,12 @@ mod tests {
             ref_params: vec![],
             ref_mutates: vec![],
             mutable_captures: vec![false; usize::from(captures_count)],
-            frame_descriptor: (captures_count != 0)
-                .then(|| FrameDescriptor::from_slots(capture_kinds.clone())),
+            frame_descriptor: (captures_count != 0).then(|| {
+                FrameDescriptor::from_slots(
+                    capture_kinds.clone(),
+                    crate::type_tracking::FrameReturnWrapper::Plain,
+                )
+            }),
             capture_kinds,
             capture_names: vec![],
             instructions: Vec::<Instruction>::new(),
@@ -375,7 +379,10 @@ mod tests {
         ));
 
         let mut blob = closure_blob(vec![NativeKind::Int64]);
-        blob.frame_descriptor = Some(FrameDescriptor::from_slots(vec![NativeKind::Bool]));
+        blob.frame_descriptor = Some(FrameDescriptor::from_slots(
+            vec![NativeKind::Bool],
+            crate::type_tracking::FrameReturnWrapper::Plain,
+        ));
         assert!(matches!(
             reconstruct_transferred_closure_layout(&blob),
             Err(TransferredClosureLayoutError::FrameDescriptorCaptureMismatch { .. })
@@ -429,7 +436,10 @@ mod tests {
         assert_ne!(mutated.compute_hash(), hash);
 
         let mut mutated = blob.clone();
-        mutated.frame_descriptor = Some(FrameDescriptor::from_slots(vec![NativeKind::Bool]));
+        mutated.frame_descriptor = Some(FrameDescriptor::from_slots(
+            vec![NativeKind::Bool],
+            crate::type_tracking::FrameReturnWrapper::Plain,
+        ));
         assert_ne!(mutated.compute_hash(), hash);
     }
 }

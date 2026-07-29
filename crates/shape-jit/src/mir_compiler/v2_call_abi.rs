@@ -91,21 +91,25 @@ mod tests {
 
     #[test]
     fn resolve_signature_uses_canonical_typed_object_return_for_result_wrapper() {
-        let mut frame = FrameDescriptor::new();
+        let mut frame = FrameDescriptor::new(FrameReturnWrapper::Result);
         frame.return_kind = Some(NativeKind::Ptr(HeapKind::TypedObject));
-        frame.return_wrapper = FrameReturnWrapper::Result;
 
         let sig = resolve_function_signature(&function_with_frame(frame), &[]);
         assert_eq!(sig.return_type, NativeKind::Ptr(HeapKind::TypedObject));
     }
 
     #[test]
-    fn resolve_signature_normalizes_legacy_result_return_kind() {
-        let mut frame = FrameDescriptor::new();
-        frame.return_kind = Some(NativeKind::Ptr(HeapKind::Result));
+    fn resolve_signature_reads_the_stamped_return_kind_verbatim() {
+        // #233: the ABI return kind is whatever the compiler stamped. The
+        // deleted `abi_return_kind()` normalized an unstamped-wrapper
+        // descriptor carrying `Ptr(Option/Result)` into `Ptr(TypedObject)`
+        // — inference at the ABI boundary. The wrapper and the carrier kind
+        // are independent facts and neither re-derives the other.
+        let mut frame = FrameDescriptor::new(FrameReturnWrapper::Plain);
+        frame.return_kind = Some(NativeKind::Int64);
 
         let sig = resolve_function_signature(&function_with_frame(frame), &[]);
-        assert_eq!(sig.return_type, NativeKind::Ptr(HeapKind::TypedObject));
+        assert_eq!(sig.return_type, NativeKind::Int64);
     }
 }
 
@@ -282,9 +286,9 @@ pub fn build_cranelift_signature(sig: &TypedFunctionSignature) -> Signature {
 /// Extract a `TypedFunctionSignature` from a bytecode `Function`.
 ///
 /// When the function carries a `FrameDescriptor`, the first `arity` slots
-/// are the parameter types and `abi_return_kind()` is the return type.  When no
-/// descriptor is present (legacy code), all slots default to `Unknown`
-/// which produces a v1-compatible all-I64 signature.
+/// are the parameter types and `return_kind` is the return type.  When no
+/// descriptor is present (legacy code), all slots fall back to the legacy
+/// I64 ABI width, which produces a v1-compatible all-I64 signature.
 ///
 /// `slot_kinds_override` is an optional caller-provided slice that takes
 /// precedence over the frame descriptor.  This is useful when the JIT's
@@ -321,7 +325,7 @@ pub fn resolve_function_signature(
         let return_type = func
             .frame_descriptor
             .as_ref()
-            .and_then(|fd| fd.abi_return_kind())
+            .and_then(|fd| fd.return_kind)
             .unwrap_or(legacy_default);
 
         return TypedFunctionSignature {
@@ -342,7 +346,7 @@ pub fn resolve_function_signature(
 
         TypedFunctionSignature {
             param_types,
-            return_type: fd.abi_return_kind().unwrap_or(legacy_default),
+            return_type: fd.return_kind.unwrap_or(legacy_default),
         }
     } else {
         // No type information at all — fully I64-ABI legacy.

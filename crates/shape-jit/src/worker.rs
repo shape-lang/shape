@@ -145,9 +145,15 @@ impl JitCompilationBackend {
             }
         };
 
-        // Build frame descriptor (use function's if available, else default)
-        let default_frame = FrameDescriptor::default();
-        let frame_descriptor = function.frame_descriptor.as_ref().unwrap_or(&default_frame);
+        // Slot kinds for OSR marshaling — empty when the function carries no
+        // descriptor. #233: no synthesized `FrameDescriptor::default()` here;
+        // OSR reads slot kinds only, and a fabricated descriptor would have to
+        // invent return metadata it cannot prove.
+        let frame_slots: &[shape_vm::type_tracking::NativeKind] = function
+            .frame_descriptor
+            .as_ref()
+            .map(|fd| fd.slots.as_slice())
+            .unwrap_or(&[]);
 
         // Compile the loop
         match osr_compiler::compile_osr_loop(
@@ -155,7 +161,7 @@ impl JitCompilationBackend {
             function,
             func_instructions,
             loop_info,
-            frame_descriptor,
+            frame_slots,
         ) {
             Ok(osr_result) => {
                 // Adjust entry point bytecode_ip back to global coordinates
@@ -384,10 +390,13 @@ mod tests {
             mir_data: None,
             ref_mutates: vec![],
             mutable_captures: vec![],
-            frame_descriptor: Some(FrameDescriptor::from_slots(vec![
-                NativeKind::Int64, // arg0
-                NativeKind::Int64, // arg1
-            ])),
+            frame_descriptor: Some(FrameDescriptor::from_slots(
+                vec![
+                    NativeKind::Int64, // arg0
+                    NativeKind::Int64, // arg1
+                ],
+                shape_vm::type_tracking::FrameReturnWrapper::Plain,
+            )),
             osr_entry_points: vec![],
         };
 
@@ -520,11 +529,14 @@ mod tests {
             mir_data: None,
             ref_mutates: vec![],
             mutable_captures: vec![],
-            frame_descriptor: Some(FrameDescriptor::from_slots(vec![
-                NativeKind::Int64, // i
-                NativeKind::Int64, // n
-                NativeKind::Int64, // sum
-            ])),
+            frame_descriptor: Some(FrameDescriptor::from_slots(
+                vec![
+                    NativeKind::Int64, // i
+                    NativeKind::Int64, // n
+                    NativeKind::Int64, // sum
+                ],
+                shape_vm::type_tracking::FrameReturnWrapper::Plain,
+            )),
             osr_entry_points: vec![],
         };
 
@@ -612,7 +624,10 @@ mod tests {
             mutable_captures: vec![],
             // W11: `NativeKind::Unknown` deleted; `Bool` is a benign stand-in
             // for this single-slot test descriptor (the slot is never read).
-            frame_descriptor: Some(FrameDescriptor::from_slots(vec![NativeKind::Bool])),
+            frame_descriptor: Some(FrameDescriptor::from_slots(
+                vec![NativeKind::Bool],
+                shape_vm::type_tracking::FrameReturnWrapper::Plain,
+            )),
             osr_entry_points: vec![],
         };
 
