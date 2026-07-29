@@ -105,11 +105,19 @@ canonicalization changes no documented promise.
 
 ## 4. Nullable-scalar semantics (public, book-gated)
 
-Rulings 1–2 are public language semantics, not internal encodings:
-`Some(NaN)` survives nullable positions with a canonical payload; `int`'s
-range excludes `i64::MIN`. Both take the standing Book gate — the book pages
-for `number`, `int`, and `Option`/`?` types must state them, with runnable
-fences, in the same slice that lands each encoding.
+Ruling 1 is public language semantics, not an internal encoding:
+`Some(NaN)` survives nullable positions with a canonical payload. It takes
+the standing Book gate — the book pages for `number` and `Option`/`?` types
+must state it, with runnable fences, in the same slice that lands the
+encoding.
+
+Ruling 2 **as amended** (second amendment, 2026-07-29) has no public
+surface left to gate: the presence pair keeps `i64::MIN` and the full `u64`
+range representable, so `int` has no excluded value to document. The earlier
+text here stated the opposite (`int`'s range excludes `i64::MIN`) — that was
+the blessed-sentinel design the amendment retired, and it never reached the
+book. The `MIN_STORABLE_INT` / `NULL_INT_BITS` / `int_is_storable` constants
+that encoded it are deleted (#225 slice (d)).
 
 ## 5. Multi-slot inline values (ruling 3)
 
