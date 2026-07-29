@@ -5,6 +5,7 @@
 use crate::context::JITContext;
 use crate::ffi::jit_kinds::*;
 use crate::ffi::value_ffi::*;
+use shape_value::encoding::ERROR_PLACEHOLDER_BITS;
 
 /// Evaluate DateTimeExpr to Time value
 /// Takes the boxed DateTimeExpr pointer and returns a boxed Time value
@@ -182,7 +183,10 @@ pub extern "C" fn jit_eval_time_reference(time_ref_bits: u64) -> u64 {
 pub extern "C" fn jit_format_error(ctx: *mut JITContext) -> u64 {
     unsafe {
         if ctx.is_null() {
-            return TAG_NULL;
+            // #234 B1: unreachable absent a JIT codegen bug, and there is no
+            // context to record `pending_call_error` in — the context IS what
+            // is null. Returns the placeholder, memory-safe by #234.
+            return ERROR_PLACEHOLDER_BITS;
         }
         let ctx_ref = &mut *ctx;
 

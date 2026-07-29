@@ -555,6 +555,19 @@ impl JITDataReference {
 /// This struct must be C-compatible (#[repr(C)]) for FFI
 ///
 /// Uses NaN-boxing for full type support
+///
+/// # Why FFI entry points may take `&mut *ctx` (#234 ruling B2)
+///
+/// Several `extern "C"` helpers historically bound `let ctx_ref = &*ctx;`
+/// because they only read. Corrupted-state bails now record
+/// `pending_call_error` so the caller deopts instead of computing on garbage,
+/// which needs a `&mut`. The conversion is sound rather than merely
+/// convenient: one JIT frame executes on one thread at a time, the context is
+/// reached only through the frame pointer Cranelift passes to that frame, and
+/// these helpers neither re-enter compiled code nor hand the pointer out, so
+/// no second live reference to the same `JITContext` exists while one is held.
+/// This note is the single place that argument lives; the conversion sites
+/// point here rather than repeating it.
 #[repr(C)]
 #[derive(Debug, Clone)]
 pub struct JITContext {

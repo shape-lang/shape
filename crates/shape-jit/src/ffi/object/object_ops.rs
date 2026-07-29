@@ -16,6 +16,7 @@ use super::super::super::context::JITContext;
 // now route to surface-and-stop per ADR-006 §2.7.4 / W10 jit-playbook §5.
 use crate::ffi::jit_kinds::*;
 use crate::ffi::value_ffi::*;
+use shape_value::encoding::ERROR_PLACEHOLDER_BITS;
 
 #[cold]
 #[track_caller]
@@ -42,7 +43,10 @@ fn unsupported_legacy_heap_kind(func_name: &str, kind: Option<u16>) -> ! {
 pub extern "C" fn jit_new_object(ctx: *mut JITContext, field_count: usize) -> u64 {
     unsafe {
         if ctx.is_null() || field_count > 64 {
-            return TAG_NULL;
+            // #234 B1: unreachable absent a JIT codegen bug, and there is no
+            // context to record `pending_call_error` in — the context IS what
+            // is null. Returns the placeholder, memory-safe by #234.
+            return ERROR_PLACEHOLDER_BITS;
         }
 
         let ctx_ref = &mut *ctx;

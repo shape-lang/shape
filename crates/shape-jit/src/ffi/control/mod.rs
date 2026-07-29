@@ -26,6 +26,7 @@ use std::ffi::c_void;
 // Trampoline VM — thread-local VirtualMachine for JIT-to-VM fallback
 // ============================================================================
 
+use shape_value::encoding::ERROR_PLACEHOLDER_BITS;
 use std::cell::Cell;
 
 thread_local! {
@@ -421,14 +422,23 @@ pub extern "C" fn jit_call_function(
 ) -> u64 {
     unsafe {
         if ctx.is_null() {
-            return TAG_NULL;
+            // #234 B1: unreachable absent a JIT codegen bug, and there is no
+            // context to record `pending_call_error` in — the context IS what
+            // is null. Returns the placeholder, memory-safe by #234.
+            return ERROR_PLACEHOLDER_BITS;
         }
         let ctx_ref = &mut *ctx;
 
         // Check if we have a function table
         if ctx_ref.function_table.is_null() || (function_id as usize) >= ctx_ref.function_table_len
         {
-            return TAG_NULL;
+            // #234 c1: corrupted JIT state — record the error so the caller
+            // deopts to the interpreter instead of computing on garbage.
+            crate::ffi::control::set_jit_runtime_error(
+                "jit_call_function: function table missing or function id out of range — deopting to interpreter".to_string(),
+            );
+            ctx_ref.pending_call_error = 1;
+            return ERROR_PLACEHOLDER_BITS;
         }
 
         // Get the function pointer
@@ -535,7 +545,10 @@ pub extern "C" fn jit_call_value(ctx: *mut JITContext) -> u64 {
 
     unsafe {
         if ctx.is_null() {
-            return TAG_NULL;
+            // #234 B1: unreachable absent a JIT codegen bug, and there is no
+            // context to record `pending_call_error` in — the context IS what
+            // is null. Returns the placeholder, memory-safe by #234.
+            return ERROR_PLACEHOLDER_BITS;
         }
         let ctx_ref = &mut *ctx;
 
@@ -549,7 +562,13 @@ pub extern "C" fn jit_call_value(ctx: *mut JITContext) -> u64 {
                 target: "shape_jit",
                 "jit-call-value BAIL: stack_ptr=0 at arg_count pop",
             );
-            return TAG_NULL;
+            // #234 c1: corrupted JIT state — record the error so the caller
+            // deopts to the interpreter instead of computing on garbage.
+            crate::ffi::control::set_jit_runtime_error(
+                "jit_call_value: operand stack empty while popping arg_count — deopting to interpreter".to_string(),
+            );
+            ctx_ref.pending_call_error = 1;
+            return ERROR_PLACEHOLDER_BITS;
         }
         ctx_ref.stack_ptr -= 1;
         let arg_count = ctx_ref.stack[ctx_ref.stack_ptr] as usize;
@@ -565,7 +584,13 @@ pub extern "C" fn jit_call_value(ctx: *mut JITContext) -> u64 {
         let mut arg_pairs: Vec<(u64, NativeKind)> = Vec::with_capacity(arg_count);
         for _ in 0..arg_count {
             if ctx_ref.stack_ptr == 0 {
-                return TAG_NULL;
+                // #234 c1: corrupted JIT state — record the error so the caller
+                // deopts to the interpreter instead of computing on garbage.
+                crate::ffi::control::set_jit_runtime_error(
+                    "jit_call_value: operand stack exhausted mid-argument-pop — deopting to interpreter".to_string(),
+                );
+                ctx_ref.pending_call_error = 1;
+                return ERROR_PLACEHOLDER_BITS;
             }
             ctx_ref.stack_ptr -= 1;
             let bits = ctx_ref.stack[ctx_ref.stack_ptr];
@@ -598,7 +623,13 @@ pub extern "C" fn jit_call_value(ctx: *mut JITContext) -> u64 {
         // bit decode on `callee_bits`, no `is_heap()` probe (§2.7.7 #4 /
         // #7 forbidden).
         if ctx_ref.stack_ptr == 0 {
-            return TAG_NULL;
+            // #234 c1: corrupted JIT state — record the error so the caller
+            // deopts to the interpreter instead of computing on garbage.
+            crate::ffi::control::set_jit_runtime_error(
+                "jit_call_value: operand stack empty while popping the callee — deopting to interpreter".to_string(),
+            );
+            ctx_ref.pending_call_error = 1;
+            return ERROR_PLACEHOLDER_BITS;
         }
         ctx_ref.stack_ptr -= 1;
         let callee_bits = ctx_ref.stack[ctx_ref.stack_ptr];
@@ -671,7 +702,13 @@ pub extern "C" fn jit_call_value(ctx: *mut JITContext) -> u64 {
                          stamped Ptr(HeapKind::Closure) but bits=0 \u{2014} \
                          producing site emitted a null callee.",
                     );
-                    return TAG_NULL;
+                    // #234 c1: corrupted JIT state — record the error so the caller
+                    // deopts to the interpreter instead of computing on garbage.
+                    crate::ffi::control::set_jit_runtime_error(
+                        "jit_call_value: callee stamped Ptr(HeapKind::Closure) but bits are null — deopting to interpreter".to_string(),
+                    );
+                    ctx_ref.pending_call_error = 1;
+                    return ERROR_PLACEHOLDER_BITS;
                 }
                 // W15.2-LANG-4 jit-filter-predicate close (2026-05-18).
                 // Function-typed parameter slots (e.g. `apply(p: (int)=>bool,

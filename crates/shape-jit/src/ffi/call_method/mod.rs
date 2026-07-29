@@ -604,7 +604,10 @@ pub extern "C" fn jit_call_method(ctx: *mut JITContext, stack_count: usize) -> u
 
     unsafe {
         if ctx.is_null() || stack_count < 3 {
-            return TAG_NULL;
+            // #234 B1: unreachable absent a JIT codegen bug, and there is no
+            // context to record `pending_call_error` in — the context IS what
+            // is null. Returns the placeholder, memory-safe by #234.
+            return ERROR_PLACEHOLDER_BITS;
         }
 
         let ctx_ref = &mut *ctx;
@@ -614,7 +617,13 @@ pub extern "C" fn jit_call_method(ctx: *mut JITContext, stack_count: usize) -> u
         // parallel-kind `UInt64` (sentinel slot — `terminators.rs:259`).
         // We decode it directly as usize — no NaN-box.
         if ctx_ref.stack_ptr == 0 {
-            return TAG_NULL;
+            // #234 c1: corrupted JIT state — record the error so the caller
+            // deopts to the interpreter instead of computing on garbage.
+            crate::ffi::control::set_jit_runtime_error(
+                "jit_call_method: operand stack empty while popping arg_count — deopting to interpreter".to_string(),
+            );
+            ctx_ref.pending_call_error = 1;
+            return ERROR_PLACEHOLDER_BITS;
         }
         ctx_ref.stack_ptr -= 1;
         let arg_count = ctx_ref.stack[ctx_ref.stack_ptr] as usize;
@@ -636,7 +645,13 @@ pub extern "C" fn jit_call_method(ctx: *mut JITContext, stack_count: usize) -> u
         // wrapper, so the parallel-kind track is the producer-side
         // classification source.
         if ctx_ref.stack_ptr == 0 {
-            return TAG_NULL;
+            // #234 c1: corrupted JIT state — record the error so the caller
+            // deopts to the interpreter instead of computing on garbage.
+            crate::ffi::control::set_jit_runtime_error(
+                "jit_call_method: operand stack empty while popping the method name — deopting to interpreter".to_string(),
+            );
+            ctx_ref.pending_call_error = 1;
+            return ERROR_PLACEHOLDER_BITS;
         }
         ctx_ref.stack_ptr -= 1;
         let method_bits = ctx_ref.stack[ctx_ref.stack_ptr];
@@ -683,7 +698,13 @@ pub extern "C" fn jit_call_method(ctx: *mut JITContext, stack_count: usize) -> u
         let mut arg_pairs: Vec<(u64, NativeKind)> = Vec::with_capacity(arg_count);
         for _ in 0..arg_count {
             if ctx_ref.stack_ptr == 0 {
-                return TAG_NULL;
+                // #234 c1: corrupted JIT state — record the error so the caller
+                // deopts to the interpreter instead of computing on garbage.
+                crate::ffi::control::set_jit_runtime_error(
+                    "jit_call_method: operand stack exhausted mid-argument-pop — deopting to interpreter".to_string(),
+                );
+                ctx_ref.pending_call_error = 1;
+                return ERROR_PLACEHOLDER_BITS;
             }
             ctx_ref.stack_ptr -= 1;
             let bits = ctx_ref.stack[ctx_ref.stack_ptr];
@@ -712,7 +733,13 @@ pub extern "C" fn jit_call_method(ctx: *mut JITContext, stack_count: usize) -> u
 
         // ── Pop receiver paired with its parallel-track kind ──────────
         if ctx_ref.stack_ptr == 0 {
-            return TAG_NULL;
+            // #234 c1: corrupted JIT state — record the error so the caller
+            // deopts to the interpreter instead of computing on garbage.
+            crate::ffi::control::set_jit_runtime_error(
+                "jit_call_method: operand stack empty while popping the receiver — deopting to interpreter".to_string(),
+            );
+            ctx_ref.pending_call_error = 1;
+            return ERROR_PLACEHOLDER_BITS;
         }
         ctx_ref.stack_ptr -= 1;
         let receiver_bits = ctx_ref.stack[ctx_ref.stack_ptr];

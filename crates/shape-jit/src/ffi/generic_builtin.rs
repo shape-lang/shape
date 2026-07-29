@@ -9,6 +9,7 @@
 
 use super::super::context::JITContext;
 use crate::ffi::value_ffi::TAG_NULL;
+use shape_value::encoding::ERROR_PLACEHOLDER_BITS;
 // jit_bits_to_nanboxed / nanboxed_to_jit_bits removed at the import
 // site — both decoded/encoded `ValueWord` from raw bits, the deleted
 // W-series shape. The trampoline body below now surfaces rather than
@@ -119,7 +120,10 @@ pub extern "C" fn builtin_dispatch_trampoline(
     arg_count: u16,
 ) -> u64 {
     if ctx.is_null() {
-        return TAG_NULL;
+        // #234 B1: unreachable absent a JIT codegen bug, and there is no
+        // context to record `pending_call_error` in — the context IS what
+        // is null. Returns the placeholder, memory-safe by #234.
+        return ERROR_PLACEHOLDER_BITS;
     }
 
     let ctx_ref = unsafe { &mut *ctx };

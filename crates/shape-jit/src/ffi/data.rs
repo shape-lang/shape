@@ -12,6 +12,7 @@
 use super::super::context::JITContext;
 use super::jit_kinds::*;
 use super::value_ffi::*;
+use shape_value::encoding::ERROR_PLACEHOLDER_BITS;
 
 // ============================================================================
 // Generic Field Access (by compile-time column index)
@@ -32,9 +33,14 @@ use super::value_ffi::*;
 pub extern "C" fn jit_get_field(ctx: *mut JITContext, row_offset: i32, column_index: u32) -> u64 {
     unsafe {
         if ctx.is_null() {
-            return TAG_NULL;
+            // #234 B1: unreachable absent a JIT codegen bug, and there is no
+            // context to record `pending_call_error` in — the context IS what is
+            // null. Returns the placeholder, which is memory-safe by #234.
+            return ERROR_PLACEHOLDER_BITS;
         }
-        let ctx_ref = &*ctx;
+        // `&mut`: corrupted-state bails below record `pending_call_error`
+        // (#234 c1). Aliasing rationale: see `JITContext` in `context.rs`.
+        let ctx_ref = &mut *ctx;
 
         // Calculate absolute row index
         let row_signed = ctx_ref.current_row as i32 + row_offset;
@@ -50,13 +56,25 @@ pub extern "C" fn jit_get_field(ctx: *mut JITContext, row_offset: i32, column_in
 
         // Check if column_ptrs is valid
         if ctx_ref.column_ptrs.is_null() {
-            return TAG_NULL;
+            // #234 c1: corrupted JIT state — record the error so the caller
+            // deopts to the interpreter instead of computing on garbage.
+            crate::ffi::control::set_jit_runtime_error(
+                "jit_get_field: column_ptrs is null — deopting to interpreter".to_string(),
+            );
+            ctx_ref.pending_call_error = 1;
+            return ERROR_PLACEHOLDER_BITS;
         }
 
         // Get the column pointer
         let col_ptr = *ctx_ref.column_ptrs.add(column_index as usize);
         if col_ptr.is_null() {
-            return TAG_NULL;
+            // #234 c1: corrupted JIT state — record the error so the caller
+            // deopts to the interpreter instead of computing on garbage.
+            crate::ffi::control::set_jit_runtime_error(
+                "jit_get_field: column pointer is null — deopting to interpreter".to_string(),
+            );
+            ctx_ref.pending_call_error = 1;
+            return ERROR_PLACEHOLDER_BITS;
         }
 
         // Get the value
@@ -83,7 +101,10 @@ pub extern "C" fn jit_get_field(ctx: *mut JITContext, row_offset: i32, column_in
 pub extern "C" fn jit_get_row_ref(ctx: *mut JITContext, row_offset: i32) -> u64 {
     unsafe {
         if ctx.is_null() {
-            return TAG_NULL;
+            // #234 B1: unreachable absent a JIT codegen bug, and there is no
+            // context to record `pending_call_error` in — the context IS what is
+            // null. Returns the placeholder, which is memory-safe by #234.
+            return ERROR_PLACEHOLDER_BITS;
         }
         let ctx_ref = &*ctx;
 
@@ -111,9 +132,14 @@ pub extern "C" fn jit_get_row_ref(ctx: *mut JITContext, row_offset: i32) -> u64 
 pub extern "C" fn jit_row_get_field(ctx: *mut JITContext, row_ref: u64, column_index: u32) -> u64 {
     unsafe {
         if ctx.is_null() {
-            return TAG_NULL;
+            // #234 B1: unreachable absent a JIT codegen bug, and there is no
+            // context to record `pending_call_error` in — the context IS what is
+            // null. Returns the placeholder, which is memory-safe by #234.
+            return ERROR_PLACEHOLDER_BITS;
         }
-        let ctx_ref = &*ctx;
+        // `&mut`: corrupted-state bails below record `pending_call_error`
+        // (#234 c1). Aliasing rationale: see `JITContext` in `context.rs`.
+        let ctx_ref = &mut *ctx;
 
         // Validate row reference tag
         if !is_data_row(row_ref) {
@@ -133,13 +159,25 @@ pub extern "C" fn jit_row_get_field(ctx: *mut JITContext, row_ref: u64, column_i
 
         // Check if column_ptrs is valid
         if ctx_ref.column_ptrs.is_null() {
-            return TAG_NULL;
+            // #234 c1: corrupted JIT state — record the error so the caller
+            // deopts to the interpreter instead of computing on garbage.
+            crate::ffi::control::set_jit_runtime_error(
+                "jit_row_get_field: column_ptrs is null — deopting to interpreter".to_string(),
+            );
+            ctx_ref.pending_call_error = 1;
+            return ERROR_PLACEHOLDER_BITS;
         }
 
         // Get the column pointer
         let col_ptr = *ctx_ref.column_ptrs.add(column_index as usize);
         if col_ptr.is_null() {
-            return TAG_NULL;
+            // #234 c1: corrupted JIT state — record the error so the caller
+            // deopts to the interpreter instead of computing on garbage.
+            crate::ffi::control::set_jit_runtime_error(
+                "jit_row_get_field: column pointer is null — deopting to interpreter".to_string(),
+            );
+            ctx_ref.pending_call_error = 1;
+            return ERROR_PLACEHOLDER_BITS;
         }
 
         // Get the value
@@ -159,9 +197,14 @@ pub extern "C" fn jit_row_get_field(ctx: *mut JITContext, row_ref: u64, column_i
 pub extern "C" fn jit_get_row_timestamp(ctx: *mut JITContext, row_offset: i32) -> u64 {
     unsafe {
         if ctx.is_null() {
-            return TAG_NULL;
+            // #234 B1: unreachable absent a JIT codegen bug, and there is no
+            // context to record `pending_call_error` in — the context IS what is
+            // null. Returns the placeholder, which is memory-safe by #234.
+            return ERROR_PLACEHOLDER_BITS;
         }
-        let ctx_ref = &*ctx;
+        // `&mut`: corrupted-state bails below record `pending_call_error`
+        // (#234 c1). Aliasing rationale: see `JITContext` in `context.rs`.
+        let ctx_ref = &mut *ctx;
 
         // Calculate absolute row index
         let row_signed = ctx_ref.current_row as i32 + row_offset;
@@ -172,7 +215,14 @@ pub extern "C" fn jit_get_row_timestamp(ctx: *mut JITContext, row_offset: i32) -
 
         // Get timestamp from timestamps_ptr
         if ctx_ref.timestamps_ptr.is_null() {
-            return TAG_NULL;
+            // #234 c1: corrupted JIT state — record the error so the caller
+            // deopts to the interpreter instead of computing on garbage.
+            crate::ffi::control::set_jit_runtime_error(
+                "jit_get_row_timestamp: timestamps_ptr is null — deopting to interpreter"
+                    .to_string(),
+            );
+            ctx_ref.pending_call_error = 1;
+            return ERROR_PLACEHOLDER_BITS;
         }
 
         let timestamp = *ctx_ref.timestamps_ptr.add(row_idx);
@@ -223,9 +273,14 @@ pub extern "C" fn jit_get_current_row(ctx: *mut JITContext) -> u64 {
 pub extern "C" fn jit_load_col_f64(ctx: *mut JITContext, col_id: u32, row_ref: u64) -> u64 {
     unsafe {
         if ctx.is_null() {
-            return TAG_NULL;
+            // #234 B1: unreachable absent a JIT codegen bug, and there is no
+            // context to record `pending_call_error` in — the context IS what is
+            // null. Returns the placeholder, which is memory-safe by #234.
+            return ERROR_PLACEHOLDER_BITS;
         }
-        let ctx_ref = &*ctx;
+        // `&mut`: corrupted-state bails below record `pending_call_error`
+        // (#234 c1). Aliasing rationale: see `JITContext` in `context.rs`.
+        let ctx_ref = &mut *ctx;
 
         let row_idx = if is_data_row(row_ref) {
             unbox_data_row(row_ref)
@@ -237,12 +292,24 @@ pub extern "C" fn jit_load_col_f64(ctx: *mut JITContext, col_id: u32, row_ref: u
             return TAG_NULL;
         }
         if ctx_ref.column_ptrs.is_null() {
-            return TAG_NULL;
+            // #234 c1: corrupted JIT state — record the error so the caller
+            // deopts to the interpreter instead of computing on garbage.
+            crate::ffi::control::set_jit_runtime_error(
+                "jit_load_col_f64: column_ptrs is null — deopting to interpreter".to_string(),
+            );
+            ctx_ref.pending_call_error = 1;
+            return ERROR_PLACEHOLDER_BITS;
         }
 
         let col_ptr = *ctx_ref.column_ptrs.add(col_id as usize);
         if col_ptr.is_null() {
-            return TAG_NULL;
+            // #234 c1: corrupted JIT state — record the error so the caller
+            // deopts to the interpreter instead of computing on garbage.
+            crate::ffi::control::set_jit_runtime_error(
+                "jit_load_col_f64: column pointer is null — deopting to interpreter".to_string(),
+            );
+            ctx_ref.pending_call_error = 1;
+            return ERROR_PLACEHOLDER_BITS;
         }
 
         let value = *col_ptr.add(row_idx);
@@ -256,9 +323,14 @@ pub extern "C" fn jit_load_col_f64(ctx: *mut JITContext, col_id: u32, row_ref: u
 pub extern "C" fn jit_load_col_i64(ctx: *mut JITContext, col_id: u32, row_ref: u64) -> u64 {
     unsafe {
         if ctx.is_null() {
-            return TAG_NULL;
+            // #234 B1: unreachable absent a JIT codegen bug, and there is no
+            // context to record `pending_call_error` in — the context IS what is
+            // null. Returns the placeholder, which is memory-safe by #234.
+            return ERROR_PLACEHOLDER_BITS;
         }
-        let ctx_ref = &*ctx;
+        // `&mut`: corrupted-state bails below record `pending_call_error`
+        // (#234 c1). Aliasing rationale: see `JITContext` in `context.rs`.
+        let ctx_ref = &mut *ctx;
 
         let row_idx = if is_data_row(row_ref) {
             unbox_data_row(row_ref)
@@ -270,12 +342,24 @@ pub extern "C" fn jit_load_col_i64(ctx: *mut JITContext, col_id: u32, row_ref: u
             return TAG_NULL;
         }
         if ctx_ref.column_ptrs.is_null() {
-            return TAG_NULL;
+            // #234 c1: corrupted JIT state — record the error so the caller
+            // deopts to the interpreter instead of computing on garbage.
+            crate::ffi::control::set_jit_runtime_error(
+                "jit_load_col_i64: column_ptrs is null — deopting to interpreter".to_string(),
+            );
+            ctx_ref.pending_call_error = 1;
+            return ERROR_PLACEHOLDER_BITS;
         }
 
         let col_ptr = *ctx_ref.column_ptrs.add(col_id as usize);
         if col_ptr.is_null() {
-            return TAG_NULL;
+            // #234 c1: corrupted JIT state — record the error so the caller
+            // deopts to the interpreter instead of computing on garbage.
+            crate::ffi::control::set_jit_runtime_error(
+                "jit_load_col_i64: column pointer is null — deopting to interpreter".to_string(),
+            );
+            ctx_ref.pending_call_error = 1;
+            return ERROR_PLACEHOLDER_BITS;
         }
 
         // Read as f64 (JIT stores all numerics as f64), truncate to integer
@@ -290,9 +374,14 @@ pub extern "C" fn jit_load_col_i64(ctx: *mut JITContext, col_id: u32, row_ref: u
 pub extern "C" fn jit_load_col_bool(ctx: *mut JITContext, col_id: u32, row_ref: u64) -> u64 {
     unsafe {
         if ctx.is_null() {
-            return TAG_NULL;
+            // #234 B1: unreachable absent a JIT codegen bug, and there is no
+            // context to record `pending_call_error` in — the context IS what is
+            // null. Returns the placeholder, which is memory-safe by #234.
+            return ERROR_PLACEHOLDER_BITS;
         }
-        let ctx_ref = &*ctx;
+        // `&mut`: corrupted-state bails below record `pending_call_error`
+        // (#234 c1). Aliasing rationale: see `JITContext` in `context.rs`.
+        let ctx_ref = &mut *ctx;
 
         let row_idx = if is_data_row(row_ref) {
             unbox_data_row(row_ref)
@@ -304,12 +393,24 @@ pub extern "C" fn jit_load_col_bool(ctx: *mut JITContext, col_id: u32, row_ref: 
             return TAG_NULL;
         }
         if ctx_ref.column_ptrs.is_null() {
-            return TAG_NULL;
+            // #234 c1: corrupted JIT state — record the error so the caller
+            // deopts to the interpreter instead of computing on garbage.
+            crate::ffi::control::set_jit_runtime_error(
+                "jit_load_col_bool: column_ptrs is null — deopting to interpreter".to_string(),
+            );
+            ctx_ref.pending_call_error = 1;
+            return ERROR_PLACEHOLDER_BITS;
         }
 
         let col_ptr = *ctx_ref.column_ptrs.add(col_id as usize);
         if col_ptr.is_null() {
-            return TAG_NULL;
+            // #234 c1: corrupted JIT state — record the error so the caller
+            // deopts to the interpreter instead of computing on garbage.
+            crate::ffi::control::set_jit_runtime_error(
+                "jit_load_col_bool: column pointer is null — deopting to interpreter".to_string(),
+            );
+            ctx_ref.pending_call_error = 1;
+            return ERROR_PLACEHOLDER_BITS;
         }
 
         let value = *col_ptr.add(row_idx);
@@ -388,6 +489,12 @@ pub extern "C" fn jit_get_field_typed(obj: u64, type_id: u64, field_idx: u64, of
     use shape_value::heap_value::TypedObjectStorage;
     let _ = field_idx;
     if obj == 0 {
+        // NOT converted by #234 c1 (deliberate): this entry point takes no
+        // `JITContext`, and its sibling returns below (misaligned offset,
+        // schema mismatch, missing slot) are read BY VALUE — a unit test
+        // asserts the schema-mismatch return equals the null carrier. The
+        // whole function belongs to the kind-blind value channel #239 owns;
+        // converting one of its four returns would half-convert it.
         return TAG_NULL;
     }
     let offset = offset as usize;
