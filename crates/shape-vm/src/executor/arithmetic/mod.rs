@@ -373,7 +373,19 @@ impl VirtualMachine {
         self.push_kinded(result.to_bits(), NativeKind::Float64)
     }
 
-    /// Number-family div/mod with zero check.
+    /// Number-family div/mod. IEEE-754: division by zero is NOT an error.
+    ///
+    /// `x / 0.0` is ±Infinity, `0.0 / 0.0` and `x % 0.0` are NaN (ADR-020 §3.1
+    /// ruling 1 as amended; supervisor ruling 2026-07-29 on #225). This path
+    /// used to raise `VMError::DivisionByZero`, applying INTEGER semantics to
+    /// floats: the JIT already conformed to IEEE, so the two tiers disagreed —
+    /// `1.0/0.0` printed `Infinity` under `--mode jit` and errored under
+    /// `--mode vm`. It also made `Some(NaN)` — public, book-gated semantics —
+    /// unreachable in the VM tier, since the most common way to produce a NaN
+    /// raised instead of returning one.
+    ///
+    /// The integer paths (`compact_int_divmod`, `compact_int_divmod_u64`) keep
+    /// their zero check: `i64` has no infinity to return.
     #[inline(always)]
     fn divmod_number_kinded(&mut self, op: impl FnOnce(f64, f64) -> f64) -> Result<(), VMError> {
         let (b_bits, b_kind) = self.pop_kinded()?;
@@ -390,9 +402,7 @@ impl VirtualMachine {
         drop_with_kind(b_bits, b_kind);
         let l = lhs?;
         let r = rhs?;
-        if r == 0.0 {
-            return Err(VMError::DivisionByZero);
-        }
+        // IEEE-754: no zero guard. See the doc comment above.
         self.push_kinded(op(l, r).to_bits(), NativeKind::Float64)
     }
 
@@ -642,9 +652,7 @@ impl VirtualMachine {
         drop_with_kind(b_bits, b_kind);
         let l = lhs?;
         let r = rhs?;
-        if r == 0.0 {
-            return Err(VMError::DivisionByZero);
-        }
+        // IEEE-754: no zero guard. See the doc comment above.
         self.push_kinded(op(l, r).to_bits(), NativeKind::Float64)
     }
 
@@ -1097,14 +1105,61 @@ mod tests {
         assert!((result - 2.5).abs() < 1e-15);
     }
 
+    /// IEEE-754 division by zero for `number` (ADR-020 §3.1 ruling 1 as
+    /// amended; supervisor ruling 2026-07-29 on #225).
+    ///
+    /// This test previously asserted `VMError::DivisionByZero` — it encoded
+    /// the defect, not the contract. The VM was applying integer semantics to
+    /// floats while the JIT already followed IEEE, so `1.0/0.0` printed
+    /// `Infinity` under `--mode jit` and errored under `--mode vm`. Rebaselined
+    /// as a true positive, not relaxed.
     #[test]
-    fn typed_arithmetic_div_number_by_zero() {
-        let mut vm = make_vm();
-        push_f64(&mut vm, 10.0);
-        push_f64(&mut vm, 0.0);
-        let instr = Instruction::simple(OpCode::DivNumber);
-        let err = vm.exec_typed_arithmetic(&instr).unwrap_err();
-        assert!(matches!(err, VMError::DivisionByZero));
+    fn typed_arithmetic_div_number_by_zero_is_ieee_infinity() {
+        for (num, expect_positive) in [(10.0_f64, true), (-1.0_f64, false)] {
+            let mut vm = make_vm();
+            push_f64(&mut vm, num);
+            push_f64(&mut vm, 0.0);
+            let instr = Instruction::simple(OpCode::DivNumber);
+            vm.exec_typed_arithmetic(&instr)
+                .expect("float division by zero is not an error under IEEE-754");
+            let (bits, _kind) = vm.pop_kinded().unwrap();
+            let got = f64::from_bits(bits);
+            assert!(got.is_infinite(), "{num}/0.0 must be infinite, got {got}");
+            assert_eq!(got.is_sign_positive(), expect_positive, "{num}/0.0 sign");
+        }
+    }
+
+    /// `0.0/0.0` is NaN, and `x % 0.0` is NaN — the same guard family, and the
+    /// reason `Some(NaN)` (public, book-gated per ADR-020 §4) is reachable in
+    /// the VM tier at all.
+    #[test]
+    fn typed_arithmetic_zero_over_zero_and_float_mod_zero_are_nan() {
+        for op in [OpCode::DivNumber, OpCode::ModNumber] {
+            let mut vm = make_vm();
+            push_f64(&mut vm, 0.0);
+            push_f64(&mut vm, 0.0);
+            let instr = Instruction::simple(op);
+            vm.exec_typed_arithmetic(&instr)
+                .expect("float div/mod by zero is not an error under IEEE-754");
+            let (bits, _kind) = vm.pop_kinded().unwrap();
+            assert!(f64::from_bits(bits).is_nan(), "{op:?} 0.0,0.0 must be NaN");
+        }
+    }
+
+    /// The integer paths keep their zero check — `i64` has no infinity.
+    #[test]
+    fn integer_division_by_zero_is_still_an_error() {
+        for op in [OpCode::DivInt, OpCode::ModInt] {
+            let mut vm = make_vm();
+            vm.push_kinded(10i64 as u64, NativeKind::Int64).unwrap();
+            vm.push_kinded(0i64 as u64, NativeKind::Int64).unwrap();
+            let instr = Instruction::simple(op);
+            let err = vm.exec_typed_arithmetic(&instr).unwrap_err();
+            assert!(
+                matches!(err, VMError::DivisionByZero),
+                "{op:?} by zero must stay an error"
+            );
+        }
     }
 
     #[test]

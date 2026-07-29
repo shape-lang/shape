@@ -1,0 +1,26 @@
+// ADR-020 §4 (public, book-gated) + §3.1.1: `Some(NaN)` survives a nullable
+// position — a NaN is an ordinary `number` value, not an absence signal.
+//
+// This fence tests SEMANTICS, not a carrier, and that is deliberate: at HEAD
+// `number?` takes the `Ptr(HeapKind::Option)` heap carrier, while the §3.1
+// NaN-sentinel encoding (`StorageType::NullableFloat64`) has no producer yet
+// and is #229's landing target. The assertion below holds under BOTH, so it
+// keeps gating after #229 migrates `Option<scalar>` off the heap carrier.
+//
+// It only became writable once #225b made float division IEEE-754: before
+// that the VM raised on `0.0/0.0` and a NaN could not be constructed at all.
+//
+// NaN PAYLOAD bits are UNSPECIFIED through nullable positions. Today's carrier
+// preserves them; the §3.1 encoding canonicalizes them. Shape exposes no float
+// bit introspection, so neither is observable — and "unspecified" is the only
+// claim both carriers keep true.
+fn dv(a: number, b: number) -> number { return a / b }
+fn wrap(x: number) -> number? { return Some(x) }
+
+// A computed NaN inside Some() is a value, so `??` does NOT take the default.
+print(wrap(dv(0.0, 0.0)) ?? -1.0)
+// Infinities are ordinary values too.
+print(wrap(dv(1.0, 0.0)) ?? -1.0)
+print(wrap(dv(0.0 - 1.0, 0.0)) ?? -1.0)
+// An ordinary finite number is unaffected.
+print(wrap(2.5) ?? -1.0)

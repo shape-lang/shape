@@ -358,13 +358,32 @@ pub const fn encoding_of(kind: NativeKind) -> Encoding {
         // `exceptions/mod.rs:1234`, `shape-runtime/src/wire_conversion.rs:45`,
         // `marshal.rs:181`) — a superset of the sentinel, so `Some(NaN)` is
         // not representable there. #225 narrows it.
+        // #225 slice (b). `None` is the reserved sentinel, not "any NaN" — the
+        // pre-ADR-020 `AnyNaN` reading made `Some(NaN)` unrepresentable in this
+        // carrier, which is the semantics ADR-020 §4 book-gates.
+        //
+        // INERT AT HEAD, and deliberately so (ADR-020 §3.1.1, the named
+        // Option-carrier duality). Nothing reaches this carrier at this commit:
+        // `TypeInfo::nullable_number()`, `local_uses_nan_sentinel()` and
+        // `module_binding_uses_nan_sentinel()` have zero callers, and
+        // `StorageType::uses_nan_sentinel()` is read only by its own test. The
+        // ordinary source-level `number?` takes `Ptr(HeapKind::Option)`
+        // instead — verified through both a function return and a typed-object
+        // field, each of which preserved `Some(NaN)` through `??`.
+        //
+        // So this row is the LANDING TARGET for #229's `Option<scalar>`
+        // unboxing, not dead code, and the canonicalization emission §3.1
+        // calls for has no construction sites to attach to until that lands.
+        // Recorded rather than manufactured: inventing a call site to make the
+        // encoding look wired would be the defect this program exists to stop.
         NativeKind::NullableFloat64 => Encoding {
             kind,
             payload: Payload::Float64,
             null_adr020: NullEncoding::Sentinel(NULL_NUMBER_BITS),
-            null_pre_adr020: NullEncoding::AnyNaN,
+            null_pre_adr020: NullEncoding::Sentinel(NULL_NUMBER_BITS),
             adr_clause: "ADR-020 §3.1 clause 1 bullet 2 (NaN sentinel + canonicalization)",
-            provenance: "shape-vm/src/executor/comparison/mod.rs:685 (is_nan)",
+            provenance: "#225: narrowed to the reserved sentinel (inert at HEAD per \
+                         ADR-020 §3.1.1); was comparison/mod.rs:685 (is_nan)",
         },
         // f32 zero-extended into the low 32 bits (ADR-006 §2.7.5 amendment,
         // Round 19 S1.5). No NullableFloat32 variant exists.
@@ -451,26 +470,37 @@ pub const fn encoding_of(kind: NativeKind) -> Encoding {
             provenance: "shape-vm/src/executor/comparison/mod.rs:682 (String => bits == 0)",
         },
         // v2-raw `repr(C)` carrier, NOT an Arc<String> (ADR-006 §2.7.5, H-c).
-        // MISMATCH transcribed, not normalized (#223): the interpreter's null
-        // test has no StringV2 arm and falls through to `false` (never null),
-        // while `wire_conversion.rs:112` projects bits == 0 to WireValue::Null.
+        //
+        // #223 transcribed a MISMATCH here: the interpreter's null test had no
+        // StringV2 arm and fell through to `_ => false` (never null), while
+        // `wire_conversion.rs:118` already projected `bits == 0` to
+        // `WireValue::Null`. The same value was null on the wire and non-null
+        // to `==`. #225 gives it ONE answer, and the table is where that answer
+        // lives: a v2-raw carrier is a pointer, so it takes the same
+        // null-pointer niche as every other pointer row.
+        //
+        // Safe by construction on the comparison path: `str_ref`
+        // (`comparison/mod.rs:589`) already returns `None` for `bits == 0`
+        // before any deref, so recognizing null here cannot introduce one.
         NativeKind::StringV2 => Encoding {
             kind,
             payload: Payload::Pointer(PointerOwner::V2StringObj),
             null_adr020: NullEncoding::NullPointer,
-            null_pre_adr020: NullEncoding::NotNullable,
+            null_pre_adr020: NullEncoding::NullPointer,
             adr_clause: "ADR-020 §3.1 clause 1 bullet 1 (heap T? = null pointer)",
-            provenance: "shape-vm/src/executor/comparison/mod.rs:700 (_ => false) \
-                         vs shape-runtime/src/wire_conversion.rs:112 (bits == 0 => Null)",
+            provenance: "#225: normalized to the null-pointer niche; was \
+                         comparison/mod.rs `_ => false` vs \
+                         wire_conversion.rs:118 `bits == 0 => Null`",
         },
-        // Same shape and same transcribed mismatch as StringV2.
+        // Same carrier shape, same resolved mismatch as StringV2.
         NativeKind::DecimalV2 => Encoding {
             kind,
             payload: Payload::Pointer(PointerOwner::V2DecimalObj),
             null_adr020: NullEncoding::NullPointer,
-            null_pre_adr020: NullEncoding::NotNullable,
+            null_pre_adr020: NullEncoding::NullPointer,
             adr_clause: "ADR-020 §3.1 clause 1 bullet 1 (heap T? = null pointer)",
-            provenance: "shape-vm/src/executor/comparison/mod.rs:700 (_ => false)",
+            provenance: "#225: normalized to the null-pointer niche; was \
+                         comparison/mod.rs `_ => false`",
         },
         // Arc<HeapValue> raw pointer; `hk` is the HeapValue discriminant and
         // the sole discriminator for the pointee (ADR-005 §1). The null test
@@ -517,13 +547,28 @@ const fn nullable_int_row(kind: NativeKind, width: u16, signed: bool) -> Encodin
              ADR-020 §3.1 blesses a sentinel for signed int? only",
         )
     };
+    // #225 slice (c): the narrow widths are migrated — their `None` is the
+    // widening niche, so `Some(0)` is an ordinary value again. The 64-bit rows
+    // still read `bits == 0` and keep colliding with `Some(0)`; they are slice
+    // (d)'s presence pairs, and the delta keeps them on the work list until
+    // then rather than letting them look settled.
+    let null_pre_adr020 = if width < 64 {
+        null_adr020
+    } else {
+        NullEncoding::ZeroBits
+    };
+    let provenance = if width < 64 {
+        "#225: migrated to the widening niche; was comparison/mod.rs:686-696 (bits == 0)"
+    } else {
+        "shape-vm/src/executor/comparison/mod.rs:686-696 (bits == 0)"
+    };
     Encoding {
         kind,
         payload: Payload::Int { width, signed },
         null_adr020,
-        null_pre_adr020: NullEncoding::ZeroBits,
+        null_pre_adr020,
         adr_clause: "ADR-020 §3.1 clause 1 bullets 3-4 (blessed sentinel / widening niche)",
-        provenance: "shape-vm/src/executor/comparison/mod.rs:686-696 (bits == 0)",
+        provenance,
     }
 }
 
@@ -687,12 +732,18 @@ mod tests {
 
     #[test]
     fn some_nan_is_representable_under_the_normative_encoding() {
-        // The other half of the same story: pre-ADR-020 every NaN is None.
-        assert!(is_none_bits_pre_adr020(
+        // The other half of the same story. Pre-#225 every NaN read as None in
+        // this carrier, so `Some(NaN)` could not exist in it; #225 slice (b)
+        // narrowed it to the reserved sentinel, so the canonical `Some(NaN)`
+        // is an ordinary value and only the sentinel is absence.
+        assert!(!is_none_bits_pre_adr020(
             NativeKind::NullableFloat64,
             CANON_NAN_BITS
         ));
-        // Normatively, only the reserved sentinel is.
+        assert!(is_none_bits_pre_adr020(
+            NativeKind::NullableFloat64,
+            NULL_NUMBER_BITS
+        ));
         assert_eq!(
             encoding_of(NativeKind::NullableFloat64).null_adr020,
             NullEncoding::Sentinel(NULL_NUMBER_BITS)
@@ -752,28 +803,81 @@ mod tests {
     #[test]
     fn pre_adr020_delta_is_the_225_work_list() {
         let delta = pre_adr020_delta();
-        // Exactly the nullable scalars plus the two v2-raw pointer carriers
-        // whose interpreter arm is missing. Everything else is already
-        // normative — no silent divergence hides in the table.
+        // What is LEFT to do, shrinking as #225 lands:
+        //   (a) StringV2 / DecimalV2  — done, null-pointer niche
+        //   (c) the six narrow nullable ints — done, widening niche
+        //   (b) NullableFloat64 — done, reserved NaN sentinel (inert at HEAD,
+        //       ADR-020 §3.1.1: the carrier is #229's landing target)
+        //   (d) the four 64-bit nullable ints — 2-slot presence pairs
+        // Everything absent from this list is already normative, which is the
+        // other half of the tripwire: no silent divergence hides in the table.
         let expected = [
-            NativeKind::NullableFloat64,
-            NativeKind::NullableInt8,
-            NativeKind::NullableUInt8,
-            NativeKind::NullableInt16,
-            NativeKind::NullableUInt16,
-            NativeKind::NullableInt32,
-            NativeKind::NullableUInt32,
             NativeKind::NullableInt64,
             NativeKind::NullableUInt64,
             NativeKind::NullableIntSize,
             NativeKind::NullableUIntSize,
-            NativeKind::StringV2,
-            NativeKind::DecimalV2,
         ];
         for kind in expected {
             assert!(delta.contains(&kind), "{kind:?} missing from delta");
         }
         assert_eq!(delta.len(), expected.len(), "delta = {delta:?}");
+    }
+
+    #[test]
+    fn v2_raw_pointer_carriers_are_null_at_zero_in_both_columns() {
+        // #225 slice (a). The defect this pins was a DISAGREEMENT, not a
+        // missing feature: `wire_conversion.rs:118` projected `bits == 0` to
+        // `WireValue::Null` while the interpreter's null test fell through to
+        // `_ => false`, so one value was null on the wire and non-null to
+        // `==`. Asserting both columns is the point — a future edit that
+        // re-splits them fails here rather than in a differential.
+        for kind in [NativeKind::StringV2, NativeKind::DecimalV2] {
+            let e = encoding_of(kind);
+            assert_eq!(e.null_adr020, NullEncoding::NullPointer, "{kind:?}");
+            assert_eq!(e.null_pre_adr020, NullEncoding::NullPointer, "{kind:?}");
+            assert!(
+                is_none_bits_pre_adr020(kind, NULL_POINTER_BITS),
+                "{kind:?}: a zero v2-raw carrier pointer must read as None"
+            );
+            assert!(
+                !is_none_bits_pre_adr020(kind, 0x1000),
+                "{kind:?}: a live carrier pointer must not read as None"
+            );
+        }
+    }
+
+    #[test]
+    fn narrow_nullable_ints_took_the_widening_niche_so_some_zero_survives() {
+        // #225 slice (c). The `Some(0)` collision dies here for the six narrow
+        // widths: `bits == 0` used to mean None, so a stored zero came back as
+        // null. The niche is `1 << width`, which no widened payload of that
+        // width can produce under either sign- or zero-extension.
+        for (kind, width) in [
+            (NativeKind::NullableInt8, 8u16),
+            (NativeKind::NullableUInt8, 8),
+            (NativeKind::NullableInt16, 16),
+            (NativeKind::NullableUInt16, 16),
+            (NativeKind::NullableInt32, 32),
+            (NativeKind::NullableUInt32, 32),
+        ] {
+            let niche = null_narrow_bits(width);
+            assert_eq!(
+                encoding_of(kind).null_adr020,
+                NullEncoding::Sentinel(niche),
+                "{kind:?}"
+            );
+            assert!(
+                !is_none_bits_pre_adr020(kind, 0),
+                "{kind:?}: Some(0) must no longer read as None"
+            );
+            assert!(
+                is_none_bits_pre_adr020(kind, niche),
+                "{kind:?}: the niche must read as None"
+            );
+            // The niche is out of range for the payload, which is the whole
+            // reason it is a niche and not a stolen value.
+            assert!(niche > u64::from(u16::MAX) || width < 16 || niche == 1 << width);
+        }
     }
 
     #[test]
