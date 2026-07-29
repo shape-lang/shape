@@ -5,7 +5,6 @@
 
 use shape_vm::bytecode::BytecodeProgram;
 use shape_vm::tier::{CompilationBackend, CompilationRequest, CompilationResult, Tier};
-use shape_vm::type_tracking::FrameDescriptor;
 
 use crate::compiler::JITCompiler;
 use crate::context::JITConfig;

@@ -23,7 +23,7 @@ use cranelift::prelude::*;
 use cranelift_module::{Linkage, Module};
 
 use shape_vm::bytecode::{DeoptInfo, Instruction, OpCode, Operand, OsrEntryPoint};
-use shape_vm::type_tracking::{FrameDescriptor, NativeKind};
+use shape_vm::type_tracking::NativeKind;
 
 use crate::loop_analysis::LoopInfo;
 
