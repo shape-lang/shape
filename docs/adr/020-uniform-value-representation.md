@@ -101,6 +101,26 @@ The FIRST multi-slot citizens are the §3.1 64-bit presence pairs, which land
 in **Phase 1** (#225) together with the minimal 2-slot machinery (kinds
 track, call ABI, snapshot for a 2-slot NativeKind); the general k-slot
 system remains Phase 3.
+
+**Normative invariants (2026-07-29 amendment, clearing the #225 blocker):**
+
+1. **A multi-slot value is N consecutive 8-byte slots with a statically
+   known per-type count — the slot ELEMENT stays 8 bytes.** This is
+   distinct from, and does not relax, ADR-006 §2.7.7's forbidden shapes:
+   16-byte slot elements, packed tag bits, widened elements, and
+   `Vec<KindedSlot>` stacks remain forbidden. CLAUDE.md §Forbidden carries
+   the same carve-out.
+2. **One `SlotId` per value through MIR, the borrow solver, and the
+   storage planner** — expansion to physical slots happens only at frame
+   layout (`FrameDescriptor.slots`), bytecode local declaration, and JIT
+   variable declaration. This is load-bearing for §5's atomicity
+   rationale: the solver/planner serialize access per `SlotId`, so a pair
+   is atomic only while it IS one `SlotId`. Splitting a pair into two
+   `SlotId`s (letting the planner assign the halves different storage
+   classes) is forbidden.
+3. **The `&[KindedSlot]` dispatch tier stays one entry per VALUE** — pair
+   expansion never reaches it; positional `args[N]` indexing remains
+   value-indexed.
 Kinds tables, snapshot format, and the call ABI carry per-type slot counts.
 Sentinel encodings (rulings 1–2) remain single-slot — multi-slot is for
 shapes with **no niche**, not a license to spend slots where a free encoding
