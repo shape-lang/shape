@@ -129,8 +129,9 @@ The FIRST multi-slot citizens are the §3.1 64-bit presence pairs.
 *(SEQUENCING AMENDED 2026-07-29, third ruling: the pairs and their 2-slot
 machinery land WITH #229's `Option<scalar>` unboxing, not in Phase 1 —
 tracing proved the 64-bit nullable SLOT kinds unreachable from any Shape
-source at HEAD (the heap Option carrier serves them, correctly, including
-`Some(0)`/`i64::MIN`/full-u64), so Phase-1 machinery could only ever be
+source at HEAD (the heap Option carrier serves the `Some` side including
+`Some(0)`/`i64::MIN`/full-u64; its `None`-in-function path has a
+pre-existing JIT defect, #238), so Phase-1 machinery could only ever be
 seam-tested. The encoding ruling — presence pairs, no integer sentinels —
 is untouched; only the landing moves to where its producer is born. #225's
 delta closes at 4 with those rows labeled deferred-to-#229.)* The general
