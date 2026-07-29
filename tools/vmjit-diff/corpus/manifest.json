@@ -5,7 +5,7 @@
   "bookRunnableTotal": 240,
   "counts": {
     "book": 240,
-    "acceptance": 224,
+    "acceptance": 219,
     "synthetic": 14
   },
   "skippedCount": 0,
@@ -1406,11 +1406,6 @@
       "source": "docs/cluster-audits/v0.3.3-book-acceptance/programs/comptime/b2b.shape"
     },
     {
-      "id": "ACC__comptime__b3.shape",
-      "tier": "acceptance",
-      "source": "docs/cluster-audits/v0.3.3-book-acceptance/programs/comptime/b3.shape"
-    },
-    {
       "id": "ACC__comptime__b4.shape",
       "tier": "acceptance",
       "source": "docs/cluster-audits/v0.3.3-book-acceptance/programs/comptime/b4.shape"
@@ -1476,11 +1471,6 @@
       "source": "docs/cluster-audits/v0.3.3-book-acceptance/programs/comptime/pif.shape"
     },
     {
-      "id": "ACC__comptime__pif2.shape",
-      "tier": "acceptance",
-      "source": "docs/cluster-audits/v0.3.3-book-acceptance/programs/comptime/pif2.shape"
-    },
-    {
       "id": "ACC__comptime__pn.shape",
       "tier": "acceptance",
       "source": "docs/cluster-audits/v0.3.3-book-acceptance/programs/comptime/pn.shape"
@@ -1524,21 +1514,6 @@
       "id": "ACC__comptime__probe6.shape",
       "tier": "acceptance",
       "source": "docs/cluster-audits/v0.3.3-book-acceptance/programs/comptime/probe6.shape"
-    },
-    {
-      "id": "ACC__comptime__probe7.shape",
-      "tier": "acceptance",
-      "source": "docs/cluster-audits/v0.3.3-book-acceptance/programs/comptime/probe7.shape"
-    },
-    {
-      "id": "ACC__comptime__probe7b.shape",
-      "tier": "acceptance",
-      "source": "docs/cluster-audits/v0.3.3-book-acceptance/programs/comptime/probe7b.shape"
-    },
-    {
-      "id": "ACC__comptime__probe7c.shape",
-      "tier": "acceptance",
-      "source": "docs/cluster-audits/v0.3.3-book-acceptance/programs/comptime/probe7c.shape"
     },
     {
       "id": "ACC__comptime__probe8.shape",
