@@ -3,7 +3,7 @@
 use cranelift::codegen::ir::FuncRef;
 use cranelift::prelude::*;
 use cranelift_module::{Linkage, Module};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use super::function_abi::prove_user_function_abi;
 use super::program_finalize::finalize_program_definitions;
@@ -13,6 +13,34 @@ use crate::context::{JittedFn, JittedStrategyFn};
 use crate::mixed_table::{FunctionEntry, MixedFunctionTable};
 use crate::numeric_compiler::compile_numeric_program;
 use shape_vm::bytecode::BytecodeProgram;
+
+/// Split one function's proven return ABI into the two call-site tables
+/// (ADR-020 §3.3).
+///
+/// Both tables are produced here, from one match on `FrameReturnArity`, so a
+/// function can never appear in both or be classified differently by two
+/// call sites. `Zero` means the function returns no value: it belongs in
+/// `unit_returning` and contributes no return kind, because there is no
+/// value to have a kind. Anything else keeps the pre-existing rule — a
+/// stamped `return_kind` is recorded, an unstamped one is recorded nowhere
+/// and still reaches the call-site surface-and-stop.
+fn harvest_return_abi(
+    idx: u16,
+    func: &shape_vm::bytecode::Function,
+    return_kinds: &mut HashMap<u16, shape_vm::type_tracking::NativeKind>,
+    unit_returning: &mut HashSet<u16>,
+) {
+    let Some(descriptor) = func.frame_descriptor.as_ref() else {
+        return;
+    };
+    if descriptor.returns_no_value() {
+        unit_returning.insert(idx);
+        return;
+    }
+    if let Some(return_kind) = descriptor.return_kind {
+        return_kinds.insert(idx, return_kind);
+    }
+}
 
 impl JITCompiler {
     #[inline(always)]
@@ -74,12 +102,15 @@ impl JITCompiler {
         let mut user_func_ids: HashMap<u16, cranelift_module::FuncId> = HashMap::new();
         let mut user_func_return_kinds: HashMap<u16, shape_vm::type_tracking::NativeKind> =
             HashMap::new();
+        let mut unit_returning_funcs: HashSet<u16> = HashSet::new();
 
         for (idx, func) in program.functions.iter().enumerate() {
-            if let Some(return_kind) = func.frame_descriptor.as_ref().and_then(|fd| fd.return_kind)
-            {
-                user_func_return_kinds.insert(idx as u16, return_kind);
-            }
+            harvest_return_abi(
+                idx as u16,
+                func,
+                &mut user_func_return_kinds,
+                &mut unit_returning_funcs,
+            );
             let func_name = format!("{}_{}", name, func.name.replace("::", "__"));
             let abi = prove_user_function_abi(self.module.make_signature(), func)?;
             let func_id = self
@@ -96,6 +127,7 @@ impl JITCompiler {
             &user_func_ids,
             &user_func_arities,
             &user_func_return_kinds,
+            &unit_returning_funcs,
         )?;
 
         for (idx, func) in program.functions.iter().enumerate() {
@@ -107,6 +139,7 @@ impl JITCompiler {
                 &user_func_ids,
                 &user_func_arities,
                 &user_func_return_kinds,
+                &unit_returning_funcs,
             )?;
         }
 
@@ -142,6 +175,7 @@ impl JITCompiler {
         user_func_ids: &HashMap<u16, cranelift_module::FuncId>,
         user_func_arities: &HashMap<u16, u16>,
         user_func_return_kinds: &HashMap<u16, shape_vm::type_tracking::NativeKind>,
+        unit_returning_funcs: &HashSet<u16>,
     ) -> Result<(), String> {
         let func = &program.functions[func_idx];
         let func_id = *user_func_ids
@@ -309,6 +343,7 @@ impl JITCompiler {
                         user_func_refs.clone(),
                         user_func_arities.clone(),
                         user_func_return_kinds.clone(),
+                        unit_returning_funcs.clone(),
                         closure_function_layouts,
                     );
                 // V3-S6c-jit-method-monomorph-routing (ADR-006 §2.7.5
@@ -754,12 +789,15 @@ impl JITCompiler {
         let mut user_func_ids: HashMap<u16, cranelift_module::FuncId> = HashMap::new();
         let mut user_func_return_kinds: HashMap<u16, shape_vm::type_tracking::NativeKind> =
             HashMap::new();
+        let mut unit_returning_funcs: HashSet<u16> = HashSet::new();
 
         for (idx, func) in program.functions.iter().enumerate() {
-            if let Some(return_kind) = func.frame_descriptor.as_ref().and_then(|fd| fd.return_kind)
-            {
-                user_func_return_kinds.insert(idx as u16, return_kind);
-            }
+            harvest_return_abi(
+                idx as u16,
+                func,
+                &mut user_func_return_kinds,
+                &mut unit_returning_funcs,
+            );
             if !jit_compatible[idx] {
                 user_func_arities.insert(idx as u16, func.arity);
                 continue;
@@ -784,6 +822,7 @@ impl JITCompiler {
             &user_func_ids,
             &user_func_arities,
             &user_func_return_kinds,
+            &unit_returning_funcs,
         )?;
 
         // Phase 4: Compile only JIT-compatible function bodies.
@@ -819,6 +858,7 @@ impl JITCompiler {
                 &user_func_ids,
                 &user_func_arities,
                 &user_func_return_kinds,
+                &unit_returning_funcs,
             ) {
                 tracing::debug!(
                     target: "shape_jit",

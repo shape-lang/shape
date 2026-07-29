@@ -1,0 +1,17 @@
+// ADR-020 §3.3 (#224): a unit-returning function is called for effect only.
+// Before the void-call change the caller could not be lowered at all — the
+// direct-call site demanded a proven FrameDescriptor.return_kind, and a unit
+// function has none because it returns no value, so the whole enclosing
+// function bailed to the interpreter.
+fn note(x: int) {
+    print(x)
+}
+fn run(n: int) -> int {
+    let mut i = 0
+    while i < n {
+        note(i)
+        i = i + 1
+    }
+    return i
+}
+print(run(4))

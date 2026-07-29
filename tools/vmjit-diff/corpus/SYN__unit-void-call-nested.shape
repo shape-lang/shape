@@ -1,0 +1,18 @@
+// ADR-020 §3.3 (#224): a unit-returning function whose own body is nothing but
+// calls to another unit-returning function. Both call sites must be void.
+fn inner(x: int) {
+    print(x * 2)
+}
+fn outer(x: int) {
+    inner(x)
+    inner(x + 1)
+}
+fn run(n: int) -> int {
+    let mut i = 0
+    while i < n {
+        outer(i)
+        i = i + 1
+    }
+    return i
+}
+print(run(3))

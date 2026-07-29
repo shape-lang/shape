@@ -159,6 +159,7 @@ fn user_function_strategy_route_rejects_forged_shared_kind_before_publication() 
             &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
+            &HashSet::new(),
         )
         .expect_err("the user-function strategy route must reject forged Shared metadata");
 

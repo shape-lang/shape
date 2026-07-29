@@ -131,6 +131,34 @@ pub enum FrameReturnWrapper {
     Result,
 }
 
+/// How many values a frame returns across the call boundary (ADR-020 §3.3).
+///
+/// This is STATIC SIGNATURE METADATA, not a value encoding. Unit is "no
+/// value": a `Zero`-arity function produces no bits at all — it writes
+/// nothing to `ctx.stack[0]`, and its call sites must not read a result.
+/// There is deliberately no bit pattern anywhere that means "unit";
+/// introducing one (a `TAG_UNIT` successor under any name) is forbidden by
+/// ADR-020 §6.
+///
+/// `Zero` is a positive proof stamped by the bytecode compiler from
+/// `ConcreteType::Void`. It is NOT the same fact as `return_kind == None`,
+/// which stays overloaded with "kind not stamped yet" — that ambiguity is
+/// precisely why this field exists. Consumers that need "does this call
+/// produce a value" must read `return_arity`, never infer it from the
+/// absence of a `return_kind`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum FrameReturnArity {
+    /// The frame returns no value (source-level `()` / `ConcreteType::Void`).
+    Zero,
+    /// The frame returns exactly one value, described by `return_kind`.
+    ///
+    /// Default so that a descriptor which has not been stamped keeps the
+    /// pre-ADR-020 behaviour: an unproven `return_kind` still reaches the
+    /// call-site surface-and-stop rather than being silently read as unit.
+    #[default]
+    One,
+}
+
 /// Typed frame layout metadata.
 ///
 /// A `FrameDescriptor` describes the storage layout for every local slot
@@ -184,6 +212,13 @@ pub struct FrameDescriptor {
     /// Defaults to `Unknown` for old serialized descriptors.
     #[serde(default)]
     pub return_wrapper: FrameReturnWrapper,
+
+    /// ADR-020 §3.3: how many values this frame returns. `Zero` means the
+    /// function is unit-returning and produces no bits; call sites emit a
+    /// void call and read no result. Defaults to `One` so an unstamped
+    /// descriptor keeps the pre-ADR-020 surface-and-stop behaviour.
+    #[serde(default)]
+    pub return_arity: FrameReturnArity,
 }
 
 impl FrameDescriptor {
@@ -195,6 +230,7 @@ impl FrameDescriptor {
             slots: Vec::new(),
             return_kind: None,
             return_wrapper: FrameReturnWrapper::Unknown,
+            return_arity: FrameReturnArity::One,
         }
     }
 
@@ -205,6 +241,7 @@ impl FrameDescriptor {
             slots,
             return_kind: None,
             return_wrapper: FrameReturnWrapper::Unknown,
+            return_arity: FrameReturnArity::One,
         }
     }
 
@@ -242,6 +279,16 @@ impl FrameDescriptor {
             },
             wrapper => wrapper,
         }
+    }
+
+    /// ADR-020 §3.3: whether this frame returns no value at all.
+    ///
+    /// Read this — never `return_kind.is_none()` — to decide whether a call
+    /// produces a result. `return_kind == None` also covers "not stamped",
+    /// which must keep reaching the call-site surface-and-stop.
+    #[inline]
+    pub fn returns_no_value(&self) -> bool {
+        self.return_arity == FrameReturnArity::Zero
     }
 
     /// Return the ABI carrier kind for this frame's return value. New

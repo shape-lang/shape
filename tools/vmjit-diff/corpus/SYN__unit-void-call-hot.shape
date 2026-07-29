@@ -1,0 +1,14 @@
+// ADR-020 §3.3 (#224): an empty unit body called in a hot loop. The callee
+// writes nothing to ctx.stack[0]; a caller that still loaded a result would
+// read whatever the previous call left there.
+fn tick(x: int) {
+}
+fn run(n: int) -> int {
+    let mut i = 0
+    while i < n {
+        tick(i)
+        i = i + 1
+    }
+    return i
+}
+print(run(50000))
