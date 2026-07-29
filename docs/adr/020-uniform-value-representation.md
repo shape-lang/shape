@@ -84,6 +84,25 @@ instance to delete).
    carrier. (Fat two-word pairs are the §5 multi-slot upgrade path if
    measurement later justifies them.)
 
+### 3.1.1 The Option-carrier duality, named (2026-07-29 amendment, per §Forbidden's duality rule)
+
+At HEAD, `Option<number-family>` has TWO carriers: the storage-hinted
+`StorageType::NullableFloat64` sentinel slot (`type_system/storage.rs:114`,
+the §3.1 target encoding) and the general `Ptr(HeapKind::Option)` TypedObject
+(what ordinary source-level `number?` produces today — one heap allocation
+per `Some`). This duality is hereby EXPLICITLY NAMED with its classification
+rule (= the storage-hint conditions at storage.rs:114; everything else takes
+the heap carrier) so it does not become a silent parallel implementation.
+It is TRANSITIONAL, not a feature: **Phase 3 (#229) owns migrating
+`Option<scalar>` off the TypedObject carrier onto the §3.1 encodings**
+(NaN-sentinel for number, widened niches for narrow ints, presence pairs
+for 64-bit) — the boxing-per-Some is exactly the uniform-word cost this ADR
+exists to delete. Until then: the §4 book fences test SEMANTICS
+(`Some(NaN)` survives `??`), which hold under both carriers; slice records
+state which carrier a fence exercises; and the book states NaN payload bits
+as UNSPECIFIED through nullable positions now, so the Phase-3
+canonicalization changes no documented promise.
+
 ## 4. Nullable-scalar semantics (public, book-gated)
 
 Rulings 1–2 are public language semantics, not internal encodings:
