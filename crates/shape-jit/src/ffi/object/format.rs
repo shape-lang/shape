@@ -11,6 +11,7 @@
 use super::super::super::context::JITContext;
 use crate::ffi::jit_kinds::*;
 use crate::ffi::value_ffi::*;
+use shape_value::encoding::ERROR_PLACEHOLDER_BITS;
 
 #[cold]
 #[track_caller]
@@ -37,21 +38,37 @@ fn unsupported_legacy_heap_kind(func_name: &str, kind: Option<u16>) -> ! {
 pub extern "C" fn jit_format(ctx: *mut JITContext, _arg_count: usize) -> u64 {
     unsafe {
         if ctx.is_null() {
-            return TAG_NULL;
+            // #234 B1: unreachable absent a JIT codegen bug, and there is no
+            // context to record `pending_call_error` in — the context IS what
+            // is null. Returns the placeholder, memory-safe by #234.
+            return ERROR_PLACEHOLDER_BITS;
         }
 
         let ctx_ref = &mut *ctx;
 
         // Pop arg_count value from stack first
         if ctx_ref.stack_ptr == 0 {
-            return TAG_NULL;
+            // #234 c1: corrupted JIT state — record the error so the caller
+            // deopts to the interpreter instead of computing on garbage.
+            crate::ffi::control::set_jit_runtime_error(
+                "jit_format: operand stack empty while popping arg_count — deopting to interpreter"
+                    .to_string(),
+            );
+            ctx_ref.pending_call_error = 1;
+            return ERROR_PLACEHOLDER_BITS;
         }
         ctx_ref.stack_ptr -= 1;
         let arg_count_val = ctx_ref.stack[ctx_ref.stack_ptr];
         let arg_count = if is_number(arg_count_val) {
             unbox_number(arg_count_val) as usize
         } else {
-            return TAG_NULL;
+            // #234 c1: corrupted JIT state — record the error so the caller
+            // deopts to the interpreter instead of computing on garbage.
+            crate::ffi::control::set_jit_runtime_error(
+                "jit_format: operand stack empty while popping the format argument — deopting to interpreter".to_string(),
+            );
+            ctx_ref.pending_call_error = 1;
+            return ERROR_PLACEHOLDER_BITS;
         };
 
         if arg_count == 0 {
@@ -62,7 +79,13 @@ pub extern "C" fn jit_format(ctx: *mut JITContext, _arg_count: usize) -> u64 {
         let mut args = Vec::with_capacity(arg_count);
         for _ in 0..arg_count {
             if ctx_ref.stack_ptr == 0 {
-                return TAG_NULL;
+                // #234 c1: corrupted JIT state — record the error so the caller
+                // deopts to the interpreter instead of computing on garbage.
+                crate::ffi::control::set_jit_runtime_error(
+                    "jit_format: operand stack exhausted mid-argument-pop — deopting to interpreter".to_string(),
+                );
+                ctx_ref.pending_call_error = 1;
+                return ERROR_PLACEHOLDER_BITS;
             }
             ctx_ref.stack_ptr -= 1;
             args.push(ctx_ref.stack[ctx_ref.stack_ptr]);

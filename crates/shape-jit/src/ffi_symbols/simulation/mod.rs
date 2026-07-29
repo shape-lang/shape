@@ -9,6 +9,7 @@
 use crate::context::JITContext;
 use crate::ffi::control::jit_call_value;
 use crate::ffi::value_ffi::*;
+use shape_value::encoding::ERROR_PLACEHOLDER_BITS;
 
 /// JIT FFI for run_simulation
 ///
@@ -26,7 +27,10 @@ use crate::ffi::value_ffi::*;
 pub extern "C" fn jit_run_simulation(ctx: *mut JITContext, config_bits: u64) -> u64 {
     unsafe {
         if ctx.is_null() {
-            return TAG_NULL;
+            // #234 B1: unreachable absent a JIT codegen bug, and there is no
+            // context to record `pending_call_error` in — the context IS what
+            // is null. Returns the placeholder, memory-safe by #234.
+            return ERROR_PLACEHOLDER_BITS;
         }
 
         let ctx_ref = &mut *ctx;
@@ -83,9 +87,14 @@ mod tests {
     use crate::context::JITContext;
 
     #[test]
-    fn test_simulation_null_ctx_returns_null() {
+    fn test_simulation_null_ctx_returns_placeholder() {
+        // #234 B1: a null context is unreachable absent a JIT codegen bug, and
+        // there is no context to record `pending_call_error` in — so the guard
+        // stays and leaves the placeholder in the value channel. What this
+        // pins is that the bail does not fabricate a value and does not read
+        // through the null pointer.
         let result = jit_run_simulation(std::ptr::null_mut(), TAG_NULL);
-        assert_eq!(result, TAG_NULL);
+        assert_eq!(result, ERROR_PLACEHOLDER_BITS);
     }
 
     #[test]

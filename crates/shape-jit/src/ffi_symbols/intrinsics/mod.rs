@@ -8,6 +8,7 @@ use crate::context::JITContext;
 // surfaces per ADR-006 §2.7.4 / W10 jit-playbook §5.
 use crate::ffi::jit_kinds::*;
 use crate::ffi::value_ffi::*;
+use shape_value::encoding::ERROR_PLACEHOLDER_BITS;
 
 /// Intrinsic sum: compute sum of all values in a column.
 pub extern "C" fn jit_intrinsic_sum(series_bits: u64) -> u64 {
@@ -348,7 +349,10 @@ pub extern "C" fn jit_series_lowest_index(series_bits: u64) -> u64 {
 pub extern "C" fn jit_time_current_time(ctx: *mut JITContext) -> u64 {
     unsafe {
         if ctx.is_null() {
-            return TAG_NULL;
+            // #234 B1: unreachable absent a JIT codegen bug, and there is no
+            // context to record `pending_call_error` in — the context IS what
+            // is null. Returns the placeholder, memory-safe by #234.
+            return ERROR_PLACEHOLDER_BITS;
         }
         let ctx_ref = &*ctx;
 
@@ -380,7 +384,10 @@ pub extern "C" fn jit_time_current_time(ctx: *mut JITContext) -> u64 {
 pub extern "C" fn jit_time_symbol(ctx: *mut JITContext) -> u64 {
     unsafe {
         if ctx.is_null() {
-            return TAG_NULL;
+            // #234 B1: unreachable absent a JIT codegen bug, and there is no
+            // context to record `pending_call_error` in — the context IS what
+            // is null. Returns the placeholder, memory-safe by #234.
+            return ERROR_PLACEHOLDER_BITS;
         }
         let ctx_ref = &*ctx;
 
@@ -401,7 +408,10 @@ pub extern "C" fn jit_time_symbol(ctx: *mut JITContext) -> u64 {
 pub extern "C" fn jit_time_last_row(ctx: *mut JITContext) -> u64 {
     unsafe {
         if ctx.is_null() {
-            return TAG_NULL;
+            // #234 B1: unreachable absent a JIT codegen bug, and there is no
+            // context to record `pending_call_error` in — the context IS what
+            // is null. Returns the placeholder, memory-safe by #234.
+            return ERROR_PLACEHOLDER_BITS;
         }
         let ctx_ref = &*ctx;
 
