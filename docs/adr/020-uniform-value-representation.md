@@ -80,10 +80,24 @@ instance to delete).
 4. **Function values** — **one carrier**: pointer to a closure record
    (code ptr + captures behind one refcounted `HeapHeader`). Zero-capture
    closures and named-function references point to **statically-allocated
-   immortal records** (refcount ops are no-ops on immortals): zero
-   allocation, one slot, no `box_function`, no `fn_id` sentinel, no dual
-   carrier. (Fat two-word pairs are the §5 multi-slot upgrade path if
-   measurement later justifies them.)
+   immortal records**: zero allocation, one slot, no `box_function`, no
+   `fn_id` sentinel, no dual carrier. (Fat two-word pairs are the §5
+   multi-slot upgrade path if measurement later justifies them.)
+   *(2026-07-29 amendment, #227 slice-2 rulings):* **The one carrier IS
+   the VM's existing `Arc<HeapValue::ClosureRaw>` / `Ptr(HeapKind::Closure)`**
+   — the VM is already single-carrier for ALL closures including
+   zero-capture; the dual carrier is JIT-only (`box_function` NaN-box).
+   Unification = the JIT ADOPTS the VM's carrier, not a third (a direct
+   v2-raw closure header would flip Closure into the Bacon-Rajan
+   cycle-capable set — a GC design change this ADR does not order; noted
+   as a GC follow-up, status quo preserved). **Immortality = one leaked
+   permanent share** (no header flag, no branch on the RC hot path):
+   "refcount ops are no-ops on immortals" holds SEMANTICALLY (the count
+   never reaches zero; frees never happen), not as a perf claim — a
+   perf-level no-op is a measured follow-up if RC traffic on immortals
+   ever shows up. The `box_function`/`is_inline_function`/`TAG_FUNCTION`
+   DELETION lands in #239 with the rest of the tag dialect and its
+   ratchet (#227 makes them producer-less; #239 buries them).
 
 ### 3.1.1 The Option-carrier duality, named (2026-07-29 amendment, per §Forbidden's duality rule)
 
