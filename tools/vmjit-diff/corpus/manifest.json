@@ -6,7 +6,7 @@
   "counts": {
     "book": 240,
     "acceptance": 219,
-    "synthetic": 20
+    "synthetic": 22
   },
   "skippedCount": 0,
   "entries": [
@@ -2411,6 +2411,16 @@
       "id": "SYN__some-nan-survives-nullable.shape",
       "tier": "synthetic",
       "source": "tools/vmjit-diff/synthetic/SYN__some-nan-survives-nullable.shape"
+    },
+    {
+      "id": "SYN__bool-bare-encoding.shape",
+      "tier": "synthetic",
+      "source": "tools/vmjit-diff/synthetic/SYN__bool-bare-encoding.shape"
+    },
+    {
+      "id": "SYN__bool-vs-int-one.shape",
+      "tier": "synthetic",
+      "source": "tools/vmjit-diff/synthetic/SYN__bool-vs-int-one.shape"
     }
   ]
 }

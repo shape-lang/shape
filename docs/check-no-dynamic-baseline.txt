@@ -42,3 +42,4 @@
 0	Arc::(from_raw|increment_strong_count|decrement_strong_count)\s*\(\s*[^;]*?\bas\s+\*(const|mut)\s+(\w+::)*TraitObjectStorage	R6 carrier-UB: Arc ptr-op on _new TraitObjectStorage carrier (use v2_retain/release_elem on HeapHeader)
 0	let\s+expected\s*=\s*NativeKind::Bool	W17 Stage-0: no-layout upvalue Bool-default fabrication — ADR-006 §2.7.8/Q10 (design §4.2.4)
 0	^(?!\s*//).*\bTAG_UNIT\b	ADR-020 §3.3/§6 (#224) — unit has no bit encoding; no unit word under any name (comment prose exempt)
+52	^(?!\s*(//|///|\*)).*\bTAG_BOOL_(TRUE|FALSE)\b	ADR-020 §3 clause 2 (#226) — bool is bare 0/1; the residue is the kind-blind JIT FFI dialect (#239 drives it to 0). SHRINK-ONLY: comment prose exempt

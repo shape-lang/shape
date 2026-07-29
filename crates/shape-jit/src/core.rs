@@ -706,7 +706,8 @@ mod tests {
     #[test]
     #[ignore = "v2: tests deleted BytecodeToIR path; covered by mir_compiler::integration_tests"]
     fn test_jit_width_aware_u8_comparison_uses_unsigned_ordering() {
-        use crate::ffi::value_ffi::TAG_BOOL_FALSE;
+        // ADR-020 §3 clause 2 (#226): a comparison result is bare 0/1.
+        use shape_value::encoding::BOOL_FALSE_BITS;
 
         let program = BytecodeProgram {
             instructions: vec![
@@ -723,7 +724,7 @@ mod tests {
             top_level_local_storage_hints: vec![StorageHint::UInt8, StorageHint::UInt8],
             ..Default::default()
         };
-        assert_eq!(run_program_get_raw("test_u8_cmp", program), TAG_BOOL_FALSE);
+        assert_eq!(run_program_get_raw("test_u8_cmp", program), BOOL_FALSE_BITS);
     }
 
     #[test]
@@ -773,7 +774,8 @@ mod tests {
     #[test]
     #[ignore = "v2: tests deleted BytecodeToIR path; covered by mir_compiler::integration_tests"]
     fn test_jit_width_aware_i16_signed_comparison() {
-        use crate::ffi::value_ffi::TAG_BOOL_TRUE;
+        // ADR-020 §3 clause 2 (#226): a comparison result is bare 0/1.
+        use shape_value::encoding::BOOL_TRUE_BITS;
 
         let program = BytecodeProgram {
             instructions: vec![
@@ -790,13 +792,14 @@ mod tests {
             top_level_local_storage_hints: vec![StorageHint::Int16, StorageHint::Int16],
             ..Default::default()
         };
-        assert_eq!(run_program_get_raw("test_i16_cmp", program), TAG_BOOL_TRUE);
+        assert_eq!(run_program_get_raw("test_i16_cmp", program), BOOL_TRUE_BITS);
     }
 
     #[test]
     #[ignore = "v2: tests deleted BytecodeToIR path; covered by mir_compiler::integration_tests"]
     fn test_jit_width_aware_u16_unsigned_comparison() {
-        use crate::ffi::value_ffi::TAG_BOOL_TRUE;
+        // ADR-020 §3 clause 2 (#226): a comparison result is bare 0/1.
+        use shape_value::encoding::BOOL_TRUE_BITS;
 
         let program = BytecodeProgram {
             instructions: vec![
@@ -813,7 +816,7 @@ mod tests {
             top_level_local_storage_hints: vec![StorageHint::UInt16, StorageHint::UInt16],
             ..Default::default()
         };
-        assert_eq!(run_program_get_raw("test_u16_cmp", program), TAG_BOOL_TRUE);
+        assert_eq!(run_program_get_raw("test_u16_cmp", program), BOOL_TRUE_BITS);
     }
 
     #[test]

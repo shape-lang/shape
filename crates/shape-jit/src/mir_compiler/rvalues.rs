@@ -1854,8 +1854,9 @@ impl<'a, 'b> MirToIR<'a, 'b> {
     ///
     /// This helper remains for the `BinOp::And` / `BinOp::Or`
     /// fallthroughs from `compile_binop_f64`, `compile_binop_int64`,
-    /// and `compile_binop_bool` where the logical op mixes with a
-    /// NaN-boxed bool encoding (TAG_BOOL_TRUE / TAG_BOOL_FALSE).
+    /// and `compile_binop_bool` where the logical op sees a bool
+    /// widened into an I64 slot. That bool is bare 0/1 (ADR-020 §3
+    /// clause 2), which is what the arms below compare against.
     ///
     /// Session 2: Dynamic arithmetic binops from CallValue-returned
     /// slots (closure calls whose return type isn't provable at MIR
@@ -1882,7 +1883,8 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                 self.compile_binop_dynamic_cmp(op, l, r)
             }
 
-            // v2-boundary: logical ops on NaN-boxed values use TAG_BOOL_TRUE/FALSE
+            // Logical ops compare against bare `1` / `0` (ADR-020 §3
+            // clause 2). There is no boolean tag to test.
             BinOp::And => {
                 let tag_true = self.builder.ins().iconst(types::I64, 1i64);
                 let l_is_true = self.builder.ins().icmp(IntCC::Equal, l, tag_true);
@@ -1939,9 +1941,10 @@ impl<'a, 'b> MirToIR<'a, 'b> {
     ///   reaching `compile_binop` are rare (the native-I32 fast path catches
     ///   both-I32 already), so this conservative sign-extend keeps the raw
     ///   integer value visible to the dynamic dispatch's `int` branch.
-    /// - `I8` (native bool) → zero-extend to `I64`. The logical-op branches of
-    ///   `compile_binop` compare against the literal `1i64` ⇔ `TAG_BOOL_TRUE`
-    ///   encoding, so widening to I64 preserves truth semantics.
+    /// - `I8` (native bool) → zero-extend to `I64`. A bool is bare 0/1
+    ///   (ADR-020 §3 clause 2) and the logical-op branches of
+    ///   `compile_binop` compare against the literal `1i64`, so widening to
+    ///   I64 preserves truth semantics.
     /// - `I64` → passed through unchanged.
     fn to_i64_bits(&mut self, v: Value) -> Value {
         let ty = self.builder.func.dfg.value_type(v);
@@ -2081,7 +2084,9 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                     let one = self.builder.ins().iconst(types::I8, 1);
                     Ok(self.builder.ins().bxor(val, one))
                 } else {
-                    // v2-boundary: NaN-boxed bool uses TAG_BOOL_TRUE/FALSE tags
+                    // A bool widened into an I64 slot is still bare 0/1
+                    // (ADR-020 §3 clause 2) — compare against the literal
+                    // `1`, not a boolean tag.
                     let tag_true = self.builder.ins().iconst(types::I64, 1i64);
                     let false_val = self.builder.ins().iconst(types::I64, 0i64);
                     let is_true = self.builder.ins().icmp(IntCC::Equal, val, tag_true);

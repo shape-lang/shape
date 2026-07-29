@@ -149,7 +149,8 @@ mod tests {
     }
 
     /// Build a JIT function that performs i32 comparison: (i64, i64) -> i64
-    /// Returns TAG_BOOL_TRUE or TAG_BOOL_FALSE (same as compile_cmp_i32).
+    /// Returns bare `1` / `0` (same as `compile_cmp_i32`), per ADR-020 §3
+    /// clause 2 — a Cranelift `icmp` result, no boolean tag.
     fn jit_i32_cmp(op: &str, a: i64, b: i64) -> u64 {
         let mut flag_builder = settings::builder();
         flag_builder.set("opt_level", "speed_and_size").unwrap();

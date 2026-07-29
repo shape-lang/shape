@@ -1,0 +1,69 @@
+// ADR-020 §3 clause 2 (#226): a bool is `0`/`1` in an integer slot — there is
+// no `TAG_BOOL_*` word in either tier. This is the bool analog of
+// SYN__unit-void-call-*: it drives bools through every position where a
+// representation could leak — parameter, return, local, comparison result,
+// logical operator, branch condition, and `print` — and requires both tiers to
+// agree. Under the deleted NaN-box dialect `false` was a NON-ZERO tagged word,
+// so any path that re-introduced it and then branched on raw truthiness would
+// read `false` as true; this program would print differently in the two tiers.
+fn is_pos(x: int) -> bool { return x > 0 }
+fn negate(b: bool) -> bool {
+    if b {
+        return false
+    }
+    return true
+}
+fn both(a: bool, b: bool) -> bool { return a && b }
+fn either(a: bool, b: bool) -> bool { return a || b }
+
+// A bool that survives a loop as a local, and one that is recomputed per
+// iteration — the JIT keeps the first in a register/spill slot across the
+// back-edge and the second in a fresh one.
+fn run(n: int) -> int {
+    let mut acc = 0
+    let mut seen_true = false
+    let mut i = 0
+    while i < n {
+        let b = is_pos(i - 2)
+        let c = negate(b)
+        if b {
+            acc = acc + 1
+        }
+        if c {
+            acc = acc + 10
+        }
+        if both(b, c) {
+            acc = acc + 100
+        }
+        if either(b, c) {
+            acc = acc + 1000
+        }
+        if b == c {
+            acc = acc + 10000
+        }
+        if b != c {
+            acc = acc + 100000
+        }
+        seen_true = either(seen_true, b)
+        i = i + 1
+    }
+    if seen_true {
+        acc = acc + 1000000
+    }
+    return acc
+}
+
+print(run(6))
+print(is_pos(3))
+print(is_pos(0 - 3))
+print(negate(true))
+print(negate(false))
+print(both(true, true))
+print(both(true, false))
+print(either(false, false))
+print(either(false, true))
+
+// `!` on a bool: the unary-not lowering compares against bare `1`.
+fn flip(b: bool) -> bool { return !b }
+print(flip(true))
+print(flip(false))

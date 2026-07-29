@@ -15,9 +15,10 @@
 //! shape because downstream symbol-table consumers (the deleted
 //! `jit_array_info` entry's signature in any future probe) and non-
 //! array consumers reference it through the public type. The
-//! `is_inline_bool` helper is similarly preserved as a §2.7.5 carrier
-//! that's not a tag-bit decode (it tests against the JIT's stable
-//! inline-bool constants from a known-Bool slot).
+//! `is_inline_bool` helper that used to sit beside it is deleted
+//! (ADR-020 §3 clause 2 / #226): a bool is bare 0/1, so there is no
+//! inline-bool constant left to test against, and the helper had no
+//! callers.
 //!
 //! ## Forbidden under any future expansion
 //!
@@ -25,8 +26,6 @@
 //!   to refuse on sight" — broader-family regex).
 //! - Bool-default fallback for unknown element kind.
 //! - `tag_bits`-based element decoder.
-
-use super::value_ffi::{TAG_BOOL_FALSE, TAG_BOOL_TRUE};
 
 // ============================================================================
 // Public ABI carrier preserved for downstream symbol-table compatibility.
@@ -46,16 +45,8 @@ pub struct ArrayInfo {
     pub length: u64,
 }
 
-// ============================================================================
-// Helper used by other (still-living) FFI sites to materialize a fresh
-// element-kind label without tag-bit decode. Kept as a §2.7.5 carrier.
-// ============================================================================
-
-/// Returns `true` iff `value_bits` carries an inline-true / inline-false
-/// constant per `value_ffi::TAG_BOOL_*`. Distinct from the deleted
-/// `tag_bits::is_tagged`/`get_tag` shape: the input is a JIT-stamped
-/// boolean payload from a known-Bool slot, not a runtime classifier.
-#[inline]
-pub fn is_inline_bool(value_bits: u64) -> bool {
-    value_bits == TAG_BOOL_TRUE || value_bits == TAG_BOOL_FALSE
-}
+// `is_inline_bool` was here — deleted per ADR-020 §3 clause 2 (#226). It
+// had no callers, and its premise (a bool is recognizable from its bits)
+// is exactly what the bare-0/1 encoding retires: 0 and 1 are ordinary
+// integer bit patterns, so only the static kind can say a slot holds a
+// bool.
