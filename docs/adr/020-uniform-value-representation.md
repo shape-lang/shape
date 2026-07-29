@@ -63,8 +63,9 @@ instance to delete).
      second amendment)*: no blessed integer sentinel ever; `i64::MIN` and
      the full u64 range remain representable. Rust-confirmed policy
      (`Option<i64>` is 16 bytes; niches only where genuine). The
-     presence-pair machinery lands in Phase 1 with this encoding — "no
-     work on code that is obsolete later" (owner).
+     presence-pair machinery lands WITH #229's `Option<scalar>` unboxing
+     (third sequencing ruling, §5 — the slot kinds are producer-less at
+     HEAD; only the ENCODING is Phase-1 normative).
    - Narrower scalars (`i32?`, `i16?`, `i8?`, `u32?`, `u16?`, `u8?`,
      `bool?`, `char?`): widen within the 8-byte slot; the encoding table
      defines one out-of-range `None` pattern per width (`1 << width`) —
