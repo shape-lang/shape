@@ -116,10 +116,16 @@ fences, in the same slice that lands each encoding.
 The 1-value-=-1-slot invariant is retired. A value may occupy k ≥ 1
 consecutive slots with a statically-known k per type: fat function pairs (if
 adopted per §3.4), inline small tuples/enums, `sret`/multi-value returns.
-The FIRST multi-slot citizens are the §3.1 64-bit presence pairs, which land
-in **Phase 1** (#225) together with the minimal 2-slot machinery (kinds
-track, call ABI, snapshot for a 2-slot NativeKind); the general k-slot
-system remains Phase 3.
+The FIRST multi-slot citizens are the §3.1 64-bit presence pairs.
+*(SEQUENCING AMENDED 2026-07-29, third ruling: the pairs and their 2-slot
+machinery land WITH #229's `Option<scalar>` unboxing, not in Phase 1 —
+tracing proved the 64-bit nullable SLOT kinds unreachable from any Shape
+source at HEAD (the heap Option carrier serves them, correctly, including
+`Some(0)`/`i64::MIN`/full-u64), so Phase-1 machinery could only ever be
+seam-tested. The encoding ruling — presence pairs, no integer sentinels —
+is untouched; only the landing moves to where its producer is born. #225's
+delta closes at 4 with those rows labeled deferred-to-#229.)* The general
+k-slot system remains Phase 3 alongside it.
 
 **Normative invariants (2026-07-29 amendment, clearing the #225 blocker):**
 
