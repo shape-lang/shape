@@ -17,7 +17,7 @@ use crate::context::JITContext;
 use crate::ffi::jit_kinds::*;
 use crate::ffi::value_ffi::*;
 use shape_runtime::context::ExecutionContext;
-use shape_value::{HeapKind, NativeKind};
+use shape_value::{HeapKind, NativeKind, encoding::ERROR_PLACEHOLDER_BITS};
 
 // Module declarations
 pub mod duration;
@@ -927,7 +927,7 @@ pub extern "C" fn jit_call_method(ctx: *mut JITContext, stack_count: usize) -> u
                 method_name,
             ));
             ctx_ref.pending_call_error = 1;
-            return TAG_NULL;
+            return ERROR_PLACEHOLDER_BITS;
         }
 
         if delegated {
@@ -976,7 +976,7 @@ pub extern "C" fn jit_call_method(ctx: *mut JITContext, stack_count: usize) -> u
                     );
                     super::control::set_jit_runtime_error(e.to_string());
                     ctx_ref.pending_call_error = 1;
-                    return TAG_NULL;
+                    return ERROR_PLACEHOLDER_BITS;
                 }
                 None => {
                     tracing::debug!(
@@ -992,7 +992,7 @@ pub extern "C" fn jit_call_method(ctx: *mut JITContext, stack_count: usize) -> u
                         method_name,
                     ));
                     ctx_ref.pending_call_error = 1;
-                    return TAG_NULL;
+                    return ERROR_PLACEHOLDER_BITS;
                 }
             }
         }
@@ -1055,14 +1055,14 @@ pub extern "C" fn jit_call_method(ctx: *mut JITContext, stack_count: usize) -> u
                         method_name,
                     ));
                     ctx_ref.pending_call_error = 1;
-                    return TAG_NULL;
+                    return ERROR_PLACEHOLDER_BITS;
                 }
                 _ => {}
             }
             match method_name.as_str() {
                 "find" | "findIndex" | "some" | "every" | "filter" | "map" | "reduce" => {
                     if args.is_empty() {
-                        return TAG_NULL;
+                        return ERROR_PLACEHOLDER_BITS;
                     }
                     let predicate = args[0];
                     let working_array_bits = receiver_bits;
@@ -1207,7 +1207,7 @@ pub extern "C" fn jit_call_method(ctx: *mut JITContext, stack_count: usize) -> u
                         method_name,
                     ));
                     ctx_ref.pending_call_error = 1;
-                    return TAG_NULL;
+                    return ERROR_PLACEHOLDER_BITS;
                 } else {
                     match read_heap_kind(receiver_bits) {
                         HK_OK | HK_ERR | HK_SOME => {
@@ -1231,7 +1231,7 @@ pub extern "C" fn jit_call_method(ctx: *mut JITContext, stack_count: usize) -> u
                                 method_name,
                             ));
                             ctx_ref.pending_call_error = 1;
-                            return TAG_NULL;
+                            return ERROR_PLACEHOLDER_BITS;
                         }
                         // #189: this arm used to call `call_array_method`,
                         // whose entire body was a `todo!()`. A `todo!()` in a
@@ -1278,7 +1278,7 @@ pub extern "C" fn jit_call_method(ctx: *mut JITContext, stack_count: usize) -> u
                                 method_name,
                             ));
                             ctx_ref.pending_call_error = 1;
-                            return TAG_NULL;
+                            return ERROR_PLACEHOLDER_BITS;
                         }
                         HK_STRING => call_string_method(receiver_bits, &method_name, &args),
                         HK_JIT_OBJECT => call_object_method(receiver_bits, &method_name, &args),
@@ -1417,8 +1417,11 @@ mod legacy_array_carrier_bail_tests {
         let result = jit_call_method(&mut ctx as *mut JITContext, 3);
 
         assert_eq!(
-            result, TAG_NULL,
-            "the bail returns the null carrier, not a fabricated value"
+            result, ERROR_PLACEHOLDER_BITS,
+            "the bail leaves the ruled placeholder in the value channel (#234). \
+             Nothing reads it — `pending_call_error` below is the signal — and \
+             it is 0 so that a leak onto a heap-kinded destination hits the \
+             `bits == 0` guard in `jit_arc_result_retain` instead of passing it"
         );
         assert_eq!(
             ctx.pending_call_error, 1,
