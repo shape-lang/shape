@@ -146,16 +146,17 @@ pub enum FrameReturnWrapper {
 /// precisely why this field exists. Consumers that need "does this call
 /// produce a value" must read `return_arity`, never infer it from the
 /// absence of a `return_kind`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+/// Deliberately has no `Default` and no `#[serde(default)]` on its field
+/// (CLAUDE.md §Greenfield): a defaulted arity would let a serialized
+/// descriptor that predates this field decode as `One`, which is a
+/// dual-format reader. Shape has no users and keeps no backwards
+/// compatibility — an artifact without the field fails to load, and the
+/// artifact is regenerated instead.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum FrameReturnArity {
     /// The frame returns no value (source-level `()` / `ConcreteType::Void`).
     Zero,
     /// The frame returns exactly one value, described by `return_kind`.
-    ///
-    /// Default so that a descriptor which has not been stamped keeps the
-    /// pre-ADR-020 behaviour: an unproven `return_kind` still reaches the
-    /// call-site surface-and-stop rather than being silently read as unit.
-    #[default]
     One,
 }
 
@@ -215,9 +216,12 @@ pub struct FrameDescriptor {
 
     /// ADR-020 §3.3: how many values this frame returns. `Zero` means the
     /// function is unit-returning and produces no bits; call sites emit a
-    /// void call and read no result. Defaults to `One` so an unstamped
-    /// descriptor keeps the pre-ADR-020 surface-and-stop behaviour.
-    #[serde(default)]
+    /// void call and read no result.
+    ///
+    /// Required on the wire — see `FrameReturnArity` for why this carries no
+    /// serde default. Every in-process constructor stamps it explicitly, so
+    /// an unstamped descriptor cannot exist; only a stale artifact could omit
+    /// it, and those are not supported.
     pub return_arity: FrameReturnArity,
 }
 
@@ -1579,10 +1583,18 @@ mod tests {
     }
 
     #[test]
-    fn frame_descriptor_deserializes_old_shape_with_unknown_wrapper() {
-        let json = r#"{"slots":[],"return_kind":{"Ptr":"Result"}}"#;
-        let fd: FrameDescriptor =
-            serde_json::from_str(json).expect("old descriptor should deserialize");
+    fn frame_descriptor_normalizes_unstamped_wrapper_from_return_kind() {
+        // A descriptor whose wrapper was never stamped still normalizes the
+        // `return_kind = Ptr(Result)` overload for ABI consumers.
+        //
+        // Built in-process, not decoded from a stored descriptor: this used to
+        // deserialize a field-light JSON blob and assert it still loaded, which
+        // is a wire-compatibility guarantee. CLAUDE.md §Greenfield keeps none —
+        // a stored artifact missing a field fails to load and is regenerated.
+        // `Unknown` is reachable without any of that: it is what
+        // `FrameDescriptor::new()` starts from.
+        let mut fd = FrameDescriptor::new();
+        fd.return_kind = Some(NativeKind::Ptr(HeapKind::Result));
 
         assert_eq!(fd.return_wrapper, FrameReturnWrapper::Unknown);
         assert_eq!(fd.effective_return_wrapper(), FrameReturnWrapper::Result);
