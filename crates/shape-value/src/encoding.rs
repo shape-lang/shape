@@ -528,13 +528,28 @@ const fn nullable_int_row(kind: NativeKind, width: u16, signed: bool) -> Encodin
              ADR-020 §3.1 blesses a sentinel for signed int? only",
         )
     };
+    // #225 slice (c): the narrow widths are migrated — their `None` is the
+    // widening niche, so `Some(0)` is an ordinary value again. The 64-bit rows
+    // still read `bits == 0` and keep colliding with `Some(0)`; they are slice
+    // (d)'s presence pairs, and the delta keeps them on the work list until
+    // then rather than letting them look settled.
+    let null_pre_adr020 = if width < 64 {
+        null_adr020
+    } else {
+        NullEncoding::ZeroBits
+    };
+    let provenance = if width < 64 {
+        "#225: migrated to the widening niche; was comparison/mod.rs:686-696 (bits == 0)"
+    } else {
+        "shape-vm/src/executor/comparison/mod.rs:686-696 (bits == 0)"
+    };
     Encoding {
         kind,
         payload: Payload::Int { width, signed },
         null_adr020,
-        null_pre_adr020: NullEncoding::ZeroBits,
+        null_pre_adr020,
         adr_clause: "ADR-020 §3.1 clause 1 bullets 3-4 (blessed sentinel / widening niche)",
-        provenance: "shape-vm/src/executor/comparison/mod.rs:686-696 (bits == 0)",
+        provenance,
     }
 }
 
@@ -763,19 +778,15 @@ mod tests {
     #[test]
     fn pre_adr020_delta_is_the_225_work_list() {
         let delta = pre_adr020_delta();
-        // The remaining nullable scalars. The two v2-raw pointer carriers
-        // (`StringV2` / `DecimalV2`) left this list in #225 slice (a) — they
-        // now take the same null-pointer niche as every other pointer row, so
-        // the interpreter and the wire projection give one answer. Everything
-        // else is already normative — no silent divergence hides in the table.
+        // What is LEFT to do, shrinking as #225 lands:
+        //   (a) StringV2 / DecimalV2  — done, null-pointer niche
+        //   (c) the six narrow nullable ints — done, widening niche
+        //   (b) NullableFloat64 — NaN sentinel + canonicalization emission
+        //   (d) the four 64-bit nullable ints — 2-slot presence pairs
+        // Everything absent from this list is already normative, which is the
+        // other half of the tripwire: no silent divergence hides in the table.
         let expected = [
             NativeKind::NullableFloat64,
-            NativeKind::NullableInt8,
-            NativeKind::NullableUInt8,
-            NativeKind::NullableInt16,
-            NativeKind::NullableUInt16,
-            NativeKind::NullableInt32,
-            NativeKind::NullableUInt32,
             NativeKind::NullableInt64,
             NativeKind::NullableUInt64,
             NativeKind::NullableIntSize,
@@ -807,6 +818,40 @@ mod tests {
                 !is_none_bits_pre_adr020(kind, 0x1000),
                 "{kind:?}: a live carrier pointer must not read as None"
             );
+        }
+    }
+
+    #[test]
+    fn narrow_nullable_ints_took_the_widening_niche_so_some_zero_survives() {
+        // #225 slice (c). The `Some(0)` collision dies here for the six narrow
+        // widths: `bits == 0` used to mean None, so a stored zero came back as
+        // null. The niche is `1 << width`, which no widened payload of that
+        // width can produce under either sign- or zero-extension.
+        for (kind, width) in [
+            (NativeKind::NullableInt8, 8u16),
+            (NativeKind::NullableUInt8, 8),
+            (NativeKind::NullableInt16, 16),
+            (NativeKind::NullableUInt16, 16),
+            (NativeKind::NullableInt32, 32),
+            (NativeKind::NullableUInt32, 32),
+        ] {
+            let niche = null_narrow_bits(width);
+            assert_eq!(
+                encoding_of(kind).null_adr020,
+                NullEncoding::Sentinel(niche),
+                "{kind:?}"
+            );
+            assert!(
+                !is_none_bits_pre_adr020(kind, 0),
+                "{kind:?}: Some(0) must no longer read as None"
+            );
+            assert!(
+                is_none_bits_pre_adr020(kind, niche),
+                "{kind:?}: the niche must read as None"
+            );
+            // The niche is out of range for the payload, which is the whole
+            // reason it is a niche and not a stolen value.
+            assert!(niche > u64::from(u16::MAX) || width < 16 || niche == 1 << width);
         }
     }
 
