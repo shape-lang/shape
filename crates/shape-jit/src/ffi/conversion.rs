@@ -187,10 +187,15 @@ fn check_type_recursive(value_bits: u64, type_spec: &str) -> bool {
             "function" => is_inline_function(value_bits) || is_heap_kind(value_bits, HK_CLOSURE),
             "object" => is_heap_kind(value_bits, HK_TYPED_OBJECT),
             "any" => true,
-            "void" => value_bits == TAG_UNIT,
+            // ADR-020 §3.3: unit is no value, so no bit pattern is ever of
+            // type `void`. A runtime type test against it is vacuously
+            // false — the same answer `never` already gives. This is the
+            // deletion of `TAG_UNIT`, not a behaviour carve-out: there is
+            // no longer anything for `value_bits` to equal.
+            "void" => false,
             "never" => false,
             "null" => value_bits == TAG_NULL,
-            "undefined" => value_bits == TAG_NULL || value_bits == TAG_UNIT,
+            "undefined" => value_bits == TAG_NULL,
             "unknown" => false,
             _ => check_basic_type(value_bits, type_spec),
         }
@@ -207,9 +212,6 @@ fn check_basic_type(value_bits: u64, type_name: &str) -> bool {
     }
     if value_bits == TAG_BOOL_TRUE || value_bits == TAG_BOOL_FALSE {
         return type_name == "boolean" || type_name == "bool";
-    }
-    if value_bits == TAG_UNIT {
-        return type_name == "void" || type_name == "unit";
     }
     if is_inline_function(value_bits) {
         return type_name == "function";

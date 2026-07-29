@@ -1359,6 +1359,11 @@ pub(crate) fn infer_top_level_concrete_types_from_mir_with_resolvers(
 struct FrameReturnMetadata {
     return_kind: Option<shape_value::NativeKind>,
     wrapper: FrameReturnWrapper,
+    /// ADR-020 §3.3. `Zero` is stamped only from a proven `ConcreteType::Void`
+    /// return; every other classification path stays `One` so an unproven
+    /// return keeps reaching the JIT call-site surface-and-stop instead of
+    /// being read as unit.
+    arity: crate::type_tracking::FrameReturnArity,
 }
 
 impl FrameReturnMetadata {
@@ -1366,11 +1371,19 @@ impl FrameReturnMetadata {
         Self {
             return_kind: None,
             wrapper: FrameReturnWrapper::Unknown,
+            arity: crate::type_tracking::FrameReturnArity::One,
         }
     }
 
     fn needs_descriptor(self) -> bool {
-        self.return_kind.is_some() || self.wrapper != FrameReturnWrapper::Unknown
+        // ADR-020 §3.3: a proven unit return is itself return metadata worth
+        // a descriptor — it is what lets the JIT emit a void call instead of
+        // refusing the caller. Without this arm a unit function whose slots
+        // are unproven carries no descriptor at all and the call site cannot
+        // tell "returns nothing" from "not stamped".
+        self.return_kind.is_some()
+            || self.wrapper != FrameReturnWrapper::Unknown
+            || self.arity == crate::type_tracking::FrameReturnArity::Zero
     }
 }
 
@@ -1390,14 +1403,22 @@ fn return_metadata_from_concrete_type(ct: &shape_value::v2::ConcreteType) -> Fra
         ConcreteType::Option(_) => FrameReturnWrapper::Option,
         _ => FrameReturnWrapper::Plain,
     };
-    let return_kind = match ct {
-        ConcreteType::Void => None,
-        _ => Some(shape_value::v2::closure_layout::native_kind_from_concrete_type(ct)),
+    // ADR-020 §3.3: `Void` is the one classification that proves "returns no
+    // value". It stamps arity `Zero` — the positive fact call sites read —
+    // rather than leaving only `return_kind: None`, which is indistinguishable
+    // from "not stamped yet".
+    let (return_kind, arity) = match ct {
+        ConcreteType::Void => (None, crate::type_tracking::FrameReturnArity::Zero),
+        _ => (
+            Some(shape_value::v2::closure_layout::native_kind_from_concrete_type(ct)),
+            crate::type_tracking::FrameReturnArity::One,
+        ),
     };
 
     FrameReturnMetadata {
         return_kind,
         wrapper,
+        arity,
     }
 }
 
@@ -1407,6 +1428,7 @@ fn typed_object_wrapper_metadata(wrapper: FrameReturnWrapper) -> FrameReturnMeta
             shape_value::HeapKind::TypedObject,
         )),
         wrapper,
+        arity: crate::type_tracking::FrameReturnArity::One,
     }
 }
 
@@ -1414,6 +1436,7 @@ fn future_return_metadata() -> FrameReturnMetadata {
     FrameReturnMetadata {
         return_kind: Some(shape_value::NativeKind::Ptr(shape_value::HeapKind::Future)),
         wrapper: FrameReturnWrapper::Plain,
+        arity: crate::type_tracking::FrameReturnArity::One,
     }
 }
 
@@ -1496,6 +1519,7 @@ fn classify_type_annotation_metadata(
             return FrameReturnMetadata {
                 return_kind: Some(shape_value::NativeKind::Ptr(shape_value::HeapKind::Closure)),
                 wrapper: FrameReturnWrapper::Plain,
+                arity: crate::type_tracking::FrameReturnArity::One,
             };
         }
         return FrameReturnMetadata::unknown();
@@ -1532,6 +1556,7 @@ fn classify_type_annotation_metadata(
                 shape_value::HeapKind::TypedObject,
             )),
             wrapper: FrameReturnWrapper::Plain,
+            arity: crate::type_tracking::FrameReturnArity::One,
         };
     }
 
@@ -4074,6 +4099,7 @@ impl BytecodeCompiler {
             let mut frame = crate::type_tracking::FrameDescriptor::from_slots(slots);
             frame.return_kind = return_metadata.return_kind;
             frame.return_wrapper = return_metadata.wrapper;
+            frame.return_arity = return_metadata.arity;
             self.program.functions[func_idx].frame_descriptor = Some(frame);
         }
 

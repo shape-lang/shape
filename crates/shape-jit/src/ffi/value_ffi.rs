@@ -4,7 +4,7 @@
 //! `NativeKind` companion stamped at JIT compile time from the call signature.
 //! The constants and helpers in this module are JIT-internal: they encode the
 //! sentinel u64 layout that JIT-emitted Cranelift code uses for inline scalars
-//! (`TAG_NULL`, `TAG_BOOL_*`, `TAG_UNIT`, `TAG_DATA_ROW`) and the JitAlloc /
+//! (`TAG_NULL`, `TAG_BOOL_*`, `TAG_DATA_ROW`) and the JitAlloc /
 //! `UnifiedValue` pointer shape for heap values.
 //!
 //! The deleted `shape_value::tag_bits::*`, `shape_value::ValueWord*`,
@@ -81,12 +81,18 @@ pub const HEAP_PTR_MASK: u64 = !HEAP_OWNED_BIT;
 
 // 3-bit inline tags at bits 50-48 (private — JIT-internal naming carries
 // `_BITS` suffix to free the unsuffixed names for the public sentinel values
-// callers reference, e.g. `TAG_NULL` / `TAG_NONE` / `TAG_UNIT`).
+// callers reference, e.g. `TAG_NULL` / `TAG_NONE`).
+//
+// ADR-020 §3.3 (#224): tag 0b100 was `TAG_UNIT`. Unit is no value — a
+// unit-returning function has a void call signature and produces no bits —
+// so the tag has no inhabitants and is deleted. The ordinal is left
+// unassigned rather than reused, so an old encoding cannot be silently
+// reinterpreted as a new one. Re-adding a unit word under any name is
+// forbidden (ADR-020 §6).
 const TAG_HEAP_BITS: u64 = 0b000;
 const TAG_INT_BITS: u64 = 0b001;
 const TAG_BOOL_BITS: u64 = 0b010;
 const TAG_NONE_BITS: u64 = 0b011;
-const TAG_UNIT_BITS: u64 = 0b100;
 const TAG_FUNCTION_BITS: u64 = 0b101;
 
 #[inline]
@@ -116,9 +122,6 @@ pub const TAG_BOOL_FALSE: u64 = make_tagged(TAG_BOOL_BITS, 0);
 
 /// Boolean true. Uses shared TAG_BOOL (0b010) with payload 1.
 pub const TAG_BOOL_TRUE: u64 = make_tagged(TAG_BOOL_BITS, 1);
-
-/// Unit (void return). Uses shared TAG_UNIT (0b100).
-pub const TAG_UNIT: u64 = make_tagged(TAG_UNIT_BITS, 0);
 
 /// None sentinel — alias for `TAG_NULL` (`Option::None` JIT representation).
 /// Re-exported under `TAG_NONE` for legacy callers.
@@ -254,10 +257,6 @@ const _: () = {
     assert!(
         TAG_BOOL_FALSE & 0x8000_0000_0000_0000 != 0,
         "TAG_BOOL must be in negative NaN space"
-    );
-    assert!(
-        TAG_UNIT & 0x8000_0000_0000_0000 != 0,
-        "TAG_UNIT must be in negative NaN space"
     );
     assert!(
         TAG_DATA_ROW & 0x8000_0000_0000_0000 != 0,
@@ -574,7 +573,6 @@ mod tests {
         assert!(TAG_NULL & 0x8000_0000_0000_0000 != 0);
         assert!(TAG_BOOL_FALSE & 0x8000_0000_0000_0000 != 0);
         assert!(TAG_BOOL_TRUE & 0x8000_0000_0000_0000 != 0);
-        assert!(TAG_UNIT & 0x8000_0000_0000_0000 != 0);
     }
 
     #[test]

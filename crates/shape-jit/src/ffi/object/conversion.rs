@@ -131,7 +131,7 @@ pub fn jit_bits_to_typed_scalar(
     hint: Option<shape_vm::NativeKind>,
 ) -> shape_value::TypedScalar {
     use crate::ffi::value_ffi::{
-        TAG_BOOL_FALSE, TAG_BOOL_TRUE, TAG_NONE, TAG_NULL, TAG_UNIT, is_number, unbox_number,
+        TAG_BOOL_FALSE, TAG_BOOL_TRUE, TAG_NONE, TAG_NULL, is_number, unbox_number,
     };
     use shape_value::TypedScalar;
     use shape_vm::NativeKind;
@@ -176,10 +176,6 @@ pub fn jit_bits_to_typed_scalar(
     if bits == TAG_NULL || bits == TAG_NONE {
         return TypedScalar::none();
     }
-    if bits == TAG_UNIT {
-        return TypedScalar::unit();
-    }
-
     // Non-scalar (heap pointer, function, etc.) — return None sentinel. The
     // kinded entry-point per ADR-006 §2.7.5/§2.7.10 takes the receiver's
     // NativeKind from the call signature for heap-shaped slots.
@@ -191,7 +187,7 @@ pub fn jit_bits_to_typed_scalar(
 /// all numeric operations internally — this is JIT-internal scalar
 /// encoding, not `tag_bits` dispatch.
 pub fn typed_scalar_to_jit_bits(ts: &shape_value::TypedScalar) -> u64 {
-    use crate::ffi::value_ffi::{TAG_BOOL_FALSE, TAG_BOOL_TRUE, TAG_NULL, TAG_UNIT, box_number};
+    use crate::ffi::value_ffi::{TAG_BOOL_FALSE, TAG_BOOL_TRUE, TAG_NULL, box_number};
     use shape_value::ScalarKind;
 
     match ts.kind {
@@ -211,7 +207,19 @@ pub fn typed_scalar_to_jit_bits(ts: &shape_value::TypedScalar) -> u64 {
             }
         }
         ScalarKind::None => TAG_NULL,
-        ScalarKind::Unit => TAG_UNIT,
+        // ADR-020 §3.3: unit is no value. There is no bit pattern that
+        // means unit, so a unit scalar cannot be lowered into a slot —
+        // a unit-returning call is void and never reaches a carrier at
+        // all. Minting a word here is exactly the `TAG_UNIT` successor
+        // ADR-020 §6 forbids, so this surfaces instead. Unreachable at
+        // HEAD: this function has no callers that can produce a
+        // `ScalarKind::Unit` input.
+        ScalarKind::Unit => unreachable!(
+            "ADR-020 §3.3 SURFACE: a unit TypedScalar reached \
+             typed_scalar_to_jit_bits. Unit has no bit encoding — the \
+             producer should have emitted a void call. Fix the producer; \
+             do not add a unit sentinel."
+        ),
     }
 }
 

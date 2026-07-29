@@ -273,6 +273,11 @@ pub struct MirToIR<'a, 'b> {
     pub(crate) user_func_arities: HashMap<u16, u16>,
     /// Function index → statically proven return kind from FrameDescriptor.
     pub(crate) user_func_return_kinds: HashMap<u16, NativeKind>,
+    /// ADR-020 §3.3: function indices proven to return NO value. Calls to
+    /// these are emitted as void calls — no `ctx.stack[0]` read, no
+    /// destination write. Disjoint from `user_func_return_kinds` by
+    /// construction (both are built by `harvest_return_abi`).
+    pub(crate) unit_returning_funcs: HashSet<u16>,
 
     // ── Borrow support ──────────────────────────────────────────────
     /// MIR SlotId → (Cranelift StackSlot, Cranelift Type) for references
@@ -961,6 +966,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
             user_func_refs,
             user_func_arities,
             HashMap::new(),
+            HashSet::new(),
             closure_function_layouts,
         )
     }
@@ -983,6 +989,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
         user_func_refs: HashMap<u16, FuncRef>,
         user_func_arities: HashMap<u16, u16>,
         user_func_return_kinds: HashMap<u16, NativeKind>,
+        unit_returning_funcs: HashSet<u16>,
         closure_function_layouts: HashMap<u16, Arc<ClosureLayout>>,
     ) -> Self {
         let local_types = mir_data.mir.local_types.clone();
@@ -1140,6 +1147,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
             user_func_refs,
             user_func_arities,
             user_func_return_kinds,
+            unit_returning_funcs,
             ref_stack_slots: HashMap::new(),
             field_byte_offsets: HashMap::new(),
             field_native_kinds,

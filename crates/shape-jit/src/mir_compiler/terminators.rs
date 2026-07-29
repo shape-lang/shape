@@ -1999,29 +1999,61 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                     Place::Local(dst),
                 ) = (func_id, func, destination)
                 {
-                    if !self.user_func_return_kinds.contains_key(&fid) {
-                        return Err(format!(
-                            "Route A surface-and-stop: SURFACE — direct call \
-                             to `{}` resolved to function index {} but has no \
-                             compile-time-proven FrameDescriptor.return_kind. \
-                             W36 named-function callgraph requires a static \
-                             return-kind proof before lowering the call-site \
-                             destination; no runtime inference or Null fallback. \
-                             ADR-006 §2.7.5.",
-                            name, fid
-                        ));
-                    }
-                    if super::types::slot_kind_for_local(&self.slot_kinds, dst.0).is_none() {
-                        return Err(format!(
-                            "Route A surface-and-stop: SURFACE — direct call \
-                             to `{}` resolved to function index {} but \
-                             destination slot {} was not stamped with a \
-                             compile-time return kind. W36 named-function \
-                             callgraph requires the call-site result kind \
-                             before lowering; no runtime inference or Null \
-                             fallback. ADR-006 §2.7.5.",
-                            name, fid, dst.0
-                        ));
+                    // ADR-020 §3.3: a proven unit-returning callee produces no
+                    // value. Its destination slot is a dead MIR temp — MIR
+                    // gives every call a destination, so `f()` as a statement
+                    // still names one — and it carries no kind precisely
+                    // because there is nothing to describe. That is the
+                    // legal shape; the guards below exist for the OPPOSITE
+                    // case (a value-returning callee whose kind was never
+                    // proven), so they must not fire here.
+                    //
+                    // If the slot DOES carry a kind, something downstream
+                    // expects a value from a function that returns none.
+                    // That is the case ADR-020 §6 says to surface rather
+                    // than invent a unit sentinel for.
+                    if self.unit_returning_funcs.contains(&fid) {
+                        if let Some(kind) =
+                            super::types::slot_kind_for_local(&self.slot_kinds, dst.0)
+                        {
+                            return Err(format!(
+                                "ADR-020 §3.3 surface-and-stop: SURFACE — direct \
+                                 call to unit-returning `{}` (function index {}) \
+                                 has destination slot {} stamped with kind {:?}, \
+                                 so a consumer expects a value from a function \
+                                 that returns none. Unit is no value; there is no \
+                                 bit pattern to store, and inventing one would be \
+                                 a forbidden unit sentinel (ADR-020 §6). Bail so \
+                                 the fall-through runs under the bytecode \
+                                 interpreter (VM == JIT).",
+                                name, fid, dst.0, kind
+                            ));
+                        }
+                    } else {
+                        if !self.user_func_return_kinds.contains_key(&fid) {
+                            return Err(format!(
+                                "Route A surface-and-stop: SURFACE — direct call \
+                                 to `{}` resolved to function index {} but has no \
+                                 compile-time-proven FrameDescriptor.return_kind. \
+                                 W36 named-function callgraph requires a static \
+                                 return-kind proof before lowering the call-site \
+                                 destination; no runtime inference or Null fallback. \
+                                 ADR-006 §2.7.5.",
+                                name, fid
+                            ));
+                        }
+                        if super::types::slot_kind_for_local(&self.slot_kinds, dst.0).is_none() {
+                            return Err(format!(
+                                "Route A surface-and-stop: SURFACE — direct call \
+                                 to `{}` resolved to function index {} but \
+                                 destination slot {} was not stamped with a \
+                                 compile-time return kind. W36 named-function \
+                                 callgraph requires the call-site result kind \
+                                 before lowering; no runtime inference or Null \
+                                 fallback. ADR-006 §2.7.5.",
+                                name, fid, dst.0
+                            ));
+                        }
                     }
                 }
 
@@ -2085,7 +2117,14 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                     }
                 }
 
-                let result = if let Some(func_ref) = func_ref {
+                // ADR-020 §3.3: does this callee produce a value at all? Only
+                // the direct path can answer statically — the indirect path's
+                // callee is a first-class value whose identity is not known
+                // here, so it keeps the one-value convention.
+                let callee_returns_unit = func_ref.is_some()
+                    && func_id.is_some_and(|fid| self.unit_returning_funcs.contains(&fid));
+
+                let result: Option<Value> = if let Some(func_ref) = func_ref {
                     // ── DIRECT CALL PATH ──────────────────────────────────
                     // Compile args as SSA values and pass as native Cranelift params.
                     // ABI: fn(ctx_ptr, arg0, arg1, ..., argN) -> i32
@@ -2135,10 +2174,23 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                     // Continue block: read return value from ctx.stack[0].
                     self.builder.switch_to_block(continue_block);
                     self.builder.seal_block(continue_block);
-                    let stack_offset = crate::context::STACK_OFFSET as i32;
-                    self.builder
-                        .ins()
-                        .load(types::I64, MemFlags::new(), self.ctx_ptr, stack_offset)
+                    if callee_returns_unit {
+                        // ADR-020 §3.3: the call is void. A unit-returning
+                        // callee never writes `ctx.stack[0]` (its `Return`
+                        // terminator sets stack_ptr = 0 and stamps
+                        // RETURN_TAG_UNIT), so loading it here would read
+                        // whatever the previous call left behind. Read
+                        // nothing.
+                        None
+                    } else {
+                        let stack_offset = crate::context::STACK_OFFSET as i32;
+                        Some(self.builder.ins().load(
+                            types::I64,
+                            MemFlags::new(),
+                            self.ctx_ptr,
+                            stack_offset,
+                        ))
+                    }
                 } else {
                     // ── INDIRECT CALL (closures/first-class functions) ────
                     // Compile the callee and args, then hand the widened
@@ -2158,15 +2210,20 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                         arg_pairs.push((self.widen_to_i64(val), arg_kind));
                     }
 
-                    self.emit_call_value_sequence(callee_boxed, callee_kind, &arg_pairs)
+                    Some(self.emit_call_value_sequence(callee_boxed, callee_kind, &arg_pairs))
                 };
 
                 // ── r5c-2-bz-b-jit-err-surface: VM-trampoline error deopt ──
                 self.emit_pending_call_error_deopt();
 
-                // 4. Store result to destination
-                self.release_old_value_if_heap(destination)?;
-                self.write_place(destination, result)?;
+                // 4. Store result to destination. A void call (ADR-020 §3.3)
+                // has nothing to store: the destination is a dead MIR temp,
+                // and releasing/overwriting it would be acting on a value
+                // that was never produced.
+                if let Some(result) = result {
+                    self.release_old_value_if_heap(destination)?;
+                    self.write_place(destination, result)?;
+                }
 
                 // 4b. Reload locals that may have been mutated via references
                 self.reload_referenced_locals();

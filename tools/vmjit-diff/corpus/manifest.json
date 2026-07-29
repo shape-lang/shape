@@ -6,7 +6,7 @@
   "counts": {
     "book": 240,
     "acceptance": 219,
-    "synthetic": 14
+    "synthetic": 18
   },
   "skippedCount": 0,
   "entries": [
@@ -2381,6 +2381,26 @@
       "id": "SYN__iterator-in-function.shape",
       "tier": "synthetic",
       "source": "tools/vmjit-diff/synthetic/SYN__iterator-in-function.shape (#189 iterator class 5: .iter() on an array local inside a function)"
+    },
+    {
+      "id": "SYN__unit-void-call-effect.shape",
+      "tier": "synthetic",
+      "source": "tools/vmjit-diff/synthetic/SYN__unit-void-call-effect.shape"
+    },
+    {
+      "id": "SYN__unit-void-call-hot.shape",
+      "tier": "synthetic",
+      "source": "tools/vmjit-diff/synthetic/SYN__unit-void-call-hot.shape"
+    },
+    {
+      "id": "SYN__unit-void-call-nested.shape",
+      "tier": "synthetic",
+      "source": "tools/vmjit-diff/synthetic/SYN__unit-void-call-nested.shape"
+    },
+    {
+      "id": "SYN__unit-void-call-return-kinds.shape",
+      "tier": "synthetic",
+      "source": "tools/vmjit-diff/synthetic/SYN__unit-void-call-return-kinds.shape"
     }
   ]
 }

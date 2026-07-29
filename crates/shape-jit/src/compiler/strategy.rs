@@ -14,7 +14,7 @@
 use cranelift::codegen::ir::FuncRef;
 use cranelift::prelude::*;
 use cranelift_module::{Linkage, Module};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use super::setup::JITCompiler;
 use crate::context::{
@@ -212,6 +212,7 @@ impl JITCompiler {
         user_func_ids: &HashMap<u16, cranelift_module::FuncId>,
         user_func_arities: &HashMap<u16, u16>,
         user_func_return_kinds: &HashMap<u16, shape_vm::type_tracking::NativeKind>,
+        unit_returning_funcs: &HashSet<u16>,
     ) -> Result<cranelift_module::FuncId, String> {
         let mut sig = self.module.make_signature();
         sig.params.push(AbiParam::new(types::I64));
@@ -333,6 +334,7 @@ impl JITCompiler {
                         user_func_refs.clone(),
                         user_func_arities.clone(),
                         user_func_return_kinds.clone(),
+                        unit_returning_funcs.clone(),
                         closure_function_layouts,
                     );
                 // V3-S6c-jit-method-monomorph-routing: top-level path with
