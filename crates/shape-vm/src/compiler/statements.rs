@@ -959,6 +959,7 @@ impl BytecodeCompiler {
                         type_name,
                         impl_name,
                         &impl_block.target_type,
+                        Self::impl_trait_type_args(&impl_block.trait_name),
                     )?;
                     // Async `Drop::drop` is registered under the
                     // disambiguated symbol name `drop_async` (mirrors the
@@ -1018,6 +1019,7 @@ impl BytecodeCompiler {
                                     type_name,
                                     impl_name,
                                     &impl_block.target_type,
+                                    Self::impl_trait_type_args(&impl_block.trait_name),
                                 )?;
                                 self.program.register_trait_method_symbol(
                                     &trait_basename,
@@ -2095,6 +2097,7 @@ impl BytecodeCompiler {
                         type_name,
                         impl_name,
                         &impl_block.target_type,
+                        Self::impl_trait_type_args(&impl_block.trait_name),
                     )?;
                     self.compile_function(&func_def)?;
                 }
@@ -2111,6 +2114,7 @@ impl BytecodeCompiler {
                                     type_name,
                                     impl_name,
                                     &impl_block.target_type,
+                                    Self::impl_trait_type_args(&impl_block.trait_name),
                                 )?;
                                 self.compile_function(&func_def)?;
                             }
@@ -2734,6 +2738,22 @@ impl BytecodeCompiler {
     /// This is in-compiler source-side completion of contract information
     /// that already exists in source code — trait declarations carry the
     /// return type, the compiler just wasn't propagating it.
+    /// # Trait-argument substitution (#227 gap 1)
+    ///
+    /// The backfilled annotation is written in the TRAIT's scope, so it may
+    /// name the trait's type PARAMETERS (`trait Into<Target> { method into()
+    /// -> Target; }`). The impl supplies the corresponding ARGUMENTS
+    /// (`impl Into<number> for int`), so `Target` is statically known to be
+    /// `number` at this desugaring — but before this substitution the
+    /// annotation reached `FrameDescriptor` construction as the unreduced
+    /// `Basic("Target")`, which no resolver can classify. That was the
+    /// largest of the four wiring gaps blocking the deletion of
+    /// `FrameReturnWrapper::Unknown` (#233): the `Into` impls live in the
+    /// prelude, so every compilation carried them.
+    ///
+    /// Substitution applies ONLY to the backfilled annotation. An annotation
+    /// the impl spelled itself is written in the IMPL's scope, where the
+    /// trait's parameter names are not bound.
     pub(super) fn desugar_impl_method(
         &self,
         method: &shape_ast::ast::types::MethodDef,
@@ -2741,6 +2761,7 @@ impl BytecodeCompiler {
         type_name: &str,
         impl_name: Option<&str>,
         target_type: &shape_ast::ast::TypeName,
+        trait_type_args: &[shape_ast::ast::TypeAnnotation],
     ) -> Result<FunctionDef> {
         // When the target type is a known generic container (Array, HashMap, etc.),
         // synthesize type parameters (T, K, V) and enrich the receiver annotation
@@ -2790,24 +2811,28 @@ impl BytecodeCompiler {
                 // present), Default via `MethodDef.return_type:
                 // Option<TypeAnnotation>` (may itself be None — in which
                 // case there's nothing to backfill).
-                for member in &trait_def.members {
-                    match member {
-                        shape_ast::ast::types::TraitMember::Required(
-                            shape_ast::ast::TraitMemberSignature::Method {
-                                name, return_type, ..
-                            },
-                        ) if name == &method.name => {
-                            return Some(return_type.clone());
-                        }
-                        shape_ast::ast::types::TraitMember::Default(default_method)
-                            if default_method.name == method.name =>
-                        {
-                            return default_method.return_type.clone();
-                        }
-                        _ => {}
+                // The outer `Option` is "the trait declares this method"; the
+                // inner one is "that declaration spelled a return type".
+                let declared = trait_def.members.iter().find_map(|member| match member {
+                    shape_ast::ast::types::TraitMember::Required(
+                        shape_ast::ast::TraitMemberSignature::Method {
+                            name, return_type, ..
+                        },
+                    ) if name == &method.name => Some(Some(return_type.clone())),
+                    shape_ast::ast::types::TraitMember::Default(default_method)
+                        if default_method.name == method.name =>
+                    {
+                        Some(default_method.return_type.clone())
                     }
-                }
-                None
+                    _ => None,
+                })??;
+
+                // #227 gap 1: reduce the trait's type parameters to the
+                // impl's arguments before the annotation leaves the trait's
+                // scope.
+                let bindings =
+                    Self::trait_param_bindings(trait_def.type_params.as_deref(), trait_type_args);
+                Some(Self::substitute_type_params(&declared, &bindings))
             })
         });
 
@@ -2839,6 +2864,108 @@ impl BytecodeCompiler {
             where_clause: None,
             effect_row: None,
         })
+    }
+
+    /// The type arguments an impl block applied to the trait it implements:
+    /// `impl Into<number> for int` → `[number]` (#227 gap 1).
+    pub(super) fn impl_trait_type_args(
+        trait_name: &shape_ast::ast::TypeName,
+    ) -> &[shape_ast::ast::TypeAnnotation] {
+        match trait_name {
+            shape_ast::ast::TypeName::Generic { type_args, .. } => type_args.as_slice(),
+            shape_ast::ast::TypeName::Simple(_) => &[],
+        }
+    }
+
+    /// Pair a trait's declared type parameters with the arguments an impl
+    /// block supplied for them (#227 gap 1).
+    ///
+    /// Positional, and deliberately partial: a parameter the impl left
+    /// unsupplied (arity mismatch, or a defaulted parameter the impl
+    /// omitted) gets no binding, so an annotation naming it stays unreduced
+    /// and reaches the descriptor builder as the honest absence it is.
+    /// `TypeParam::Const` names are not type bindings and are skipped.
+    fn trait_param_bindings(
+        type_params: Option<&[shape_ast::ast::TypeParam]>,
+        trait_type_args: &[shape_ast::ast::TypeAnnotation],
+    ) -> std::collections::HashMap<String, shape_ast::ast::TypeAnnotation> {
+        let Some(params) = type_params else {
+            return std::collections::HashMap::new();
+        };
+        params
+            .iter()
+            .zip(trait_type_args.iter())
+            .filter_map(|(param, arg)| match param {
+                shape_ast::ast::TypeParam::Type { name, .. } => Some((name.clone(), arg.clone())),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Rewrite every occurrence of a bound type-parameter name in `ann` to
+    /// its bound argument (#227 gap 1).
+    ///
+    /// Recursive because a trait may declare `-> Option<Target>` or
+    /// `-> (Target) -> Target`, not just a bare parameter. Only
+    /// single-segment paths can name a type parameter, so qualified paths
+    /// (`std::core::Foo`) are never rewritten.
+    fn substitute_type_params(
+        ann: &shape_ast::ast::TypeAnnotation,
+        bindings: &std::collections::HashMap<String, shape_ast::ast::TypeAnnotation>,
+    ) -> shape_ast::ast::TypeAnnotation {
+        use shape_ast::ast::TypeAnnotation as TA;
+        if bindings.is_empty() {
+            return ann.clone();
+        }
+        let recur = |a: &TA| Self::substitute_type_params(a, bindings);
+        match ann {
+            TA::Basic(name) => bindings.get(name).cloned().unwrap_or_else(|| ann.clone()),
+            TA::Reference(path) if !path.is_qualified() => bindings
+                .get(path.name())
+                .cloned()
+                .unwrap_or_else(|| ann.clone()),
+            TA::Array(inner) => TA::Array(Box::new(recur(inner))),
+            TA::Tuple(items) => TA::Tuple(items.iter().map(recur).collect()),
+            TA::Union(items) => TA::Union(items.iter().map(recur).collect()),
+            TA::Intersection(items) => TA::Intersection(items.iter().map(recur).collect()),
+            TA::Borrow { mutable, inner } => TA::Borrow {
+                mutable: *mutable,
+                inner: Box::new(recur(inner)),
+            },
+            TA::Object(fields) => TA::Object(
+                fields
+                    .iter()
+                    .map(|f| shape_ast::ast::types::ObjectTypeField {
+                        type_annotation: recur(&f.type_annotation),
+                        ..f.clone()
+                    })
+                    .collect(),
+            ),
+            TA::Function {
+                params,
+                returns,
+                effects,
+            } => TA::Function {
+                params: params
+                    .iter()
+                    .map(|p| shape_ast::ast::types::FunctionParam {
+                        type_annotation: recur(&p.type_annotation),
+                        ..p.clone()
+                    })
+                    .collect(),
+                returns: Box::new(recur(returns)),
+                effects: effects.clone(),
+            },
+            // A generic HEAD may itself be a bound parameter only if the
+            // binding is a bare name; rewriting `T<...>` that way would
+            // fabricate a type the source never spelled, so only the
+            // arguments are substituted.
+            TA::Generic { name, args } => TA::Generic {
+                name: name.clone(),
+                args: args.iter().map(recur).collect(),
+            },
+            _ => ann.clone(),
+        }
     }
 
     /// Synthesize receiver generics for bare collection extend blocks.
@@ -9384,6 +9511,107 @@ mod tests {
                 other
             ),
         }
+    }
+
+    #[test]
+    fn backfilled_return_type_substitutes_the_impls_trait_arguments() {
+        // #227 gap 1. The trait declares its return as its own type
+        // PARAMETER; the impl supplies the argument. Before the
+        // substitution the backfill handed the descriptor builder
+        // `Basic("Target")`, which no resolver reduces — 130 of the 338
+        // measured #233 hard-error failures, because `Into` lives in the
+        // prelude and every compilation carries it.
+        let code = r#"
+            trait Conv<Target> { method convert() -> Target }
+            type Src {}
+            impl Conv<string> for Src {
+                method convert() { "x" }
+            }
+        "#;
+        let program = parse_program(code).expect("Failed to parse");
+        let bytecode = BytecodeCompiler::new()
+            .compile(&program)
+            .expect("Failed to compile");
+
+        let func_def = bytecode
+            .expanded_function_defs
+            .get("Src::convert")
+            .expect("Src::convert function def should be registered");
+
+        match func_def.return_type.as_ref() {
+            Some(shape_ast::ast::TypeAnnotation::Basic(name)) => assert_eq!(
+                name, "string",
+                "the trait's `Target` must arrive reduced to the impl's \
+                 argument `string`, got Basic(`{name}`)"
+            ),
+            other => panic!("expected Basic(\"string\"), got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn backfilled_return_type_substitutes_trait_arguments_under_a_constructor() {
+        // Same substitution, but the trait's parameter is nested inside a
+        // type constructor rather than being the whole annotation — the
+        // reason the rewrite recurses instead of matching a bare name.
+        let code = r#"
+            trait Boxer<Target> { method boxed() -> Array<Target> }
+            type Src {}
+            impl Boxer<int> for Src {
+                method boxed() { [1] }
+            }
+        "#;
+        let program = parse_program(code).expect("Failed to parse");
+        let bytecode = BytecodeCompiler::new()
+            .compile(&program)
+            .expect("Failed to compile");
+
+        let func_def = bytecode
+            .expanded_function_defs
+            .get("Src::boxed")
+            .expect("Src::boxed function def should be registered");
+
+        let inner = match func_def.return_type.as_ref() {
+            Some(shape_ast::ast::TypeAnnotation::Array(inner)) => (**inner).clone(),
+            Some(shape_ast::ast::TypeAnnotation::Generic { args, .. }) if args.len() == 1 => {
+                args[0].clone()
+            }
+            other => panic!("expected an array-shaped return, got: {other:?}"),
+        };
+        match inner {
+            shape_ast::ast::TypeAnnotation::Basic(name) => assert_eq!(
+                name, "int",
+                "the nested `Target` must reduce to `int`, got Basic(`{name}`)"
+            ),
+            other => panic!("expected Basic(\"int\") inside the array, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_unsupplied_trait_parameter_stays_unreduced() {
+        // The substitution is positional and partial on purpose: a trait
+        // parameter the impl supplied no argument for has no binding, so
+        // the annotation must survive unrewritten rather than pick up a
+        // neighbouring argument.
+        let code = r#"
+            trait Pair<A, B> { method second() -> B }
+            type Src {}
+            impl Pair<int> for Src {
+                method second() { 1 }
+            }
+        "#;
+        let program = parse_program(code).expect("Failed to parse");
+        let err = BytecodeCompiler::new()
+            .compile(&program)
+            .expect_err("an unreduced return parameter cannot type-check");
+
+        // The observable consequence of leaving `B` alone: the body's `int`
+        // has nothing to unify with. Binding `B` to the neighbouring `int`
+        // argument would have compiled — silently, and wrongly.
+        let message = format!("{err:?}");
+        assert!(
+            message.contains("is not compatible with B"),
+            "expected the unreduced `B` to reach the checker, got: {message}"
+        );
     }
 
     #[test]

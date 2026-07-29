@@ -272,6 +272,7 @@ impl BytecodeCompiler {
                 type_name,
                 impl_block.impl_name.as_deref(),
                 &impl_block.target_type,
+                Self::impl_trait_type_args(&impl_block.trait_name),
             )?;
             targets.push(DeclarationDiscoveryTarget::Function {
                 definition,

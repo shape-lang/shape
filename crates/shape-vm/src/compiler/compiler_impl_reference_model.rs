@@ -1576,12 +1576,53 @@ impl BytecodeCompiler {
     ) -> HashMap<String, shape_ast::ast::TypeAnnotation> {
         let funcs = Self::collect_program_functions(program);
         let mut out = HashMap::new();
-        for (name, _) in funcs {
+        // #227 gap 4: impl methods too. `collect_program_functions` walks only
+        // `Item::Function`/`Export`/`Module`, so an impl method the source
+        // annotated nowhere — neither on the method nor on the trait's
+        // declaration (`impl Drop for Conn { method drop() { … } }`) — had no
+        // return classification to give the frame-descriptor builder, even
+        // though inference proved one. Both tiers name an unnamed impl's
+        // method `{type}::{method}` (this compiler's `desugar_impl_method`,
+        // and `inference::items`' impl-method `FunctionDef`), so the inferred
+        // entry is keyed exactly as the descriptor builder will ask for it.
+        let names = funcs
+            .into_keys()
+            .chain(Self::collect_impl_method_names(&program.items));
+        for name in names {
             let Some(Type::Function { returns, .. }) = inferred_types.get(&name) else {
                 continue;
             };
             if let Some(ann) = returns.to_annotation() {
                 out.insert(name, ann);
+            }
+        }
+        out
+    }
+
+    /// Desugared names of the methods in every `impl` block, matching
+    /// `desugar_impl_method`'s unnamed-impl spelling (#227 gap 4).
+    ///
+    /// Named impls (`impl Display for User as Json`) desugar to the
+    /// four-segment `{trait}::{type}::{impl}::{method}` form, which the
+    /// inference tier does not mint, so they are deliberately not collected —
+    /// a name with no inferred entry would only be a lookup miss.
+    fn collect_impl_method_names(items: &[shape_ast::ast::Item]) -> Vec<String> {
+        let mut out = Vec::new();
+        for item in items {
+            match item {
+                shape_ast::ast::Item::Impl(impl_block, _) if impl_block.impl_name.is_none() => {
+                    let type_name = match &impl_block.target_type {
+                        shape_ast::ast::TypeName::Simple(name) => name.as_str(),
+                        shape_ast::ast::TypeName::Generic { name, .. } => name.as_str(),
+                    };
+                    for method in &impl_block.methods {
+                        out.push(format!("{}::{}", type_name, method.name));
+                    }
+                }
+                shape_ast::ast::Item::Module(module_def, _) => {
+                    out.extend(Self::collect_impl_method_names(&module_def.items));
+                }
+                _ => {}
             }
         }
         out
@@ -2418,6 +2459,15 @@ impl BytecodeCompiler {
             self.type_tracker
                 .register_function_return_concrete_type(&fn_name, ret_ty);
         }
+
+        // #227 gap 4: keep the annotations themselves, not just the ones that
+        // projected to a `ConcreteType`. The frame-descriptor builder can
+        // classify strictly more annotation shapes than
+        // `declared_annotation_concrete_type` resolves (inline object types,
+        // function types, and the "structurally not a fallible wrapper"
+        // residue), so an entry the filter above dropped still carries a
+        // provable return classification.
+        self.inferred_return_annotations = inferred_return_annotations.clone();
 
         // MIR authority for non-function items: run borrow analysis on top-level
         // code before compilation. Errors in cleanly-lowered regions are emitted;

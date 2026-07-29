@@ -3986,6 +3986,14 @@ impl BytecodeCompiler {
         let Some(func) = self.program.functions.get(func_idx) else {
             return;
         };
+        // Copy the layout facts out of the borrow: the classification chain
+        // below needs `&mut self` (the span-table return-type source).
+        let (func_locals_count, func_body_length, func_entry_point, func_arity) = (
+            func.locals_count,
+            func.body_length,
+            func.entry_point,
+            func.arity,
+        );
         // Per ADR-006 §2.7.5.1, the compiler-tier intermediate state is
         // `Option<StorageHint>`. The wire-format `function_local_storage_hints`
         // (and `FrameDescriptor.slots`) is `Vec<NativeKind>` — every slot
@@ -3995,18 +4003,18 @@ impl BytecodeCompiler {
         // descriptor and the legacy hints vec; otherwise we leave both empty
         // (the legacy "all-Unknown" path) so downstream readers fall back to
         // polymorphic emission.
-        let proven_hints: Option<Vec<StorageHint>> = (0..func.locals_count)
+        let proven_hints: Option<Vec<StorageHint>> = (0..func_locals_count)
             .map(|slot| self.type_tracker.get_local_storage_hint(slot))
             .collect();
 
         let instr_len = self.program.instructions.len();
-        let code_end = if func.body_length > 0 {
-            (func.entry_point + func.body_length).min(instr_len)
+        let code_end = if func_body_length > 0 {
+            (func_entry_point + func_body_length).min(instr_len)
         } else {
             instr_len
         };
-        let (has_trusted, has_v2_typed) = if func.entry_point <= code_end && code_end <= instr_len {
-            let slice = &self.program.instructions[func.entry_point..code_end];
+        let (has_trusted, has_v2_typed) = if func_entry_point <= code_end && code_end <= instr_len {
+            let slice = &self.program.instructions[func_entry_point..code_end];
             (
                 slice.iter().any(|i| i.opcode.is_trusted()),
                 // U4-4: a function emitting V2 typed opcodes (e.g.
@@ -4055,6 +4063,12 @@ impl BytecodeCompiler {
                 // U4-5b: classify the Result/Option discriminator off the
                 // recorded return `ConcreteType` — no return-NAME string head
                 // match.
+                //
+                // #227 gap 4: when that side-table has no entry, fall through
+                // to the inferred return ANNOTATION for the same function.
+                // The side-table only holds annotations that projected to a
+                // `ConcreteType`; `classify_type_annotation_metadata` proves a
+                // classification for strictly more shapes.
                 let func_name = if self.current_function == Some(func_idx) {
                     self.current_body_semantic_owner_key()
                         .unwrap_or(self.program.functions[func_idx].name.as_str())
@@ -4065,6 +4079,33 @@ impl BytecodeCompiler {
                 self.type_tracker
                     .get_function_return_concrete_type(&func_name)
                     .map(classify_concrete_return_metadata)
+                    .or_else(|| {
+                        let inferred = self.inferred_return_annotations.get(&func_name)?.clone();
+                        classify_type_annotation_metadata(self, &inferred, false)
+                    })
+            })
+            .or_else(|| {
+                // #227 gap 3: a COMPILER-SYNTHESIZED function — the comptime
+                // mini-program's entry wrapper, an implicit-generic
+                // specialization, a generated method emission. These are born
+                // after the whole-program inference walk that fills the two
+                // sources above, so neither has an entry for them; their
+                // headers carry no return annotation either, which is the
+                // third of the four #233 wiring gaps.
+                //
+                // What they DO have is a body whose statements carry real
+                // source spans, so the engine's post-solve span table holds
+                // the type of the terminal expression — the expression whose
+                // type IS the function's return type. That is the same table,
+                // and the same terminal-expression rule, the closure path
+                // above uses; nothing here is re-derived at runtime.
+                let fd = func_def?;
+                let inferred = crate::compiler::expressions::closures::
+                    infer_closure_body_return_type_with_caller_context(
+                        self, &[], &fd.body, None, &[], &[],
+                    )?;
+                let ann = inferred.to_annotation()?;
+                classify_type_annotation_metadata(self, &ann, false)
             });
 
         // Populate FrameDescriptor when (a) every slot's kind is proven
@@ -4108,9 +4149,9 @@ impl BytecodeCompiler {
         // `locals_count` is the documented "proven prefix" (out-of-range local
         // reads return `None` and fall back to polymorphic emission, exactly as
         // the empty-vec case did). No `Unknown` placeholder, no Bool-default.
-        let arity = func.arity as usize;
+        let arity = func_arity as usize;
         let proven_params: Option<Vec<StorageHint>> = if arity > 0 && proven_hints.is_none() {
-            (0..arity.min(func.locals_count as usize))
+            (0..arity.min(func_locals_count as usize))
                 .map(|slot| {
                     self.type_tracker.get_local_storage_hint(slot as u16).or_else(|| {
                         let annotation = func_def?
@@ -8826,6 +8867,88 @@ mod frame_return_metadata_tests {
             .find(|func| func.name == name)
             .unwrap_or_else(|| panic!("no compiled function is registered under the name {name}"));
         func.frame_descriptor.as_ref().and_then(|fd| fd.return_kind)
+    }
+
+    /// The wrapper a function's descriptor claims, or `None` when the
+    /// function carries no descriptor at all.
+    fn return_wrapper_of(
+        program: &crate::bytecode::BytecodeProgram,
+        name: &str,
+    ) -> Option<FrameReturnWrapper> {
+        program
+            .functions
+            .iter()
+            .find(|func| func.name == name)
+            .unwrap_or_else(|| panic!("no compiled function is registered under the name {name}"))
+            .frame_descriptor
+            .as_ref()
+            .map(|fd| fd.return_wrapper)
+    }
+
+    #[test]
+    fn an_unannotated_impl_method_is_classified_from_inference() {
+        // #227 gap 4. Neither the impl nor the trait declaration names a
+        // return type, so both the annotation source and the registered
+        // concrete-return source are empty — this used to be a straight
+        // trip to the #233 residual. Inference proves the type; publishing
+        // it under the symbol `desugar_impl_method` mints is what makes it
+        // reachable here.
+        // `impl Drop` is the shape the #233 census actually measured
+        // (`Conn::drop`, `R::drop`, `Guard::drop`, …).
+        let program = compile(
+            r#"
+            type Conn { id: int }
+            impl Drop for Conn {
+                method drop() { print("closed") }
+            }
+            let c = Conn { id: 1 }
+            print(c.id)
+            "#,
+        );
+        assert_eq!(
+            return_wrapper_of(&program, "Conn::drop"),
+            Some(FrameReturnWrapper::Plain),
+            "the method returns no fallible wrapper and the descriptor must \
+             claim that positively, not fall through to the residual"
+        );
+    }
+
+    #[test]
+    fn a_closure_return_is_classified_from_its_body() {
+        // #227 gap 2. A closure literal declares no return type, so its
+        // synthesized `FunctionDef` reaches the builder with
+        // `return_type: None`; the type is nonetheless resolved, on the
+        // closure body's terminal expression.
+        let program = compile(
+            r#"
+            let f = |x: int| x * 3
+            print(f(2))
+            "#,
+        );
+        assert_eq!(
+            return_kind_of(&program, "__closure_0"),
+            Some(NativeKind::Int64),
+            "the closure's inferred `int` return must reach the descriptor"
+        );
+    }
+
+    #[test]
+    fn a_closure_returning_a_fallible_wrapper_stamps_that_wrapper() {
+        // The wrapper is the half that changes `?` semantics, so it is
+        // checked separately from the ABI kind: a residual stamp here would
+        // leave `op_try_unwrap`'s None arm unable to discriminate.
+        let program = compile(
+            r#"
+            fn maybe(x: int) -> Option<int> { Some(x) }
+            let f = |x: int| maybe(x)
+            print(f(2))
+            "#,
+        );
+        assert_eq!(
+            return_wrapper_of(&program, "__closure_0"),
+            Some(FrameReturnWrapper::Option),
+            "the closure returns `Option<int>`; the descriptor must say so"
+        );
     }
 
     #[test]
