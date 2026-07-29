@@ -40,8 +40,7 @@
 //! | `Char` | `c as u32`, low 32, zero-extended | not nullable |
 //! | `Int8`/`16`/`32`/`64`/`Size`, `UInt*` | integer, low `w`, widened | not nullable |
 //! | `NullableInt8`/`16`/`32`, `NullableUInt8`/`16`/`32` | integer, low `w` | [`null_narrow_bits`]`(w)` = `1 << w` |
-//! | `NullableInt64`, `NullableIntSize` | `i64 as u64` | [`NULL_INT_BITS`] (`i64::MIN`) |
-//! | `NullableUInt64`, `NullableUIntSize` | `u64` | **unruled** — see [`NullEncoding::Unruled`] |
+//! | `NullableInt64`, `NullableIntSize`, `NullableUInt64`, `NullableUIntSize` | `i64 as u64` / `u64` | presence slot = 0 — see [`NullEncoding::PresencePair`] |
 //! | `Bool` | `0` = false, `1` = true | not nullable (kind-discriminated) |
 //! | `Null` | none — kind alone carries absence | always `None` |
 //! | `String` | `Arc::into_raw(Arc<String>)` | null pointer (`0`) |
@@ -112,20 +111,26 @@ pub const NULL_NUMBER_BITS: u64 = 0x7FF8_0000_0000_0001;
 /// single 64-bit integer compare.
 pub const CANON_NAN_BITS: u64 = 0x7FF8_0000_0000_0000;
 
-/// `int?` (`i64?`) `None`: the blessed sentinel `i64::MIN` (ADR-020 §3.1
-/// clause 1, third bullet; owner ruling 2).
-///
-/// `i64` has no niche, so one value is spent. `i64::MIN` is unstorable as a
-/// `Some` value — checked at construction via [`int_is_storable`] — and
-/// `int`'s documented range is `[i64::MIN + 1, i64::MAX]`
-/// ([`MIN_STORABLE_INT`]).
-pub const NULL_INT_BITS: u64 = i64::MIN as u64;
+/// The presence value meaning `None` in a 2-slot presence pair (ADR-020 §3.1
+/// clause 1, third bullet, as amended 2026-07-29).
+pub const PRESENCE_NONE: u64 = 0;
 
-/// The smallest storable `int` value: `i64::MIN + 1` (ADR-020 §3.1, §4).
+/// The presence value meaning `Some` in a 2-slot presence pair (ADR-020 §3.1
+/// clause 1, third bullet, as amended 2026-07-29).
+pub const PRESENCE_SOME: u64 = 1;
+
+/// Whether a 2-slot presence pair holds `None`, given its **presence** slot
+/// (ADR-020 §3.1 clause 1 bullet 3 as amended; §5 multi-slot).
 ///
-/// `i64::MIN` itself is reserved as [`NULL_INT_BITS`]. This bound is public
-/// language semantics, not an internal detail — it is book-gated per §4.
-pub const MIN_STORABLE_INT: i64 = i64::MIN + 1;
+/// The normative read primitive for [`NullEncoding::PresencePair`]. It takes
+/// the presence slot and nothing else: the payload slot is unconstrained, and
+/// consulting it is precisely the mistake the second amendment removed.
+/// Companion to [`canonicalize_nullable_f64`] — both define an encoding here
+/// so producers cannot each invent one (ADR-020 §6).
+#[inline]
+pub const fn presence_pair_is_none(presence_slot: u64) -> bool {
+    presence_slot == PRESENCE_NONE
+}
 
 /// `i8?` / `u8?` `None`, widened in an 8-byte slot (ADR-020 §3.1 clause 1,
 /// fourth bullet). See [`null_narrow_bits`] for the niche argument.
@@ -164,7 +169,7 @@ pub const fn null_narrow_bits(width: u16) -> u64 {
     assert!(
         width == 8 || width == 16 || width == 32,
         "null_narrow_bits: only 8/16/32-bit payloads have a widening niche; \
-         64-bit kinds use NULL_INT_BITS (signed) or are unruled (unsigned)"
+         64-bit kinds are 2-slot presence pairs (ADR-020 §3.1, second amendment)"
     );
     1u64 << width
 }
@@ -199,16 +204,6 @@ pub const fn canonicalize_nullable_f64(bits: u64) -> u64 {
     }
 }
 
-/// Whether `v` is storable as a `Some` value in an `int?` (ADR-020 §3.1
-/// clause 1, third bullet).
-///
-/// `i64::MIN` is reserved as [`NULL_INT_BITS`]. #225 wires this into the
-/// `int` → `int?` construction sites.
-#[inline]
-pub const fn int_is_storable(v: i64) -> bool {
-    v != i64::MIN
-}
-
 // Sentinel invariants. These are the properties the rest of the program
 // relies on; a bad edit to a constant above fails the build, not a test run.
 const _: () = assert!(
@@ -224,8 +219,9 @@ const _: () = assert!(
 const _: () = assert!(NULL_NUMBER_BITS & 0x0008_0000_0000_0000 != 0);
 const _: () = assert!(CANON_NAN_BITS & 0x0008_0000_0000_0000 != 0);
 const _: () = assert!(canonicalize_nullable_f64(NULL_NUMBER_BITS) == CANON_NAN_BITS);
-const _: () = assert!(NULL_INT_BITS == 0x8000_0000_0000_0000);
-const _: () = assert!(!int_is_storable(i64::MIN) && int_is_storable(MIN_STORABLE_INT));
+// The presence slot is two-valued and disjoint; nothing about the payload slot
+// constrains it, which is the whole point of spending the second slot.
+const _: () = assert!(PRESENCE_NONE != PRESENCE_SOME);
 // `IntSize` / `UIntSize` share the 64-bit rows of the table.
 const _: () = assert!(
     usize::BITS == 64,
@@ -305,12 +301,23 @@ pub enum NullEncoding {
     /// `None` = all-zero bits. Pre-ADR-020 interpreter behavior for the
     /// nullable integer kinds — **it collides with `Some(0)`**, the same
     /// defect class as the fixed `(0, Bool)` collision. Replaced by
-    /// [`NULL_INT_BITS`] / [`null_narrow_bits`] by #225.
+    /// [`null_narrow_bits`] / [`NullEncoding::PresencePair`] by #225.
     ZeroBits,
-    /// No ruling exists yet for this kind's `None` pattern. The payload is
-    /// the reason, for the diagnostic a producer should emit rather than
-    /// guessing.
-    Unruled(&'static str),
+    /// `None` = a second, adjacent slot holding [`PRESENCE_NONE`]; `Some` =
+    /// that slot holding [`PRESENCE_SOME`] with the payload slot carrying the
+    /// full-range integer (ADR-020 §3.1 clause 1 bullet 3 as amended
+    /// 2026-07-29, plus §5's multi-slot invariants).
+    ///
+    /// The 64-bit integer kinds have no niche: every one of the 2^64 payload
+    /// patterns is a representable value, and §3.1's normative rule forbids
+    /// excluding one. So absence moves out of the payload's bits entirely and
+    /// into a slot of its own — which is Rust's own answer (`Option<i64>` is
+    /// 16 bytes).
+    ///
+    /// Unlike every other variant here, this encoding is **not a function of
+    /// one `u64`**: [`is_none_bits_pre_adr020`] structurally cannot answer for
+    /// it, and says so rather than guessing.
+    PresencePair,
 }
 
 /// One row of the normative table.
@@ -444,10 +451,28 @@ pub const fn encoding_of(kind: NativeKind) -> Encoding {
         NativeKind::IntSize => int_row(kind, 64, true),
         NativeKind::UIntSize => int_row(kind, 64, false),
 
-        // -- Nullable integers. Narrow widths get the `1 << width` niche;
-        // signed 64-bit gets the blessed `i64::MIN`; unsigned 64-bit has
-        // neither and is unruled. Pre-ADR-020 every one of them tests
-        // `bits == 0`, which collides with `Some(0)`.
+        // -- Nullable integers. Narrow widths get the `1 << width` niche; all
+        // four 64-bit kinds are 2-slot presence pairs, because a 64-bit
+        // integer has no pattern to spare. Pre-ADR-020 every one of them
+        // tests `bits == 0`, which collides with `Some(0)`.
+        //
+        // INERT AT HEAD for the four 64-bit kinds, and measured so (#225
+        // slice (d), same discipline as the NullableFloat64 row above): they
+        // have no producer. `native_kind_from_storage_type`
+        // (`shape-vm/src/type_tracking.rs:98`) has no non-test caller, and the
+        // only other route — `with_nullability` via
+        // `VariableTypeInfo::infer_storage_hint` — was instrumented and run
+        // over all 479 `tools/vmjit-diff/corpus` programs plus hand-written
+        // `let x: i64?` / `Option<i64>` / `Option<u64>` / `Option<usize>`
+        // sources: thousands of `nullable=false` stamps, zero `nullable=true`.
+        // Every remaining `NullableInt64` mention in shape-vm and shape-jit is
+        // a consumer match arm. Source-level `int?` takes
+        // `Ptr(HeapKind::Option)` (the ADR-020 §3.1.1 duality), where `Some(0)`
+        // and `Some(i64::MIN)` already round-trip correctly.
+        //
+        // So this row records the normative encoding and #229's migration
+        // target; the 2-slot machinery it calls for has no traffic to carry
+        // and no end-to-end differential to prove it, and is NOT built here.
         NativeKind::NullableInt8 => nullable_int_row(kind, 8, true),
         NativeKind::NullableUInt8 => nullable_int_row(kind, 8, false),
         NativeKind::NullableInt16 => nullable_int_row(kind, 16, true),
@@ -533,25 +558,19 @@ const fn int_row(kind: NativeKind, width: u16, signed: bool) -> Encoding {
 const fn nullable_int_row(kind: NativeKind, width: u16, signed: bool) -> Encoding {
     let null_adr020 = if width < 64 {
         NullEncoding::Sentinel(null_narrow_bits(width))
-    } else if signed {
-        NullEncoding::Sentinel(NULL_INT_BITS)
     } else {
-        // Surfaced by #223: ADR-020 §3.1 rules `int?` (signed 64-bit) and the
-        // narrow widths. `u64?` / `usize?` have neither a niche nor a ruled
-        // blessed sentinel. `u64::MAX` is the symmetric candidate and is what
-        // `shape-runtime/src/snapshot.rs:1530`'s comment assumes ("MAX for
-        // unsigned"), but no owner ruling exists — a producer must surface,
-        // not guess.
-        NullEncoding::Unruled(
-            "u64?/usize? have no ruled None pattern: no niche in u64, and \
-             ADR-020 §3.1 blesses a sentinel for signed int? only",
-        )
+        // The second amendment (2026-07-29) retired the `i64::MIN` blessed
+        // sentinel and with it the `u64?`/`usize?` "unruled" gap: signed and
+        // unsigned 64-bit take the SAME answer, because the reason is shared —
+        // 64 bits of payload leave no invalid pattern to spend, so absence
+        // gets its own slot instead of stealing a value.
+        NullEncoding::PresencePair
     };
     // #225 slice (c): the narrow widths are migrated — their `None` is the
     // widening niche, so `Some(0)` is an ordinary value again. The 64-bit rows
-    // still read `bits == 0` and keep colliding with `Some(0)`; they are slice
-    // (d)'s presence pairs, and the delta keeps them on the work list until
-    // then rather than letting them look settled.
+    // still read `bits == 0` in their (unreachable) consumer arms, so the
+    // delta keeps them on the work list: the encoding above is ruled, but the
+    // presence-pair machinery that would implement it is not built.
     let null_pre_adr020 = if width < 64 {
         null_adr020
     } else {
@@ -589,7 +608,18 @@ pub fn is_none_bits_pre_adr020(kind: NativeKind, bits: u64) -> bool {
         NullEncoding::Sentinel(s) => bits == s,
         NullEncoding::AnyNaN => is_nan_bits(bits),
         NullEncoding::ZeroBits => bits == 0,
-        NullEncoding::Unruled(_) => false,
+        // Statically unreachable: no row carries `PresencePair` in the
+        // `null_pre_adr020` column (the four 64-bit nullable rows still read
+        // `ZeroBits` there, which is what keeps them on `pre_adr020_delta()`).
+        // It stays a surface-and-stop rather than a `false`, because a pair's
+        // absence is not a function of these bits — answering from them at all
+        // would be a guess, and this is a null test.
+        NullEncoding::PresencePair => unreachable!(
+            "{kind:?}: a presence pair's absence lives in its presence slot, \
+             not in the payload bits this function was handed. A caller \
+             reaching here means the 2-slot carrier acquired a producer \
+             without the 2-slot read path (ADR-020 §3.1 / §5)."
+        ),
     }
 }
 
@@ -710,24 +740,54 @@ mod tests {
     }
 
     #[test]
-    fn int_none_sentinel_excludes_exactly_one_value() {
-        assert_eq!(NULL_INT_BITS, i64::MIN as u64);
-        assert!(!int_is_storable(i64::MIN));
-        assert!(int_is_storable(i64::MIN + 1));
-        assert!(int_is_storable(i64::MAX));
-        assert!(int_is_storable(0));
-        assert_eq!(MIN_STORABLE_INT, i64::MIN + 1);
+    fn every_64_bit_integer_stays_representable_under_the_presence_pair() {
+        // The point of the second amendment: no 64-bit payload pattern is
+        // spent. `Some(0)` (the #223 mismatch-1 defect) and `Some(i64::MIN)`
+        // (what the retired blessed sentinel would have cost) are both
+        // ordinary values, and absence is not competing with either.
+        for kind in [
+            NativeKind::NullableInt64,
+            NativeKind::NullableUInt64,
+            NativeKind::NullableIntSize,
+            NativeKind::NullableUIntSize,
+        ] {
+            assert_eq!(
+                encoding_of(kind).null_adr020,
+                NullEncoding::PresencePair,
+                "{kind:?}"
+            );
+            // The payload slot is unconstrained: absence is decided by the
+            // presence slot ALONE, so every 64-bit pattern — including the
+            // two the retired designs would have spent — is storable as
+            // `Some` and is not confusable with `None`.
+            for payload in [0u64, i64::MIN as u64, i64::MAX as u64, u64::MAX] {
+                assert!(
+                    !presence_pair_is_none(PRESENCE_SOME),
+                    "{kind:?}: payload {payload:#x} must read as Some"
+                );
+                assert!(
+                    presence_pair_is_none(PRESENCE_NONE),
+                    "{kind:?}: absence must not depend on payload {payload:#x}"
+                );
+            }
+        }
+        assert_eq!(PRESENCE_NONE, 0);
+        assert_eq!(PRESENCE_SOME, 1);
     }
 
     #[test]
     fn zero_is_a_storable_int_which_the_pre_adr020_encoding_gets_wrong() {
-        // The finding #223 surfaced, pinned as a test so #225 has a red to
-        // turn green: pre-ADR-020, `Some(0)` in an int? slot reads as None.
+        // The finding #223 surfaced: pre-ADR-020, `Some(0)` in an int? slot
+        // reads as None. That encoding is still what the (unreachable)
+        // consumer arms implement, so this stays red-by-record until the
+        // presence-pair machinery lands with #229's traffic.
         assert!(is_none_bits_pre_adr020(NativeKind::NullableInt64, 0));
-        // Under the normative encoding it does not.
-        let e = encoding_of(NativeKind::NullableInt64);
-        assert_eq!(e.null_adr020, NullEncoding::Sentinel(NULL_INT_BITS));
-        assert_ne!(NULL_INT_BITS, 0);
+        // The normative encoding does not have the defect, and does not fix it
+        // by spending `i64::MIN` either — the retired sentinel design.
+        assert_eq!(
+            encoding_of(NativeKind::NullableInt64).null_adr020,
+            NullEncoding::PresencePair
+        );
     }
 
     #[test]
@@ -808,7 +868,13 @@ mod tests {
         //   (c) the six narrow nullable ints — done, widening niche
         //   (b) NullableFloat64 — done, reserved NaN sentinel (inert at HEAD,
         //       ADR-020 §3.1.1: the carrier is #229's landing target)
-        //   (d) the four 64-bit nullable ints — 2-slot presence pairs
+        //   (d) the four 64-bit nullable ints — the ENCODING is ruled
+        //       (presence pairs, replacing the retired i64::MIN sentinel and
+        //       the unruled unsigned rows), but the 2-slot machinery is not
+        //       built: the carrier has no producer at HEAD (see the
+        //       measurement on `nullable_int_row`), so there is no traffic to
+        //       migrate and no differential that could prove the migration.
+        //       These four stay on the work list, which is the honest state.
         // Everything absent from this list is already normative, which is the
         // other half of the tripwire: no silent divergence hides in the table.
         let expected = [
@@ -881,11 +947,21 @@ mod tests {
     }
 
     #[test]
-    fn unsigned_64_bit_none_is_unruled_not_guessed() {
-        for kind in [NativeKind::NullableUInt64, NativeKind::NullableUIntSize] {
-            assert!(
-                matches!(encoding_of(kind).null_adr020, NullEncoding::Unruled(_)),
-                "{kind:?} must stay unruled until an owner ruling exists"
+    fn unsigned_and_signed_64_bit_share_one_ruled_answer() {
+        // #223 left `u64?`/`usize?` unruled because ADR-020 §3.1 blessed a
+        // sentinel for signed `int?` only. The second amendment removed the
+        // asymmetry by removing the sentinel: the reason 64-bit needs a
+        // second slot (no invalid pattern to spend) never depended on sign.
+        for kind in [
+            NativeKind::NullableInt64,
+            NativeKind::NullableIntSize,
+            NativeKind::NullableUInt64,
+            NativeKind::NullableUIntSize,
+        ] {
+            assert_eq!(
+                encoding_of(kind).null_adr020,
+                NullEncoding::PresencePair,
+                "{kind:?}"
             );
         }
     }
