@@ -575,10 +575,9 @@ val
     // the top-level. Stamp Int64 kind on the program so the host
     // synthesizer re-tags the bits correctly.
     let mut bytecode = compile_source(source).expect("compile should succeed");
-    let mut frame = bytecode
-        .top_level_frame
-        .clone()
-        .unwrap_or_else(crate::type_tracking::FrameDescriptor::new);
+    let mut frame = bytecode.top_level_frame.clone().unwrap_or_else(|| {
+        crate::type_tracking::FrameDescriptor::new(crate::type_tracking::FrameReturnWrapper::Plain)
+    });
     frame.return_kind = Some(crate::type_tracking::NativeKind::Int64);
     bytecode.top_level_frame = Some(frame);
     let mut vm = VirtualMachine::new(VMConfig::default());
@@ -638,10 +637,9 @@ match ("12" as int?) {
 }
 "#;
     let mut bytecode = compile_source(source).expect("compile should succeed");
-    let mut frame = bytecode
-        .top_level_frame
-        .clone()
-        .unwrap_or_else(crate::type_tracking::FrameDescriptor::new);
+    let mut frame = bytecode.top_level_frame.clone().unwrap_or_else(|| {
+        crate::type_tracking::FrameDescriptor::new(crate::type_tracking::FrameReturnWrapper::Plain)
+    });
     frame.return_kind = Some(crate::type_tracking::NativeKind::Int64);
     bytecode.top_level_frame = Some(frame);
     let mut vm = VirtualMachine::new(VMConfig::default());
@@ -667,10 +665,9 @@ match ("xx" as int?) {
 }
 "#;
     let mut bytecode = compile_source(source).expect("compile should succeed");
-    let mut frame = bytecode
-        .top_level_frame
-        .clone()
-        .unwrap_or_else(crate::type_tracking::FrameDescriptor::new);
+    let mut frame = bytecode.top_level_frame.clone().unwrap_or_else(|| {
+        crate::type_tracking::FrameDescriptor::new(crate::type_tracking::FrameReturnWrapper::Plain)
+    });
     frame.return_kind = Some(crate::type_tracking::NativeKind::Int64);
     bytecode.top_level_frame = Some(frame);
     let mut vm = VirtualMachine::new(VMConfig::default());
@@ -703,10 +700,9 @@ match parse("not-int") {
 }
 "#;
     let mut bytecode = compile_source(source).expect("compile should succeed");
-    let mut frame = bytecode
-        .top_level_frame
-        .clone()
-        .unwrap_or_else(crate::type_tracking::FrameDescriptor::new);
+    let mut frame = bytecode.top_level_frame.clone().unwrap_or_else(|| {
+        crate::type_tracking::FrameDescriptor::new(crate::type_tracking::FrameReturnWrapper::Plain)
+    });
     frame.return_kind = Some(crate::type_tracking::NativeKind::Int64);
     bytecode.top_level_frame = Some(frame);
     let mut vm = VirtualMachine::new(VMConfig::default());
@@ -744,10 +740,9 @@ let s: Option<int> = Some(7)
 s as int
 "#;
     let mut bytecode = compile_source(some_src).expect("Some cast should compile");
-    let mut frame = bytecode
-        .top_level_frame
-        .clone()
-        .unwrap_or_else(crate::type_tracking::FrameDescriptor::new);
+    let mut frame = bytecode.top_level_frame.clone().unwrap_or_else(|| {
+        crate::type_tracking::FrameDescriptor::new(crate::type_tracking::FrameReturnWrapper::Plain)
+    });
     frame.return_kind = Some(crate::type_tracking::NativeKind::Int64);
     bytecode.top_level_frame = Some(frame);
     let mut vm = VirtualMachine::new(VMConfig::default());

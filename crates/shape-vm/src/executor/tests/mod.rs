@@ -154,7 +154,7 @@ fn execute_bytecode_typed(
     return_kind: crate::type_tracking::NativeKind,
 ) -> Result<u64, VMError> {
     use crate::type_tracking::FrameDescriptor;
-    let mut frame = FrameDescriptor::new();
+    let mut frame = FrameDescriptor::new(crate::type_tracking::FrameReturnWrapper::Plain);
     frame.return_kind = Some(return_kind);
     let program = BytecodeProgram {
         instructions,
@@ -620,7 +620,9 @@ fn test_comparison_operators_complete() {
         ],
         constants: vec![Constant::Number(5.0)],
         top_level_frame: Some({
-            let mut f = crate::type_tracking::FrameDescriptor::new();
+            let mut f = crate::type_tracking::FrameDescriptor::new(
+                crate::type_tracking::FrameReturnWrapper::Plain,
+            );
             f.return_kind = Some(crate::type_tracking::NativeKind::Bool);
             f
         }),
@@ -641,7 +643,9 @@ fn test_comparison_operators_complete() {
         ],
         constants: vec![Constant::Number(3.0), Constant::Number(5.0)],
         top_level_frame: Some({
-            let mut f = crate::type_tracking::FrameDescriptor::new();
+            let mut f = crate::type_tracking::FrameDescriptor::new(
+                crate::type_tracking::FrameReturnWrapper::Plain,
+            );
             f.return_kind = Some(crate::type_tracking::NativeKind::Bool);
             f
         }),
@@ -662,7 +666,9 @@ fn test_comparison_operators_complete() {
         ],
         constants: vec![Constant::Number(7.0)],
         top_level_frame: Some({
-            let mut f = crate::type_tracking::FrameDescriptor::new();
+            let mut f = crate::type_tracking::FrameDescriptor::new(
+                crate::type_tracking::FrameReturnWrapper::Plain,
+            );
             f.return_kind = Some(crate::type_tracking::NativeKind::Bool);
             f
         }),
@@ -683,7 +689,9 @@ fn test_comparison_operators_complete() {
         ],
         constants: vec![Constant::Number(5.0), Constant::Number(3.0)],
         top_level_frame: Some({
-            let mut f = crate::type_tracking::FrameDescriptor::new();
+            let mut f = crate::type_tracking::FrameDescriptor::new(
+                crate::type_tracking::FrameReturnWrapper::Plain,
+            );
             f.return_kind = Some(crate::type_tracking::NativeKind::Bool);
             f
         }),
@@ -704,7 +712,9 @@ fn test_comparison_operators_complete() {
         ],
         constants: vec![Constant::Int(42), Constant::Int(42)],
         top_level_frame: Some({
-            let mut f = crate::type_tracking::FrameDescriptor::new();
+            let mut f = crate::type_tracking::FrameDescriptor::new(
+                crate::type_tracking::FrameReturnWrapper::Plain,
+            );
             f.return_kind = Some(crate::type_tracking::NativeKind::Bool);
             f
         }),
@@ -725,7 +735,9 @@ fn test_comparison_operators_complete() {
         ],
         constants: vec![Constant::Number(1.5), Constant::Number(2.5)],
         top_level_frame: Some({
-            let mut f = crate::type_tracking::FrameDescriptor::new();
+            let mut f = crate::type_tracking::FrameDescriptor::new(
+                crate::type_tracking::FrameReturnWrapper::Plain,
+            );
             f.return_kind = Some(crate::type_tracking::NativeKind::Bool);
             f
         }),
@@ -752,7 +764,9 @@ fn test_logical_or_not() {
         ],
         constants: vec![Constant::Bool(false), Constant::Bool(true)],
         top_level_frame: Some({
-            let mut f = crate::type_tracking::FrameDescriptor::new();
+            let mut f = crate::type_tracking::FrameDescriptor::new(
+                crate::type_tracking::FrameReturnWrapper::Plain,
+            );
             f.return_kind = Some(crate::type_tracking::NativeKind::Bool);
             f
         }),
@@ -772,7 +786,9 @@ fn test_logical_or_not() {
         ],
         constants: vec![Constant::Bool(false)],
         top_level_frame: Some({
-            let mut f = crate::type_tracking::FrameDescriptor::new();
+            let mut f = crate::type_tracking::FrameDescriptor::new(
+                crate::type_tracking::FrameReturnWrapper::Plain,
+            );
             f.return_kind = Some(crate::type_tracking::NativeKind::Bool);
             f
         }),

@@ -836,7 +836,7 @@ impl VirtualMachine {
     ///
     /// - **Inside-fn** — discriminate by the enclosing frame's declared
     ///   return-wrapper semantics (read from
-    ///   `current_frame_descriptor().effective_return_wrapper()`):
+    ///   `current_frame_descriptor().return_wrapper`):
     ///
     ///   - **Result-returning** (`return_wrapper == Result`): LIFT None to
     ///     `Err(AnyError{ payload: "Value was None", code: "OPTION_NONE" })`
@@ -845,13 +845,14 @@ impl VirtualMachine {
     ///     lift, this is the documented book contract (L114: "None →
     ///     early-return `Err(AnyError)` (code `OPTION_NONE`)").
     ///
-    ///   - **Option-returning**, **plain**, or **unknown**: propagate
-    ///     None verbatim as the early-return value. For Option-typed
-    ///     enclosing frames, None IS the valid early-return; lifting to
-    ///     Err would break that semantics. For unknown frame metadata
-    ///     (no FrameDescriptor or no wrapper stamp), propagate verbatim
-    ///     — the pre-PB1 behavior is preserved for any compile-time emit
-    ///     site that hasn't reached return-wrapper-stamp territory yet.
+    ///   - **Option-returning**, **plain**, or **no descriptor at all**:
+    ///     propagate None verbatim as the early-return value. For
+    ///     Option-typed enclosing frames, None IS the valid early-return;
+    ///     lifting to Err would break that semantics. A frame with no
+    ///     `FrameDescriptor` carries no return metadata and propagates
+    ///     verbatim. #233: there is no third case — a descriptor that
+    ///     exists always names a stamped wrapper, so "descriptor present
+    ///     but wrapper unknown" is not a state the compiler can produce.
     ///
     /// Per audit 14a binder: this is NOT two operators. The `?`
     /// semantics is single-mode "early-return failure to nearest
@@ -870,14 +871,14 @@ impl VirtualMachine {
         }
 
         // In-fn: discriminate on the enclosing frame's declared
-        // return-wrapper semantics. `effective_return_wrapper` retains
-        // compatibility with old descriptors that encoded Result/Option
-        // in `return_kind`.
-        let return_wrapper = self
-            .current_frame_descriptor()
-            .map(|fd| fd.effective_return_wrapper())
-            .unwrap_or(FrameReturnWrapper::Unknown);
-        let lift_to_result_err = matches!(return_wrapper, FrameReturnWrapper::Result);
+        // return-wrapper semantics. #233: this is a positive question —
+        // "did the compiler stamp this frame Result-returning?" — so a
+        // frame with no descriptor answers `None` and takes the propagate
+        // path below. There is no "unknown wrapper" value to fold in.
+        let lift_to_result_err = matches!(
+            self.current_frame_descriptor().map(|fd| fd.return_wrapper),
+            Some(FrameReturnWrapper::Result)
+        );
 
         if lift_to_result_err {
             // Result-returning fn: LIFT None to Err(AnyError) wrapped
@@ -892,11 +893,11 @@ impl VirtualMachine {
             return self.return_value_inner(bits, kind);
         }
 
-        // Option-returning fn OR unknown frame return kind:
+        // Option-returning fn, plain fn, or a frame with no descriptor:
         // propagate None verbatim as the early-return value. For
-        // Option-typed frames this IS the correct early-return; for
-        // unknown frames the pre-PB1 behavior is preserved (the
-        // null-sentinel propagates as today).
+        // Option-typed frames this IS the correct early-return; a frame
+        // with no descriptor has no return metadata at all and keeps the
+        // pre-PB1 behavior (the null-sentinel propagates as today).
         self.return_value_inner(Self::NONE_BITS, NativeKind::Null)
     }
 
@@ -1574,9 +1575,8 @@ mod none_early_return_frame_metadata_tests {
     }
 
     fn wrapper_frame(wrapper: FrameReturnWrapper) -> FrameDescriptor {
-        let mut frame = FrameDescriptor::new();
+        let mut frame = FrameDescriptor::new(wrapper);
         frame.return_kind = Some(NativeKind::Ptr(HeapKind::TypedObject));
-        frame.return_wrapper = wrapper;
         frame
     }
 

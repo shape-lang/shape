@@ -1367,7 +1367,29 @@ struct FrameReturnMetadata {
 }
 
 impl FrameReturnMetadata {
-    fn unknown() -> Self {
+    /// A return classification that proves the frame carries no fallible
+    /// wrapper but leaves the ABI carrier kind unstamped.
+    ///
+    /// #233: this is NOT the deleted `unknown()`. The wrapper here is a
+    /// positive fact — a declared function type, an unresolvable-but-named
+    /// annotation head, etc. is structurally not `Option`/`Result` — while
+    /// `return_kind: None` keeps its existing "kind not stamped" meaning
+    /// that the JIT call-site surface-and-stop already handles.
+    fn plain_without_kind() -> Self {
+        Self {
+            return_kind: None,
+            wrapper: FrameReturnWrapper::Plain,
+            arity: crate::type_tracking::FrameReturnArity::One,
+        }
+    }
+
+    /// #233 residual: no classification source resolved the return type.
+    ///
+    /// The only producer of `FrameReturnWrapper::Unknown`. Callers must
+    /// reach for this ONLY at the descriptor-construction site, and only
+    /// after every classification source has been tried — see the four
+    /// blocked producer classes documented on `FrameReturnWrapper`.
+    fn unclassified_residual() -> Self {
         Self {
             return_kind: None,
             wrapper: FrameReturnWrapper::Unknown,
@@ -1381,8 +1403,17 @@ impl FrameReturnMetadata {
         // refusing the caller. Without this arm a unit function whose slots
         // are unproven carries no descriptor at all and the call site cannot
         // tell "returns nothing" from "not stamped".
+        //
+        // #233: the middle arm used to read `wrapper != Unknown`. `Plain` is
+        // now reachable with no ABI kind (`plain_without_kind`), and such a
+        // classification carries nothing a consumer can use, so the arm asks
+        // the question it always meant: does this frame return a FALLIBLE
+        // wrapper that `op_try_unwrap`'s None arm has to discriminate on?
         self.return_kind.is_some()
-            || self.wrapper != FrameReturnWrapper::Unknown
+            || matches!(
+                self.wrapper,
+                FrameReturnWrapper::Option | FrameReturnWrapper::Result
+            )
             || self.arity == crate::type_tracking::FrameReturnArity::Zero
     }
 }
@@ -1496,11 +1527,20 @@ fn body_provably_returns_heap_closure(body: &[shape_ast::ast::Statement]) -> boo
             .all(|stmt| matches!(stmt, Statement::Return(Some(Expr::FunctionExpr { .. }), _)))
 }
 
+/// Returns `None` only when the annotation names a type the compiler cannot
+/// resolve AND whose head spelling does not settle the fallible-wrapper
+/// question — i.e. a `Basic`/`Reference`/`Generic` head that is neither
+/// `Option` nor `Result` and that `declared_annotation_concrete_type` could
+/// not resolve. Such a head can still be a `type Alias = Result<…>`
+/// (`shape.pest:100 type_alias_def`), so claiming `Plain` there would be
+/// exactly the unproven claim #233 deletes. Every structurally non-fallible
+/// annotation shape (function type, array, tuple, union, borrow, …) returns
+/// `Some(plain_without_kind())` — a positive fact, not an absence.
 fn classify_type_annotation_metadata(
     compiler: &BytecodeCompiler,
     return_type: &shape_ast::ast::TypeAnnotation,
     heap_closure_carrier_proven: bool,
-) -> FrameReturnMetadata {
+) -> Option<FrameReturnMetadata> {
     // #188 stage 1: a declared function-type return. The ABI carrier for a
     // closure value is `Ptr(HeapKind::Closure)` — the same kind
     // `native_kind_from_concrete_type` already maps `ConcreteType::Closure` /
@@ -1516,13 +1556,16 @@ fn classify_type_annotation_metadata(
     // decide this and why being wrong is a use-after-free.
     if matches!(return_type, shape_ast::ast::TypeAnnotation::Function { .. }) {
         if heap_closure_carrier_proven {
-            return FrameReturnMetadata {
+            return Some(FrameReturnMetadata {
                 return_kind: Some(shape_value::NativeKind::Ptr(shape_value::HeapKind::Closure)),
                 wrapper: FrameReturnWrapper::Plain,
                 arity: crate::type_tracking::FrameReturnArity::One,
-            };
+            });
         }
-        return FrameReturnMetadata::unknown();
+        // #233: the carrier is unproven, so no `return_kind` — but a declared
+        // function type is structurally not `Option`/`Result`, so the wrapper
+        // IS proven `Plain`. The old `unknown()` conflated the two.
+        return Some(FrameReturnMetadata::plain_without_kind());
     }
     // `Future<T>` is an inline scheduler-id ABI carrier, not a v2
     // `ConcreteType`. Its declaration is still sufficient proof to stamp the
@@ -1532,7 +1575,7 @@ fn classify_type_annotation_metadata(
         shape_ast::ast::TypeAnnotation::Generic { name, args }
             if name.as_str() == "Future" && args.len() == 1
     ) {
-        return future_return_metadata();
+        return Some(future_return_metadata());
     }
 
     // ADR-009 C3 S7 — the S2d gap-(a) kind-tracker completion: an INLINE
@@ -1551,13 +1594,13 @@ fn classify_type_annotation_metadata(
     // MirToIR inline-Object field-layout proof behind it is tracked
     // separately (gap (b), the S7 follow-up issue).
     if matches!(return_type, shape_ast::ast::TypeAnnotation::Object(_)) {
-        return FrameReturnMetadata {
+        return Some(FrameReturnMetadata {
             return_kind: Some(shape_value::NativeKind::Ptr(
                 shape_value::HeapKind::TypedObject,
             )),
             wrapper: FrameReturnWrapper::Plain,
             arity: crate::type_tracking::FrameReturnArity::One,
-        };
+        });
     }
 
     if let Some(concrete) =
@@ -1566,7 +1609,7 @@ fn classify_type_annotation_metadata(
             return_type,
         )
     {
-        return return_metadata_from_concrete_type(&concrete);
+        return Some(return_metadata_from_concrete_type(&concrete));
     }
 
     use shape_ast::ast::TypeAnnotation;
@@ -1574,13 +1617,22 @@ fn classify_type_annotation_metadata(
         TypeAnnotation::Basic(name) => name.as_str(),
         TypeAnnotation::Reference(path) => path.as_str(),
         TypeAnnotation::Generic { name, .. } => name.as_str(),
-        _ => return FrameReturnMetadata::unknown(),
+        // #233: every remaining annotation shape (array, tuple, union,
+        // intersection, borrow, dyn, existential, void/never/null) is
+        // structurally not a fallible wrapper. That is a proof, so the
+        // wrapper is `Plain`; only the ABI carrier kind stays unstamped.
+        _ => return Some(FrameReturnMetadata::plain_without_kind()),
     };
     match wrapper_from_return_head(head) {
         Some(wrapper @ (FrameReturnWrapper::Option | FrameReturnWrapper::Result)) => {
-            typed_object_wrapper_metadata(wrapper)
+            Some(typed_object_wrapper_metadata(wrapper))
         }
-        _ => FrameReturnMetadata::unknown(),
+        // A named head the compiler could not resolve. `type X = Result<…>`
+        // aliases exist, so the head spelling alone does not prove `Plain`
+        // here — this is the one genuine classification gap, and it stays an
+        // absence at the COMPILER tier (`None`) that the descriptor builder
+        // has to answer for.
+        _ => None,
     }
 }
 
@@ -3903,23 +3955,21 @@ impl BytecodeCompiler {
         }
     }
 
-    /// Capture local storage hints for a compiled function.
+    /// Capture local storage hints for a compiled function and populate the
+    /// function's `FrameDescriptor` so the verifier and executor can use
+    /// per-slot type info for trusted opcodes.
     ///
-    /// Must be called before the function scope is popped so the type tracker still
-    /// has local slot metadata. Also populates the function's `FrameDescriptor` so
-    /// the verifier and executor can use per-slot type info for trusted opcodes.
-    pub(super) fn capture_function_local_storage_hints(&mut self, func_idx: usize) {
-        self.capture_function_local_storage_hints_inner(func_idx, None);
-    }
-
-    /// PB1 Wave-1-extension (audit 14a + 14b, 2026-05-29): variant of
-    /// `capture_function_local_storage_hints` that accepts the
-    /// FunctionDef so the Result/Option return-kind can be classified
-    /// from the AST directly. Used by call sites that compile a
-    /// `FunctionDef`; other call sites continue using
-    /// `capture_function_local_storage_hints` (return-kind inference
-    /// then falls back to the registered `function_return_types` map,
-    /// which captures simple-name return types).
+    /// Must be called before the function scope is popped so the type tracker
+    /// still has local slot metadata.
+    ///
+    /// `func_def` supplies the AST so the Result/Option return wrapper can be
+    /// classified from the declared return type directly (it handles generic
+    /// `Result<T>` / `Option<T>` spellings that a simple-name head match
+    /// misses); the registered concrete return type is the fallback source.
+    ///
+    /// (The `func_def`-less sibling `capture_function_local_storage_hints`
+    /// was deleted with #233 — it had no callers, and reintroducing a
+    /// no-AST entry point would reintroduce the classification gap.)
     pub(super) fn capture_function_local_storage_hints_with_def(
         &mut self,
         func_idx: usize,
@@ -3984,13 +4034,21 @@ impl BytecodeCompiler {
         // generic `Result<T>` / `Option<T>` types whose head name isn't
         // captured by `TypeAnnotation::as_simple_name()`). (2)
         // registered concrete return type fallback.
+        //
+        // #233: `return_metadata` is `Option<FrameReturnMetadata>` — `None`
+        // means "the static return type never reached this builder", the
+        // compiler-tier absence that replaced the runtime-visible
+        // `FrameReturnWrapper::Unknown`. An annotation that classifies to
+        // `None` now also falls through to source (2) rather than
+        // short-circuiting, so the recorded concrete return type gets to
+        // answer the unresolvable-alias case.
         let return_metadata = func_def
             .and_then(|fd| {
                 fd.return_type
                     .as_ref()
                     .map(|ann| (ann, body_provably_returns_heap_closure(&fd.body)))
             })
-            .map(|(ann, carrier_proven)| {
+            .and_then(|(ann, carrier_proven)| {
                 classify_type_annotation_metadata(self, ann, carrier_proven)
             })
             .or_else(|| {
@@ -4007,8 +4065,7 @@ impl BytecodeCompiler {
                 self.type_tracker
                     .get_function_return_concrete_type(&func_name)
                     .map(classify_concrete_return_metadata)
-            })
-            .unwrap_or_else(FrameReturnMetadata::unknown);
+            });
 
         // Populate FrameDescriptor when (a) every slot's kind is proven
         // and we have hints/trusted-opcode coverage, OR (b) we have
@@ -4024,7 +4081,9 @@ impl BytecodeCompiler {
             Some(h) => !h.is_empty() || has_trusted,
             None => false,
         };
-        let needs_descriptor_for_return = return_metadata.needs_descriptor();
+        let needs_descriptor_for_return = return_metadata
+            .map(FrameReturnMetadata::needs_descriptor)
+            .unwrap_or(false);
         // U4-4: V2 typed opcodes in the body force a descriptor (verifier rule).
         let needs_descriptor_for_v2 = has_v2_typed;
 
@@ -4096,9 +4155,28 @@ impl BytecodeCompiler {
                 None if needs_descriptor_for_params => proven_params.clone().unwrap_or_default(),
                 _ => Vec::new(),
             };
-            let mut frame = crate::type_tracking::FrameDescriptor::from_slots(slots);
+            // #233 RESIDUAL — the single site in the workspace that stamps
+            // `FrameReturnWrapper::Unknown`. A descriptor is being built for
+            // slot / V2-opcode / param-prefix reasons, but no classification
+            // source resolved this function's return type.
+            //
+            // It is deliberately NOT defaulted to `Plain`: `Plain` claims
+            // "returns no fallible wrapper", and for a `Result`-returning
+            // frame that claim silently changes `?` semantics
+            // (`propagate_none_early_return` would propagate None instead of
+            // lifting it to `Err(OPTION_NONE)`). Nor is it re-derived from
+            // `return_kind` — that inference (`effective_return_wrapper`) is
+            // deleted.
+            //
+            // Deleting the variant requires the four producer classes listed
+            // on `FrameReturnWrapper` (`type_tracking.rs`) to thread their
+            // static return type here first. Until then this stamp is
+            // explicit, single-sited, and greppable.
+            let return_metadata =
+                return_metadata.unwrap_or_else(FrameReturnMetadata::unclassified_residual);
+            let mut frame =
+                crate::type_tracking::FrameDescriptor::from_slots(slots, return_metadata.wrapper);
             frame.return_kind = return_metadata.return_kind;
-            frame.return_wrapper = return_metadata.wrapper;
             frame.return_arity = return_metadata.arity;
             self.program.functions[func_idx].frame_descriptor = Some(frame);
         }
@@ -4423,7 +4501,19 @@ impl BytecodeCompiler {
             // for return_kind alone, and the legacy hints vec also stays
             // empty in that case.
             let slots = top_hints_proven.unwrap_or_default();
-            let mut frame = crate::type_tracking::FrameDescriptor::from_slots(slots);
+            // #233: the top-level frame has no fallible-wrapper early-return
+            // semantics to carry. `?` at top level never consults a
+            // descriptor — `propagate_none_early_return`
+            // (`executor/exceptions/mod.rs`) branches on
+            // `self.call_stack.is_empty()` first and surfaces OPTION_NONE as
+            // an uncaught exception, and an Option-VALUED program's tail is
+            // classified from the AST by `is_top_level_option_returning`
+            // (`execution.rs`). `Plain` is the proven fact here, not a
+            // default.
+            let mut frame = crate::type_tracking::FrameDescriptor::from_slots(
+                slots,
+                crate::type_tracking::FrameReturnWrapper::Plain,
+            );
             frame.return_kind = return_kind;
             self.program.top_level_frame = Some(frame);
         }
@@ -8754,7 +8844,7 @@ mod frame_return_metadata_tests {
             Some(NativeKind::Ptr(HeapKind::TypedObject))
         );
         assert_eq!(frame.return_wrapper, FrameReturnWrapper::Result);
-        assert_eq!(frame.effective_return_wrapper(), FrameReturnWrapper::Result);
+        assert_eq!(frame.return_wrapper, FrameReturnWrapper::Result);
     }
 
     #[test]
@@ -8773,7 +8863,7 @@ mod frame_return_metadata_tests {
             Some(NativeKind::Ptr(HeapKind::TypedObject))
         );
         assert_eq!(frame.return_wrapper, FrameReturnWrapper::Option);
-        assert_eq!(frame.effective_return_wrapper(), FrameReturnWrapper::Option);
+        assert_eq!(frame.return_wrapper, FrameReturnWrapper::Option);
     }
 
     #[test]
@@ -8789,7 +8879,7 @@ mod frame_return_metadata_tests {
 
         assert_eq!(frame.return_kind, Some(NativeKind::Int64));
         assert_eq!(frame.return_wrapper, FrameReturnWrapper::Plain);
-        assert_eq!(frame.effective_return_wrapper(), FrameReturnWrapper::Plain);
+        assert_eq!(frame.return_wrapper, FrameReturnWrapper::Plain);
     }
 
     // ADR-009 C3 S7 — the S2d gap-(a) completion: an INLINE object return
@@ -8814,7 +8904,7 @@ mod frame_return_metadata_tests {
             Some(NativeKind::Ptr(HeapKind::TypedObject))
         );
         assert_eq!(frame.return_wrapper, FrameReturnWrapper::Plain);
-        assert_eq!(frame.effective_return_wrapper(), FrameReturnWrapper::Plain);
+        assert_eq!(frame.return_wrapper, FrameReturnWrapper::Plain);
     }
 
     #[test]

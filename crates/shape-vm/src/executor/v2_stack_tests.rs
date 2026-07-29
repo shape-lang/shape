@@ -32,7 +32,9 @@ fn execute_program_typed(
     mut program: BytecodeProgram,
     return_kind: NativeKind,
 ) -> Result<u64, VMError> {
-    let mut frame = program.top_level_frame.unwrap_or_else(FrameDescriptor::new);
+    let mut frame = program
+        .top_level_frame
+        .unwrap_or_else(|| FrameDescriptor::new(crate::type_tracking::FrameReturnWrapper::Plain));
     // `FrameDescriptor.return_kind` is `Option<NativeKind>` per ADR-006
     // §2.7.8/Q10 (single-slot cell-storage shape — `None` ≡ "kind not
     // stamped"). Test helpers always stamp a kind, so wrap in `Some`.
