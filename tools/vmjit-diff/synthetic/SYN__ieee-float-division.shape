@@ -1,0 +1,27 @@
+// ADR-020 §3.1 ruling 1 (amended) + supervisor ruling 2026-07-29 on #225:
+// `number` is IEEE-754 f64, so division by zero is NOT an error in either
+// tier. Before #225b the VM applied INTEGER division-by-zero semantics to
+// floats and raised, while the JIT already returned IEEE values — so this
+// program errored under `--mode vm` and printed under `--mode jit`.
+//
+// This also makes Some(NaN) reachable in the VM tier at all, which ADR-020 §4
+// requires as public book-gated semantics.
+fn dv(a: number, b: number) -> number { return a / b }
+fn md(a: number, b: number) -> number { return a % b }
+
+print(dv(1.0, 0.0))
+print(dv(0.0, 0.0))
+print(dv(0.0 - 1.0, 0.0))
+print(md(1.0, 0.0))
+
+// The integer paths are unchanged: i64 has no infinity to return, so integer
+// division by zero stays an error. Kept in the same fixture so a future edit
+// that "simplifies" the guard away is caught by the same program.
+fn safe_div(a: int, b: int) -> int {
+    if b == 0 {
+        return 0
+    }
+    return a / b
+}
+print(safe_div(10, 2))
+print(safe_div(10, 0))
