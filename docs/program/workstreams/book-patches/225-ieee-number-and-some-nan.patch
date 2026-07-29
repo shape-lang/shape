@@ -1,0 +1,80 @@
+# Book patch for #225 (REP-NULL) — ADR-020 §4 gate.
+#
+# Target: shape-web @ 358e4fa
+# Page:   book/book-site/src/content/docs/fundamentals/builtin-types.mdx
+#
+# Adds two sections to Scalar Types:
+#   - `number` is IEEE-754 (division by zero -> Infinity/NaN; int still errors)
+#   - NaN in an Option<number> (Some(NaN) survives ??; payload bits UNSPECIFIED)
+#
+# Every fence verified green on vm AND jit at rep-null (see below), output
+# byte-identical across tiers:
+#   Infinity | -Infinity | NaN | NaN | 5 | 0 | NaN | 2.5
+#
+# 'UNSPECIFIED' rather than 'canonicalized' is deliberate per ADR-020 §3.1.1:
+# today's Ptr(HeapKind::Option) carrier preserves NaN payload bits, the §3.1
+# NaN-sentinel carrier will canonicalize them, and #229 migrates between the
+# two. 'Unspecified' is the only claim both carriers keep true, so the book
+# text does not have to change when #229 lands.
+#
+diff --git a/book/book-site/src/content/docs/fundamentals/builtin-types.mdx b/book/book-site/src/content/docs/fundamentals/builtin-types.mdx
+index ef69c3c..842b308 100644
+--- a/book/book-site/src/content/docs/fundamentals/builtin-types.mdx
++++ b/book/book-site/src/content/docs/fundamentals/builtin-types.mdx
+@@ -65,6 +65,56 @@ are rejected at compile time. Overflow-arithmetic semantics are not yet uniform
+ across execution modes — see [Integer Width Types](/fundamentals/integer-types/)
+ for the full runtime-support details. Use `int` for general-purpose integer work.
+ 
++### `number` is IEEE-754
++
++`number` is an IEEE-754 binary64 float, and it behaves like one. Division by
++zero is **not** an error — it produces an infinity, or `NaN` when the numerator
++is also zero:
++
++```shape
++fn dv(a: number, b: number) -> number { return a / b }
++
++print(dv(1.0, 0.0))        // Infinity
++print(dv(0.0 - 1.0, 0.0))  // -Infinity
++print(dv(0.0, 0.0))        // NaN
++print(dv(1.0, 0.0) - dv(1.0, 0.0))  // NaN
++```
++
++Integer division is different: `int` has no infinity to produce, so `1 / 0` on
++`int` is a runtime error. This is the one place `int` and `number` disagree
++about the same written expression.
++
++```shape
++fn safe_div(a: int, b: int) -> int {
++    if b == 0 {
++        return 0
++    }
++    return a / b
++}
++
++print(safe_div(10, 2))  // 5
++print(safe_div(10, 0))  // 0
++```
++
++### `NaN` in an `Option<number>`
++
++A `NaN` is an ordinary `number` value, not a missing one. Putting one in an
++`Option<number>` gives you `Some(NaN)`, so `??` does **not** substitute the
++default:
++
++```shape
++fn dv(a: number, b: number) -> number { return a / b }
++fn wrap(x: number) -> number? { return Some(x) }
++
++print(wrap(dv(0.0, 0.0)) ?? -1.0)  // NaN, not -1.0
++print(wrap(2.5) ?? -1.0)           // 2.5
++```
++
++The `NaN` *payload* bits — the diagnostic bits some platforms carry inside a
++`NaN` — are **unspecified** once a value passes through a nullable position.
++Shape gives you no way to observe them, so this affects nothing you can write;
++it is stated so the guarantee is not assumed.
++
+ ## Generic Container Types
+ 
+ | Type | Description |

@@ -6,7 +6,7 @@
   "counts": {
     "book": 240,
     "acceptance": 219,
-    "synthetic": 19
+    "synthetic": 20
   },
   "skippedCount": 0,
   "entries": [
@@ -2406,6 +2406,11 @@
       "id": "SYN__ieee-float-division.shape",
       "tier": "synthetic",
       "source": "tools/vmjit-diff/synthetic/SYN__ieee-float-division.shape"
+    },
+    {
+      "id": "SYN__some-nan-survives-nullable.shape",
+      "tier": "synthetic",
+      "source": "tools/vmjit-diff/synthetic/SYN__some-nan-survives-nullable.shape"
     }
   ]
 }

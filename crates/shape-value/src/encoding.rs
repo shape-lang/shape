@@ -358,13 +358,32 @@ pub const fn encoding_of(kind: NativeKind) -> Encoding {
         // `exceptions/mod.rs:1234`, `shape-runtime/src/wire_conversion.rs:45`,
         // `marshal.rs:181`) — a superset of the sentinel, so `Some(NaN)` is
         // not representable there. #225 narrows it.
+        // #225 slice (b). `None` is the reserved sentinel, not "any NaN" — the
+        // pre-ADR-020 `AnyNaN` reading made `Some(NaN)` unrepresentable in this
+        // carrier, which is the semantics ADR-020 §4 book-gates.
+        //
+        // INERT AT HEAD, and deliberately so (ADR-020 §3.1.1, the named
+        // Option-carrier duality). Nothing reaches this carrier at this commit:
+        // `TypeInfo::nullable_number()`, `local_uses_nan_sentinel()` and
+        // `module_binding_uses_nan_sentinel()` have zero callers, and
+        // `StorageType::uses_nan_sentinel()` is read only by its own test. The
+        // ordinary source-level `number?` takes `Ptr(HeapKind::Option)`
+        // instead — verified through both a function return and a typed-object
+        // field, each of which preserved `Some(NaN)` through `??`.
+        //
+        // So this row is the LANDING TARGET for #229's `Option<scalar>`
+        // unboxing, not dead code, and the canonicalization emission §3.1
+        // calls for has no construction sites to attach to until that lands.
+        // Recorded rather than manufactured: inventing a call site to make the
+        // encoding look wired would be the defect this program exists to stop.
         NativeKind::NullableFloat64 => Encoding {
             kind,
             payload: Payload::Float64,
             null_adr020: NullEncoding::Sentinel(NULL_NUMBER_BITS),
-            null_pre_adr020: NullEncoding::AnyNaN,
+            null_pre_adr020: NullEncoding::Sentinel(NULL_NUMBER_BITS),
             adr_clause: "ADR-020 §3.1 clause 1 bullet 2 (NaN sentinel + canonicalization)",
-            provenance: "shape-vm/src/executor/comparison/mod.rs:685 (is_nan)",
+            provenance: "#225: narrowed to the reserved sentinel (inert at HEAD per \
+                         ADR-020 §3.1.1); was comparison/mod.rs:685 (is_nan)",
         },
         // f32 zero-extended into the low 32 bits (ADR-006 §2.7.5 amendment,
         // Round 19 S1.5). No NullableFloat32 variant exists.
@@ -713,12 +732,18 @@ mod tests {
 
     #[test]
     fn some_nan_is_representable_under_the_normative_encoding() {
-        // The other half of the same story: pre-ADR-020 every NaN is None.
-        assert!(is_none_bits_pre_adr020(
+        // The other half of the same story. Pre-#225 every NaN read as None in
+        // this carrier, so `Some(NaN)` could not exist in it; #225 slice (b)
+        // narrowed it to the reserved sentinel, so the canonical `Some(NaN)`
+        // is an ordinary value and only the sentinel is absence.
+        assert!(!is_none_bits_pre_adr020(
             NativeKind::NullableFloat64,
             CANON_NAN_BITS
         ));
-        // Normatively, only the reserved sentinel is.
+        assert!(is_none_bits_pre_adr020(
+            NativeKind::NullableFloat64,
+            NULL_NUMBER_BITS
+        ));
         assert_eq!(
             encoding_of(NativeKind::NullableFloat64).null_adr020,
             NullEncoding::Sentinel(NULL_NUMBER_BITS)
@@ -781,12 +806,12 @@ mod tests {
         // What is LEFT to do, shrinking as #225 lands:
         //   (a) StringV2 / DecimalV2  — done, null-pointer niche
         //   (c) the six narrow nullable ints — done, widening niche
-        //   (b) NullableFloat64 — NaN sentinel + canonicalization emission
+        //   (b) NullableFloat64 — done, reserved NaN sentinel (inert at HEAD,
+        //       ADR-020 §3.1.1: the carrier is #229's landing target)
         //   (d) the four 64-bit nullable ints — 2-slot presence pairs
         // Everything absent from this list is already normative, which is the
         // other half of the tripwire: no silent divergence hides in the table.
         let expected = [
-            NativeKind::NullableFloat64,
             NativeKind::NullableInt64,
             NativeKind::NullableUInt64,
             NativeKind::NullableIntSize,
