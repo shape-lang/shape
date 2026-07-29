@@ -683,9 +683,15 @@ impl Default for JITContext {
             column_count: 0,
             row_count: 0,
             current_row: 0,
-            // Local variables and stack
-            locals: [TAG_NULL; 256],
-            stack: [TAG_NULL; 512],
+            // Local variables and stack. Zero-filled per #234's ruling, NOT
+            // a null/none word: these slots must never be read before they
+            // are written (the parallel-kind track below is what surfaces a
+            // read-before-write), so the fill is not an encoding of anything.
+            // It is `0` because if a bug ever does read one, `0` is a
+            // guarded null pointer / zero scalar rather than a non-zero
+            // pattern that passes a `bits == 0` guard and gets dereferenced.
+            locals: [0; 256],
+            stack: [0; 512],
             // ADR-006 §2.7.7: parallel-kind track initialized to the
             // SENTINEL kind code (`stack_kind_code::SENTINEL`). Live slots
             // overwrite this with the producing-site kind in lockstep with

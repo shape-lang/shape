@@ -144,6 +144,25 @@ pub const NULL_NARROW_16_BITS: u64 = null_narrow_bits(16);
 /// fourth bullet). See [`null_narrow_bits`].
 pub const NULL_NARROW_32_BITS: u64 = null_narrow_bits(32);
 
+/// The bits a JIT FFI function leaves in its value channel on an error
+/// path (#234 interim ruling, 2026-07-29). **Never read.**
+///
+/// The real error signal is `JITContext::pending_call_error`, which the
+/// caller checks before touching the value channel; this constant only fills
+/// the `-> u64` return slot those signatures still have. It is `0` rather
+/// than any tagged pattern for a safety reason measured on the old value:
+/// `TAG_NULL` was `TAG_BASE | …`, i.e. NON-ZERO, and
+/// `jit_arc_result_retain` (`shape-jit/src/ffi/result.rs:373-380`) guards
+/// only `if bits == 0`. A `TAG_NULL` placeholder reaching a heap-kinded
+/// destination therefore passed the guard and ran
+/// `Arc::increment_strong_count` on a bogus pointer. At `0` the whole class
+/// is null-guarded mechanically: memory-safe-if-leaked beats loud-if-leaked.
+///
+/// Interim by construction: #229's unified Cranelift return list
+/// (`-> I32` for unit, `-> (I32, value…)` otherwise) deletes the value
+/// channel on error paths, and this constant with it.
+pub const ERROR_PLACEHOLDER_BITS: u64 = 0;
+
 /// `false` (ADR-020 §3 clause 2). No `TAG_BOOL_FALSE`.
 pub const BOOL_FALSE_BITS: u64 = 0;
 
