@@ -617,3 +617,28 @@ program:
 5. **Multi-word atomicity = confined to `SharedAtomic*`** (supervisor default
    per report recommendation, Valhalla's lesson): non-shared multi-slot
    values are tear-free by construction; document in the ADR.
+
+### AMENDMENT 2026-07-29 (second): ruling 2 superseded — 2-slot presence for all 64-bit nullable integers
+
+Owner ruling (prompted by the `u64?` question #223 surfaced): **no blessed
+sentinels for integers, ever.** `int?` (`i64?`), `u64?`, `usize?` are 2-slot
+presence pairs `{presence: 0|1, payload}` — `i64::MIN` remains representable;
+u64 keeps its full range. Rationale confirmed against Rust: `Option<i64>` is
+16 bytes; Rust only uses niches that genuinely exist (NonZero, references)
+and never excludes a real value. The `NULL_INT_BITS` sentinel in the #223
+table's normative column is obsolete; #225 replaces it with the presence-pair
+encoding.
+
+**Ruling 1 STANDS** (NaN-sentinel + canonicalization for `number?`): f64's
+NaN payload space is a genuine niche (2^52 dead patterns) — with
+canonicalization no representable value is excluded, unlike the integer
+sentinel. One slot. Narrow scalars (`i8?`/`i16?`/`i32?`/`u8?`/`u16?`/`u32?`)
+keep their free widened niches (1 << width is out of range — nothing
+excluded). Only 64-bit integers pay the second slot.
+
+**Sequencing consequence (owner):** presence-pairs land NOW, in Phase 1
+(#225's scope), not Phase 3 — "we should not work on code that is obsolete
+later." The minimal 2-slot machinery (a NativeKind spanning two slots in the
+VM kinds track, call ABI, and snapshot) is therefore #225's prerequisite
+work; GENERAL multi-slot (fat function pairs, inline tuples/enums) remains
+#229.
