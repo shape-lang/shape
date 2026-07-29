@@ -58,12 +58,21 @@ instance to delete).
      sites). `Some(NaN)` is representable; `x == null` is one 64-bit
      integer compare. Documented loss: NaN payload bits are not preserved
      through nullable positions.
-   - `int?`: blessed sentinel — `i64::MIN` is `None` and unstorable as a
-     value (checked at construction); int's documented range is
-     `[i64::MIN+1, i64::MAX]` (ruling 2).
-   - Narrower scalars (`i32?`, `i8?`, `bool?`, `char?`): widen within the
-     8-byte slot; the encoding table defines one out-of-range `None`
-     pattern per width.
+   - 64-bit integers (`int?`/`i64?`, `u64?`, `usize?`): **2-slot presence
+     pair** `{presence: 0|1, payload}` — *(ruling 2 as AMENDED 2026-07-29,
+     second amendment)*: no blessed integer sentinel ever; `i64::MIN` and
+     the full u64 range remain representable. Rust-confirmed policy
+     (`Option<i64>` is 16 bytes; niches only where genuine). The
+     presence-pair machinery lands in Phase 1 with this encoding — "no
+     work on code that is obsolete later" (owner).
+   - Narrower scalars (`i32?`, `i16?`, `i8?`, `u32?`, `u16?`, `u8?`,
+     `bool?`, `char?`): widen within the 8-byte slot; the encoding table
+     defines one out-of-range `None` pattern per width (`1 << width`) —
+     a genuine niche, nothing representable is excluded.
+   - The niche/sentinel distinction is normative: an encoding may use
+     only patterns that are INVALID for the payload type (NaN payload
+     space with canonicalization, out-of-range widened patterns, null
+     pointers). Excluding a representable value is forbidden.
 2. **Bool** — `0`/`1` in an integer slot/register. No `TAG_BOOL_*`.
 3. **Unit** — no value. Unit calls are void (zero-return signatures).
    No `TAG_UNIT`.
@@ -88,6 +97,10 @@ fences, in the same slice that lands each encoding.
 The 1-value-=-1-slot invariant is retired. A value may occupy k ≥ 1
 consecutive slots with a statically-known k per type: fat function pairs (if
 adopted per §3.4), inline small tuples/enums, `sret`/multi-value returns.
+The FIRST multi-slot citizens are the §3.1 64-bit presence pairs, which land
+in **Phase 1** (#225) together with the minimal 2-slot machinery (kinds
+track, call ABI, snapshot for a 2-slot NativeKind); the general k-slot
+system remains Phase 3.
 Kinds tables, snapshot format, and the call ABI carry per-type slot counts.
 Sentinel encodings (rulings 1–2) remain single-slot — multi-slot is for
 shapes with **no niche**, not a license to spend slots where a free encoding
