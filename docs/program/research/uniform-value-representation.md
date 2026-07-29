@@ -582,10 +582,22 @@ Shape facts cited from: `docs/runtime-v2-spec.md`,
 The five open questions are ruled. These are binding for the representation
 program:
 
-1. **`number?` = NaN-sentinel.** One slot, null = canonical NaN pattern.
-   `Some(NaN)` is unrepresentable as a documented language semantic: a
-   NaN-producing computation in a nullable position yields null. (Matches
-   `NullableFloat64`'s current documentation.)
+1. **`number?` = NaN-sentinel with canonicalization-at-construction**
+   *(AMENDED 2026-07-29, user, superseding the same-day collapse-to-null
+   ruling)*: one slot; `None` = one reserved sentinel NaN bit pattern;
+   at every statically-known `number` → `number?` construction site, a
+   computed NaN is canonicalized to a DIFFERENT fixed quiet-NaN pattern
+   (`if x != x { x = CANON_NAN }`, one compare + cmov, only at those
+   sites). `Some(NaN)` is therefore fully representable; `x == null` is a
+   single 64-bit integer compare; reads are free. Documented loss: NaN
+   PAYLOAD bits are not preserved through nullable positions (all user
+   NaNs become the canonical Some-NaN) — semantically invisible unless
+   float bit introspection is ever exposed; the ADR must note it.
+   Rationale: variant identity (Some vs None) is runtime information and
+   must be bit-distinguishable, but construction sites ARE static in a
+   strictly-typed program, so disjointness can be enforced exactly there.
+   The same trick does NOT apply to `int?` (no spare bit pattern exists);
+   ruling 2 stands unchanged.
 2. **`int?` = blessed sentinel.** `i64::MIN` is reserved as null and
    unstorable as a `Some` value (checked at construction); the language
    documents int's range as `[i64::MIN+1, i64::MAX]`.
