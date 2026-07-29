@@ -1773,7 +1773,11 @@ pub unsafe fn drop_with_kind(bits: u64, kind: NativeKind) {
 /// - `Vec<KindedSlot>` for the cell store (§2.7.5 — `KindedSlot` is a
 ///   runtime-tier carrier, not the storage-tier shape).
 /// - 16-byte cell slots / packed tag bits in the `u64` (§2.1 — 8-byte
-///   slot invariant).
+///   slot invariant). ADR-020 §5 does NOT relax this: a multi-slot value
+///   is N *consecutive 8-byte* slots with a statically-known per-type
+///   count, so the slot ELEMENT stays 8 bytes and this line still binds.
+///   A future 2-slot cell (presence pair, #229) spends two slots — it
+///   never widens one.
 /// - `Vec<Option<NativeKind>>` for the kind track (§2.7.5.1 — cells are
 ///   post-proof; every cell has a concrete kind by construction).
 /// - `NativeKind::Unknown` / `Pending` / `Dynamic` placeholders (deleted

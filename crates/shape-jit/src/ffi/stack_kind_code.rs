@@ -25,6 +25,11 @@
 //! - `Vec<KindedSlot>` for the stack — same §2.7.5 rule the VM-side rules
 //!   out; storage stays raw u64 + parallel byte track.
 //! - 16-byte slot — would conflict with the §2.1 8-byte invariant.
+//!   ADR-020 §5 does NOT relax this: a multi-slot value is N *consecutive
+//!   8-byte* slots with a statically-known per-type count, so the slot
+//!   ELEMENT stays 8 bytes and this line still binds. The 64-bit nullable
+//!   codes below (`C_NULLABLE_INT64` and siblings) become 2-slot presence
+//!   pairs with #229 — two entries in this track, never a wider one.
 //! - Encoding `Ptr(HeapKind)` arms via a tag-bit probe on the slot's u64 —
 //!   the deleted ValueWord `tag_bits` dispatch (CLAUDE.md "Forbidden
 //!   Patterns" #4). Kind comes from the producing call signature, period.
