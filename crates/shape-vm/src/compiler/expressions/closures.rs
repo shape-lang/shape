@@ -3473,6 +3473,29 @@ impl BytecodeCompiler {
             effect_row: None,
         };
 
+        // #227 gap 2: publish the closure's inferred return type for the frame
+        // descriptor builder.
+        //
+        // A closure literal declares no return type, so `closure_def` carries
+        // `return_type: None` and the builder's annotation source has nothing
+        // to classify — that absence is why every `__closure_N` reached the
+        // #233 residual stamp. The type is not unknown, though: the engine
+        // resolved the closure body during the whole-program walk, and
+        // `infer_closure_body_return_type_with_caller_context` already reads it
+        // out of the span table for the emission-side hints.
+        //
+        // It is published into the inferred-annotation map rather than written
+        // onto `closure_def.return_type`, so it stays a fact the descriptor
+        // builder reads and never becomes a declared annotation that body
+        // compilation would additionally check against.
+        if let Some(inferred) =
+            infer_closure_body_return_type_with_caller_context(self, params, body, None, &[], &[])
+            && let Some(ann) = inferred.to_annotation()
+        {
+            self.inferred_return_annotations
+                .insert(closure_name.clone(), ann);
+        }
+
         let user_pass_modes = self.effective_function_like_pass_modes(None, params, Some(body));
         let mut closure_pass_modes =
             vec![crate::compiler::ParamPassMode::ByValue; captured_vars.len()];

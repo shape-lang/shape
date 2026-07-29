@@ -93,6 +93,7 @@ impl BytecodeCompiler {
             type_inference: shape_runtime::type_system::inference::TypeInferenceEngine::new(),
             inference_facts: shape_runtime::type_system::InferenceFacts::default(),
             resolved_expr_types: HashMap::new(),
+            inferred_return_annotations: HashMap::new(),
             type_aliases: HashMap::new(),
             current_line: 1,
             current_file_id: 0,

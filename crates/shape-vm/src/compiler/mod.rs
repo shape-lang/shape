@@ -1096,6 +1096,20 @@ pub struct BytecodeCompiler {
     /// error, never a re-derivation.
     pub(crate) resolved_expr_types: HashMap<shape_ast::ast::Span, shape_runtime::type_system::Type>,
 
+    /// #227 gap 4: the return type inference proved for each source function,
+    /// as an annotation, keyed by qualified function name.
+    ///
+    /// This is the SAME map `compile_post_assembly` already feeds into
+    /// `function_return_concrete_types`, retained here because that side-table
+    /// only keeps entries whose annotation projects to a `ConcreteType`. An
+    /// inferred anonymous-object return (`fn aabb(lo, hi) { {min: lo, max: hi} }`)
+    /// has no `ConcreteType` projection but IS classifiable — the frame
+    /// descriptor builder's third classification source runs the full
+    /// `classify_type_annotation_metadata` over this map, which is what keeps
+    /// such a function from reaching the builder with no return classification
+    /// at all.
+    pub(crate) inferred_return_annotations: HashMap<String, shape_ast::ast::TypeAnnotation>,
+
     /// Track type aliases defined in the program
     /// Maps alias name -> target type (for type validation)
     pub(crate) type_aliases: HashMap<String, String>,

@@ -395,7 +395,7 @@ impl TypeInferenceEngine {
             }
             Item::Impl(impl_block, _) => {
                 self.register_impl(impl_block)?;
-                self.infer_impl_method_bodies(impl_block)?;
+                self.infer_impl_method_bodies(impl_block, types)?;
             }
             Item::Extend(extend, _) => {
                 self.register_extend(extend)?;
@@ -1745,9 +1745,23 @@ impl TypeInferenceEngine {
     /// receiver the compiler later desugars: `method eq(other: Self)` in
     /// `impl Eq for Money` is checked as an inference-only
     /// `fn Money::eq(self: Money, other: Money) -> bool { ... }`.
+    ///
+    /// The inferred method type is PUBLISHED into `types` under the same
+    /// `{type}::{method}` name the bytecode compiler's `desugar_impl_method`
+    /// mints (#227 gap 4). Before this, the result was inferred and dropped,
+    /// so a method the source annotated nowhere — neither on the impl nor on
+    /// the trait declaration, as `impl Drop for Conn { method drop() { … } }`
+    /// — reached frame-descriptor construction with no return classification
+    /// at all, which is one of the four wiring gaps that kept
+    /// `FrameReturnWrapper::Unknown` alive (#233).
+    ///
+    /// A name already published (a module-qualified free function that
+    /// happens to collide) is not overwritten: the method's surface is the
+    /// addition here, not a replacement.
     fn infer_impl_method_bodies(
         &mut self,
         impl_block: &shape_ast::ast::ImplBlock,
+        types: &mut HashMap<String, Type>,
     ) -> TypeResult<()> {
         if !Self::impl_target_is_concrete(&impl_block.target_type) {
             return Ok(());
@@ -1770,7 +1784,14 @@ impl TypeInferenceEngine {
                 trait_def.as_ref(),
                 &trait_type_args,
             )?;
-            let _ = self.infer_function(&func)?;
+            let method_type = self.infer_function(&func)?;
+            types
+                .entry(Self::compiler_symbol_for_impl_method(
+                    &type_name,
+                    &trait_name,
+                    method,
+                ))
+                .or_insert(method_type);
         }
 
         if let Some(trait_def) = trait_def {
@@ -1788,12 +1809,39 @@ impl TypeInferenceEngine {
                         Some(&trait_def),
                         &trait_type_args,
                     )?;
-                    let _ = self.infer_function(&func)?;
+                    let method_type = self.infer_function(&func)?;
+                    types
+                        .entry(Self::compiler_symbol_for_impl_method(
+                            &type_name,
+                            &trait_name,
+                            default_method,
+                        ))
+                        .or_insert(method_type);
                 }
             }
         }
 
         Ok(())
+    }
+
+    /// The symbol the bytecode compiler mints for an unnamed impl's method
+    /// (#227 gap 4), so an inferred type published under it is found by the
+    /// name the frame-descriptor builder asks with.
+    ///
+    /// Mirrors `desugar_impl_method`, including its `Drop::drop` async
+    /// disambiguation: sync and async drop coexist in the function index, so
+    /// the async variant is `{type}::drop_async`.
+    fn compiler_symbol_for_impl_method(
+        type_name: &str,
+        trait_name: &str,
+        method: &shape_ast::ast::MethodDef,
+    ) -> String {
+        let trait_basename = trait_name.rsplit("::").next().unwrap_or(trait_name);
+        if trait_basename == "Drop" && method.name == "drop" && method.is_async {
+            format!("{type_name}::drop_async")
+        } else {
+            format!("{}::{}", type_name, method.name)
+        }
     }
 
     fn inference_function_for_impl_method(
