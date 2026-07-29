@@ -185,6 +185,19 @@ Shape supports:
 
 ## Development Guidelines
 
+### Greenfield — No Backwards Compatibility (owner ruling 2026-07-29)
+
+Shape is purely in development with **zero users**. There is no backwards
+compatibility anywhere: old snapshots are unsupported (format changes need no
+migration path — old snapshots simply fail to load), every ABI may change
+freely (FFI/extension vtables, call convention, bytecode, wire, encoding
+tables), and **compatibility layers are forbidden**. A "compat layer",
+"transitional shim", dual-format reader, or version bridge proposed to
+protect existing artifacts is refused on sight — it is the §Forbidden
+Patterns walk-back shape wearing a compatibility justification. Design
+decisions weigh ergonomics, LSP richness, compile-time checkability,
+architectural soundness, and implementation cost — never the status quo.
+
 ### Exhaustive Match Rule
 Adding a new AST variant (Expr, Statement, Item) requires updating **~8+ files**: desugar, closure analysis, type inference, visitor (x2), compiler (x2), LSP (hover/inlay/tokens), and potentially JIT translation. The compiler will tell you — follow the exhaustive match errors.
 
