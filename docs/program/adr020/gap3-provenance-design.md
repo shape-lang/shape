@@ -598,3 +598,67 @@ known-constraint "`Queryable<T>` generic impl … type-inference erases type arg
 (CLAUDE.md §Known Constraints). C-harness (3 sites) is small and can ride
 whichever ticket restores the hard error, since those tests must be fixed before
 step 4 regardless.
+
+---
+
+## 10. A2 slice closed; the boundary held (2026-08-01)
+
+The supervisor reversed part of the #255 split and returned the 3 A2-family
+residuals to this lane, **bounded**, with a stop-condition: if the bounded slice
+could not be separated from the general widening, stop and let #227's final act
+wait on #255 rather than buy a zero residual count with a half-widened
+module-export authority.
+
+**The slice separated cleanly and the stop-condition did not fire.** Both
+extension callees in the residual set declare SCALARS —
+`__connect` is `ConcreteType::Unit`, `__connect_codegen` is `ConcreteType::String`
+(`lib_tests_parts/extension_integration_tests.rs:342-355`). Neither is the
+contested case, so classifying them required no decision about non-scalar
+object, generic, or named-schema returns. #255 keeps that question whole.
+
+Both fixes are the A1 shape — a declared contract in a side table reaching the
+AST-tier consumer for the first time:
+
+| Residual | Where the contract already lived |
+|---|---|
+| `__intrinsic_dist_uniform` | `define_builtin("__intrinsic_dist_uniform", [number, number], number)`, `environment/mod.rs:1304` |
+| `myext::__connect` / `__connect_codegen` | `register_typed_function(..., ConcreteType::Unit / ::String, ...)` on the extension's `ModuleExports` |
+
+**Where the bound is drawn, and the guard on it.** Only `Unit` and the canonical
+scalar family are honoured. `Unit` is in because "returns nothing" is not the
+contested case — it is the same positive fact §Root B already proves for
+Shape-source bodies, arriving from a declaration instead of a body. Everything
+else yields `None` and stays unclassified. The guard is
+`a_non_scalar_module_export_return_stays_unclassified_for_255`, verified to FAIL
+when the bound is widened to `Some(Basic(shape_type_name()))`. If that test is
+ever "fixed" by returning a type, the widening happened.
+
+For intrinsics, only MONOMORPHIC declarations are honoured: a polymorphic
+builtin's return may depend on the instantiation, and reading the unsubstituted
+return would be the same shortcut §2.3 records as refused.
+
+### 10.1 Probe trajectory, final for this lane
+
+| After | Probe panics | Clean-run failures |
+|---|---:|---|
+| design baseline `82dd9e53` | 99 | 8 |
+| A1 `d4de20b7` | 23 | 8 |
+| B `4b84e2ed` | 11 | 8 |
+| intrinsic + bounded A2 `0b41d128` | **8** | 8 |
+
+The remaining 8 are exactly Root C (§9): 5 C-real, 3 C-harness. Every other
+root measured on this ticket is closed.
+
+### 10.2 Fixture trap, for whoever writes the next guard here
+
+Recorded because it cost a round and will cost the next person one too. A
+tail-position `if/else` in Shape source parses to an **expression**-position
+`if`, not `Statement::If`. A guard built from a parsed fixture therefore answers
+`BodyValue::Expr` under both the correct rule and the naive one, and passes with
+`_ => BodyValue::Unit` installed. To discriminate, build the body as AST. Five
+end-to-end fixtures and one parsed fixture were all confirmed non-discriminating
+this way before the AST-built guard was written.
+
+More generally: every guard in this ticket's territory was checked by installing
+the violating input and confirming the test goes red. Two of them did not, and
+were rewritten rather than kept.
