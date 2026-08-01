@@ -1449,6 +1449,56 @@ direction.
 
 ---
 
+## 10.4 Two process findings this document earned the hard way
+
+Both belong in the ADR lift alongside §3.5.1's nine-rescues arithmetic. That
+arithmetic tells you **which pattern to refuse**; these two tell you **how the
+refusal gets circumvented in good faith**, which is the part that actually
+happens.
+
+### 10.4.1 Verifying a property of the artifact you HAVE, and reporting it as a property of the artifact you are DESCRIBING
+
+Three instances in a single day, by three different people, none of them
+careless:
+
+| who | what was verified | what was reported |
+|---|---|---|
+| supervisor | `verify-merge` passed on the merged tree | that a commit message's description of that tree was accurate — it named a deletion that had not happened |
+| this lane (§4.0) | a proof gate named `slot_kind_of` **exists** | that unproven emit sites **stop** — the function is a fabricating `unwrap_or(Int64)` and is never called on an FFI-return path |
+| this lane (§7.1) | 0 executions across 481 corpus programs | that no producer **exists** — with an instrument that cannot distinguish absence from non-arrival |
+
+The general form: **a check was run, it passed, and its result was reported as
+a different proposition than the one it tested.** Each check was real. None was
+evidence for the claim it was offered for.
+
+The countermeasure is not "be more careful"; all three were careful. It is to
+state, for every claim, *which artifact* was examined and *what would have made
+the check fail* — which is why §1 lists the exact commands, §1.2 states the
+denominator, and §1.1.1 instructs the reader to distrust this document's own
+numbers under a named condition.
+
+### 10.4.2 A correction applied where it was noticed, not everywhere it applies
+
+A self-audit of this document across its revisions found **two** places where a
+superseded claim survived in a location the original correction did not reach:
+
+- §3's bucket-(c) list still named `call_string_method` after §3.0.1 moved it to
+  bucket (d) — Finding 1's exact contradiction, surviving in a second spot.
+- §4.2's ownership assertion still specified `slot_kind_of(destination)` as the
+  emit-time check — the fabricating function #257 refuted — **inside the section
+  whose purpose is to prevent that class of error.**
+
+Both were written by an author who had, in the same document, just finished
+arguing against exactly this. That is the finding, and it is why §3.5.1's ruling
+is *delete the mechanism* rather than *prove one more kind*: a point fix lands
+where attention was, and attention is the scarce thing. The nine rescues in
+§3.5.1/§4.0.3 were not carelessness either — each was a correct local fix.
+
+**Operational consequence for this slice:** after every correction, grep the
+whole document (and the whole tree) for the superseded claim rather than editing
+the site that prompted it. Two of two corrections in this document needed that
+and did not get it the first time.
+
 ## 11. Premises refuted
 
 For the record, since each of these would have mis-scoped the work:
