@@ -232,6 +232,25 @@ check-jit-bails:
 regen-jit-bail-baseline:
 	node scripts/generate-jit-bail-baseline.mjs
 
+# --- JIT FFI reachability ratchet (#216) ---
+
+# Registration is not reachability, and neither is declaration into IR. An FFI
+# symbol becomes callable from emitted code only through a Cranelift FuncRef,
+# and only `ffi_builder.rs`'s `r!("...")` can mint one for it. This gate fails
+# on a `builder.symbol` / `declare_function` registration with no `r!()` key, on
+# an `r!()` whose FFIFuncRefs field is never referenced, on a fixed symbol left
+# behind in the debt list, and on an allow-list entry with no reason. Baseline
+# in docs/program/adr011-012/baselines/jit-ffi-reachability-inventory.json.
+check-jit-ffi-reachability:
+	node scripts/check-jit-ffi-reachability.mjs --self-test
+
+# Regenerate after a symbol is genuinely wired (an `r!()` key plus a call) or
+# its registration deleted. The committed diff is the review surface: debt
+# lists that GROW in it are the thing this ratchet exists to prevent —
+# regenerating to silence a NEW violation is the defection, not the fix.
+regen-jit-ffi-reachability-baseline:
+	node scripts/generate-jit-ffi-reachability-baseline.mjs
+
 # --- ADR-011..016 step-5 legacy identity manifest (#136) ---
 
 # Identity-default guard: every name-selected builtin identity that currently
