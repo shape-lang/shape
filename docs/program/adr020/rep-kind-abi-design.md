@@ -1716,6 +1716,43 @@ whole document (and the whole tree) for the superseded claim rather than editing
 the site that prompted it. Two of two corrections in this document needed that
 and did not get it the first time.
 
+### 10.4.3 The under-describe — the one failure in this family with NO mechanical defense
+
+§10.4.1 is about a record claiming **more** than the artifact supports. Its
+mirror image claims **less**, and it is the harder of the two.
+
+The instance: a merge commit's message described only one of the three things
+the merge carried. Nothing on the tree was wrong. Every gate was green. The code,
+the fixtures and the gate all landed correctly — only the record was poorer than
+the work.
+
+**Why this has no tripwire, and over-claiming does.** An over-claim is
+eventually caught because *someone goes looking for the thing that was claimed*
+— they try to use the deleted symbol, run the fixed case, rely on the closed
+defect. The claim itself creates the expectation that exposes it. An
+under-describe creates no expectation at all: **nobody goes looking for work
+that was already done.** There is no future reader whose task brings them into
+contact with the omission, because the omission is precisely the part they were
+never told to expect. It can survive indefinitely with every gate green, and its
+cost is paid later by someone re-deriving a fact that was already established
+and recorded nowhere they would look.
+
+Note the asymmetry in the countermeasure too. §10.4.1's control is a second party
+going to the artifact — but that works because they are checking a *stated*
+claim against the artifact. Here there is no stated claim to check. A reviewer
+comparing the message to the diff would catch it, but nothing prompts that
+comparison, because the message is not wrong about anything it says.
+
+**This is the argument for durable records over handbacks** (and for this
+document existing at all). A handback that under-describes is lost the moment
+the conversation scrolls; a design doc that under-describes is at least in the
+place the next actor will read. The mitigation is not a gate — none is
+available — it is the habit of writing the record for someone who was not
+present, and of stating what a change carried rather than what prompted it.
+
+Recorded here because it was corrected on instinct by the person who made it,
+before anyone raised it. That is the only mechanism this failure has.
+
 ## 11. Premises refuted
 
 For the record, since each of these would have mis-scoped the work:
