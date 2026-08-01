@@ -361,11 +361,15 @@ Bucket (c) highlights — reachable-looking but provably not callable:
   but they are the unprojected-object-schema path; a hand-written dynamic-object
   falsifier surface-and-stops at `ObjectStore: SURFACE — schema id 91
   (__inline_obj_54) field a has …` before reaching them. 0 corpus hits.
-- `call_string_method` (16 sites) — statically reachable from `jit_call_method`,
-  dynamically unreachable because the compiler refuses to emit the call
-  (STAGE-StringJIT, §2). 0 corpus hits, 3 falsifiers all deopt.
 - `call_object_method` (11 sites), `call_duration_method` (6),
-  `call_matrix_method` (4), `call_time_method` (3) — same shape, 0 hits.
+  `call_matrix_method` (4), `call_time_method` (3) — reachable only via the
+  legacy `unified_box` `UInt64` cascade this ticket deletes (§3.0.1), 0 hits.
+  **Note `call_string_method` is NOT in this list** — it looks identical from
+  here (statically reachable, 0 corpus hits, all falsifiers deopt) but it is
+  **bucket (d)**, because its `NativeKind::String` route is gated only by the
+  emit-side deopts this conversion removes. See §3.0.1; the difference is
+  whether the route survives the conversion, and it is not visible from the hit
+  count.
 - `jit_iter_next` (8 sites) / `jit_iter_done` (4) — a `for v in arr` loop
   executes 301 native dispatches and never touches them; array iteration is
   fully native.
@@ -787,8 +791,10 @@ Two consequences worth stating so they are not rediscovered:
    return `TAG_NULL` — a non-share — into a slot the emit site may treat as
    heap; that mismatch is one of the two mechanisms behind #254.
 2. **O1/O2 join the §10.2 kind-agreement assertion.** The emit-time check
-   becomes: the chosen monomorph's class matches `slot_kind_of(destination)`
-   **and**, when that kind is heap, the monomorph is the `_ptr` one. A scalar
+   becomes: the chosen monomorph's class matches the destination's **proven**
+   kind — `slot_kind_for_local(...)`, **never** `slot_kind_of`, which is itself
+   a fabricating `unwrap_or(Int64)` (§4.0) — **and**, when that kind is heap,
+   the monomorph is the `_ptr` one. A scalar
    monomorph writing into a `Ptr(_)`-stamped slot is exactly the
    `ClosurePlaceholder` defect (§6.1) in general form, and this assertion is
    what would have caught it at the emit site.
