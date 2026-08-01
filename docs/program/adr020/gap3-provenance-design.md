@@ -527,3 +527,74 @@ discarded that work; it was caught only because the follow-up test run failed to
 compile. The probe script now snapshots both files at apply time and restores
 from that snapshot. Anyone re-running this measurement mid-change should verify
 the same, or commit before probing.
+
+---
+
+## 9. Root C, diagnosed (2026-08-01)
+
+Sized after A1 and B landed, as chartered. **Root C is production-real, not a
+test-harness artifact**, and it splits in two.
+
+### 9.1 The split
+
+| n | Sub-root | Evidence |
+|---:|---|---|
+| 3 | **C-harness** — inference never ran | `table_len=0`. The test builds a `BytecodeCompiler` directly and drives monomorphization / shadow emission without `compile()`, so `resolved_expr_types` is never populated. `b5_const_in_closure_body_is_substituted`, `failed_shadow_emission_restores_body_analysis_authority`, `replacement_mir_uses_only_its_own_distinct_closure_identity` |
+| 5 | **C-real** — inference ran, the span is still absent | `table_len` 3/4/9/15/29 |
+
+A `table_len` of 0 is structural, not circumstantial: it can only mean the
+whole-program inference pass never executed. Those three need their harness
+fixed (or the classifier's precondition stated), not a compiler change.
+
+### 9.2 C-real reproduces through the production path
+
+Four approximated closure shapes compiled clean through `BytecodeCompiler::new()
+.compile()`, which was nearly enough to write the whole root off as harness-only.
+Running the **exact** test sources instead reproduced it immediately:
+
+```shape
+extend Vec<number> {
+    method sum_all() {
+        self.reduce(|a, b| a + b, 0)
+    }
+}
+[1, 2, 3].sum_all()
+```
+
+Through the full `compile()` with the hard-error probe applied:
+
+```
+GAP3_RESIDUAL fn=__closure_0
+  REASON[SPAN_MISS expr=BinaryOp span=Span { start: 96, end: 101 } table_len=4]
+```
+
+This is the minimal reproducer for C-real. Note the shape of the near-miss: the
+approximations were the same *language constructs* but not the same *typing
+situation*, and they proved nothing. Only the verbatim source did.
+
+### 9.3 Probable mechanism — stated as a hypothesis, not a finding
+
+`a + b` is at span 96..101 and the whole program's post-solve table holds only 4
+entries. The closure's parameters are unannotated, and it is an argument to a
+generic method (`reduce`) inside a **generic `extend` body**. If the method's
+generic signature does not bind `a` and `b` at the point the closure body is
+walked, `a + b` stays a free variable and `finalize_expr_type_table`
+(`inference/mod.rs:471`) drops it — the same drop that produced the
+`ComptimeHandlerWrapper` class, reached by a different route.
+
+That is consistent with every C-real datum (all five sit inside `extend` method
+bodies or a comptime block, all have small tables), but it is **not measured**.
+Confirming it means instrumenting which spans the walk records for this program
+and why each is dropped. That is the next step, and it is a bidirectional-closure
+-inference question inside generic `extend` bodies — a different and larger
+territory than A1 or B.
+
+### 9.4 Recommendation
+
+C-real should be its own ticket. It is not "wiring a declared contract to a
+consumer" like A1 and A2; it is inference coverage for closure parameters inside
+generic `extend` method bodies, and it touches the same machinery as the
+known-constraint "`Queryable<T>` generic impl … type-inference erases type args"
+(CLAUDE.md §Known Constraints). C-harness (3 sites) is small and can ride
+whichever ticket restores the hard error, since those tests must be fixed before
+step 4 regardless.
