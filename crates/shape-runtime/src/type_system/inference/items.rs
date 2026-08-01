@@ -2751,6 +2751,20 @@ impl TypeInferenceEngine {
         }
     }
 
+    /// #240 (B): how many explicit `return <expr>` sites a body contains.
+    ///
+    /// The bytecode compiler's return classifier needs this to decide whether a
+    /// body that falls off its end produces no value. "No terminal expression"
+    /// alone is NOT that proof: a body whose last statement is an `if/else` in
+    /// which both branches `return v` also has no terminal expression, and it
+    /// does not return unit. Counting the value-returning `return` sites is
+    /// what separates the two.
+    pub fn explicit_value_return_count(stmts: &[Statement]) -> usize {
+        let mut out = Vec::new();
+        Self::collect_explicit_returns(stmts, &mut out);
+        out.len()
+    }
+
     /// Collect the value expression of every explicit `return <expr>` reachable
     /// in the body, recursing through control-flow statement bodies.
     pub(super) fn collect_explicit_returns<'a>(stmts: &'a [Statement], out: &mut Vec<&'a Expr>) {
