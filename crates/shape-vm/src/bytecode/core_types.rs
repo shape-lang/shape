@@ -670,11 +670,22 @@ pub struct BytecodeProgram {
 
     /// Closure-spec Phase H1: per-function `ClosureLayout` for every closure
     /// function index. The JIT worker reads this to drive `emit_heap_closure`
-    /// Cranelift codegen for escaping closures (replacing the legacy
-    /// `jit_make_closure` FFI path). `None` entries indicate the function is
-    /// not a closure body, or the layout wasn't computed. Populated at the
-    /// end of compilation from the compiler's `ClosureRegistry`. Not
-    /// serialized — programs loaded from disk fall back to the FFI path.
+    /// Cranelift codegen for escaping closures. `None` entries indicate the
+    /// function is not a closure body, or the layout wasn't computed.
+    /// Populated at the end of compilation from the compiler's
+    /// `ClosureRegistry`.
+    ///
+    /// **Not serialized — and there is NO fallback path.** This comment
+    /// previously read "programs loaded from disk fall back to the FFI path",
+    /// which was false and load-bearing: it was the sole documented
+    /// justification for the `jit_make_closure` legacy arm, which minted a
+    /// third function-value carrier. The same serde boundary that drops these
+    /// layouts also drops the MIR (`mir_data` and `top_level_mir` are both
+    /// `#[serde(skip)]`; `linker.rs` nulls `mir_data`), and every JIT path
+    /// errors without MIR. So a disk-loaded program never reaches closure
+    /// lowering at all — there is nothing for a fallback to serve. The arm and
+    /// its FFI were deleted in #239 (ADR-020 §6); a missing layout for a real
+    /// fid now surface-and-stops.
     #[serde(skip, default)]
     pub closure_function_layouts: Vec<Option<Arc<shape_value::v2::closure_layout::ClosureLayout>>>,
 

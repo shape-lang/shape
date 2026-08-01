@@ -136,7 +136,6 @@ impl JITCompiler {
             print_typed_array: r!("jit_print_typed_array"),
 
             // Closure construction
-            make_closure: r!("jit_make_closure"),
             finalize_heap_closure: r!("jit_finalize_heap_closure"),
             closure_block_ptr: r!("jit_closure_block_ptr"),
             // Track A.1D: OwnedMutable capture cell allocator.
