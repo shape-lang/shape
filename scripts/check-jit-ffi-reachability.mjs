@@ -77,6 +77,28 @@
 //   (the symbol got wired, or deleted); a NEW violating symbol fails, and a
 //   STALE entry (listed but no longer violating) also fails, so fixing a
 //   symbol forces the ratchet down instead of leaving slack behind.
+//
+// WHAT A GREEN CHECK DOES *NOT* MEAN — read this before citing it
+//
+//   This check mechanizes reachability tiers 1 -> 2 -> 3:
+//
+//     tier 1  registered  (`builder.symbol`)
+//     tier 2  declared    (a Cranelift signature)
+//     tier 3  given a `FuncRef` that is actually referenced
+//
+//   **Tier 4 — "actually reached by a real program" — is NOT checked, and is
+//   not statically decidable.** It needs a corpus. So a green result here
+//   means a symbol is CALLABLE, not that it is LIVE. The natural misreading
+//   is that green means the FFI surface is exercised; it does not.
+//
+//   That gap is currently wide open. Per #260 the vm/jit corpus is mostly
+//   vacuous — measured 2026-08-01 at 11 of 488 programs executing any native
+//   code (2.3%), so nothing in the tree presently constitutes a working
+//   instrument for "live". `run-diff.mjs` reports the native-executing
+//   denominator per run; read it before treating any "0 corpus hits" result
+//   as evidence a symbol is dead. Note also that `program_fallback == null`
+//   is the WRONG liveness metric — a per-function bail leaves it null while
+//   nothing runs natively. Assert `sum(native_dispatches) > 0` instead.
 
 import fs from "node:fs";
 import path from "node:path";
