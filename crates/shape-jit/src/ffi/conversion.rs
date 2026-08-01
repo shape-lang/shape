@@ -1152,41 +1152,38 @@ pub extern "C" fn jit_string_concat(
 /// and drops them before returning. Null bits carry no share and read as
 /// the empty string — the same sentinel handling `jit_string_concat` uses.
 ///
-/// **Kind contract.** The call site (`compile_string_eq`) admits this
-/// lowering only when BOTH operands are proven `NativeKind::String`, so a
-/// non-String kind code here is a producer-side stamp gap, not a runtime
-/// case to absorb. Per ADR-006 §2.7.7 #9 it surfaces rather than guessing:
-/// returning an arbitrary answer would reintroduce exactly the
-/// silent-wrong-output this function exists to remove.
+/// **Kind contract: no kind-code parameters, deliberately.** Unlike
+/// `jit_string_concat` — whose `Add` call site admits `str + <any>` and so
+/// must thread a per-operand kind stamp — this entry point carries no kind
+/// bytes. Its only call site, `compile_string_eq`, is gated by
+/// `both_string`, which admits the lowering **only** when BOTH operands are
+/// proven `NativeKind::String`; anything else (mixed kinds,
+/// `NativeKind::StringV2`, an unproven stamp) fails the gate and surfaces.
+/// So both carriers are statically `String` here and a kind byte could only
+/// ever re-encode a fact the emit site already proved. Passing one would be
+/// a runtime discriminator standing in for a static proof, which is exactly
+/// what ADR-006 §2.7.5's producer-side stamp exists to avoid.
+///
+/// If a future change widens the gate to admit `StringV2` — the second
+/// string carrier — the operands stop being statically same-carrier and
+/// this signature has to be revisited (monomorphized per carrier pair, or
+/// fed by a normalization). That is carrier-unification work
+/// (ADR-020 / #239), not a parameter to add speculatively now.
 #[unsafe(no_mangle)]
-pub extern "C" fn jit_string_eq(a_bits: u64, a_kind_code: u8, b_bits: u64, b_kind_code: u8) -> u8 {
-    use super::stack_kind_code;
-    use shape_value::NativeKind;
+pub extern "C" fn jit_string_eq(a_bits: u64, b_bits: u64) -> u8 {
     use std::sync::Arc;
 
     /// Adopt one operand's share. `None` = the null sentinel (no share to
     /// consume), which reads as the empty string.
-    fn adopt(bits: u64, kind_code: u8, operand: &str) -> Option<Arc<String>> {
-        match stack_kind_code::decode(kind_code) {
-            Some(NativeKind::String) => {
-                if bits == 0 {
-                    return None;
-                }
-                Some(unsafe { Arc::<String>::from_raw(bits as *const String) })
-            }
-            other => panic!(
-                "jit_string_eq {operand}: ADR-006 §2.7.7 #9 SURFACE — operand kind \
-                 stamp is {other:?}, not NativeKind::String. `compile_string_eq` \
-                 admits this lowering only for two proven String operands; \
-                 reaching here means the producer-side stamp and the call-site \
-                 gate disagree. Answering anyway would be silent wrong output \
-                 (the #232 defect class)."
-            ),
+    fn adopt(bits: u64) -> Option<Arc<String>> {
+        if bits == 0 {
+            return None;
         }
+        Some(unsafe { Arc::<String>::from_raw(bits as *const String) })
     }
 
-    let a = adopt(a_bits, a_kind_code, "[a]");
-    let b = adopt(b_bits, b_kind_code, "[b]");
+    let a = adopt(a_bits);
+    let b = adopt(b_bits);
     let eq = match (&a, &b) {
         (Some(x), Some(y)) => x.as_str() == y.as_str(),
         (Some(x), None) => x.is_empty(),
@@ -1990,10 +1987,6 @@ mod jit_string_eq_tests {
     //! The rest pin the content semantics and the null sentinel.
 
     use super::*;
-    use crate::ffi::stack_kind_code;
-    use shape_value::NativeKind;
-
-    const SK: u8 = stack_kind_code::encode(NativeKind::String);
 
     /// Build a `NativeKind::String` carrier with one strong-count share,
     /// matching what the `Operand::Copy` retain hands the FFI.
@@ -2006,23 +1999,26 @@ mod jit_string_eq_tests {
         // The #232 case: a pointer compare answers 0 here.
         let a = arc_bits("Permission denied: (fs.write)");
         let b = arc_bits("Permission denied: (fs.write)");
-        assert_ne!(a, b, "test needs two DIFFERENT allocations to be meaningful");
-        assert_eq!(jit_string_eq(a, SK, b, SK), 1);
+        assert_ne!(
+            a, b,
+            "test needs two DIFFERENT allocations to be meaningful"
+        );
+        assert_eq!(jit_string_eq(a, b), 1);
     }
 
     #[test]
     fn different_content_compares_unequal() {
-        assert_eq!(jit_string_eq(arc_bits("val-1"), SK, arc_bits("val-2"), SK), 0);
+        assert_eq!(jit_string_eq(arc_bits("val-1"), arc_bits("val-2")), 0);
     }
 
     #[test]
     fn prefix_is_not_equal() {
-        assert_eq!(jit_string_eq(arc_bits("abc"), SK, arc_bits("abcd"), SK), 0);
+        assert_eq!(jit_string_eq(arc_bits("abc"), arc_bits("abcd")), 0);
     }
 
     #[test]
     fn comparison_is_case_sensitive() {
-        assert_eq!(jit_string_eq(arc_bits("Abc"), SK, arc_bits("abc"), SK), 0);
+        assert_eq!(jit_string_eq(arc_bits("Abc"), arc_bits("abc")), 0);
     }
 
     #[test]
@@ -2031,29 +2027,29 @@ mod jit_string_eq_tests {
         // Two shares of ONE allocation — the FFI consumes one per operand.
         let a = std::sync::Arc::into_raw(std::sync::Arc::clone(&arc)) as u64;
         let b = std::sync::Arc::into_raw(arc) as u64;
-        assert_eq!(jit_string_eq(a, SK, b, SK), 1);
+        assert_eq!(jit_string_eq(a, b), 1);
     }
 
     #[test]
     fn empty_strings_compare_equal() {
-        assert_eq!(jit_string_eq(arc_bits(""), SK, arc_bits(""), SK), 1);
+        assert_eq!(jit_string_eq(arc_bits(""), arc_bits("")), 1);
     }
 
     #[test]
     fn null_sentinel_reads_as_empty_string() {
         // Null carries no share to consume; it reads as "" the same way
         // `jit_string_concat` treats it.
-        assert_eq!(jit_string_eq(0, SK, 0, SK), 1);
-        assert_eq!(jit_string_eq(0, SK, arc_bits(""), SK), 1);
-        assert_eq!(jit_string_eq(arc_bits(""), SK, 0, SK), 1);
-        assert_eq!(jit_string_eq(0, SK, arc_bits("x"), SK), 0);
-        assert_eq!(jit_string_eq(arc_bits("x"), SK, 0, SK), 0);
+        assert_eq!(jit_string_eq(0, 0), 1);
+        assert_eq!(jit_string_eq(0, arc_bits("")), 1);
+        assert_eq!(jit_string_eq(arc_bits(""), 0), 1);
+        assert_eq!(jit_string_eq(0, arc_bits("x")), 0);
+        assert_eq!(jit_string_eq(arc_bits("x"), 0), 0);
     }
 
     #[test]
     fn multibyte_content_compares_by_bytes() {
-        assert_eq!(jit_string_eq(arc_bits("héllo"), SK, arc_bits("héllo"), SK), 1);
-        assert_eq!(jit_string_eq(arc_bits("héllo"), SK, arc_bits("hello"), SK), 0);
+        assert_eq!(jit_string_eq(arc_bits("héllo"), arc_bits("héllo")), 1);
+        assert_eq!(jit_string_eq(arc_bits("héllo"), arc_bits("hello")), 0);
     }
 
     #[test]
@@ -2064,17 +2060,16 @@ mod jit_string_eq_tests {
         let arc = std::sync::Arc::new("key-5".to_string());
         for _ in 0..3 {
             let operand = std::sync::Arc::into_raw(std::sync::Arc::clone(&arc)) as u64;
-            assert_eq!(jit_string_eq(operand, SK, arc_bits("key-5"), SK), 1);
+            assert_eq!(jit_string_eq(operand, arc_bits("key-5")), 1);
         }
         assert_eq!(arc.as_str(), "key-5");
         assert_eq!(std::sync::Arc::strong_count(&arc), 1);
     }
 
-    // The non-String kind stamp surfaces via `panic!` in the FFI body. It is
-    // deliberately NOT covered by a `#[should_panic]` test: `jit_string_eq`
-    // is `extern "C"`, so the panic is non-unwinding and aborts the process
-    // rather than unwinding into the harness. The arm stays unreachable in
-    // practice because `compile_string_eq`'s `both_string` gate admits only
-    // two proven `NativeKind::String` operands; the abort is the fail-stop
-    // for a producer/gate disagreement, not a live path.
+    // There is no non-String-operand test because the FFI takes no kind
+    // bytes and cannot observe a kind: `compile_string_eq`'s `both_string`
+    // gate proves both operands are `NativeKind::String` before the call is
+    // emitted, so operand kind is a compile-time property of the emit site,
+    // not a runtime input. The gate itself is what a widening change would
+    // have to revisit (see `both_string`'s note on `StringV2`).
 }

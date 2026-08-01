@@ -192,30 +192,20 @@ pub extern "C" fn jit_v2_string_concat(a: *mut u8, b: *mut u8) -> *mut u8 {
     }
 }
 
-/// Compare two v2 strings for byte-equality. Returns 1 if equal, 0 otherwise.
-#[unsafe(no_mangle)]
-pub extern "C" fn jit_v2_string_eq(a: *mut u8, b: *mut u8) -> u8 {
-    if a == b {
-        return 1;
-    }
-    if a.is_null() || b.is_null() {
-        return 0;
-    }
-    unsafe {
-        let obj_a = as_obj(a);
-        let obj_b = as_obj(b);
-        if obj_a.len != obj_b.len {
-            return 0;
-        }
-        let len = obj_a.len as usize;
-        if len == 0 {
-            return 1;
-        }
-        let slice_a = std::slice::from_raw_parts(obj_a.data, len);
-        let slice_b = std::slice::from_raw_parts(obj_b.data, len);
-        if slice_a == slice_b { 1 } else { 0 }
-    }
-}
+// `jit_v2_string_eq` DELETED (#232, 2026-08-01). It compared bytes
+// correctly but was never declared, never registered, and had zero callers
+// — its tests passed by invoking it directly, so the symbol read as covered
+// while no compiled program could reach it. Meanwhile the live string
+// comparison had no lowering at all and fell through to a raw pointer
+// `icmp` in `compile_binop_dynamic_cmp`. Keeping a dead second
+// implementation of string equality next to the live `jit_string_eq`
+// (`ffi/conversion.rs`) is the parallel-implementation defection attractor
+// CLAUDE.md refuses on sight, so it is deleted outright rather than wired:
+// it operates on this module's SHADOW `StringObj` layout, whose
+// `HK_STRING_U16 = 0` sits in the v1 ordinal namespace and could never have
+// interoperated with real v2 string headers (`HEAP_KIND_V2_STRING = 81`).
+// The rest of that shadow module is #222's deletion; this removes one
+// entry point from it.
 
 /// Print a v2 string to stdout (with trailing newline), used by the `print`
 /// builtin in JIT-compiled code.
@@ -365,55 +355,6 @@ mod tests {
         jit_v2_string_release(a);
         jit_v2_string_release(b);
         jit_v2_string_release(c);
-    }
-
-    #[test]
-    fn test_eq_same_content() {
-        let a = jit_v2_string_alloc(b"test".as_ptr(), 4);
-        let b = jit_v2_string_alloc(b"test".as_ptr(), 4);
-        assert_eq!(jit_v2_string_eq(a, b), 1);
-
-        jit_v2_string_release(a);
-        jit_v2_string_release(b);
-    }
-
-    #[test]
-    fn test_eq_different_content() {
-        let a = jit_v2_string_alloc(b"abc".as_ptr(), 3);
-        let b = jit_v2_string_alloc(b"xyz".as_ptr(), 3);
-        assert_eq!(jit_v2_string_eq(a, b), 0);
-
-        jit_v2_string_release(a);
-        jit_v2_string_release(b);
-    }
-
-    #[test]
-    fn test_eq_different_lengths() {
-        let a = jit_v2_string_alloc(b"ab".as_ptr(), 2);
-        let b = jit_v2_string_alloc(b"abc".as_ptr(), 3);
-        assert_eq!(jit_v2_string_eq(a, b), 0);
-
-        jit_v2_string_release(a);
-        jit_v2_string_release(b);
-    }
-
-    #[test]
-    fn test_eq_same_pointer() {
-        let a = jit_v2_string_alloc(b"dup".as_ptr(), 3);
-        assert_eq!(jit_v2_string_eq(a, a), 1);
-        jit_v2_string_release(a);
-    }
-
-    #[test]
-    fn test_eq_null() {
-        let a = jit_v2_string_alloc(b"x".as_ptr(), 1);
-        assert_eq!(jit_v2_string_eq(a, std::ptr::null_mut()), 0);
-        assert_eq!(jit_v2_string_eq(std::ptr::null_mut(), a), 0);
-        assert_eq!(
-            jit_v2_string_eq(std::ptr::null_mut(), std::ptr::null_mut()),
-            1
-        );
-        jit_v2_string_release(a);
     }
 
     #[test]

@@ -637,18 +637,18 @@ pub fn declare_object_functions(module: &mut JITModule, ffi_funcs: &mut HashMap<
         ffi_funcs.insert("jit_string_concat".to_string(), func_id);
     }
 
-    // #232 jit-string-eq: jit_string_eq(a_bits: u64, a_kind_code: u8,
-    //                                   b_bits: u64, b_kind_code: u8) -> u8
-    // Same kind-stamped operand ABI as `jit_string_concat` above (ADR-006
-    // §2.7.5/§2.7.7 producer-side stamp, one kind byte per operand).
+    // #232 jit-string-eq: jit_string_eq(a_bits: u64, b_bits: u64) -> u8
+    // Deliberately NOT kind-stamped, unlike `jit_string_concat` above: the
+    // only call site (`compile_string_eq`) is gated by `both_string`, which
+    // admits the lowering only when BOTH operands are proven
+    // `NativeKind::String`. A kind byte would re-encode at runtime a fact
+    // the emit site already proved statically (ADR-006 §2.7.5).
     // Returns 1/0 in an I8 — the Cranelift width a `NativeKind::Bool` slot
     // uses, so the result feeds the comparison consumers unchanged.
     {
         let mut sig = module.make_signature();
         sig.params.push(AbiParam::new(types::I64));
-        sig.params.push(AbiParam::new(types::I8));
         sig.params.push(AbiParam::new(types::I64));
-        sig.params.push(AbiParam::new(types::I8));
         sig.returns.push(AbiParam::new(types::I8));
         let func_id = module
             .declare_function("jit_string_eq", Linkage::Import, &sig)
