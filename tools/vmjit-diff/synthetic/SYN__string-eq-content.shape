@@ -1,0 +1,84 @@
+// SYN__string-eq-content.shape — #232 regression case.
+//
+// The JIT had no string arm for BinOp::Eq/Ne, so string operands fell
+// through mir_compiler::rvalues::compile_binop to compile_binop_dynamic_cmp,
+// whose Eq/Ne arm emits a raw `icmp` on the operand bits. For
+// NativeKind::String those bits are Arc::into_raw(Arc<String>) POINTERS, so
+// the comparison tested Arc IDENTITY, not content — two separately
+// allocated strings with identical bytes compared UNEQUAL under --mode jit
+// while the VM's EqString opcode reported equal. Exit 0, silent wrong
+// output.
+//
+// String LITERALS coincidentally agreed (they share one interned Arc), which
+// is why the defect only ever surfaced on runtime-constructed strings. Every
+// case below therefore builds at least one operand at runtime (f-string
+// interpolation or `+` concat) — a literal-only probe passes even unfixed
+// and would be a false-green regression case.
+//
+// Originally filed as a permission-check divergence: the acceptance program
+// ACC__security-perms__small models the book's permission algebra in pure
+// Shape and compares an f-string deny message against a literal, so the
+// first divergence looked like a security-layer disagreement. It is not —
+// the permission bitset logic is byte-identical across tiers.
+
+fn interp(i: int) -> string {
+    return f"val-{i}-end"
+}
+
+fn concat(a: string, b: string) -> string {
+    return a + b
+}
+
+fn check(got: string, want: string) -> bool {
+    return got == want
+}
+
+fn main() {
+    // Runtime-built vs literal — the ACC__security-perms__small shape.
+    if interp(1) != "val-1-end" {
+        print("FAIL: interpolated != equal literal")
+        return
+    }
+    // Two independent runtime allocations, identical content.
+    if interp(2) != interp(2) {
+        print("FAIL: two identical interpolations compared unequal")
+        return
+    }
+    // Concat result vs literal.
+    if concat("foo", "bar") != "foobar" {
+        print("FAIL: concat != equal literal")
+        return
+    }
+    // `==` form, across a function-parameter boundary.
+    if !check(interp(3), "val-3-end") {
+        print("FAIL: == across param boundary said unequal")
+        return
+    }
+
+    // Negative cases: a fix that answers "equal" unconditionally must not
+    // pass this file.
+    if interp(1) == interp(2) {
+        print("FAIL: different content compared equal")
+        return
+    }
+    if concat("ab", "c") == "abcd" {
+        print("FAIL: prefix compared equal")
+        return
+    }
+    if concat("Ab", "c") == "abc" {
+        print("FAIL: comparison was case-insensitive")
+        return
+    }
+    if concat("", "") != "" {
+        print("FAIL: empty vs empty compared unequal")
+        return
+    }
+    if concat("", "") == "x" {
+        print("FAIL: empty compared equal to non-empty")
+        return
+    }
+
+    print("STRING_EQ_OK")
+}
+
+main()

@@ -1128,6 +1128,77 @@ pub extern "C" fn jit_string_concat(
     Arc::into_raw(Arc::new(out)) as u64
 }
 
+/// Byte-compare two `NativeKind::String` operands. Returns 1 when the
+/// contents are equal, 0 otherwise.
+///
+/// #232: the JIT had no string arm for `BinOp::Eq`/`Ne`, so string operands
+/// fell through `mir_compiler::rvalues::compile_binop` to
+/// `compile_binop_dynamic_cmp`, whose Eq/Ne arm emits a raw `icmp` on the
+/// two operand bit patterns. For `NativeKind::String` those bits are
+/// `Arc::into_raw(Arc<String>)` POINTERS, so the comparison tested Arc
+/// identity, not content: two separately-allocated strings with identical
+/// bytes compared unequal. String literals coincidentally agreed because
+/// they share one interned Arc; every runtime-constructed string
+/// (f-string interpolation, `+` concat) diverged from the VM. The VM's
+/// `EqString` opcode (`shape-vm/src/executor/comparison/mod.rs::
+/// cmp_string_eq_kinded`) is the normative behavior — content equality
+/// read through a kind-driven `&str` accessor.
+///
+/// **Strong-count contract.** Mirrors `jit_string_concat` exactly: each
+/// `NativeKind::String` operand arrives carrying one strong-count share
+/// (the `Operand::Copy` retain in `mir_compiler/ownership.rs::
+/// compile_operand`, or the producer-side per-consumption retain for
+/// `MirConstant::Str`). This FFI consumes both shares via `Arc::from_raw`
+/// and drops them before returning. Null bits carry no share and read as
+/// the empty string — the same sentinel handling `jit_string_concat` uses.
+///
+/// **Kind contract.** The call site (`compile_string_eq`) admits this
+/// lowering only when BOTH operands are proven `NativeKind::String`, so a
+/// non-String kind code here is a producer-side stamp gap, not a runtime
+/// case to absorb. Per ADR-006 §2.7.7 #9 it surfaces rather than guessing:
+/// returning an arbitrary answer would reintroduce exactly the
+/// silent-wrong-output this function exists to remove.
+#[unsafe(no_mangle)]
+pub extern "C" fn jit_string_eq(a_bits: u64, a_kind_code: u8, b_bits: u64, b_kind_code: u8) -> u8 {
+    use super::stack_kind_code;
+    use shape_value::NativeKind;
+    use std::sync::Arc;
+
+    /// Adopt one operand's share. `None` = the null sentinel (no share to
+    /// consume), which reads as the empty string.
+    fn adopt(bits: u64, kind_code: u8, operand: &str) -> Option<Arc<String>> {
+        match stack_kind_code::decode(kind_code) {
+            Some(NativeKind::String) => {
+                if bits == 0 {
+                    return None;
+                }
+                Some(unsafe { Arc::<String>::from_raw(bits as *const String) })
+            }
+            other => panic!(
+                "jit_string_eq {operand}: ADR-006 §2.7.7 #9 SURFACE — operand kind \
+                 stamp is {other:?}, not NativeKind::String. `compile_string_eq` \
+                 admits this lowering only for two proven String operands; \
+                 reaching here means the producer-side stamp and the call-site \
+                 gate disagree. Answering anyway would be silent wrong output \
+                 (the #232 defect class)."
+            ),
+        }
+    }
+
+    let a = adopt(a_bits, a_kind_code, "[a]");
+    let b = adopt(b_bits, b_kind_code, "[b]");
+    let eq = match (&a, &b) {
+        (Some(x), Some(y)) => x.as_str() == y.as_str(),
+        (Some(x), None) => x.is_empty(),
+        (None, Some(y)) => y.is_empty(),
+        (None, None) => true,
+    };
+    // Consume both shares (the `Arc::from_raw` above adopted them).
+    drop(a);
+    drop(b);
+    eq as u8
+}
+
 /// Convert value to number
 pub extern "C" fn jit_to_number(value_bits: u64) -> u64 {
     if is_number(value_bits) {
@@ -1901,4 +1972,109 @@ mod jit_print_f64_gamma_cp1_tests {
         assert_eq!(jit_render_f64(f64::NAN), "NaN");
         jit_print_f64(f64::NAN);
     }
+}
+
+#[cfg(test)]
+mod jit_string_eq_tests {
+    //! #232 regression tests for `jit_string_eq`.
+    //!
+    //! The JIT had no string arm for `BinOp::Eq`/`Ne`, so string operands
+    //! reached `compile_binop_dynamic_cmp`'s raw `icmp`, which compared
+    //! `Arc<String>` POINTERS. Content-equal strings from two different
+    //! allocations therefore compared UNEQUAL under `--mode jit` while the
+    //! VM's `EqString` reported equal — silent wrong output on every
+    //! f-string / concat comparison.
+    //!
+    //! The first test is the one that fails against a pointer compare:
+    //! two independently allocated `Arc<String>`s with identical bytes.
+    //! The rest pin the content semantics and the null sentinel.
+
+    use super::*;
+    use crate::ffi::stack_kind_code;
+    use shape_value::NativeKind;
+
+    const SK: u8 = stack_kind_code::encode(NativeKind::String);
+
+    /// Build a `NativeKind::String` carrier with one strong-count share,
+    /// matching what the `Operand::Copy` retain hands the FFI.
+    fn arc_bits(s: &str) -> u64 {
+        std::sync::Arc::into_raw(std::sync::Arc::new(s.to_string())) as u64
+    }
+
+    #[test]
+    fn distinct_allocations_with_equal_content_compare_equal() {
+        // The #232 case: a pointer compare answers 0 here.
+        let a = arc_bits("Permission denied: (fs.write)");
+        let b = arc_bits("Permission denied: (fs.write)");
+        assert_ne!(a, b, "test needs two DIFFERENT allocations to be meaningful");
+        assert_eq!(jit_string_eq(a, SK, b, SK), 1);
+    }
+
+    #[test]
+    fn different_content_compares_unequal() {
+        assert_eq!(jit_string_eq(arc_bits("val-1"), SK, arc_bits("val-2"), SK), 0);
+    }
+
+    #[test]
+    fn prefix_is_not_equal() {
+        assert_eq!(jit_string_eq(arc_bits("abc"), SK, arc_bits("abcd"), SK), 0);
+    }
+
+    #[test]
+    fn comparison_is_case_sensitive() {
+        assert_eq!(jit_string_eq(arc_bits("Abc"), SK, arc_bits("abc"), SK), 0);
+    }
+
+    #[test]
+    fn same_pointer_compares_equal() {
+        let arc = std::sync::Arc::new("shared".to_string());
+        // Two shares of ONE allocation — the FFI consumes one per operand.
+        let a = std::sync::Arc::into_raw(std::sync::Arc::clone(&arc)) as u64;
+        let b = std::sync::Arc::into_raw(arc) as u64;
+        assert_eq!(jit_string_eq(a, SK, b, SK), 1);
+    }
+
+    #[test]
+    fn empty_strings_compare_equal() {
+        assert_eq!(jit_string_eq(arc_bits(""), SK, arc_bits(""), SK), 1);
+    }
+
+    #[test]
+    fn null_sentinel_reads_as_empty_string() {
+        // Null carries no share to consume; it reads as "" the same way
+        // `jit_string_concat` treats it.
+        assert_eq!(jit_string_eq(0, SK, 0, SK), 1);
+        assert_eq!(jit_string_eq(0, SK, arc_bits(""), SK), 1);
+        assert_eq!(jit_string_eq(arc_bits(""), SK, 0, SK), 1);
+        assert_eq!(jit_string_eq(0, SK, arc_bits("x"), SK), 0);
+        assert_eq!(jit_string_eq(arc_bits("x"), SK, 0, SK), 0);
+    }
+
+    #[test]
+    fn multibyte_content_compares_by_bytes() {
+        assert_eq!(jit_string_eq(arc_bits("héllo"), SK, arc_bits("héllo"), SK), 1);
+        assert_eq!(jit_string_eq(arc_bits("héllo"), SK, arc_bits("hello"), SK), 0);
+    }
+
+    #[test]
+    fn repeated_comparison_does_not_disturb_a_surviving_share() {
+        // Mirrors `let s = mk(i); s == a; s == b;` — each `Operand::Copy`
+        // retain is consumed by exactly one FFI call, and the binding's own
+        // share must still be readable afterwards.
+        let arc = std::sync::Arc::new("key-5".to_string());
+        for _ in 0..3 {
+            let operand = std::sync::Arc::into_raw(std::sync::Arc::clone(&arc)) as u64;
+            assert_eq!(jit_string_eq(operand, SK, arc_bits("key-5"), SK), 1);
+        }
+        assert_eq!(arc.as_str(), "key-5");
+        assert_eq!(std::sync::Arc::strong_count(&arc), 1);
+    }
+
+    // The non-String kind stamp surfaces via `panic!` in the FFI body. It is
+    // deliberately NOT covered by a `#[should_panic]` test: `jit_string_eq`
+    // is `extern "C"`, so the panic is non-unwinding and aborts the process
+    // rather than unwinding into the harness. The arm stays unreachable in
+    // practice because `compile_string_eq`'s `both_string` gate admits only
+    // two proven `NativeKind::String` operands; the abort is the fail-stop
+    // for a producer/gate disagreement, not a live path.
 }
