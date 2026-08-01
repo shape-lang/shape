@@ -1,8 +1,11 @@
 # #240 — gap 3 of the `FrameReturnWrapper::Unknown` deletion: design
 
-**Status:** design complete, nothing wired. Branch `gap3-provenance`, based on
-`main@dac5fe7e`. All product-code edits described here were made as throwaway
-experiments and **reverted**; the branch carries this document only.
+**Status:** design complete; roots A1 and B **implemented and landed**, root C
+diagnosed but not started. Branch `gap3-provenance`, based on `main@dac5fe7e`.
+See §8 for the landed state, the remaining 11 residuals, and the routing call
+that `#255`'s split now requires. Sections 1–7 are the original design and are
+preserved as written except where a later measurement corrected them; those
+corrections are marked in place rather than edited away.
 
 **Headline verdict:** both roots named on #240 are **refuted**. Neither
 generated-node provenance (ADR-009 C1) nor comptime-block return-type pinning is
@@ -192,14 +195,22 @@ audit of the 24 rows against the catalog:
 
 | Row | Catalog declares | Table declared | Verdict |
 |---|---|---|---|
-| `warning` | `Unit` | *(none)* | drift — fixed in experiment |
-| `error` | `Unit` | *(none)* | drift — fixed in experiment |
-| `install` | `Unit` | *(none)* | drift — fixed in experiment |
-| `item_fn` | `OpaqueTypedObject("__CheckedItem")` | *(none)* | drift — fixed in experiment |
-| `extend_method` | `OpaqueTypedObject` | *(none)* | drift — not yet exercised by a probe failure |
-| `extend_method_literal` | `OpaqueTypedObject` | *(none)* | drift — not yet exercised |
-| `string_lit` | — | *(none)* | needs a catalog answer |
+| `warning` | `Unit` | *(none)* | drift — closed by A1 |
+| `error` | `Unit` | *(none)* | drift — closed by A1 |
+| `install` | `Unit` | *(none)* | drift — closed by A1 |
+| `item_fn` | `OpaqueTypedObject("__CheckedItem")` | *(none)* | drift — closed by A1 |
+| `extend_method` | `OpaqueTypedObject` | *(none)* | drift — closed by A1, not exercised by a probe failure |
+| `extend_method_literal` | `OpaqueTypedObject` | *(none)* | drift — closed by A1, not exercised |
+| one string-literal producer row | `String` | *(none)* | drift — closed by A1 |
 | other 17 rows | various | present | agree |
+
+**Correction to an earlier claim in this document.** The string-literal
+producer row was first reported here as having "no discoverable registered
+intrinsic". That was a regex artifact of the audit script, not a fact: a probe
+that enumerated all 24 rows against the built `ModuleExports` reported
+`GAP3_CAT_MISSING []` — **every** forwarder target has a catalog entry, and that
+row's is `ConcreteType::String`. No row needs a hand-declared return, and open
+question 2 below is answered.
 
 ADR-011 §Resolved intrinsic identity makes the catalog the authority: intrinsic
 behaviour is selected by a resolved `IntrinsicId` "with its exact
@@ -439,14 +450,80 @@ the flake rather than a regression.
    implementation diverges (`Err`, aborting comptime execution). Deriving from
    the catalog is right either way, but if Shape wants a `never`/divergent return
    type this is where it first bites. Not blocking.
-2. **`string_lit`** is the one forwarder row with no discoverable registered
-   intrinsic under either its own name or its target-method name. Its declared
-   return has to come from somewhere before A1's drift test can be total.
-3. **Root A2's scope.** Widening `build_module_qualified_scalar_returns` beyond
-   scalars touches extension typing generally. It is in gap 3's residual by
-   measurement (3 of 23), but it may deserve its own ticket rather than riding
-   #227's final act.
+2. ~~The string-literal producer row's missing catalog entry.~~ **ANSWERED by
+   measurement** — see the correction under §3 Root A1. Every forwarder target
+   has a catalog entry; the gap was in the audit script, not the code. A1's
+   drift test is total over all 24 rows.
+3. **Root A2's scope.** ~~May deserve its own ticket.~~ **RULED 2026-08-01:
+   split to #255.** Widening `build_module_qualified_scalar_returns` beyond
+   scalar aliases touches extension typing generally and interacts with #207's
+   named-type schema registration. #227's final act no longer waits on it —
+   which means the probe cannot reach zero in this lane; see §8.
 
 Nothing in this design requires an ADR amendment. In particular the ADR-009 C1
 generated-node-provenance shape is **not** needed — that is the main thing this
 measurement changes about the plan.
+
+---
+
+## 8. Implementation status (2026-08-01)
+
+Authorized to leave design phase after the refutation was verified. A1 and B are
+landed and measured; C is diagnosed but not implemented.
+
+| Root | Commit | Probe panics after | Clean-run failures |
+|---|---|---|---|
+| *(design baseline)* | `82dd9e53` | 99 | 8 |
+| **A1** — forwarder returns derived from the catalog | `d4de20b7` | 23 | 8 |
+| **B** — a body producing no value classifies as unit | `4b84e2ed` | 11 | 8 |
+| **C** — closure / generated-method span misses | not started | — | — |
+
+"Clean-run failures" is `cargo test -p shape-vm --lib` with no probe applied,
+and is the same failure NAME SET as the `dac5fe7e` control at every step (§6.3).
+Neither root regressed anything.
+
+A1 closed the drift CLASS, not the four rows the experiment needed: the
+`named_return_type` column is deleted, all 24 rows derive, and a row that
+resolves to no registered intrinsic — or whose declared type has no annotation
+spelling — is a hard error at generation time.
+
+### 8.1 The remaining 11, by root
+
+| n | Root | Members |
+|---:|---|---|
+| 7 | **C** — closures | `__closure_0` in 7 tests; tails `BinaryOp`×4, `MethodCall`, `FunctionExpr`, `Comptime` |
+| 1 | **C** — generated method | `__w24_method_Number_tripled_329_340_number`, tail `BinaryOp` |
+| 2 | **A2 → #255** | `myext::__connect`, `myext::__connect_codegen` — extension-module exports |
+| 1 | **A2-adjacent** | `__intrinsic_dist_uniform` — a registered intrinsic absent from `function_defs`, so a specialisation's tail walk cannot resolve it. Same shape as A2 (declared contract in a side table); needs a routing call between #255 and this ticket |
+
+**Three of the seven closure cases report `table_len=0`** — the closure is
+compiled where no span table is installed at all
+(`failed_shadow_emission_restores_body_analysis_authority`,
+`replacement_mir_uses_only_its_own_distinct_closure_identity`,
+`b5_const_in_closure_body_is_substituted`). No span-keyed lookup can help those;
+the type has to come from wherever the enclosing compile got its own.
+
+### 8.2 The probe cannot reach zero in this lane
+
+With A2 split to #255, 2 (arguably 3) of the 11 residuals are out of this
+ticket's scope, so "probe at fixpoint zero" and "A2 is #255's" cannot both hold
+here. The close-out sequence in §5 needs one of:
+
+- **(a)** #255 lands first and #227's final act waits on it after all; or
+- **(b)** #227's final act is gated on "probe zero **excluding** the A2 members",
+  with those members' descriptors provably unreachable from the stamp site — a
+  claim that has to be demonstrated, not assumed; or
+- **(c)** the A2 members are re-pulled into this ticket.
+
+This is an owner/supervisor routing call, not a technical one. Until it is made,
+step 4 (restoring the hard error) cannot be scheduled — restoring it while any
+residual remains turns those tests into hard failures.
+
+### 8.3 Process note
+
+The probe's revert was `git checkout --` on `helpers.rs` and `closures.rs`.
+Applied while root B was still uncommitted in `closures.rs`, it silently
+discarded that work; it was caught only because the follow-up test run failed to
+compile. The probe script now snapshots both files at apply time and restores
+from that snapshot. Anyone re-running this measurement mid-change should verify
+the same, or commit before probing.
