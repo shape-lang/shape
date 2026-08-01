@@ -137,7 +137,6 @@ pub struct FFIFuncRefs {
     pub(crate) print_typed_array: FuncRef,
 
     // Closure construction (Phase H2: typed closure block → Arc<Closure>).
-    pub(crate) make_closure: FuncRef,
     pub(crate) finalize_heap_closure: FuncRef,
     /// #188 slice 2: recovers the raw `TypedClosureHeader*` from an
     /// `Arc<HeapValue::ClosureRaw>` closure slot, or 0 when the slot cannot

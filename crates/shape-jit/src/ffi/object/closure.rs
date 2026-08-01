@@ -1,75 +1,31 @@
 // Heap allocation audit (PR-9 V8 Gap Closure):
-//   Category A (NaN-boxed returns): 1 site
-//     jit_box(HK_CLOSURE, ...) — jit_make_closure
-//   Category B (intermediate/consumed): 1 site
-//     JITClosure::new() allocates captures via Box — consumed by jit_box
+//   Category A (NaN-boxed returns): 0 sites — the single site was
+//     `jit_box(HK_CLOSURE, ..)` inside `jit_make_closure`, deleted in #239.
+//   Category B (intermediate/consumed): 0 sites — `JITClosure::new()` was
+//     consumed by that same `jit_box`.
 //   Category C (heap islands): 0 sites
 //!
 //! Closure Creation
 //!
 //! Functions for creating closures with captured values.
 
-use super::super::super::context::{JITClosure, JITContext};
-use crate::ffi::jit_kinds::*;
-use crate::ffi::value_ffi::*;
-
 // ============================================================================
 // Closure Creation
 // ============================================================================
 
-/// Create a closure with captured values from the stack.
-///
-/// Supports unlimited captures via heap-allocated capture array.
-///
-/// # Deprecation (Closure-spec Phase H1/H5)
-///
-/// Phase H1 introduces `MirToIR::emit_heap_closure` which inlines the
-/// allocation + `TypedClosureHeader` init directly in Cranelift IR. Phase H2
-/// makes `emit_heap_closure` the unconditional default for escaping
-/// closures — this FFI is no longer called from that opcode's lowering and
-/// exists only to service the legacy non-layout fallback in the unified
-/// `MakeClosure` opcode. Phase H5 merged `MakeClosureHeap` into
-/// `MakeClosure` (the escape flag now lives in the operand variant
-/// `ClosureAlloc { escapes }`); a follow-up phase can delete this FFI once
-/// all closure functions are guaranteed to have a registered
-/// `ClosureLayout`.
-#[deprecated(
-    note = "Closure-spec Phase H2: `emit_heap_closure` + `jit_finalize_heap_closure` \
-            is now the unconditional path for escaping closures. This FFI remains \
-            only for residual non-layout fallback paths; a follow-up phase deletes it."
-)]
-#[inline(always)]
-pub extern "C" fn jit_make_closure(
-    ctx: *mut JITContext,
-    function_id: u16,
-    captures_count: u16,
-) -> u64 {
-    unsafe {
-        if ctx.is_null() {
-            return box_function(function_id);
-        }
-
-        let ctx_ref = &mut *ctx;
-        let count = captures_count as usize;
-
-        // Check stack bounds
-        if ctx_ref.stack_ptr < count || ctx_ref.stack_ptr > 512 {
-            return box_function(function_id);
-        }
-
-        // Pop captured values from stack
-        let mut captures = Vec::with_capacity(count);
-        for _ in 0..count {
-            ctx_ref.stack_ptr -= 1;
-            captures.push(ctx_ref.stack[ctx_ref.stack_ptr]);
-        }
-        captures.reverse(); // Restore original order
-
-        // Create closure struct with dynamic captures
-        let closure = JITClosure::new(function_id, &captures);
-        unified_box(HK_CLOSURE, *closure)
-    }
-}
+// `jit_make_closure` DELETED (#239 / ADR-020 §6) — it was the THIRD
+// function-value carrier, producing `unified_box(HK_CLOSURE)` beside the VM's
+// `Arc<HeapValue::ClosureRaw>` and the JIT's `box_function`. Its only emit site
+// was the `MakeClosure` ARM-3 legacy fallback in
+// `mir_compiler/statements.rs`, which is deleted in the same commit.
+//
+// Its `#[deprecated]` note said a follow-up phase could delete it "once all
+// closure functions are guaranteed to have a registered `ClosureLayout`". That
+// precondition was ALREADY MET — which is why the note was more dangerous than
+// the function: it read as a live TODO whose condition was still pending. The
+// warrant is structural, not empirical: the one documented route to a
+// missing layout (programs loaded from disk) cannot reach the JIT at all,
+// because the serde boundary that drops the layouts also drops the MIR.
 
 // ============================================================================
 // Closure-spec Phase H2: TypedClosureHeader finalizer

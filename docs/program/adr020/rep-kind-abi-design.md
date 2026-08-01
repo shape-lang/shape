@@ -1549,7 +1549,7 @@ careless:
 | this lane (§4.0) | a proof gate named `slot_kind_of` **exists** | that unproven emit sites **stop** — the function is a fabricating `unwrap_or(Int64)` and is never called on an FFI-return path |
 | this lane (§7.1) | 0 executions across 481 corpus programs | that no producer **exists** — with an instrument that cannot distinguish absence from non-arrival |
 | this lane (§10.1.0) | five known-red programs now produce **identical VM and JIT output** | that five defects were **fixed** — all five have zero native dispatches; they agree because the JIT never runs |
-| safety-perms | `verify-merge` reported **22/22 PASS** | that a merge had **completed** — the tree still had unmerged files; the gate cannot observe an in-progress conflicted merge |
+| supervisor | `verify-merge` reported **22/22 PASS**, on **three separate occasions in one day** | that a merge had **completed** — the tree still had unmerged files each time. The gate cannot detect an in-progress conflicted merge; only the absence of `UU` entries proves one finished. **This is the sharpest instance in the table, because unlike the others the gate IS the check** — it is the artifact whose entire purpose is to answer the question it was read as answering |
 | this lane (§1.1) | a grep for *"is this field named anywhere"* returned 184 | that 184 symbols appear in a `builder.ins().call(...)` — the narrow claim is unsound, since a `FuncRef` can be selected into a local and called indirectly (142 false positives when measured) |
 
 The general form: **a check was run, it passed, and its result was reported as

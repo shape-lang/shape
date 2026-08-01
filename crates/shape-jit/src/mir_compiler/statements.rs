@@ -731,101 +731,49 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                     return Ok(());
                 }
 
-                // ── LEGACY HEAP PATH (no ClosureLayout available) ─────
-                // Fallback for closure functions that were not registered
-                // in `closure_function_layouts` (e.g. programs loaded from
-                // disk without the side-table). Phase H5 will delete this
-                // once the compile-time registration is universal and the
-                // `MakeClosure` opcode is merged into `MakeClosureHeap`.
-
-                // Push each capture operand to ctx.stack[stack_ptr + i].
-                // ADR-006 §2.7.7 / Q9: lockstep parallel-kind write at every
-                // push site. `jit_make_closure` (the legacy FFI consuming
-                // these slots) doesn't currently read the kinds — but the
-                // invariant requires the writes so future FFI consumers can
-                // route through `stack_kind_code::decode` rather than
-                // synthesizing kinds at the read site.
-                let stack_base = crate::context::STACK_OFFSET as i32;
-                let sp_offset = crate::context::STACK_PTR_OFFSET as i32;
-                let old_sp = self.builder.ins().load(
-                    cranelift::prelude::types::I64,
-                    MemFlags::new(),
-                    self.ctx_ptr,
-                    sp_offset,
-                );
-
-                // R4.2E: legacy ClosureCapture path pushes captures to
-                // ctx.stack as raw I64 bit-patterns. Widen narrow Cranelift
-                // types inline (sextend / uextend / bitcast) — no NaN-box
-                // tagging.
-                for (i, op) in operands.iter().enumerate() {
-                    // Source the capture kind from the producing site,
-                    // falling back to the §2.7.5 carrier kind (`UInt64`)
-                    // for opaque-source operands — NOT a Bool-default
-                    // fallback.
-                    let _ = i;
-                    let op_kind = self.operand_slot_kind_or_carrier(op);
-
-                    let raw = self.compile_operand(op)?;
-                    let raw_ty = self.builder.func.dfg.value_type(raw);
-                    let val = if raw_ty == cranelift::prelude::types::I64 {
-                        raw
-                    } else if raw_ty == cranelift::prelude::types::F64 {
-                        self.builder.ins().bitcast(
-                            cranelift::prelude::types::I64,
-                            MemFlags::new(),
-                            raw,
-                        )
-                    } else if raw_ty == cranelift::prelude::types::I32 {
-                        self.builder
-                            .ins()
-                            .sextend(cranelift::prelude::types::I64, raw)
-                    } else if raw_ty == cranelift::prelude::types::I8 {
-                        self.builder
-                            .ins()
-                            .uextend(cranelift::prelude::types::I64, raw)
-                    } else if raw_ty == cranelift::prelude::types::I16 {
-                        self.builder
-                            .ins()
-                            .sextend(cranelift::prelude::types::I64, raw)
-                    } else {
-                        raw
-                    };
-                    let slot_idx = self.builder.ins().iadd_imm(old_sp, i as i64);
-                    let byte_off = self.builder.ins().ishl_imm(slot_idx, 3);
-                    let abs_off = self.builder.ins().iadd_imm(byte_off, stack_base as i64);
-                    let addr = self.builder.ins().iadd(self.ctx_ptr, abs_off);
-                    self.builder.ins().store(MemFlags::new(), val, addr, 0);
-                    // §2.7.7 / Q9 lockstep parallel-kind write.
-                    self.emit_kind_track_write(slot_idx, op_kind);
-                }
-
-                // Update ctx.stack_ptr += captures_count
-                let new_sp = self.builder.ins().iadd_imm(old_sp, operands.len() as i64);
-                self.builder
-                    .ins()
-                    .store(MemFlags::new(), new_sp, self.ctx_ptr, sp_offset);
-
-                // Call jit_make_closure(ctx, function_id, captures_count)
-                let fid_val = self
-                    .builder
-                    .ins()
-                    .iconst(cranelift::prelude::types::I64, fid as i64);
-                let cap_count = self
-                    .builder
-                    .ins()
-                    .iconst(cranelift::prelude::types::I64, operands.len() as i64);
-                let inst = self
-                    .builder
-                    .ins()
-                    .call(self.ffi.make_closure, &[self.ctx_ptr, fid_val, cap_count]);
-                let closure_val = self.builder.inst_results(inst)[0];
-
-                // Store the closure in the closure_slot
-                let place = Place::Local(*closure_slot);
-                self.release_old_value_if_heap(&place)?;
-                self.write_place(&place, closure_val)?;
-                Ok(())
+                // ── ARM 3 DELETED (#239 / ADR-020 §6, third function-value
+                // carrier). ─────────────────────────────────────────────
+                //
+                // This arm called `jit_make_closure`, which produced
+                // `unified_box(HK_CLOSURE)` — a THIRD function-value carrier
+                // beside the VM's `Arc<HeapValue::ClosureRaw>` and the JIT's
+                // `box_function`. ADR-020 §6 forbids a second carrier; a third
+                // needs no migration path.
+                //
+                // It was reached only when `closure_function_layouts` had no
+                // entry for a real `fid`. That is unreachable, and the
+                // structural argument matters more than the measurement:
+                //
+                //   * Five single-writer links make a missing layout
+                //     impossible for a real fid.
+                //   * The documented escape hatch DOES NOT EXIST. The comment
+                //     at `shape-vm/src/bytecode/core_types.rs` claimed
+                //     "programs loaded from disk fall back to the FFI path" —
+                //     but the same serde boundary that drops the layouts also
+                //     drops the MIR (`mir_data` / `top_level_mir` are
+                //     `#[serde(skip)]`; `linker.rs` nulls `mir_data`), and
+                //     every JIT path errors without MIR. No MIR, no
+                //     `ClosureCapture` lowering, no ARM 3.
+                //
+                // Empirically (weaker, and recorded as weaker): 0 executions
+                // across 481 corpus programs and 4 hand-built escaping-closure
+                // falsifiers, plus a gdb sweep with `jit_finalize_heap_closure`
+                // as a live positive control observing ~10,001 escaping
+                // allocations at 100% ARM 2 / 0% ARM 3. A corpus sweep alone
+                // cannot distinguish absence from non-arrival — the structural
+                // argument above is the warrant.
+                //
+                // Surfacing rather than silently deleting: if the impossible
+                // happens, we want the bail, not a fabricated carrier.
+                Err(format!(
+                    "MirToIR: SURFACE — closure function_id {fid} has no registered \
+                     ClosureLayout. The legacy `jit_make_closure` fallback that used to \
+                     serve this case is DELETED (#239 / ADR-020 §6: it minted a third \
+                     function-value carrier via `unified_box(HK_CLOSURE)`). A real fid \
+                     always has a layout; reaching here means the compile-time \
+                     registration regressed, which is a producer-side bug to fix rather \
+                     than a case to fall back for."
+                ))
             }
         }
     }

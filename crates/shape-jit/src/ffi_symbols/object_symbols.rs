@@ -24,7 +24,7 @@ use super::super::ffi::object::{
     jit_alloc_owned_mut_cell_u16, jit_alloc_owned_mut_cell_u32, jit_alloc_owned_mut_cell_u64,
     jit_alloc_shared_cell, jit_arc_shared_release, jit_arc_shared_retain, jit_closure_block_ptr,
     jit_finalize_heap_closure, jit_format, jit_get_prop, jit_hashmap_shape_id,
-    jit_hashmap_value_at, jit_length, jit_make_closure, jit_new_object, jit_object_rest,
+    jit_hashmap_value_at, jit_length, jit_new_object, jit_object_rest,
     jit_read_owned_mut_cell_bool, jit_read_owned_mut_cell_f64, jit_read_owned_mut_cell_i8,
     jit_read_owned_mut_cell_i16, jit_read_owned_mut_cell_i32, jit_read_owned_mut_cell_i64,
     jit_read_owned_mut_cell_ptr, jit_read_owned_mut_cell_u8, jit_read_owned_mut_cell_u16,
@@ -197,7 +197,6 @@ pub fn register_object_symbols(builder: &mut JITBuilder) {
     // ckpt-1..ckpt-4). Body delegates to the canonical VM-side
     // `ValueFormatter::format_kinded` via the UInt64 carrier label.
     builder.symbol("jit_print_typed_array", jit_print_typed_array as *const u8);
-    builder.symbol("jit_make_closure", jit_make_closure as *const u8);
     // Closure-spec Phase H2: TypedClosureHeader finalizer used by
     // `MirToIR::emit_heap_closure` to convert the raw typed block into a
     // NaN-boxed `Arc<HeapValue::Closure>` for downstream dispatch. Replaces
@@ -960,19 +959,6 @@ pub fn declare_object_functions(module: &mut JITModule, ffi_funcs: &mut HashMap<
             .declare_function("jit_print_typed_array", Linkage::Import, &sig)
             .expect("Failed to declare jit_print_typed_array");
         ffi_funcs.insert("jit_print_typed_array".to_string(), func_id);
-    }
-
-    // jit_make_closure(ctx, func_idx, capture_count) -> u64
-    {
-        let mut sig = module.make_signature();
-        sig.params.push(AbiParam::new(types::I64)); // ctx
-        sig.params.push(AbiParam::new(types::I64)); // func_idx
-        sig.params.push(AbiParam::new(types::I64)); // capture_count
-        sig.returns.push(AbiParam::new(types::I64));
-        let func_id = module
-            .declare_function("jit_make_closure", Linkage::Import, &sig)
-            .expect("Failed to declare jit_make_closure");
-        ffi_funcs.insert("jit_make_closure".to_string(), func_id);
     }
 
     // Closure-spec Phase H2: jit_finalize_heap_closure(header_ptr, function_id,
