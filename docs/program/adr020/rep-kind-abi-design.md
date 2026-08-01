@@ -42,6 +42,17 @@ HeapHeader`, scalars get `i64`, same Cranelift class, different Rust type); and
 the restatement of §5's zero-safety claim as a **precondition with 25 open
 sites** rather than a discharged property (§5.1).
 
+**Grill round 2 refuted §4's central premise (#257), and the correction adds
+scope.** The claim that unproven emit sites already surface-and-stop is false:
+the guard exists at one site (`terminators.rs:2045`) and not at its siblings,
+`slot_kind_of` is itself a fabricating `unwrap_or(Int64)` never called on an
+FFI-return path, and seven `Array` method chains silently return `TAG_NULL` as
+an `i64` today (one of them aborts). Closing that gap and deleting seven
+`unwrap_or` defaults are **in-scope prerequisites landing before the
+monomorphization** — monomorphizing an unguarded site changes the shape of the
+wrong answer rather than removing it. Scope has now moved twice: **down** on the
+partition (§3) and **up** here (§4.0).
+
 ---
 
 ## 1. Method — what was measured, and how
@@ -374,6 +385,15 @@ fallthrough itself survived every time:
    `i < arr.length` down this path and **deopted every length-bounded loop**,
    making every shape `bounds_elision` can prove invisible to the native tier.
    Fixed by adding a `Place::Field` kind arm (`rvalues.rs:719`).
+   **This is the mechanism behind a standing puzzle in the repo**: the measured
+   result that JIT bounds-check elision gives no speedup even when it fires
+   (0.999x on a check-dominated kernel), and that the 5.3x once credited to BCE
+   was really a `.length` kind-projection nativity fix. Of course BCE measured
+   ~0 — until this arm was fixed, every length-bounded loop was deopting
+   wholesale, so there was no native loop for BCE to optimize. A puzzling
+   benchmark note becomes an understood one, and the deletion candidate status
+   of BCE should be re-evaluated *after* this conversion, on a tier that
+   actually runs the loops natively.
 3. **Heap strings** — `Eq`/`Ne` on heap strings emitted a raw `icmp` on two
    POINTERS. Invisible because interned string literals share a pointer, so
    literal-vs-literal passed by luck. Being fixed now by the safety lane's
@@ -382,8 +402,15 @@ fallthrough itself survived every time:
 That is the ticket's thesis stated three times by three unrelated incidents: a
 kind-blind fallthrough is correct for the kinds its author had in mind and
 silently wrong for the rest, and each rescue narrows the hole without closing
-it. **Design ruling: this conversion DELETES the `Eq`/`Ne` arm rather than
-adding a fourth kind proof.** Once every operand carries a proven kind, the
+it. **Design ruling (RATIFIED, grill round 1): this conversion DELETES the
+`Eq`/`Ne` arm rather than adding a fourth kind proof.** The supervisor asked
+that the reasoning be recorded at **ADR level, not only here** — three
+silent-wrong-answer defects traced to one kind-blind fallthrough, each fixed by
+adding a proof upstream while the fallthrough survived, is the §Forbidden
+walk-back documented in miniature with three iterations already on the board. A
+fourth rescue is the pattern, not a fix. See §4.0.3 for the same shape found
+independently in a second subsystem (five more point fixes), which is what
+turns this from an anecdote into a rule. Once every operand carries a proven kind, the
 ordered-comparison treatment (surface-and-stop) is correct for equality too,
 and `compile_binop_dynamic_cmp` ceases to exist rather than shrinking again. A
 fourth point fix is the walk-back shape CLAUDE.md §Forbidden names.
@@ -412,6 +439,21 @@ lesson generalizes.
 
 **Consequence for §8: the ratchet must include the raw bit patterns, not only
 the symbol names.** A ratchet that only knows names is defeated by an `iconst`.
+
+**And the general principle, which outlives #239 — write it where the next gate
+author reads it:**
+
+> **A forbidden dispatch can be spelled without naming any forbidden symbol.**
+> Symbol rows are therefore insufficient *in principle*, not merely incomplete.
+> A gate over a semantic prohibition must match the operation's *shape* — its
+> constants, its instruction sequence — not only its vocabulary.
+
+Note the trap in this specific instance: the local at `places.rs:533` happens to
+be *named* `is_tagged`, so a symbol row for that name would catch this one site.
+**That is luck, not design.** Rename the local and the site is invisible again,
+while the actual dispatch — the constant, the `icmp`, the `select` — is
+unchanged. A gate that catches this by name has not caught the pattern; it has
+caught one author's choice of identifier.
 
 Reachability of this specific site is **open and I did not settle it**. Its
 caller chain (`index_to_i64` → `inline_array_get` / siblings at
@@ -442,8 +484,35 @@ safety lane:
   not happen once kinds are proven. **My recommendation: land it as-is now
   (it fixes a live correctness bug), and fold it into the monomorph set when this
   ticket converts the channel** — `jit_string_eq` on two proven `String`
-  operands needs no kind codes at all. If the safety lane disagrees, that is a
-  substantive disagreement worth resolving before this slice starts, not after.
+  operands needs no kind codes at all.
+
+  **RULED (grill round 1): lands as-is, as a bounded exception with a named
+  creditor.** The supervisor's reasoning corrects mine on the *cause*: the kind
+  codes are not there because the call site is polymorphic — they are there
+  because **there are two string carriers** (`String` and `StringV2`) and a
+  comparison may span them. That makes the parameter a symptom of the carrier
+  duality, not of an unproven destination kind, and the honest monomorph set for
+  a two-carrier world is four variants or a normalization — neither of which the
+  safety lane should be designing while fixing a live silent-wrong-output bug.
+
+  This is explicitly **not** the "mark it as a follow-up for a later phase"
+  rationalization, which is refused because it names no creditor and no
+  retirement condition. This one names both. Binding conditions, all required:
+
+  1. **Retirement condition: carrier unification** (`String`/`StringV2` becoming
+     one) — not merely this ticket's monomorphization. Recorded in §12.5
+     alongside the `box_string`/#228 boundary, because it is the same duality.
+  2. The monomorph set carries `jit_string_eq` as a row with that retirement
+     condition stated inline, so it cannot be mistaken for a converged entry
+     point.
+  3. **A ratchet row on the kind-code parameter shape**, so it cannot propagate
+     to a second function while it exists.
+
+  I accept the ruling. I have not attempted the falsification the supervisor
+  offered (showing mixed `String`/`StringV2` comparison is impossible at the
+  emit site, which would make the codes unnecessary now) — it is a real
+  question, but it is #228/carrier-unification evidence, and gathering it would
+  not change what this slice does.
 - **DELETE `jit_v2_string_eq`** (`ffi/v2_string_ffi.rs:197`) — never registered
   in `ffi_builder.rs`, zero callers, unit tests pass by calling it directly.
   That is a textbook **tier-1-only** symbol (§1.1) and a textbook bucket-(c)
@@ -459,31 +528,122 @@ The ticket poses a dichotomy: per-kind monomorphized helpers where the emit
 site knows the kind, *or* an explicit kind parameter where genuinely
 polymorphic.
 
-**The second bucket is empty. Every converted entry point is monomorphized.**
+**The rule (no runtime kind parameter) stands. The premise the first two drafts
+gave for it was FALSE, and the correction adds scope.** Filed as **#257**.
 
-The rule, and why it is total:
+### 4.0 What was refuted, and what survives
 
-> A JIT emit site may only emit a value-producing FFI call when it has a
-> proven `NativeKind` for the destination slot. It therefore always knows which
-> monomorph to call. A site that cannot prove the destination kind does not get
-> a polymorphic fallback — it surface-and-stops, which is what it already does
-> today.
+The first draft asserted: *"every emit site must already prove its destination
+kind to `write_place`, and sites that cannot surface-and-stop today."* The
+second half is false, and I verified the refutation independently rather than
+accepting it.
 
-This is not a new rule; it is the existing contract, stated. `write_place`'s
-destination is a MIR `Place` whose slot kind is fixed by the storage planner
-and readable at the emit site via
-`mir_compiler/conversions.rs:29::slot_kind_of(SlotId) -> NativeKind`. Sites
-without a proof already fail closed — the two live messages are the W36
-named-call bail ("direct call to `mk` resolved to function index 194 but has no
-compile-time-proven `FrameDescriptor.return_kind` … no runtime inference or
-Null fallback. ADR-006 §2.7.5") and the Route A `Rvalue::Aggregate` surface.
+**Code evidence, confirmed at HEAD:**
 
-Adding a runtime kind parameter would therefore be strictly a **regression**:
-it would reintroduce a runtime type discriminator on a path where the compiler
-already has a static proof, which is CLAUDE.md §Forbidden ("Runtime `tag_bits`
-dispatch", "`SlotKind::Dynamic`") wearing a parameter instead of a tag word.
-I recommend the ADR record the emptiness of the second bucket explicitly so a
-later agent cannot reopen it as "the polymorphic case the design allowed for".
+- `mir_compiler/conversions.rs:29::slot_kind_of` — the function I cited as the
+  proof gate — is itself
+  `slot_kind_for_local(...).unwrap_or(NativeKind::Int64)`. **It fabricates.**
+  Its own docstring says so: *"Codegen sites that specifically need a 'kind was
+  proven by inference' answer should call `slot_kind_for_local` directly and
+  surface-and-stop on `None`."* I cited the function that documents itself as
+  not being the gate.
+- It is called **once** in non-test code (`places.rs:1463`, inside
+  `null_place`) and **never on an FFI-return path**. The mechanism I cited is
+  not the mechanism that runs.
+- `write_place`'s `Place::Local` arm fabricates the same default
+  (`places.rs:1299-1300`).
+- The guard does exist — at **one** emit site. The direct-call path checks
+  `slot_kind_for_local(&self.slot_kinds, dst.0).is_none()` and surfaces
+  (`terminators.rs:2045`). The generic method-call path
+  (`terminators.rs:822-879`) takes `inst_results(inst)[0]` and hands it to
+  `write_place` with **no such check**. It was written once and never applied
+  to its siblings.
+
+**Empirical evidence, reproduced independently on a clean release binary.**
+Seven `Array` methods emit silent wrong answers, natively dispatched, `rc=0`,
+no bail — the value is `TAG_NULL` read as `i64`:
+
+| expression | VM | JIT | rc |
+|---|---|---|---|
+| `a.slice(0,2).len()` | `2` | `-1407374883553280` | 0 |
+| `a.sort().len()` | `3` | `-1407374883553280` | 0 |
+| `a.concat([9]).len()` | `4` | `-1407374883553280` | 0 |
+| `a.zip([4,5,6]).len()` | `3` | `-1407374883553280` | 0 |
+| `a.take(2).len()` | `2` | `-1407374883553280` | 0 |
+| `a.skip(1).len()` | `2` | `-1407374883553280` | 0 |
+| **`a.unique().len()`** | `3` | *(no output)* | **134 — SIGABRT** |
+
+Two controls isolate the variable exactly: `let s: Array<int> = a.slice(0,2);
+s.len()` matches (the annotation seeds the slot kind), and `a.first().len()`
+matches (`first` is in the parametric table at `types.rs:1319`). Same shape;
+the only difference is whether a stamp exists.
+
+**One datum beyond the refutation as filed:** `a.unique().len()` does not
+merely return a wrong number, it **aborts (rc=134)**. That is a third live
+memory-safety signal in this ticket's territory, alongside #254 and the
+STAGE-F3 `DateTime` SIGSEGV (§3.0.1).
+
+**What survives, and it is the load-bearing half.** The *rule* is unaffected:
+a runtime kind parameter is still forbidden, because it would reintroduce a
+runtime type discriminator where the compiler is *supposed* to have a static
+proof — CLAUDE.md §Forbidden ("Runtime `tag_bits` dispatch",
+"`SlotKind::Dynamic`") wearing a parameter instead of a tag word. The
+refutation is not "you need polymorphism"; it is "you asserted the fail-closed
+behaviour already exists, and it does not".
+
+### 4.0.1 The rule, correctly stated
+
+> **Every value-producing FFI emit site must surface-and-stop when the
+> destination slot kind is unproven.** Where the kind is proven, the site calls
+> the corresponding monomorph. There is no polymorphic fallback and no runtime
+> kind parameter. **Today at least three emit sites violate this, and the
+> `unwrap_or` defaults that let them do so are in-scope prerequisites of this
+> conversion — they land before the monomorphization, not after.**
+
+**Why this ordering is not optional.** An implementer following the first
+draft writes `match slot_kind_of(dest)` to pick the monomorph, receives a
+fabricated `Int64` for an unproven slot, and calls `jit_call_method_i64` for a
+value that is actually `Ptr(HeapKind::TypedArray)`. Once `Float64` splits into
+its own monomorph (§4.1), an unproven slot holding an `f64` routes to the i64
+monomorph and receives raw bits — **exactly the `box_number` corruption §4.1
+claims the f64 monomorph eliminates.** Monomorphizing on an unguarded site does
+not fix the silent wrong answer; it changes its shape. The guard extension is a
+prerequisite, not a companion.
+
+### 4.0.2 The seven fabricating defaults (in-scope inventory)
+
+All verified at HEAD. #236 documents two of the seven.
+
+| site | default |
+|---|---|
+| `mir_compiler/places.rs:1300` | `unwrap_or(NativeKind::Int64)` — inside `write_place` |
+| `mir_compiler/conversions.rs:30` | `unwrap_or(NativeKind::Int64)` — inside `slot_kind_of` |
+| `mir_compiler/blocks.rs:90` | `unwrap_or(NativeKind::Int64)` |
+| `mir_compiler/rvalues.rs:301` | `unwrap_or(NativeKind::Int64)` |
+| `mir_compiler/statements.rs:872` | `unwrap_or(NativeKind::Int64)` |
+| `osr_compiler.rs:225` | `unwrap_or(NativeKind::Int64)` |
+| `mir_compiler/rvalues.rs:590` | `unwrap_or(NativeKind::UInt64)` |
+
+Deleting them turns `Option<NativeKind>` back into the proof it already is —
+the same mechanical enforcement `prove_native_kind() -> Result<_, ProofGap>`
+provides on the VM side (CLAUDE.md §Mechanical enforcement). The type system
+already carries the information; seven `unwrap_or`s throw it away.
+
+### 4.0.3 Prior art: the same walk-back, five more times
+
+`mir_compiler/types.rs` records this exact class being point-fixed **at least
+five times** by adding one more name arm to a keyed allowlist — HashMap `has`,
+HashSet `add`, Deque `pushBack`, `PriorityQueue::push`, and the iterator
+adapters. `well_known_method_return_kind` (`types.rs:1081`) is that allowlist,
+and its own comment promises "no fabricated default" while `write_place`
+fabricates one two files away.
+
+That is the **same three-strikes shape** §3.5.1 identifies for
+`compile_binop_dynamic_cmp`, found independently in a second subsystem: a
+kind-blind default, correct for the kinds someone had in mind, silently wrong
+for the rest, and rescued one name at a time. Two independent instances of one
+pattern is the argument for deleting the mechanism rather than extending the
+allowlist a sixth and a fourth time respectively.
 
 ### 4.1 Shape of the converted signatures
 
@@ -928,32 +1088,76 @@ argument above is only as good as the property that no other path can
 reintroduce a universal sentinel — and the §8 ratchet, not this paragraph, is
 what enforces that going forward.
 
+### 10.1.2 The honest performance consequence — write it down before it looks like a regression
+
+Closing §4.0's guard gap **will bail whole programs that natively execute
+today.** Every one of the seven `Array` shapes above is currently
+natively dispatched and fast; after the guard extension they deopt to the
+interpreter until their slot kinds are actually proven.
+
+That is correct — an honest deopt beats a silent wrong answer, and CLAUDE.md's
+"surface-and-stop, not force" says so — but it will read as a performance
+regression in any benchmark that touches array method chains, and the corpus
+native-dispatch rate (§1.2, currently 121/481) will **fall** before it rises.
+State it in the slice record with the expected direction, because an
+unexplained native-rate drop is exactly the kind of result someone reverts.
+
+The recovery is not a relaxation of the guard: it is stamping the kinds that
+are missing, which is `well_known_method_return_kind` coverage and #240's
+territory (generated-node provenance and comptime return pinning). **Do not
+close the guard gap by widening the allowlist** — that is §4.0.3's sixth
+point fix.
+
 ### 10.2 Carrier-level unit coverage that would actually bite
 
-The inherited warning is correct and I can now state its mechanism: the
-shape-jit `--lib` suite stays green through heap corruption because its tests
-exercise FFI functions **as Rust functions**, with hand-built arguments, never
-through Cranelift-emitted code. `jit_call_value(ctx)` called from a Rust test
-with a hand-built `JITContext` never exercises the emit site's kind stamping,
-which is where the lie lives. This is the §machinery-vs-wiring failure in its
-purest form: the test calls the machinery, the bug is in the wiring.
+The inherited warning is correct — **and the mechanism is worse than "the tests
+call the machinery"**. A grill refuter established that the FFI wiring is
+**structurally absent** from every test-built JIT module: FFI symbols reach
+emitted code only via `register_ffi_symbols` (`compiler/setup.rs:65`), which is
+called only from `JITCompiler::new`, while every test `JITBuilder` is built with
+`default_libcall_names()` and never sees it, and every test `declare_function`
+uses `Linkage::Local`. **Test-emitted code cannot link an FFI function at all.**
+Zero of 834 shape-jit unit tests compile-and-run a Shape program in the default
+gate. A green `--lib` suite is not weak evidence about the value-call carrier;
+it is *no* evidence, because the carrier is not present in the binary under
+test.
 
-Two coverage requirements, neither satisfiable by the existing suite shape:
+Three coverage requirements:
 
 1. **Producer/consumer kind-agreement assertion.** For every converted entry
-   point, a test that asserts the emit site's `slot_kind_of(destination)` and
-   the monomorph actually called agree. Mechanically: an emit-time debug
-   assertion in `MirToIR` that the chosen monomorph matches the destination
-   kind, exercised by compiling real MIR. This is the check that the
-   `ClosurePlaceholder` stamp/emit pair would have failed since it was written.
-2. **End-to-end differential through the CLI**, not the seam — the corpus
-   fixtures above. A carrier defect that only manifests when Cranelift-emitted
-   code retains a value is unobservable from any in-process unit test that
-   builds its own context.
+   point, an emit-time assertion in `MirToIR` that the chosen monomorph matches
+   the destination slot's **proven** kind — `slot_kind_for_local(...)`, never
+   `slot_kind_of` (§4.0) — and, per §4.2 O2, that a heap-kinded destination gets
+   the `_ptr` monomorph. This is the check the `ClosurePlaceholder` stamp/emit
+   pair would have failed since it was written, and the check that would have
+   caught all seven §4.0 Array shapes.
+2. **Un-gate `closure_dispatch_regression_tests` — a cheaper bite than I
+   assumed existed.** That module (34 tests, `mir_compiler/`) executes real
+   programs and asserts on returned values; its header records the pre-fix
+   symptom as returning `Null` instead of `Integer(6)` — the exact class this
+   ticket owns. It is `deep-tests`-gated on a **stale rationale**:
+   `mir_compiler/mod.rs:53-61` justifies the gate by saying
+   `ffi/control/mod.rs:171::jit_call_value` is `todo!(...)` and to "re-enable
+   when the kinded value-call ABI lands". **It landed** — `jit_call_value` has a
+   real body at `ffi/control/mod.rs:532` at HEAD. Re-run and un-gate it in this
+   slice; it is materially cheaper than the corpus differential and it bites at
+   the right layer.
+3. **End-to-end differential through the CLI** — the §10.1 corpus fixtures. A
+   carrier defect that only manifests when Cranelift-emitted code retains a
+   value is unobservable from any in-process unit test that builds its own
+   context.
 
-I recommend requirement 1 be stated in the slice record as the reason the
-`--lib` suite passing is *not* evidence, so a future reviewer does not read a
-green suite as coverage.
+**Gate arithmetic that has to change, and it is the reason this class ships.**
+Verified in the justfile: `just test` (Tier 2, line 64) passes
+`--features shape-jit/deep-tests`; **`just test-all` (line 88), the merge
+blocker, does not** — it passes only the `shape-vm`/`shape-runtime`/`shape-ast`
+deep features. So every test capable of observing this class is **absent from
+the merge gate**. Un-gating per (2) is necessary but not sufficient; `test-all`
+must also carry `shape-jit/deep-tests`, or the tests exist and the gate still
+cannot see them.
+
+State in the slice record that the `--lib` suite passing is *not* evidence, so a
+future reviewer does not read a green suite as coverage.
 
 ### 10.3 Standing gates
 
@@ -1001,8 +1205,13 @@ For the record, since each of these would have mis-scoped the work:
 
 ## 12. Wanted from review
 
-1. **Ratification that the polymorphic bucket is empty** (§4) and that the ADR
-   should say so, closing it against reopening.
+1. ~~**Ratification that the polymorphic bucket is empty**~~ — **REFUTED**
+   (#257). The *rule* stands (no runtime kind parameter) and I still want it
+   ADR-recorded; the *premise* that unproven sites already surface-and-stop was
+   false. Rewritten as §4.0/§4.0.1: unproven destinations **must** surface-and-
+   stop, at least three emit sites do not, and closing that plus deleting the
+   seven `unwrap_or` defaults are **in-scope prerequisites** landing before the
+   monomorphization. What I now want ratified is that ordering.
 2. ~~**A ruling on the §9 precondition**~~ — **RATIFIED** (grill round 1,
    without reservation): corpus fixtures for the three closure shapes land
    before the conversion, in the same slice, and this is inside the mandate.
