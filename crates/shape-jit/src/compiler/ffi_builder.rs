@@ -271,6 +271,10 @@ impl JITCompiler {
             // F5.a/F5.b: string `+` FFI (used by MIR BinaryOp::Add on
             // NativeKind::String operands, incl. f-string desugared chains).
             string_concat: r!("jit_string_concat"),
+
+            // #232: string `==` / `!=` (used by MIR BinaryOp::Eq/Ne when both
+            // operands are proven NativeKind::String).
+            string_eq: r!("jit_string_eq"),
             format_default_i64: r!("jit_format_default_i64"),
             format_default_bool: r!("jit_format_default_bool"),
             format_default_f64: r!("jit_format_default_f64"),

@@ -53,6 +53,35 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                     return self.compile_string_concat(l, lhs_kind, r, rhs_kind);
                 }
 
+                // #232 jit-string-eq: string `==` / `!=` — content compare
+                // via FFI. Checked BEFORE every scalar classifier below so a
+                // string comparison never reaches the kind-blind generic
+                // `compile_binop_dynamic_cmp`, whose Eq/Ne arm emits a raw
+                // `icmp` on the operand bits. For `NativeKind::String` those
+                // bits are `Arc::into_raw(Arc<String>)` POINTERS, so that
+                // compare tested Arc IDENTITY rather than content: two
+                // separately-allocated strings holding identical bytes
+                // compared unequal. Literals coincidentally agreed (one
+                // interned Arc), which is why the defect only surfaced on
+                // runtime-constructed strings — f-string interpolation and
+                // `+` concat — where the JIT diverged from the VM's
+                // `EqString` opcode (`shape-vm/src/executor/comparison/
+                // mod.rs::cmp_string_eq_kinded`, content equality through a
+                // kind-driven `&str` accessor).
+                //
+                // Unlike the `Add` arm above this requires BOTH operands to
+                // be proven `NativeKind::String`, not either: `str + <any>`
+                // is a meaningful render, but `<string> == <scalar>` is not a
+                // comparison the FFI may answer by formatting one side —
+                // that would manufacture equality the VM does not have.
+                // Anything else (mixed kinds, `NativeKind::StringV2`, an
+                // unproven stamp) keeps falling through and surfaces, which
+                // deopts the enclosing function to the interpreter and so
+                // preserves VM == JIT rather than guessing.
+                if matches!(op, BinOp::Eq | BinOp::Ne) && Self::both_string(lhs_kind, rhs_kind) {
+                    return self.compile_string_eq(op, l, lhs_kind, r, rhs_kind);
+                }
+
                 // r5c-2-gz-cp6 narrow-neg-literal: narrow integer
                 // COMPARISON (i8/i16/i32/u8/u16/u32 against another narrow,
                 // a width-polymorphic literal, or a genuine `int`). Checked
@@ -936,6 +965,32 @@ impl<'a, 'b> MirToIR<'a, 'b> {
             || matches!(rhs, Some(shape_vm::type_tracking::NativeKind::String))
     }
 
+    /// #232: true when BOTH operand kinds are proven `NativeKind::String`.
+    ///
+    /// The `Eq`/`Ne` sibling of [`Self::either_string`], and deliberately
+    /// stricter. Concat may render a non-string operand; equality may not —
+    /// formatting one side to compare it would invent an equality the VM's
+    /// `EqString` never reports. Requiring both sides also makes the operand
+    /// kind codes reaching `jit_string_eq` exact, so its §2.7.7 #9 surface
+    /// arm stays a genuine producer-gap assertion rather than a live path.
+    ///
+    /// Scoped to `NativeKind::String` (the `Arc<String>` carrier that
+    /// f-string interpolation and `+` concat produce). `NativeKind::StringV2`
+    /// is deliberately excluded: its slots have no retain arm in
+    /// `ownership.rs::retain_func_for_place` (they fall to the legacy
+    /// `arc_retain`), so the strong-count contract `jit_string_eq` relies on
+    /// does not hold for them. A StringV2 comparison therefore keeps
+    /// surfacing and deopts, which is correct-but-slower rather than
+    /// fast-and-wrong. Widening this to one carrier-blind string kind is
+    /// representation-program territory (ADR-020 / #239), not a local patch.
+    fn both_string(
+        lhs: Option<shape_vm::type_tracking::NativeKind>,
+        rhs: Option<shape_vm::type_tracking::NativeKind>,
+    ) -> bool {
+        matches!(lhs, Some(shape_vm::type_tracking::NativeKind::String))
+            && matches!(rhs, Some(shape_vm::type_tracking::NativeKind::String))
+    }
+
     /// W15.2-LANG-7 jit-print-fstring close (Phase 4b Round 3, 2026-05-18):
     /// emit a call to the kind-aware
     /// `jit_string_concat(a_bits, a_kind_code, b_bits, b_kind_code) -> bits`
@@ -979,6 +1034,60 @@ impl<'a, 'b> MirToIR<'a, 'b> {
             .ins()
             .call(self.ffi.string_concat, &[a, a_code_val, b, b_code_val]);
         Ok(self.builder.inst_results(inst)[0])
+    }
+
+    /// #232 jit-string-eq: emit the content compare for `==` / `!=` on two
+    /// proven `NativeKind::String` operands.
+    ///
+    /// Mirrors [`Self::compile_string_concat`]'s operand protocol exactly —
+    /// both operand `Value`s widened to their I64 bit patterns, each paired
+    /// with its ADR-006 §2.7.5/§2.7.7 producer-side kind stamp. The call-site
+    /// gate ([`Self::both_string`]) guarantees both stamps are `String`, so
+    /// `operand_slot_kind` returns `Some(_)` on both sides by construction
+    /// and the SENTINEL encoding is unreachable here.
+    ///
+    /// `jit_string_eq` returns 1/0 in an I8 — the Cranelift width of a
+    /// `NativeKind::Bool` slot, so the `Eq` result is returned unchanged.
+    /// `Ne` inverts with `icmp_imm(Equal, res, 0)`, which yields 1 exactly
+    /// when the contents differ and keeps the result at I8.
+    ///
+    /// The FFI CONSUMES one strong-count share per operand (`Arc::from_raw`
+    /// + drop), matching the `Operand::Copy` retain that
+    /// `ownership.rs::compile_operand` emits for a refcounted slot — the
+    /// same contract `jit_string_concat` relies on. No extra retain or
+    /// release is emitted here.
+    fn compile_string_eq(
+        &mut self,
+        op: &BinOp,
+        lhs: Value,
+        lhs_kind: Option<shape_vm::type_tracking::NativeKind>,
+        rhs: Value,
+        rhs_kind: Option<shape_vm::type_tracking::NativeKind>,
+    ) -> Result<Value, String> {
+        use crate::ffi::stack_kind_code;
+        let a = self.to_i64_bits(lhs);
+        let b = self.to_i64_bits(rhs);
+        let a_code = lhs_kind
+            .map(stack_kind_code::encode)
+            .unwrap_or(stack_kind_code::SENTINEL);
+        let b_code = rhs_kind
+            .map(stack_kind_code::encode)
+            .unwrap_or(stack_kind_code::SENTINEL);
+        let a_code_val = self.builder.ins().iconst(types::I8, a_code as i64);
+        let b_code_val = self.builder.ins().iconst(types::I8, b_code as i64);
+        let inst = self
+            .builder
+            .ins()
+            .call(self.ffi.string_eq, &[a, a_code_val, b, b_code_val]);
+        let eq = self.builder.inst_results(inst)[0];
+        match op {
+            BinOp::Eq => Ok(eq),
+            BinOp::Ne => Ok(self.builder.ins().icmp_imm(IntCC::Equal, eq, 0)),
+            other => Err(format!(
+                "compile_string_eq: called with {other:?} — the call-site gate in \
+                 `compile_rvalue` admits only BinOp::Eq / BinOp::Ne."
+            )),
+        }
     }
 
     // ── Fuzzy comparisons ───────────────────────────────────────────

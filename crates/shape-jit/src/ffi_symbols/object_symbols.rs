@@ -14,7 +14,7 @@ use super::super::ffi::conversion::{
     jit_print_f64, jit_print_hashmap, jit_print_hashset, jit_print_i64, jit_print_iterator,
     jit_print_lazy, jit_print_mutex, jit_print_option, jit_print_priority_queue, jit_print_range,
     jit_print_result, jit_print_str, jit_print_typed_array, jit_print_typed_object, jit_print_u64,
-    jit_string_concat, jit_to_number, jit_to_string, jit_type_check, jit_typeof,
+    jit_string_concat, jit_string_eq, jit_to_number, jit_to_string, jit_type_check, jit_typeof,
 };
 #[allow(deprecated)]
 use super::super::ffi::object::{
@@ -60,6 +60,9 @@ pub fn register_object_symbols(builder: &mut JITBuilder) {
     builder.symbol("jit_to_number", jit_to_number as *const u8);
     // F5.a/F5.b: string `+` for `"a" + "b"` and `f"..."`-desugared concat chains.
     builder.symbol("jit_string_concat", jit_string_concat as *const u8);
+    // #232: string `==` / `!=` content compare (the raw pointer `icmp` in
+    // `compile_binop_dynamic_cmp` tested Arc identity, not content).
+    builder.symbol("jit_string_eq", jit_string_eq as *const u8);
     // W88A containment: these Result producer symbols stay registered only as
     // fail-closed backstops for stale FFIFuncRefs. Normal MIR EnumStore
     // lowering deopts before emitting them because the old bodies would
@@ -632,6 +635,25 @@ pub fn declare_object_functions(module: &mut JITModule, ffi_funcs: &mut HashMap<
             .declare_function("jit_string_concat", Linkage::Import, &sig)
             .expect("Failed to declare jit_string_concat");
         ffi_funcs.insert("jit_string_concat".to_string(), func_id);
+    }
+
+    // #232 jit-string-eq: jit_string_eq(a_bits: u64, a_kind_code: u8,
+    //                                   b_bits: u64, b_kind_code: u8) -> u8
+    // Same kind-stamped operand ABI as `jit_string_concat` above (ADR-006
+    // §2.7.5/§2.7.7 producer-side stamp, one kind byte per operand).
+    // Returns 1/0 in an I8 — the Cranelift width a `NativeKind::Bool` slot
+    // uses, so the result feeds the comparison consumers unchanged.
+    {
+        let mut sig = module.make_signature();
+        sig.params.push(AbiParam::new(types::I64));
+        sig.params.push(AbiParam::new(types::I8));
+        sig.params.push(AbiParam::new(types::I64));
+        sig.params.push(AbiParam::new(types::I8));
+        sig.returns.push(AbiParam::new(types::I8));
+        let func_id = module
+            .declare_function("jit_string_eq", Linkage::Import, &sig)
+            .expect("Failed to declare jit_string_eq");
+        ffi_funcs.insert("jit_string_eq".to_string(), func_id);
     }
 
     // W88A fail-closed Result producer ABI backstops. Signature:
