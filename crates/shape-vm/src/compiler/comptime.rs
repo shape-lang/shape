@@ -51,12 +51,6 @@ const TYPE_REF_FORWARDER: &str = "\u{1}comptime:forward-type-ref";
 // crosses into the mini-VM (Dec 49).
 const TRAIT_REF_FORWARDER: &str = "\u{1}comptime:forward-trait-ref";
 
-/// `find_impl`'s forwarder return annotation: `Option<ImplRef-carrier>`.
-/// Must stay byte-identical to
-/// `format!("Option<{COMPTIME_FROZEN_IMPL_REF_SCHEMA}>")` — pinned by
-/// `find_impl_forwarder_return_marker_matches_the_impl_ref_schema`.
-const FIND_IMPL_RETURN_MARKER: &str = "Option<\u{1}comptime:ImplRef>";
-
 // ADR-009 B4 (Stage 2, Dec 54): uniform nominal-application forwarders.
 // `type_constructor(C)` lowers (like `type_ref`) to this unspellable forwarder
 // carrying the FROZEN head identity as int literals — a name string never
@@ -83,11 +77,6 @@ const TYPE_ARGUMENT_FORWARDER: &str = "\u{1}comptime:forward-type-argument";
 // arity-2 forwarders unchanged.
 const BEFORE_HOOK_NOCAPTURE_FORWARDER: &str = "\u{1}comptime:forward-before-hook-nocapture";
 const AFTER_HOOK_NOCAPTURE_FORWARDER: &str = "\u{1}comptime:forward-after-hook-nocapture";
-
-/// `refine`'s forwarder return annotation: `Option<AppliedType-carrier>`. Must
-/// stay byte-identical to `format!("Option<{COMPTIME_APPLIED_TYPE_SCHEMA}>")` —
-/// pinned by `refine_forwarder_return_marker_matches_the_applied_type_schema`.
-const REFINE_RETURN_MARKER: &str = "Option<\u{1}comptime:AppliedType>";
 
 /// ADR-009 B6 R1 (Dec 63): a `FrozenCallable`'s parameters are selected by
 /// signature POSITION (`callable.param(I)`) or a hygienic token that resolves
@@ -4467,30 +4456,70 @@ annotation reflect() on type {
         );
     }
 
-    /// Drift pin: the find_impl forwarder's `Option<...>` return marker must
-    /// wrap exactly the reserved ImplRef carrier schema name.
+    /// Drift pin: the find_impl forwarder's return must be
+    /// `Option<reserved ImplRef carrier schema>`.
+    ///
+    /// #240 (A1): re-pointed at the LIVE derivation. This used to compare a
+    /// hand-written `FIND_IMPL_RETURN_MARKER` constant against the schema name;
+    /// once the forwarder's return started deriving from the intrinsic catalog
+    /// that constant fed nothing, so the pin was asserting a dead string
+    /// matched a schema — vacuous. It now asserts what the forwarder actually
+    /// gets, which is the invariant the pin was written to protect.
     #[test]
     fn find_impl_forwarder_return_marker_matches_the_impl_ref_schema() {
+        let declared = gap3_catalog_return("find_impl");
         assert_eq!(
-            super::FIND_IMPL_RETURN_MARKER,
-            format!(
-                "Option<{}>",
-                shape_runtime::type_schema::builtin_schemas::COMPTIME_FROZEN_IMPL_REF_SCHEMA
-            )
+            super::forwarder_return_annotation(&declared),
+            Some(shape_ast::ast::TypeAnnotation::option(
+                shape_ast::ast::TypeAnnotation::Basic(
+                    shape_runtime::type_schema::builtin_schemas::COMPTIME_FROZEN_IMPL_REF_SCHEMA
+                        .to_string()
+                )
+            )),
         );
     }
 
-    /// ADR-009 B4 drift pin: the refine forwarder's `Option<...>` return marker
-    /// must wrap exactly the reserved AppliedType carrier schema name.
+    /// ADR-009 B4 drift pin: the refine forwarder's return must be
+    /// `Option<reserved AppliedType carrier schema>`. #240 (A1): re-pointed at
+    /// the live derivation, same reason as the find_impl pin above.
     #[test]
     fn refine_forwarder_return_marker_matches_the_applied_type_schema() {
+        let declared = gap3_catalog_return(super::REFINE_FORWARDER);
         assert_eq!(
-            super::REFINE_RETURN_MARKER,
-            format!(
-                "Option<{}>",
-                shape_runtime::type_schema::builtin_schemas::COMPTIME_APPLIED_TYPE_SCHEMA
-            )
+            super::forwarder_return_annotation(&declared),
+            Some(shape_ast::ast::TypeAnnotation::option(
+                shape_ast::ast::TypeAnnotation::Basic(
+                    shape_runtime::type_schema::builtin_schemas::COMPTIME_APPLIED_TYPE_SCHEMA
+                        .to_string()
+                )
+            )),
         );
+    }
+
+    /// The declared return `ConcreteType` of the intrinsic a FORWARDER targets.
+    ///
+    /// #240: the catalog is the single authority, so a drift pin reads from it
+    /// rather than from a parallel constant. The target method is resolved
+    /// through the forwarder table rather than spelled here — hand-typing the
+    /// intrinsic name would reintroduce the second authority these pins used to
+    /// carry (and the names are SOH-prefixed and unspellable anyway).
+    fn gap3_catalog_return(forwarder: &str) -> shape_runtime::typed_module_exports::ConcreteType {
+        let target = super::COMPTIME_BUILTIN_FORWARDERS
+            .iter()
+            .find_map(|(name, _, target, _, _)| (*name == forwarder).then_some(*target))
+            .unwrap_or_else(|| panic!("no forwarder row named '{forwarder}'"));
+        let module = crate::compiler::comptime_builtins::create_comptime_builtins_module(
+            Default::default(),
+            crate::compiler::comptime_builtins::semantic_freeze::overlay_for_tests(
+                &crate::compiler::BytecodeCompiler::new(),
+            ),
+        );
+        module
+            .typed_exports()
+            .get(target)
+            .unwrap_or_else(|| panic!("forwarder '{forwarder}' targets unregistered intrinsic"))
+            .return_type
+            .clone()
     }
 
     /// ADR-009 B4: `type_constructor(Head)` lowers the bare nominal head to its
@@ -6341,18 +6370,26 @@ mod forwarder_contract_tests {
             // heads — `classify_type_annotation_metadata` stamps those
             // `plain_without_kind`, a positive "structurally not Option/Result"
             // fact, so they classify without a resolvable concrete type.
+            // #240: the check is TOTAL over the remaining rows, Option
+            // included. It used to skip `Option<...>` because the rendering is
+            // a composite rather than a `Basic` — which left the two
+            // Option-returning reflection forwarders (find_impl, refine)
+            // covered only by their own hand-written marker constants. Those
+            // constants died with the `named_return_type` column, so skipping
+            // here would have left the rows with no drift coverage at all.
             let expected = declared.shape_type_name();
             let actual = match &rendered {
                 TypeAnnotation::Basic(n) => n.clone(),
-                other => format!("{other:?}"),
+                composite => match composite.option_inner() {
+                    Some(TypeAnnotation::Basic(inner)) => format!("Option<{inner}>"),
+                    _ => format!("{composite:?}"),
+                },
             };
-            if !expected.starts_with("Option<") {
-                assert_eq!(
-                    actual, expected,
-                    "forwarder '{name}': rendered annotation disagrees with the catalog's \
-                     declared spelling — the table has drifted from the intrinsic contract",
-                );
-            }
+            assert_eq!(
+                actual, expected,
+                "forwarder '{name}': rendered annotation disagrees with the catalog's \
+                 declared spelling — the table has drifted from the intrinsic contract",
+            );
         }
     }
 }

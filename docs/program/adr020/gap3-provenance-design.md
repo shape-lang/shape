@@ -741,3 +741,45 @@ does not touch `capture_plan/`. Recorded so it is not lost — an annotation who
 `replace body` contains a closure panicking rather than producing a clean
 diagnostic on the production path is worth someone's attention, but the claim
 here is only "observed", not "caused by" or "pre-existing".
+
+---
+
+## 12. Dead constants from the A1 deletion — traced, not assumed (2026-08-01)
+
+Two constants in `compiler/comptime.rs` went dead when A1 deleted the
+`named_return_type` column, and `rustc` reported both. Traced before touching:
+each had exactly two consumers — its own definition and a `#[cfg(test)]` **drift
+pin** asserting the constant matched a reserved carrier schema name.
+
+They were genuinely orphaned (their doc comments name them as "the forwarder
+return annotation", which is precisely what A1 replaced). **But deleting them
+outright would have silently dropped real coverage**, and that is the part the
+warning cannot see:
+
+- The two pins protected an invariant that still matters — the `find_impl` and
+  `refine` forwarders return `Option<reserved carrier schema>`.
+- After A1 those pins were **vacuous**: they compared a dead string against a
+  schema, asserting nothing about what the forwarder actually gets.
+- A1's own agreement guard **skipped `Option<...>` rows** (the rendering is a
+  composite, not a `Basic`), so those two rows would have been left with no
+  drift coverage at all.
+
+Resolution, three parts:
+
+1. Both constants deleted.
+2. Both pins **re-pointed at the live derivation** — they now assert
+   `forwarder_return_annotation(catalog_declared)` is
+   `Option<reserved schema>`, i.e. the invariant they were written to protect,
+   measured against what runs.
+3. A1's agreement guard made **total** over Option rows, so the general drift
+   check no longer has a hole where these two rows live.
+
+The pins resolve their target intrinsic **through the forwarder table** rather
+than spelling it. A first attempt hardcoded the target names and failed — they
+are SOH-prefixed and unspellable — and hand-typing them would have reintroduced
+exactly the second authority the dead constants were.
+
+**The generalisable point:** a dead-code warning tells you a symbol is unused,
+not whether the thing it participated in is still covered. Here the warning was
+correct and the naive response to it (delete both, done) would have quietly
+widened a coverage gap that A1 had already opened elsewhere.
