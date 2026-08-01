@@ -1132,6 +1132,58 @@ and the reason the deletion belongs in this slice rather than a follow-up.
 
 ---
 
+### 6.3 Implementation path for the flip — feasibility established, construction recorded
+
+Established at `af64e8be` before starting the edit, so the next actor does not
+re-derive it.
+
+**1. The layout is available at emit time.** The flip needs a `ClosureLayout` for
+a `fid` at JIT *compile* time, because `ownership.rs` emits an `iconst` of the
+carrier value. `closure_function_layouts: HashMap<u16, Arc<ClosureLayout>>` is a
+field on `MirToIR` (`mir_compiler/mod.rs:447`, used at `statements.rs:648,670`),
+so the emit site can consult it directly.
+
+**2. A zero-capture layout is constructible for named functions.**
+`MirConstant::Function(name)` names a *function*, not a closure body, so it has
+no registered layout — this is the gap the pool must fill.
+`ClosureLayout::from_capture_types(&[], &[])`
+(`shape-value/src/v2/closure_layout.rs:999`) is well-formed on empty slices: the
+length-equality and ≤64 preconditions hold, there is no `ConcreteType::Void` to
+panic on, and all three masks come out 0.
+
+**3. The record construction mirrors the VM's**, at
+`shape-vm/src/executor/call_convention.rs:1327-1332`:
+
+```rust
+let ptr = alloc_typed_closure(fid, /*type_id*/ 0, &layout_arc);
+// zero captures: no write_capture_raw_u64 calls
+let block = OwnedClosureBlock::from_raw(ptr, layout_arc);
+// -> HeapValue::ClosureRaw(block) -> Arc::new -> leak ONE permanent share
+```
+
+Immortality per ADR-020 §3.4 is one leaked share — no header flag, no branch on
+the RC hot path — mirroring `arc_string_constant`
+(`ffi/string.rs:213`), which holds a pool share and hands out an incremented
+one.
+
+**4. The #227 slice-2 blocker looks NARROWER than recorded, and this needs
+confirming before it is trusted.** The revert reason was recorded as
+"`dispatch_borrowed_closure_via_trampoline_vm` cannot execute a zero-capture
+record". Reading that consumer (`ffi/control/mod.rs:259-365`), **nothing rejects
+zero captures**: `no_cell_captures` is trivially true with all masks 0,
+`total_args` reduces to `arg_pairs.len()`, and the native path is taken whenever
+the function table has a non-null entry for the fid. The capture loop
+`for i in 0..layout.capture_count()` simply does not execute.
+
+So the blocker is more likely to be the **function-table entry for a named
+function's fid**, or a record minted without a valid `TypedClosureHeader`, than a
+structural inability to dispatch zero captures. **Do not treat this paragraph as
+a refutation** — it is a reading, not a measurement, and the #227 lane had the
+failing artifact in hand while this is inference from source. Confirm by
+constructing the record and calling it before building anything on top; if the
+consumer does reject it, the reason will be visible immediately and is the thing
+to fix first.
+
 ## 7. The third carrier
 
 `jit_make_closure` (`crates/shape-jit/src/ffi/object/closure.rs:40`) produces
