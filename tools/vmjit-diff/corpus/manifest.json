@@ -2451,6 +2451,11 @@
       "id": "SYN__string-scalar-method-native.shape",
       "tier": "synthetic",
       "source": "tools/vmjit-diff/synthetic/SYN__string-scalar-method-native.shape"
+    },
+    {
+      "id": "SYN__closure-l106.shape",
+      "tier": "synthetic",
+      "source": "tools/vmjit-diff/synthetic/SYN__closure-l106.shape"
     }
   ]
 }

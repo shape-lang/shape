@@ -1314,6 +1314,41 @@ not the condition itself (§6.1); any escaping form works. Repro B is the
 exception: it reproduces in both forms, so its fixture may take either — but see
 §6.1 on why B's fixture must additionally assert native execution.
 
+### 10.1.0 EVERY row asserts native execution — the differential can no longer see the defect
+
+**This requirement supersedes the "post-fix" column above for every row, not
+just the positive ones.**
+
+After #257, the native-dispatch rate is 11/482 corpus programs. With the native
+tier inert, `--mode jit` and `--mode vm` run **the same interpreter**, so VM==JIT
+agreement is nearly free and proves only that the program ran — not that it ran
+natively and got the right answer.
+
+**Measured proof that this is not hypothetical.** #257 flipped five known-red
+entries to MATCH, and this lane initially reported that as five defects fixed.
+All five were then checked with `--native-witness`: every one is
+`program_fallback: jit-compile-error` with **zero native dispatches**. They match
+because the JIT never runs. **That is the defect being masked, not fixed** — and
+retiring those pins would silently re-arm five defects (two release-blocking:
+#232's permission divergence and #219) the moment the native rate recovers.
+
+This is the same shape as #224's original finding — *"whole program previously
+bailed via unit-returning `fn main`, so VM==JIT trivially"* — which is what
+unmasked #231 and #232 in the first place. The wheel has turned once around.
+
+**Requirement.** Every acceptance fixture asserts `sum(native_dispatches) > 0`
+under `--mode jit --native-witness`, enforced by
+`scripts/check-jit-native-acceptance.sh` (`just check-jit-native-acceptance`).
+
+**The two metrics are NOT interchangeable.** `program_fallback == null` and
+`sum(native_dispatches) > 0` differ by an order of magnitude on the same sample
+(16.7% vs 0%): a per-function bail leaves `program_fallback` null while nothing
+runs natively. **The gate requires non-zero DISPATCHES.** Asserting the absence
+of a program-level bail would pass while the tier is inert.
+
+Until the conversion lands this gate fails for every row, by design — it is the
+conversion's acceptance criterion, not a merge blocker for the earlier steps.
+
 Two load-bearing *positive* fixtures, which is the pair that proves the
 conversion delivered a typed channel rather than renaming the untyped one:
 `SYN__string-scalar-method` (STAGE-StringJIT gone) and
@@ -1372,25 +1407,42 @@ argument above is only as good as the property that no other path can
 reintroduce a universal sentinel — and the §8 ratchet, not this paragraph, is
 what enforces that going forward.
 
-### 10.1.2 The honest performance consequence — write it down before it looks like a regression
+### 10.1.2 The performance consequence — MEASURED, and worse than this section first said
 
-Closing §4.0's guard gap **will bail whole programs that natively execute
-today.** Every one of the seven `Array` shapes above is currently
-natively dispatched and fast; after the guard extension they deopt to the
-interpreter until their slot kinds are actually proven.
+**Original text said the native rate "falls before it rises". That is true and
+materially understates it. Corrected with the measurement.**
 
-That is correct — an honest deopt beats a silent wrong answer, and CLAUDE.md's
-"surface-and-stop, not force" says so — but it will read as a performance
-regression in any benchmark that touches array method chains, and the corpus
-native-dispatch rate (§1.2, currently 121/481) will **fall** before it rises.
-State it in the slice record with the expected direction, because an
-unexplained native-rate drop is exactly the kind of result someone reverts.
+#257 landed (deleting the fabricated `Int64` destination default). Measured on
+the full corpus, branch vs the `dac5fe7e` control, both binaries built from
+source:
 
-The recovery is not a relaxation of the guard: it is stamping the kinds that
-are missing, which is `well_known_method_return_kind` coverage and #240's
-territory (generated-node provenance and comptime return pinning). **Do not
-close the guard gap by widening the allowlist** — that is §4.0.3's sixth
-point fix.
+| | control | after #257 |
+|---|---|---|
+| programs with ≥1 native dispatch | **121 / 481** | **11 / 482** |
+
+**A 91% reduction. The native tier is effectively inert in the intermediate
+state** — not "reduced". Even L106 (`let inc = |x| x + 1; print(inc(10))`), the
+simplest closure call in the language, now executes zero native dispatches. A
+60-program sample taken independently by the supervisor found **0 of 60**
+executing any native code.
+
+This is correct — an honest bail beats a silent wrong answer, and CLAUDE.md's
+"surface-and-stop, not force" says so. The owner accepted it. But it must be
+written with its true magnitude, because:
+
+1. **Any JIT-shaped benchmark run in this window measures the interpreter.**
+2. **The corpus differential is degraded as a gate** for exactly as long as this
+   lasts (§10.1.0, §10.3) — it can no longer distinguish "correct because the
+   channel works" from "correct because nothing ran".
+
+**The recovery is NOT a natural rebound**, and describing it as "rises" invited
+that reading. It is two pieces of deliberate work: this ticket's conversion, and
+stamping the kinds that are missing — `well_known_method_return_kind` coverage,
+#240 territory (generated-node provenance, comptime return pinning) and #262.
+Nothing recovers on its own.
+
+**Do not close the guard gap by widening the allowlist** — that is §4.0.3's
+sixth point fix, and it would restore the native rate by restoring the defect.
 
 ### 10.2 Carrier-level unit coverage that would actually bite
 
@@ -1454,6 +1506,17 @@ future reviewer does not read a green suite as coverage.
 
 ### 10.3 Standing gates
 
+**READ THIS FIRST: the corpus differential is DEGRADED as a gate until the
+conversion restores the native rate (§10.1.2).** With 11/482 programs executing
+native code, `--mode jit` and `--mode vm` run the same interpreter for almost
+every program, so a MATCH is nearly free. Five known-red entries flipped to MATCH
+under #257 and all five were verified bail-masked — zero native dispatches
+(§10.1.0). **A green corpus in this window is not evidence about the value
+channel.** Pair every differential claim with
+`just check-jit-native-acceptance`, and treat a MATCH on a program with zero
+native dispatches as "not yet tested", not "passing".
+
+
 Full 481-program corpus differential, 0 unexpected. `known-red.json` has already
 moved under this design: the `jit-vm-permission-check-divergence` class was
 retired by #232, so the baseline this slice diffs against is **not** the one §1
@@ -1485,10 +1548,22 @@ careless:
 | supervisor | `verify-merge` passed on the merged tree | that a commit message's description of that tree was accurate — it named a deletion that had not happened |
 | this lane (§4.0) | a proof gate named `slot_kind_of` **exists** | that unproven emit sites **stop** — the function is a fabricating `unwrap_or(Int64)` and is never called on an FFI-return path |
 | this lane (§7.1) | 0 executions across 481 corpus programs | that no producer **exists** — with an instrument that cannot distinguish absence from non-arrival |
+| this lane (§10.1.0) | five known-red programs now produce **identical VM and JIT output** | that five defects were **fixed** — all five have zero native dispatches; they agree because the JIT never runs |
+| safety-perms | `verify-merge` reported **22/22 PASS** | that a merge had **completed** — the tree still had unmerged files; the gate cannot observe an in-progress conflicted merge |
+| this lane (§1.1) | a grep for *"is this field named anywhere"* returned 184 | that 184 symbols appear in a `builder.ins().call(...)` — the narrow claim is unsound, since a `FuncRef` can be selected into a local and called indirectly (142 false positives when measured) |
 
 The general form: **a check was run, it passed, and its result was reported as
 a different proposition than the one it tested.** Each check was real. None was
 evidence for the claim it was offered for.
+
+**Six instances now, across three people, in under two days — and four are this
+lane's.** The rate matters more than any individual case: this is not a lapse,
+it is the default failure mode of verification under time pressure. Note also
+that instance 4 (the bail-masked MATCHes) was caught **by someone else
+re-checking a number this lane had already reported**, which is the only reason
+five pins were not retired and five defects silently re-armed. The countermeasure
+that actually worked was not care — it was a second party re-deriving the claim
+from the artifact rather than from the report.
 
 The countermeasure is not "be more careful"; all three were careful. It is to
 state, for every claim, *which artifact* was examined and *what would have made
