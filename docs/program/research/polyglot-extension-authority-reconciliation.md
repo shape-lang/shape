@@ -25,9 +25,13 @@ built from it make Shape core/tooling the authority for:
 - the `[foreign.<language>]` environment schema;
 - checker identity and settings;
 - Python environment layout;
-- the canonical cross-language marshalling table;
 - which TypeScript module forms are supported; and
 - when and how the foreign checker participates.
+
+Core also owns the canonical cross-language marshalling table, but that one is
+inherited rather than decided by ADR-019, which lists the existing copy-only
+marshalling among the defects it starts from
+([ADR-019 lines 28-31](../../adr/019-polyglot-depth-and-foreign-toolchain-integration.md#L28)).
 
 The map instead fixes a language-runtime extension as the exclusive authority
 for its body checking, native package ecosystem, environment construction,
@@ -58,12 +62,15 @@ The route is therefore:
   self-skipping evidence. It is not reported as shipped behavior.
 - ADR-019 is formally **Proposed**, not accepted
   ([ADR-019 lines 3-16](../../adr/019-polyglot-depth-and-foreign-toolchain-integration.md#L3)),
-  even though its implementation amendments for stubs, buffers, environments,
-  foreign references, and async are in production code
+  even though the two slices it carries implementation amendments for — the
+  capability block (§2.1, #199) and declared environments (§4.1, #198) — are in
+  production code
   ([ADR-019 lines 120-169](../../adr/019-polyglot-depth-and-foreign-toolchain-integration.md#L120),
   [lines 230-300](../../adr/019-polyglot-depth-and-foreign-toolchain-integration.md#L230)).
-  The implementation is evidence; “Proposed” is not permission to treat its
-  authority split as ratified.
+  Those are its *only* two implementation amendments: the stub-channel and
+  async work landed under other authorities, and the foreign-reference carrier
+  is staged rather than live (§4). The implementation is evidence; “Proposed”
+  is not permission to treat its authority split as ratified.
 
 ## Classification summary
 
@@ -206,8 +213,10 @@ The committed Book patch states this limitation honestly
 
 ### ADR-019 authority conflict
 
-ADR-019 says a host `ForeignToolchainProvider` runs pyright/tsc and that a
-core-defined per-language lockfile pins the checker
+ADR-019 routes foreign checking through one `ForeignToolchainProvider` per
+language, registered with `ComptimeHost`, which runs pyright/tsc. It does not
+say whether core or the extension supplies that provider — but it does make the
+checker pin core-defined
 ([ADR-019 lines 52-87](../../adr/019-polyglot-depth-and-foreign-toolchain-integration.md#L52)).
 It says environment construction is “toolchain-owned” and derives the
 environment from `shape.toml` language tables
@@ -293,6 +302,16 @@ constraints, so the first task under the owning contract is reachability (a
 `ForeignType` reference variant and a disposer an extension can actually
 declare), not more machinery. Remote re-establishment remains an explicit
 future contract, not an implicit handle copy.
+
+The asymmetry with §6 is deliberate. Native compute kernels get “delete as a
+claimed contract” because only a generic enum label exists; the
+foreign-reference carrier is complete machinery that nothing can reach. The
+dispositions differ because the remedies differ — wiring versus building — not
+because the evidence states differ.
+
+The deciding ticket for both the marshalling interface and the
+foreign-reference seam is
+[Define the dynamic foreign-call and marshalling contract](https://github.com/shape-lang/shape/issues/242).
 
 ## 5. Zero-copy buffers
 
@@ -423,7 +442,11 @@ Two broader public claims do not survive this reconciliation:
 - “Nothing about Python (or any language) is hardcoded in Shape's core”
   ([Polyglot Functions lines 629-638](https://github.com/shape-lang/shape-web/blob/3016b627f3b683c3dee05780ed001d8a52be2e02/book/book-site/src/content/docs/tooling/polyglot.mdx#L629-L638))
   conflicts with the core-owned environment schema, checker pin, CPython path
-  construction, and TypeScript module policy above.
+  construction, and TypeScript module policy above. The same page contradicts
+  itself 130 lines earlier, stating that `lib/python3.11/site-packages` follows
+  from `version = "3.11.7"`
+  ([Polyglot Functions line 501](https://github.com/shape-lang/shape-web/blob/3016b627f3b683c3dee05780ed001d8a52be2e02/book/book-site/src/content/docs/tooling/polyglot.mdx#L501)) —
+  an in-file self-contradiction, not merely a cross-layer one.
 - The extension system is documented as exclusively for language runtimes,
   globally installed and auto-detected, with `shape.language_runtime` as its
   only supported contract
@@ -434,7 +457,10 @@ Two broader public claims do not survive this reconciliation:
 
 The distributed Book's “genuine” Python/TypeScript matrix requires a built
 extension already present on the receiver
-([Polyglot + Distributed lines 35-77](https://github.com/shape-lang/shape-web/blob/3016b627f3b683c3dee05780ed001d8a52be2e02/book/book-site/src/content/docs/advanced/polyglot-distributed.mdx#L35-L77)).
+([Polyglot + Distributed lines 23-77](https://github.com/shape-lang/shape-web/blob/3016b627f3b683c3dee05780ed001d8a52be2e02/book/book-site/src/content/docs/advanced/polyglot-distributed.mdx#L23-L77) —
+the load-bearing sentence, “Extensions are **declared node capabilities**, never
+network payloads — a node that lacks a runtime refuses cleanly,” is at lines
+22-23).
 That is a truthful transport claim under its stated prerequisite, not evidence
 of clean-receiver artifact materialization. The release-evidence contract must
 keep those claims distinct.
@@ -455,8 +481,9 @@ implementation ticket:
   must distinguish Shape-owned typed conformance/outcomes from
   extension-owned language representations.
 - [Define extension-owned foreign environments and package artifacts](https://github.com/shape-lang/shape/issues/243)
-  must explicitly supersede ADR-019 §1/§4's core/toolchain authority, while
-  preserving reproducibility and fail-closed evidence requirements.
+  must supersede ADR-019 §4's core-owned environment authority in substance,
+  while preserving reproducibility and fail-closed evidence requirements; the
+  clause-by-clause ADR disposition belongs to #250, not here.
 - [Define pinned extension packaging, trust, isolation, and lifecycle](https://github.com/shape-lang/shape/issues/244)
   must replace ambient global scanning and wildcard source builds.
 - [Define the native compute-kernel extension ABI](https://github.com/shape-lang/shape/issues/245)
@@ -466,9 +493,18 @@ implementation ticket:
   must bind exact extension, environment, kernel, target, and blob identities;
   current loopback proves execution only after out-of-band provisioning.
 
-One follow-on decision is now sharp enough to record in the map's fog or as a
-future ticket: **which exact ADR-019 clauses are retained, amended, or
-superseded after the four owning contracts close, and what single authoritative
-document replaces its conflicting authority statements?** That editorial
-reconciliation should follow those decisions; doing it first would guess their
+Two further routings, so no finding here is orphaned. The release-evidence
+contract that must keep the preprovisioned-transport claims distinct from
+clean-receiver admission is
+[Define release, platform, safety, and observability evidence](https://github.com/shape-lang/shape/issues/248);
+the two over-broad Book claims in §8 belong to
+[Define the Phase-A public feature and executable documentation subset](https://github.com/shape-lang/shape/issues/249).
+
+The one follow-on decision this report sharpens — **which exact ADR-019 clauses
+are retained, amended, or superseded once the owning contracts close, and what
+single authoritative document replaces its conflicting authority statements?**
+— is already filed as
+[Reconcile ADR-019 with extension authority](https://github.com/shape-lang/shape/issues/250),
+blocked behind #242, #243, #244, and #246. This report deliberately does not
+pre-empt it: doing that editorial reconciliation first would guess those
 answers.
