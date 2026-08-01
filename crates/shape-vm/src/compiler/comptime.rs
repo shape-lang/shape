@@ -132,8 +132,17 @@ pub(crate) const RUNTIME_REPR_CLASS_DIAGNOSTIC: &str = "runtime representation c
      dispositions are not nominal reflection categories: a shape descriptor exposes semantic \
      identity + its public member interface, never a backend representation class";
 
-/// (name, arity, target_method, return_fields, named_return_type,
-/// param_annotations)
+/// (name, arity, target_method, return_fields, param_annotations)
+///
+/// #240 (A1): there is deliberately NO return-type column. A forwarder's
+/// return type is DERIVED from the registered intrinsic's declared
+/// `ConcreteType` (`register_typed_function`) — the catalog is the single
+/// authority per ADR-011 §Resolved intrinsic identity. The former
+/// `named_return_type` column was a hand-written duplicate of
+/// `ConcreteType::shape_type_name()` that had drifted to `None` on 7 of 24
+/// rows, which is what left generated wrappers unclassifiable (#227 gap 3).
+/// `return_fields` is NOT a duplicate: it REFINES `ConcreteType::Object`
+/// with per-field types the catalog cannot express.
 ///
 /// `param_annotations` (slice S5): concrete parameter annotations for the
 /// generated forwarder fn. Forwarder params default to UNANNOTATED
@@ -144,16 +153,9 @@ pub(crate) const RUNTIME_REPR_CLASS_DIAGNOSTIC: &str = "runtime representation c
 /// reserved carrier schemas so the mini-VM analyzer routes the call through
 /// the comptime-builtin arm and the R3/R4/R8 named diagnostics fire at
 /// check time instead of decaying to generic intrinsic errors.
-const COMPTIME_BUILTIN_FORWARDERS: &[(
-    &str,
-    usize,
-    &str,
-    Option<&[&str]>,
-    Option<&str>,
-    Option<&[&str]>,
-)] = &[
-    ("warning", 1, "warning", None, None, None),
-    ("error", 1, "error", None, None, None),
+const COMPTIME_BUILTIN_FORWARDERS: &[(&str, usize, &str, Option<&[&str]>, Option<&[&str]>)] = &[
+    ("warning", 1, "warning", None, None),
+    ("error", 1, "error", None, None),
     (
         "build_config",
         0,
@@ -171,14 +173,12 @@ const COMPTIME_BUILTIN_FORWARDERS: &[(
             "version",
         ]),
         None,
-        None,
     ),
     (
         TYPE_REF_FORWARDER,
         2,
         super::comptime_builtins::TYPE_REF_INTRINSIC,
         None,
-        Some(shape_runtime::type_schema::builtin_schemas::COMPTIME_FROZEN_TYPE_REF_SCHEMA),
         None,
     ),
     (
@@ -186,7 +186,6 @@ const COMPTIME_BUILTIN_FORWARDERS: &[(
         1,
         super::comptime_builtins::TYPE_CATEGORY_INTRINSIC,
         None,
-        Some("FrozenTypeCategory"),
         None,
     ),
     // ADR-009 B2 (slice S4): trait identity + implementation evidence.
@@ -198,7 +197,6 @@ const COMPTIME_BUILTIN_FORWARDERS: &[(
         2,
         super::comptime_builtins::TRAIT_REF_INTRINSIC,
         None,
-        Some(shape_runtime::type_schema::builtin_schemas::COMPTIME_FROZEN_TRAIT_REF_SCHEMA),
         None,
     ),
     (
@@ -206,7 +204,6 @@ const COMPTIME_BUILTIN_FORWARDERS: &[(
         2,
         super::comptime_builtins::FIND_IMPL_INTRINSIC,
         None,
-        Some(FIND_IMPL_RETURN_MARKER),
         // S5: concrete carrier-schema params — see `param_annotations` note
         // in the table doc above.
         Some(&[
@@ -223,7 +220,6 @@ const COMPTIME_BUILTIN_FORWARDERS: &[(
         1,
         super::comptime_builtins::REFLECT_INTRINSIC,
         None,
-        Some(shape_runtime::comptime_reflection::FROZEN_TYPE_PAYLOAD_ENUM_NAME),
         None,
     ),
     // ADR-009 B5 (Stage 2, Dec 56) — `reflect_repr(TypeRef<T>,
@@ -236,7 +232,6 @@ const COMPTIME_BUILTIN_FORWARDERS: &[(
         2,
         super::comptime_builtins::REFLECT_REPR_INTRINSIC,
         None,
-        Some(shape_runtime::comptime_reflection::FROZEN_TYPE_PAYLOAD_ENUM_NAME),
         Some(&[
             shape_runtime::type_schema::builtin_schemas::COMPTIME_FROZEN_TYPE_REF_SCHEMA,
             shape_runtime::type_schema::builtin_schemas::COMPTIME_REPRESENTATION_ACCESS_SCHEMA,
@@ -253,9 +248,6 @@ const COMPTIME_BUILTIN_FORWARDERS: &[(
         2,
         super::comptime_builtins::TYPE_CONSTRUCTOR_INTRINSIC,
         None,
-        Some(
-            shape_runtime::type_schema::builtin_schemas::COMPTIME_FROZEN_TYPE_CONSTRUCTOR_REF_SCHEMA,
-        ),
         None,
     ),
     (
@@ -263,7 +255,6 @@ const COMPTIME_BUILTIN_FORWARDERS: &[(
         1,
         super::comptime_builtins::CONST_ARG_INTRINSIC,
         None,
-        Some(shape_runtime::type_schema::builtin_schemas::COMPTIME_FROZEN_TYPE_REF_SCHEMA),
         None,
     ),
     (
@@ -271,7 +262,6 @@ const COMPTIME_BUILTIN_FORWARDERS: &[(
         2,
         super::comptime_builtins::APPLY_INTRINSIC,
         None,
-        Some(shape_runtime::type_schema::builtin_schemas::COMPTIME_APPLIED_TYPE_SCHEMA),
         None,
     ),
     (
@@ -279,7 +269,6 @@ const COMPTIME_BUILTIN_FORWARDERS: &[(
         2,
         super::comptime_builtins::REFINE_INTRINSIC,
         None,
-        Some(REFINE_RETURN_MARKER),
         None,
     ),
     (
@@ -287,12 +276,11 @@ const COMPTIME_BUILTIN_FORWARDERS: &[(
         2,
         super::comptime_builtins::TYPE_ARGUMENT_INTRINSIC,
         None,
-        Some(shape_runtime::type_schema::builtin_schemas::COMPTIME_FROZEN_TYPE_REF_SCHEMA),
         None,
     ),
     // First typed generation fragment surface. `item_fn(...)` returns a
     // typed fragment carrier accepted by `extend (expr)`.
-    ("item_fn", 3, "item_fn", None, None, None),
+    ("item_fn", 3, "item_fn", None, None),
     // ADR-009 E2 #18 (slice 4.5, E2-Q2/B): `extend_method(...)` — the typed
     // single-extend-method producer (arity 5), same carrier shape as item_fn
     // (returns the `__CheckedItem` OpaqueTypedObject accepted by `extend (expr)`;
@@ -302,7 +290,7 @@ const COMPTIME_BUILTIN_FORWARDERS: &[(
     // `comptime_builtins_module_base` registration — the second registration
     // surface a comptime builtin needs, or `extend_method(...)` is `[C0001]
     // Undefined function` in a handler.
-    ("extend_method", 5, "extend_method", None, None, None),
+    ("extend_method", 5, "extend_method", None, None),
     // ADR-009 E2 #18 (slice 5b-1): `extend_method_literal(...)` — the literal-body
     // sibling of `extend_method` (arity 4: type_name, method_name, return_type,
     // value). Same carrier shape (returns the `__CheckedItem` OpaqueTypedObject
@@ -311,7 +299,13 @@ const COMPTIME_BUILTIN_FORWARDERS: &[(
     // needs this forwarder row IN ADDITION to `comptime_builtins_module_base`
     // registration, or `extend_method_literal(...)` is `[C0001] Undefined function`
     // in a handler.
-    ("extend_method_literal", 4, "extend_method_literal", None, None, None),
+    (
+        "extend_method_literal",
+        4,
+        "extend_method_literal",
+        None,
+        None,
+    ),
     // ADR-009 C3 #14 (slice 2): the public hook-template API (the C3-G1
     // metaprogramming primitive). `before_hook`/`after_hook` construct the S1
     // `CheckedTemplate` through its chokepoint; their `body` argument is a
@@ -326,22 +320,8 @@ const COMPTIME_BUILTIN_FORWARDERS: &[(
     // to the `comptime_builtins_module_base` registrations, or the names are
     // `[C0001] Undefined function` in a handler (the extend_method_literal
     // lesson).
-    (
-        "before_hook",
-        2,
-        "before_hook",
-        None,
-        Some("__CheckedTemplate"),
-        None,
-    ),
-    (
-        "after_hook",
-        2,
-        "after_hook",
-        None,
-        Some("__CheckedTemplate"),
-        None,
-    ),
+    ("before_hook", 2, "before_hook", None, None),
+    ("after_hook", 2, "after_hook", None, None),
     // `capture`'s DECLARED return type is load-bearing: a captures array
     // literal `[capture(...), ...]` proves its element type from the
     // forwarder's declared `__CaptureBinding` struct return (the
@@ -351,14 +331,7 @@ const COMPTIME_BUILTIN_FORWARDERS: &[(
     // (`capture<T>(name, value: T)` — see the named special-case in
     // `comptime_builtin_forwarders`) so capture VALUES type per call site
     // and mixed-type captures in one handler are legal.
-    (
-        "capture",
-        2,
-        "capture",
-        None,
-        Some("__CaptureBinding"),
-        None,
-    ),
+    ("capture", 2, "capture", None, None),
     // ADR-009 C3 #14 (slice 2, S2b): `install(template)` pushes the
     // InstallHookTemplate directive for the annotation's target (implicit,
     // like every directive emitter). Unit return (no named return type —
@@ -366,14 +339,13 @@ const COMPTIME_BUILTIN_FORWARDERS: &[(
     // from the caller's handle. Handler-scope resolution needs this row IN
     // ADDITION to the `comptime_builtins_module_base` registration
     // (the extend_method_literal lesson).
-    ("install", 1, "install", None, None, None),
+    ("install", 1, "install", None, None),
     // The rewrite-only zero-capture lowerings (see the forwarder consts doc).
     (
         BEFORE_HOOK_NOCAPTURE_FORWARDER,
         1,
         "before_hook_nocapture",
         None,
-        Some("__CheckedTemplate"),
         None,
     ),
     (
@@ -381,12 +353,11 @@ const COMPTIME_BUILTIN_FORWARDERS: &[(
         1,
         "after_hook_nocapture",
         None,
-        Some("__CheckedTemplate"),
         None,
     ),
     // Comptime-excellence §4.5.7.4 — `string_lit(s)` renders a computed string
     // as a Shape source literal for embedding into `extend (expr)` output.
-    ("string_lit", 1, "string_lit", None, None, None),
+    ("string_lit", 1, "string_lit", None, None),
 ];
 
 /// Comptime execution result.
@@ -640,141 +611,200 @@ fn hook_template_carrier_items() -> Vec<Item> {
     vec![carrier("__CheckedTemplate"), carrier("__CaptureBinding")]
 }
 
-fn comptime_builtin_forwarders() -> Vec<Item> {
+/// #240 (A1): render a registered intrinsic's declared return `ConcreteType`
+/// as the forwarder's return annotation.
+///
+/// This is the ONLY source of a forwarder's return type. It is deliberately
+/// partial: a variant with no faithful annotation spelling returns `None` and
+/// the caller surfaces a named error rather than emitting a forwarder with
+/// `return_type: None`. An un-annotated forwarder is what made every wrapper
+/// downstream of it unclassifiable (#227 gap 3) — a silent `None` here is the
+/// bug, not the fallback.
+fn forwarder_return_annotation(
+    ct: &shape_runtime::typed_module_exports::ConcreteType,
+) -> Option<TypeAnnotation> {
+    use shape_runtime::typed_module_exports::ConcreteType as CT;
+    match ct {
+        // `concrete_type_from_annotation` reads both "void" and "unit" as
+        // `ConcreteType::Void`; "void" is the spelling the descriptor
+        // builder's arity-`Zero` classification is exercised with.
+        CT::Unit => Some(TypeAnnotation::Basic("void".to_string())),
+        CT::Int => Some(TypeAnnotation::Basic("int".to_string())),
+        CT::Number => Some(TypeAnnotation::Basic("number".to_string())),
+        CT::Bool => Some(TypeAnnotation::Basic("bool".to_string())),
+        CT::String => Some(TypeAnnotation::Basic("string".to_string())),
+        // Reserved carrier schemas (`__CheckedTemplate`, `\u{1}comptime:TypeRef`,
+        // …) are nominal names the mini-VM analyzer resolves directly.
+        CT::OpaqueTypedObject(name) | CT::JsonValue(name) | CT::Named(name) => {
+            Some(TypeAnnotation::Basic(name.clone()))
+        }
+        CT::Option(inner) => forwarder_return_annotation(inner).map(TypeAnnotation::option),
+        // `Object` / `TypedObject` carry no field structure at the catalog
+        // tier; the row's `return_fields` refinement is what makes them
+        // usable, and the caller requires it.
+        CT::Object | CT::TypedObject => None,
+        _ => None,
+    }
+}
+
+fn comptime_builtin_forwarders(
+    catalog: &shape_runtime::module_exports::ModuleExports,
+) -> Result<Vec<Item>> {
     let mut items = vec![frozen_type_category_enum_item()];
     items.extend(frozen_type_payload_model_items());
     items.extend(hook_template_carrier_items());
-    items.extend(COMPTIME_BUILTIN_FORWARDERS.iter().map(
-        |(name, arity, target_method, return_fields, named_return_type, param_annotations)| {
-            // ADR-009 C3 #14 (slice 4, S4a — #66 item 1): `capture` is the
-            // ONE generic forwarder — `fn capture<T>(name, value: T) ->
-            // __CaptureBinding`. A monomorphic forwarder gives the VALUE
-            // param a single shared inference site, so every `capture()`
-            // call in one handler unifies against the same var and
-            // mixed-type captures (int + string, int + Array<int>) fail
-            // with `[C0001] Could not solve type constraints` — exactly the
-            // shape S4's typed config params lower to (the G2 sugar test).
-            // Making the forwarder generic types the value PER CALL SITE
-            // via the language's own generic-call inference +
-            // monomorphization; each mono body still calls the variadic
-            // kind-agnostic `__comptime__.capture`. Param 0 (name) stays
-            // UNANNOTATED so the builtin's own "capture expects a string
-            // capture name" sentence stays reachable.
-            let is_generic_capture_forwarder = *name == "capture";
-            let params: Vec<shape_ast::ast::FunctionParameter> = (0..*arity)
-                .map(|i| shape_ast::ast::FunctionParameter {
-                    pattern: shape_ast::ast::DestructurePattern::Identifier(
-                        hygienic_forwarder_param(i),
-                        Span::DUMMY,
-                    ),
-                    is_const: false,
-                    is_reference: false,
-                    is_mut_reference: false,
-                    is_out: false,
-                    buffer_share: shape_ast::ast::BufferShare::Copied,
-                    type_annotation: param_annotations
-                        .and_then(|annotations| annotations.get(i))
-                        .map(|annotation| TypeAnnotation::Basic((*annotation).to_string()))
-                        .or_else(|| {
-                            (is_generic_capture_forwarder && i == 1)
-                                .then(|| TypeAnnotation::Basic("T".to_string()))
-                        }),
-                    default_value: None,
-                })
-                .collect();
-
-            let args: Vec<Expr> = (0..*arity)
-                .map(|i| Expr::Identifier(hygienic_forwarder_param(i), Span::DUMMY))
-                .collect();
-
-            let body_expr = Expr::QualifiedFunctionCall {
-                namespace: "__comptime__".to_string(),
-                function: (*target_method).to_string(),
-                const_args: Vec::new(),
-                args,
-                named_args: Vec::new(),
-                span: Span::DUMMY,
-            };
-
-            // If the forwarder has known return fields, generate an Object
-            // type annotation so the compiler can emit GetFieldTyped for
-            // property access on the return value.
-            //
-            // ADR-009 B2 (slice S4): a named return type of the form
-            // `Option<inner>` (find_impl's `Option<ImplRef-carrier>`)
-            // becomes a real `Option` generic annotation so `match` with
-            // `Some(..)` / `None` patterns type-checks in the mini-VM.
-            let return_type = named_return_type
-                .map(|name| {
-                    if let Some(inner) = name
-                        .strip_prefix("Option<")
-                        .and_then(|rest| rest.strip_suffix('>'))
-                    {
-                        TypeAnnotation::option(TypeAnnotation::Basic(inner.to_string()))
-                    } else {
-                        TypeAnnotation::Basic((*name).to_string())
-                    }
-                })
-                .or_else(|| {
-                    return_fields.map(|fields| {
-                        TypeAnnotation::Object(
-                            fields
-                                .iter()
-                                .map(|f| ObjectTypeField {
-                                    name: f.to_string(),
-                                    optional: false,
-                                    // Reflection result fields carry their real
-                                    // types (comptime-excellence §4.1.2), not `unknown`.
-                                    type_annotation: match *f {
-                                        "fields" => TypeAnnotation::Array(Box::new(
-                                            comptime_field_descriptor_annotation(),
-                                        )),
-                                        "return_type_ref" | "type_ref" => {
-                                            comptime_type_ref_annotation()
-                                        }
-                                        "name" | "kind" | "return_type" => {
-                                            TypeAnnotation::Basic("string".to_string())
-                                        }
-                                        _ => TypeAnnotation::Basic("unknown".to_string()),
-                                    },
-                                    annotations: vec![],
-                                })
-                                .collect(),
-                        )
+    let forwarders: Vec<Item> = COMPTIME_BUILTIN_FORWARDERS
+        .iter()
+        .map(
+            |(name, arity, target_method, return_fields, param_annotations)| -> Result<Item> {
+                // ADR-009 C3 #14 (slice 4, S4a — #66 item 1): `capture` is the
+                // ONE generic forwarder — `fn capture<T>(name, value: T) ->
+                // __CaptureBinding`. A monomorphic forwarder gives the VALUE
+                // param a single shared inference site, so every `capture()`
+                // call in one handler unifies against the same var and
+                // mixed-type captures (int + string, int + Array<int>) fail
+                // with `[C0001] Could not solve type constraints` — exactly the
+                // shape S4's typed config params lower to (the G2 sugar test).
+                // Making the forwarder generic types the value PER CALL SITE
+                // via the language's own generic-call inference +
+                // monomorphization; each mono body still calls the variadic
+                // kind-agnostic `__comptime__.capture`. Param 0 (name) stays
+                // UNANNOTATED so the builtin's own "capture expects a string
+                // capture name" sentence stays reachable.
+                let is_generic_capture_forwarder = *name == "capture";
+                let params: Vec<shape_ast::ast::FunctionParameter> = (0..*arity)
+                    .map(|i| shape_ast::ast::FunctionParameter {
+                        pattern: shape_ast::ast::DestructurePattern::Identifier(
+                            hygienic_forwarder_param(i),
+                            Span::DUMMY,
+                        ),
+                        is_const: false,
+                        is_reference: false,
+                        is_mut_reference: false,
+                        is_out: false,
+                        buffer_share: shape_ast::ast::BufferShare::Copied,
+                        type_annotation: param_annotations
+                            .and_then(|annotations| annotations.get(i))
+                            .map(|annotation| TypeAnnotation::Basic((*annotation).to_string()))
+                            .or_else(|| {
+                                (is_generic_capture_forwarder && i == 1)
+                                    .then(|| TypeAnnotation::Basic("T".to_string()))
+                            }),
+                        default_value: None,
                     })
-                });
+                    .collect();
 
-            Item::Function(
-                FunctionDef {
-                    name: (*name).to_string(),
-                    name_span: Span::DUMMY,
-                    declaring_module_path: None,
-                    doc_comment: None,
-                    params,
-                    return_type,
-                    body: vec![Statement::Return(Some(body_expr), Span::DUMMY)],
-                    type_params: Some(if is_generic_capture_forwarder {
-                        vec![TypeParam::Type {
-                            name: "T".to_string(),
-                            span: Span::DUMMY,
-                            doc_comment: None,
-                            default_type: None,
-                            trait_bounds: Vec::new(),
-                        }]
-                    } else {
-                        Vec::new()
-                    }),
-                    annotations: Vec::new(),
-                    where_clause: None,
-                    is_async: false,
-                    is_comptime: false,
-                    effect_row: None,
-                },
-                Span::DUMMY,
-            )
-        },
-    ));
-    items
+                let args: Vec<Expr> = (0..*arity)
+                    .map(|i| Expr::Identifier(hygienic_forwarder_param(i), Span::DUMMY))
+                    .collect();
+
+                let body_expr = Expr::QualifiedFunctionCall {
+                    namespace: "__comptime__".to_string(),
+                    function: (*target_method).to_string(),
+                    const_args: Vec::new(),
+                    args,
+                    named_args: Vec::new(),
+                    span: Span::DUMMY,
+                };
+
+                // #240 (A1): the return annotation is DERIVED from the registered
+                // intrinsic's declared `ConcreteType`. `return_fields`, when
+                // present, REFINES an `Object` return with the per-field types the
+                // catalog tier cannot express (so `cfg.debug` resolves to a typed
+                // field read); it is not an alternative authority.
+                //
+                // ADR-009 B2 (slice S4): a declared `Option<inner>` return
+                // (find_impl's `Option<ImplRef-carrier>`) becomes a real `Option`
+                // generic annotation so `match` with `Some(..)` / `None` patterns
+                // type-checks in the mini-VM — that now falls out of the
+                // `CT::Option` arm rather than being re-parsed from a string.
+                let declared = catalog.typed_exports().get(*target_method).ok_or_else(|| {
+                    ShapeError::SemanticError {
+                        message: format!(
+                            "comptime forwarder '{name}' targets '__comptime__.{target_method}', \
+                         which has no registered intrinsic: a forwarder's type contract is \
+                         derived from the intrinsic catalog and cannot be hand-declared",
+                        ),
+                        location: None,
+                    }
+                })?;
+                let refined = return_fields.map(|fields| {
+                    TypeAnnotation::Object(
+                        fields
+                            .iter()
+                            .map(|f| ObjectTypeField {
+                                name: f.to_string(),
+                                optional: false,
+                                // Reflection result fields carry their real
+                                // types (comptime-excellence §4.1.2), not `unknown`.
+                                type_annotation: match *f {
+                                    "fields" => TypeAnnotation::Array(Box::new(
+                                        comptime_field_descriptor_annotation(),
+                                    )),
+                                    "return_type_ref" | "type_ref" => {
+                                        comptime_type_ref_annotation()
+                                    }
+                                    "name" | "kind" | "return_type" => {
+                                        TypeAnnotation::Basic("string".to_string())
+                                    }
+                                    _ => TypeAnnotation::Basic("unknown".to_string()),
+                                },
+                                annotations: vec![],
+                            })
+                            .collect(),
+                    )
+                });
+                let return_type = match refined {
+                    Some(object_annotation) => object_annotation,
+                    None => forwarder_return_annotation(&declared.return_type).ok_or_else(
+                        || ShapeError::SemanticError {
+                            message: format!(
+                                "comptime forwarder '{name}' has no annotation spelling for its \
+                             declared return type {:?}: add the rendering to \
+                             `forwarder_return_annotation`, or a `return_fields` refinement — \
+                             emitting an un-annotated forwarder is what left generated wrappers \
+                             unclassifiable (#227 gap 3)",
+                                declared.return_type,
+                            ),
+                            location: None,
+                        },
+                    )?,
+                };
+                let return_type = Some(return_type);
+
+                Ok(Item::Function(
+                    FunctionDef {
+                        name: (*name).to_string(),
+                        name_span: Span::DUMMY,
+                        declaring_module_path: None,
+                        doc_comment: None,
+                        params,
+                        return_type,
+                        body: vec![Statement::Return(Some(body_expr), Span::DUMMY)],
+                        type_params: Some(if is_generic_capture_forwarder {
+                            vec![TypeParam::Type {
+                                name: "T".to_string(),
+                                span: Span::DUMMY,
+                                doc_comment: None,
+                                default_type: None,
+                                trait_bounds: Vec::new(),
+                            }]
+                        } else {
+                            Vec::new()
+                        }),
+                        annotations: Vec::new(),
+                        where_clause: None,
+                        is_async: false,
+                        is_comptime: false,
+                        effect_row: None,
+                    },
+                    Span::DUMMY,
+                ))
+            },
+        )
+        .collect::<Result<Vec<Item>>>()?;
+    items.extend(forwarders);
+    Ok(items)
 }
 
 fn frozen_type_category_enum_item() -> Item {
@@ -2571,7 +2601,34 @@ pub(crate) fn execute_comptime_with_context(
         effect_row: None,
     };
 
-    let mut items = comptime_builtin_forwarders();
+    // ADR-009 §4.1 (S2): the reflection intrinsics consume the shared
+    // freeze handle — the Arc moves into the builtins module's closures.
+    //
+    // S5: the site-time key set for the Dec 52 ordering diagnostic is the
+    // live key snapshot PLUS the J-CT.2 `comptime impl` pairs threaded into
+    // this mini-program (those register only in the mini-VM's env, so the
+    // outer live keys never see them). Diagnostic-only — the trait-impl
+    // key set is passed through unchanged, and no evidence is ever
+    // produced from either set.
+    //
+    // #240 (A1): built BEFORE the forwarders, because the forwarders derive
+    // their type contracts from this catalog.
+    let mut site_time_impl_keys = trait_impl_keys.clone();
+    for impl_block in comptime_impl_blocks {
+        let trait_name = match &impl_block.trait_name {
+            shape_ast::ast::types::TypeName::Simple(n) => n.to_string(),
+            shape_ast::ast::types::TypeName::Generic { name, .. } => name.to_string(),
+        };
+        let type_name = match &impl_block.target_type {
+            shape_ast::ast::types::TypeName::Simple(n) => n.to_string(),
+            shape_ast::ast::types::TypeName::Generic { name, .. } => name.to_string(),
+        };
+        site_time_impl_keys.insert(format!("{trait_name}::{type_name}"));
+    }
+    let comptime_builtins =
+        super::comptime_builtins::create_comptime_builtins_module(site_time_impl_keys, freeze);
+
+    let mut items = comptime_builtin_forwarders(&comptime_builtins)?;
     // J-CT.2 — struct defs FIRST so impl-block trait/method bindings can
     // resolve the target type. Impl blocks SECOND so the trait-method
     // symbol registry is populated before the wrapping `__comptime_block__`
@@ -2627,29 +2684,6 @@ pub(crate) fn execute_comptime_with_context(
         docs: shape_ast::ast::ProgramDocs::default(),
     };
 
-    // ADR-009 §4.1 (S2): the reflection intrinsics consume the shared
-    // freeze handle — the Arc moves into the builtins module's closures.
-    //
-    // S5: the site-time key set for the Dec 52 ordering diagnostic is the
-    // live key snapshot PLUS the J-CT.2 `comptime impl` pairs threaded into
-    // this mini-program (those register only in the mini-VM's env, so the
-    // outer live keys never see them). Diagnostic-only — the trait-impl
-    // key set is passed through unchanged, and no evidence is ever
-    // produced from either set.
-    let mut site_time_impl_keys = trait_impl_keys.clone();
-    for impl_block in comptime_impl_blocks {
-        let trait_name = match &impl_block.trait_name {
-            shape_ast::ast::types::TypeName::Simple(n) => n.to_string(),
-            shape_ast::ast::types::TypeName::Generic { name, .. } => name.to_string(),
-        };
-        let type_name = match &impl_block.target_type {
-            shape_ast::ast::types::TypeName::Simple(n) => n.to_string(),
-            shape_ast::ast::types::TypeName::Generic { name, .. } => name.to_string(),
-        };
-        site_time_impl_keys.insert(format!("{trait_name}::{type_name}"));
-    }
-    let comptime_builtins =
-        super::comptime_builtins::create_comptime_builtins_module(site_time_impl_keys, freeze);
     compile_and_execute_comptime_program(
         &program,
         vec!["__comptime__".to_string()],
@@ -3290,7 +3324,23 @@ pub(crate) fn execute_comptime_with_annotation_handler(
         effect_row: None,
     };
 
-    let mut items = comptime_builtin_forwarders();
+    // ADR-009 §4.1 (S2/S3): the `__comptime__` builtins module carries the
+    // reflection surface resolved against the shared freeze handle — for the
+    // speculative pre-pass runs exactly as for the authoritative pass-2
+    // runs. The old `TypeReflectionSnapshot::default()` empty-snapshot
+    // defect and its S2 successor (the pre-pass reflection-rejection
+    // module) are deleted.
+    // S5: annotation-handler runs thread no J-CT.2 comptime impl blocks, so
+    // the site-time key set for the Dec 52 ordering diagnostic is exactly
+    // the live key snapshot (diagnostic-only; never evidence).
+    //
+    // #240 (A1): built BEFORE the forwarders, because the forwarders derive
+    // their type contracts from this catalog.
+    let site_time_impl_keys = trait_impl_keys.clone();
+    let comptime_builtins =
+        super::comptime_builtins::create_comptime_builtins_module(site_time_impl_keys, freeze);
+
+    let mut items = comptime_builtin_forwarders(&comptime_builtins)?;
     items.extend(
         comptime_helpers
             .iter()
@@ -3333,18 +3383,6 @@ pub(crate) fn execute_comptime_with_annotation_handler(
         docs: shape_ast::ast::ProgramDocs::default(),
     };
 
-    // ADR-009 §4.1 (S2/S3): the `__comptime__` builtins module carries the
-    // reflection surface resolved against the shared freeze handle — for the
-    // speculative pre-pass runs exactly as for the authoritative pass-2
-    // runs. The old `TypeReflectionSnapshot::default()` empty-snapshot
-    // defect and its S2 successor (the pre-pass reflection-rejection
-    // module) are deleted.
-    // S5: annotation-handler runs thread no J-CT.2 comptime impl blocks, so
-    // the site-time key set for the Dec 52 ordering diagnostic is exactly
-    // the live key snapshot (diagnostic-only; never evidence).
-    let site_time_impl_keys = trait_impl_keys.clone();
-    let comptime_builtins =
-        super::comptime_builtins::create_comptime_builtins_module(site_time_impl_keys, freeze);
     compile_and_execute_comptime_program(
         &program,
         vec![
@@ -6186,5 +6224,135 @@ mod tests_deferred {
             "Error should mention comptime: {}",
             err_msg
         );
+    }
+}
+
+#[cfg(test)]
+mod forwarder_contract_tests {
+    //! #240 (A1) — the comptime forwarder table must not re-declare, and must
+    //! not silently drop, the intrinsic catalog's type contract.
+    //!
+    //! This is the test that would have prevented #227 gap 3. The former
+    //! `named_return_type` column was a hand-written duplicate of
+    //! `ConcreteType::shape_type_name()`; it had drifted to `None` on 7 of 24
+    //! rows, so those forwarders were emitted with `return_type: None`. Every
+    //! wrapper whose tail called one of them then had a free-variable return,
+    //! was dropped from the post-solve span table, and reached the descriptor
+    //! builder unclassified — 76 of the 99 measured `FrameReturnWrapper::
+    //! Unknown` stamps.
+
+    use super::*;
+
+    fn catalog() -> shape_runtime::module_exports::ModuleExports {
+        crate::compiler::comptime_builtins::create_comptime_builtins_module(
+            Default::default(),
+            crate::compiler::comptime_builtins::semantic_freeze::overlay_for_tests(
+                &crate::compiler::BytecodeCompiler::new(),
+            ),
+        )
+    }
+
+    /// Every forwarder row resolves to a registered intrinsic and renders a
+    /// return annotation. A row that cannot is a hard error at generation
+    /// time, never a `return_type: None`.
+    #[test]
+    fn every_forwarder_declares_a_return_type_derived_from_the_catalog() {
+        let catalog = catalog();
+        let items = comptime_builtin_forwarders(&catalog)
+            .expect("every forwarder row must derive its contract from the catalog");
+
+        let mut checked = 0;
+        for (name, _arity, _target, _fields, _params) in COMPTIME_BUILTIN_FORWARDERS.iter() {
+            let generated = items
+                .iter()
+                .find_map(|item| match item {
+                    Item::Function(def, _) if def.name == *name => Some(def),
+                    _ => None,
+                })
+                .unwrap_or_else(|| panic!("forwarder '{name}' was not generated"));
+            assert!(
+                generated.return_type.is_some(),
+                "forwarder '{name}' was emitted with no return type — this is the \
+                 #227 gap-3 shape: its callers' returns become free variables and \
+                 their frames reach the descriptor builder unclassified",
+            );
+            checked += 1;
+        }
+        assert_eq!(
+            checked,
+            COMPTIME_BUILTIN_FORWARDERS.len(),
+            "every row must be checked",
+        );
+    }
+
+    /// The catalog is the single authority: the rendered annotation must agree
+    /// with what `register_typed_function` declared, so the table cannot drift
+    /// back into a second source of truth.
+    #[test]
+    fn rendered_return_annotation_agrees_with_the_declared_concrete_type() {
+        let catalog = catalog();
+        for (name, _arity, target, return_fields, _params) in COMPTIME_BUILTIN_FORWARDERS.iter() {
+            // `return_fields` REFINES an Object return with per-field types the
+            // catalog tier cannot express; those rows are checked for presence
+            // above, not for agreement.
+            if return_fields.is_some() {
+                continue;
+            }
+            let declared = catalog
+                .typed_exports()
+                .get(*target)
+                .unwrap_or_else(|| panic!("forwarder '{name}' targets unregistered '{target}'"))
+                .return_type
+                .clone();
+            let rendered = forwarder_return_annotation(&declared).unwrap_or_else(|| {
+                panic!("forwarder '{name}': no annotation spelling for {declared:?}")
+            });
+
+            // A unit-returning intrinsic must reach the builder as a PROVEN
+            // void — that is what stamps `FrameReturnArity::Zero` (ADR-020
+            // §3.3) instead of leaving the frame unclassified. This is the
+            // load-bearing case: `install`/`warning`/`error` are Unit, and
+            // their un-annotated forwarders are what produced 63 of the 99
+            // measured Unknown stamps.
+            if matches!(
+                declared,
+                shape_runtime::typed_module_exports::ConcreteType::Unit
+            ) {
+                let round_tripped =
+                    crate::compiler::v2_map_emission::concrete_type_from_annotation(&rendered)
+                        .unwrap_or_else(|| {
+                            panic!(
+                                "forwarder '{name}': Unit rendered to {rendered:?}, which does \
+                                 not resolve — the descriptor builder cannot prove the void"
+                            )
+                        });
+                assert_eq!(
+                    round_tripped,
+                    shape_value::v2::ConcreteType::Void,
+                    "forwarder '{name}' declares Unit but does not render to a proven Void",
+                );
+                continue;
+            }
+
+            // Every other row: the rendering must be exactly the catalog's own
+            // spelling, so the table cannot drift back into a second authority.
+            // Reserved carrier schemas (`__CheckedTemplate`,
+            // `\u{1}comptime:TypeRef`, …) are deliberately unresolvable-but-NAMED
+            // heads — `classify_type_annotation_metadata` stamps those
+            // `plain_without_kind`, a positive "structurally not Option/Result"
+            // fact, so they classify without a resolvable concrete type.
+            let expected = declared.shape_type_name();
+            let actual = match &rendered {
+                TypeAnnotation::Basic(n) => n.clone(),
+                other => format!("{other:?}"),
+            };
+            if !expected.starts_with("Option<") {
+                assert_eq!(
+                    actual, expected,
+                    "forwarder '{name}': rendered annotation disagrees with the catalog's \
+                     declared spelling — the table has drifted from the intrinsic contract",
+                );
+            }
+        }
     }
 }
