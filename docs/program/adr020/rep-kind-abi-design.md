@@ -20,7 +20,7 @@ The rest of the dialect — 62 of 83 dialect-touching `-> u64` functions, and 77
 of the 118 bare-bail returns — is not reachable from Cranelift-emitted code and
 is **deleted, not converted**.
 
-Revised scope: **~9 functions converted, ~62 deleted, 31 bare-bails treated**
+Revised scope: **~10 functions converted, ~62 deleted, 31 bare-bails treated**
 (not 108 converted / 118 treated). This is materially smaller than the ticket's
 estimate and lands comfortably as one slice.
 
@@ -32,6 +32,15 @@ reconstructs the deleted `is_tagged` dispatch as an inline `iconst` and would
 therefore survive both the FFI deletion and a name-only ratchet. The second
 changes the ratchet design: **it must match raw bit patterns, not just symbol
 names.**
+
+Grill round 1 produced three further corrections, all folded in: a fourth
+partition bucket for functions that are unreachable *only* because an emit-site
+deopt guards them, which the conversion deletes (§3.0.1 — `call_string_method`
+moves out of "delete" into "convert"); an **ownership channel** the signature
+must carry alongside the kind channel (§4.2 — heap returns get `*mut
+HeapHeader`, scalars get `i64`, same Cranelift class, different Rust type); and
+the restatement of §5's zero-safety claim as a **precondition with 25 open
+sites** rather than a discharged property (§5.1).
 
 ---
 
@@ -204,7 +213,67 @@ So the conversion is: **give the return value the destination's kind.**
 |---|---|---|---|
 | **(a) reachable AND executed** | 12 | ~72 | convert — kind-threaded returns |
 | **(b) reachable, producer-less after #227** | 2 | 4 | delete with the carrier flip |
-| **(c) unreachable** | 69 | ~163 | delete outright |
+| **(c) unreachable, and STAYS unreachable after the conversion** | 68 | ~147 | delete outright |
+| **(d) unreachable ONLY because an emit-site deopt guards it** | 1 | 16 | **convert** — the conversion deletes the guard |
+
+### 3.0.1 Bucket (d) — the bucket the first draft was missing
+
+A grill pass found an internal contradiction in the first draft, and it was
+real. §2 argues the conversion's payoff is that the STAGE-StringJIT deopt "can
+be deleted, restoring native execution", and §10.1 makes that deletion a
+required acceptance fixture — yet the first draft put `call_string_method` in
+bucket (c) *because* that deopt makes it unreachable. Both cannot hold: if the
+deopt dies, the function it was gating becomes live.
+
+The resolution is that "unreachable" was hiding two different states, and only
+one of them is a delete:
+
+- **(c) unreachable for a reason the conversion does not change** — no emit
+  site (`jit_get_prop`), no source-level producer (`jit_typeof`: `typeof` is
+  not a Shape builtin), not registered (`jit_series_*`), or **reachable only
+  through a carrier the conversion itself deletes**.
+- **(d) unreachable only because an emit-site guard refuses to emit the call,
+  where that guard exists *because* the channel is untyped.** Deleting the
+  guard is the point of the ticket. These must be converted, in this slice,
+  or the acceptance fixture cannot pass.
+
+Measured membership. There are exactly **three** emit-site deopt guards, all in
+`mir_compiler/terminators.rs`:
+
+| guard | line | condition | what it gates |
+|---|---|---|---|
+| STAGE-M1 | `:543` | proven `String` receiver + string-returning method | `call_string_method` |
+| STAGE-StringJIT | `:601` | proven `String` receiver (scalar-returning) | `call_string_method` |
+| STAGE-F3 | `:689` | receiver `Ptr(Temporal\|Instant\|Decimal\|BigInt\|DataTable\|TableView\|Content)` | the `_ => TAG_NULL` cascade arm |
+
+**`call_string_method` → bucket (d), +16 sites.** It has two inbound routes
+inside `jit_call_method`: the `NativeKind::String` arm
+(`ffi/call_method/mod.rs:1165`) and the legacy `HK_STRING` cascade arm
+(`:1310`). The first is gated *only* by STAGE-M1/StringJIT, so it goes live the
+moment those die. Its 16 dialect sites are converted, not deleted.
+
+**The four sibling dispatchers stay in bucket (c)** — and the reason is
+measured, not assumed. `call_object_method` (11 sites), `call_duration_method`
+(6), `call_matrix_method` (4), `call_time_method` (3) and `matrix_transpose` (1)
+are reachable **only** through the legacy JIT-format cascade at
+`ffi/call_method/mod.rs:1310-1317` (`HK_JIT_OBJECT` / `HK_DURATION` /
+`HK_MATRIX` / `HK_TIME`), which runs only under the `UInt64`
+opaque-bits carrier guard — i.e. the `unified_box` NaN-box carrier. That carrier
+is on §8's deletion list. **Their only route dies with the dialect**, so unlike
+`call_string_method` they do not come back, and they are correctly bucket (c).
+
+**STAGE-F3 is a routing obligation, not a dispatcher to convert.** Its 7
+VM-only typed-Arc receiver kinds currently fall to the cascade's silent
+`_ => TAG_NULL` arm (`:1318`) — which its own error text documents as producing
+`fn f(d: DateTime) -> int { d.unix_timestamp() + 1 }` → **rc=139 SIGSEGV**.
+Deleting the guard therefore requires those receivers to route to
+`dispatch_call_via_trampoline_vm` (already bucket (a), live, 8 programs)
+instead of the `TAG_NULL` arm. That is a routing edit in the same slice, and it
+retires a second live SIGSEGV class alongside #254.
+
+**Scope effect: +1 function and +16 sites converted, −16 from bucket (c).** The
+headline (~9 functions converted) becomes **~10**, and the deletion bulk is
+essentially unchanged. The slice does not change shape.
 
 Bucket (a), with measured corpus execution counts (number of the 481 programs
 that executed the function at least once, `--mode jit`):
@@ -421,18 +490,24 @@ later agent cannot reopen it as "the polymorphic case the design allowed for".
 Cranelift return types are per-signature, so the monomorph set is driven by
 Cranelift ABI classes, not by all 27 `NativeKind` variants. Three classes:
 
-| class | Cranelift return | members |
-|---|---|---|
-| `i64` | `types::I64` | `Int64`, `UInt64`, `Int32`… (widened in-slot), `Bool`, `Char`, all `Ptr(HeapKind)`, `String`, `StringV2` |
-| `f64` | `types::F64` | `Float64` |
-| void | *(no results)* | `Null` (ADR-020 §3.3 — already partly landed; `terminators.rs:2219` has the void-call arm) |
+| class | Rust return | Cranelift return | members |
+|---|---|---|---|
+| scalar | `i64` | `types::I64` | `Int64`, `UInt64`, `Int32`… (widened in-slot), `Bool`, `Char` |
+| pointer | `*mut HeapHeader` | `types::I64` | all `Ptr(HeapKind)`, `String`, `StringV2` |
+| float | `f64` | `types::F64` | `Float64` |
+| void | *(none)* | *(no results)* | `Null` (ADR-020 §3.3 — already partly landed; `terminators.rs:2219` has the void-call arm) |
 
-So `jit_call_value` becomes `jit_call_value_i64` / `jit_call_value_f64` /
-`jit_call_value_void`, and likewise for the other converted entry points. The
-integer class stays one monomorph because a raw `i64` slot and a raw pointer
-slot are bit-identical at the ABI — the *kind* distinction lives in the
-emit-site metadata and the caller's `write_place`, which is precisely ADR-020
-§1's "type lives exclusively in static metadata".
+So `jit_call_value` becomes `jit_call_value_i64` / `jit_call_value_ptr` /
+`jit_call_value_f64` / `jit_call_value_void`, and likewise for the other
+converted entry points.
+
+**The scalar and pointer classes are one Cranelift class but two Rust
+signatures, deliberately** (see §4.2). They lower identically — `*mut
+HeapHeader` and `i64` are both `types::I64`, so this costs nothing at the ABI —
+but at the Rust level they are different types, which is what lets rustc
+distinguish "this return transfers an owned share" from "this return is a
+number". Collapsing them into a single `i64` would erase the only remaining
+carrier of that distinction.
 
 `Float64` must be its own monomorph, and this is the load-bearing part: it is
 the only way `box_number` dies. Today every numeric result is `f64::to_bits`
@@ -444,6 +519,61 @@ nullable narrow scalars return `i64` with §3.1's widened out-of-range niche.
 Nullable 64-bit integers do **not** appear: per ADR-020 §5's third sequencing
 ruling their presence-pair machinery lands with #229, and at HEAD those slot
 kinds have no producer.
+
+### 4.2 The ownership channel — the second thing the signature must carry
+
+A grill pass caught that §4.1's original three-class table specified the *kind*
+channel and silently dropped the **ownership** channel. Collapsing `Int64`,
+`Bool`, `Char` and every `Ptr(HeapKind)` into one `i64` return means the
+signature cannot say whether the caller received an owned share, a borrowed
+pointer, or a plain scalar — and those demand different caller behaviour. The
+W17 close is the cautionary precedent: a `KindedSlot::new(...)` + `clone()` that
+claimed ownership without bumping the refcount produced a ghost share and a
+use-after-free at snapshot-drop time.
+
+**The rule at HEAD, measured.** The emit site does:
+
+```rust
+self.release_old_value_if_heap(destination)?;   // terminators.rs:2224
+self.write_place(destination, result)?;         // terminators.rs:2225
+```
+
+`write_place` (`places.rs:1204`) contains **no retain** on any arm. By contrast
+the *constant* producers retain explicitly at the producer site
+(`arc_string_retain`, `ownership.rs:951` / `:991`), because the constant pool
+keeps its own permanent share. The asymmetry is the convention:
+
+> **Invariant O1.** An FFI call's heap return **transfers exactly one owned
+> share** to the caller. The emit site releases the destination's old value and
+> stores the new one without retaining. A constant producer, which does not
+> transfer, retains at the producer site instead.
+
+This is currently a convention held together by comments. The conversion makes
+it a type-level obligation:
+
+> **Invariant O2.** A converted entry point returns `*mut HeapHeader` **iff** it
+> transfers a share; it returns `i64` / `f64` iff it transfers nothing. There is
+> no third case — a borrowed heap pointer is not a legal return, because the
+> callee cannot bound the borrow's lifetime across the FFI edge. An entry point
+> that today returns a borrowed pointer must retain before returning.
+
+Two consequences worth stating so they are not rediscovered:
+
+1. **The `_ptr` monomorph is the retain audit.** Converting an entry point to
+   `-> *mut HeapHeader` forces its author to answer "does this path transfer?"
+   on **every** return path, including the bail paths in §5. Today those bails
+   return `TAG_NULL` — a non-share — into a slot the emit site may treat as
+   heap; that mismatch is one of the two mechanisms behind #254.
+2. **O1/O2 join the §10.2 kind-agreement assertion.** The emit-time check
+   becomes: the chosen monomorph's class matches `slot_kind_of(destination)`
+   **and**, when that kind is heap, the monomorph is the `_ptr` one. A scalar
+   monomorph writing into a `Ptr(_)`-stamped slot is exactly the
+   `ClosurePlaceholder` defect (§6.1) in general form, and this assertion is
+   what would have caught it at the emit site.
+
+This is the class of defect §10.2 argues unit tests cannot see, so O1/O2 need
+the emit-time assertion and the corpus fixtures, not a test that calls the FFI
+function directly with a hand-built context.
 
 ---
 
@@ -465,14 +595,54 @@ The 31 live sites are confined to seven functions: `jit_call_value` (10),
 
 Treatment per the #234 rulings, refined by what already exists:
 
-- **c1 (corrupted-state guards) — no kind needed, and mostly already done.**
+- **c1 (corrupted-state guards) — no kind needed, but NOT already discharged.**
   The pattern is `set_jit_runtime_error(msg); ctx.pending_call_error = 1; return
-  ERROR_PLACEHOLDER_BITS`, and `ERROR_PLACEHOLDER_BITS == 0` is memory-safe under
-  every kind. 31 sites in shape-jit already carry it. Remaining c1 bare-bails
-  just adopt it. In the void monomorph the return disappears entirely and only
-  the flag remains. **This refutes the implicit premise that c1 needs the kinds
-  in the signatures first** — it does not; it is independent and could even
-  precede the conversion.
+  ERROR_PLACEHOLDER_BITS`. In the void monomorph the return disappears entirely
+  and only the flag remains. **This refutes the implicit premise that c1 needs
+  the kinds in the signatures first** — it does not; it is independent and could
+  even land before the conversion, and §5.1 argues it should.
+
+### 5.1 The zero-safety claim is a PRECONDITION, not a property (grill Finding 3)
+
+The first draft asserted that `ERROR_PLACEHOLDER_BITS == 0` "is memory-safe
+under every `NativeKind`" and moved on. That is true of **the value in
+isolation** and false of the system. A `0` that lands in a slot stamped
+`Ptr(HeapKind::Closure)` and later meets `drop_with_kind` is an `Arc` decrement
+on a null pointer. The real safety argument rests on the emit side branching to
+the deopt on `pending_call_error` **before** `write_place` runs
+(`emit_pending_call_error_deopt`, `terminators.rs:2217`) — a property of the
+**emit sites**, not of the value. #234 names this the bits==0 guard-bypass
+hazard, and the first draft read as though it had been discharged.
+
+**It has not been. Measured at HEAD: of the 31 live bare-bail sites, only 6
+acquire `pending_call_error`. 25 do not**, and at least 12 of those
+demonstrably `return TAG_NULL`, so a tag word reaches `write_place` today with
+no deopt:
+
+| function | live sites lacking the flag |
+|---|---|
+| `jit_call_value` (`ffi/control/mod.rs`) | `:538`, `:552`, `:601`, `:674`, `:725`, `:778`, `:835`, `:849`, `:895` |
+| `jit_call_method` (`ffi/call_method/mod.rs`) | `:607`, `:639`, `:657`, `:668`, `:686`, `:715` |
+| `jit_typed_object_get_field` / `_set_field` (`ffi/typed_object/field_access.rs`) | `:27`, `:34`, `:74`, `:81`, `:87` |
+| `jit_typed_object_alloc` (`ffi/typed_object/allocation.rs`) | `:70`, `:98` |
+| `build_option_object` / `jit_schema_option_some` (`ffi/typed_object/option.rs`) | `:85`, `:112` |
+| `dispatch_borrowed_closure_via_trampoline_vm` (`ffi/control/mod.rs`) | `:360` |
+
+**That table is the mechanism of #254 repro B, enumerated.** The nine
+`jit_call_value` rows are precisely the paths by which `TAG_NULL` reaches a
+proven-`Int64` destination and gets `iadd`-ed. §10.1.1's "impossible by
+construction" argument depends on every one of them acquiring the flag; until
+they do, the argument describes the design, not the tree.
+
+**Requirement**: all 25 acquire `pending_call_error` in the same slice, and the
+§10.2 emit-time assertion additionally checks that no converted entry point has
+a return path that neither transfers a valid value (O2) nor sets the flag.
+
+**Recommendation — land c1 first, as its own commit.** It is separable (needs no
+kinds), it closes a live memory-safety hazard on today's tree, and it makes the
+conversion's diff smaller and easier to review. The rest of the slice stays
+indivisible per §9; this one piece genuinely is not, and there is no reason to
+hold a hazard closure behind a design review.
 - **c2 (semantic nulls) — needs the kind, and only now becomes enumerable.**
   Each site returns its destination kind's §3.1 encoding: null pointer for
   heap `T?`, canonical sentinel NaN for `number?`, widened niche for narrow
@@ -833,9 +1003,9 @@ For the record, since each of these would have mis-scoped the work:
 
 1. **Ratification that the polymorphic bucket is empty** (§4) and that the ADR
    should say so, closing it against reopening.
-2. **A ruling on the §9 precondition**: corpus fixtures for the three closure
-   shapes land *before* the conversion, in the same slice. I read this as
-   inside the ticket's mandate; it is also the only way the gate is real.
+2. ~~**A ruling on the §9 precondition**~~ — **RATIFIED** (grill round 1,
+   without reservation): corpus fixtures for the three closure shapes land
+   before the conversion, in the same slice, and this is inside the mandate.
 3. **Confirmation that `jit_make_closure` deletion needs no producer search
    beyond what §7 records** — I looked and found none, but absence of a
    producer is the kind of claim a second pair of eyes should try to break.
@@ -845,10 +1015,18 @@ For the record, since each of these would have mis-scoped the work:
    keeps `box_function` under a `Ptr(Closure)` stamp is patching the guard, not
    the lie. If another lane lands a fix first, this design's §6 needs re-basing;
    worth deciding which ticket owns the carrier before both move.
-5. Whether `box_string` / `unified_box` (150 programs — by far the most-executed
-   dialect function) should be converted in this slice or whether the string
-   heap carrier is #228 territory. I have scoped it in, but it is the one
-   boundary I am least sure of.
+5. ~~Whether `box_string` / `unified_box` belongs here or in #228~~ —
+   **RULED (grill round 1): SPLIT AT THE CHANNEL.** The return-channel
+   conversion and the dialect deletion for `box_string` are **#239**. The
+   `UnifiedValue`/`JitAlloc` HeapHeader merge and any object-layout change are
+   **#228**. The boundary, stated here so #228's lane does not find it
+   half-done: **#239 changes how the value is RETURNED; #228 changes how the
+   object is LAID OUT.** Concretely — #239 converts `box_string`'s call sites
+   so a string return travels as `*mut HeapHeader` in a `_ptr` monomorph
+   (§4.1/§4.2) and deletes `unified_box`; #239 does **not** touch the header
+   bytes, the refcount field, or the GC colour/buffered bits, which stay whole
+   for #228. A `box_string` call site that needs a layout change to convert is
+   out of scope and should be surfaced, not absorbed.
 6. **Ratification of the §3.5.1 ruling to DELETE the `Eq`/`Ne` fallthrough**
    rather than add a fourth kind proof. Three incidents have been point-fixed
    upstream of it; the safety lane's `jit_string_eq` is the third. I want the
@@ -862,3 +1040,16 @@ For the record, since each of these would have mis-scoped the work:
    siblings, §3.5.2). I did not settle its reachability and I am not guessing.
    Either it is dead (my expectation — delete with bucket (c)) or it hides a
    live inline tag test on every array index.
+9. **New, from grill round 1 — the STAGE-F3 routing obligation** (§3.0.1).
+   Deleting that guard requires the 7 VM-only typed-Arc receiver kinds to route
+   to `dispatch_call_via_trampoline_vm` instead of the cascade's silent
+   `_ => TAG_NULL` arm. Its own error text documents the current behaviour as
+   `fn f(d: DateTime) -> int { d.unix_timestamp() + 1 }` → **rc=139 SIGSEGV** —
+   a second live memory-safety class in this ticket's territory, distinct from
+   #254 and not currently filed. It needs the same disposition decision as #254:
+   own it here, or file and route it.
+10. **New — should c1 land first as a separate commit** (§5.1)? 25 of 31 live
+    bare-bail sites lack `pending_call_error` today, which is a live hazard on
+    the tree, and closing it needs no kinds. My recommendation is yes; it
+    contradicts nothing in §9, since §9's indivisibility argument is about the
+    producer flip and the channel, not about c1.
