@@ -123,8 +123,27 @@ distinct questions, and only the last means "live":
 |---|---|---|---|
 | 1. registered | is there an `extern "C" fn` and a `declare(...)` call? | `grep 'extern "C" fn'` | 423 |
 | 2. declared into IR | does `build_ffi_refs` populate a `FuncRef` for it? | the `r!()` keys | 186 |
-| 3. **emitted** | does any `builder.ins().call(self.ffi.<field>, …)` reference it? | `grep -rhno 'ffi\.[a-z0-9_]*' mir_compiler/ compiler/` | 184 |
+| 3. **referenced** | is the `FFIFuncRefs` field **named anywhere** in `crates/shape-jit/src`? | `grep -rhno 'ffi\.[a-z0-9_]*' mir_compiler/ compiler/` | 184 |
 | 4. executed | does a real program under `--mode jit` reach it? | first-hit probe over the corpus + targeted falsifiers | 12 of 42 probed |
+
+**Tier 3 is "never named", NOT "never in a `builder.ins().call`" — and the
+distinction is load-bearing.** The first draft of this table asked the narrow
+question while running the broad test; the test was sound and the description
+was not, which is §10.4.1's pattern inside the table that documents it. The
+narrow form is **unsound**, because a `FuncRef` can be selected into a local and
+called indirectly:
+
+```rust
+let retain_func = self.retain_func_for_place(place)?;   // returns self.ffi.arc_closure_retain
+self.builder.ins().call(retain_func, &[val]);           // the field never appears at the call
+```
+
+The safety-perms lane measured the narrow formulation on the seed tree: **142
+symbols flagged, including retain/release entries proven live by execution.**
+The "never referenced at all" form is sound because no indirection can read a
+field that is never named. That reasoning is now mechanized as `verify-merge`
+CHECK 22 rule R3 and recorded in its baseline's `not_a_rule` field so nobody
+"completes" the check later by tightening it.
 
 Tier 1 → 2 is #226's finding (a registered symbol need not be callable).
 **Tier 2 → 3 is this lane's addition**: a symbol can be declared into every
