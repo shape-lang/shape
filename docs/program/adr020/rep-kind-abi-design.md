@@ -138,6 +138,26 @@ An enumeration that stops at tier 1 over-counts by ~2.3x; one that stops at
 tier 2 still admits `jit_get_prop`. **Any future lane enumerating an FFI
 surface should run all four.**
 
+### 1.1.1 THREAT TO THIS SECTION'S VALIDITY — #260
+
+Every "N hits across 481 programs" number in this document assumes a corpus run
+is **reproducible**. #260 records a nondeterministic V2 bytecode verifier —
+identical input yielding 0, 2 and 8 violations across five runs, confirmed by the
+supervisor. The stronger half of the claim, that it can disable the JIT run to
+run, was **not** reproducible (fourteen witness runs came back fully native), so
+the two halves are filed apart.
+
+**If the stronger half ever holds, it invalidates every dynamic measurement
+here** — mine and the refuters' alike — because a program that silently ran
+interpreted contributes a zero indistinguishable from a genuine absence. That is
+the same instrument failure §7.1 admits to in a different guise.
+
+This is a further reason the dynamic numbers in §3 are presented as a filter over
+a static partition rather than as the partition itself, and why every
+unreachability claim in §3 is additionally backed by a static impossibility or a
+targeted falsifier. **Re-run the corpus twice and compare failure NAME SETS, not
+counts, before trusting any number in this document.**
+
 ### 1.2 Denominator caveat, stated up front
 
 Only **121 of 481** corpus programs execute any native code (287 bail
@@ -605,12 +625,20 @@ no bail — the value is `TAG_NULL` read as `i64`:
 | `a.zip([4,5,6]).len()` | `3` | `-1407374883553280` | 0 |
 | `a.take(2).len()` | `2` | `-1407374883553280` | 0 |
 | `a.skip(1).len()` | `2` | `-1407374883553280` | 0 |
-| **`a.unique().len()`** | `3` | *(no output)* | **134 — SIGABRT** |
+| **`a.unique().len()`** | `3` | *(no output)* | **134 — SIGABRT** (this lane) / **1** with `Array.includes: receiver bits failed v2 TypedArray detection (kind Ptr(TypedArray))` (supervisor) |
 
 Two controls isolate the variable exactly: `let s: Array<int> = a.slice(0,2);
 s.len()` matches (the annotation seeds the slot kind), and `a.first().len()`
 matches (`first` is in the parametric table at `types.rs:1319`). Same shape;
 the only difference is whether a stamp exists.
+
+**The `unique` row has two different observations recorded deliberately** — this
+lane saw rc=134 (SIGABRT), the supervisor saw rc=1 with a
+`v2 TypedArray detection` diagnostic. Both are recorded rather than one being
+picked, because the disagreement is itself a datum: it means at least one input
+to that path is **nondeterministic**, which bears directly on #260 below. Either
+way it is not a silent wrong answer, so it does not change the seven-shape
+count's character.
 
 **One datum beyond the refutation as filed:** `a.unique().len()` does not
 merely return a wrong number, it **aborts (rc=134)**. That is a third live
@@ -892,7 +920,7 @@ Cranelift-emitted code). Filed as **#254**. **This shape is not in the corpus**
 `SYN__closure-infn-tagnull` rc=1) and it is distinct from #219, which requires a
 closure declared inside a function and passed as an argument.
 
-#### #254 is TWO defects, and the discriminator is scope — not what either of us first proposed
+#### #254 is TWO defects — the discriminator is ESCAPE (my "scope" framing was one step short)
 
 The supervisor asked me to run the annotation control against repro B
 specifically, on the hypothesis that A is the carrier defect and B is a §5.1 c1
@@ -908,13 +936,13 @@ than either of us proposed**:
 
 Two conclusions, both measured:
 
-1. **The two SIGSEGV variants (A and C) ARE module-scope-conditioned** — the
-   supervisor's narrowing is correct for them. The identical shape inside
-   `fn main()` is correct on both tiers. So the defect is not "a closure calls a
-   closure"; it is **a module-scope closure calling another module-scope
-   closure**, which is a GENERIC_CARRIER site under ADR-006 §2.7 with its own
-   `KindedSlot` discipline (§6.2's consumer inventory must therefore cover the
-   **module-binding read path**, which the original list did not — see below).
+1. **The two SIGSEGV variants (A and C) require an ESCAPING closure slot.**
+   Module scope was the visible correlate and both the supervisor and I stopped
+   there; the measured condition is escape. The identical shape inside
+   `fn main()` is safe because fn-local closure slots take the **stack** path
+   (`statements.rs:652` → `emit_stack_closure`, no retain/release). Module-scope
+   bindings escape by definition, which is why every module-scope repro faults —
+   but so would any other escaping form.
 2. **Repro B is NOT module-scope-conditioned.** It reproduces identically inside
    `fn main()`. So the narrowing that holds for A and C does **not** hold for B,
    and B is a genuinely separate defect with a wider blast radius — every
@@ -922,26 +950,123 @@ Two conclusions, both measured:
 
 **Neither variant is #257's class.** Adding a type annotation rescues neither,
 whereas the annotation control is exactly what rescues the seven §4.0 `Array`
-shapes. So both are present-and-wrong stamps, not absent ones, and c1 (§5.1)
-alone will not fix B either — the supervisor's proposed B-mechanism is
-**refuted** by the annotation control. What distinguishes B from A is *which*
-closure holds the capture (callee vs caller), not the presence of a bail.
+shapes. So both are **present-and-wrong** stamps, not absent ones.
 
-**Consequence for §6.2's consumer inventory.** The original list —
-`jit_call_value`'s `is_inline_function` arm, both trampoline dispatchers,
-`unbox_function_id` — is **incomplete**. The module-scope conditioning of A and
-C says the module-binding read path is also a consumer of the mis-stamped
-carrier, and it is not in that list. `executor/mod.rs:792::module_binding_read_owned_kinded`
-is the VM-side analogue named in CLAUDE.md's §2.7.8/Q10 notes; the JIT-side
-module-binding read is the site the implementing lane must add and verify.
+**But my next inference did not follow, and I am withdrawing it.** I wrote:
+annotation rescues neither, therefore both are wrong stamps, therefore *c1 will
+not close B*. The first two steps hold; the third does not follow from them. The
+annotation control distinguishes an **absent** stamp (#257) from a **wrong** one
+(#254). It says nothing about whether a **consumer-side stop** suppresses the
+symptom — and that is exactly what c1 is. c1 does not fix a stamp; it makes the
+consumer refuse to hand back a usable value.
 
-Working hypothesis for the fault (**not yet proven**, offered so the
-implementing lane can confirm cheaply): `h` captures `g`; the capture path
-retains the captured slot according to its stamped kind `Ptr(Closure)`;
-`Arc::increment_strong_count` on the tag word writes to a wild address. If
-confirmed, the crash is a direct consequence of the metadata lie and dies with
-this conversion — which is the strongest available argument that the flip is
-the fix, not a refactor.
+**The cheap resolution the supervisor proposed, carried out:** the site that
+fires for B is `ffi/control/mod.rs:872` (established under gdb), and **`:872` is
+one of the eight paths named in #259** (`control/mod.rs:614, 651, 762, 798, 815,
+872, 886, 932`) that return `TAG_NULL` **without** setting `pending_call_error` —
+confirmed at HEAD: no `pending_call_error` assignment appears anywhere in that
+arm. So c1, which makes exactly those paths set the flag, would cause the emit
+side to deopt at `emit_pending_call_error_deopt` **before** `write_place`, and no
+`TAG_NULL` would reach the destination.
+
+**Therefore the likely outcome is that c1 closes B's SYMPTOM while leaving its
+CAUSE** — B becomes correct-via-deopt, and the carrier lie waits for the §6.2
+flip. Stated as the expected outcome rather than a settled fact, because only
+observing B after c1 lands is decisive. Two consequences for the implementing
+lane:
+
+- **The c1 commit's acceptance must not claim it fixed #254.** If B goes green
+  after c1, that is a deopt, not a repair, and the §10.1 fixture for B must
+  additionally assert native execution (via `--native-witness`) so a
+  correct-but-interpreted result cannot be mistaken for a converted channel.
+- **Do not be surprised when B goes green early.** A and C will not.
+
+What distinguishes B from A is *which* closure holds the capture (callee vs
+caller) — see the measured mechanism below.
+
+**Consequence for §6.2's consumer inventory — I claimed a missing consumer and
+then WITHDREW it.** I reasoned from the module-scope conditioning that the
+module-binding read path must be an uncovered consumer of the mis-stamped
+carrier. That inference rested on the module-scope framing, which the measured
+mechanism below refutes: the condition is **escape**, not module binding. There
+is no missing module-binding consumer; the module-scope programs fault for the
+same reason any escaping closure would.
+
+The consumer inventory that survives is the producer-side one in §6.2, plus the
+mask-driven retain loop at `mir_compiler/statements.rs:1214/1233/1243` — which is
+**not** a kind-stamp consumer at all (it reads neither stamp) and so was
+correctly absent from a list of stamp consumers. It belongs to the inventory as a
+**layout** consumer, which is a different and previously unnamed category.
+
+#### The mechanism — MEASURED, and my hypothesis was WRONG
+
+I hypothesised that the capture path retains the captured slot *according to its
+stamped kind* `Ptr(Closure)`. **Refuted under gdb.** The retain loop is driven
+**solely** by `ClosureLayout::heap_capture_mask`
+(`mir_compiler/statements.rs:1214/1233/1243`, faulting `atomic_rmw` at `:1255`).
+It never calls `operand_native_kind` and reads **neither** kind stamp. My
+"consumes the `Ptr(Closure)` stamp" chain does not exist.
+
+**The real mechanism, and it is a better argument for the flip than mine was:**
+
+- A **non-capturing** closure is `box_function(fid)` — a NaN-boxed tag word.
+- `ClosureLayout` is **shared with the VM**, where a closure is always
+  `Arc<ClosureRaw>`. It therefore classifies a captured closure as
+  `FieldKind::Ptr` and sets its heap-capture-mask bit.
+- So **capturing a non-capturing closure retains a tag word.** The layout says
+  "refcounted pointer" because on the VM side it always is; the JIT put a tag
+  word there instead.
+
+Confirmed by a falsifiable prediction: inserting an extra closure ahead shifts
+the `fid`, and the fault address moved `…00c2` → `…00c3` exactly as predicted.
+
+This **strengthens §6.2 rather than weakening it.** The defect is not a stamp
+being misread by a consumer — it is **two carriers that no single `ClosureLayout`
+can describe**, which is precisely why ADR-020 §3.4 rules that the one carrier is
+the VM's `Arc<ClosureRaw>`. A layout shared across two tiers is only coherent if
+the tiers agree on the representation. They do not, and that is the thing this
+ticket fixes.
+
+**The minimal repro is smaller than the one in §6.1 above: two `let`s and no call
+at all.**
+
+```shape
+let g = |x| x + 1
+let h = |y| g(y) + 1
+```
+
+This segfaults with nothing invoked — the fault is in the *allocation* of `h`,
+not in any dispatch. Use this form in the fixture; it removes `print`, the call,
+and the arithmetic as suspects.
+
+**Correction to §6.1's framing, which I inherited and should not have:** the
+condition is **not** module scope. The in-function version is safe because
+fn-local closure slots take the **stack** path (`statements.rs:652` →
+`emit_stack_closure`, documented at `:940` as doing no retain/release). That is
+**escape analysis**, not a module-binding carrier. A module-scope binding escapes
+by definition, which is why every module-scope repro faults; but any escaping
+closure slot reaches the same code. The supervisor's module-scope narrowing and
+my §6.2 "the module-binding read path is a missing consumer" inference are both
+**withdrawn** — the missing-consumer claim was reasoning from a false premise.
+
+**Variant B is the mirror image, not a different family.** Where A carries a tag
+word under a layout that says `Ptr`, B carries **genuine heap-closure bits under
+the `UInt64` stamp** (`rvalues.rs:634`, the `MirConstant::Function` arm) into
+`jit_call_value`, whose `UInt64` handler recognises only `TAG_FUNCTION` or
+`unified_box(HK_CLOSURE)` — not the VM's raw `Arc`. It falls to the surface arm
+at `ffi/control/mod.rs:872` and returns `TAG_NULL`. Two directions of the same
+duality: **one has a guard and returns a wrong value, the other has no guard and
+faults.**
+
+#### REFUSED SHORTCUT — record it before someone finds it
+
+Hardening the mask-driven retain at `statements.rs:1243` to skip tag-shaped words
+**suppresses the segfault and must not be taken.** It leaves a closure that the
+layout says is refcounted but which is never retained and never released — the
+refcount lie behind a repaired guard. It converts variant A (a crash, which is
+loud) into variant B (a silent wrong answer, which is not). That is a strict
+worsening dressed as a fix, and it is the §Forbidden walk-back shape: the
+dynamic-path defect kept alive under a guard that makes it invisible.
 
 ### 6.2 The flip
 
@@ -984,30 +1109,73 @@ and the reason the deletion belongs in this slice rather than a follow-up.
 
 ## 7. The third carrier
 
-`jit_make_closure` (`ffi/object/closure.rs:40`) produces
+`jit_make_closure` (`crates/shape-jit/src/ffi/object/closure.rs:40`) produces
 `unified_box(HK_CLOSURE)` — a third function-value carrier beside the VM's
 `Arc<ClosureRaw>` and the JIT's `box_function`. It is emitted from the legacy
-fallback at `mir_compiler/statements.rs:821`.
+ARM-3 fallback at `crates/shape-jit/src/mir_compiler/statements.rs:821` (fully
+qualified deliberately: several files in this tree are named `statements.rs`,
+and a bare cite is a deletion hazard).
 
-**Measured: it never executes.** 0 hits across 481 corpus programs, and 0 hits
-across four hand-written falsifiers built specifically to force an escaping
-capturing closure (local capture + escape through a call, capture pushed into
-an array, nested capture, capture returned). The escaping paths that do run
-reach `emit_heap_closure` or `dispatch_borrowed_closure_via_trampoline_vm`
-instead; the array variant surface-and-stops at Route A
-(`Rvalue::Aggregate reached the kind …`).
+**RATIFIED: delete the fallback and `jit_make_closure` outright; do not migrate
+its error returns.** But the warrant is the structural argument below, **not**
+my corpus sweep — that distinction is load-bearing and the doc previously had it
+backwards.
 
-I could not construct a producer. **Ruling tested and upheld: delete the
-`statements.rs:821` fallback and `jit_make_closure` outright; do not migrate its
-error returns.** ADR-020 §6 forbids a second function-value carrier, so a third
-one that provably has no producer needs no migration path, and §Greenfield
-forbids keeping it "just in case".
+### 7.1 Why my original evidence does not support the conclusion
 
-If the implementing lane finds a producer I could not, that is a genuine
-refutation and should come back as one rather than be resolved by keeping the
-carrier.
+I wrote "0 hits across 481 corpus programs and 0 across four falsifiers" and
+concluded no producer exists. **That measurement is close to powerless as
+stated**, and I should have caught it: most closure-bearing corpus programs never
+reach `ClosureCapture` lowering at all, for reasons unrelated to closures (§1.2 —
+only 121/481 execute any native code, and the whole-program bail rate dominates).
+A sweep with no per-program positive control reports zero executions whether or
+not the arm is reachable. It is an absence claim measured with an instrument that
+cannot distinguish absence from non-arrival.
 
----
+The refuting investigation did it properly: gdb breakpoints on the symbol with
+`jit_finalize_heap_closure` as a **live positive control**, observing ~10,001
+escaping closure allocations at **100% ARM 2, 0% ARM 3** — including module
+scope, which none of my falsifiers covered.
+
+### 7.2 The structural argument — the actual warrant
+
+ARM 3 fires only when `closure_function_layouts.get(&fid) == None` **and** the
+slot escapes. Five single-writer links make a missing layout impossible for a
+real `fid`.
+
+The critical part is that **the documented escape hatch does not exist.**
+`crates/shape-vm/src/bytecode/core_types.rs:677` claims:
+
+> *"serialized — programs loaded from disk fall back to the FFI path."*
+
+That is false. The same serde boundary that drops the layouts also drops the
+MIR: `mir_data` and `top_level_mir` are both `#[serde(skip)]`, and
+`linker.rs:738` nulls `mir_data`. Every JIT path errors without MIR. **No MIR, no
+`ClosureCapture` lowering, no ARM 3.** The one scenario the codebase advertises
+as reaching the fallback cannot reach the JIT at all.
+
+### 7.3 Required with the deletion
+
+1. **Delete the two stale artifacts in the same commit.** Both are verified
+   present:
+   - the false comment at `core_types.rs:677` (quoted above);
+   - the `#[deprecated]` note at `ffi/object/closure.rs:36-40`, which states the
+     function "exists only to service the legacy non-layout fallback" and that "a
+     follow-up phase can delete this FFI once all closure functions are
+     guaranteed to have a registered `ClosureLayout`."
+
+   Leaving either re-seeds the belief that a non-layout program can reach the
+   JIT. The `#[deprecated]` note is the more dangerous of the two because it
+   reads as a live TODO with a precondition that has **already been met**.
+2. **Record the untested surfaces rather than implying totality.** Neither the
+   corpus sweep nor the gdb investigation covered: the REPL, `wire-serve` /
+   `@remote`, `shape build`, snapshot resume, annotation handler bodies, async
+   closures, or multi-file imports. The structural argument is what covers them —
+   it is a property of the lowering, not of a sample — but the deletion record
+   should say which surfaces were reasoned about rather than observed.
+
+If the implementing lane finds a producer, that is a genuine refutation and
+should come back as one rather than be resolved by keeping the carrier.
 
 ## 8. The ratchet, in the same slice
 
@@ -1102,8 +1270,8 @@ acceptance set, all as corpus fixtures with VM/JIT differential:
 
 | fixture | source | **form — binding** | HEAD behaviour | post-fix |
 |---|---|---|---|---|
-| `SYN__closure-calls-closure.shape` | §6.1 A | **MODULE SCOPE — required** | **SIGSEGV** | VM==JIT `3` |
-| `SYN__closure-calls-closure-outer-capture.shape` | §6.1 C | **MODULE SCOPE — required** | **SIGSEGV** | VM==JIT `7` |
+| `SYN__closure-calls-closure.shape` | §6.1 A (use the two-`let` no-call form) | **ESCAPING slot — required** | **SIGSEGV** | VM==JIT `3` |
+| `SYN__closure-calls-closure-outer-capture.shape` | §6.1 C | **ESCAPING slot — required** | **SIGSEGV** | VM==JIT `7` |
 | `SYN__closure-calls-closure-capture.shape` | §6.1 B | either (reproduces at both) | silent `TAG_NULL+1` | VM==JIT `7` |
 | `SYN__datetime-method-native.shape` | §2 STAGE-F3 | any | whole-**program** deopt, 0 native dispatches | native, VM==JIT |
 | `SYN__string-scalar-method.shape` | `s.length()` in a fn | any | whole-fn deopt | native, VM==JIT |
@@ -1111,12 +1279,15 @@ acceptance set, all as corpus fixtures with VM/JIT differential:
 | `SYN__string-eq-content.shape` | **already exists** on `main` (#232) | — | green | **reuse, do not duplicate** — extend with a `StringV2` operand, which deopts today (§2) and must go native |
 
 **Fixture-form warning — do not "simplify" the first two into a function.** The
-two SIGSEGV variants reproduce **only** at module scope; wrapped in `fn main()`
-they are correct on both tiers at HEAD (§6.1). A fixture written the natural way
-— inside a function — would pass today and prove nothing, and the next person to
-tidy the corpus is exactly the person who would rewrite them that way. The
-module-scope binding is load-bearing, not incidental style. Repro B is the
-exception: it reproduces in both forms, so its fixture may take either.
+two SIGSEGV variants require the closure slot to **escape**; wrapped in
+`fn main()` the slots take the stack path (`statements.rs:652` →
+`emit_stack_closure`, no retain/release) and are correct on both tiers at HEAD.
+A fixture written the natural way — inside a function — would pass today and
+prove nothing, and the next person to tidy the corpus is exactly the person who
+would rewrite it that way. Module scope is the *simplest* way to force escape,
+not the condition itself (§6.1); any escaping form works. Repro B is the
+exception: it reproduces in both forms, so its fixture may take either — but see
+§6.1 on why B's fixture must additionally assert native execution.
 
 Two load-bearing *positive* fixtures, which is the pair that proves the
 conversion delivered a typed channel rather than renaming the untyped one:
