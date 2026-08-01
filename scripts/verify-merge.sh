@@ -734,6 +734,26 @@ fi
 echo
 
 # -----------------------------------------------------------------------------
+# CHECK 22 — JIT FFI reachability (registration is not reachability)
+# -----------------------------------------------------------------------------
+# Three instances in one day of a symbol that LOOKED covered while nothing a
+# user could run could reach it: jit_v2_string_eq (correct, tested, never
+# registered), the jit_typeof/jit_to_string/... family (declared, zero call
+# sites), and jit_v2_retain/jit_v2_release (registered AND declared, never
+# given a FuncRef — the size-blind Layout(8,8) dealloc filed as live UB in
+# #216 that was in fact unreachable). This makes the class fail by
+# construction instead of being rediscovered one ticket at a time.
+echo "=== CHECK 22: JIT FFI reachability ratchet (#216) ==="
+if node scripts/check-jit-ffi-reachability.mjs --self-test; then
+  record_pass "JIT FFI reachability ratchet"
+  echo "  -> clean"
+else
+  record_fail "JIT FFI reachability ratchet" "a symbol was registered or declared without a FuncRef, a FuncRef field went unreferenced, a fixed symbol was left in the debt list, or an allow-list entry carries no reason"
+  echo "  -> FAILED (unreachable registration, dead FuncRef, stale debt entry, or reasonless allow-list entry)"
+fi
+echo
+
+# -----------------------------------------------------------------------------
 # REPORT
 # -----------------------------------------------------------------------------
 echo "=== SUMMARY ==="
