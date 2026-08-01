@@ -1,0 +1,31 @@
+// ADR-020 / #239 POSITIVE acceptance fixture — the strongest signal in the set.
+//
+// Any method call on a VM-only typed-Arc receiver (DateTime, Temporal, Instant,
+// Decimal, BigInt, DataTable, TableView, Content) trips the STAGE-F3 guard at
+// mir_compiler/terminators.rs:689 and deopts the WHOLE PROGRAM — not the
+// enclosing function. Measured with --native-witness: program_fallback
+// {scope: "program", reason_class: "jit-compile-error"}, and total
+// native_dispatches = 0.
+//
+// So this program is CORRECT on both tiers today precisely because the JIT
+// never runs. A VM==JIT comparison cannot detect whether the conversion
+// achieved anything here — the acceptance assertion is the WITNESS:
+//
+//     shape run --mode jit --native-witness w.json <this file>
+//     => program_fallback == null AND sum(native_dispatches) > 0
+//
+// A program going from zero native dispatches to non-zero is unambiguous in a
+// way "the deopt message is gone" is not.
+//
+// Deleting STAGE-F3 is a HARD PRECONDITION on routing these seven receiver
+// kinds to `dispatch_call_via_trampoline_vm` in the same edit. The guard's own
+// text documents the consequence of removing it without the routing:
+// `fn f(d: DateTime) -> int { d.unix_timestamp() + 1 }` -> rc=139.
+from std::core::intrinsics use { DateTime }
+
+fn stamp(d: DateTime) -> int {
+    return d.unix_timestamp() + 1
+}
+
+let dt = DateTime.parse("2024-06-15T14:30:45+00:00")
+print(stamp(dt))
