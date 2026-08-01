@@ -79,7 +79,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                 // deopts the enclosing function to the interpreter and so
                 // preserves VM == JIT rather than guessing.
                 if matches!(op, BinOp::Eq | BinOp::Ne) && Self::both_string(lhs_kind, rhs_kind) {
-                    return self.compile_string_eq(op, l, lhs_kind, r, rhs_kind);
+                    return self.compile_string_eq(op, l, r);
                 }
 
                 // r5c-2-gz-cp6 narrow-neg-literal: narrow integer
@@ -1039,12 +1039,17 @@ impl<'a, 'b> MirToIR<'a, 'b> {
     /// #232 jit-string-eq: emit the content compare for `==` / `!=` on two
     /// proven `NativeKind::String` operands.
     ///
-    /// Mirrors [`Self::compile_string_concat`]'s operand protocol exactly —
-    /// both operand `Value`s widened to their I64 bit patterns, each paired
-    /// with its ADR-006 §2.7.5/§2.7.7 producer-side kind stamp. The call-site
-    /// gate ([`Self::both_string`]) guarantees both stamps are `String`, so
-    /// `operand_slot_kind` returns `Some(_)` on both sides by construction
-    /// and the SENTINEL encoding is unreachable here.
+    /// Mirrors [`Self::compile_string_concat`]'s operand protocol — both
+    /// operand `Value`s widened to their I64 bit patterns — but passes NO
+    /// kind bytes. Concat needs them because its `Add` call site admits
+    /// `str + <any>`; equality does not, because the [`Self::both_string`]
+    /// gate admits this lowering only when BOTH operands are proven
+    /// `NativeKind::String`. Both carriers are therefore statically the same
+    /// here, and a kind byte could only re-encode at runtime what the emit
+    /// site already proved (ADR-006 §2.7.5 producer-side stamp). Widening
+    /// the gate to the second string carrier (`StringV2`) is what would
+    /// force the question open again — carrier-unification work
+    /// (ADR-020 / #239), not a parameter to add speculatively.
     ///
     /// `jit_string_eq` returns 1/0 in an I8 — the Cranelift width of a
     /// `NativeKind::Bool` slot, so the `Eq` result is returned unchanged.
@@ -1056,29 +1061,10 @@ impl<'a, 'b> MirToIR<'a, 'b> {
     /// `ownership.rs::compile_operand` emits for a refcounted slot — the
     /// same contract `jit_string_concat` relies on. No extra retain or
     /// release is emitted here.
-    fn compile_string_eq(
-        &mut self,
-        op: &BinOp,
-        lhs: Value,
-        lhs_kind: Option<shape_vm::type_tracking::NativeKind>,
-        rhs: Value,
-        rhs_kind: Option<shape_vm::type_tracking::NativeKind>,
-    ) -> Result<Value, String> {
-        use crate::ffi::stack_kind_code;
+    fn compile_string_eq(&mut self, op: &BinOp, lhs: Value, rhs: Value) -> Result<Value, String> {
         let a = self.to_i64_bits(lhs);
         let b = self.to_i64_bits(rhs);
-        let a_code = lhs_kind
-            .map(stack_kind_code::encode)
-            .unwrap_or(stack_kind_code::SENTINEL);
-        let b_code = rhs_kind
-            .map(stack_kind_code::encode)
-            .unwrap_or(stack_kind_code::SENTINEL);
-        let a_code_val = self.builder.ins().iconst(types::I8, a_code as i64);
-        let b_code_val = self.builder.ins().iconst(types::I8, b_code as i64);
-        let inst = self
-            .builder
-            .ins()
-            .call(self.ffi.string_eq, &[a, a_code_val, b, b_code_val]);
+        let inst = self.builder.ins().call(self.ffi.string_eq, &[a, b]);
         let eq = self.builder.inst_results(inst)[0];
         match op {
             BinOp::Eq => Ok(eq),

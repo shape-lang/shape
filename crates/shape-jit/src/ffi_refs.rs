@@ -341,15 +341,19 @@ pub struct FFIFuncRefs {
     pub(crate) string_concat: FuncRef,
 
     // #232 jit-string-eq: string `==` / `!=` content compare.
-    //   `string_eq` — `(a_bits: u64, a_kind_code: u8, b_bits: u64,
-    //   b_kind_code: u8) -> u8`, same kind-stamped operand ABI as
-    //   `string_concat`. Called from `mir_compiler::rvalues::compile_rvalue`
-    //   when BOTH operand slots carry `NativeKind::String` under
-    //   `BinOp::Eq`/`Ne`. Without it those operands fell through to
-    //   `compile_binop_dynamic_cmp`, whose raw `icmp` compared
-    //   `Arc<String>` POINTERS — Arc identity instead of content, so every
-    //   runtime-constructed string (f-string, `+` concat) compared unequal
-    //   to its content-equal partner and diverged from the VM's `EqString`.
+    //   `string_eq` — `(a_bits: u64, b_bits: u64) -> u8`. Called from
+    //   `mir_compiler::rvalues::compile_rvalue` when BOTH operand slots
+    //   carry `NativeKind::String` under `BinOp::Eq`/`Ne`. Without it those
+    //   operands fell through to `compile_binop_dynamic_cmp`, whose raw
+    //   `icmp` compared `Arc<String>` POINTERS — Arc identity instead of
+    //   content, so every runtime-constructed string (f-string, `+` concat)
+    //   compared unequal to its content-equal partner and diverged from the
+    //   VM's `EqString`.
+    //
+    //   Deliberately NOT kind-stamped, unlike `string_concat`: the
+    //   `both_string` gate at the single call site proves both operands are
+    //   `NativeKind::String`, so a kind byte would re-encode at runtime a
+    //   statically proven fact (ADR-006 §2.7.5).
     pub(crate) string_eq: FuncRef,
 
     // Typed interpolation producers. Source kind and policy select the import
