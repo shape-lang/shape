@@ -1,0 +1,24 @@
+// #259 regression pin: a surface-and-stop path in `jit_call_value` must not
+// hand back a legal value.
+//
+// The callee `g` is stamped `UInt64` (the `MirConstant::Function` carrier kind)
+// but its bits are neither an inline function nor a unified-heap closure, so
+// `jit_call_value` correctly detects a carrier violation at
+// `crates/shape-jit/src/ffi/control/mod.rs` (the UInt64 callee arm). Before
+// #259 it then returned `TAG_NULL` — which read as `i64` is
+// -1407374883553280 — and the caller printed it as an ordinary integer, rc=0.
+//
+// No arithmetic on the result, deliberately: a regression shows up as the raw
+// TAG_NULL word rather than as an off-by-one, so the failure names its own
+// cause.
+//
+// EXPECTED TO DIVERGE until ADR-020 / #239 converts the value channel: the
+// interpreter prints 2, the JIT aborts native execution with a named carrier
+// violation. Pinned in known-red.json as `callvalue-stop-aborts-native`. The
+// pin asserts the FAIL-CLOSED behaviour, not correctness — if this program ever
+// prints a number under `--mode jit` that is not 2, the stop has started
+// returning a value again.
+let c = 0
+let g = |x| x + 1 + c
+let h = |y| g(y)
+print(h(1))
