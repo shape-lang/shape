@@ -662,3 +662,82 @@ this way before the AST-built guard was written.
 More generally: every guard in this ticket's territory was checked by installing
 the violating input and confirming the test goes red. Two of them did not, and
 were rewritten rather than kept.
+
+---
+
+## 11. C-harness closed — 2 of 3; the third was masked (2026-08-01)
+
+Chartered to close the three `table_len=0` harness residuals in this lane.
+**Two closed. The third was not a harness case — the harness fix unmasked what
+it actually is, and it routes to #262.**
+
+### 11.1 The fix
+
+Both harnesses built a `BytecodeCompiler::new()` and drove monomorphization or
+shadow emission directly. Production never reaches descriptor construction in
+that state: `compile()` populates the span table before any body compiles (the
+T1 keystone). A harness that skips it leaves the return classifier with nothing
+to classify a closure's terminal expression from — a **missing test
+precondition, not a compiler gap**, confirmed by the same sources compiling
+clean through `compile()`.
+
+Both now install the facts `compile()` would have, using the idiom already
+established at `compiler/functions/reference_provenance_tests.rs:196`:
+
+```rust
+let facts = BytecodeCompiler::infer_reference_model(&program).3;
+compiler.resolved_expr_types = facts.expression_types().clone();
+compiler.inference_facts = facts;
+```
+
+Applied at `monomorphization/cache.rs` (`b5_compiler_for_source`) and at
+`functions_annotations/original_body_shadow_tests.rs`
+(`compiler_with_inference_facts`, wired into the shared
+`compile_annotated_function` so every test using it gets the precondition, not
+just the one that happened to trip).
+
+Probe: **8 → 6.**
+
+### 11.2 The third case was masked, and is #262's
+
+`replacement_mir_uses_only_its_own_distinct_closure_identity` did not close. It
+MOVED:
+
+| | before | after |
+|---|---|---|
+| function | `__closure_0` | `__closure_1` |
+| table_len | 0 | 6 |
+
+`__closure_0` is the target body's `unary` closure — it now classifies, so the
+harness fix worked. `__closure_1` is the closure inside the annotation's
+`replace body` directive, and the span table (now populated, 6 entries) does not
+cover it.
+
+That is no longer "inference never ran". It is "the span table does not cover a
+closure inside a `replace body` directive" — an inference-coverage question of
+the same family as C-real, differing only in which body inference fails to
+reach (a directive body rather than a generic `extend` body). **Forcing it
+closed here would mean widening inference coverage in the lane that explicitly
+routed inference coverage to #262.** It goes to #262.
+
+This is the masking effect of §1.2 arriving one last time, and it is why the
+close-out iterates rather than working a fixed list.
+
+### 11.3 Unattributed observation, not a finding
+
+While checking whether the `replace body` closure is production-reachable, the
+exact fixture source compiled through the full `compile()` path panicked at a
+DIFFERENT, unrelated assertion:
+
+```
+crates/shape-vm/src/compiler/comptime_builtins/capture_plan/surface.rs:46
+  "generated declaration reached capture planning with an unstamped closure node"
+```
+
+The repo's own harness path for the same source passes. Reproduced with and
+without an added `fn main()`, so it is not a fixture artifact. **Not
+attributed**: it was not checked against a pre-#240 baseline, and this ticket
+does not touch `capture_plan/`. Recorded so it is not lost — an annotation whose
+`replace body` contains a closure panicking rather than producing a clean
+diagnostic on the production path is worth someone's attention, but the claim
+here is only "observed", not "caused by" or "pre-existing".

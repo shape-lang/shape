@@ -2,6 +2,25 @@ use super::*;
 
 use shape_ast::ast::Item;
 
+/// #240 (C-harness): a compiler carrying the inference facts that `compile()`
+/// would have installed for `source`.
+///
+/// `BytecodeCompiler::new()` has an EMPTY `resolved_expr_types`. Production
+/// never reaches descriptor construction in that state — `compile()` populates
+/// the span table before any body compiles — so a harness that skips it leaves
+/// the return classifier with nothing to classify a closure's terminal
+/// expression from. A missing test precondition, not a compiler gap: the same
+/// sources compile clean through `compile()`. Mirrors the idiom in
+/// `compiler/functions/reference_provenance_tests.rs`.
+fn compiler_with_inference_facts(source: &str) -> BytecodeCompiler {
+    let program = shape_ast::parse_program(source).expect("fixture parses");
+    let mut compiler = BytecodeCompiler::new();
+    let facts = BytecodeCompiler::infer_reference_model(&program).3;
+    compiler.resolved_expr_types = facts.expression_types().clone();
+    compiler.inference_facts = facts;
+    compiler
+}
+
 fn source_function(source: &str, name: &str) -> FunctionDef {
     shape_ast::parse_program(source)
         .expect("fixture parses")
@@ -46,7 +65,12 @@ fn compile_annotated_function(
     let [expected_annotation_name] = annotation_names.as_slice() else {
         panic!("fixture must define exactly one annotation")
     };
-    let mut compiler = BytecodeCompiler::new();
+    // #240 (C-harness): install the span table `compile()` would have built
+    // before any body compiles. Without it a closure in the target body (or in
+    // a `replace body` directive) reaches the descriptor builder with no
+    // resolvable terminal type — a missing precondition of this harness, not a
+    // compiler gap.
+    let mut compiler = compiler_with_inference_facts(source);
     compiler
         .register_function(&function)
         .expect("target function registers");
@@ -411,11 +435,11 @@ fn probe(value: int) -> int {
 
 #[test]
 fn failed_shadow_emission_restores_body_analysis_authority() {
-    let semantic_owner = source_function(
-        "fn probe(value: int) -> int { let worker = |item: int| item + 1\nlet observed = worker(value)\nmissing_value }",
-        "probe",
-    );
-    let mut compiler = BytecodeCompiler::new();
+    const SOURCE: &str = "fn probe(value: int) -> int { let worker = |item: int| item + 1\nlet observed = worker(value)\nmissing_value }";
+    let semantic_owner = source_function(SOURCE, "probe");
+    // #240 (C-harness): the body contains a closure, so the return classifier
+    // needs the span table `compile()` would have installed.
+    let mut compiler = compiler_with_inference_facts(SOURCE);
     install_frozen_owners(&mut compiler, &[&semantic_owner]);
     let capability = authenticated_capability(&compiler, &semantic_owner);
     let shadow_name = capability.shadow_name().to_string();

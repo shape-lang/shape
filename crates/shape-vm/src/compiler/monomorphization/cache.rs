@@ -1811,6 +1811,30 @@ mod tests {
         panic!("function `{}` not found in parsed program", name);
     }
 
+    /// #240 (C-harness): a compiler carrying the inference facts that
+    /// `compile()` would have installed for `source`.
+    ///
+    /// `BytecodeCompiler::new()` has an EMPTY `resolved_expr_types`. Production
+    /// never reaches descriptor construction in that state — `compile()`
+    /// populates the span table before any body is compiled
+    /// (`compiler_impl_reference_model.rs`, the T1 keystone) — so a harness
+    /// that skips it puts the return classifier in a state it cannot classify
+    /// from, and any closure in the body reaches the descriptor builder with no
+    /// resolvable terminal type. That is a missing test precondition, not a
+    /// compiler gap: the same sources compile clean through `compile()`.
+    ///
+    /// Mirrors the established idiom in
+    /// `compiler/functions/reference_provenance_tests.rs`.
+    fn b5_compiler_for_source(source: &str) -> BytecodeCompiler {
+        let program = shape_ast::parser::parse_program(source)
+            .unwrap_or_else(|e| panic!("parse failed for source `{}`: {:?}", source, e));
+        let mut compiler = BytecodeCompiler::new();
+        let facts = BytecodeCompiler::infer_reference_model(&program).3;
+        compiler.resolved_expr_types = facts.expression_types().clone();
+        compiler.inference_facts = facts;
+        compiler
+    }
+
     /// Register the parsed function in a fresh compiler and drive it through
     /// the type-only `ensure_monomorphic_function` entry point. Returns the
     /// produced function index.
@@ -2029,7 +2053,9 @@ mod tests {
             }
         "#;
         let def = b5_function_def_from_source(src, "offset_by");
-        let mut compiler = BytecodeCompiler::new();
+        // #240 (C-harness): the body contains a closure, so the classifier
+        // needs the span table `compile()` would have installed.
+        let mut compiler = b5_compiler_for_source(src);
         b5_register_and_monomorphize(&mut compiler, def).unwrap();
         let specialized = compiler
             .function_defs
