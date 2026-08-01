@@ -3057,6 +3057,25 @@ pub(crate) fn infer_closure_body_return_type_with_caller_context(
     if span.is_dummy() {
         return None;
     }
+    // #240 (bounded A2 slice): a terminal call into a registered extension
+    // module carries its return in the module's own declaration, which the
+    // span table never sees — the engine records what it INFERRED, and a
+    // native export has no body to infer from. Consult the declaration before
+    // giving up. Bounded to `Unit` + the canonical scalars; see
+    // `declared_module_export_return_annotation`, where the #255 boundary is
+    // stated.
+    if !compiler.resolved_expr_types.contains_key(&span)
+        && let Expr::QualifiedFunctionCall {
+            namespace,
+            function,
+            ..
+        } = terminal
+        && let Some(declared) =
+            compiler.declared_module_export_return_annotation(namespace, function)
+    {
+        return Some(shape_runtime::type_system::Type::Concrete(declared));
+    }
+
     let resolved = compiler.resolved_expr_types.get(&span)?;
 
     // FORWARD BINDER: an unknown-sentinel survives finalization but is NOT a
