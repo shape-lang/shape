@@ -152,3 +152,84 @@ Per the check added to this ticket: when these close, verify each residual
 carries two independent problems (the dropped `self * 3.0` and the
 module-qualified gate miss) in one source, so fixing either alone will leave a
 residual at a different span and the count will still fall by one.
+
+---
+
+# Part II — #262 (sub-root A) after the re-cut: the gate, measured
+
+Ticket re-cut to **the coverage gate only**. B and C filed as **#264**
+(unconstrained parameters) and **#265** (extend receiver type variable) with
+their traces. This part measures the gate itself, still before any design.
+
+## 6. Gate anatomy
+
+`infer_extend_method_bodies` (`inference/extend_methods.rs:172`) admits a body
+only when one of three predicates holds. **All three require
+`TypeName::Simple` with an exact, unqualified name**, which is the single
+underlying cause of both reported defects:
+
+| Predicate | Accepts | Rejects the defect because |
+|---|---|---|
+| `struct_type_defs.contains_key(type_name_str)` | a declared struct name | `"generated::Number"` carries the module prefix |
+| `bare_single_param_collection_extend` (`:353`) | `Simple("Array"\|"Vec")` **only** | `Vec<number>` is `TypeName::Generic`, not `Simple` |
+| `scalar_extend_receiver_annotation` (`:385`) | early-returns `None` unless `Simple` | same qualified-name problem |
+
+Note the receiver-annotation machinery is **already** general:
+`type_name_to_annotation_for_extend_body` (`:340`) falls through to
+`type_name_to_annotation_for_impl`, which renders an arbitrary receiver. So
+`self` would receive `Vec<number>` — strictly MORE precise than the bare form's
+`Vec<T>`. Only the gate rejects it.
+
+## 7. What the gate protects — measured, not assumed
+
+The gate was removed entirely (maximal experiment, not a proposed fix) and the
+suite run.
+
+**Blast radius: exactly one test.**
+
+```
+baseline 8 failures  vs  gate-removed 8 failures
+  + compiler::monomorphization::semantic_specialization::lexical_tests::
+      same_spelled_outer_and_callee_parameters_fall_back_without_losing_identity
+  - executor::foreign_async::tests::…   (known-flaky family, absent this run)
+```
+
+That is a much smaller protective role than a gate of this shape suggests, and
+it bounds the design space: admitting these receivers is cheap. The one casualty
+is itself a member of this residual family, which makes it a scoping question
+rather than collateral.
+
+## 8. What widening actually closes — and what merely MOVES
+
+Probe with the gate removed: **6 → 4**. Naive counting reads that as "closed 2".
+Applying the residual-identity check, **only one genuinely closed**:
+
+| Case | Before | After | Verdict |
+|---|---|---|---|
+| `test_parse_extend_with_multi_generic` (**the ticket's reproducer**) | residual, `tbl=4` | gone | **CLOSED** |
+| `same_spelled_outer_and_callee_…` | residual, `tbl=15` | no residual, but the test now **FAILS** | **NOT closed** — traded a residual for a failure |
+| `nested_extend_generation_…` | residual, `tbl=3` | residual, `tbl=4` | **MOVED** — more spans recorded (`generated::Number` now walked), still unclassified; the #265 double-defect |
+| `nested_returned_closure_…`, `specialized_extend_method_…`, `replacement_mir_…` | residual | residual | unaffected — #264 / other families |
+
+**This is the residual-identity check earning its place on the first use.** The
+count fell by two; one of those was a test failure wearing a closed residual's
+clothes, and the other was the same defect at a different span. A count-only
+report would have claimed twice the progress.
+
+## 9. Design input, no design
+
+Established before designing, as chartered:
+
+1. The gate's rejection is **structural** — three predicates all keyed on
+   `TypeName::Simple` with an unqualified name.
+2. The receiver-annotation path downstream is **already general**, so widening
+   the gate does not require new receiver machinery.
+3. The gate protects **one** test, which is itself in this family.
+4. Widening closes **the ticket's reproducer** and nothing else outright; the
+   remaining residuals belong to #264/#265 or need their own answer.
+
+The open design question is what the widened predicate should be — admit
+`Generic` collection receivers with concrete arguments and strip module
+qualifiers, or replace the three ad-hoc predicates with one receiver-resolution
+call — and what to do about the single protected test, which needs reading
+before it is either fixed or re-scoped. Not answered here.
