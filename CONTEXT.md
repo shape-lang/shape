@@ -7,6 +7,134 @@ Maintainability note: this remains one cross-cutting glossary while strict
 typing and comptime terminology are still being resolved; splitting before the
 domain boundaries stabilize would create competing canonical definitions.
 
+## Product Direction
+
+**Domain-Neutral Core**:
+The language, compiler, runtime, and extension protocols express general
+computation and data semantics only; domain behavior such as financial
+backtesting belongs to libraries and independently loadable extensions.
+_Avoid_: finance intrinsic, backtest opcode, domain-selected compiler behavior
+
+**Production Data/Polyglot Workflow**:
+A production-oriented Shape program that coordinates typed data transformations
+across Shape and declared foreign-language modules with reproducible inputs,
+dependencies, execution, and results.
+_Avoid_: glue script, notebook-only pipeline, untyped foreign orchestration
+
+**Language Runtime Extension Authority**:
+The exclusive authority for one foreign language's body checking, native
+package ecosystem, environment construction, language-specific marshalling,
+and execution; Shape owns only the declared typed boundary, permissions,
+portable identity, admission, and user-visible outcome contract.
+_Avoid_: core-owned uv support, core-owned npm resolver, language-specific compiler branch
+
+**Dynamic Foreign Call**:
+A `fn <language> name(...)` declaration executed by its Language Runtime
+Extension and observed by Shape as `Result<T>` because the foreign runtime
+cannot statically prove that execution will return a conforming `T`.
+_Avoid_: trusted dynamic return, extension exception escaping Shape's outcome contract
+
+**Foreign Environment Artifact**:
+A content-addressed portable environment produced by a Language Runtime
+Extension from its native ecosystem inputs and admitted by Shape for local or
+remote execution without Shape interpreting the package manager's semantics.
+_Avoid_: ambient interpreter environment, host-path identity, core-parsed package graph
+
+**Foreign Environment Binding**:
+An extension-defined typed annotation contribution that associates a module or
+foreign function with a Foreign Environment Artifact derived from a tracked
+native ecosystem input such as `pyproject.toml`; a function binding replaces
+its module default, and bindings never merge implicitly.
+_Avoid_: core-known Python annotation, ambient project discovery, untracked file path, implicit environment merge
+
+**Remote Extension Requirement**:
+The language-neutral content-addressed requirement carried by portable or
+remote execution for an exact extension contract, target, environment digest,
+and required blobs; the receiving extension validates and materializes it.
+_Avoid_: interpreter path in payload, package-manager semantics in remote core, live environment handle
+
+**Pinned Extension Dependency**:
+A project-declared extension requirement locked to exact ABI contracts, target
+artifacts, and content identities and consumed unchanged by local, CI, and
+remote admission.
+_Avoid_: globally installed extension as identity, compiler-bundled special case, remote version guess
+
+**Remote-Ready Artifact**:
+A portable program artifact whose extension, environment, kernel, target, and
+blob requirements can be deterministically admitted and materialized by a clean
+receiver, without implying that network transport or distributed execution has
+already been provided.
+_Avoid_: local-only artifact, transport implementation as portability proof
+
+**Flagship Developer Journey**:
+The clean-machine acceptance path from locked project provisioning through
+compiler/LSP agreement, local execution and profiling, artifact construction,
+and admission by a clean loopback receiver with structured source-mapped
+failures and no ambient dependencies.
+_Avoid_: preconfigured demo machine, editor/compiler semantic split, happy-path-only tutorial
+
+**Platform Support Tier**:
+An evidence-defined target class: Tier 1 passes the complete Flagship Developer
+Journey and release-artifact suite, while a lower tier makes its missing
+capabilities explicit and refuses unsupported artifacts before execution.
+_Avoid_: builds-once portability claim, runtime target surprise
+
+**Extension Execution Class**:
+The admitted trust boundary for a native extension: `TrustedInProcess` permits
+reviewed hash-pinned code to share the runtime process, while `IsolatedProcess`
+contains memory and crash faults; project requests may be tightened but never
+weakened by host or placement policy.
+_Avoid_: implicit native trust, project bypass of host isolation, sandbox claim for in-process code
+
+**Release Safety Blocker**:
+Any known silent wrong output, memory-unsafety or verifier-bypass path,
+permission divergence, execution-tier semantic divergence, foreign
+type-conformance escape, or isolation-boundary failure; development may pin it,
+but no release may admit it.
+_Avoid_: known-red as release waiver, tier-specific correctness
+
+**Reference Backtest**:
+The flagship end-to-end workload that evaluates financial strategies over
+historical data while exercising realistic ingestion, transformation,
+composition, parameter exploration, and reproducibility requirements.
+_Avoid_: finance-specific compiler path, isolated performance microbenchmark
+
+**Native Compute Kernel Extension**:
+A host-loadable native extension that implements typed, high-throughput data
+operations behind a declared Shape capability while remaining independent of
+any application domain.
+_Avoid_: compiler-builtin finance kernel, foreign-language callback loop, hidden intrinsic
+
+**Compute Kernel Capability**:
+The dedicated versioned native-call contract for a Native Compute Kernel
+Extension, discovered and managed through Shape's common extension envelope but
+semantically distinct from language-runtime and general module capabilities.
+_Avoid_: second plugin loader, LanguageRuntime masquerading as compute, generic serialized invocation
+
+**Kernel Data Plane**:
+The bulk-data boundary of a Compute Kernel Capability: typed borrowed columnar
+buffers or table batches, distinct from small typed control arguments and
+crossed without serialization, copying, or per-row foreign callbacks.
+_Avoid_: MessagePack hot path, Arrow IPC hot path, row-at-a-time ABI
+
+**Shape Columnar Data Model**:
+Shape's domain-neutral semantic model for typed columns, batches, and tables;
+Arrow, NumPy, device buffers, and specialized physical layouts are adapters to
+this model rather than authorities over its types, nullability, or ownership.
+_Avoid_: Arrow as language semantics, adapter-specific type identity
+
+**Finite Data Workflow**:
+The Phase-A execution scope over bounded tables and batches, including
+partitioned, incremental-ingestion, and out-of-core processing, but excluding
+continuous streams, watermarks, and event-time semantics.
+_Avoid_: live stream disguised as batch, unbounded Phase-A state
+
+**Kernel Performance Bar**:
+The acceptance threshold of at least 95% of direct-Rust kernel throughput and
+80% of an equivalent Rust application's end-to-end throughput, with compatible
+bulk buffers crossing without serialization or full-buffer copies.
+_Avoid_: microbenchmark-only speed, foreign-runtime baseline as the ceiling
+
 ## Project Policy
 
 **Architecture-First Change Policy**:
