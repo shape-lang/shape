@@ -1349,6 +1349,41 @@ of a program-level bail would pass while the tier is inert.
 Until the conversion lands this gate fails for every row, by design — it is the
 conversion's acceptance criterion, not a merge blocker for the earlier steps.
 
+#### The re-derivation command for the headline claim
+
+"The conversion restored the native rate" is the positive claim step 4 will want
+to make, and per §10.4.1 a positive claim about an artifact ships with the
+invocation that reproduces it, not a summary of the result. **Do not report this
+number from the implementing lane's run alone.**
+
+```bash
+# 1. Build from the commit under test. A stale binary lies in the MASKING
+#    direction — it "shows" defects already fixed and native rates already
+#    restored. This is not hypothetical: a 7-minute-stale worktree binary was
+#    caught misreporting during step 2.
+direnv exec /home/dev/dev/shape-lang cargo build --release --bin shape --jobs 4
+
+# 2. Per-program native dispatch across the whole corpus.
+cd tools/vmjit-diff/corpus
+for f in *.shape; do
+  timeout 25 ../../../target/release/shape run --mode jit --native-witness /tmp/w.json "$f" >/dev/null 2>&1
+  python3 -c "
+import json
+try:
+    d = json.load(open('/tmp/w.json'))
+    print(sum(x.get('native_dispatches', 0) for x in d.get('functions', [])))
+except Exception:
+    print(-1)"
+done | awk '$1+0>0 {n++} END {print n\" programs with >=1 native dispatch\"}'
+
+# 3. The acceptance set specifically.
+just check-jit-native-acceptance
+```
+
+Reference points, both measured on this branch: **121/481 before #257**,
+**11/482 after**. Step 4 must move the second number, and the mover must be
+verified by someone who did not produce it.
+
 Two load-bearing *positive* fixtures, which is the pair that proves the
 conversion delivered a typed channel rather than renaming the untyped one:
 `SYN__string-scalar-method` (STAGE-StringJIT gone) and
@@ -1556,20 +1591,56 @@ The general form: **a check was run, it passed, and its result was reported as
 a different proposition than the one it tested.** Each check was real. None was
 evidence for the claim it was offered for.
 
-**Six instances now, across three people, in under two days — and four are this
-lane's.** The rate matters more than any individual case: this is not a lapse,
-it is the default failure mode of verification under time pressure. Note also
-that instance 4 (the bail-masked MATCHes) was caught **by someone else
-re-checking a number this lane had already reported**, which is the only reason
-five pins were not retired and five defects silently re-armed. The countermeasure
-that actually worked was not care — it was a second party re-deriving the claim
-from the artifact rather than from the report.
+**Six instances, three people, under two days — four of them this lane's.** The
+rate is the finding, not any individual case. Every one was made by someone
+competent, unhurried enough to be doing careful work, and **holding the right
+tool at the time**: this lane had the `--native-witness` tooling and checked tier
+agreement without checking whether anything ran; the supervisor had
+`verify-merge` and read its pass as proof that a commit message described the
+tree.
 
-The countermeasure is not "be more careful"; all three were careful. It is to
-state, for every claim, *which artifact* was examined and *what would have made
-the check fail* — which is why §1 lists the exact commands, §1.2 states the
-denominator, and §1.1.1 instructs the reader to distrust this document's own
-numbers under a named condition.
+#### The countermeasure — and it is NOT "be more careful"
+
+State this plainly, because "be more careful" is the conclusion a reader draws
+by default and it is the wrong one. Care is not the variable. All six were
+careful.
+
+> **The countermeasure that has actually worked, every time, is a second party
+> going to the artifact instead of to the report.**
+
+The evidence is in the table itself. Instance 4 — five known-red entries
+reported as fixed when they were bail-masked — was caught only because the
+supervisor **re-derived a number this lane had already reported**, on a freshly
+built binary, rather than accepting it. That single re-derivation is the only
+reason five pins were not retired and five defects, two of them
+release-blocking, were not silently re-armed the moment the native rate
+recovered. No amount of additional care by the reporting lane would have caught
+it, because the lane's check *passed* — it was simply a check of a different
+proposition.
+
+Three consequences, all of which are structural rather than behavioural:
+
+1. **Independent re-derivation is not distrust; it is the mechanism.** A fleet
+   where the supervisor re-runs lanes' measurements is not expressing doubt
+   about competence — it is the only control that has caught this class. Framing
+   it as a trust question would remove the control on the grounds of politeness.
+2. **A positive claim about an artifact must ship with the command that
+   re-derives it.** Not a summary of the result: the invocation, so the second
+   party can reproduce rather than re-implement. This is why §1 lists exact
+   commands, §1.2 states the denominator, and §1.1.1 instructs the reader to
+   distrust this document's own numbers under a named condition.
+3. **State which artifact was examined and what would have made the check
+   fail.** "The tests pass" is not a claim; "this binary, built from this
+   commit, produced this output, and would have produced X if the defect were
+   present" is. Where a check cannot fail in the presence of the defect —
+   `--lib` for the value-call carrier (§10.2), a stdout hash for a SIGSEGV
+   (§10.1), a corpus MATCH while the tier is inert (§10.1.0) — say so instead of
+   reporting the pass.
+
+This generalises past #239 and belongs in the ADR lift alongside §3.5.1's
+nine-rescues arithmetic. The two are complementary and neither is sufficient
+alone: **nine-rescues tells you which pattern to refuse; this tells you how the
+refusal gets circumvented in good faith by people who are trying.**
 
 ### 10.4.2 A correction applied where it was noticed, not everywhere it applies
 
