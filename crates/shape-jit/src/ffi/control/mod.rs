@@ -611,7 +611,14 @@ pub extern "C" fn jit_call_value(ctx: *mut JITContext) -> u64 {
                          stamp a concrete NativeKind for every push (no \
                          Bool-default fallback per \u{a7}2.7.7 #9).",
                     );
-                    return TAG_NULL;
+                    // #259: a stop that returns a legal value does not stop.
+                    set_jit_runtime_error(
+                        "jit_call_value: arg kind-byte is SENTINEL/reserved — a producing-site kind \
+                         stamp is missing; native execution aborted"
+                            .to_string(),
+                    );
+                    ctx_ref.pending_call_error = 1;
+                    return ERROR_PLACEHOLDER_BITS;
                 }
             };
             arg_pairs.push((bits, kind));
@@ -648,7 +655,14 @@ pub extern "C" fn jit_call_value(ctx: *mut JITContext) -> u64 {
                      per ADR-006 \u{a7}2.7.11 / Q12. No Bool-default fallback \
                      (\u{a7}2.7.7 #9).",
                 );
-                return TAG_NULL;
+                // #259: a stop that returns a legal value does not stop.
+                set_jit_runtime_error(
+                    "jit_call_value: callee kind-byte is SENTINEL/reserved — a producing-site \
+                     kind stamp is missing; native execution aborted"
+                        .to_string(),
+                );
+                ctx_ref.pending_call_error = 1;
+                return ERROR_PLACEHOLDER_BITS;
             }
         };
 
@@ -759,6 +773,26 @@ pub extern "C" fn jit_call_value(ctx: *mut JITContext) -> u64 {
                                 ctx_ref.stack_kinds[ctx_ref.stack_ptr] = stack_kind_code::SENTINEL;
                                 return ret_bits;
                             }
+                            // #259 DELIBERATELY NOT CONVERTED — not a
+                            // surface-and-stop path. Reaching here means the
+                            // callee left no value on the stack, which for a
+                            // unit-returning callee is CORRECT (ADR-020 §3.3:
+                            // unit calls are void and the emit site discards
+                            // the result). Setting `pending_call_error` here
+                            // would deopt every unit-returning value call.
+                            //
+                            // `jit_call_value` cannot distinguish "unit callee
+                            // returned nothing" from "non-unit callee failed to
+                            // produce a value", because its `-> u64` signature
+                            // carries no return-kind information — that is the
+                            // channel defect #239 converts. Resolve there, when
+                            // the void monomorph makes the distinction
+                            // expressible in the signature.
+                            //
+                            // Separately suspicious and also #239's: `_signal`
+                            // above discards the callee's JIT signal, so a
+                            // callee that signalled an error is indistinguishable
+                            // from one that returned nothing.
                             return TAG_NULL;
                         }
                     }
@@ -795,7 +829,19 @@ pub extern "C" fn jit_call_value(ctx: *mut JITContext) -> u64 {
                              arm is not ClosureRaw. Producing site \
                              mislabeled the slot kind.",
                         );
-                        TAG_NULL
+                        // #259: a stop that returns a legal value does not
+                        // stop. This arm is the measured mechanism of #219 —
+                        // it fired 6,554 times in a single corpus program
+                        // (`SYN__closure-infn-tagnull.shape`), each time
+                        // handing `TAG_NULL` back as a usable number that the
+                        // caller accumulated into an integer overflow.
+                        set_jit_runtime_error(
+                            "jit_call_value: callee stamped Ptr(HeapKind::Closure) but the \
+                             HeapValue arm is not ClosureRaw; native execution aborted"
+                                .to_string(),
+                        );
+                        ctx_ref.pending_call_error = 1;
+                        ERROR_PLACEHOLDER_BITS
                     }
                 };
                 drop(arc);
@@ -812,7 +858,14 @@ pub extern "C" fn jit_call_value(ctx: *mut JITContext) -> u64 {
                     "jit-call-value SURFACE \u{a7}2.7.26: ModuleFn callee \
                      not implemented in jit_call_value.",
                 );
-                return TAG_NULL;
+                // #259: a stop that returns a legal value does not stop.
+                set_jit_runtime_error(
+                    "jit_call_value: ModuleFn callee is not implemented in the JIT value-call \
+                     surface; native execution aborted"
+                        .to_string(),
+                );
+                ctx_ref.pending_call_error = 1;
+                return ERROR_PLACEHOLDER_BITS;
             }
             NativeKind::UInt64
             | NativeKind::Int64
@@ -869,7 +922,18 @@ pub extern "C" fn jit_call_value(ctx: *mut JITContext) -> u64 {
                          emitted bits that don't match either UInt64-class \
                          shape.",
                     );
-                    return TAG_NULL;
+                    // #259: a stop that returns a legal value does not stop.
+                    // This is the arm the investigator identified under gdb as
+                    // #259's reproducer and #254's silent variant: it detects
+                    // the carrier violation, describes it accurately, and then
+                    // returned a usable number.
+                    set_jit_runtime_error(
+                        "jit_call_value: callee stamped UInt64 is neither an inline function \
+                         nor a unified-heap closure; native execution aborted"
+                            .to_string(),
+                    );
+                    ctx_ref.pending_call_error = 1;
+                    return ERROR_PLACEHOLDER_BITS;
                 }
             }
             other => {
@@ -883,7 +947,14 @@ pub extern "C" fn jit_call_value(ctx: *mut JITContext) -> u64 {
                      Ptr(HeapKind::ModuleFn) (deferred), and UInt64/Int64-\
                      family (function-id and JIT-internal NaN-box shapes).",
                 );
-                return TAG_NULL;
+                // #259: a stop that returns a legal value does not stop.
+                set_jit_runtime_error(
+                    "jit_call_value: callee kind is not a recognized callable kind; native \
+                     execution aborted"
+                        .to_string(),
+                );
+                ctx_ref.pending_call_error = 1;
+                return ERROR_PLACEHOLDER_BITS;
             }
         }
 
@@ -929,6 +1000,11 @@ pub extern "C" fn jit_call_value(ctx: *mut JITContext) -> u64 {
                     ctx_ref.stack_kinds[ctx_ref.stack_ptr] = stack_kind_code::SENTINEL;
                     return ret_bits;
                 }
+                // #259 DELIBERATELY NOT CONVERTED — sibling of the
+                // function-table path above; same reasoning. "No value on the
+                // stack" is a legitimate unit return, not a detected
+                // violation, and the `-> u64` signature cannot express the
+                // difference. Resolve in #239 with the void monomorph.
                 return TAG_NULL;
             }
         }

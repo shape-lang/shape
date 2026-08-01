@@ -6,7 +6,7 @@
   "counts": {
     "book": 240,
     "acceptance": 219,
-    "synthetic": 23
+    "synthetic": 24
   },
   "skippedCount": 0,
   "entries": [
@@ -2426,6 +2426,11 @@
       "id": "SYN__string-eq-content.shape",
       "tier": "synthetic",
       "source": "tools/vmjit-diff/synthetic/SYN__string-eq-content.shape (#232 string ==/!= compared Arc pointers not content; regression MATCH case)"
+    },
+    {
+      "id": "SYN__callvalue-stop-returns-value.shape",
+      "tier": "synthetic",
+      "source": "tools/vmjit-diff/synthetic/SYN__callvalue-stop-returns-value.shape"
     }
   ]
 }
