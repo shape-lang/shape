@@ -191,6 +191,21 @@ check-no-dynamic:
 check-alloc-seam:
 	bash scripts/check-alloc-seam.sh
 
+# --- ADR-020 / #239 native-execution acceptance gate ---
+#
+# The corpus differential only means something while the native tier runs. After
+# #257 the rate fell to 11/482 programs, so `--mode jit` and `--mode vm` execute
+# the same interpreter for almost everything and a MATCH is nearly free — five
+# known-red entries flipped to MATCH purely by bail-masking. This gate asserts
+# what the differential can no longer see: that the acceptance fixtures execute
+# NATIVELY (non-zero native_dispatches, not merely absence of a program-level
+# bail — those two differ by an order of magnitude).
+#
+# FAILS for every row until #239's conversion lands. That is by design: it is
+# the conversion's acceptance criterion, not a merge blocker before it.
+check-jit-native-acceptance:
+	bash scripts/check-jit-native-acceptance.sh
+
 # --- ADR-011..016 step-4 migration baselines (#133 / #134 / #135) ---
 
 # Growth gate for the frozen legacy-authority sets: discovery producers, ambient
