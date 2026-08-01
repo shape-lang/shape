@@ -1,0 +1,23 @@
+// ADR-020 / #239 POSITIVE acceptance fixture — the STAGE-StringJIT surface.
+//
+// A scalar-returning method on a proven `string` receiver whole-function-deopts
+// at mir_compiler/terminators.rs:601. That deopt's own message states this
+// ticket's thesis: the `jit_call_method` VM trampoline "boxes the scalar result
+// via `box_number(.. as f64)` ... NEITHER of which is the raw native scalar the
+// proven destination slot expects."
+//
+// Correct on both tiers today because the function runs interpreted. As with
+// the DateTime fixture, VM==JIT is NOT the acceptance assertion — native
+// execution is. After the conversion `stringlen` must dispatch natively, which
+// is what proves the channel carries a raw typed scalar rather than a renamed
+// untyped one.
+fn stringlen(s: string) -> int {
+    return s.length()
+}
+
+fn indexof(s: string) -> int {
+    return s.indexOf("l")
+}
+
+print(stringlen("hello"))
+print(indexof("hello"))

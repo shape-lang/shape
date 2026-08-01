@@ -1,0 +1,26 @@
+// #254 regression guard for the CALLING forms, which #257 fixed by deopt.
+//
+// All three shapes below were wrong before #257: A printed a SIGSEGV, B printed
+// TAG_NULL+1 (-1407374883553279) at rc=0, C segfaulted. They are green now
+// because the call's destination slot has no proven kind, so `write_place`
+// refuses and the function bails to the interpreter — correct, and NOT native.
+//
+// This fixture pins the CORRECTNESS, not the tier. It must keep matching after
+// the ADR-020 conversion, at which point these should also run natively; if the
+// conversion makes any of them print a tag word again, this catches it.
+//
+// Distinct from SYN__closure-calls-closure-alloc.shape, which has no call and
+// still segfaults — that one pins the allocation-side carrier defect.
+let g1 = |x| x + 1
+let h1 = |y| g1(y) + 1
+print(h1(1))
+
+let c2 = 5
+let g2 = |x| x + c2
+let h2 = |y| g2(y) + 1
+print(h2(1))
+
+let g3 = |x| x + 1
+let c3 = 5
+let h3 = |y| g3(y) + c3
+print(h3(1))

@@ -1296,8 +1296,32 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                     return Ok(());
                 }
 
+                // #257: NO FABRICATED DEFAULT. The pre-fix `unwrap_or(Int64)`
+                // here is why an unstamped call destination produced silent
+                // wrong output rather than a bail: `write_place` invented a
+                // kind, `ensure_kind` converted the incoming bits to match the
+                // invention, and a `TAG_NULL` or an `f64` bit pattern was
+                // stored into a slot the rest of the pipeline then believed was
+                // an `Int64`. Seven `Array` method chains
+                // (`a.slice(..).len()`, `.sort()`, `.concat()`, `.zip()`,
+                // `.take()`, `.skip()`, `.unique()`) returned
+                // -1407374883553280 at rc=0 through exactly this line.
+                //
+                // `slot_kind_for_local` returns `Option` because the kind is a
+                // PROOF; `unwrap_or` discarded the proof obligation. Per
+                // ADR-006 §2.7.5 and CLAUDE.md §Mechanical enforcement, an
+                // unproven destination surface-and-stops.
                 let target_kind = super::types::slot_kind_for_local(&self.slot_kinds, slot.0)
-                    .unwrap_or(shape_vm::type_tracking::NativeKind::Int64);
+                    .ok_or_else(|| {
+                        format!(
+                            "MirToIR: SURFACE — destination slot {} has no compile-time-proven \
+                             NativeKind, so there is no sound width/representation to store into \
+                             it. The producing site must stamp the slot kind (ADR-006 §2.7.5); \
+                             fabricating a default here is how #257's silent wrong output \
+                             happened. No runtime inference, no Int64 fallback.",
+                            slot.0
+                        )
+                    })?;
                 let var = *self
                     .locals
                     .get(slot)

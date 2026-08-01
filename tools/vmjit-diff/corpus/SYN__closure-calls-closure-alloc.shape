@@ -1,0 +1,41 @@
+// #254 / ADR-020 §3.4 pin: allocating a closure that captures a NON-CAPTURING
+// closure must not retain a tag word.
+//
+// MEASURED MECHANISM (gdb, adversarial investigation): the capture retain loop
+// is driven solely by `ClosureLayout::heap_capture_mask`
+// (mir_compiler/statements.rs:1214/1233/1243, faulting atomic_rmw at :1255).
+// `ClosureLayout` is SHARED with the VM, where a closure is always
+// `Arc<ClosureRaw>`, so it classifies a captured closure as `FieldKind::Ptr`
+// and sets its heap-capture-mask bit. But a non-capturing closure in the JIT is
+// `box_function(fid)` — a NaN-boxed tag word. Capturing it therefore runs an
+// Arc increment against `0xfffd_0000_0000_00<fid>`. Confirmed by prediction:
+// inserting a closure ahead shifts the fid and the fault address moves in step.
+//
+// THREE THINGS ABOUT THE FORM ARE LOAD-BEARING. Do not "simplify" any of them.
+//
+// 1. NO CALL. The fault is in the ALLOCATION of `h`, not in any dispatch.
+//    Adding `print(h(1))` makes this program PASS at HEAD, because the call's
+//    unproven destination trips #257's guard and the whole function bails
+//    before the allocation runs. A fixture with a call proves nothing.
+// 2. MODULE SCOPE / ESCAPING slot. Wrapped in `fn main()` the closure slots take
+//    the stack path (statements.rs:652 -> emit_stack_closure, :940 — no
+//    retain/release) and this is correct on both tiers. Module scope is the
+//    simplest way to force escape; escape is the actual condition.
+// 3. `g` MUST NOT CAPTURE. A capturing `g` is a real heap closure and the
+//    layout's classification is then true.
+//
+// HEAD: VM rc=0 (no output, nothing is printed); JIT rc=139 SIGSEGV inside
+// Cranelift-emitted code. Deterministic — 3/3 runs.
+//
+// EXPECTED TO DIVERGE until the ADR-020 §3.4 carrier flip lands (#239 step 4),
+// after which the JIT's one function-value carrier is the VM's
+// `Arc<HeapValue::ClosureRaw>` and the layout's `FieldKind::Ptr` is true.
+// Pinned in known-red.json as `closure-capture-retains-tag-word`.
+//
+// REFUSED FIX, recorded so it is not attempted: hardening the mask-driven
+// retain at statements.rs:1243 to skip tag-shaped words suppresses this
+// segfault and leaves a closure the layout says is refcounted but which is
+// never retained or released — the refcount lie behind a repaired guard. It
+// converts a loud crash into a silent wrong answer.
+let g = |x| x + 1
+let h = |y| g(y) + 1

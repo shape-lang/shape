@@ -123,8 +123,27 @@ distinct questions, and only the last means "live":
 |---|---|---|---|
 | 1. registered | is there an `extern "C" fn` and a `declare(...)` call? | `grep 'extern "C" fn'` | 423 |
 | 2. declared into IR | does `build_ffi_refs` populate a `FuncRef` for it? | the `r!()` keys | 186 |
-| 3. **emitted** | does any `builder.ins().call(self.ffi.<field>, …)` reference it? | `grep -rhno 'ffi\.[a-z0-9_]*' mir_compiler/ compiler/` | 184 |
+| 3. **referenced** | is the `FFIFuncRefs` field **named anywhere** in `crates/shape-jit/src`? | `grep -rhno 'ffi\.[a-z0-9_]*' mir_compiler/ compiler/` | 184 |
 | 4. executed | does a real program under `--mode jit` reach it? | first-hit probe over the corpus + targeted falsifiers | 12 of 42 probed |
+
+**Tier 3 is "never named", NOT "never in a `builder.ins().call`" — and the
+distinction is load-bearing.** The first draft of this table asked the narrow
+question while running the broad test; the test was sound and the description
+was not, which is §10.4.1's pattern inside the table that documents it. The
+narrow form is **unsound**, because a `FuncRef` can be selected into a local and
+called indirectly:
+
+```rust
+let retain_func = self.retain_func_for_place(place)?;   // returns self.ffi.arc_closure_retain
+self.builder.ins().call(retain_func, &[val]);           // the field never appears at the call
+```
+
+The safety-perms lane measured the narrow formulation on the seed tree: **142
+symbols flagged, including retain/release entries proven live by execution.**
+The "never referenced at all" form is sound because no indirection can read a
+field that is never named. That reasoning is now mechanized as `verify-merge`
+CHECK 22 rule R3 and recorded in its baseline's `not_a_rule` field so nobody
+"completes" the check later by tightening it.
 
 Tier 1 → 2 is #226's finding (a registered symbol need not be callable).
 **Tier 2 → 3 is this lane's addition**: a symbol can be declared into every
@@ -1448,6 +1467,56 @@ invocation — `--fresh` does not rebuild, and stale binaries fail in the maskin
 direction.
 
 ---
+
+## 10.4 Two process findings this document earned the hard way
+
+Both belong in the ADR lift alongside §3.5.1's nine-rescues arithmetic. That
+arithmetic tells you **which pattern to refuse**; these two tell you **how the
+refusal gets circumvented in good faith**, which is the part that actually
+happens.
+
+### 10.4.1 Verifying a property of the artifact you HAVE, and reporting it as a property of the artifact you are DESCRIBING
+
+Three instances in a single day, by three different people, none of them
+careless:
+
+| who | what was verified | what was reported |
+|---|---|---|
+| supervisor | `verify-merge` passed on the merged tree | that a commit message's description of that tree was accurate — it named a deletion that had not happened |
+| this lane (§4.0) | a proof gate named `slot_kind_of` **exists** | that unproven emit sites **stop** — the function is a fabricating `unwrap_or(Int64)` and is never called on an FFI-return path |
+| this lane (§7.1) | 0 executions across 481 corpus programs | that no producer **exists** — with an instrument that cannot distinguish absence from non-arrival |
+
+The general form: **a check was run, it passed, and its result was reported as
+a different proposition than the one it tested.** Each check was real. None was
+evidence for the claim it was offered for.
+
+The countermeasure is not "be more careful"; all three were careful. It is to
+state, for every claim, *which artifact* was examined and *what would have made
+the check fail* — which is why §1 lists the exact commands, §1.2 states the
+denominator, and §1.1.1 instructs the reader to distrust this document's own
+numbers under a named condition.
+
+### 10.4.2 A correction applied where it was noticed, not everywhere it applies
+
+A self-audit of this document across its revisions found **two** places where a
+superseded claim survived in a location the original correction did not reach:
+
+- §3's bucket-(c) list still named `call_string_method` after §3.0.1 moved it to
+  bucket (d) — Finding 1's exact contradiction, surviving in a second spot.
+- §4.2's ownership assertion still specified `slot_kind_of(destination)` as the
+  emit-time check — the fabricating function #257 refuted — **inside the section
+  whose purpose is to prevent that class of error.**
+
+Both were written by an author who had, in the same document, just finished
+arguing against exactly this. That is the finding, and it is why §3.5.1's ruling
+is *delete the mechanism* rather than *prove one more kind*: a point fix lands
+where attention was, and attention is the scarce thing. The nine rescues in
+§3.5.1/§4.0.3 were not carelessness either — each was a correct local fix.
+
+**Operational consequence for this slice:** after every correction, grep the
+whole document (and the whole tree) for the superseded claim rather than editing
+the site that prompted it. Two of two corrections in this document needed that
+and did not get it the first time.
 
 ## 11. Premises refuted
 

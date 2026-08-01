@@ -6,7 +6,7 @@
   "counts": {
     "book": 240,
     "acceptance": 219,
-    "synthetic": 24
+    "synthetic": 28
   },
   "skippedCount": 0,
   "entries": [
@@ -2431,6 +2431,26 @@
       "id": "SYN__callvalue-stop-returns-value.shape",
       "tier": "synthetic",
       "source": "tools/vmjit-diff/synthetic/SYN__callvalue-stop-returns-value.shape"
+    },
+    {
+      "id": "SYN__closure-calls-closure-alloc.shape",
+      "tier": "synthetic",
+      "source": "tools/vmjit-diff/synthetic/SYN__closure-calls-closure-alloc.shape"
+    },
+    {
+      "id": "SYN__closure-calls-closure-guarded.shape",
+      "tier": "synthetic",
+      "source": "tools/vmjit-diff/synthetic/SYN__closure-calls-closure-guarded.shape"
+    },
+    {
+      "id": "SYN__datetime-method-native.shape",
+      "tier": "synthetic",
+      "source": "tools/vmjit-diff/synthetic/SYN__datetime-method-native.shape"
+    },
+    {
+      "id": "SYN__string-scalar-method-native.shape",
+      "tier": "synthetic",
+      "source": "tools/vmjit-diff/synthetic/SYN__string-scalar-method-native.shape"
     }
   ]
 }
