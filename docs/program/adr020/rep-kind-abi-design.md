@@ -188,6 +188,8 @@ both caused by the untyped channel:**
 |---|---|---|
 | **STAGE-StringJIT** (`terminators.rs:601`) | any scalar-returning method on a proven `string` receiver | whole-function deopt |
 | **STAGE-F3** (`terminators.rs:689`) | any method on a `DateTime`/`Temporal`/`Instant`/`Decimal`/`BigInt`/`DataTable`/`TableView`/`Content` receiver | **whole-PROGRAM deopt** — `--native-witness` reports `scope: "program"`, `reason_class: "jit-compile-error"`, **0 native dispatches** |
+| **StringV2 equality** (`rvalues.rs:986::both_string`, new on `main` `4b773a0d`) | `==`/`!=` where either operand is `NativeKind::StringV2` | deopt — the `both_string` gate admits only `String`, so `StringV2` surfaces |
+| **Route A / ObjectStore** | unprojected object schemas, `Rvalue::Aggregate` | surface-and-stop |
 
 The second is the sharper number: **any program that calls a method on a
 DateTime, Decimal, BigInt, DataTable, TableView or Content value runs entirely
@@ -196,9 +198,19 @@ interpreted.** Not the enclosing function — the entire program. Verified on
 both tiers precisely because the JIT never runs.
 
 **So the conversion's payoff is not "delete some constants".** It is restoring
-native execution to the string-method surface *and* the whole VM-only typed-Arc
-receiver surface — two measured deopt classes, plus the Route A / ObjectStore
-surface-and-stops in the same family. That is the argument for doing the work.
+native execution across **four** measured deopt classes. The `StringV2` row is
+the newest and the most explicit: the merged fix's own comment
+(`rvalues.rs:983-985`) defers it to this ticket by name — *"Widening this to one
+carrier-blind string kind is representation-program territory (ADR-020 / #239),
+not a local patch."* That is a scope handoff recorded in the tree, and it is the
+concrete form of the `String`/`StringV2` carrier duality discussed in §12.5.
+
+Worth noting for §4.2: `jit_string_eq`'s correctness depends on a **strong-count
+contract** over its operands, and `StringV2` is excluded precisely because its
+slots have no retain arm in `ownership.rs::retain_func_for_place`. The merged
+fix's soundness therefore rests on exactly the share-accounting invariants O1/O2
+specify — independent corroboration that the ownership channel is load-bearing
+and not a theoretical nicety.
 
 ### 2.1 Precisely which channel is kind-blind
 
@@ -411,8 +423,29 @@ fallthrough itself survived every time:
    actually runs the loops natively.
 3. **Heap strings** — `Eq`/`Ne` on heap strings emitted a raw `icmp` on two
    POINTERS. Invisible because interned string literals share a pointer, so
-   literal-vs-literal passed by luck. Being fixed now by the safety lane's
-   `jit_string_eq`.
+   literal-vs-literal passed by luck. Fixed by the safety lane's `jit_string_eq`
+   (#232, merged `4b773a0d`).
+
+**Incident 4 landed while this document was being written, and followed the
+predicted shape exactly.** Verified at `origin/main` (`4b773a0d`): the fix adds a
+`both_string` guard **upstream** at `rvalues.rs:81`, and **the raw-`icmp`
+fallthrough is byte-for-byte unchanged** at `rvalues.rs:2116-2124`. That is a
+fourth kind proof added ahead of a fallthrough that has now survived four
+incidents.
+
+To be unambiguous, because this is a prediction coming true and not a criticism:
+**the safety lane did the right thing.** Fixing a live silent-wrong-output bug by
+proving the kind upstream is the correct immediate action, and deleting the
+fallthrough was never their charter — their own code comment says so, deferring
+the general case to this ticket by name (`rvalues.rs:983-985`): *"Widening this
+to one carrier-blind string kind is representation-program territory (ADR-020 /
+#239), not a local patch."*
+
+The point is what happens **next**. Four incidents, four upstream proofs, one
+surviving fallthrough. If #239 does not delete it, incident 5 is already paid
+for. §4.0.3 finds the identical shape in a second subsystem with five more point
+fixes; that is nine rescues across two mechanisms, which is why the ruling is
+delete rather than prove-once-more.
 
 That is the ticket's thesis stated three times by three unrelated incidents: a
 kind-blind fallthrough is correct for the kinds its author had in mind and
@@ -482,60 +515,46 @@ must resolve**: either prove the legacy array path unreachable and delete the
 chain (my expectation, consistent with §3's bucket (c)), or convert it. Do not
 leave it as-is on the strength of "the tests pass" — by construction they would.
 
-### 3.5.3 Inbound FFI-surface changes folded in
+### 3.5.3 Inbound FFI-surface changes — status verified at `origin/main` (`4b773a0d`)
 
-Per the supervisor's coordination note, two changes land on `main` under the
-safety lane:
+The safety lane's #232 fix is merged. I inspected `origin/main` directly rather
+than working from the coordination note, and **three details differ from how the
+change was described to me**. Recording them because the implementing lane will
+otherwise inherit a stale picture.
 
-- **ADD `jit_string_eq(a_bits, a_kind_code, b_bits, b_kind_code) -> u8`**
-  (`ffi/conversion.rs`, registered near `ffi_builder.rs:273`). This is **not new
-  debt** — it is kind-threaded by construction, taking explicit kind codes rather
-  than recovering type from bits, and it belongs in this design as a **worked
-  example of the target ABI**. One caveat I would raise: explicit *kind-code
-  parameters* are the shape §4 argues against for the sites this ticket converts,
-  because there the emit site can always pick a monomorph. For `jit_string_eq`
-  the parameters are defensible if and only if the emit site genuinely compares
-  two operands whose kinds are not both statically known — which, per §4, should
-  not happen once kinds are proven. **My recommendation: land it as-is now
-  (it fixes a live correctness bug), and fold it into the monomorph set when this
-  ticket converts the channel** — `jit_string_eq` on two proven `String`
-  operands needs no kind codes at all.
+**`jit_string_eq` — the kind codes were RULED unnecessary, and I was right to
+push.** I argued the explicit `a_kind_code`/`b_kind_code` parameters are the
+shape §4 forbids: a runtime discriminator where a static proof exists. The
+supervisor initially ruled "bounded exception with carrier unification as the
+creditor", then **reversed** on the evidence — the fix gates the arm on
+`both_string` (`rvalues.rs:81`, `:986`), meaning **both operands are proven
+`NativeKind::String` at the emit site**, so the kind codes are compile-time
+constants and mixed `String` × `StringV2` is unreachable *by construction of the
+fix itself*. There is no exception to bound because there is no polymorphism at
+the call site.
 
-  **RULED (grill round 1): lands as-is, as a bounded exception with a named
-  creditor.** The supervisor's reasoning corrects mine on the *cause*: the kind
-  codes are not there because the call site is polymorphic — they are there
-  because **there are two string carriers** (`String` and `StringV2`) and a
-  comparison may span them. That makes the parameter a symptom of the carrier
-  duality, not of an unproven destination kind, and the honest monomorph set for
-  a two-carrier world is four variants or a normalization — neither of which the
-  safety lane should be designing while fixing a live silent-wrong-output bug.
+**Status at `main`: the parameters are still present** —
+`jit_string_eq(a_bits: u64, a_kind_code: u8, b_bits: u64, b_kind_code: u8) -> u8`
+at `ffi/conversion.rs:1162`. The removal is a follow-up commit that has not
+landed. **This design's monomorph set does NOT carry them**, and §12.5 needs no
+retirement row.
 
-  This is explicitly **not** the "mark it as a follow-up for a later phase"
-  rationalization, which is refused because it names no creditor and no
-  retirement condition. This one names both. Binding conditions, all required:
+**`jit_v2_string_eq` — NOT deleted at `main`.** It is still defined at
+`ffi/v2_string_ffi.rs:197` with its seven direct-call unit tests intact
+(`:374-413`). It therefore **remains in this ticket's bucket (c)** rather than
+leaving the inventory, and it stays a textbook tier-1-only symbol (§1.1):
+registered-looking, never callable, tests green throughout because they call it
+as a Rust function.
 
-  1. **Retirement condition: carrier unification** (`String`/`StringV2` becoming
-     one) — not merely this ticket's monomorphization. Recorded in §12.5
-     alongside the `box_string`/#228 boundary, because it is the same duality.
-  2. The monomorph set carries `jit_string_eq` as a row with that retirement
-     condition stated inline, so it cannot be mistaken for a converged entry
-     point.
-  3. **A ratchet row on the kind-code parameter shape**, so it cannot propagate
-     to a second function while it exists.
+**The `both_string` arm is a fourth upstream kind proof, and the raw-`icmp`
+fallthrough is unchanged** (`rvalues.rs:2116-2124`, byte-identical). See §3.5.1 —
+this is the predicted pattern occurring on schedule, and it is the reason the
+deletion ruling matters rather than a reason to revisit it.
 
-  I accept the ruling. I have not attempted the falsification the supervisor
-  offered (showing mixed `String`/`StringV2` comparison is impossible at the
-  emit site, which would make the codes unnecessary now) — it is a real
-  question, but it is #228/carrier-unification evidence, and gathering it would
-  not change what this slice does.
-- **DELETE `jit_v2_string_eq`** (`ffi/v2_string_ffi.rs:197`) — never registered
-  in `ffi_builder.rs`, zero callers, unit tests pass by calling it directly.
-  That is a textbook **tier-1-only** symbol (§1.1) and a textbook bucket-(c)
-  member: registered-looking, never callable, tests green throughout. It is
-  being deleted by the safety lane, so it leaves this ticket's inventory.
-
-Neither changes the §3 partition materially: one add on the correct side of the
-line, one delete from bucket (c).
+**Net effect on the §3 partition: none.** `jit_string_eq` is a worked example of
+the target ABI on the correct side of the line; `jit_v2_string_eq` stays in
+bucket (c); the `StringV2` deopt (§2) is new payoff scope this ticket already
+owns by the merged code's own deferral.
 
 ## 4. The monomorphization rule
 
@@ -1089,6 +1108,7 @@ acceptance set, all as corpus fixtures with VM/JIT differential:
 | `SYN__datetime-method-native.shape` | §2 STAGE-F3 | any | whole-**program** deopt, 0 native dispatches | native, VM==JIT |
 | `SYN__string-scalar-method.shape` | `s.length()` in a fn | any | whole-fn deopt | native, VM==JIT |
 | `SYN__closure-l106.shape` | L106 | module scope | green | stays green (regression) |
+| `SYN__string-eq-content.shape` | **already exists** on `main` (#232) | — | green | **reuse, do not duplicate** — extend with a `StringV2` operand, which deopts today (§2) and must go native |
 
 **Fixture-form warning — do not "simplify" the first two into a function.** The
 two SIGSEGV variants reproduce **only** at module scope; wrapped in `fn main()`
@@ -1190,6 +1210,15 @@ gate. A green `--lib` suite is not weak evidence about the value-call carrier;
 it is *no* evidence, because the carrier is not present in the binary under
 test.
 
+**Demonstrated by a natural experiment, not just argued.** The #232 fix (merged
+`4b773a0d`) reports **503 passing** in shape-jit `--lib` — and a string equality
+that compared *pointers instead of content* had shipped and stayed green through
+all 503. The fix had to add its own production-path coverage because none
+existed. Those 503 tests did not merely fail to catch the defect; they were
+structurally incapable of observing it. Cite alongside the `jit_v2_string_eq`
+evidence (§3.5.3), where seven unit tests pass by calling a function that no
+emitted code can reach.
+
 Three coverage requirements:
 
 1. **Producer/consumer kind-agreement assertion.** For every converted entry
@@ -1229,9 +1258,13 @@ future reviewer does not read a green suite as coverage.
 
 ### 10.3 Standing gates
 
-Full 481-program corpus differential, 0 unexpected (with `known-red.json`
-updated: #219's `closure-infn-stack-pointer-tagnull` entry should close if this
-conversion fixes it — verify rather than assume); `just verify-merge`;
+Full 481-program corpus differential, 0 unexpected. `known-red.json` has already
+moved under this design: the `jit-vm-permission-check-divergence` class was
+retired by #232, so the baseline this slice diffs against is **not** the one §1
+was measured on — re-baseline before believing any delta. #219's
+`closure-infn-stack-pointer-tagnull` entry should close if this conversion fixes
+it, but per §6.1 that is now two defects with different scope conditions, so
+verify each rather than assuming one entry covers both; `just verify-merge`;
 `just check-clean`; `just check-no-dynamic` with the new names and a proven
 bite. Rebuild `cargo build --release --bin shape` before any `run-diff.mjs`
 invocation — `--fresh` does not rebuild, and stale binaries fail in the masking
@@ -1304,15 +1337,21 @@ For the record, since each of these would have mis-scoped the work:
    bytes, the refcount field, or the GC colour/buffered bits, which stay whole
    for #228. A `box_string` call site that needs a layout change to convert is
    out of scope and should be surfaced, not absorbed.
-6. **Ratification of the §3.5.1 ruling to DELETE the `Eq`/`Ne` fallthrough**
-   rather than add a fourth kind proof. Three incidents have been point-fixed
-   upstream of it; the safety lane's `jit_string_eq` is the third. I want the
-   deletion recorded as the ruling so a fourth rescue is refused on sight.
-7. **Whether `jit_string_eq` should keep explicit kind-code parameters** once
-   this ticket lands (§3.5.3). My position: land it now as the correctness fix,
-   then fold it into the monomorph set — two proven `String` operands need no
-   kind codes. This is a live disagreement with the shape the safety lane is
-   landing, and it is cheaper to settle before the conversion starts.
+6. ~~**Ratification of the §3.5.1 ruling to DELETE the `Eq`/`Ne` fallthrough**~~
+   — **RATIFIED**, with the reasoning to be lifted to ADR level. Since
+   ratification a **fourth** incident has been point-fixed upstream of the
+   fallthrough (#232's `both_string` guard, merged `4b773a0d`) while the
+   fallthrough itself remains byte-identical at `rvalues.rs:2116-2124`. The
+   prediction held on schedule. Four rescues here, five more in the §4.0.3
+   allowlist: nine across two mechanisms.
+7. ~~**Whether `jit_string_eq` should keep explicit kind-code parameters**~~ —
+   **RESOLVED IN FAVOUR OF THE LANE POSITION (ruling reversed).** The fix gates
+   on `both_string`, so both operands are proven `String` at the emit site and
+   the codes are compile-time constants — exactly §4's "runtime discriminator
+   where a static proof exists". No bounded exception, no creditor, no
+   retirement row. The parameters are removed in a follow-up; **they are still
+   present at `main`** (`ffi/conversion.rs:1162`), so the implementing lane
+   should confirm the removal landed before assuming the signature.
 8. **Disposition of the legacy v1-array emit chain** (`inline_array_get` and
    siblings, §3.5.2). I did not settle its reachability and I am not guessing.
    Either it is dead (my expectation — delete with bucket (c)) or it hides a
