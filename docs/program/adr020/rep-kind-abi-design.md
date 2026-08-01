@@ -179,11 +179,26 @@ Source: `mir_compiler/terminators.rs:602-620`; quoted verbatim from a live
 > proven destination slot expects. `write_place` stores the NaN-box bits verbatim
 > into the (e.g. `Int64`) slot → garbage … STAGE-StringJIT.
 
-That is this ticket's thesis, already written down as a permanent deopt. The
-conversion's payoff is that this deopt (and the Route A / ObjectStore
-surface-and-stops in the same family) can be **deleted**, restoring native
-execution to whole classes of programs. That is the argument for doing the
-work, and it is stronger than "delete some constants".
+That is this ticket's thesis, already written down as a permanent deopt.
+
+**And it is not the only one. There are two measured whole-program deopt classes,
+both caused by the untyped channel:**
+
+| class | trigger | measured effect |
+|---|---|---|
+| **STAGE-StringJIT** (`terminators.rs:601`) | any scalar-returning method on a proven `string` receiver | whole-function deopt |
+| **STAGE-F3** (`terminators.rs:689`) | any method on a `DateTime`/`Temporal`/`Instant`/`Decimal`/`BigInt`/`DataTable`/`TableView`/`Content` receiver | **whole-PROGRAM deopt** — `--native-witness` reports `scope: "program"`, `reason_class: "jit-compile-error"`, **0 native dispatches** |
+
+The second is the sharper number: **any program that calls a method on a
+DateTime, Decimal, BigInt, DataTable, TableView or Content value runs entirely
+interpreted.** Not the enclosing function — the entire program. Verified on
+`fn f(d: DateTime) -> int { return d.unix_timestamp() + 1 }`, which is correct on
+both tiers precisely because the JIT never runs.
+
+**So the conversion's payoff is not "delete some constants".** It is restoring
+native execution to the string-method surface *and* the whole VM-only typed-Arc
+receiver surface — two measured deopt classes, plus the Route A / ObjectStore
+surface-and-stops in the same family. That is the argument for doing the work.
 
 ### 2.1 Precisely which channel is kind-blind
 
@@ -852,13 +867,54 @@ print(h(1))
 ```
 
 VM `3`; JIT **SIGSEGV** (rc=139, gdb shows the fault inside unsymbolized
-Cranelift-emitted code). With a capture added, it becomes a silent wrong answer
-of exactly `TAG_NULL + 1` = `-1407374883553279` (`0xfffb000000000000 + 1`),
-rc=0. Filed as **#254**. **This shape is not in the corpus** (no corpus program segfaults:
-`SYN__first-class-closure-{dispatch,return}`, `ACC__functions__segfault-repro`,
-`ACC__jit-compilation__large` all rc=0; `SYN__closure-infn-tagnull` rc=1) and
-it is distinct from #219, which requires a closure declared inside a function
-and passed as an argument.
+Cranelift-emitted code). Filed as **#254**. **This shape is not in the corpus**
+(no corpus program segfaults: `SYN__first-class-closure-{dispatch,return}`,
+`ACC__functions__segfault-repro`, `ACC__jit-compilation__large` all rc=0;
+`SYN__closure-infn-tagnull` rc=1) and it is distinct from #219, which requires a
+closure declared inside a function and passed as an argument.
+
+#### #254 is TWO defects, and the discriminator is scope — not what either of us first proposed
+
+The supervisor asked me to run the annotation control against repro B
+specifically, on the hypothesis that A is the carrier defect and B is a §5.1 c1
+bail (a `TAG_NULL` returned without the flag, then `+ 1`). I ran that control
+**and** a scope control. The result splits the defects on a **different axis
+than either of us proposed**:
+
+| variant | module scope | inside `fn main()` | annotated |
+|---|---|---|---|
+| **A** `g=\|x\| x+1; h=\|y\| g(y)+1` | **rc=139 SIGSEGV** | **correct, rc=0** | still rc=139 |
+| **C** `g=\|x\| x+1; c=5; h=\|y\| g(y)+c` (capture in the *caller*) | **rc=139 SIGSEGV** | **correct, rc=0** | — |
+| **B** `c=5; g=\|x\| x+c; h=\|y\| g(y)+1` (capture in the *callee*) | `TAG_NULL+1`, rc=0 | **`TAG_NULL+1`, rc=0** | still `TAG_NULL+1` |
+
+Two conclusions, both measured:
+
+1. **The two SIGSEGV variants (A and C) ARE module-scope-conditioned** — the
+   supervisor's narrowing is correct for them. The identical shape inside
+   `fn main()` is correct on both tiers. So the defect is not "a closure calls a
+   closure"; it is **a module-scope closure calling another module-scope
+   closure**, which is a GENERIC_CARRIER site under ADR-006 §2.7 with its own
+   `KindedSlot` discipline (§6.2's consumer inventory must therefore cover the
+   **module-binding read path**, which the original list did not — see below).
+2. **Repro B is NOT module-scope-conditioned.** It reproduces identically inside
+   `fn main()`. So the narrowing that holds for A and C does **not** hold for B,
+   and B is a genuinely separate defect with a wider blast radius — every
+   closure that captures and is then called from another closure, at any scope.
+
+**Neither variant is #257's class.** Adding a type annotation rescues neither,
+whereas the annotation control is exactly what rescues the seven §4.0 `Array`
+shapes. So both are present-and-wrong stamps, not absent ones, and c1 (§5.1)
+alone will not fix B either — the supervisor's proposed B-mechanism is
+**refuted** by the annotation control. What distinguishes B from A is *which*
+closure holds the capture (callee vs caller), not the presence of a bail.
+
+**Consequence for §6.2's consumer inventory.** The original list —
+`jit_call_value`'s `is_inline_function` arm, both trampoline dispatchers,
+`unbox_function_id` — is **incomplete**. The module-scope conditioning of A and
+C says the module-binding read path is also a consumer of the mis-stamped
+carrier, and it is not in that list. `executor/mod.rs:792::module_binding_read_owned_kinded`
+is the VM-side analogue named in CLAUDE.md's §2.7.8/Q10 notes; the JIT-side
+module-binding read is the site the implementing lane must add and verify.
 
 Working hypothesis for the fault (**not yet proven**, offered so the
 implementing lane can confirm cheaply): `h` captures `g`; the capture path
@@ -1025,18 +1081,30 @@ tiers). It was the right acceptance test for #227 slice 2, where the producer
 flip broke it; it cannot detect the defects this ticket fixes. Proposed
 acceptance set, all as corpus fixtures with VM/JIT differential:
 
-| fixture | source | HEAD behaviour | post-fix |
-|---|---|---|---|
-| `SYN__closure-calls-closure.shape` | §6.1 m3 | **SIGSEGV** | VM==JIT `3` |
-| `SYN__closure-calls-closure-capture.shape` | §6.1 m4 | silent `TAG_NULL+1` | VM==JIT `7` |
-| `SYN__closure-calls-closure-outer-capture.shape` | §6.1 m5 | **SIGSEGV** | VM==JIT `7` |
-| `SYN__string-scalar-method.shape` | `s.length()` in a fn | whole-fn deopt | native, VM==JIT |
-| `SYN__closure-l106.shape` | L106 | green | stays green (regression) |
+| fixture | source | **form — binding** | HEAD behaviour | post-fix |
+|---|---|---|---|---|
+| `SYN__closure-calls-closure.shape` | §6.1 A | **MODULE SCOPE — required** | **SIGSEGV** | VM==JIT `3` |
+| `SYN__closure-calls-closure-outer-capture.shape` | §6.1 C | **MODULE SCOPE — required** | **SIGSEGV** | VM==JIT `7` |
+| `SYN__closure-calls-closure-capture.shape` | §6.1 B | either (reproduces at both) | silent `TAG_NULL+1` | VM==JIT `7` |
+| `SYN__datetime-method-native.shape` | §2 STAGE-F3 | any | whole-**program** deopt, 0 native dispatches | native, VM==JIT |
+| `SYN__string-scalar-method.shape` | `s.length()` in a fn | any | whole-fn deopt | native, VM==JIT |
+| `SYN__closure-l106.shape` | L106 | module scope | green | stays green (regression) |
 
-The string fixture is the load-bearing *positive* one: it proves the
-STAGE-StringJIT deopt is gone, i.e. that the conversion delivered a typed
-channel rather than merely renaming the untyped one. Without it, a conversion
-that keeps every deopt in place would pass.
+**Fixture-form warning — do not "simplify" the first two into a function.** The
+two SIGSEGV variants reproduce **only** at module scope; wrapped in `fn main()`
+they are correct on both tiers at HEAD (§6.1). A fixture written the natural way
+— inside a function — would pass today and prove nothing, and the next person to
+tidy the corpus is exactly the person who would rewrite them that way. The
+module-scope binding is load-bearing, not incidental style. Repro B is the
+exception: it reproduces in both forms, so its fixture may take either.
+
+Two load-bearing *positive* fixtures, which is the pair that proves the
+conversion delivered a typed channel rather than renaming the untyped one:
+`SYN__string-scalar-method` (STAGE-StringJIT gone) and
+`SYN__datetime-method-native` (STAGE-F3 gone — and this one is the stronger
+signal, since the program currently records **0 native dispatches**, so its
+witness going non-zero is unambiguous). Without both, a conversion that keeps
+every deopt in place would pass the whole suite.
 
 ### 10.1.1 Why #254 repro B becomes impossible by construction
 
@@ -1249,16 +1317,33 @@ For the record, since each of these would have mis-scoped the work:
    siblings, §3.5.2). I did not settle its reachability and I am not guessing.
    Either it is dead (my expectation — delete with bucket (c)) or it hides a
    live inline tag test on every array index.
-9. **New, from grill round 1 — the STAGE-F3 routing obligation** (§3.0.1).
-   Deleting that guard requires the 7 VM-only typed-Arc receiver kinds to route
-   to `dispatch_call_via_trampoline_vm` instead of the cascade's silent
-   `_ => TAG_NULL` arm. Its own error text documents the current behaviour as
-   `fn f(d: DateTime) -> int { d.unix_timestamp() + 1 }` → **rc=139 SIGSEGV** —
-   a second live memory-safety class in this ticket's territory, distinct from
-   #254 and not currently filed. It needs the same disposition decision as #254:
-   own it here, or file and route it.
-10. **New — should c1 land first as a separate commit** (§5.1)? 25 of 31 live
-    bare-bail sites lack `pending_call_error` today, which is a live hazard on
-    the tree, and closing it needs no kinds. My recommendation is yes; it
-    contradicts nothing in §9, since §9's indivisibility argument is about the
-    producer flip and the channel, not about c1.
+9. ~~**the STAGE-F3 routing obligation as a live SIGSEGV**~~ — **MY OVER-CLAIM,
+   CORRECTED. Do not file.** I read the rc=139 out of the guard's error text and
+   reported it as a live defect. It is not. Verified with a valid program
+   (my first probe was malformed — `now()` is not a Shape function):
+
+   ```shape
+   from std::core::intrinsics use { DateTime }
+   fn f(d: DateTime) -> int { return d.unix_timestamp() + 1 }
+   ```
+   **VM `1718461846`, JIT `1718461846`, rc=0 on both tiers.** The guard fires and
+   the program deopts; `--native-witness` reports
+   `program_fallback = {scope: "program", reason_class: "jit-compile-error"}` and
+   **0 native dispatches**. The rc=139 in the message describes what *would*
+   happen if the guard were deleted without routing — a consequence of this
+   ticket's own work, not a defect on today's tree.
+
+   Correct status: **a hard precondition on deleting STAGE-F3.** The 7 VM-only
+   typed-Arc receiver kinds must route to `dispatch_call_via_trampoline_vm` in
+   the same edit that removes the guard, with a corpus fixture proving it, or the
+   deletion is not landable. The distinction matters: a latent hazard conditioned
+   on a future edit is a design precondition; a live hazard is a ticket. Filing
+   this would have put a crash ticket in the tracker for a crash nobody can
+   currently trigger.
+10. ~~**should c1 land first as a separate commit**~~ — **RATIFIED (grill round
+    2): land c1 as its own commit before the conversion.** §9's indivisibility
+    covers the producer flip and the channel, not the error-flag adoption. Note
+    for the implementing lane: c1 is **not** the fix for #254 repro B — the
+    annotation control refutes that (§6.1) — so do not expect the c1 commit to
+    close any of the three closure fixtures. It closes the hazard that 25 of 31
+    live bail sites can put a bail placeholder into a typed slot with no deopt.
