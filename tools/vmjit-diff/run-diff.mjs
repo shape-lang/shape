@@ -38,6 +38,15 @@
  *     [--limit <n>]             (first n after tier/filter, manifest order)
  *     [--progress <path.jsonl>] (default: tools/vmjit-diff/reports/progress.jsonl)
  *     [--fresh]                 (ignore + truncate any existing progress file)
+ *     [--self-test-nativity]    (#260: exercise the vacuity logic and exit)
+ *
+ * Nativity (#260): the jit leg is run with `--native-witness`, and each result
+ * records whether the JIT actually executed native code. A MATCH on a program
+ * that whole-program falls back is VACUOUS — both legs ran the interpreter, so
+ * it could not have exposed a JIT defect. The summary reports the
+ * native-executing denominator; quote THAT, not the program count, in any
+ * "we ran the corpus and observed X" claim. Reporting only: classification,
+ * known-red handling and the exit code are untouched.
  *
  * Resumability: every completed program is appended to the progress file
  * (JSONL; first line is a meta record pinning binary + corpus). On start,
@@ -78,6 +87,7 @@ function parseArgs(argv) {
     knownRed: join(__dirname, 'known-red.json'),
     progress: join(__dirname, 'reports', 'progress.jsonl'),
     fresh: false,
+    selfTestNativity: false,
   };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
@@ -91,6 +101,7 @@ function parseArgs(argv) {
     else if (a === '--known-red') out.knownRed = resolve(argv[++i]);
     else if (a === '--progress') out.progress = resolve(argv[++i]);
     else if (a === '--fresh') out.fresh = true;
+    else if (a === '--self-test-nativity') out.selfTestNativity = true;
     else if (a === '--help' || a === '-h') {
       console.log(readFileSync(fileURLToPath(import.meta.url), 'utf-8').split('*/')[0]);
       process.exit(0);
@@ -109,9 +120,12 @@ function fail(msg) {
 
 // ---------- run one mode -------------------------------------------------------
 
-function runMode(bin, mode, file, timeoutSecs, cwd) {
+function runMode(bin, mode, file, timeoutSecs, cwd, witnessPath = null) {
   const t0 = process.hrtime.bigint();
-  const res = spawnSync(bin, ['run', '--mode', mode, file], {
+  const argv = ['run', '--mode', mode];
+  if (witnessPath) argv.push('--native-witness', witnessPath);
+  argv.push(file);
+  const res = spawnSync(bin, argv, {
     cwd,
     encoding: 'utf-8',
     timeout: timeoutSecs * 1000,
@@ -143,6 +157,126 @@ function classify(vm, jit) {
   if (vmOk && !jitOk) return 'JIT_FAIL';
   if (vm.stdout === jit.stdout && vm.exit === jit.exit) return 'MATCH';
   return 'DIVERGED';
+}
+
+// ---------- nativity (#260) ----------------------------------------------------
+//
+// A MATCH means "vm stdout == jit stdout". It does NOT mean the JIT ran. A
+// program that whole-program falls back executes the interpreter under BOTH
+// modes, so it matches itself vacuously and could not have exposed a JIT
+// defect even in principle. Measured 2026-08-01: only 123 of 483 corpus
+// programs executed any native code, so ~74.5% of MATCHes were vacuous — and
+// after #257 the native rate is far lower again. "N programs, zero hits" is
+// therefore a claim about N, not about what was tested; the number that
+// matters is the native-executing denominator.
+//
+// This reads the `--native-witness` record the jit leg already writes.
+// REPORTING ONLY — `classify()` is untouched and nativity never affects
+// MATCH/DIVERGED, the known-red logic, or the exit code. Safe to instrument
+// the compared leg rather than paying for a third run: verified on 8 diverse
+// programs that `--native-witness` leaves jit stdout byte-identical and the
+// exit code unchanged. The one apparent exception (`ACC__comptime__pb3`,
+// exit 1 vs 101) flaps identically WITHOUT the flag — it is that program's
+// documented UB crash-mode flake, not instrumentation. Nativity itself is
+// stable run-to-run (40/40 and 30/30 identical readings, #260), so a single
+// reading is representative.
+//
+// Defensive by construction: any read/parse failure yields `null`, never an
+// error. This is shared tooling and a reporting field must never be able to
+// fail another lane's run.
+function readNativity(witnessPath) {
+  try {
+    const record = JSON.parse(readFileSync(witnessPath, 'utf-8'));
+    const fns = Array.isArray(record.functions) ? record.functions : [];
+    return {
+      nativeDispatches: fns.reduce((n, f) => n + (f.native_dispatches ?? 0), 0),
+      nativeInstalled: fns.filter((f) => f.native_installed).length,
+      wholeProgramFallback: record.program_fallback != null,
+    };
+  } catch {
+    return null;
+  }
+}
+
+// Vacuity arithmetic, extracted so `--self-test-nativity` can exercise it
+// without running the corpus.
+function summarizeNativity(results) {
+  const measured = results.filter((r) => r.nativity);
+  return {
+    measured: measured.length,
+    unmeasured: results.length - measured.length,
+    native: measured.filter((r) => r.nativity.nativeDispatches > 0).length,
+    fellBack: measured.filter((r) => r.nativity.wholeProgramFallback).length,
+    vacuousMatches: results.filter(
+      (r) => r.classification === 'MATCH' && r.nativity && r.nativity.nativeDispatches === 0,
+    ).length,
+  };
+}
+
+// `--self-test-nativity`: every forced negative must be caught, and the
+// unmutated control must pass. A reporting field that cannot distinguish a
+// vacuous MATCH from a real one would recreate the #260 defect one layer up.
+function selfTestNativity() {
+  const checks = [];
+  const ok = (name, cond) => checks.push([name, !!cond]);
+
+  const tmp = join(dirname(args.progress), '.native-witness.selftest.json');
+  mkdirSync(dirname(tmp), { recursive: true });
+
+  writeFileSync(
+    tmp,
+    JSON.stringify({
+      program_fallback: null,
+      functions: [
+        { native_dispatches: 3, native_installed: true },
+        { native_dispatches: 1, native_installed: true },
+        { native_dispatches: 0, native_installed: false },
+      ],
+    }),
+  );
+  const native = readNativity(tmp);
+  ok('a natively-executing witness reports its dispatches', native?.nativeDispatches === 4);
+  ok('and counts installed functions', native?.nativeInstalled === 2);
+  ok('and is not marked whole-program fallback', native?.wholeProgramFallback === false);
+
+  writeFileSync(
+    tmp,
+    JSON.stringify({
+      program_fallback: { reason: 'fabricated' },
+      functions: [{ native_dispatches: 0, native_installed: false }],
+    }),
+  );
+  const fellBack = readNativity(tmp);
+  ok('a whole-program fallback reports zero dispatches', fellBack?.nativeDispatches === 0);
+  ok('and is marked whole-program fallback', fellBack?.wholeProgramFallback === true);
+
+  writeFileSync(tmp, '{ this is not json');
+  ok('corrupt witness yields null, never a throw', readNativity(tmp) === null);
+  rmSync(tmp, { force: true });
+  ok('missing witness yields null, never a throw', readNativity(tmp) === null);
+
+  // THE BITE: a MATCH whose jit leg never ran natively must be counted vacuous.
+  const summary = summarizeNativity([
+    { classification: 'MATCH', nativity: { nativeDispatches: 0, wholeProgramFallback: true } },
+    { classification: 'MATCH', nativity: { nativeDispatches: 5, wholeProgramFallback: false } },
+    { classification: 'DIVERGED', nativity: { nativeDispatches: 0, wholeProgramFallback: true } },
+    { classification: 'MATCH', nativity: null },
+  ]);
+  ok('a MATCH with no native execution is counted VACUOUS', summary.vacuousMatches === 1);
+  ok('a MATCH that ran natively is NOT counted vacuous', summary.native === 1);
+  ok('a non-MATCH is not counted as a vacuous MATCH', summary.vacuousMatches !== 2);
+  ok('an unmeasured program is excluded, not assumed native', summary.unmeasured === 1);
+  ok('whole-program fallbacks are counted', summary.fellBack === 2);
+
+  let allOk = true;
+  for (const [name, passed] of checks) {
+    if (passed) console.log(`  self-test ok: ${name}`);
+    else {
+      console.error(`SELF-TEST FAILED: ${name}`);
+      allOk = false;
+    }
+  }
+  return allOk;
 }
 
 function truncate(s, maxLines = 6, maxChars = 500) {
@@ -237,6 +371,16 @@ if (!progressValid) {
   );
 }
 
+// #260: scratch path for the per-program native-execution witness. Lives beside
+// the progress file, is overwritten per program, and is removed at the end.
+const witnessPath = join(dirname(args.progress), '.native-witness.json');
+
+// #260: `--self-test-nativity` exercises the vacuity logic and exits, without
+// running the corpus. Placed before the run loop so it is cheap to gate on.
+if (args.selfTestNativity) {
+  process.exit(selfTestNativity() ? 0 : 1);
+}
+
 const pending = programs.filter((e) => !resumed.has(e.id));
 console.log(
   `[vmjit-diff] corpus: ${args.corpus} — ${programs.length} selected, ${pending.length} to run (${programs.length - pending.length} resumed), timeout ${args.timeoutSecs}s per mode`,
@@ -246,11 +390,13 @@ for (const [i, entry] of pending.entries()) {
   const file = join(args.corpus, entry.id);
   if (!existsSync(file)) fail(`corpus file missing: ${file}`);
   const vm = runMode(bin, 'vm', file, args.timeoutSecs, args.corpus);
-  const jit = runMode(bin, 'jit', file, args.timeoutSecs, args.corpus);
+  const jit = runMode(bin, 'jit', file, args.timeoutSecs, args.corpus, witnessPath);
   if (vm.spawnError || jit.spawnError)
     fail(`spawn failed for ${entry.id}: ${vm.spawnError ?? jit.spawnError}`);
   const classification = classify(vm, jit);
   const isMatch = classification === 'MATCH';
+  // #260: read BEFORE the next program overwrites it; null on any failure.
+  const nativity = readNativity(witnessPath);
 
   const rec = {
     type: 'result',
@@ -260,6 +406,9 @@ for (const [i, entry] of pending.entries()) {
     classification,
     vm: { exit: vm.exit, signal: vm.signal, timedOut: vm.timedOut, ms: vm.ms },
     jit: { exit: jit.exit, signal: jit.signal, timedOut: jit.timedOut, ms: jit.ms },
+    // #260 REPORTING ONLY — never consulted by classify(). `null` when the
+    // witness could not be read.
+    nativity,
     // Full streams kept only for non-MATCH to keep the report small.
     ...(isMatch
       ? {}
@@ -370,6 +519,31 @@ const mdPath = args.report.replace(/\.json$/, '.md');
 writeFileSync(mdPath, md.join('\n'));
 
 console.log(`[vmjit-diff] ${Object.entries(counts).map(([k, v]) => `${k}=${v}`).join(' ')} | known-red=${knownRedHits} now-matching=${knownRedNowMatching} unexpected=${unexpected}`);
+
+// #260: the denominator that any "N programs, zero hits" claim actually rests
+// on. A program with no native dispatches ran the interpreter under BOTH modes,
+// so its MATCH is vacuous — it could not have exposed a JIT defect. Reporting
+// only; this line never changes the exit code.
+{
+  const measured = results.filter((r) => r.nativity);
+  const native = measured.filter((r) => r.nativity.nativeDispatches > 0);
+  const fellBack = measured.filter((r) => r.nativity.wholeProgramFallback);
+  const vacuousMatches = results.filter(
+    (r) => r.classification === 'MATCH' && r.nativity && r.nativity.nativeDispatches === 0,
+  );
+  const pct = (n) => (measured.length ? ((100 * n) / measured.length).toFixed(1) : '0.0');
+  console.log(
+    `[vmjit-diff] nativity: ${native.length}/${measured.length} programs executed native code ` +
+      `(${pct(native.length)}%); ${fellBack.length} whole-program fallback; ` +
+      `${vacuousMatches.length} of ${counts.MATCH} MATCHes are VACUOUS (jit never ran natively). ` +
+      `Quote the native denominator, not the program count — see #260.` +
+      (measured.length < results.length
+        ? ` [${results.length - measured.length} unmeasured]`
+        : ''),
+  );
+}
+
+rmSync(witnessPath, { force: true });
 console.log(`[vmjit-diff] report: ${args.report}`);
 console.log(`[vmjit-diff] report: ${mdPath}`);
 
