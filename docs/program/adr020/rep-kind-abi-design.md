@@ -24,6 +24,15 @@ Revised scope: **~9 functions converted, ~62 deleted, 31 bare-bails treated**
 (not 108 converted / 118 treated). This is materially smaller than the ticket's
 estimate and lands comfortably as one slice.
 
+Two additions the FFI-surface framing initially missed, both in the **emit
+layer** (§3.5): the `Eq`/`Ne` fallthrough in `compile_binop_dynamic_cmp`, which
+has generated three separate silent-wrong-answer defects and should be deleted
+rather than point-fixed a fourth time; and `emit_index_to_i64`, which
+reconstructs the deleted `is_tagged` dispatch as an inline `iconst` and would
+therefore survive both the FFI deletion and a name-only ratchet. The second
+changes the ratchet design: **it must match raw bit patterns, not just symbol
+names.**
+
 ---
 
 ## 1. Method — what was measured, and how
@@ -84,6 +93,31 @@ fields are populated by `r!()` but never appear in any `builder.ins().call`:
 at the Cranelift level. Any scoping that trusts the `r!()` set alone
 over-counts.
 
+#### The three liveness tiers — reusable test for any FFI-surface enumeration
+
+State this explicitly, because #226 conflated tiers 1 and 2 and this lane's
+first draft nearly conflated 2 and 3. For a JIT FFI symbol there are **four**
+distinct questions, and only the last means "live":
+
+| tier | question | how to test | count at HEAD |
+|---|---|---|---|
+| 1. registered | is there an `extern "C" fn` and a `declare(...)` call? | `grep 'extern "C" fn'` | 423 |
+| 2. declared into IR | does `build_ffi_refs` populate a `FuncRef` for it? | the `r!()` keys | 186 |
+| 3. **emitted** | does any `builder.ins().call(self.ffi.<field>, …)` reference it? | `grep -rhno 'ffi\.[a-z0-9_]*' mir_compiler/ compiler/` | 184 |
+| 4. executed | does a real program under `--mode jit` reach it? | first-hit probe over the corpus + targeted falsifiers | 12 of 42 probed |
+
+Tier 1 → 2 is #226's finding (a registered symbol need not be callable).
+**Tier 2 → 3 is this lane's addition**: a symbol can be declared into every
+compiled function's IR and still have no call site, because `build_ffi_refs`
+populates the struct unconditionally while the emit sites are conditional. A
+`FuncRef` in the IR costs a relocation entry, not a call. Tier 3 → 4 is the
+dynamic filter, and it is the one that needs the §1.2 denominator caveat
+attached whenever it is cited.
+
+An enumeration that stops at tier 1 over-counts by ~2.3x; one that stops at
+tier 2 still admits `jit_get_prop`. **Any future lane enumerating an FFI
+surface should run all four.**
+
 ### 1.2 Denominator caveat, stated up front
 
 Only **121 of 481** corpus programs execute any native code (287 bail
@@ -115,7 +149,8 @@ not a typed channel — it is one untyped channel with three names.
 
 **The compiler already says so, in a shipped error message.** A `string`
 method returning a scalar whole-function-deopts rather than emit the call.
-Reproduced live (`s.length()` inside a function, `--mode jit`):
+Source: `mir_compiler/terminators.rs:602-620`; quoted verbatim from a live
+`--mode jit` run of `s.length()` inside a function:
 
 > MirToIR: scalar-returning string method `.length(...)` on a proven
 > `NativeKind::String` receiver has no sound JIT codegen — the `jit_call_method`
@@ -222,6 +257,132 @@ and it omits the live `jit_typed_object_*` trio, `jit_schema_option_some`,
 the bucket-(a) table above.
 
 ---
+
+## 3.5 The second category: dialect in the EMIT layer
+
+Everything above enumerates the dialect as it exists in **FFI function bodies**.
+That framing has a blind spot, and the supervisor's `jit_string_eq` note is what
+exposed it: the JIT also emits tag logic **directly into Cranelift IR**, where
+it is not an `extern "C" fn`, has no `r!()` key, and appears in no FFI-surface
+enumeration.
+
+Measured split of dialect sites (non-comment, non-prose):
+
+| layer | sites | nature |
+|---|---|---|
+| `ffi/` | 394 | FFI function bodies — §3's partition |
+| `ffi_symbols/` | 110 | registration + intrinsic bodies — mostly bucket (c) |
+| `mir_compiler/` | 10 | **emit layer** — 8 are prose inside error-message string literals; 2 are real |
+| `compiler/` | 1 | prose inside an error message |
+
+The emit layer is nearly clean, which is good news for scope — but the
+residue is disproportionately dangerous, because emit-layer code is
+**unconditionally live** (it is the compiler, not the runtime) and because two
+of the three instances are invisible to a symbol-name ratchet.
+
+### 3.5.1 `compile_binop_dynamic_cmp` — one kind-blind arm, three incidents
+
+Answering the supervisor's direct question: `compile_binop_dynamic_cmp`
+(`mir_compiler/rvalues.rs:2001`) has exactly **two** arms and only **one** is
+kind-blind.
+
+- `Eq`/`Ne` → `builder.ins().icmp(cc, lhs, rhs)` on `to_i64_bits`-widened
+  operands, justified in-comment as "kind-mismatched bits are unequal by
+  construction".
+- `Lt`/`Le`/`Gt`/`Ge` → `Err(...)`, surface-and-stop.
+
+So there is no further ordered-comparison inventory. But the Eq/Ne arm's *fix
+history* is the finding, and it is worth more than the site count. Three
+separate defects have been traced to this one arm, each resolved by adding a
+kind proof **upstream** so that one more case stops falling through, while the
+fallthrough itself survived every time:
+
+1. **Narrow ints** — `let c: i8 = -56; c == -56` gave VM `true`, JIT `false`,
+   because `to_i64_bits` zero-extends an `I8` while the literal slot held a
+   sign-extended `I64`. Positive values coincided, so it hid. Fixed by adding
+   `narrow_int_cmp_kind` (`rvalues.rs:864`).
+2. **`arr.length`** — an unproven kind on the length projection sent
+   `i < arr.length` down this path and **deopted every length-bounded loop**,
+   making every shape `bounds_elision` can prove invisible to the native tier.
+   Fixed by adding a `Place::Field` kind arm (`rvalues.rs:719`).
+3. **Heap strings** — `Eq`/`Ne` on heap strings emitted a raw `icmp` on two
+   POINTERS. Invisible because interned string literals share a pointer, so
+   literal-vs-literal passed by luck. Being fixed now by the safety lane's
+   `jit_string_eq`.
+
+That is the ticket's thesis stated three times by three unrelated incidents: a
+kind-blind fallthrough is correct for the kinds its author had in mind and
+silently wrong for the rest, and each rescue narrows the hole without closing
+it. **Design ruling: this conversion DELETES the `Eq`/`Ne` arm rather than
+adding a fourth kind proof.** Once every operand carries a proven kind, the
+ordered-comparison treatment (surface-and-stop) is correct for equality too,
+and `compile_binop_dynamic_cmp` ceases to exist rather than shrinking again. A
+fourth point fix is the walk-back shape CLAUDE.md §Forbidden names.
+
+### 3.5.2 A tag test that no symbol ratchet can see
+
+`mir_compiler/places.rs:523::emit_index_to_i64` emits a **runtime tag test into
+machine code**:
+
+```rust
+let tag_base = self.builder.ins()
+    .iconst(types::I64, 0xFFF8_0000_0000_0000u64 as i64);
+let is_tagged = self.builder.ins()
+    .icmp(IntCC::UnsignedGreaterThanOrEqual, index_bits, tag_base);
+// … float path: bitcast+fcvt;  int path: ishl 16 / sshr 16 (i48 payload)
+self.builder.ins().select(is_tagged, from_int, from_float)
+```
+
+This is the deleted `is_tagged` dispatch, reconstructed inline. It does not call
+`is_tagged`, does not name `TAG_BASE`, and **spells the constant as a literal**
+— so deleting the FFI dialect and ratcheting every symbol in §8 would leave it
+untouched and passing. `0xFFF8` appears as a literal at only three
+non-comment sites in shape-jit (`places.rs:532`, two in a test at `:1838-1839`,
+plus the `TAG_BASE` definition itself), so the residue is small — but the
+lesson generalizes.
+
+**Consequence for §8: the ratchet must include the raw bit patterns, not only
+the symbol names.** A ratchet that only knows names is defeated by an `iconst`.
+
+Reachability of this specific site is **open and I did not settle it**. Its
+caller chain (`index_to_i64` → `inline_array_get` / siblings at
+`places.rs:600,653,696,711`) is documented throughout as the **legacy v1 array
+layout** (`data@+0 / len@+8`, the JitArray/UnifiedArray shape that Route A
+deleted), and my three array-indexing falsifiers (int index, negative index,
+number array) all produced VM==JIT correct results, i.e. they took the typed
+`v2_array` path. Note the arm is only reached when the Cranelift value type is
+`I64` and not `F64`/`I32`/`I8`. I flag it as **inventory the implementing lane
+must resolve**: either prove the legacy array path unreachable and delete the
+chain (my expectation, consistent with §3's bucket (c)), or convert it. Do not
+leave it as-is on the strength of "the tests pass" — by construction they would.
+
+### 3.5.3 Inbound FFI-surface changes folded in
+
+Per the supervisor's coordination note, two changes land on `main` under the
+safety lane:
+
+- **ADD `jit_string_eq(a_bits, a_kind_code, b_bits, b_kind_code) -> u8`**
+  (`ffi/conversion.rs`, registered near `ffi_builder.rs:273`). This is **not new
+  debt** — it is kind-threaded by construction, taking explicit kind codes rather
+  than recovering type from bits, and it belongs in this design as a **worked
+  example of the target ABI**. One caveat I would raise: explicit *kind-code
+  parameters* are the shape §4 argues against for the sites this ticket converts,
+  because there the emit site can always pick a monomorph. For `jit_string_eq`
+  the parameters are defensible if and only if the emit site genuinely compares
+  two operands whose kinds are not both statically known — which, per §4, should
+  not happen once kinds are proven. **My recommendation: land it as-is now
+  (it fixes a live correctness bug), and fold it into the monomorph set when this
+  ticket converts the channel** — `jit_string_eq` on two proven `String`
+  operands needs no kind codes at all. If the safety lane disagrees, that is a
+  substantive disagreement worth resolving before this slice starts, not after.
+- **DELETE `jit_v2_string_eq`** (`ffi/v2_string_ffi.rs:197`) — never registered
+  in `ffi_builder.rs`, zero callers, unit tests pass by calling it directly.
+  That is a textbook **tier-1-only** symbol (§1.1) and a textbook bucket-(c)
+  member: registered-looking, never callable, tests green throughout. It is
+  being deleted by the safety lane, so it leaves this ticket's inventory.
+
+Neither changes the §3 partition materially: one add on the correct side of the
+line, one delete from bucket (c).
 
 ## 4. The monomorphization rule
 
@@ -477,6 +638,23 @@ for scale only — set the real limits from the gate): `TAG_NULL` 229,
 `box_function` 8, `is_tagged` 7, `TAG_NONE` 5, `make_tagged` 5, `get_tag` 4,
 `TAG_FUNCTION_BITS` 3.
 
+**The ratchet must also cover raw bit patterns, not only symbol names**
+(§3.5.2). `emit_index_to_i64` reconstructs the deleted `is_tagged` dispatch from
+an `iconst` of `0xFFF8_0000_0000_0000` without naming a single ratcheted symbol;
+every row above would pass while that code stands. Add at minimum a row
+matching the NaN-box tag bit-pattern literal, e.g.
+
+```
+<n>	0x[fF]{3}[89a-fA-F]_?0{4}_?0{4}_?0{4}	ADR-020 §6 — NaN-box tag bit pattern as a literal; the dialect reconstructed as an iconst
+```
+
+with the limit set from the gate's own count (three non-comment sites at HEAD,
+one of them live), then driven to 0. The name rows and the bit-pattern row are
+complementary: the first stops the dialect returning by name, the second stops
+it returning by value. **This is the single most important addition to the
+ratchet design**, because it is the only row that would have caught the one
+emit-layer instance that survives the entire FFI deletion.
+
 The ratchet must **bite before it is trusted**: the slice includes a proof run
 showing that re-adding one deleted symbol fails the gate. A ratchet that has
 never been observed to fail is an assertion, not a gate — and this one has
@@ -529,6 +707,56 @@ The string fixture is the load-bearing *positive* one: it proves the
 STAGE-StringJIT deopt is gone, i.e. that the conversion delivered a typed
 channel rather than merely renaming the untyped one. Without it, a conversion
 that keeps every deopt in place would pass.
+
+### 10.1.1 Why #254 repro B becomes impossible by construction
+
+This is the claim the design has to be able to make, so state it precisely.
+
+**Today.** `let c = 5; let g = |x| x + c; let h = |y| g(y) + 1; print(h(1))`
+prints `-1407374883553279`. The chain: `g(y)` is a value call; `jit_call_value`
+returns `u64`; on its failure path that `u64` is `TAG_NULL`
+(`0xfffb000000000000`); the emit site stores the return **verbatim** into `h`'s
+destination slot via `write_place` (`terminators.rs:2225`); the slot's proven
+kind is `Int64`; the following `+ 1` is therefore emitted as a native `iadd` on
+raw `i64`; and `0xfffb000000000000 + 1` is a perfectly well-formed integer. The
+program exits 0 with a wrong number. **Nothing in that chain is a bug in any
+single component** — each step is locally correct given its inputs. The defect
+is that the channel between them carries no type, so a value that means "no
+value" is indistinguishable from a value that means `-1407374883553280`.
+
+**After the conversion.** The destination kind is `Int64`, so the emit site
+calls the `i64` monomorph, whose Rust signature returns a raw `i64` and which
+has no representation for "null" — `TAG_NULL` is not a value it can produce,
+because `TAG_NULL` no longer exists (§8 ratchets it to 0). The failure path is
+the §2.1 error channel instead: `pending_call_error = 1` plus
+`ERROR_PLACEHOLDER_BITS` (`0`), and the emit site's already-present
+`emit_pending_call_error_deopt` (`terminators.rs:2217`) branches to the deopt
+**before** `write_place` runs. The wrong value is never stored, so the `iadd`
+never sees it.
+
+Three independent properties each block the defect, which is what "by
+construction" has to mean:
+
+1. **No universal null word exists.** ADR-020 §3.1 replaces it with per-type
+   niches; an `int` destination has no null encoding at all (the presence pair
+   is #229's, and until then `int` is simply not nullable). There is no bit
+   pattern for the failure path to smuggle in.
+2. **The failure path is out-of-band.** It is a flag plus a deopt branch, not a
+   return value, so it cannot be mistaken for data no matter what bits accompany
+   it — and `ERROR_PLACEHOLDER_BITS == 0` is memory-safe under every kind if it
+   ever is stored.
+3. **The return type is the destination type.** A monomorph returning `i64`
+   cannot return a float's bits or a pointer's bits; the mismatch that produced
+   #254 is not expressible in the signature.
+
+Repro A (SIGSEGV) is blocked by the same change at a different point: the
+`Ptr(HeapKind::Closure)` stamp becomes true (§6.2), so the capture-retain that
+currently does `Arc` arithmetic on a tag word operates on a real closure record.
+
+**This is why the fixtures must be in the corpus, not just asserted here.** The
+argument above is only as good as the property that no other path can
+reintroduce a universal sentinel — and the §8 ratchet, not this paragraph, is
+what enforces that going forward.
 
 ### 10.2 Carrier-level unit coverage that would actually bite
 
@@ -587,6 +815,19 @@ For the record, since each of these would have mis-scoped the work:
    bucket is empty; a kind parameter would be a forbidden runtime discriminator.
 6. **"L106 is THE acceptance test."** It passes at HEAD and cannot detect this
    ticket's defects.
+7. **"The dialect is an FFI-function problem."** My own first framing, and it
+   has a blind spot: the JIT emits tag logic directly into Cranelift IR, where
+   it has no symbol and no `r!()` key (§3.5). The emit layer is nearly clean —
+   10 sites, 8 of them prose in error strings — but one of the two real ones
+   (`emit_index_to_i64`) survives both the FFI deletion and a name-only ratchet.
+8. **A stale comment that would mislead the implementing lane.** The docstring
+   on `compile_binop` (`rvalues.rs:1855-1868`) describes "an inline NaN-box
+   dispatch — `Both-Number` … or `Both-Int` … i48 math" for dynamic arithmetic
+   from CallValue-returned slots. **That code no longer exists**:
+   `compile_binop_dynamic_arith` (`rvalues.rs:1974`) is now a bare `Err(...)`
+   surface-and-stop. Anyone scoping from the comment would budget for an inline
+   tag-dispatch conversion that is already done. Delete the stale paragraph in
+   this slice.
 
 ## 12. Wanted from review
 
@@ -608,3 +849,16 @@ For the record, since each of these would have mis-scoped the work:
    dialect function) should be converted in this slice or whether the string
    heap carrier is #228 territory. I have scoped it in, but it is the one
    boundary I am least sure of.
+6. **Ratification of the §3.5.1 ruling to DELETE the `Eq`/`Ne` fallthrough**
+   rather than add a fourth kind proof. Three incidents have been point-fixed
+   upstream of it; the safety lane's `jit_string_eq` is the third. I want the
+   deletion recorded as the ruling so a fourth rescue is refused on sight.
+7. **Whether `jit_string_eq` should keep explicit kind-code parameters** once
+   this ticket lands (§3.5.3). My position: land it now as the correctness fix,
+   then fold it into the monomorph set — two proven `String` operands need no
+   kind codes. This is a live disagreement with the shape the safety lane is
+   landing, and it is cheaper to settle before the conversion starts.
+8. **Disposition of the legacy v1-array emit chain** (`inline_array_get` and
+   siblings, §3.5.2). I did not settle its reachability and I am not guessing.
+   Either it is dead (my expectation — delete with bucket (c)) or it hides a
+   live inline tag test on every array index.
