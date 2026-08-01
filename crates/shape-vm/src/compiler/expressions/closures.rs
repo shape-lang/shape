@@ -3022,11 +3022,60 @@ pub(crate) fn infer_closure_body_return_type_with_caller_context(
     }
 
     // 2. Engine span-table lookup at the body's terminal-expression span.
-    let terminal = closure_body_terminal_expr(body)?;
+    //
+    // #240 (B): a body with no value-producing tail is classified positively as
+    // unit rather than declining. "No terminal expression" on its own is NOT
+    // that proof — a body whose last statement is an `if/else` in which both
+    // branches `return v` also has no terminal expression, and does not return
+    // unit — so `BodyValue::Unit` is only reached through the whitelist in
+    // `closure_body_value`, guarded by the value-`return` count below.
+    let terminal = match closure_body_value(body) {
+        BodyValue::Expr(expr) => expr,
+        BodyValue::Unit => {
+            // A value-returning `return` anywhere means the function's return
+            // type is that expression's type, which this classifier cannot see.
+            // Exception: when the tail statement IS the sole `return <expr>`,
+            // the walk above already classified that expression's own value.
+            let value_returns =
+                shape_runtime::type_system::inference::TypeInferenceEngine::
+                    explicit_value_return_count(body);
+            let tail_is_the_only_value_return = value_returns == 1
+                && matches!(
+                    body.last(),
+                    Some(shape_ast::ast::Statement::Return(Some(_), _))
+                );
+            if value_returns > 0 && !tail_is_the_only_value_return {
+                return None;
+            }
+            return Some(shape_runtime::type_system::Type::Concrete(
+                TypeAnnotation::Basic("void".to_string()),
+            ));
+        }
+        BodyValue::Unknown => return None,
+    };
     let span = shape_ast::ast::Spanned::span(terminal);
     if span.is_dummy() {
         return None;
     }
+    // #240 (bounded A2 slice): a terminal call into a registered extension
+    // module carries its return in the module's own declaration, which the
+    // span table never sees — the engine records what it INFERRED, and a
+    // native export has no body to infer from. Consult the declaration before
+    // giving up. Bounded to `Unit` + the canonical scalars; see
+    // `declared_module_export_return_annotation`, where the #255 boundary is
+    // stated.
+    if !compiler.resolved_expr_types.contains_key(&span)
+        && let Expr::QualifiedFunctionCall {
+            namespace,
+            function,
+            ..
+        } = terminal
+        && let Some(declared) =
+            compiler.declared_module_export_return_annotation(namespace, function)
+    {
+        return Some(shape_runtime::type_system::Type::Concrete(declared));
+    }
+
     let resolved = compiler.resolved_expr_types.get(&span)?;
 
     // FORWARD BINDER: an unknown-sentinel survives finalization but is NOT a
@@ -3044,35 +3093,71 @@ pub(crate) fn infer_closure_body_return_type_with_caller_context(
     Some(resolved.clone())
 }
 
-/// Find a closure body's terminal expression — the expression whose type IS the
-/// closure's return type. Mirrors the terminal-finding logic the deleted
-/// mini-inferencer used: the last statement; an explicit `Return(Some(e))` uses
-/// `e`; a trailing expression statement uses its expr; a trailing `Block`
-/// recurses into the block's last item.
-fn closure_body_terminal_expr(body: &[shape_ast::ast::Statement]) -> Option<&Expr> {
+/// #240 (B): what a body evaluates to, as a three-way classification.
+///
+/// The predecessor returned `Option<&Expr>`, whose `None` conflated two very
+/// different facts: "this body produces no value" and "I cannot tell what this
+/// body produces". The first is a positive classification that stamps
+/// `FrameReturnArity::Zero` (ADR-020 §3.3); the second must surface. Collapsing
+/// them is what left every unit-returning generated body unclassified.
+enum BodyValue<'a> {
+    /// This expression's type IS the body's type.
+    Expr(&'a Expr),
+    /// The body provably produces no value — control falls off the end past a
+    /// statement form that yields nothing.
+    Unit,
+    /// Not provable here. Never read as unit.
+    Unknown,
+}
+
+/// Classify a body's value. The last statement decides: an explicit
+/// `Return(Some(e))` or a trailing expression statement uses `e`; a trailing
+/// `Block` recurses into the block's last item; the statement forms that yield
+/// nothing prove `Unit`; everything else is `Unknown`.
+fn closure_body_value(body: &[shape_ast::ast::Statement]) -> BodyValue<'_> {
     use shape_ast::ast::{BlockItem, Statement};
 
-    fn expr_terminal(expr: &Expr) -> Option<&Expr> {
+    fn expr_terminal(expr: &Expr) -> BodyValue<'_> {
         match expr {
             Expr::Return(Some(inner), _) => expr_terminal(inner),
-            Expr::Block(block, _) => match block.items.last()? {
-                BlockItem::Expression(e) => expr_terminal(e),
-                BlockItem::Statement(s) => stmt_terminal(s),
-                _ => None,
+            // An empty block, or one whose last item binds or assigns, has no
+            // value — `{ let x = 1 }` evaluates to unit.
+            Expr::Block(block, _) => match block.items.last() {
+                Some(BlockItem::Expression(e)) => expr_terminal(e),
+                Some(BlockItem::Statement(s)) => stmt_terminal(s),
+                Some(BlockItem::VariableDecl(_)) | Some(BlockItem::Assignment(_)) => {
+                    BodyValue::Unit
+                }
+                None => BodyValue::Unit,
             },
-            other => Some(other),
+            other => BodyValue::Expr(other),
         }
     }
 
-    fn stmt_terminal(stmt: &Statement) -> Option<&Expr> {
+    fn stmt_terminal(stmt: &Statement) -> BodyValue<'_> {
         match stmt {
             Statement::Expression(e, _) => expr_terminal(e),
             Statement::Return(Some(e), _) => expr_terminal(e),
-            _ => None,
+            // WHITELIST — statement forms that provably yield no value. This is
+            // deliberately not `_ =>`: `Statement::If` is excluded because a
+            // statement-position `if/else` whose branches both `return v` has
+            // no terminal expression yet does not return unit, and a future
+            // statement form must be classified explicitly rather than
+            // defaulting into a unit claim.
+            Statement::Return(None, _)
+            | Statement::VariableDecl(..)
+            | Statement::Assignment(..)
+            | Statement::While(..)
+            | Statement::For(..) => BodyValue::Unit,
+            _ => BodyValue::Unknown,
         }
     }
 
-    stmt_terminal(body.last()?)
+    match body.last() {
+        Some(last) => stmt_terminal(last),
+        // An empty body produces no value.
+        None => BodyValue::Unit,
+    }
 }
 
 impl BytecodeCompiler {
@@ -4883,3 +4968,260 @@ fn collect_callee_names_in_expr(
 // A.1C.3 module-binding `var` capture coverage in particular needs to
 // be restored alongside the closure-cell parallel-kind invariant
 // (ADR-006 §2.7.8 / Q10).
+
+#[cfg(test)]
+mod gap3_body_value_tests {
+    //! #240 (B) — a body that produces no value must be classified positively
+    //! as unit (stamping `FrameReturnArity::Zero`, ADR-020 §3.3), and a body
+    //! whose value merely cannot be seen here must NOT be.
+    //!
+    //! The unsoundness these guard against is specific and was measured: the
+    //! obvious implementation ("the terminal-expression finder returned `None`,
+    //! so the body returns unit") is WRONG, because that finder also returns
+    //! `None` for a body whose last statement is an `if/else` in which both
+    //! branches `return v`. Stamping such a frame `Zero` would tell every call
+    //! site the function produces no value while it returns an int.
+
+    use crate::compiler::BytecodeCompiler;
+    use crate::type_tracking::FrameReturnArity;
+    use shape_ast::parser::parse_program;
+
+    fn fn_body(program: &shape_ast::ast::Program, name: &str) -> Vec<shape_ast::ast::Statement> {
+        program
+            .items
+            .iter()
+            .find_map(|item| match item {
+                shape_ast::ast::Item::Function(def, _) if def.name == name => {
+                    Some(def.body.clone())
+                }
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("no function named '{name}'"))
+    }
+
+    fn return_arity_of(src: &str, fn_name: &str) -> Option<FrameReturnArity> {
+        let program = parse_program(src).expect("fixture should parse");
+        let bytecode = BytecodeCompiler::new()
+            .compile(&program)
+            .expect("fixture should compile");
+        bytecode
+            .functions
+            .iter()
+            .find(|f| f.name == fn_name)
+            .unwrap_or_else(|| panic!("no function named '{fn_name}' in the compiled program"))
+            .frame_descriptor
+            .as_ref()
+            .map(|d| d.return_arity)
+    }
+
+    #[test]
+    fn body_falling_off_the_end_is_stamped_zero_arity() {
+        let arity = return_arity_of(
+            r#"
+            fn observe(x: int) {
+                let doubled = x * 2
+            }
+            fn main() { observe(3) }
+            "#,
+            "observe",
+        );
+        assert_eq!(
+            arity,
+            Some(FrameReturnArity::Zero),
+            "a body whose last statement is a binding produces no value and must \
+             stamp Zero — leaving it unstamped is the #227 gap-3 residual",
+        );
+    }
+
+    #[test]
+    fn empty_body_is_stamped_zero_arity() {
+        let arity = return_arity_of(
+            r#"
+            fn nothing() {
+            }
+            fn main() { nothing() }
+            "#,
+            "nothing",
+        );
+        assert_eq!(arity, Some(FrameReturnArity::Zero));
+    }
+
+    /// THE unsoundness guard, tested against `closure_body_value` DIRECTLY.
+    ///
+    /// The end-to-end fixtures below cannot reach this code: for an ordinary
+    /// source function, whole-program inference resolves the return type at an
+    /// earlier classification source, so the terminal-expression source never
+    /// runs. Asserting only end-to-end would pass even with the naive rule
+    /// installed — verified by injecting it. These call the classifier.
+    #[test]
+    fn classifier_declines_an_if_else_where_both_branches_return_a_value() {
+        let program = parse_program(
+            r#"
+            fn pick(flag: bool) {
+                if flag {
+                    return 1
+                } else {
+                    return 2
+                }
+            }
+            "#,
+        )
+        .expect("fixture should parse");
+        let body = fn_body(&program, "pick");
+
+        // The load-bearing property: the classifier must never claim this body
+        // produces no value. (This fixture parses to an EXPRESSION-position
+        // `if`, so the walk answers `Expr`; a statement-position `if` is
+        // excluded from the whitelist and answers `Unknown`. Either is safe —
+        // `Unit` is the one answer that would be wrong, and it is exactly what
+        // a naive "terminal finder returned None => void" rule produces.)
+        assert!(
+            !matches!(super::closure_body_value(&body), super::BodyValue::Unit),
+            "an if/else whose branches both return an int must never be \
+             classified as producing no value",
+        );
+
+        // Second layer: even if the tail classification said unit, the
+        // value-`return` count is non-zero, which independently declines.
+        assert_eq!(
+            shape_runtime::type_system::inference::TypeInferenceEngine::explicit_value_return_count(
+                &body
+            ),
+            2,
+            "both `return` sites must be counted",
+        );
+    }
+
+    /// THE discriminating guard for the whitelist.
+    ///
+    /// A statement-position `if/else` whose branches both `return v` has no
+    /// terminal expression, and MUST NOT be read as producing no value. The
+    /// body is built directly rather than parsed: Shape's parser lowers a
+    /// source `if/else` in tail position to an EXPRESSION-position `if`, so a
+    /// parsed fixture answers `Expr` under every rule and cannot tell a correct
+    /// implementation from the naive one (verified — a parsed fixture passes
+    /// with `_ => BodyValue::Unit` installed). This asserts the contract of the
+    /// whitelist itself.
+    #[test]
+    fn classifier_never_reads_a_statement_if_else_as_producing_no_value() {
+        use shape_ast::ast::{Expr, IfStatement, Literal, Span, Statement};
+
+        let int_return = |n: i64| {
+            Statement::Return(
+                Some(Expr::Literal(Literal::Int(n), Span::DUMMY)),
+                Span::DUMMY,
+            )
+        };
+        let body = vec![Statement::If(
+            IfStatement {
+                condition: Expr::Literal(Literal::Bool(true), Span::DUMMY),
+                then_body: vec![int_return(1)],
+                else_body: Some(vec![int_return(2)]),
+            },
+            Span::DUMMY,
+        )];
+
+        assert!(
+            !matches!(super::closure_body_value(&body), super::BodyValue::Unit),
+            "a statement-position if/else whose branches both return an int must              never be classified as producing no value — stamping Zero here tells              every call site the frame yields nothing while it returns an int",
+        );
+        // Second, independent layer: the value-`return` count declines it even
+        // if the tail classification were wrong.
+        assert_eq!(
+            shape_runtime::type_system::inference::TypeInferenceEngine::explicit_value_return_count(
+                &body
+            ),
+            2,
+            "both `return` sites must be counted",
+        );
+    }
+
+    #[test]
+    fn classifier_proves_unit_for_a_body_that_falls_off_the_end() {
+        let program = parse_program(
+            r#"
+            fn observe(x: int) {
+                let doubled = x * 2
+            }
+            "#,
+        )
+        .expect("fixture should parse");
+        let body = fn_body(&program, "observe");
+        assert!(matches!(
+            super::closure_body_value(&body),
+            super::BodyValue::Unit
+        ));
+        assert_eq!(
+            shape_runtime::type_system::inference::TypeInferenceEngine::explicit_value_return_count(
+                &body
+            ),
+            0,
+        );
+    }
+
+    /// Both branches return a value, so the body has no
+    /// terminal expression — but it does not return unit.
+    #[test]
+    fn if_else_where_both_branches_return_a_value_is_not_zero_arity() {
+        let arity = return_arity_of(
+            r#"
+            fn pick(flag: bool) {
+                if flag {
+                    return 1
+                } else {
+                    return 2
+                }
+            }
+            fn main() { pick(true) }
+            "#,
+            "pick",
+        );
+        assert_ne!(
+            arity,
+            Some(FrameReturnArity::Zero),
+            "both branches return an int — stamping Zero would tell every call \
+             site this frame produces no value",
+        );
+    }
+
+    /// Second unsoundness guard: a `loop` yielding through `break v`.
+    #[test]
+    fn loop_breaking_with_a_value_is_not_zero_arity() {
+        let arity = return_arity_of(
+            r#"
+            fn count_up() {
+                let mut i = 0
+                loop {
+                    i = i + 1
+                    if i > 3 {
+                        break i
+                    }
+                }
+            }
+            fn main() { count_up() }
+            "#,
+            "count_up",
+        );
+        assert_ne!(
+            arity,
+            Some(FrameReturnArity::Zero),
+            "the loop yields an int through `break i`",
+        );
+    }
+
+    /// A body that DOES produce a value keeps its ordinary classification —
+    /// the unit conclusion must not swallow real returns.
+    #[test]
+    fn body_with_a_tail_expression_is_not_zero_arity() {
+        let arity = return_arity_of(
+            r#"
+            fn twice(x: int) -> int {
+                return x * 2
+            }
+            fn main() { twice(3) }
+            "#,
+            "twice",
+        );
+        assert_ne!(arity, Some(FrameReturnArity::Zero));
+    }
+}

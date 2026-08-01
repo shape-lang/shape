@@ -7715,6 +7715,78 @@ impl BytecodeCompiler {
         Ok(self.implicit_specialization_return_concrete_type(&func_def, &arg_cts, 0))
     }
 
+    /// #240 (bounded A2 slice): the declared return annotation of a registered
+    /// extension-module export, restricted to the shapes whose meaning is not
+    /// in question.
+    ///
+    /// **The boundary is deliberate and #255 owns the other side.** Only
+    /// `Unit` and the canonical scalar family are honoured here. A non-scalar
+    /// object return, a generic return, or a named-schema return yields `None`
+    /// and its frame stays unclassified — deciding whether the module-export
+    /// declaration is AUTHORITATIVE for those is #255's question (it interacts
+    /// with #207's named-type schema registration), and answering it here to
+    /// reach a zero residual count would be buying the number with a
+    /// half-widened authority.
+    ///
+    /// `Unit` is included because "returns nothing" is not the contested case:
+    /// it is the same positive fact the body-value classifier already proves
+    /// for Shape-source bodies, arriving from a declaration instead of a body.
+    pub(crate) fn declared_module_export_return_annotation(
+        &self,
+        namespace: &str,
+        function: &str,
+    ) -> Option<shape_ast::ast::TypeAnnotation> {
+        use shape_ast::ast::TypeAnnotation;
+        use shape_runtime::type_system::BuiltinTypes;
+        use shape_runtime::typed_module_exports::ConcreteType as ExportType;
+
+        let registry = self.extension_registry.as_ref()?;
+        for module in registry.iter() {
+            // A source-level namespace is a LOCAL name: the module's full
+            // canonical path, its trailing segment, or an import alias.
+            let matches_namespace = module.name == namespace
+                || module.name.rsplit("::").next() == Some(namespace)
+                || self
+                    .graph_namespace_map
+                    .iter()
+                    .chain(self.module_scope_sources.iter())
+                    .any(|(local, canonical)| local == namespace && canonical == &module.name);
+            if !matches_namespace {
+                continue;
+            }
+            let Some(declared) = module.typed_exports().get(function) else {
+                continue;
+            };
+            return match &declared.return_type {
+                ExportType::Unit => Some(TypeAnnotation::Basic("void".to_string())),
+                other => BuiltinTypes::canonical_script_alias(other.shape_type_name().trim())
+                    .map(|scalar| TypeAnnotation::Basic(scalar.to_string())),
+            };
+        }
+        None
+    }
+
+    /// #240: the declared return `ConcreteType` of a registered builtin or
+    /// intrinsic, read from the type environment's builtin table.
+    ///
+    /// These callees have no `FunctionDef` — they are declared by
+    /// `define_builtin(name, params, returns)` — so every AST-tier walk that
+    /// keys on `function_defs` alone treats them as unknowable. Only a
+    /// MONOMORPHIC declaration is honoured: a polymorphic builtin's return may
+    /// depend on the instantiation, and guessing it here would be exactly the
+    /// unsubstituted-return shortcut #240 refuses.
+    fn declared_builtin_return_concrete_type(&self, name: &str) -> Option<ConcreteType> {
+        let scheme = self.type_inference.env.lookup(name)?;
+        if !scheme.quantified.is_empty() {
+            return None;
+        }
+        let shape_runtime::type_system::Type::Function { returns, .. } = &scheme.ty else {
+            return None;
+        };
+        let annotation = returns.to_annotation()?;
+        crate::compiler::v2_map_emission::concrete_type_from_annotation(&annotation)
+    }
+
     fn implicit_specialization_return_concrete_type(
         &self,
         func_def: &shape_ast::ast::FunctionDef,
@@ -7833,7 +7905,18 @@ impl BytecodeCompiler {
                 self.implicit_specialization_expr_type(expr, param_cts, depth)
             }
             Expr::FunctionCall { name, args, .. } => {
-                let func_def = self.function_defs.get(name)?;
+                // #240: a callee with no `FunctionDef` is not automatically
+                // unknowable. Registered intrinsics (`__intrinsic_dist_uniform`
+                // and its siblings) carry a DECLARED signature in the type
+                // environment's builtin table
+                // (`environment/mod.rs::define_builtin`) and never enter
+                // `function_defs`, so the walk used to give up on the one
+                // callee whose contract is least in doubt. Same shape as the
+                // A1 forwarder gap: a declared contract in a side table that
+                // never reached the AST-tier consumer.
+                let Some(func_def) = self.function_defs.get(name) else {
+                    return self.declared_builtin_return_concrete_type(name);
+                };
                 let mut arg_cts = Vec::with_capacity(args.len());
                 for arg in args {
                     arg_cts.push(
@@ -9432,6 +9515,123 @@ mod r3_subcase_struct_array_hof_tests {
         assert!(
             format!("{:?}", res.unwrap_err()).contains("nonexistent"),
             "rejection should name the missing field"
+        );
+    }
+}
+
+#[cfg(test)]
+mod gap3_declared_contract_tests {
+    //! #240 — declared type contracts that live OUTSIDE the AST must reach the
+    //! return classifier, and the bounded slice must stay bounded.
+
+    use crate::compiler::BytecodeCompiler;
+    use shape_ast::ast::TypeAnnotation;
+    use shape_runtime::marshal::register_typed_function;
+    use shape_runtime::module_exports::ModuleExports;
+    use shape_runtime::typed_module_exports::{ConcreteReturn, ConcreteType, TypedReturn};
+
+    fn fixture_module() -> ModuleExports {
+        let mut module = ModuleExports::new("myfixture");
+        register_typed_function(
+            &mut module,
+            "returns_unit",
+            "",
+            vec![],
+            ConcreteType::Unit,
+            |_, _| Ok(TypedReturn::Concrete(ConcreteReturn::Unit)),
+        );
+        register_typed_function(
+            &mut module,
+            "returns_string",
+            "",
+            vec![],
+            ConcreteType::String,
+            |_, _| Ok(TypedReturn::Concrete(ConcreteReturn::Unit)),
+        );
+        // The #255 side of the boundary: a named/opaque object return.
+        register_typed_function(
+            &mut module,
+            "returns_object",
+            "",
+            vec![],
+            ConcreteType::OpaqueTypedObject("SomeSchema".to_string()),
+            |_, _| Ok(TypedReturn::Concrete(ConcreteReturn::Unit)),
+        );
+        module
+    }
+
+    /// A registered intrinsic has no `FunctionDef`; its declared signature lives
+    /// in the type environment's builtin table. Before #240 the specialisation
+    /// walk gave up on exactly the callee whose contract is least in doubt.
+    #[test]
+    fn a_registered_intrinsics_declared_return_is_recovered() {
+        let compiler = BytecodeCompiler::new();
+        assert!(
+            compiler
+                .function_defs
+                .get("__intrinsic_dist_uniform")
+                .is_none(),
+            "precondition: the intrinsic must have no FunctionDef, or this test \
+             is not exercising the declared-contract path",
+        );
+        assert_eq!(
+            compiler.declared_builtin_return_concrete_type("__intrinsic_dist_uniform"),
+            Some(shape_value::v2::ConcreteType::F64),
+            "`__intrinsic_dist_uniform` is declared [number, number] -> number",
+        );
+    }
+
+    #[test]
+    fn an_unregistered_name_yields_no_declared_return() {
+        let compiler = BytecodeCompiler::new();
+        assert_eq!(
+            compiler.declared_builtin_return_concrete_type("__intrinsic_not_a_real_builtin"),
+            None,
+        );
+    }
+
+    #[test]
+    fn a_module_exports_unit_and_scalar_returns_are_recovered() {
+        let compiler = BytecodeCompiler::new().with_extensions(vec![fixture_module()]);
+        assert_eq!(
+            compiler.declared_module_export_return_annotation("myfixture", "returns_unit"),
+            Some(TypeAnnotation::Basic("void".to_string())),
+            "a Unit-returning export must reach the classifier as a proven void",
+        );
+        assert_eq!(
+            compiler.declared_module_export_return_annotation("myfixture", "returns_string"),
+            Some(TypeAnnotation::Basic("string".to_string())),
+        );
+    }
+
+    /// THE BOUNDARY GUARD (#255). The bounded slice covers `Unit` and the
+    /// canonical scalars ONLY. Whether a module-export declaration is
+    /// AUTHORITATIVE for a non-scalar object / generic / named-schema return is
+    /// #255's question — it interacts with #207's named-type schema
+    /// registration. If this assertion is ever "fixed" by returning a type
+    /// here, that is the half-widened module-export authority this program
+    /// exists to refuse, and #227's final act must wait on #255 instead.
+    #[test]
+    fn a_non_scalar_module_export_return_stays_unclassified_for_255() {
+        let compiler = BytecodeCompiler::new().with_extensions(vec![fixture_module()]);
+        assert_eq!(
+            compiler.declared_module_export_return_annotation("myfixture", "returns_object"),
+            None,
+            "a non-scalar object return must NOT be classified here — that is \
+             #255's decision, not a residual to clear",
+        );
+    }
+
+    #[test]
+    fn an_unknown_namespace_or_export_yields_nothing() {
+        let compiler = BytecodeCompiler::new().with_extensions(vec![fixture_module()]);
+        assert_eq!(
+            compiler.declared_module_export_return_annotation("nosuchmod", "returns_unit"),
+            None,
+        );
+        assert_eq!(
+            compiler.declared_module_export_return_annotation("myfixture", "nosuchfn"),
+            None,
         );
     }
 }
