@@ -1232,41 +1232,37 @@ pub extern "C" fn jit_v2_field_store_ptr(ptr: *mut u8, offset: u32, val: *const 
 // ============================================================================
 // Refcount FFI
 // ============================================================================
-
-#[unsafe(no_mangle)]
-pub extern "C" fn jit_v2_retain(ptr: *const u8) {
-    unsafe {
-        let header = ptr as *const HeapHeader;
-        (*header).retain();
-    }
-}
-
-#[unsafe(no_mangle)]
-pub extern "C" fn jit_v2_release(ptr: *const u8) {
-    unsafe {
-        let header = ptr as *const HeapHeader;
-        if (*header).release() {
-            // Refcount reached zero — deallocate.
-            // For now, we only deallocate the struct itself.
-            // Future: dispatch on kind for proper cleanup of nested resources.
-            let kind = (*header).kind();
-            let _ = kind; // TODO: dispatch cleanup based on kind
-            // PRE-EXISTING DEFECT (surfaced, not introduced, by the #194 seam):
-            // this frees an object of unknown size with an 8-byte layout. A
-            // `dealloc` whose layout does not match the allocation is UB, and
-            // every kind this path can see is larger than 8 bytes. Routing it
-            // through the seam does not fix it — the size is genuinely not
-            // known here, because this function never learned to dispatch on
-            // `kind`. Fixing it means giving the release path the size (or the
-            // kind dispatch the TODO above describes), which is a behaviour
-            // change outside this pure-refactor slice.
-            shape_value::v2::heap_alloc::dealloc_block(
-                ptr as *mut u8,
-                std::alloc::Layout::from_size_align(8, 8).unwrap(), // minimum — real size TBD
-            );
-        }
-    }
-}
+//
+// `jit_v2_retain` / `jit_v2_release` DELETED (#216, 2026-08-01).
+//
+// `jit_v2_release` deallocated ANY v2 carrier with a hardcoded
+// `Layout::from_size_align(8, 8)` ("minimum — real size TBD"), having never
+// learned to dispatch on the header kind. Every kind that could reach it is
+// larger than 8 bytes, so a mismatched-layout `dealloc` is UB, and a
+// two-allocation carrier would additionally have leaked its data buffer.
+//
+// It was NOT reachable from emitted code. Both functions were registered
+// (`ffi_symbols/v2_symbols.rs` `builder.symbol` + `declare`) but NO
+// `FFIFuncRefs` field was ever built for either, and `ffi_builder.rs`'s
+// `r!()` is the only path from a registered symbol to a callable FuncRef —
+// so no compiled program could name them. The size-blind dealloc was a
+// loaded footgun one `r!()` line away from being live, not a live hazard.
+//
+// Deleted rather than taught to dispatch, per #216's own second option
+// ("delete the symbol if every call site can route through the typed
+// releases"): there were no call sites at all, and the canonical per-kind
+// paths are already built and wired — `jit_v2_typed_array_release` and
+// `jit_v2_typed_object_release`. Keeping a size-blind dealloc registered
+// under an inviting generic name is the attractor; the next author needing
+// "release a v2 thing" finds it and wires it.
+//
+// `jit_v2_retain` went with it: correct in isolation (a header refcount
+// bump) but equally unreachable, and a lone retain with no paired release
+// invites exactly the hand-rolled dealloc its own test had to write. That
+// test (`test_retain_increments_refcount`) cleaned up manually with the
+// CORRECT `Layout(24, 8)` and carried the comment "don't use
+// jit_v2_release which would dealloc wrong size" — the defect was known and
+// worked around rather than removed.
 
 // ── r5c-2-β-δ-(α): v2-raw `TypedArray<T>` retain / release ──────────────────
 //
@@ -1949,21 +1945,10 @@ mod tests {
         assert!(jit_v2_array_add_f64(std::ptr::null(), std::ptr::null()).is_null());
     }
 
-    #[test]
-    fn test_retain_increments_refcount() {
-        let ptr = jit_v2_alloc_struct(24, HEAP_KIND_V2_STRUCT);
-        unsafe {
-            let header = &*(ptr as *const HeapHeader);
-            assert_eq!(header.get_refcount(), 1);
-            jit_v2_retain(ptr);
-            assert_eq!(header.get_refcount(), 2);
-            jit_v2_retain(ptr);
-            assert_eq!(header.get_refcount(), 3);
-            // Clean up manually (don't use jit_v2_release which would dealloc wrong size)
-            shape_value::v2::heap_alloc::dealloc_block(
-                ptr,
-                std::alloc::Layout::from_size_align(24, 8).unwrap(),
-            );
-        }
-    }
+    // `test_retain_increments_refcount` DELETED with `jit_v2_retain` /
+    // `jit_v2_release` (#216). It was the only non-registration caller of
+    // either, and it exercised retain while deliberately routing around
+    // release with a hand-written `Layout(24, 8)` dealloc — a test that
+    // documented the defect instead of failing on it. Header refcounting
+    // itself stays covered by the typed carriers' own retain/release tests.
 }

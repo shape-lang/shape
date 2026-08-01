@@ -293,8 +293,8 @@ pub fn register_v2_symbols(builder: &mut JITBuilder) {
     );
 
     // Refcount
-    builder.symbol("jit_v2_retain", v2::jit_v2_retain as *const u8);
-    builder.symbol("jit_v2_release", v2::jit_v2_release as *const u8);
+    // `jit_v2_retain` / `jit_v2_release` symbols DELETED (#216): size-blind
+    // `Layout(8, 8)` dealloc, never given a FuncRef, never callable.
     // r5c-2-β-δ-(α): v2-raw TypedArray<T> retain / release.
     builder.symbol(
         "jit_v2_typed_array_retain",
@@ -904,19 +904,11 @@ pub fn declare_v2_functions(module: &mut JITModule, ffi_funcs: &mut HashMap<Stri
     // Refcount
     // ========================================================================
 
-    // jit_v2_retain(ptr) -> void
-    {
-        let mut sig = module.make_signature();
-        sig.params.push(AbiParam::new(types::I64));
-        declare(module, ffi_funcs, "jit_v2_retain", &sig);
-    }
-
-    // jit_v2_release(ptr) -> void
-    {
-        let mut sig = module.make_signature();
-        sig.params.push(AbiParam::new(types::I64));
-        declare(module, ffi_funcs, "jit_v2_release", &sig);
-    }
+    // `jit_v2_retain` / `jit_v2_release` declarations DELETED (#216) with the
+    // functions themselves — see `ffi/v2/mod.rs`. `jit_v2_release` freed any
+    // v2 carrier with a hardcoded `Layout(8, 8)`; neither had an
+    // `FFIFuncRefs` field, so no emitted code could call either. The
+    // per-kind releases below are the wired paths.
 
     // r5c-2-β-δ-(α): jit_v2_typed_array_retain(ptr) -> void
     {
