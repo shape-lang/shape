@@ -1382,3 +1382,276 @@ mod tests {
     // `preflight_gates_call_foreign_j1`), which is the load-bearing gate and
     // is testable without aborting.
 }
+
+#[cfg(test)]
+mod zero_capture_trampoline_probe {
+    //! #239 step-4b precondition — MEASUREMENT, not flip work.
+    //!
+    //! `docs/program/adr020/rep-kind-abi-design.md` §6.3 item 4 records that
+    //! #227 slice 2's revert reason was
+    //! "`dispatch_borrowed_closure_via_trampoline_vm` cannot execute a
+    //! zero-capture closure record", that a source reading of the consumer
+    //! found nothing rejecting zero captures, and that the reading must not be
+    //! trusted until someone constructs the record and calls it. These tests
+    //! are that construction.
+    //!
+    //! The record built here is the exact carrier §6.2 makes the JIT adopt:
+    //! `alloc_typed_closure(fid, 0, &ClosureLayout::from_capture_types(&[], &[]))`
+    //! wrapped in `OwnedClosureBlock`, mirroring the VM's construction at
+    //! `shape-vm/src/executor/call_convention.rs:1327-1332` with no
+    //! `write_capture_*` calls. Nothing in these tests changes a producer, a
+    //! kind stamp, or a consumer.
+    //!
+    //! Each test states what would have made it fail, because a probe that
+    //! cannot observe the rejection it is looking for is not evidence
+    //! (§10.4.1).
+
+    use super::*;
+    use shape_value::v2::closure_layout::ClosureLayout;
+    use shape_value::v2::closure_raw::{OwnedClosureBlock, alloc_typed_closure};
+    use shape_value::{HeapValue, NativeKind};
+    use std::sync::Arc;
+
+    /// The zero-capture layout §6.3 item 2 says is well-formed on empty
+    /// slices. Constructing it is itself part of the measurement — a panic
+    /// here would refute that claim before any dispatch happens.
+    fn zero_capture_layout() -> Arc<ClosureLayout> {
+        let layout = ClosureLayout::from_capture_types(&[], &[]);
+        assert_eq!(layout.capture_count(), 0);
+        assert_eq!(layout.heap_capture_mask, 0);
+        assert_eq!(layout.owned_mutable_capture_mask, 0);
+        assert_eq!(layout.shared_capture_mask, 0);
+        Arc::new(layout)
+    }
+
+    /// Build the zero-capture record for `fid`. Caller owns the single
+    /// refcount share `alloc_typed_closure` mints; `OwnedClosureBlock::Drop`
+    /// retires it.
+    fn zero_capture_block(fid: u16) -> OwnedClosureBlock {
+        let layout = zero_capture_layout();
+        // SAFETY: `alloc_typed_closure` returns a fresh block matching
+        // `layout` with refcount 1, and `from_raw` takes that one share. No
+        // capture writes are owed — the layout has no capture slots.
+        unsafe {
+            let ptr = alloc_typed_closure(fid, 0, &layout);
+            OwnedClosureBlock::from_raw(ptr, layout)
+        }
+    }
+
+    /// Compile `source` through the same pipeline `--mode jit` uses to build
+    /// its trampoline bytecode (`JITExecutor::execute_program` →
+    /// `compile_program_for_inspection`), so function ids agree with
+    /// production.
+    fn compile(source: &str) -> shape_vm::BytecodeProgram {
+        let _ = shape_runtime::initialize_shared_runtime();
+        let mut engine = shape_runtime::engine::ShapeEngine::new().expect("engine creation failed");
+        let program = shape_ast::parse_program(source).expect("parse failed");
+        let mut executor = shape_vm::BytecodeExecutor::new();
+        executor
+            .compile_program_for_inspection(&mut engine, &program)
+            .expect("bytecode compilation failed")
+    }
+
+    fn function_id_of(bytecode: &shape_vm::BytecodeProgram, name: &str) -> u16 {
+        bytecode
+            .functions
+            .iter()
+            .position(|f| f.name == name)
+            .unwrap_or_else(|| panic!("function `{name}` is not in the compiled function table"))
+            as u16
+    }
+
+    /// Load `bytecode` into a VM and register it as this thread's trampoline,
+    /// exactly as `executor.rs:771-779` does (content-addressed payload
+    /// cleared so the linker does not renumber functions).
+    fn with_trampoline<R>(bytecode: shape_vm::BytecodeProgram, f: impl FnOnce() -> R) -> R {
+        let mut bytecode = bytecode;
+        bytecode.content_addressed = None;
+        let mut vm = shape_vm::VirtualMachine::new(shape_vm::VMConfig::default());
+        vm.load_program(bytecode);
+        // SAFETY: `vm` outlives `f()` — it is dropped after the unset below.
+        unsafe { set_trampoline_vm(&mut vm as *mut shape_vm::VirtualMachine) };
+        let result = f();
+        unset_trampoline_vm();
+        result
+    }
+
+    const ADD_ONE: &str = "fn add_one(x: int) -> int { return x + 1 }\n";
+
+    /// **The named experiment.** A zero-capture record for a NAMED function,
+    /// handed straight to `dispatch_borrowed_closure_via_trampoline_vm` with a
+    /// null `JITContext` so the native arm declines and the interpreter arm
+    /// runs.
+    ///
+    /// Would fail if: the consumer rejected zero captures (returns `TAG_NULL`
+    /// and sets an error message), the capture loops mis-handled
+    /// `capture_count() == 0`, or `call_closure_with_nb_args_keepalive`
+    /// refused a block whose fid names a non-closure function. Any of those
+    /// produce `TAG_NULL` / a recorded error rather than `42`.
+    #[test]
+    fn zero_capture_record_executes_through_the_interpreter_arm() {
+        let _ = take_jit_runtime_error();
+        let bytecode = compile(ADD_ONE);
+        let fid = function_id_of(&bytecode, "add_one");
+
+        // Two dispatches through the SAME record with different arguments, so
+        // a constant or stale return cannot satisfy both assertions.
+        let (first, second) = with_trampoline(bytecode, || {
+            let block = zero_capture_block(fid);
+            let first = dispatch_borrowed_closure_via_trampoline_vm(
+                &block,
+                &[(41u64, NativeKind::Int64)],
+                std::ptr::null_mut(),
+            );
+            let second = dispatch_borrowed_closure_via_trampoline_vm(
+                &block,
+                &[(1_000_000u64, NativeKind::Int64)],
+                std::ptr::null_mut(),
+            );
+            (first, second)
+        });
+
+        assert_eq!(
+            take_jit_runtime_error(),
+            None,
+            "the dispatcher recorded a trampoline error for a zero-capture record",
+        );
+        assert_ne!(first, TAG_NULL, "zero-capture dispatch returned TAG_NULL");
+        assert_eq!(
+            first as i64, 42,
+            "add_one(41) through a zero-capture closure record",
+        );
+        assert_eq!(
+            second as i64, 1_000_001,
+            "the record is re-entrant: a second dispatch tracks its own argument",
+        );
+    }
+
+    /// The same record reached the way `jit_call_value`'s
+    /// `Ptr(HeapKind::Closure)` arm reaches it after the §6.2 flip:
+    /// `Arc::into_raw(Arc<HeapValue::ClosureRaw(block)>)` as callee bits,
+    /// through the `is_inline_function` bit-shape predicate, then
+    /// `Arc::from_raw` + the `HeapValue::ClosureRaw` match.
+    ///
+    /// Would fail if: a real record's pointer bits satisfied
+    /// `is_inline_function` (the NaN-box predicate would steal the callee
+    /// into the bare-function arm), the `HeapValue` arm did not project to
+    /// `ClosureRaw`, or the dispatch itself rejected the record.
+    #[test]
+    fn zero_capture_record_survives_the_arc_heapvalue_callee_round_trip() {
+        let _ = take_jit_runtime_error();
+        let bytecode = compile(ADD_ONE);
+        let fid = function_id_of(&bytecode, "add_one");
+
+        let bits = with_trampoline(bytecode, || {
+            let arc: Arc<HeapValue> = Arc::new(HeapValue::ClosureRaw(zero_capture_block(fid)));
+            let callee_bits = Arc::into_raw(arc) as u64;
+
+            assert_ne!(callee_bits, 0, "record pointer must be non-null");
+            assert!(
+                !is_inline_function(callee_bits),
+                "a real zero-capture record must not satisfy the NaN-box \
+                 inline-function predicate, or jit_call_value would route it \
+                 into the bare-function arm",
+            );
+
+            // SAFETY: reclaims the exact share `into_raw` released above.
+            let recovered = unsafe { Arc::<HeapValue>::from_raw(callee_bits as *const HeapValue) };
+            let bits = match &*recovered {
+                HeapValue::ClosureRaw(block) => dispatch_borrowed_closure_via_trampoline_vm(
+                    block,
+                    &[(41u64, NativeKind::Int64)],
+                    std::ptr::null_mut(),
+                ),
+                other => panic!("expected HeapValue::ClosureRaw, got {:?}", other.kind()),
+            };
+            drop(recovered);
+            bits
+        });
+
+        assert_eq!(take_jit_runtime_error(), None);
+        assert_eq!(bits as i64, 42);
+    }
+
+    /// Stand-in for a JIT-compiled closure body: pushes `a0 + 1000` onto the
+    /// context stack and returns signal 0, which is the contract
+    /// `dispatch_borrowed_closure_via_trampoline_vm`'s native arm reads back
+    /// (`signal >= 0 && stack_ptr > 0` → pop).
+    unsafe extern "C" fn stub_native_callee(ctx: *mut JITContext, a0: u64) -> i32 {
+        // SAFETY: the dispatcher passes the non-null context it was given.
+        let ctx = unsafe { &mut *ctx };
+        let sp = ctx.stack_ptr;
+        ctx.stack[sp] = a0 + 1000;
+        ctx.stack_kinds[sp] = crate::ffi::stack_kind_code::SENTINEL;
+        ctx.stack_ptr = sp + 1;
+        0
+    }
+
+    /// The native arm with zero captures. `total_args` must reduce to
+    /// `arg_pairs.len()`, the capture-read loop must not execute, and the
+    /// result must come back off the context stack.
+    ///
+    /// The trampoline VM is deliberately left UNSET: if the native arm
+    /// declined the zero-capture record for any reason, control would reach
+    /// the interpreter arm, find no VM, and return `TAG_NULL` with the
+    /// "could not reach the interpreter trampoline" message. That is the
+    /// observable this test would report on a rejection.
+    #[test]
+    fn zero_capture_record_enters_the_native_arm() {
+        let _ = take_jit_runtime_error();
+        unset_trampoline_vm();
+
+        const FID: u16 = 7;
+        let mut table: Vec<*const u8> = vec![std::ptr::null(); (FID as usize) + 1];
+        table[FID as usize] = stub_native_callee as *const u8;
+
+        let mut ctx = Box::new(JITContext::default());
+        ctx.function_table = table.as_ptr() as *const crate::context::JittedStrategyFn;
+        ctx.function_table_len = table.len();
+        ctx.stack_ptr = 0;
+
+        let block = zero_capture_block(FID);
+        let bits = dispatch_borrowed_closure_via_trampoline_vm(
+            &block,
+            &[(5u64, NativeKind::Int64)],
+            &mut *ctx as *mut JITContext,
+        );
+
+        assert_eq!(
+            take_jit_runtime_error(),
+            None,
+            "the native arm recorded an error for a zero-capture record",
+        );
+        assert_eq!(ctx.pending_call_error, 0);
+        assert_eq!(
+            bits, 1005,
+            "the native arm must marshal [captures..., args...] = [5] and read \
+             the callee's result back off the context stack",
+        );
+    }
+
+    /// Negative control for the two tests above: they assert a value that the
+    /// failure path cannot produce. This pins that the failure path is
+    /// reachable and distinguishable — a zero-capture record whose fid has a
+    /// null function-table entry and no trampoline VM returns `TAG_NULL` and
+    /// records an error.
+    #[test]
+    fn zero_capture_rejection_would_be_visible_as_tag_null() {
+        let _ = take_jit_runtime_error();
+        unset_trampoline_vm();
+
+        let block = zero_capture_block(3);
+        let bits = dispatch_borrowed_closure_via_trampoline_vm(
+            &block,
+            &[(41u64, NativeKind::Int64)],
+            std::ptr::null_mut(),
+        );
+
+        assert_eq!(bits, TAG_NULL);
+        assert!(
+            take_jit_runtime_error()
+                .is_some_and(|m| m.contains("could not reach the interpreter trampoline")),
+            "the rejection path must record its own message",
+        );
+    }
+}
