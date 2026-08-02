@@ -1654,4 +1654,71 @@ mod zero_capture_trampoline_probe {
             "the rejection path must record its own message",
         );
     }
+
+    /// #227 slice 2's revert reason had a SECOND half — "closure-callee
+    /// refcount discipline differs from string constants" — which the §6.3
+    /// item-4 instruction did not cover and which the dispatch tests above do
+    /// not touch. This measures the share arithmetic of the §6.2 pool design
+    /// against the consumer that actually retires shares.
+    ///
+    /// The consumer is `jit_call_value`'s `Ptr(HeapKind::Closure)` arm: it
+    /// does `Arc::<HeapValue>::from_raw(callee_bits)` (line 815) and
+    /// `drop(arc)` (line 847) — **one share retired per call**.
+    ///
+    /// §6.2 item 1 / §6.3 item 3 specify the producer as a pool holding "one
+    /// leaked permanent share". This test measures what that yields against
+    /// the consumer above, and what the string-constant discipline
+    /// (`ownership.rs:933,949,989`, which additionally emits a
+    /// per-consumption `arc_string_retain` **call** into the generated code)
+    /// yields instead.
+    ///
+    /// A keep-alive share is held throughout so nothing is ever freed — the
+    /// test measures counts, it does not trigger the fault.
+    #[test]
+    fn pooled_record_share_arithmetic_against_the_retiring_consumer() {
+        // ── Without a per-consumption retain: one call exhausts the pool ──
+        let arc: Arc<HeapValue> = Arc::new(HeapValue::ClosureRaw(zero_capture_block(3)));
+        let keepalive = Arc::clone(&arc);
+        let pooled_bits = Arc::into_raw(arc) as u64;
+        assert_eq!(Arc::strong_count(&keepalive), 2, "pool share + keep-alive");
+
+        // One consumption, mirroring control/mod.rs:815 + :847 exactly.
+        // SAFETY: reclaims the pool's share; the keep-alive keeps the
+        // allocation live past the drop.
+        drop(unsafe { Arc::<HeapValue>::from_raw(pooled_bits as *const HeapValue) });
+
+        assert_eq!(
+            Arc::strong_count(&keepalive),
+            1,
+            "a single call retires the pool's permanent share — the record is \
+             immortal for exactly one dispatch, and the second would free it",
+        );
+        drop(keepalive);
+
+        // ── With the string-constant discipline: the count is stable ──
+        let arc: Arc<HeapValue> = Arc::new(HeapValue::ClosureRaw(zero_capture_block(3)));
+        let keepalive = Arc::clone(&arc);
+        let pooled_bits = Arc::into_raw(arc) as u64;
+
+        for _ in 0..8 {
+            // The producer-side retain the `StringId` / `Str` / `Method` arms
+            // emit into the generated code before every consumption.
+            // SAFETY: `pooled_bits` addresses a live Arc (keep-alive holds a
+            // share); the increment pairs with the consumer's drop below.
+            unsafe { Arc::increment_strong_count(pooled_bits as *const HeapValue) };
+            // SAFETY: reclaims the share the increment just added.
+            drop(unsafe { Arc::<HeapValue>::from_raw(pooled_bits as *const HeapValue) });
+        }
+
+        assert_eq!(
+            Arc::strong_count(&keepalive),
+            2,
+            "with a per-consumption retain the pool share survives every call",
+        );
+
+        // Retire the pool share so the allocation is freed exactly once.
+        // SAFETY: the final reclaim of the share `into_raw` released.
+        drop(unsafe { Arc::<HeapValue>::from_raw(pooled_bits as *const HeapValue) });
+        drop(keepalive);
+    }
 }
