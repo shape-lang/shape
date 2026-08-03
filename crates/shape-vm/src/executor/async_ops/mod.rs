@@ -384,13 +384,12 @@ impl VirtualMachine {
     ///   bits, kind)` API (same shape as the external-completion path used
     ///   by remote calls); the share transfers from the stack slot into the
     ///   scheduler's cached-result entry. `resolve_spawned_task` then hits
-    ///   its `TaskStatus::Completed` cached fast-path at line 407 and
-    ///   returns the value cleanly via `clone_with_kind`.
+    ///   its `TaskState::Completed` cached fast-path and returns the value
+    ///   cleanly via `clone_with_kind`.
     ///
     /// If inside an async scope, the spawned future id is tracked for
     /// cancellation. Cancellation of a non-callable / pre-completed task is
-    /// a no-op (the result is already stored — `cancel` only releases the
-    /// `callables` entry, which is empty for non-callable kinds).
+    /// a no-op — `cancel` leaves an entry that already has an outcome alone.
     fn op_spawn_task(&mut self) -> Result<AsyncExecutionResult, VMError> {
         let sp_before = self.sp;
         // Pop the top-of-stack kinded slot. The share transfers to the
@@ -509,25 +508,21 @@ impl VirtualMachine {
                 self.task_scheduler.register(task_id, slot_bits, slot_kind);
             }
             _ => {
-                // Non-callable pre-resolved value. Register with Pending
-                // status so the scope tracking + `is_resolved` checks
-                // behave uniformly with the callable path, then `complete`
-                // immediately so `resolve_spawned_task` hits the
-                // cached-result fast-path. The scheduler's `register`
-                // requires a `(bits, kind)` pair to slot into the
-                // `callables` map for refcount discipline; for the
-                // pre-resolved path we transfer the share directly to
-                // the `results` map via `complete` and ensure the
-                // `callables` entry is empty so the take-callable arm
-                // never fires.
+                // Non-callable pre-resolved value. There is no callable to
+                // register, so the value goes straight in as the task's
+                // outcome via `complete`, and `resolve_spawned_task` hits
+                // the cached-result fast-path. The entry is
+                // `TaskState::Completed` from the start, so the
+                // take-callable arm never fires and `is_resolved` reports
+                // true immediately.
                 //
                 // Refcount discipline: `complete(task_id, bits, kind)`
                 // takes one strong-count share into the cached-result
                 // entry; the share transferred to us from `pop_kinded`
                 // moves into the scheduler. `resolve_spawned_task`'s
-                // cached fast-path at `call_convention.rs:407` clones a
-                // fresh share via `clone_with_kind` for the returned
-                // `KindedSlot`, leaving the cached entry's share intact.
+                // cached fast-path clones a fresh share via
+                // `clone_with_kind` for the returned `KindedSlot`, leaving
+                // the cached entry's share intact.
                 self.task_scheduler.complete(task_id, slot_bits, slot_kind);
             }
         }

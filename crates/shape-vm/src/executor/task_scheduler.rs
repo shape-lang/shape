@@ -35,7 +35,7 @@
 //!
 //! ## One map, one state (#237 / ADR-020 grill R-G5)
 //!
-//! Tasks live in a single `task_id -> `[`TaskState`] map whose entry carries
+//! Tasks live in a single `task_id` -> [`TaskState`] map whose entry carries
 //! the driver — callable, external receiver, or in-flight tokio task —
 //! *inside* the variant. Status is read off the entry. The four parallel maps
 //! this replaced (callables / results / external_receivers / pending_async)
