@@ -1301,6 +1301,169 @@ That is §4.1's monomorphization, and it is now the only thing between the
 gate and green. `SYN__datetime-method-native` additionally needs
 `unix_timestamp`'s destination stamped, which is the same channel.
 
+### 6.6 The channel, CONVERTED 2026-08-03 — and the retain control finally ran
+
+Commits `3cf3415f` (#236's seven), `8593ed20` (the conversion),
+`af074226` (two corrections the corpus found), `54baf0a9` (ratchets).
+Measured by the implementing lane; NOT independently re-derived.
+
+**§6.5's causal story was half right, and the half that was wrong is the
+interesting one.** §6.5 said the four remaining acceptance fixtures were
+"all blocked on ONE thing: `jit_call_value` and `jit_call_method` return
+`-> u64` with no return kind". Measured per fixture, they were blocked on
+three different things:
+
+| fixture | measured bail |
+|---|---|
+| `SYN__closure-calls-closure-guarded` | destination slot unproven (§4.1) |
+| `SYN__callvalue-stop-returns-value` | destination slot unproven (§4.1) |
+| `SYN__string-scalar-method-native` | STAGE-StringJIT — the METHOD channel's `box_number` |
+| `SYN__datetime-method-native` | **neither** — `DateTime` used as a function value with no fid in the JIT function table, an arm the §6.2 flip itself created |
+
+The fourth is worth stating plainly because the brief inherited §6.5's
+sentence: `SYN__datetime-method-native` does not block on the return
+channel at all today. It needs a callee-side answer first, and only then
+`unix_timestamp`'s destination stamp.
+
+**The `-> u64` signature was not discarding a kind. There was none to
+discard.** The JIT's `Return` lowering wrote `ctx.stack[0]`,
+`return_type_tag` and `stack_ptr = 1` — and never stamped
+`ctx.stack_kinds[0]`. It is the one push in `terminators.rs` that skipped
+the §2.7.7/Q9 lockstep every other push observes, and the one a value-call
+consumer reads back. `return_type_tag` is a different channel (the
+whole-program HOST marshalling tag, read once by `executor.rs`) and cannot
+distinguish the heap arms. So the conversion is in two halves: stamp the
+track at the producer, then let the signature carry what is now there.
+
+**#259's two deferred paths are decidable, which was that ticket's
+falsifiable test of this slice.** `dispatch_borrowed_closure_via_
+trampoline_vm` returns `Outcome::{Value(KindedSlot), NoValue, Failed}`.
+`NoValue` is SUCCESS under `_void` and an error under the other three.
+
+**The `_void` monomorph DISCARDS a returned value rather than aborting,
+and the asymmetry is deliberate.** The other three abort on a class
+disagreement because a value is about to be written into a slot that
+cannot hold it (§4.2 O2). Under `_void` there is no slot, so nothing is
+written and nothing downstream reads it — and the direct-call path has
+always behaved exactly this way (`callee_returns_unit` skips the
+`ctx.stack[0]` load). Making the indirect path fatal where the direct path
+is silent is an inconsistency, not a check. Dropping the `KindedSlot`
+retires the share, which the direct path abandons. Measured instance:
+`ACC__generics__vprobe_as.shape` calls `print`, whose FrameDescriptor says
+it returns no value while the trampoline hands back `Ptr(HeapKind::String)`
+— a declaration/body disagreement upstream of this channel.
+
+#### The bonus kill: a live memory-corruption defect, and it is #254's shape
+
+`emit_heap_closure`'s capture-retain loop emitted an inline
+`atomic_rmw add I32 [cap_ptr + 0], 1` per `heap_capture_mask` bit,
+described as matching `HeapHeader::retain`. Right for a v2-raw carrier
+whose header is at offset 0; **wrong for every `Arc<T>` carrier**, whose
+refcount is at offset -16. For a captured closure the increment landed on
+the first word of the `HeapValue` payload — the enum DISCRIMINANT.
+`ClosureRaw` and `TaskGroup` are adjacent variants
+(`heap_variants.rs:502,507`), so `ClosureRaw + 1 == TaskGroup`, and that
+is verbatim what
+
+```shape
+let g = |x| x + 1
+let h = |y| g(y) + 1
+print(h(1))
+```
+
+produced once the conversion let it reach native dispatch: *"callee
+stamped Ptr(HeapKind::Closure) but the HeapValue arm is TaskGroup"*. The
+captured closure was corrupted by the retain meant to keep it alive.
+
+`retain_func_for_place`'s Closure arm has documented this exact failure
+since W15.2-LANG-4 — "would write a `fetch_add` at offset +4 of the
+HeapValue payload — corrupting the discriminant". The loop simply never
+consulted it. It now goes through `retain_func_for_kind`, split out of
+`retain_func_for_place` so a site holding a kind without a `Place` reaches
+the same table.
+
+**Method note.** This was found by admitting a program to native execution
+and reading what came out, not by reasoning about carriers — the same
+lesson §6.5 recorded. The decisive datum was the enum variant NAME in the
+diagnostic; the pre-existing message said only "is not ClosureRaw", and
+"TaskGroup" is what made `+1` visible. A refusal diagnostic that does not
+name what it actually saw costs a diagnosis.
+
+#### The retain end-to-end control — it RAN, and it did NOT reproduce
+
+§6.5 owed this, and it is now constructible. Program:
+
+```shape
+fn touch(n: int) -> int {
+    let g1 = |x| x + 1
+    return g1(n)
+}
+// 400 calls
+```
+
+**801 native dispatches, `program_fallback: null`** — so the instrument
+could observe: the closure constant is re-materialised per call under
+native dispatch, which is precisely the shape §6.4 predicted would exhaust
+the pool's per-compile share budget.
+
+With BOTH emitted `jit_arc_closure_retain` calls removed (uncommitted,
+rebuilt release), the program **ran to completion, rc=0, all 400 lines
+correct**. Also tried: 300 re-materialisations through a capturing
+closure (901 native dispatches) — same, no failure. Restored, still green.
+
+So the honest result is **negative, not confirmatory**: on every shape
+this lane could construct that reaches native dispatch, the constant-site
+retain is not load-bearing. A plausible reason is in this slice itself —
+the capture-retain fix above now supplies a share per capture, and
+`compile_operand`'s Copy retain supplies one per call operand, so the
+budget balances without it. This is NOT a licence to delete the retains:
+a negative result from two shapes does not establish redundancy, and the
+unit-level arithmetic in `closure_constant_pool_tests` is unchanged and
+still shows unretained consumption spending the budget. What it does mean
+is that §6.5's obligation is discharged as *run and reported*, and the
+retain still has no end-to-end justification.
+
+#### Numbers, with the invocations
+
+```bash
+direnv exec /home/dev/dev/shape-lang cargo build --release --bin shape -j 8
+node tools/vmjit-diff/run-diff.mjs --fresh --report <path>.json
+direnv exec /home/dev/dev/shape-lang bash scripts/check-jit-native-acceptance.sh --report-only
+```
+
+- Corpus: **MATCH=487 DIVERGED=1 VM_FAIL=0 JIT_FAIL=0 TIMEOUT=0,
+  unexpected=0** (the one divergence is the pinned nondeterministic
+  `ACC__comptime__pb3`).
+- Nativity: **88/488 programs executed native code (18.0%)**, 330
+  whole-program fallback — against the supervisor's 86/488 re-derivation
+  on the merged flip. Read the native denominator, not the program count.
+- Acceptance: **2/5**. `SYN__closure-calls-closure-guarded` 0 -> **7**
+  dispatches AND prints `3/7/7`, matching the VM. `SYN__closure-l106` 2
+  (unchanged). The other three per the table above.
+
+**#254's capture variant is CLOSED by measurement**, not by a MATCH: the
+guarded fixture executes natively and produces the right values.
+
+#### What the remaining three need
+
+1. `SYN__callvalue-stop-returns-value` and the `g.shape` family
+   (`let h = |y| g(y)` — a closure whose body is JUST a call): the call
+   destination is a temp moved into the proven return slot. The kind flows
+   BACKWARD across `Assign(Local(0), Use(Move(Local(t))))`, and the
+   backward pass only propagates operand-to-operand, never into the move
+   source. MIR moves are kind-preserving by construction — there is no
+   converting move rvalue, conversions are `PrimitiveCast` — so this is
+   the natural completion of the existing backward pass. Deliberately NOT
+   taken in this slice: it is an inference-policy change and deserves its
+   own evidence rather than being folded in under time pressure.
+2. `SYN__string-scalar-method-native`: the METHOD channel. Same
+   monomorphization, applied to `jit_call_method`, which is what retires
+   STAGE-StringJIT.
+3. `SYN__datetime-method-native`: the callee-side `DateTime`-as-value arm
+   first (see the table above), then the destination stamp.
+
+---
+
 ## 7. The third carrier
 
 `jit_make_closure` (`crates/shape-jit/src/ffi/object/closure.rs:40`) produces
