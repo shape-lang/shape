@@ -522,31 +522,12 @@ fn kinded_to_slot(
     // assertion was true and the `unwrap_or` was unreachable — but the
     // invariant lived in the comment, so adding an eighth width type to
     // `FieldType` would have silently stamped every one of its values
-    // `Int64` in `field_kinds`. Naming the seven here makes rustc hold
-    // it: a new width variant is a non-exhaustive-match error.
+    // `Int64` in `field_kinds`. The projection now lives beside
+    // `is_width_integer` as `FieldType::width_integer_native_kind`, an
+    // exhaustive match, so rustc holds the invariant: a new width variant
+    // is a non-exhaustive-match error at the projection.
     if let Some(ft) = field_type {
-        let resolved = match ft {
-            FieldType::I8 => Some(NativeKind::Int8),
-            FieldType::U8 => Some(NativeKind::UInt8),
-            FieldType::I16 => Some(NativeKind::Int16),
-            FieldType::U16 => Some(NativeKind::UInt16),
-            FieldType::I32 => Some(NativeKind::Int32),
-            FieldType::U32 => Some(NativeKind::UInt32),
-            FieldType::U64 => Some(NativeKind::UInt64),
-            FieldType::F64
-            | FieldType::I64
-            | FieldType::Bool
-            | FieldType::String
-            | FieldType::Timestamp
-            | FieldType::Decimal
-            | FieldType::Array(_)
-            | FieldType::Object(_)
-            | FieldType::Any(_)
-            | FieldType::Option(_)
-            | FieldType::HashMap { .. }
-            | FieldType::Set(_) => None,
-        };
-        if let Some(resolved) = resolved {
+        if let Some(resolved) = ft.width_integer_native_kind() {
             let raw = match kind {
                 NativeKind::Int64 => bits as i64,
                 NativeKind::Float64 => f64::from_bits(bits) as i64,

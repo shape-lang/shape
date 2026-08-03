@@ -59,8 +59,9 @@ pub extern "C" fn jit_run_simulation(ctx: *mut JITContext, config_bits: u64) -> 
         //      track, so every callee and argument would arrive at the dispatch
         //      shell carrying a SENTINEL kind byte, which surfaces. The loop
         //      was already inoperable in that sense before this conversion.
-        //   2. It selected the callee with `is_inline_function` /
-        //      `is_heap_kind(_, HK_CLOSURE)` and boxed the row index with
+        //   2. It selected the callee with the deleted dual-carrier
+        //      bit-shape probes (`is_inline_function` /
+        //      `is_heap_kind(_, HK_CLOSURE)`) and boxed the row index with
         //      `box_number`. Both are pre-#239 carriers: since the flip
         //      (ADR-020 §3.4) every function value is one
         //      `Arc<HeapValue::ClosureRaw>`, so those predicates have no
@@ -78,7 +79,7 @@ pub extern "C" fn jit_run_simulation(ctx: *mut JITContext, config_bits: u64) -> 
         crate::ffi::control::set_jit_runtime_error(
             "jit_run_simulation: the per-row handler loop pushed callee/args without the \
              ADR-006 §2.7.7 parallel-kind stamps and classified the handler with the \
-             pre-#239 `is_inline_function` / HK_CLOSURE carriers, neither of which has a \
+             pre-#239 dual-carrier bit-shape probes, neither of which has a \
              producer since ADR-020 §3.4. There is also no destination slot here whose \
              proven kind could select a §4.1 return monomorph. Native execution aborted; \
              `DataTable.simulate()` runs on the interpreter."

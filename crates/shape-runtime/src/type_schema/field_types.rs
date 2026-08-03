@@ -346,6 +346,42 @@ impl FieldType {
         }
     }
 
+    /// The `NativeKind` a width-integer field stores at, or `None` when this
+    /// is not a width-integer type.
+    ///
+    /// Total by construction over `FieldType`, and deliberately a sibling of
+    /// [`Self::is_width_integer`] rather than a fallible projection at the call
+    /// site: consumers stamp this kind into a TypedObject's `field_kinds`
+    /// track, so "which width" must be a match rustc can check, not an
+    /// invariant held in a comment. #236 / R-G7 — `object_creation.rs` used to
+    /// call `to_native_kind().unwrap_or(NativeKind::Int64)` under an
+    /// `is_width_integer()` guard, with a comment asserting the two agreed.
+    /// They did, and the `unwrap_or` was unreachable; but an eighth width
+    /// variant would have silently stamped all its values `Int64`.
+    pub fn width_integer_native_kind(&self) -> Option<NativeKind> {
+        match self {
+            Self::I8 => Some(NativeKind::Int8),
+            Self::U8 => Some(NativeKind::UInt8),
+            Self::I16 => Some(NativeKind::Int16),
+            Self::U16 => Some(NativeKind::UInt16),
+            Self::I32 => Some(NativeKind::Int32),
+            Self::U32 => Some(NativeKind::UInt32),
+            Self::U64 => Some(NativeKind::UInt64),
+            Self::F64
+            | Self::I64
+            | Self::Bool
+            | Self::String
+            | Self::Timestamp
+            | Self::Decimal
+            | Self::Array(_)
+            | Self::Object(_)
+            | Self::Any(_)
+            | Self::Option(_)
+            | Self::HashMap { .. }
+            | Self::Set(_) => None,
+        }
+    }
+
     /// Returns true if this is a sub-64 or unsigned-64 integer width type.
     pub fn is_width_integer(&self) -> bool {
         matches!(
