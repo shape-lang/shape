@@ -662,6 +662,262 @@ mod tests {
         (v.to_bits(), NativeKind::Float64)
     }
 
+    /// Helper: a refcounted heap value whose strong count is directly
+    /// observable through its `HeapHeader` (same fixture shape as
+    /// `vm_impl/stack.rs`'s GC barrier tests).
+    ///
+    /// The `function_callable` fixture above is deliberately share-free
+    /// (`HeapKind::Future` is an inline scalar — `clone_with_kind` /
+    /// `drop_with_kind` are no-ops for it), so it cannot witness a
+    /// retain/release imbalance. Every test that asserts share accounting
+    /// uses this probe instead. Returned with strong count 1, owned by the
+    /// caller.
+    fn heap_probe() -> Kinded {
+        let field_kinds: Arc<[NativeKind]> = Arc::from(vec![NativeKind::Int64]);
+        let obj = shape_value::heap_value::TypedObjectStorage::_new(
+            7,
+            vec![shape_value::slot::ValueSlot::from_int(0)].into_boxed_slice(),
+            0,
+            field_kinds,
+        );
+        (obj as u64, NativeKind::Ptr(HeapKind::TypedObject))
+    }
+
+    /// Read a [`heap_probe`]'s strong count. Caller must hold at least one
+    /// live share.
+    fn probe_rc(bits: u64) -> u32 {
+        // SAFETY: `bits` came from `heap_probe` and the caller still owns a
+        // share, so the allocation is live.
+        unsafe {
+            (*(bits as *const shape_value::heap_value::TypedObjectStorage))
+                .header
+                .refcount
+                .load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+
+    // ---------------------------------------------------------------
+    // Share-accounting pins (#237).
+    //
+    // These fix the scheduler's §2.7.7 retain-on-store balance BEFORE the
+    // four-map → one-`TaskState`-map restructure, so the restructure has to
+    // reproduce it exactly rather than argue that it did. Each test hands
+    // the scheduler exactly one share of a live probe, keeps one for itself,
+    // and asserts the count the scheduler is responsible for.
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn drop_releases_a_registered_callable_share() {
+        let (bits, kind) = heap_probe(); // rc 1: ours
+        clone_with_kind(bits, kind); // rc 2: the scheduler's
+        let mut sched = TaskScheduler::new();
+        sched.register(1, bits, kind);
+        assert_eq!(probe_rc(bits), 2);
+
+        drop(sched);
+        assert_eq!(
+            probe_rc(bits),
+            1,
+            "scheduler Drop must release the registered callable's share"
+        );
+        drop_with_kind(bits, kind);
+    }
+
+    #[test]
+    fn drop_releases_a_completed_result_share() {
+        let (bits, kind) = heap_probe();
+        clone_with_kind(bits, kind);
+        let mut sched = TaskScheduler::new();
+        sched.complete(1, bits, kind);
+        assert_eq!(probe_rc(bits), 2);
+
+        drop(sched);
+        assert_eq!(
+            probe_rc(bits),
+            1,
+            "scheduler Drop must release the cached result's share"
+        );
+        drop_with_kind(bits, kind);
+    }
+
+    #[test]
+    fn take_callable_transfers_the_share_out_and_drop_does_not_double_release() {
+        let (bits, kind) = heap_probe();
+        clone_with_kind(bits, kind);
+        let mut sched = TaskScheduler::new();
+        sched.register(1, bits, kind);
+
+        let taken = sched.take_callable(1).expect("callable registered");
+        assert_eq!(taken, (bits, kind));
+        assert_eq!(
+            probe_rc(bits),
+            2,
+            "take_callable transfers, it does not clone"
+        );
+
+        drop(sched);
+        assert_eq!(
+            probe_rc(bits),
+            2,
+            "the taken share belongs to the caller; Drop must not release it again"
+        );
+        drop_with_kind(bits, kind); // the caller retires the taken share
+        assert_eq!(probe_rc(bits), 1);
+        drop_with_kind(bits, kind);
+    }
+
+    #[test]
+    fn cancel_releases_the_pending_callable_share() {
+        let (bits, kind) = heap_probe();
+        clone_with_kind(bits, kind);
+        let mut sched = TaskScheduler::new();
+        sched.register(1, bits, kind);
+
+        sched.cancel(1);
+        assert_eq!(
+            probe_rc(bits),
+            1,
+            "cancel must release the callable it will never run"
+        );
+        drop(sched);
+        assert_eq!(probe_rc(bits), 1, "and Drop must not release it twice");
+        drop_with_kind(bits, kind);
+    }
+
+    #[test]
+    fn re_registering_a_callable_releases_the_displaced_share() {
+        let (first, first_kind) = heap_probe();
+        clone_with_kind(first, first_kind);
+        let (second, second_kind) = heap_probe();
+        clone_with_kind(second, second_kind);
+
+        let mut sched = TaskScheduler::new();
+        sched.register(1, first, first_kind);
+        sched.register(1, second, second_kind);
+        assert_eq!(
+            probe_rc(first),
+            1,
+            "the displaced callable's share must be released, not leaked"
+        );
+        assert_eq!(probe_rc(second), 2);
+
+        drop(sched);
+        assert_eq!(probe_rc(second), 1);
+        drop_with_kind(first, first_kind);
+        drop_with_kind(second, second_kind);
+    }
+
+    #[test]
+    fn completing_twice_releases_the_displaced_result_share() {
+        let (first, first_kind) = heap_probe();
+        clone_with_kind(first, first_kind);
+        let (second, second_kind) = heap_probe();
+        clone_with_kind(second, second_kind);
+
+        let mut sched = TaskScheduler::new();
+        sched.complete(1, first, first_kind);
+        sched.complete(1, second, second_kind);
+        assert_eq!(
+            probe_rc(first),
+            1,
+            "the displaced result's share must be released, not leaked"
+        );
+        assert_eq!(probe_rc(second), 2);
+
+        drop(sched);
+        assert_eq!(probe_rc(second), 1);
+        drop_with_kind(first, first_kind);
+        drop_with_kind(second, second_kind);
+    }
+
+    #[test]
+    fn resolve_task_caches_one_share_and_hands_one_out() {
+        let (callable, callable_kind) = heap_probe(); // rc 1: ours
+        clone_with_kind(callable, callable_kind); // rc 2: the scheduler's
+        let (result, result_kind) = heap_probe(); // rc 1: ours
+        clone_with_kind(result, result_kind); // rc 2: the one the executor yields
+
+        let mut sched = TaskScheduler::new();
+        sched.register(1, callable, callable_kind);
+
+        // The executor consumes the callable share it is handed (as a real
+        // callee frame does at `op_return`) and yields the result share.
+        let produced = sched
+            .resolve_task(1, |(bits, kind)| {
+                drop_with_kind(bits, kind);
+                Ok((result, result_kind))
+            })
+            .expect("resolve");
+        assert_eq!(produced, (result, result_kind));
+        assert_eq!(
+            probe_rc(callable),
+            1,
+            "the callable share transferred to the executor and was retired there"
+        );
+        assert_eq!(
+            probe_rc(result),
+            3,
+            "the executor's share is cached and a fresh one is returned"
+        );
+
+        drop_with_kind(result, result_kind); // caller retires the returned share
+        drop(sched);
+        assert_eq!(
+            probe_rc(result),
+            1,
+            "scheduler Drop retires the cached result share"
+        );
+        drop_with_kind(result, result_kind);
+        drop_with_kind(callable, callable_kind);
+    }
+
+    #[test]
+    fn a_cached_resolve_hands_out_a_fresh_share_each_time() {
+        let (result, result_kind) = heap_probe();
+        clone_with_kind(result, result_kind);
+        let mut sched = TaskScheduler::new();
+        sched.complete(1, result, result_kind); // rc 2: ours + cached
+
+        let a = sched.resolve_task(1, |_| panic!("cached")).expect("cached");
+        assert_eq!(probe_rc(result), 3);
+        let b = sched.resolve_task(1, |_| panic!("cached")).expect("cached");
+        assert_eq!(probe_rc(result), 4);
+        assert_eq!(a, b);
+
+        drop_with_kind(result, result_kind);
+        drop_with_kind(result, result_kind);
+        drop(sched);
+        assert_eq!(probe_rc(result), 1, "only the test's own share survives");
+        drop_with_kind(result, result_kind);
+    }
+
+    #[test]
+    fn try_resolve_external_balances_the_delivered_share() {
+        let (result, result_kind) = heap_probe();
+        clone_with_kind(result, result_kind); // rc 2: ours + the one we send
+
+        let mut sched = TaskScheduler::new();
+        let tx = sched.register_external(1);
+        tx.send(Ok((result, result_kind)))
+            .expect("receiver is registered");
+
+        let delivered = sched
+            .try_resolve_external(1)
+            .expect("ready")
+            .expect("delivered ok");
+        assert_eq!(delivered, (result, result_kind));
+        assert_eq!(
+            probe_rc(result),
+            3,
+            "the delivered share is handed out and a second is cached"
+        );
+
+        drop_with_kind(result, result_kind); // caller retires the delivered share
+        drop(sched);
+        assert_eq!(probe_rc(result), 1, "only the test's own share survives");
+        drop_with_kind(result, result_kind);
+    }
+
     #[test]
     fn test_register_and_take_callable() {
         let mut sched = TaskScheduler::new();
