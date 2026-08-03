@@ -179,6 +179,20 @@ differential's `classify()` reads stdout + exit code, so MATCH/DIVERGED
 counts are insulated — only the nativity denominator moves, which is
 exactly why this precedes the flip's baseline.
 
+**MEASURED OUTCOME (2026-08-03, appended per the testable-premise
+discipline):** the ruling's premise — #260 as a candidate first-order cause
+of the 11/488 denominator — was **refuted by the lane's measurement and
+confirmed by supervisor re-derivation**: `v2-verifier-unverified` accounts
+for 0 of the 407 whole-program fallbacks (earlier preflight bails win
+first; `record_program_fallback` is first-wins). The extent fix landed on
+its own merits (`b5a66808`): corpus verifier-line emissions 360/488 → 3/488,
+the 3 survivors being TRUE `__main__` violations (#240 territory); the
+native denominator did not move. The pre-flip ordering was cheap insurance
+that bought a clean attribution, not the expected recovery. **The R-G2
+tripwire clock started 2026-08-03.** Criterion (a) of the ticket was moot,
+not satisfied — the upstream `HashMap` iteration order
+(`import_permissions.rs:44`) remains, now invisible through the verifier.
+
 **#256** folds into the flip close-out — the only ordering under which its
 "proven to bite" acceptance is satisfiable, because the live inline tag
 reconstruction (`places.rs:523-551`, re-spelling `0xFFF8...` so even a
