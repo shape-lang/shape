@@ -100,47 +100,28 @@ impl VirtualMachine {
         // the existing `[jit-fallback]` path routes the program through
         // the interpreter, which agrees with the VM error surface. Full V2
         // type soundness for every JIT-emitted opcode is v0.4 follow-up.
-        #[cfg(debug_assertions)]
-        {
-            if let Err(errors) = crate::bytecode::verifier::verify_trusted_opcodes(&self.program) {
-                eprintln!(
-                    "Bytecode verification warning: {} violation(s) found",
-                    errors.len()
-                );
-                for e in &errors {
-                    eprintln!("  - {}", e);
-                }
-            }
-            if let Err(errors) = crate::bytecode::verifier::verify_v2_typed_opcodes(&self.program) {
-                eprintln!(
-                    "V2 bytecode verification warning: {} violation(s) found",
-                    errors.len()
-                );
-                for e in &errors {
-                    eprintln!("  - {}", e);
-                }
+        // #260: release used to print "verification failed" for behavior that
+        // is identical to debug's "verification warning" — print and continue.
+        // "Failed" followed by a successful run is not a contract anyone can
+        // read, and it trains readers to ignore the line. The debug wording is
+        // the honest one, so both profiles now use it and the two arms
+        // collapse into one.
+        if let Err(errors) = crate::bytecode::verifier::verify_trusted_opcodes(&self.program) {
+            eprintln!(
+                "Bytecode verification warning: {} violation(s) found",
+                errors.len()
+            );
+            for e in &errors {
+                eprintln!("  - {}", e);
             }
         }
-
-        #[cfg(not(debug_assertions))]
-        {
-            if let Err(errors) = crate::bytecode::verifier::verify_trusted_opcodes(&self.program) {
-                eprintln!(
-                    "Bytecode verification failed: {} violation(s)",
-                    errors.len()
-                );
-                for e in &errors {
-                    eprintln!("  - {}", e);
-                }
-            }
-            if let Err(errors) = crate::bytecode::verifier::verify_v2_typed_opcodes(&self.program) {
-                eprintln!(
-                    "V2 bytecode verification failed: {} violation(s)",
-                    errors.len()
-                );
-                for e in &errors {
-                    eprintln!("  - {}", e);
-                }
+        if let Err(errors) = crate::bytecode::verifier::verify_v2_typed_opcodes(&self.program) {
+            eprintln!(
+                "V2 bytecode verification warning: {} violation(s) found",
+                errors.len()
+            );
+            for e in &errors {
+                eprintln!("  - {}", e);
             }
         }
     }

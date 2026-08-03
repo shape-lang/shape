@@ -140,6 +140,24 @@ impl BytecodeProgram {
         &self,
         function_index: usize,
     ) -> Result<DirectFunctionInstructions<'_>, FunctionWindowError> {
+        let owned_ranges = self.direct_function_windows(function_index)?;
+
+        Ok(DirectFunctionInstructions {
+            instructions: &self.instructions,
+            remaining_ranges: owned_ranges.into_iter(),
+            current_range: 0..0,
+        })
+    }
+
+    /// Ascending instruction-offset ranges directly owned by one function.
+    ///
+    /// Same ownership derivation as `direct_function_instructions`, exposed as
+    /// ranges for callers that need the offsets themselves (the bytecode
+    /// verifier reports them). Empty rows own no ranges.
+    pub(crate) fn direct_function_windows(
+        &self,
+        function_index: usize,
+    ) -> Result<Vec<Range<usize>>, FunctionWindowError> {
         let target = self.program_window(function_index)?;
         let mut descendants = Vec::new();
 
@@ -181,13 +199,7 @@ impl BytecodeProgram {
             )
         });
         let excluded = maximal_laminar_descendants(function_index, &descendants)?;
-        let owned_ranges = subtract_ranges(target, &excluded);
-
-        Ok(DirectFunctionInstructions {
-            instructions: &self.instructions,
-            remaining_ranges: owned_ranges.into_iter(),
-            current_range: 0..0,
-        })
+        Ok(subtract_ranges(target, &excluded))
     }
 
     fn program_window(&self, function_index: usize) -> Result<Range<usize>, FunctionWindowError> {

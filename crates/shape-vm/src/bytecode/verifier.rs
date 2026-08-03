@@ -39,6 +39,41 @@
 //! now verifies the still-meaningful invariant (operand shape). The
 //! `verify_v2_typed_opcodes` pass — which checks real v2 invariants — is
 //! unchanged and keeps its enforcement structure.
+//!
+//! ## #260 — extents come from `body_length`, not from the next entry point
+//!
+//! Both passes used to derive a function's instruction range as
+//! `entry_point → next function's entry_point`, never consulting
+//! `body_length`. That is wrong for any zero-length row: the permission
+//! carriers synthesized by `publish_dependency_permission_blob`
+//! (`compiler/import_permissions.rs`) have `body_length: 0` and
+//! `frame_descriptor: None`, so each one inherited the entire instruction
+//! range of the following real function and reported that function's V2
+//! typed opcodes as its own violations.
+//!
+//! That accounted for the whole observed violation class. Measured over the
+//! 488-program vm/jit corpus (518 program-load blocks, 76,242 function rows):
+//! all 26,772 zero-length rows are permission carriers, every one of them
+//! `frame_descriptor: None`, and 26,528 of them inherited a non-empty range.
+//! Because the carrier set varies with `HashMap` iteration order upstream
+//! (`import_permissions.rs`), the reported violation count varied run to run
+//! on identical input — nine distinct counts over 40 runs of a three-line
+//! program.
+//!
+//! Extents now come from `BytecodeProgram::direct_function_windows`, the
+//! ownership notion the crate already uses elsewhere: an instruction belongs
+//! to the innermost function whose `[entry_point, entry_point + body_length)`
+//! window contains it, and empty rows own nothing. On the same corpus this is
+//! byte-identical to the old rule for every one of the 49,470 real functions
+//! (`entry_point + body_length == next entry_point` in all 49,470 cases, no
+//! nested windows observed), so the change subtracts the false positives
+//! without relaxing anything that was being checked.
+//!
+//! It does not silence real violations: `__main__` in three corpus programs
+//! genuinely carries V2 typed opcodes inside its own window with
+//! `frame_descriptor: None`, and is still reported.
+
+use std::ops::Range;
 
 use super::{BytecodeProgram, OpCode, Operand};
 
@@ -71,6 +106,11 @@ pub enum VerifyError {
         opcode: OpCode,
         instruction_offset: usize,
     },
+    /// The function table does not describe unambiguous instruction ownership
+    /// (a window overflows, leaves the instruction stream, or overlaps another
+    /// without containing it). No function's extent can be derived, so neither
+    /// pass can verify anything; reported once per program.
+    MalformedFunctionWindows { detail: String },
 }
 
 impl std::fmt::Display for VerifyError {
@@ -113,13 +153,42 @@ impl std::fmt::Display for VerifyError {
                 "V2 field opcode {:?} at offset {} in function '{}': missing FieldOffset operand",
                 opcode, instruction_offset, function_name
             ),
+            VerifyError::MalformedFunctionWindows { detail } => write!(
+                f,
+                "function table does not describe unambiguous instruction ownership: {detail}"
+            ),
         }
     }
+}
+
+/// Instruction offsets directly owned by each function, in table order.
+///
+/// See the `#260` section of the module docs: ownership is
+/// `[entry_point, entry_point + body_length)` minus any contained function
+/// windows, so zero-length rows own nothing instead of inheriting the next
+/// function's range. A malformed function table is a single program-level
+/// error rather than one error per function.
+fn direct_windows_per_function(
+    program: &BytecodeProgram,
+) -> Result<Vec<Vec<Range<usize>>>, VerifyError> {
+    (0..program.functions.len())
+        .map(|index| {
+            program.direct_function_windows(index).map_err(|error| {
+                VerifyError::MalformedFunctionWindows {
+                    detail: error.to_string(),
+                }
+            })
+        })
+        .collect()
 }
 
 impl std::error::Error for VerifyError {}
 
 /// Verify that all trusted opcodes in a program are well-formed.
+///
+/// Each function is checked over the instructions it directly owns (see the
+/// `#260` module-doc section), so a zero-length row owns nothing and a
+/// violation names the function that actually contains it.
 ///
 /// Post-ADR-006 §2.7.7 the two surviving trusted opcodes (`LoadLocalTrusted`,
 /// `JumpIfFalseTrusted`) source slot kind from the stack
@@ -134,23 +203,13 @@ impl std::error::Error for VerifyError {}
 /// all violations found.
 pub fn verify_trusted_opcodes(program: &BytecodeProgram) -> Result<(), Vec<VerifyError>> {
     let mut errors = Vec::new();
+    let windows = match direct_windows_per_function(program) {
+        Ok(windows) => windows,
+        Err(error) => return Err(vec![error]),
+    };
 
-    for func in &program.functions {
-        // Collect instruction offsets that belong to this function.
-        // Functions store their entry_point and instructions run until the next
-        // function or end of program. We scan the instruction stream from
-        // entry_point looking for trusted opcodes.
-        let start = func.entry_point;
-        // Find the end: next function's entry_point or end of instructions
-        let end = program
-            .functions
-            .iter()
-            .filter(|f| f.entry_point > start)
-            .map(|f| f.entry_point)
-            .min()
-            .unwrap_or(program.instructions.len());
-
-        for offset in start..end {
+    for (func, owned) in program.functions.iter().zip(&windows) {
+        for offset in owned.iter().cloned().flatten() {
             let Some(instruction) = program.instructions.get(offset) else {
                 break;
             };
@@ -217,21 +276,20 @@ fn is_v2_field_op(op: OpCode) -> bool {
 /// - Typed array ops, field ops, and i32 arithmetic appear in functions with FrameDescriptors
 /// - Field load/store ops have a FieldOffset operand with a reasonable byte offset (<= 4096)
 ///
+/// Each function is checked over the instructions it directly owns (see the
+/// `#260` module-doc section), so a zero-length permission carrier owns
+/// nothing instead of inheriting the next function's range.
+///
 /// Returns `Ok(())` if all v2 typed opcodes pass, or a list of all violations.
 pub fn verify_v2_typed_opcodes(program: &BytecodeProgram) -> Result<(), Vec<VerifyError>> {
     let mut errors = Vec::new();
+    let windows = match direct_windows_per_function(program) {
+        Ok(windows) => windows,
+        Err(error) => return Err(vec![error]),
+    };
 
-    for func in &program.functions {
-        let start = func.entry_point;
-        let end = program
-            .functions
-            .iter()
-            .filter(|f| f.entry_point > start)
-            .map(|f| f.entry_point)
-            .min()
-            .unwrap_or(program.instructions.len());
-
-        for offset in start..end {
+    for (func, owned) in program.functions.iter().zip(&windows) {
+        for offset in owned.iter().cloned().flatten() {
             let Some(instruction) = program.instructions.get(offset) else {
                 break;
             };
@@ -841,5 +899,226 @@ mod tests {
         let prog = make_program(vec![func], instructions);
         let errs = verify_v2_typed_opcodes(&prog).unwrap_err();
         assert_eq!(errs.len(), 2);
+    }
+
+    // ===== #260: extents come from body_length, not the next entry point =====
+
+    /// A zero-length permission carrier, shaped exactly as
+    /// `publish_dependency_permission_blob` builds one: `body_length: 0`,
+    /// `frame_descriptor: None`, entry point at the offset the next real
+    /// function starts from.
+    fn permission_carrier(entry_point: usize) -> Function {
+        Function {
+            name: "\0shape.module-import-permissions::std::core::index".to_string(),
+            arity: 0,
+            param_names: vec![],
+            locals_count: 0,
+            entry_point,
+            body_length: 0,
+            is_closure: false,
+            captures_count: 0,
+            is_async: false,
+            ref_params: vec![],
+            ref_mutates: vec![],
+            mutable_captures: vec![],
+            frame_descriptor: None,
+            osr_entry_points: vec![],
+            mir_data: None,
+        }
+    }
+
+    fn v2_function(
+        name: &str,
+        entry_point: usize,
+        body_length: usize,
+        descriptor: bool,
+    ) -> Function {
+        Function {
+            name: name.to_string(),
+            arity: 0,
+            param_names: vec![],
+            locals_count: 1,
+            entry_point,
+            body_length,
+            is_closure: false,
+            captures_count: 0,
+            is_async: false,
+            ref_params: vec![],
+            ref_mutates: vec![],
+            mutable_captures: vec![],
+            frame_descriptor: descriptor.then(|| {
+                FrameDescriptor::from_slots(
+                    vec![NativeKind::Int64],
+                    crate::type_tracking::FrameReturnWrapper::Plain,
+                )
+            }),
+            osr_entry_points: vec![],
+            mir_data: None,
+        }
+    }
+
+    /// The reported #260 class: a zero-length carrier sitting at the entry
+    /// point of a real, fully-descriptored function used to inherit that
+    /// function's whole instruction range and report its typed opcodes as
+    /// violations against itself.
+    #[test]
+    fn zero_length_permission_carrier_owns_no_instructions() {
+        let instructions = vec![
+            Instruction::simple(OpCode::TypedArrayGetF64),
+            Instruction::simple(OpCode::TypedArrayGetF64),
+            Instruction::simple(OpCode::ReturnValue),
+        ];
+        let prog = make_program(
+            vec![permission_carrier(0), v2_function("real_fn", 0, 3, true)],
+            instructions,
+        );
+        assert!(
+            verify_v2_typed_opcodes(&prog).is_ok(),
+            "a body_length:0 carrier must not inherit the following function's range"
+        );
+    }
+
+    /// POSITIVE CONTROL for the fix. A real function that genuinely carries a
+    /// V2 typed opcode inside its own window with no `FrameDescriptor` is
+    /// still reported — including when a carrier sits at its entry point, so
+    /// the carrier fix cannot be silencing the whole pass. This is the shape
+    /// `__main__` has in three corpus programs (`ACC__comptime__pb`, `pb3`,
+    /// `probe2`), which are real violations, not carrier false positives.
+    #[test]
+    fn real_function_violation_is_still_reported_next_to_a_carrier() {
+        let instructions = vec![
+            Instruction::simple(OpCode::TypedArrayGetF64),
+            Instruction::simple(OpCode::ReturnValue),
+        ];
+        let prog = make_program(
+            vec![permission_carrier(0), v2_function("__main__", 0, 2, false)],
+            instructions,
+        );
+        let errs = verify_v2_typed_opcodes(&prog).unwrap_err();
+        assert_eq!(errs.len(), 1, "exactly the real violation, once");
+        match &errs[0] {
+            VerifyError::V2MissingFrameDescriptor {
+                function_name,
+                instruction_offset,
+                ..
+            } => {
+                assert_eq!(function_name, "__main__");
+                assert_eq!(*instruction_offset, 0);
+            }
+            other => panic!("expected the real function's violation, got {other:?}"),
+        }
+    }
+
+    /// The old rule attributed a function's instructions to whichever row had
+    /// the next-lowest entry point, so a violation in the SECOND function was
+    /// reported against the FIRST. Ownership now follows `body_length`, so
+    /// each violation names the function that actually contains it.
+    #[test]
+    fn violations_are_attributed_to_the_containing_function() {
+        let instructions = vec![
+            Instruction::simple(OpCode::ReturnValue),
+            Instruction::simple(OpCode::TypedArrayGetF64),
+            Instruction::simple(OpCode::ReturnValue),
+        ];
+        let prog = make_program(
+            vec![
+                v2_function("first", 0, 1, true),
+                v2_function("second", 1, 2, false),
+            ],
+            instructions,
+        );
+        let errs = verify_v2_typed_opcodes(&prog).unwrap_err();
+        assert_eq!(errs.len(), 1);
+        assert!(matches!(
+            &errs[0],
+            VerifyError::V2MissingFrameDescriptor { function_name, .. } if function_name == "second"
+        ));
+    }
+
+    /// Instructions past the last function's window belong to no function and
+    /// are not verified against the last row — the old `unwrap_or(len)` end
+    /// swept them up.
+    #[test]
+    fn instructions_beyond_the_last_window_are_not_attributed() {
+        let instructions = vec![
+            Instruction::simple(OpCode::ReturnValue),
+            Instruction::simple(OpCode::TypedArrayGetF64),
+        ];
+        let prog = make_program(vec![v2_function("only", 0, 1, false)], instructions);
+        assert!(verify_v2_typed_opcodes(&prog).is_ok());
+    }
+
+    /// A nested function body physically inside its parent's window (the
+    /// layout `function_instructions.rs` documents) is verified once, against
+    /// the function that directly owns it — not a second time against an
+    /// enclosing row that may have no descriptor.
+    #[test]
+    fn nested_function_body_is_verified_only_against_its_own_row() {
+        let instructions = vec![
+            Instruction::simple(OpCode::ReturnValue), // 0: outer, jump-over
+            Instruction::simple(OpCode::TypedArrayGetF64), // 1: inner body
+            Instruction::simple(OpCode::ReturnValue), // 2: inner body
+            Instruction::simple(OpCode::ReturnValue), // 3: outer tail
+        ];
+        let prog = make_program(
+            vec![
+                v2_function("outer", 0, 4, false),
+                v2_function("inner", 1, 2, true),
+            ],
+            instructions,
+        );
+        assert!(
+            verify_v2_typed_opcodes(&prog).is_ok(),
+            "the inner body is the inner function's, and it has a descriptor"
+        );
+    }
+
+    /// A function table that cannot describe unambiguous ownership is a real
+    /// malformed-bytecode defect and is surfaced once, not swallowed and not
+    /// repeated per function.
+    #[test]
+    fn malformed_function_windows_are_reported_once() {
+        let instructions = vec![
+            Instruction::simple(OpCode::TypedArrayGetF64),
+            Instruction::simple(OpCode::ReturnValue),
+        ];
+        let prog = make_program(
+            vec![
+                v2_function("a", 0, 2, false),
+                v2_function("b", 1, 4, false), // leaves the instruction stream
+            ],
+            instructions,
+        );
+        let errs = verify_v2_typed_opcodes(&prog).unwrap_err();
+        assert_eq!(errs.len(), 1);
+        assert!(matches!(
+            &errs[0],
+            VerifyError::MalformedFunctionWindows { .. }
+        ));
+    }
+
+    /// The trusted pass shares the extent rule, so a carrier must not make it
+    /// re-report the following function's trusted opcodes.
+    #[test]
+    fn trusted_pass_ignores_zero_length_carriers() {
+        use crate::bytecode::Operand;
+        let instructions = vec![
+            Instruction::new(OpCode::LoadLocalTrusted, Some(Operand::Offset(3))),
+            Instruction::simple(OpCode::ReturnValue),
+        ];
+        let prog = make_program(
+            vec![permission_carrier(0), v2_function("real_fn", 0, 2, true)],
+            instructions,
+        );
+        let errs = verify_trusted_opcodes(&prog).unwrap_err();
+        assert_eq!(
+            errs.len(),
+            1,
+            "the malformed operand is reported exactly once"
+        );
+        assert!(matches!(
+            &errs[0],
+            VerifyError::TrustedOpcodeBadOperand { function_name, .. } if function_name == "real_fn"
+        ));
     }
 }

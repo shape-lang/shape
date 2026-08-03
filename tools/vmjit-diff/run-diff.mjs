@@ -45,8 +45,10 @@
  * that whole-program falls back is VACUOUS — both legs ran the interpreter, so
  * it could not have exposed a JIT defect. The summary reports the
  * native-executing denominator; quote THAT, not the program count, in any
- * "we ran the corpus and observed X" claim. Reporting only: classification,
- * known-red handling and the exit code are untouched.
+ * "we ran the corpus and observed X" claim, and the whole-program fallbacks
+ * broken down by `reason_class` so the total can be attributed to causes.
+ * Reporting only: classification, known-red handling and the exit code are
+ * untouched.
  *
  * Resumability: every completed program is appended to the progress file
  * (JSONL; first line is a meta record pinning binary + corpus). On start,
@@ -192,10 +194,32 @@ function readNativity(witnessPath) {
       nativeDispatches: fns.reduce((n, f) => n + (f.native_dispatches ?? 0), 0),
       nativeInstalled: fns.filter((f) => f.native_installed).length,
       wholeProgramFallback: record.program_fallback != null,
+      // The `reason_class` half of the fallback record — the only field that
+      // can attribute a whole-program fallback to a cause. Without it a run
+      // reports "407 programs fell back" and cannot say to what, so a fix
+      // aimed at one refusal site has no before/after to point at. `null`
+      // when the program did not fall back; `'unclassified-missing'` when it
+      // did but the record carries no class, which is itself a witness defect
+      // and must stay visible rather than being folded into the untyped bulk.
+      fallbackReasonClass:
+        record.program_fallback == null
+          ? null
+          : (record.program_fallback.reason_class ?? 'unclassified-missing'),
     };
   } catch {
     return null;
   }
+}
+
+// Whole-program fallbacks grouped by `reason_class`, descending by count.
+function fallbackClassCounts(results) {
+  const counts = new Map();
+  for (const r of results) {
+    if (!r.nativity?.wholeProgramFallback) continue;
+    const cls = r.nativity.fallbackReasonClass ?? 'unclassified-missing';
+    counts.set(cls, (counts.get(cls) ?? 0) + 1);
+  }
+  return [...counts.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
 }
 
 // Vacuity arithmetic, extracted so `--self-test-nativity` can exercise it
@@ -238,17 +262,34 @@ function selfTestNativity() {
   ok('a natively-executing witness reports its dispatches', native?.nativeDispatches === 4);
   ok('and counts installed functions', native?.nativeInstalled === 2);
   ok('and is not marked whole-program fallback', native?.wholeProgramFallback === false);
+  ok('and carries no fallback reason class', native?.fallbackReasonClass === null);
 
   writeFileSync(
     tmp,
     JSON.stringify({
-      program_fallback: { reason: 'fabricated' },
+      program_fallback: { reason_class: 'v2-verifier-unverified', detail: 'fabricated' },
       functions: [{ native_dispatches: 0, native_installed: false }],
     }),
   );
   const fellBack = readNativity(tmp);
   ok('a whole-program fallback reports zero dispatches', fellBack?.nativeDispatches === 0);
   ok('and is marked whole-program fallback', fellBack?.wholeProgramFallback === true);
+  ok(
+    'and records the reason class rather than discarding it',
+    fellBack?.fallbackReasonClass === 'v2-verifier-unverified',
+  );
+
+  writeFileSync(
+    tmp,
+    JSON.stringify({
+      program_fallback: { detail: 'class-less record' },
+      functions: [{ native_dispatches: 0, native_installed: false }],
+    }),
+  );
+  ok(
+    'a fallback record with no class stays visible as unclassified-missing',
+    readNativity(tmp)?.fallbackReasonClass === 'unclassified-missing',
+  );
 
   writeFileSync(tmp, '{ this is not json');
   ok('corrupt witness yields null, never a throw', readNativity(tmp) === null);
@@ -267,6 +308,19 @@ function selfTestNativity() {
   ok('a non-MATCH is not counted as a vacuous MATCH', summary.vacuousMatches !== 2);
   ok('an unmeasured program is excluded, not assumed native', summary.unmeasured === 1);
   ok('whole-program fallbacks are counted', summary.fellBack === 2);
+
+  // Attribution: a fallback total that cannot be split by cause cannot show
+  // that a fix to one refusal site did anything.
+  const byClass = fallbackClassCounts([
+    { nativity: { wholeProgramFallback: true, fallbackReasonClass: 'v2-verifier-unverified' } },
+    { nativity: { wholeProgramFallback: true, fallbackReasonClass: 'v2-verifier-unverified' } },
+    { nativity: { wholeProgramFallback: true, fallbackReasonClass: 'user-trait-or-impl' } },
+    { nativity: { wholeProgramFallback: false, fallbackReasonClass: null } },
+    { nativity: null },
+  ]);
+  ok('fallbacks group by reason class, most common first', byClass[0]?.[0] === 'v2-verifier-unverified' && byClass[0]?.[1] === 2);
+  ok('a second class is reported separately', byClass[1]?.[0] === 'user-trait-or-impl' && byClass[1]?.[1] === 1);
+  ok('non-fallbacks and unmeasured programs are not grouped', byClass.length === 2);
 
   let allOk = true;
   for (const [name, passed] of checks) {
@@ -541,6 +595,13 @@ console.log(`[vmjit-diff] ${Object.entries(counts).map(([k, v]) => `${k}=${v}`).
         ? ` [${results.length - measured.length} unmeasured]`
         : ''),
   );
+  const byClass = fallbackClassCounts(results);
+  if (byClass.length) {
+    console.log(
+      `[vmjit-diff] whole-program fallback by reason class: ` +
+        byClass.map(([cls, n]) => `${cls}=${n}`).join(' '),
+    );
+  }
 }
 
 rmSync(witnessPath, { force: true });
