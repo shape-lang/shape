@@ -77,23 +77,23 @@ pub fn register_file_io_handle_ops(module: &mut ModuleExports) {
             let mode = mode.as_str();
             match mode {
                 "r" => crate::module_exports::check_fs_permission(
-                    ctx,
+                    &ctx.permissions,
                     shape_abi_v1::Permission::FsRead,
                     path,
                 )?,
                 "w" | "a" => crate::module_exports::check_fs_permission(
-                    ctx,
+                    &ctx.permissions,
                     shape_abi_v1::Permission::FsWrite,
                     path,
                 )?,
                 "rw" => {
                     crate::module_exports::check_fs_permission(
-                        ctx,
+                        &ctx.permissions,
                         shape_abi_v1::Permission::FsRead,
                         path,
                     )?;
                     crate::module_exports::check_fs_permission(
-                        ctx,
+                        &ctx.permissions,
                         shape_abi_v1::Permission::FsWrite,
                         path,
                     )?;
@@ -147,7 +147,10 @@ pub fn register_file_io_handle_ops(module: &mut ModuleExports) {
         "IoHandle",
         ConcreteType::String,
         |handle, ctx| {
-            crate::module_exports::check_permission(ctx, shape_abi_v1::Permission::FsRead)?;
+            crate::module_exports::check_permission(
+                &ctx.permissions,
+                shape_abi_v1::Permission::FsRead,
+            )?;
             let mut guard = lock_as_file(&handle, "io.read_to_string()")?;
             let file = as_file_mut(&mut guard);
             file.seek(std::io::SeekFrom::Start(0))
@@ -183,7 +186,10 @@ pub fn register_file_io_handle_ops(module: &mut ModuleExports) {
         ],
         ConcreteType::String,
         |handle, n, ctx| {
-            crate::module_exports::check_permission(ctx, shape_abi_v1::Permission::FsRead)?;
+            crate::module_exports::check_permission(
+                &ctx.permissions,
+                shape_abi_v1::Permission::FsRead,
+            )?;
             let mut guard = lock_as_file(&handle, "io.read()")?;
             let file = as_file_mut(&mut guard);
             let contents = if n >= 0 {
@@ -228,7 +234,10 @@ pub fn register_file_io_handle_ops(module: &mut ModuleExports) {
         ],
         ConcreteType::Bytes,
         |handle, n, ctx| {
-            crate::module_exports::check_permission(ctx, shape_abi_v1::Permission::FsRead)?;
+            crate::module_exports::check_permission(
+                &ctx.permissions,
+                shape_abi_v1::Permission::FsRead,
+            )?;
             let mut guard = lock_as_file(&handle, "io.read_bytes()")?;
             let file = as_file_mut(&mut guard);
             let bytes = if n >= 0 {
@@ -257,7 +266,10 @@ pub fn register_file_io_handle_ops(module: &mut ModuleExports) {
         [("handle", "IoHandle"), ("data", "string")],
         ConcreteType::Int,
         |handle, data, ctx| {
-            crate::module_exports::check_permission(ctx, shape_abi_v1::Permission::FsWrite)?;
+            crate::module_exports::check_permission(
+                &ctx.permissions,
+                shape_abi_v1::Permission::FsWrite,
+            )?;
             let mut guard = lock_as_file(&handle, "io.write()")?;
             let file = as_file_mut(&mut guard);
             let bytes_written = file
@@ -278,7 +290,10 @@ pub fn register_file_io_handle_ops(module: &mut ModuleExports) {
         "IoHandle",
         ConcreteType::Bool,
         |handle, ctx| {
-            crate::module_exports::check_permission(ctx, shape_abi_v1::Permission::FsRead)?;
+            crate::module_exports::check_permission(
+                &ctx.permissions,
+                shape_abi_v1::Permission::FsRead,
+            )?;
             Ok(TypedReturn::Concrete(ConcreteReturn::Bool(handle.close())))
         },
     );
@@ -292,7 +307,10 @@ pub fn register_file_io_handle_ops(module: &mut ModuleExports) {
         "IoHandle",
         ConcreteType::Unit,
         |handle, ctx| {
-            crate::module_exports::check_permission(ctx, shape_abi_v1::Permission::FsWrite)?;
+            crate::module_exports::check_permission(
+                &ctx.permissions,
+                shape_abi_v1::Permission::FsWrite,
+            )?;
             let mut guard = lock_as_file(&handle, "io.flush()")?;
             let file = as_file_mut(&mut guard);
             file.flush().map_err(|e| format!("io.flush(): {}", e))?;
@@ -316,7 +334,7 @@ pub fn register_file_path_ops(module: &mut ModuleExports) {
         |path, ctx| {
             let path = path.as_str();
             crate::module_exports::check_fs_permission(
-                ctx,
+                &ctx.permissions,
                 shape_abi_v1::Permission::FsRead,
                 path,
             )?;
@@ -337,7 +355,7 @@ pub fn register_file_path_ops(module: &mut ModuleExports) {
         |path, ctx| {
             let path = path.as_str();
             crate::module_exports::check_fs_permission(
-                ctx,
+                &ctx.permissions,
                 shape_abi_v1::Permission::FsRead,
                 path,
             )?;
@@ -385,7 +403,7 @@ pub fn register_file_path_ops(module: &mut ModuleExports) {
         |path, ctx| {
             let path = path.as_str();
             crate::module_exports::check_fs_permission(
-                ctx,
+                &ctx.permissions,
                 shape_abi_v1::Permission::FsRead,
                 path,
             )?;
@@ -406,7 +424,7 @@ pub fn register_file_path_ops(module: &mut ModuleExports) {
         |path, ctx| {
             let path = path.as_str();
             crate::module_exports::check_fs_permission(
-                ctx,
+                &ctx.permissions,
                 shape_abi_v1::Permission::FsRead,
                 path,
             )?;
@@ -442,7 +460,7 @@ pub fn register_file_path_ops(module: &mut ModuleExports) {
         |path, recursive, ctx| {
             let path = path.as_str();
             crate::module_exports::check_fs_permission(
-                ctx,
+                &ctx.permissions,
                 shape_abi_v1::Permission::FsWrite,
                 path,
             )?;
@@ -467,7 +485,7 @@ pub fn register_file_path_ops(module: &mut ModuleExports) {
         |path, ctx| {
             let path = path.as_str();
             crate::module_exports::check_fs_permission(
-                ctx,
+                &ctx.permissions,
                 shape_abi_v1::Permission::FsWrite,
                 path,
             )?;
@@ -494,12 +512,12 @@ pub fn register_file_path_ops(module: &mut ModuleExports) {
             let old = old.as_str();
             let new = new.as_str();
             crate::module_exports::check_fs_permission(
-                ctx,
+                &ctx.permissions,
                 shape_abi_v1::Permission::FsWrite,
                 old,
             )?;
             crate::module_exports::check_fs_permission(
-                ctx,
+                &ctx.permissions,
                 shape_abi_v1::Permission::FsWrite,
                 new,
             )?;
@@ -520,7 +538,7 @@ pub fn register_file_path_ops(module: &mut ModuleExports) {
         |path, ctx| {
             let path = path.as_str();
             crate::module_exports::check_fs_permission(
-                ctx,
+                &ctx.permissions,
                 shape_abi_v1::Permission::FsRead,
                 path,
             )?;
@@ -543,7 +561,7 @@ pub fn register_file_path_ops(module: &mut ModuleExports) {
         |path, ctx| {
             let path = path.as_str();
             crate::module_exports::check_fs_permission(
-                ctx,
+                &ctx.permissions,
                 shape_abi_v1::Permission::FsRead,
                 path,
             )?;
@@ -591,7 +609,7 @@ pub fn register_file_path_ops(module: &mut ModuleExports) {
         |path, data, level, ctx| {
             let path = path.as_str();
             crate::module_exports::check_fs_permission(
-                ctx,
+                &ctx.permissions,
                 shape_abi_v1::Permission::FsWrite,
                 path,
             )?;

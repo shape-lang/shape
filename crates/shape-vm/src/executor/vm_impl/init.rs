@@ -78,8 +78,7 @@ impl VirtualMachine {
             function_entry_points: Vec::new(),
             program_entry_ip: 0,
             resource_usage: None,
-            granted_permissions: None,
-            scope_constraints: None,
+            permissions: std::sync::Arc::default(),
             ffi_receiver_strict: false,
             time_travel: None,
             #[cfg(feature = "jit")]
@@ -133,8 +132,29 @@ impl VirtualMachine {
         granted: Option<shape_abi_v1::PermissionSet>,
         constraints: Option<shape_abi_v1::ScopeConstraints>,
     ) {
-        self.granted_permissions = granted;
-        self.scope_constraints = constraints;
+        self.permissions = std::sync::Arc::new(
+            shape_runtime::module_exports::PermissionContext::new(granted, constraints),
+        );
+    }
+
+    /// The permission envelope to gate this dispatch against.
+    ///
+    /// Cheap `Arc::clone` — the sync arm borrows it through `ModuleContext`,
+    /// the async arm carries the clone across its awaits (#252 / §R-G3).
+    pub(crate) fn permission_context(
+        &self,
+    ) -> std::sync::Arc<shape_runtime::module_exports::PermissionContext> {
+        std::sync::Arc::clone(&self.permissions)
+    }
+
+    /// The granted `PermissionSet`, or `None` for a trusted-local allow-all run.
+    pub(crate) fn granted_permissions(&self) -> Option<&shape_abi_v1::PermissionSet> {
+        self.permissions.granted_permissions.as_ref()
+    }
+
+    /// The installed scope narrowing (paths / hosts / ffi), if any.
+    pub(crate) fn scope_constraints(&self) -> Option<&shape_abi_v1::ScopeConstraints> {
+        self.permissions.scope_constraints.as_ref()
     }
 
     /// Install the VM-level language-runtime registry (ffi-rebuild §4.2).
@@ -278,8 +298,7 @@ impl VirtualMachine {
             .filter_map(|h| h.as_ref().map(|fh| fh.0))
             .collect();
         let required_permissions: Vec<String> = self
-            .granted_permissions
-            .as_ref()
+            .granted_permissions()
             .map(|set| set.iter().map(|p| p.name().to_string()).collect())
             .unwrap_or_default();
         shape_runtime::snapshot::CodeManifest::from_blobs(blobs, None, required_permissions)

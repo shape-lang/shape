@@ -38,7 +38,7 @@ pub fn register_network_io(module: &mut ModuleExports) {
         |addr, ctx| {
             let addr = addr.as_str();
             crate::module_exports::check_net_permission(
-                ctx,
+                &ctx.permissions,
                 shape_abi_v1::Permission::NetConnect,
                 addr,
             )?;
@@ -62,7 +62,7 @@ pub fn register_network_io(module: &mut ModuleExports) {
         |addr, ctx| {
             let addr = addr.as_str();
             crate::module_exports::check_net_permission(
-                ctx,
+                &ctx.permissions,
                 shape_abi_v1::Permission::NetListen,
                 addr,
             )?;
@@ -84,7 +84,10 @@ pub fn register_network_io(module: &mut ModuleExports) {
         "IoHandle",
         ConcreteType::IoHandle,
         |handle, ctx| {
-            crate::module_exports::check_permission(ctx, shape_abi_v1::Permission::NetListen)?;
+            crate::module_exports::check_permission(
+                &ctx.permissions,
+                shape_abi_v1::Permission::NetListen,
+            )?;
             let guard = handle
                 .resource
                 .lock()
@@ -132,7 +135,10 @@ pub fn register_network_io(module: &mut ModuleExports) {
         ],
         ConcreteType::String,
         |handle, n, ctx| {
-            crate::module_exports::check_permission(ctx, shape_abi_v1::Permission::NetConnect)?;
+            crate::module_exports::check_permission(
+                &ctx.permissions,
+                shape_abi_v1::Permission::NetConnect,
+            )?;
             let mut guard = handle
                 .resource
                 .lock()
@@ -165,7 +171,10 @@ pub fn register_network_io(module: &mut ModuleExports) {
         [("handle", "IoHandle"), ("data", "string")],
         ConcreteType::Int,
         |handle, data, ctx| {
-            crate::module_exports::check_permission(ctx, shape_abi_v1::Permission::NetConnect)?;
+            crate::module_exports::check_permission(
+                &ctx.permissions,
+                shape_abi_v1::Permission::NetConnect,
+            )?;
             let mut guard = handle
                 .resource
                 .lock()
@@ -194,7 +203,10 @@ pub fn register_network_io(module: &mut ModuleExports) {
         "IoHandle",
         ConcreteType::Bool,
         |handle, ctx| {
-            crate::module_exports::check_permission(ctx, shape_abi_v1::Permission::NetConnect)?;
+            crate::module_exports::check_permission(
+                &ctx.permissions,
+                shape_abi_v1::Permission::NetConnect,
+            )?;
             Ok(TypedReturn::Concrete(ConcreteReturn::Bool(handle.close())))
         },
     );
@@ -212,7 +224,7 @@ pub fn register_network_io(module: &mut ModuleExports) {
         |addr, ctx| {
             let addr = addr.as_str();
             crate::module_exports::check_net_permission(
-                ctx,
+                &ctx.permissions,
                 shape_abi_v1::Permission::NetListen,
                 addr,
             )?;
@@ -241,7 +253,10 @@ pub fn register_network_io(module: &mut ModuleExports) {
         ],
         ConcreteType::Int,
         |handle, data, target, ctx| {
-            crate::module_exports::check_permission(ctx, shape_abi_v1::Permission::NetConnect)?;
+            crate::module_exports::check_permission(
+                &ctx.permissions,
+                shape_abi_v1::Permission::NetConnect,
+            )?;
             let guard = handle
                 .resource
                 .lock()
@@ -285,7 +300,10 @@ pub fn register_network_io(module: &mut ModuleExports) {
         ],
         ConcreteType::TypedObject,
         |handle, n, ctx| {
-            crate::module_exports::check_permission(ctx, shape_abi_v1::Permission::NetConnect)?;
+            crate::module_exports::check_permission(
+                &ctx.permissions,
+                shape_abi_v1::Permission::NetConnect,
+            )?;
             let guard = handle
                 .resource
                 .lock()

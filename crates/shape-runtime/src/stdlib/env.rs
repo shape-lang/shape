@@ -37,7 +37,10 @@ pub fn create_env_module() -> ModuleExports {
         "string",
         ConcreteType::Bool,
         |name, ctx| {
-            crate::module_exports::check_permission(ctx, shape_abi_v1::Permission::Env)?;
+            crate::module_exports::check_permission(
+                &ctx.permissions,
+                shape_abi_v1::Permission::Env,
+            )?;
             Ok(TypedReturn::Concrete(ConcreteReturn::Bool(
                 std::env::var(name.as_str()).is_ok(),
             )))
@@ -51,7 +54,10 @@ pub fn create_env_module() -> ModuleExports {
         "Get the current working directory",
         ConcreteType::String,
         |ctx| {
-            crate::module_exports::check_permission(ctx, shape_abi_v1::Permission::Env)?;
+            crate::module_exports::check_permission(
+                &ctx.permissions,
+                shape_abi_v1::Permission::Env,
+            )?;
             let cwd = std::env::current_dir().map_err(|e| format!("env.cwd() failed: {}", e))?;
             Ok(TypedReturn::Concrete(ConcreteReturn::String(
                 cwd.to_string_lossy().into_owned(),
@@ -66,7 +72,10 @@ pub fn create_env_module() -> ModuleExports {
         "Get the operating system name (e.g. linux, macos, windows)",
         ConcreteType::String,
         |ctx| {
-            crate::module_exports::check_permission(ctx, shape_abi_v1::Permission::Env)?;
+            crate::module_exports::check_permission(
+                &ctx.permissions,
+                shape_abi_v1::Permission::Env,
+            )?;
             Ok(TypedReturn::Concrete(ConcreteReturn::String(
                 std::env::consts::OS.to_string(),
             )))
@@ -80,7 +89,10 @@ pub fn create_env_module() -> ModuleExports {
         "Get the CPU architecture (e.g. x86_64, aarch64)",
         ConcreteType::String,
         |ctx| {
-            crate::module_exports::check_permission(ctx, shape_abi_v1::Permission::Env)?;
+            crate::module_exports::check_permission(
+                &ctx.permissions,
+                shape_abi_v1::Permission::Env,
+            )?;
             Ok(TypedReturn::Concrete(ConcreteReturn::String(
                 std::env::consts::ARCH.to_string(),
             )))

@@ -1562,7 +1562,7 @@ pub fn create_remote_module() -> ModuleExports {
         ),
         |addr, code, ctx| {
             shape_runtime::module_exports::check_permission(
-                ctx,
+                &ctx.permissions,
                 shape_abi_v1::Permission::NetConnect,
             )?;
             let msg = crate::remote::WireMessage::Execute(crate::remote::ExecuteRequest {
@@ -1621,7 +1621,7 @@ pub fn create_remote_module() -> ModuleExports {
         ),
         |addr, ctx| {
             shape_runtime::module_exports::check_permission(
-                ctx,
+                &ctx.permissions,
                 shape_abi_v1::Permission::NetConnect,
             )?;
             let msg = crate::remote::WireMessage::Ping(crate::remote::PingRequest {});
@@ -1740,7 +1740,10 @@ fn remote_call_raising_body(
     slots: &[KindedSlot],
     ctx: &shape_runtime::module_exports::ModuleContext,
 ) -> Result<TypedReturn, String> {
-    shape_runtime::module_exports::check_permission(ctx, shape_abi_v1::Permission::NetConnect)?;
+    shape_runtime::module_exports::check_permission(
+        &ctx.permissions,
+        shape_abi_v1::Permission::NetConnect,
+    )?;
 
     let addr_sv = slot_to_serializable(slots[0].raw(), slots[0].kind(), &ephemeral_store()?)
         .map_err(|e| format!("remote::call: invalid address argument: {e}"))?;
@@ -1772,7 +1775,10 @@ fn remote_call_result_body(
     slots: &[KindedSlot],
     ctx: &shape_runtime::module_exports::ModuleContext,
 ) -> Result<TypedReturn, String> {
-    shape_runtime::module_exports::check_permission(ctx, shape_abi_v1::Permission::NetConnect)?;
+    shape_runtime::module_exports::check_permission(
+        &ctx.permissions,
+        shape_abi_v1::Permission::NetConnect,
+    )?;
 
     let addr_sv = slot_to_serializable(slots[0].raw(), slots[0].kind(), &ephemeral_store()?)
         .map_err(|e| format!("remote::call: invalid address argument: {e}"))?;
@@ -1802,7 +1808,10 @@ fn remote_call_async_result_body(
     slots: &[KindedSlot],
     ctx: &shape_runtime::module_exports::ModuleContext,
 ) -> Result<TypedReturn, String> {
-    shape_runtime::module_exports::check_permission(ctx, shape_abi_v1::Permission::NetConnect)?;
+    shape_runtime::module_exports::check_permission(
+        &ctx.permissions,
+        shape_abi_v1::Permission::NetConnect,
+    )?;
 
     let addr_sv = slot_to_serializable(slots[0].raw(), slots[0].kind(), &ephemeral_store()?)
         .map_err(|e| format!("remote::call_async: invalid address argument: {e}"))?;

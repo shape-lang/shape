@@ -578,19 +578,23 @@ pub struct VirtualMachine {
     /// When set, the dispatch loop calls `tick_instruction()` each cycle.
     pub resource_usage: Option<crate::resource_limits::ResourceUsage>,
 
-    /// Permissions granted to code executing in this VM (WF-1D security wiring).
+    /// The permission envelope enforced for code executing in this VM
+    /// (WF-1D security wiring) — granted `PermissionSet` plus the scope
+    /// constraints that narrow it to specific paths / hosts.
     ///
-    /// Threaded into every runtime `ModuleContext` built for stdlib dispatch
-    /// (see `invoke_module_fn_id_stub`). When `Some`, each gated stdlib I/O
-    /// call is checked against this set via `check_permission`; when `None`,
-    /// operations are allowed (preserved ONLY for genuinely-trusted local
-    /// `unlimited()` runs per the ratified posture). The serve / remote / wire
-    /// paths always set this to a concrete set so they fail closed.
-    pub(crate) granted_permissions: Option<shape_abi_v1::PermissionSet>,
-
-    /// Scope constraints (path / host narrowing) for gated stdlib dispatch.
-    /// Threaded into the runtime `ModuleContext` alongside `granted_permissions`.
-    pub(crate) scope_constraints: Option<shape_abi_v1::ScopeConstraints>,
+    /// Threaded into every runtime `ModuleContext` built for sync stdlib
+    /// dispatch, and cloned as an owned `Arc` into every async export
+    /// (`invoke_module_fn_id_stub`, both arms). When `granted_permissions` is
+    /// `Some`, each gated stdlib I/O call is checked against it via
+    /// `check_permission`; when `None`, operations are allowed (preserved
+    /// ONLY for genuinely-trusted local `unlimited()` runs per the ratified
+    /// posture). The serve / remote / wire paths always set a concrete set so
+    /// they fail closed.
+    ///
+    /// Held as one `Arc<PermissionContext>` rather than two loose fields so
+    /// the async half (#252 / §R-G3) shares the identical envelope by
+    /// `Arc::clone` instead of a second copy that could drift from this one.
+    pub(crate) permissions: std::sync::Arc<shape_runtime::module_exports::PermissionContext>,
 
     /// WF-2F axis C — wire-serve receiver posture (polyglot-distributed §4.6 /
     /// OQ-6, ratified 2026-07-05). When a foreign-bearing function is executed

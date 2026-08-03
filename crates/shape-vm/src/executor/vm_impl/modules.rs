@@ -872,8 +872,7 @@ impl VirtualMachine {
                 // re-entrancy cell below. The snapshot owns its own
                 // KindedSlot shares so the live VM is undisturbed.
                 let vm_state_snap = self.capture_vm_state();
-                let granted_permissions = self.granted_permissions.clone();
-                let scope_constraints = self.scope_constraints.clone();
+                let permissions = self.permission_context();
                 let function_hash_raw = self.function_hash_raw.clone();
 
                 // `ctx.schemas` sources the ambient thread-local registry
@@ -932,8 +931,7 @@ impl VirtualMachine {
                         vm_state: Some(&vm_state_snap),
                         // WF-1D security wiring: thread the VM's installed
                         // permission envelope into the gated-dispatch context.
-                        granted_permissions,
-                        scope_constraints,
+                        permissions,
                         set_pending_resume: None,
                         set_pending_frame_resume: None,
                         remote_dispatch: Some(&remote_dispatcher),
@@ -959,7 +957,15 @@ impl VirtualMachine {
                 // the caller's carriers (retains one share per heap slot)
                 // — kinds preserved, no raw-bits flatten.
                 let kinded_args: Vec<shape_value::KindedSlot> = args.to_vec();
-                let fut = (async_entry.invoke)(kinded_args);
+                // #252 (owner ruling 2026-08-02, §R-G3): the async body owns
+                // its permission envelope too. `ModuleContext` borrows the VM
+                // and cannot cross an await, which is why async exports used to
+                // run ungated; the `Arc<PermissionContext>` snapshot below is
+                // `'static`, so the body gates its I/O at the call site exactly
+                // like the sync arm above. The envelope is per-run immutable,
+                // so this snapshot cannot go stale under the task.
+                let permissions = self.permission_context();
+                let fut = (async_entry.invoke)(kinded_args, permissions);
                 // Install the program's ambient schema registry as a
                 // TASK-LOCAL scope wrapping the future, so it is inherited
                 // when the future runs on a shared-runtime worker thread (ser).

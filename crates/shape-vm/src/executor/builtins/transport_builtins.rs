@@ -164,7 +164,7 @@ pub fn create_transport_module() -> ModuleExports {
         ConcreteType::IoHandle,
         |ctx| {
             shape_runtime::module_exports::check_permission(
-                ctx,
+                &ctx.permissions,
                 shape_abi_v1::Permission::NetConnect,
             )?;
             let transport = transport_provider::transport_provider()
@@ -192,7 +192,7 @@ pub fn create_transport_module() -> ModuleExports {
         ConcreteType::IoHandle,
         |ctx| {
             shape_runtime::module_exports::check_permission(
-                ctx,
+                &ctx.permissions,
                 shape_abi_v1::Permission::NetConnect,
             )?;
             let transport = transport_provider::transport_provider()
@@ -227,7 +227,7 @@ pub fn create_transport_module() -> ModuleExports {
         ),
         |handle, dest, payload, ctx| {
             shape_runtime::module_exports::check_permission(
-                ctx,
+                &ctx.permissions,
                 shape_abi_v1::Permission::NetConnect,
             )?;
             let bytes = match ints_to_bytes(&payload, "send") {
@@ -264,7 +264,7 @@ pub fn create_transport_module() -> ModuleExports {
         ),
         |handle, dest, ctx| {
             shape_runtime::module_exports::check_permission(
-                ctx,
+                &ctx.permissions,
                 shape_abi_v1::Permission::NetConnect,
             )?;
             let transport = match extract_transport(&handle, "connect") {
@@ -302,7 +302,7 @@ pub fn create_transport_module() -> ModuleExports {
         ConcreteType::Named("Result<(), string>".to_string()),
         |handle, payload, ctx| {
             shape_runtime::module_exports::check_permission(
-                ctx,
+                &ctx.permissions,
                 shape_abi_v1::Permission::NetConnect,
             )?;
             let bytes = match ints_to_bytes(&payload, "connection_send") {
@@ -375,7 +375,7 @@ pub fn create_transport_module() -> ModuleExports {
         ),
         |handle, timeout_ms, ctx| {
             shape_runtime::module_exports::check_permission(
-                ctx,
+                &ctx.permissions,
                 shape_abi_v1::Permission::NetConnect,
             )?;
             let timeout = if timeout_ms > 0 {
@@ -429,7 +429,7 @@ pub fn create_transport_module() -> ModuleExports {
         ConcreteType::Named("Result<(), string>".to_string()),
         |handle, ctx| {
             shape_runtime::module_exports::check_permission(
-                ctx,
+                &ctx.permissions,
                 shape_abi_v1::Permission::NetConnect,
             )?;
             let mut guard = match handle.resource.lock() {
@@ -487,7 +487,7 @@ pub fn create_transport_module() -> ModuleExports {
         ConcreteType::IoHandle,
         |max_entries, ctx| {
             shape_runtime::module_exports::check_permission(
-                ctx,
+                &ctx.permissions,
                 shape_abi_v1::Permission::NetConnect,
             )?;
             let inner = transport_provider::transport_provider()
@@ -532,7 +532,7 @@ pub fn create_transport_module() -> ModuleExports {
         ),
         |handle, ctx| {
             shape_runtime::module_exports::check_permission(
-                ctx,
+                &ctx.permissions,
                 shape_abi_v1::Permission::NetConnect,
             )?;
             let memo = extract_memoized(&handle, "memo_stats")?;
@@ -569,7 +569,7 @@ pub fn create_transport_module() -> ModuleExports {
         ConcreteType::Named("()".to_string()),
         |handle, ctx| {
             shape_runtime::module_exports::check_permission(
-                ctx,
+                &ctx.permissions,
                 shape_abi_v1::Permission::NetConnect,
             )?;
             let memo = extract_memoized(&handle, "memo_invalidate")?;

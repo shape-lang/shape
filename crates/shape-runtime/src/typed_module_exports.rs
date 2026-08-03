@@ -430,19 +430,26 @@ pub struct TypedModuleFunction {
 /// One typed-return native module *async* function entry.
 ///
 /// Mirrors [`TypedModuleFunction`] but the body returns a future that
-/// resolves to `Result<TypedReturn, String>`. Async exports do not get a
-/// `ModuleContext` (the context borrows from the VM and cannot cross
-/// await points); permission gating must happen synchronously around the
-/// dispatch site or up-front in the body before the await.
+/// resolves to `Result<TypedReturn, String>`.
+///
+/// Async exports get no `ModuleContext` — it borrows from the VM and cannot
+/// cross an await point. They instead receive an owned
+/// `Arc<PermissionContext>` (#252 owner ruling 2026-08-02, §R-G3), so an
+/// async body gates its I/O exactly like a sync one: `check_permission` /
+/// `check_net_permission` immediately above the call, scoped checks against
+/// the concrete host or path argument. The envelope is per-run immutable, so
+/// the snapshot taken at spawn is exact.
 #[derive(Clone)]
 pub struct TypedModuleAsyncFunction {
-    /// The typed async function body. Owns its arg vec to satisfy
-    /// `'static` future bounds. Receives an owned `Vec<shape_value::KindedSlot>`
-    /// carrying the caller's true, compile-time-stamped kinds (§2.7.7) —
-    /// not raw `Vec<u64>` (ADR-006 §2.7.5).
+    /// The typed async function body. Owns its arg vec and its permission
+    /// envelope to satisfy `'static` future bounds. Receives an owned
+    /// `Vec<shape_value::KindedSlot>` carrying the caller's true,
+    /// compile-time-stamped kinds (§2.7.7) — not raw `Vec<u64>` (ADR-006
+    /// §2.7.5) — plus the `Arc<PermissionContext>` it must gate against.
     pub invoke: Arc<
         dyn Fn(
                 Vec<shape_value::KindedSlot>,
+                Arc<crate::module_exports::PermissionContext>,
             ) -> Pin<Box<dyn Future<Output = Result<TypedReturn, String>> + Send>>
             + Send
             + Sync,
