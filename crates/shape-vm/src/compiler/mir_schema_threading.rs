@@ -23,11 +23,10 @@
 //!    Matches `Expr::StructLiteral { type_name, .. }` lowering — e.g.
 //!    `let t = X {}` in Smoke 3.
 //!
-//! 2. Anonymous-inline path — for `Expr::Object(...)` with no
-//!    spreads, use `register_inline_object_schema(&field_refs)` (the
-//!    same helper the bytecode-side compiler calls at
-//!    `crates/shape-vm/src/compiler/expressions/collections.rs:396`).
-//!    Empty-field-name entries (spread placeholders) are skipped.
+//! 2. Anonymous-inline path — look the literal's span up in the bytecode
+//!    compiler's `inline_object_schema_by_span` map, which
+//!    `compile_typed_object_literal` populates when it registers the
+//!    schema (#235 stage 1). Spread-bearing stores are skipped.
 //!
 //! 3. Otherwise — leave `schema_id: None`. The downstream JIT
 //!    consumer surfaces-and-stops on `None` per ADR-006 §2.7.5
@@ -54,9 +53,14 @@ use crate::type_tracking::TypeTracker;
 /// (unknown struct name, spread-bearing inline object) keep
 /// `schema_id: None`; the downstream JIT consumer surfaces-and-stops
 /// per the §2.7.5 discipline.
-pub(crate) fn back_patch_schema_ids(mir: &mut MirFunction, type_tracker: &mut TypeTracker) {
+pub(crate) fn back_patch_schema_ids(
+    mir: &mut MirFunction,
+    type_tracker: &mut TypeTracker,
+    inline_object_schema_by_span: &std::collections::HashMap<shape_ast::ast::Span, u32>,
+) {
     for block in &mut mir.blocks {
         for stmt in &mut block.statements {
+            let stmt_span = stmt.span;
             if let StatementKind::ObjectStore {
                 container_slot,
                 field_names,
@@ -108,27 +112,26 @@ pub(crate) fn back_patch_schema_ids(mir: &mut MirFunction, type_tracker: &mut Ty
                 if has_spread {
                     continue;
                 }
-                // W17.2-C §4.D.5 migration: route through the typed
-                // variant with FieldType::Any per field — per-field type
-                // info is unavailable at MIR back-patch time (the
-                // surrounding comment explains the carrier-tier site).
-                // Verification-pass safety net catches via the
-                // `__inline_obj_*` transitional row.
-                let typed_fields: Vec<(&str, shape_runtime::type_schema::FieldType)> = field_names
-                    .iter()
-                    .map(|s| {
-                        (
-                            s.as_str(),
-                            shape_runtime::type_schema::any_migration::class_a_inference_gap(),
-                        )
-                    })
-                    .collect();
-                // `register_inline_object_schema_typed` is idempotent: a
-                // second call with the same field ordering + types
-                // returns the existing schema id (the registry's
-                // `lookup_predeclared_id_by_field_order` fast path).
-                let sid = type_tracker.register_inline_object_schema_typed(&typed_fields);
-                *schema_id = Some(sid);
+                // #235 stage 1: use the schema the bytecode-side producer
+                // already minted for THIS literal, looked up by the literal's
+                // AST span. Both passes lower the same `Expr::Object` node, so
+                // the span is a stable joint key — unlike statement ordering,
+                // which the two passes do not promise to share.
+                //
+                // The pre-#235 shape re-minted a schema here with every field
+                // stamped `FieldType::Any`. Because schema registration interns
+                // on structural content (field names AND types), that produced a
+                // SECOND schema distinct from the typed one the bytecode side
+                // had registered, and the JIT consumed the all-`Any` twin.
+                // Typing the producer without fixing this site changes nothing
+                // the JIT can observe.
+                //
+                // A literal with no recorded schema keeps `None`, and the JIT
+                // consumer surfaces-and-stops per ADR-006 §2.7.5 — no re-mint
+                // fallback, no `register_predeclared_any_schema` resurrection.
+                if let Some(sid) = inline_object_schema_by_span.get(&stmt_span) {
+                    *schema_id = Some(*sid);
+                }
             }
         }
     }

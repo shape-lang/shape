@@ -24,7 +24,7 @@
     ]
   },
   "step": "docs/design/typed-comptime/adr011-012-execution-rulings.md — ten required steps, step 4",
-  "source_revision": "1bd4ee481f557f24bd3b391ecac7bbce0802901b",
+  "source_revision": "c1b4d091d9ecc1e5d9799baff185274223b08b18",
   "regenerate_with": "node scripts/generate-adr011-012-legacy-baselines.mjs --ticket 134",
   "check_with": "node scripts/check-adr011-012-legacy-baselines.mjs --ticket 134",
   "direction_rule": "Monotonic non-increasing. A set count may fall (migration progress) and may never rise. A new owner path is growth even when the total is unchanged, because it is a new surface carrying old authority.",
@@ -32,9 +32,9 @@
     "source_revision",
     "description"
   ],
-  "total_count": 1069,
+  "total_count": 1048,
   "total_count_note": "Sum of the set counts. Sets may deliberately overlap (a narrowly scoped set can re-count sites a broader set already counts), so this is a ratchet aggregate for reporting movement — never a count of distinct legacy sites.",
-  "sets_sha256": "85c4813d8d832d818a50b75d4245e2d17bde56333f9f7871c06e689dc7df0ce1",
+  "sets_sha256": "0d1c882886fbfc26aa91d9aac22343e94eb358d2ea8dcb652cc8030523b68847",
   "sets": [
     {
       "id": "universal-comptime-target",
@@ -158,8 +158,8 @@
       ],
       "exclude": [],
       "pattern": "pseudo_tuple|substitute_\\w*markers?|build_impl_shadow_call",
-      "count": 105,
-      "owner_count": 8,
+      "count": 106,
+      "owner_count": 9,
       "owners": [
         {
           "path": "crates/shape-runtime/stdlib-src/core/remote.shape",
@@ -172,6 +172,10 @@
         {
           "path": "crates/shape-vm/src/compiler/comptime_fragments/checked_template.rs",
           "count": 8
+        },
+        {
+          "path": "crates/shape-vm/src/compiler/expressions/collections.rs",
+          "count": 1
         },
         {
           "path": "crates/shape-vm/src/compiler/expressions/function_calls.rs",
@@ -290,8 +294,8 @@
         "crates/shape-runtime/src/type_schema/any_migration.rs"
       ],
       "pattern": "FieldType::Any|any_migration::",
-      "count": 229,
-      "owner_count": 36,
+      "count": 206,
+      "owner_count": 34,
       "owners": [
         {
           "path": "bin/shape-cli/tests/stdlib/stdlib_advanced.rs",
@@ -315,7 +319,7 @@
         },
         {
           "path": "crates/shape-runtime/src/type_schema/builtin_schemas.rs",
-          "count": 13
+          "count": 7
         },
         {
           "path": "crates/shape-runtime/src/type_schema/field_types.rs",
@@ -351,15 +355,11 @@
         },
         {
           "path": "crates/shape-vm/src/compiler/expressions/collections.rs",
-          "count": 16
+          "count": 14
         },
         {
           "path": "crates/shape-vm/src/compiler/expressions/function_calls.rs",
-          "count": 5
-        },
-        {
-          "path": "crates/shape-vm/src/compiler/functions.rs",
-          "count": 1
+          "count": 2
         },
         {
           "path": "crates/shape-vm/src/compiler/helpers.rs",
@@ -371,7 +371,7 @@
         },
         {
           "path": "crates/shape-vm/src/compiler/mir_schema_threading.rs",
-          "count": 2
+          "count": 1
         },
         {
           "path": "crates/shape-vm/src/compiler/mod.rs",
@@ -383,7 +383,7 @@
         },
         {
           "path": "crates/shape-vm/src/compiler/patterns/destructure.rs",
-          "count": 7
+          "count": 2
         },
         {
           "path": "crates/shape-vm/src/compiler/post_inference_verify.rs",
@@ -432,10 +432,6 @@
         {
           "path": "crates/shape-vm/src/executor/vm_impl/modules.rs",
           "count": 1
-        },
-        {
-          "path": "crates/shape-vm/src/type_tracking.rs",
-          "count": 5
         }
       ]
     },
@@ -597,8 +593,8 @@
       ],
       "exclude": [],
       "pattern": "HookDecision|pseudo_tuple|substitute_\\w*markers?|build_impl_shadow_call",
-      "count": 332,
-      "owner_count": 10,
+      "count": 333,
+      "owner_count": 11,
       "owners": [
         {
           "path": "crates/shape-vm/src/compiler/comptime_builtins.rs",
@@ -607,6 +603,10 @@
         {
           "path": "crates/shape-vm/src/compiler/comptime_fragments/checked_template.rs",
           "count": 61
+        },
+        {
+          "path": "crates/shape-vm/src/compiler/expressions/collections.rs",
+          "count": 1
         },
         {
           "path": "crates/shape-vm/src/compiler/expressions/function_calls.rs",

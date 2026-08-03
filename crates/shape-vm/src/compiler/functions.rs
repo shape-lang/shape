@@ -1123,6 +1123,7 @@ impl BytecodeCompiler {
                 crate::compiler::mir_schema_threading::back_patch_schema_ids(
                     &mut mir,
                     &mut self.type_tracker,
+                    &self.inline_object_schema_by_span,
                 );
 
                 self.program.functions[func_idx].mir_data =
@@ -1954,16 +1955,15 @@ impl BytecodeCompiler {
                     if let Some(type_ann) = &param.type_annotation {
                         match type_ann {
                             shape_ast::ast::TypeAnnotation::Object(fields) => {
-                                // W17.2-C §4.D.5 migration: route through
-                                // typed-with-Any (NOT per-field lowering;
-                                // schema layout changes from Any-uniform
-                                // break downstream consumers that assume
-                                // the legacy layout — same disposition as
-                                // `extract_object_schema_id_from_annotation`
-                                // at `expressions/function_calls.rs`).
-                                // Per-field-typed schema layout migration
-                                // is v0.4 W17.3+ territory. Verification-
-                                // pass safety net via `__inline_obj_*`.
+                                // #235 stage 1: the declared per-field type is
+                                // right here on the annotation. The pre-#235
+                                // shape stamped every field `Any` to preserve
+                                // an "Any-uniform layout" that downstream
+                                // consumers were assumed to depend on; under
+                                // §Greenfield that coupling carries zero
+                                // weight, and the uniform layout is what made
+                                // the JIT whole-function-deopt on every
+                                // object-annotated parameter.
                                 let typed_fields: Vec<(
                                     &str,
                                     shape_runtime::type_schema::FieldType,
@@ -1972,7 +1972,7 @@ impl BytecodeCompiler {
                                     .map(|f| {
                                         (
                                             f.name.as_str(),
-                                            shape_runtime::type_schema::any_migration::class_a_inference_gap(),
+                                            Self::type_annotation_to_field_type(&f.type_annotation),
                                         )
                                     })
                                     .collect();

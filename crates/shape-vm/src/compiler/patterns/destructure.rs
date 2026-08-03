@@ -26,30 +26,17 @@ impl BytecodeCompiler {
             return Some(schema_id);
         }
 
-        let explicit_fields: Vec<&str> = fields
-            .iter()
-            .filter_map(|field| match field.pattern {
-                shape_ast::ast::DestructurePattern::Rest(_) => None,
-                _ => Some(field.key.as_str()),
-            })
-            .collect();
-        // W17.2-C §4.D.5 migration: destructure-pattern field types are
-        // unavailable here (we're inferring schema FROM the pattern);
-        // route through typed variant with FieldType::Any per field.
-        // Verification-pass safety net catches via `__inline_obj_*`.
-        let typed_fields: Vec<(&str, shape_runtime::type_schema::FieldType)> = explicit_fields
-            .iter()
-            .map(|n| {
-                (
-                    *n,
-                    shape_runtime::type_schema::any_migration::class_a_inference_gap(),
-                )
-            })
-            .collect();
-        Some(
-            self.type_tracker
-                .register_inline_object_schema_typed(&typed_fields),
-        )
+        // #235 stage 1: a destructure PATTERN names fields, it does not type
+        // them — the types live on the source expression, and the two lookups
+        // above are exactly the attempts to read them. When both miss, the
+        // pre-#235 shape invented a schema with every field stamped
+        // `FieldType::Any`: a schema the program never declared, which then
+        // satisfied the very check meant to catch its absence. A schema is
+        // minted from resolved types or not at all (ADR-020 grill R-G4), so
+        // this reports `None` and the caller proceeds without a compile-time
+        // schema exactly as it already does for any other unresolved source.
+        let _ = fields;
+        None
     }
 
     fn resolve_decomposition_source_schema(
@@ -63,31 +50,14 @@ impl BytecodeCompiler {
             return Some(schema_id);
         }
 
-        let mut ordered_fields: Vec<&str> = Vec::new();
-        let mut seen = std::collections::HashSet::new();
-        for (fields, _) in resolved_bindings {
-            for field in fields {
-                if seen.insert(field.as_str()) {
-                    ordered_fields.push(field.as_str());
-                }
-            }
-        }
-        // W17.2-C §4.D.5 migration: decomposition-source schema is
-        // inferred from the destructure bindings; no per-field types
-        // available. Route through typed variant with FieldType::Any.
-        let typed_fields: Vec<(&str, shape_runtime::type_schema::FieldType)> = ordered_fields
-            .iter()
-            .map(|n| {
-                (
-                    *n,
-                    shape_runtime::type_schema::any_migration::class_a_inference_gap(),
-                )
-            })
-            .collect();
-        Some(
-            self.type_tracker
-                .register_inline_object_schema_typed(&typed_fields),
-        )
+        // #235 stage 1: same as `resolve_object_destructure_schema` above —
+        // binding names are not types. `None` routes into the caller's
+        // existing diagnostic ("Decomposition requires compile-time known
+        // source schema"), which is the honest answer; the pre-#235 all-`Any`
+        // schema made that diagnostic unreachable by fabricating a schema
+        // that satisfied it.
+        let _ = resolved_bindings;
+        None
     }
 
     fn resolve_typed_field_operand_destructure(
@@ -1183,12 +1153,14 @@ impl BytecodeCompiler {
                 // field-typed schema layout migration is v0.4 W17.3+
                 // territory.
                 let fields: Vec<String> = obj_fields.iter().map(|f| f.name.clone()).collect();
+                // #235 stage 1: the declared annotation is on each field of the
+                // object type being destructured — it was computed and dropped.
                 let typed_fields: Vec<(&str, shape_runtime::type_schema::FieldType)> = obj_fields
                     .iter()
                     .map(|f| {
                         (
                             f.name.as_str(),
-                            shape_runtime::type_schema::any_migration::class_a_inference_gap(),
+                            Self::type_annotation_to_field_type(&f.type_annotation),
                         )
                     })
                     .collect();
@@ -1213,23 +1185,25 @@ impl BytecodeCompiler {
                     .map(|(f, _)| f.clone())
                     .unwrap_or_default();
 
+                // #235 stage 1: a named type with no registered schema is an
+                // unknown type, and the honest response is to say so. The
+                // pre-#235 shape minted an all-`Any` schema under the missing
+                // name, so a decomposition against a type that does not exist
+                // compiled and then behaved as an untyped record.
                 let schema_id = self
                     .type_tracker
                     .schema_registry()
                     .get(type_name)
                     .map(|s| s.id)
-                    .unwrap_or_else(|| {
-                        // W17.2-C §4.D.5 migration: registry miss falls
-                        // back to typed-with-Any (no upstream field-type
-                        // info available); verification-pass safety net.
-                        let typed_fields: Vec<(&str, shape_runtime::type_schema::FieldType)> =
-                            fields
-                                .iter()
-                                .map(|n| (n.as_str(), shape_runtime::type_schema::any_migration::class_a_inference_gap()))
-                                .collect();
-                        self.type_tracker
-                            .register_inline_object_schema_typed(&typed_fields)
-                    });
+                    .ok_or_else(|| ShapeError::SemanticError {
+                        message: format!(
+                            "decomposition binding names type `{}`, which has no \
+                             registered schema. A schema is minted from resolved \
+                             types only (#235, ADR-020 grill R-G4).",
+                            type_name
+                        ),
+                        location: Some(self.span_to_source_location(binding.span)),
+                    })?;
 
                 Ok((fields, schema_id))
             }

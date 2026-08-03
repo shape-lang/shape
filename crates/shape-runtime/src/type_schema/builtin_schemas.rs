@@ -888,9 +888,12 @@ pub fn register_builtin_schemas(registry: &mut TypeSchemaRegistry) -> BuiltinSch
     let _comptime_field_descriptor = TypeSchemaBuilder::new("__ComptimeFieldDescriptor")
         .string_field("name")
         .string_field("type")
+        // Element type is proven at the producer: `comptime_target.rs`
+        // builds `anns_arr` with `nb_object_array(ann_objs)` where every
+        // `ann_obj` is a `__ComptimeAnnotationDescriptor`.
         .array_field(
             "annotations",
-            crate::type_schema::any_migration::class_c_array_field_element(),
+            FieldType::Object("__ComptimeAnnotationDescriptor".to_string()),
         )
         .bool_field("optional")
         .object_field("type_ref", "__ComptimeTypeRef")
@@ -905,10 +908,8 @@ pub fn register_builtin_schemas(registry: &mut TypeSchemaRegistry) -> BuiltinSch
 
     let _comptime_annotation_descriptor = TypeSchemaBuilder::new("__ComptimeAnnotationDescriptor")
         .string_field("name")
-        .array_field(
-            "args",
-            crate::type_schema::any_migration::class_c_array_field_element(),
-        )
+        // `comptime_target.rs` builds `args_arr` with `nb_string_array`.
+        .array_field("args", FieldType::String)
         .register(registry);
 
     // comptime-excellence §4.3 line 284: `return_type: OptionString` — a
@@ -926,24 +927,22 @@ pub fn register_builtin_schemas(registry: &mut TypeSchemaRegistry) -> BuiltinSch
     let _comptime_target = TypeSchemaBuilder::new("__ComptimeTarget")
         .string_field("kind")
         .string_field("name")
+        // All four element types are proven at the producer in
+        // `comptime_target.rs`: `fields`/`params` are `nb_object_array` of
+        // the named descriptor schemas, `annotations`/`captures` are
+        // `nb_string_array`.
         .array_field(
             "fields",
-            crate::type_schema::any_migration::class_c_array_field_element(),
+            FieldType::Object("__ComptimeFieldDescriptor".to_string()),
         )
         .array_field(
             "params",
-            crate::type_schema::any_migration::class_c_array_field_element(),
+            FieldType::Object("__ComptimeParamDescriptor".to_string()),
         )
         .option_string_field("return_type")
         .object_field("return_type_ref", "__ComptimeTypeRef")
-        .array_field(
-            "annotations",
-            crate::type_schema::any_migration::class_c_array_field_element(),
-        )
-        .array_field(
-            "captures",
-            crate::type_schema::any_migration::class_c_array_field_element(),
-        )
+        .array_field("annotations", FieldType::String)
+        .array_field("captures", FieldType::String)
         .register(registry);
 
     // §4.4 comptime-handler `ctx` compile-context record. Read-only build

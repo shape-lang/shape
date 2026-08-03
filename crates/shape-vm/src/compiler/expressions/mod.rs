@@ -1166,7 +1166,7 @@ impl BytecodeCompiler {
 
             // Collections
             Expr::Array(elements, span) => self.compile_expr_array(elements, *span),
-            Expr::Object(fields, _) => self.compile_expr_object(fields),
+            Expr::Object(fields, span) => self.compile_expr_object(fields, *span),
 
             // Property and index access
             Expr::PropertyAccess {

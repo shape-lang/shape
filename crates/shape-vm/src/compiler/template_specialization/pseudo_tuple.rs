@@ -438,10 +438,16 @@ impl PseudoTuplePlan {
                 fields
                     .iter()
                     .enumerate()
-                    .map(|(index, (name, _))| ObjectEntry::Field {
+                    // #235 stage 1: carry each field's annotation onto the
+                    // synthesized entry. `carrier_return_annotation` below
+                    // already builds `TypeAnnotation::Object` out of exactly
+                    // these annotations, so the type was computed and then
+                    // dropped here — leaving the object-literal producer with
+                    // nothing to mint a typed schema from.
+                    .map(|(index, (name, annotation))| ObjectEntry::Field {
                         key: name.clone(),
                         value: Expr::Identifier(slot_local_name(index), span),
-                        type_annotation: None,
+                        type_annotation: Some(annotation.clone()),
                     })
                     .collect(),
                 span,

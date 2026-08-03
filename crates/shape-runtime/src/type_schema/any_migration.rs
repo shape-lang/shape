@@ -29,12 +29,12 @@
 //! Classes, per the R-G4 staging plan:
 //!
 //! - **A** — inference gaps where the resolved type was computed and then
-//!   discarded. Retired in stage 1; no constructor exists for it.
+//!   discarded. **Retired 2026-08-03** (stage 1); no constructor exists.
 //! - **B** — genuinely heterogeneous stdlib carriers.
 //!   [`heterogeneous_stdlib_carrier`]. Stage 2 moves these to the
 //!   value-tier kind track (ADR-006 §2.7.7), never a schema claim.
 //! - **C** — `array_field(_, Any)` one-liners with the element type
-//!   already proven at the producer. Retired in stage 1.
+//!   already proven at the producer. **Retired 2026-08-03** (stage 1).
 //! - **D** — provably-empty `bounds` arrays. [`bounds_array_element`].
 //!   Resolves via the `never` element type in #266.
 //! - **E** — enum `__payload_N` slots. [`enum_payload_slot`]. Own design
@@ -77,23 +77,6 @@ fn mint() -> FieldType {
 /// `Clone` nor `Copy`, precisely so that no site outside this module can
 /// launder a token out of an existing value.
 pub(crate) fn clone_of_existing() -> FieldType {
-    mint()
-}
-
-/// **Class A** — a site where the resolved field type was computed and
-/// then thrown away in favour of an `Any`-uniform layout.
-///
-/// Stage 1 of #235 retires every caller of this function and deletes it.
-/// If you are reading this and it still exists, stage 1 did not finish.
-pub fn class_a_inference_gap() -> FieldType {
-    mint()
-}
-
-/// **Class C** — an `array_field(name, Any)` one-liner whose element type
-/// is proven at the producer a few lines away.
-///
-/// Stage 1 of #235 retires every caller of this function and deletes it.
-pub fn class_c_array_field_element() -> FieldType {
     mint()
 }
 

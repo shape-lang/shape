@@ -6195,7 +6195,12 @@ impl BytecodeCompiler {
             })
             .collect();
         let module_object = Expr::Object(entries, span);
-        self.compile_expr(&module_object)?;
+        // #235: mark before lowering — see `lowering_module_namespace_object`.
+        let prev_ns = self.lowering_module_namespace_object;
+        self.lowering_module_namespace_object = true;
+        let ns_result = self.compile_expr(&module_object);
+        self.lowering_module_namespace_object = prev_ns;
+        ns_result?;
 
         let binding_idx = self.get_or_create_module_binding(&module_path);
         self.emit(Instruction::new(

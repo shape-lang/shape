@@ -830,6 +830,7 @@ impl BytecodeCompiler {
     pub(super) fn compile_expr_object(
         &mut self,
         entries: &[shape_ast::ast::ObjectEntry],
+        span: shape_ast::ast::Span,
     ) -> Result<()> {
         use shape_ast::ast::ObjectEntry;
         // Inside function bodies the MIR solver handles ref-in-object;
@@ -850,7 +851,7 @@ impl BytecodeCompiler {
 
         if !has_spreads {
             // ALL non-spread objects use TypedObject — field names known at compile time
-            self.compile_typed_object_literal(entries)
+            self.compile_typed_object_literal(entries, span)
         } else {
             // Spread objects: field set not fully known at compile time (Phase 1b)
             self.compile_dynamic_object(entries)
@@ -865,6 +866,7 @@ impl BytecodeCompiler {
     fn compile_typed_object_literal(
         &mut self,
         entries: &[shape_ast::ast::ObjectEntry],
+        span: shape_ast::ast::Span,
     ) -> Result<()> {
         use shape_ast::ast::ObjectEntry;
 
@@ -914,55 +916,122 @@ impl BytecodeCompiler {
             .and_then(|var| self.hoisted_field_types.get(var))
             .cloned()
             .unwrap_or_default();
-        // v0.3 Phase 4b Round 5b W17.2-C (audit §4.D.3 PROPAGATE):
-        // `infer_field_type_from_expr` only resolves compile-time literals.
-        // Non-literal expressions (function calls, complex expressions,
-        // unresolved variables) cannot project a concrete `FieldType` at
-        // this site — full inference for the entire RHS would require
-        // running the type system over the expression tree, which is not
-        // in scope at the inline-object construction call site.
+        // #235 stage 1 (owner ruling 2026-08-02, grill R-G4): a schema is
+        // minted from resolved types or not at all. `infer_field_type_from_expr`
+        // only reads compile-time literals, so every non-literal field used to
+        // be stamped `FieldType::Any` and absorbed by the `__inline_obj_*`
+        // transitional row in `post_inference_verify.rs`. That stamp is what
+        // made the JIT whole-function-deopt on any function containing an
+        // anonymous object literal ("field `x` has Any shape", refused at
+        // `shape-jit/src/mir_compiler/mod.rs::object_store_alloc_surface`)
+        // while the identical declared-type program compiled natively.
         //
-        // PROPAGATE: fall back to `FieldType::Any` and let the
-        // post_inference_verify pass at
-        // `crates/shape-vm/src/compiler/post_inference_verify.rs` absorb
-        // via the `__inline_obj_*` transitional whitelist row (W17.2-C
-        // narrowed-row). The `register_inline_object_schema_typed` call
-        // at line 526 below auto-generates the `__inline_obj_N` schema
-        // name, which is recognized by the verification pass's prefix
-        // rule. Per audit §5 + §9.B.3 supervisor ratify 2026-05-19 +
-        // ADR-006 §2.7.5 producer-side stamp (the schema-side Any is
-        // bounded by the verification-pass-side absorber).
-        let typed_fields: Vec<(&str, FieldType)> = entries
-            .iter()
-            .filter_map(|e| match e {
-                ObjectEntry::Field { key, value, .. } => {
-                    let ft = infer_field_type_from_expr(value).unwrap_or(
-                        shape_runtime::type_schema::any_migration::class_a_inference_gap(),
-                    );
-                    Some((key.as_str(), ft))
-                }
-                ObjectEntry::Spread(_) => None,
-            })
-            .chain(hoisted.iter().map(|h| {
-                // Hoisted-field type lookup: the AST pre-pass at
-                // `compiler/mod.rs::hoisted_field_types` populates inferred
-                // types when the assigned RHS is a literal. Non-literal
-                // RHS falls back to `FieldType::Any` here — same
-                // verification-pass absorber per the §4.D.3 disposition
-                // above (the inline-object schema name `__inline_obj_N`
-                // routes through the transitional prefix rule).
-                let ft = hoisted_type_lookup
-                    .get(h.as_str())
-                    .cloned()
-                    .unwrap_or(shape_runtime::type_schema::any_migration::class_a_inference_gap());
-                (h.as_str(), ft)
-            }))
-            .collect();
+        // The resolved type is available: `field_type_for_assignment_value`
+        // consults the same inference facts the checker already produced.
+        // A field whose type inference could not resolve is a producer-side
+        // gap and surfaces here rather than being re-defaulted.
+        // Hoisted above the mint loop (#235 stage 1): the schema now needs the
+        // enclosing expected type at mint time, not only when compiling values.
+        let expected_obj_type = self.pending_expected_call_return_type.clone();
+        let mut typed_fields: Vec<(&str, FieldType)> = Vec::new();
+        for e in entries {
+            let ObjectEntry::Field {
+                key,
+                value,
+                type_annotation,
+            } = e
+            else {
+                continue;
+            };
+            if self.lowering_module_namespace_object {
+                // Class B carrier, staged after stage 1 — see
+                // `lowering_module_namespace_object`. Not an inference failure:
+                // the producer declared what this record is.
+                typed_fields.push((
+                    key.as_str(),
+                    shape_runtime::type_schema::any_migration::heterogeneous_stdlib_carrier(),
+                ));
+                continue;
+            }
+            // Expected-type threading (issue #14): a field whose value is a
+            // bare `[]` has no element type of its own — it takes it from the
+            // enclosing declared type, the same source the value-compile loop
+            // below uses via `expected_object_field_annotation`. Consult the
+            // declared field annotation first so `let n: Node = { kids: [] }`
+            // mints `Array<T>` rather than failing to resolve.
+            // An entry that declares its own type is authoritative — the
+            // checker has already validated the value against it.
+            //
+            // If the declared annotation has no `FieldType` projection at all
+            // (a tuple, a function type, a union — `FieldType` cannot express
+            // them), that is NOT an inference gap: the type is known exactly
+            // and the schema tier has no way to write it down. It routes to
+            // the separately-tracked `unprojectable_annotation` residue rather
+            // than to a stage-1 class, and rather than to a compile error that
+            // would reject programs the checker accepts. The synthesized
+            // pseudo-tuple carrier (`template_specialization/pseudo_tuple.rs`)
+            // is the live instance: its `a0` field is annotated
+            // `(int, int, int)`.
+            let annotated = type_annotation
+                .as_ref()
+                .map(|ann| Self::type_annotation_to_field_type(ann));
+            let declared = expected_obj_type
+                .as_ref()
+                .and_then(|exp| self.expected_object_field_annotation(exp, key))
+                .map(|ann| Self::type_annotation_to_field_type(&ann))
+                .filter(field_type_is_strictly_proven);
+            let resolved = match annotated.or(declared) {
+                Some(ft) => Some(ft),
+                None => self.field_type_for_assignment_value(value),
+            };
+            let Some(ft) = resolved else {
+                return Err(ShapeError::SemanticError {
+                    message: format!(
+                        "cannot prove a type for field `{}` of this object literal. \
+                         A schema is minted from resolved types only (#235, ADR-020 \
+                         grill R-G4): the schema tier has no unknown state. Annotate \
+                         the binding, or give the field an expression whose type \
+                         inference resolves.",
+                        key
+                    ),
+                    location: Some(self.span_to_source_location(value.span())),
+                });
+            };
+            typed_fields.push((key.as_str(), ft));
+        }
+        for h in &hoisted {
+            // Hoisted fields come from a later property assignment
+            // (`o.y = 2`); the AST pre-pass at `compiler/mod.rs::
+            // hoisted_field_types` records the assigned RHS type when it is a
+            // literal. A hoisted field whose RHS type is unknown is the same
+            // producer-side gap as above.
+            let Some(ft) = hoisted_type_lookup.get(h.as_str()).cloned() else {
+                return Err(ShapeError::SemanticError {
+                    message: format!(
+                        "cannot prove a type for hoisted field `{}` of this object \
+                         literal (assigned later via property assignment). A schema \
+                         is minted from resolved types only (#235, ADR-020 grill \
+                         R-G4).",
+                        h
+                    ),
+                    location: Some(self.span_to_source_location(span)),
+                });
+            };
+            typed_fields.push((h.as_str(), ft));
+        }
 
         // Register inline schema with ALL fields (explicit + hoisted), with inferred types
         let schema_id = self
             .type_tracker
             .register_inline_object_schema_typed(&typed_fields);
+        // #235 stage 1: record the schema against this literal's span so the
+        // post-MIR back-patch (`compiler::mir_schema_threading`) can thread
+        // THIS id onto the matching `StatementKind::ObjectStore`. Before this,
+        // the back-patch re-minted a parallel all-`Any` schema from the bare
+        // field-name list, and the JIT read that twin — so typing the fields
+        // here alone would have changed nothing the JIT could see. The span is
+        // the AST identity of the literal; both passes lower the same node.
+        self.inline_object_schema_by_span.insert(span, schema_id);
 
         // Build combined field list for NewTypedObject field_count
         let all_field_names: Vec<&str> = typed_fields.iter().map(|(n, _)| *n).collect();
@@ -983,7 +1052,6 @@ impl BytecodeCompiler {
         // field with no declared context falls back to the existing behavior
         // (bare empty-array fields at a marshal/polymorphic sink then
         // canonical-instantiate; all others surface-and-stop unchanged).
-        let expected_obj_type = self.pending_expected_call_return_type.clone();
         for entry in entries {
             if let ObjectEntry::Field { key, value, .. } = entry {
                 self.plan_flexible_binding_escape_from_expr(value);
