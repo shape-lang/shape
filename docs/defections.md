@@ -8611,3 +8611,55 @@ whole-program-deopts every one of them, so the Any-shape cliff was never
 their limiting factor. REJECTED: quoting a corpus MATCH as evidence for this
 lane in either direction. The cliff is measured by a targeted probe pair with
 a declared-type twin as its positive control.
+
+---
+
+## #239 backward kind propagation across MIR moves — refused on evidence (2026-08-03)
+
+Dispatched as an evidence-first lane to extend the backward pass in
+`shape-jit/src/mir_compiler/types.rs::infer_slot_kinds_with_concrete` across
+`Assign(Local(d), Use(Move(Local(s))))`, on the premise recorded in
+`docs/program/adr020/rep-kind-abi-design.md` §6.6 that "MIR moves are
+kind-preserving by construction". The premise is false. Full write-up in
+§6.7 of that doc; the rejected compromises are here.
+
+**REJECTED: landing the rule and excluding `?`/`await` by construct.** The
+`?` operator lowers to `Assign(Local(d), Use(Copy(Local(s))))` where `s` is a
+`Call` destination and the assignment is a `Result` UNWRAP — the same MIR
+shape as the kind-preserving case the rule targeted, which is also a call
+destination moved into a proven slot. There is no key that separates them,
+so the exclusion cannot be written in the pass; it would have to consult
+`JitResidual::TryUnwrap`, a per-function deopt flag owned by shape-vm's
+bytecode layer. An inference rule whose soundness is a lookup into another
+crate's deopt list is the "keep a fallback for one edge case" shape with the
+fallback moved out of sight.
+
+**REJECTED: landing it on the strength of the guard holding today.** Measured:
+`?`-bearing functions report `try-unwrap-residual` with zero native
+dispatches, and `await` bails main via `vm_only_opcodes: [Await]`. Both hold
+right now. Neither is in the inference layer, neither is consulted by the
+pass, and the JIT `?` codegen that would remove the first is on the roadmap.
+The failure mode is not a bail — it is a scalar `NativeKind` stamped on heap
+`Result` bits, which sends `retain_func_for_kind` to the wrong FFI. Silent
+heap corruption, no signal, discovered later by someone else.
+
+**REJECTED: "the corpus is green, so the restriction is fine".** Not run as
+an argument. A corpus differential cannot exhibit what the deopt gates
+prevent from executing; a green corpus here measures the guards, not the
+rule. Quoting it either way would be the vacuous-denominator error #260
+already recorded.
+
+**REJECTED: reporting the two sweep-proposed counterexamples as real.** A
+sub-agent sweep offered multi-kind merge temps (`if c { 1 } else { "s" }`)
+and unit/non-unit merges (`if c { print("x") } else { 5 }`). Both are type
+errors — verified against the release binary before being carried into the
+finding. Passing them upstream as violations would have refuted the premise
+for the wrong reason and made the real counterexample look like one item in
+a list instead of the structural fact it is.
+
+**What was done instead.** The premise was pinned as a test
+(`mir::lowering::tests::try_operator_is_a_kind_changing_bare_use_of_a_call_destination`)
+so the refutation is mechanical rather than narrative, and the constructive
+route — lower `?` to the `Rvalue::EnumPayload` variant MIR already uses for
+`match Ok(v)` bindings — is recorded in §6.7 as a producer fix to dispatch
+separately. No production code changed in this lane.

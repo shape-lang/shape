@@ -1462,6 +1462,107 @@ guarded fixture executes natively and produces the right values.
 3. `SYN__datetime-method-native`: the callee-side `DateTime`-as-value arm
    first (see the table above), then the destination stamp.
 
+### 6.7 Backward kind propagation across MIR moves — REFUTED 2026-08-03
+
+§6.6 item 1 proposed extending the backward pass in
+`crates/shape-jit/src/mir_compiler/types.rs::infer_slot_kinds_with_concrete`
+to propagate a proven DESTINATION kind backwards into the SOURCE of a bare
+`Use` move, and called it "the natural completion of the existing backward
+pass". The warrant was one sentence:
+
+> MIR moves are kind-preserving by construction — there is no converting move
+> rvalue, conversions are `PrimitiveCast`.
+
+**That sentence is false, and the codebase already knew it.** The lane was
+dispatched evidence-first with instructions to verify the premise rather than
+inherit it. It does not survive. No inference-policy change was made.
+
+**The enumeration.** `Rvalue` has 13 variants
+(`crates/shape-vm/src/mir/types.rs:347`). Twelve spell a kind change
+distinctly — `Borrow`, `BinaryOp`, `FuzzyComparison`, `UnaryOp`,
+`FormatValue`, `Aggregate`, `Clone`, `EnumTest`, `EnumPayload`,
+`TypePatternTest`, `EnumDiscriminantTest`, `PrimitiveCast`. Two of them carry
+a comment warning against exactly the pass-through this proposal wanted to
+rely on: `FormatValue`'s ("a single-part `f"{value}"` must not copy the source
+operand bits directly into a String-labelled destination") and
+`PrimitiveCast`'s, whose lowering site records that `as int` USED to lower to
+`Rvalue::Use(arg)` and rendered `f"{true as int}"` as `true` under JIT
+(`mir/lowering/expr.rs:2962-2977`, locked by
+`test_lower_bool_as_int_emits_primitive_cast`).
+
+The thirteenth is `Use`, and it is not clean:
+
+| construct | lowering | kind change |
+|---|---|---|
+| `let v = fallible()?` | `expr.rs:2668` `Expr::TryOperator` -> `assign_copy_from_slot` -> `Assign(Local(d), Use(Copy(Local(s))))` | **YES** — `Ptr(HeapKind::Result)` -> payload kind |
+| `let v = await f()` | `expr.rs:383` `lower_await_expr` -> `Assign(Local(d), Use(operand))` | **YES** — future -> awaited value |
+
+**The refutation is stronger than "there is an exception".** The `?` shape is
+not merely a counterexample; it is the SAME MIR SHAPE as the case the
+proposal targeted. Both are a `Call` terminator's destination temp moved into
+another local:
+
+- `let h = |y| g(y)` -> call temp moved into the proven return slot
+  (kind-preserving, the motivating case)
+- `let v = fallible()?` -> call temp moved into the unwrap destination
+  (kind-CHANGING)
+
+Pinned by `mir::lowering::tests::
+try_operator_is_a_kind_changing_bare_use_of_a_call_destination`, which
+collects the shape from both programs with one collector and finds it in
+both. MIR retains nothing that separates them, so a rule keyed on this shape
+cannot tell an unwrap from a move. A restriction to "source is a call
+destination" does not help — that is where BOTH live. There is no key.
+
+**What keeps the counterexample off the JIT today is a guard in a different
+subsystem, and it names this exact hazard.** `JitResidual::TryUnwrap`
+(`crates/shape-vm/src/bytecode/jit_residual.rs:155`) raises a per-FUNCTION
+deopt whose reason string is:
+
+> the `?` operator: MIR lowers it as a transparent copy, so the JIT would
+> stamp the success type's NativeKind onto heap Result/Option bits
+
+That is verbatim the failure the proposed rule would produce, written down
+before this lane existed. Measured on the release binary: a `?`-bearing
+function reports `disposition: interpreter-fallback`,
+`reason_class: try-unwrap-residual`, `native_dispatches: 0`. `await` is
+gated separately, by the `vm_only_opcodes: [Await]` main-code preflight
+(`shape-jit/src/compiler/accessors.rs`).
+
+So the rule would have been sound-by-accident: correct only while two
+unrelated gates hold, neither of which is in the inference layer and neither
+of which the pass consults. The failure mode if either moves is not a crash
+but a wrong `NativeKind` on heap bits, which routes `retain`/`release` to the
+wrong FFI (`ownership.rs::retain_func_for_kind`) — silent heap corruption of
+the kind the capture-retain bug in §6.6 produced.
+
+**Two claimed counterexamples that did NOT survive, recorded so nobody
+re-raises them.** A sweep proposed multi-kind merge temps
+(`let r = if c { 1 } else { "s" }`) and unit/non-unit merges
+(`let r = if c { print("x") } else { 5 }`) as violations. Both are REJECTED
+BY THE TYPE CHECKER — "int is not compatible with string" and "void is not
+compatible with int" respectively — so neither is constructible in well-typed
+Shape. Reasoning about MIR shapes without checking that the front end admits
+the program manufactures counterexamples that do not exist; the type checker
+is part of the invariant.
+
+**The constructive fix, for whoever wants this later.** MIR already has the
+correct variant. `match r { Ok(v) => ... }` lowers its payload extraction to
+`Rvalue::EnumPayload` (`mir/lowering/stmt.rs:1044-1052`); `let v = r?` does
+not, and that asymmetry is the whole defect. Lower `?` (and `await`) to
+`EnumPayload` / a distinctly-spelled variant and the premise becomes true by
+construction rather than true-by-guard — at which point the backward
+extension is sound, `JitResidual::TryUnwrap` can retire, and the acceptance
+fixture becomes reachable. **That is a producer fix, not an inference-policy
+change, and it should be dispatched as one.** Doing the inference change
+first would put a silent-corruption rule in the tree and rely on a deopt flag
+in another crate to keep it correct.
+
+**Acceptance impact.** The gate stays at 2/5.
+`SYN__callvalue-stop-returns-value` is NOT retired by this lane. It remains
+blocked on the destination-slot kind, and the honest route to it is the
+producer fix above.
+
 ---
 
 ## 7. The third carrier
