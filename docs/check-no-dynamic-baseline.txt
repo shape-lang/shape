@@ -6,20 +6,49 @@
 #   - Lower a limit when a count decreases (deletion progress).
 #   - Never raise a limit. Once a row reaches 0 it stays at 0 forever.
 #   - Adding a forbidden pattern is fine — start it at the current count.
-#   - Scope is enforced by scripts/check-no-dynamic.sh: crates bin tools extensions.
+#   - Scope is enforced by scripts/check-no-dynamic.sh: crates bin tools
+#     extensions, minus *.md (prose under crates/ is not code — see the script).
+#
+# A SYMBOL ROW PROVES A NAME IS GONE, NOT THAT A BEHAVIOR IS GONE (#256).
+#
+# The gate's founding assumption is that a forbidden construct must be SPELLED
+# to exist. It need not be. `emit_index_to_i64` (mir_compiler/places.rs, since
+# deleted) rebuilt the deleted `is_tagged` dispatch inline in Cranelift IR —
+# an iconst of 0xFFF8_0000_0000_0000, an unsigned icmp, a select — calling no
+# helper and naming no ratcheted symbol. Every symbol row here passed while it
+# stood. Renaming its local variable would have made it invisible to the one
+# row that caught it by luck.
+#
+# So: when you add a row for a deletion, ask whether the construct is
+# expressible from primitives. Rows covering a deleted FUNCTION are mostly
+# safe — the name is the thing. Rows covering a deleted DISPATCH PATTERN are
+# the exposed class, and need a shape-level or bit-pattern companion row
+# alongside the name row. Rows 53-54 are the worked example.
+#
+# A limit above the measured count is SLACK, and a regression can hide inside
+# it: delete a comment mention, add a live call, count unchanged, gate green.
+# Shrink a row the moment it can shrink. Where the residue is comment prose,
+# prefer the `^(?!\s*(//|///|\*)).*` exemption idiom and a limit that counts
+# only code lines — it makes the row bite on the FIRST live reintroduction
+# instead of the twelfth, and it stops the gate punishing the by-name
+# documentation of deleted code that CLAUDE.md §Forbidden Patterns requires.
 #
 # Established 2026-05-07 on bulldozer-strictly-typed @ 7bab206.
+# Rows audited against the symbol-vs-shape principle 2026-08-03 (#256):
+# docs/program/adr020/c256-row-audit.md.
 
-12	\bsynthesize_value_word_from_raw\b	W-series ValueWord synthesizer (deleted)
+1	^(?!\s*(//|///|\*)).*\bsynthesize_value_word_from_raw\b	W-series ValueWord synthesizer (deleted). #256 audit 2026-08-03: 12→1. Eleven of the twelve were leading-comment prose naming the deletion as CLAUDE.md requires; the one code line is the multi-line surface-and-stop message at execution.rs:438, prose inside a string literal, not a call. SHRINK-ONLY, target 0 when eval_statements gets its Phase-2c kinded rebuild
 0	\blast_program_return_kind\b	W-series runtime return-kind stamp
-1	\bnormalize_persisted_for_slot\b	W-series persistence normalizer
-5	\bexec_arithmetic_dynamic_fallback\b	dynamic arithmetic fallback handler
+0	^(?!\s*(//|///|\*)).*\bnormalize_persisted_for_slot\b	W-series persistence normalizer. #256 audit 2026-08-03: 1→0. The single residual was comment prose (helpers.rs:3175); the symbol is fully deleted. Tombstone — refuses reintroduction
+0	^(?!\s*(//|///|\*)).*\bexec_arithmetic_dynamic_fallback\b	dynamic arithmetic fallback handler. #256 audit 2026-08-03: 5→0. All five residuals were comment prose; the handler is fully deleted. Tombstone. NOTE (weak-pattern, not acted on): this row guards a DISPATCH PATTERN, not just a name — a runtime kind switch inside an arithmetic handler is rebuildable without the identifier. No companion row proposed; see the audit doc for why a NativeKind-match shape row is not writable without swamping legitimate code
 0	\bexec_comparison_dynamic_fallback\b	dynamic comparison fallback handler
+0	^(?!\s*(//|///|\*)).*\bexec_\w+_dynamic_fallback\b	#256 row audit 2026-08-03 — THE FAMILY, not two of its members. CLAUDE.md §Forbidden spells this handler class with a wildcard ("exec_*_dynamic_fallback handlers. Deleted.") but the baseline transcribed only the arithmetic and comparison instances, so exec_string_dynamic_fallback or any other suffix escaped both rows. Seeds at 0: the five residual mentions are comment prose citing the prohibition. The two named rows above stay — they carry the deletion history this one cannot
 0	\bConvertBoolToString\b	W4-d Convert<X>To<Y> opcode pattern
+0	^(?!\s*(//|///|\*)).*\bConvert[A-Z]\w*To[A-Z]\w*\b	#256 row audit 2026-08-03 — THE FAMILY, not its one canonical member. CLAUDE.md §Forbidden names "Convert<X>To<Y> opcodes added to paper over a kind-tracker gap" as a class and ConvertBoolToString only as the example; the row above catches the example and nothing else, so ConvertIntToString would pass. Seeds at 0: all four residual mentions are comment prose citing the prohibition. CAVEAT: a legitimately-named non-opcode type in Convert<X>To<Y> shape would trip this — that is a conversation, which is the point, not a false alarm to silence
 0	\brebox_native_bits\b	W-series typed->tagged rebox helper
-8	\blast_emitted_native_kind\b	sparse kind tracker (replace with prove_native_kind)
-4	\bcapture_as_value\b	closure capture deletion progress
-17	\b(nan_box|NanBox|NanTag)\b	NanBox residuals
+3	^(?!\s*(//|///|\*)).*\blast_emitted_native_kind\b	sparse kind tracker (replace with prove_native_kind). #256 audit 2026-08-03: 8→3. LIVE PRODUCTION CODE, the only pre-existing row that is: 1 definition (helpers.rs:2708) + 2 call sites (helpers.rs:4402, helpers_binding.rs:701); the other five were comment prose. At 8 a fourth call site could be added while a comment was deleted and the gate stayed green. SHRINK-ONLY, target 0
+0	^(?!\s*(//|///|\*)).*\bcapture_as_value\b	closure capture deletion progress. #256 audit 2026-08-03: 4→0. All four residuals were comment prose in vm_closure_handle.rs naming the deleted Pattern-C widening bridge; the method is gone. Tombstone
+0	\b(nan_box|NanBox|NanTag)\b	NanBox residuals. #256 audit 2026-08-03: 17→0, the single largest slack in the file, and it was entirely fictitious. Rust occurrences: ZERO — crates/shape-jit/src/nan_boxing.rs no longer exists. All 17 were prose in four V2-era audit .md files checked in under crates/, which the directory-based scope was counting as code; the script now excludes *.md. Tombstone: no comment exemption on this row, because with markdown gone the remaining scan is code and comments in real source, and the name has no legitimate use left
 0	\bSlotKind::(Dynamic|Unknown)\b	deleted SlotKind variants
 0	ValueBits shim	rejected rename
 0	FFI-boundary bridge	rejected rename
@@ -42,7 +71,7 @@
 0	Arc::(from_raw|increment_strong_count|decrement_strong_count)\s*\(\s*[^;]*?\bas\s+\*(const|mut)\s+(\w+::)*TraitObjectStorage	R6 carrier-UB: Arc ptr-op on _new TraitObjectStorage carrier (use v2_retain/release_elem on HeapHeader)
 0	let\s+expected\s*=\s*NativeKind::Bool	W17 Stage-0: no-layout upvalue Bool-default fabrication — ADR-006 §2.7.8/Q10 (design §4.2.4)
 0	^(?!\s*//).*\bTAG_UNIT\b	ADR-020 §3.3/§6 (#224) — unit has no bit encoding; no unit word under any name (comment prose exempt)
-52	^(?!\s*(//|///|\*)).*\bTAG_BOOL_(TRUE|FALSE)\b	ADR-020 §3 clause 2 (#226) — bool is bare 0/1; the residue is the kind-blind JIT FFI dialect (#239 drives it to 0). SHRINK-ONLY: comment prose exempt
+51	^(?!\s*(//|///|\*)).*\bTAG_BOOL_(TRUE|FALSE)\b	ADR-020 §3 clause 2 (#226) — bool is bare 0/1; the residue is the kind-blind JIT FFI dialect (#239 drives it to 0). SHRINK-ONLY: comment prose exempt. #256 audit 2026-08-03: 52→51 — the 52nd was a markdown line in compiler/V2_MIGRATION_STATUS.md, now out of scope
 6	^(?!\s*(//|///|\*)).*\bbox_function\b	ADR-020 §3.4 / §6 (#239) — the SECOND function-value carrier. Producer-less: both ownership.rs arms emit arc_closure_constant. SHRINK-ONLY, target 0; residue is value_ffi.rs (def+tests) and the NaN-box typeof/is_type + simulation surface, which the value-channel conversion deletes
 7	^(?!\s*(//|///|\*)).*\bis_inline_function\b	ADR-020 §3.4 / §6 (#239) — the dual-carrier bit-shape probe. Deleted from every closure consumer; residue is the NaN-box typeof/is_type + simulation surface. SHRINK-ONLY, target 0
 2	^(?!\s*(//|///|\*)).*\bunbox_function_id\b	ADR-020 §3.4 / §6 (#239) — fn-id sentinel extraction. Producer-less; residue is value_ffi.rs def+test. SHRINK-ONLY, target 0
@@ -50,4 +79,5 @@
 5	^(?!\s*(//|///|\*)).*\bis_tagged\b	ADR-020 §6 (#256) — the tag test itself. The row #256 records as MISSING (value_ffi.rs:104). SHRINK-ONLY, target 0
 5	^(?!\s*(//|///|\*)).*\bmake_tagged\b	ADR-020 §6 (#239) — tag-word construction. SHRINK-ONLY, target 0
 4	^(?!\s*(//|///|\*)).*\bget_tag\b	ADR-020 §6 (#239) — tag extraction. SHRINK-ONLY, target 0
+4	^(?!\s*(//|///|\*)).*0x7[fF]{2}[89a-fA-F]_?0{4}_?0{4}_?0{3}[0-9a-fA-F]	ADR-020 §2.1/§6 (#256 row audit 2026-08-03) — the POSITIVE-quiet-NaN half of the encoding family as a LITERAL, the companion the row below did not cover: its character class starts 0xFFF, so every 0x7FF8 sentinel was invisible to it. Found two uncovered re-spellings of a normative constant: value_ffi.rs:64 `CANONICAL_NAN` (a private duplicate of encoding.rs `CANON_NAN_BITS` — and dead, defined once and read nowhere) and places.rs:1833 (a test re-spelling `NULL_NUMBER_BITS` inline). Neither names a ratcheted symbol; both are the private per-crate encoding ADR-020 §6 forbids and the drift encoding.rs's own module doc cites as bug family #219/#188/#189. Seeds at 4 = 2 normative definitions (encoding.rs:104,112) + those 2. SHRINK-ONLY, target 2
 4	^(?!\s*(//|///|\*)).*0x[fF]{3}[89a-fA-F]_?0{4}_?0{4}_?0{4}	ADR-020 §6 / design §3.5.2 (#256) — the NaN-box tag pattern as a LITERAL. The name rows stop the dialect returning by name; this one stops it returning by value. It is the only row that would have caught emit_index_to_i64 (places.rs:532), which reconstructed the deleted is_tagged dispatch from an iconst while naming no ratcheted symbol — deleted in #239. Cannot seed at 0: the residue is TAG_BASE/TAG_MASK in value_ffi.rs, the normative pattern in shape-value/src/encoding.rs (ADR-020 §6 makes that table the sole source), and one shape-vm write-barrier test. SHRINK-ONLY
