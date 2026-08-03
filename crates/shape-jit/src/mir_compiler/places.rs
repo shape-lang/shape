@@ -518,37 +518,22 @@ impl<'a, 'b> MirToIR<'a, 'b> {
         (data_ptr, length)
     }
 
-    /// Convert a NaN-boxed index to a raw i64.
-    /// Handles both NaN-boxed f64 (number) and NaN-boxed i48 (int).
-    fn emit_index_to_i64(&mut self, index_bits: Value) -> Value {
-        // If bits < TAG_BASE (0xFFF8...), it's a raw f64 — bitcast and convert.
-        // If bits >= TAG_BASE, it's a tagged value (int) — extract i48 payload.
-        // For performance, we use bitcast → fcvt which handles the common f64 case.
-        // For NaN-boxed ints, fcvt_to_sint_sat on NaN gives 0, so we also extract
-        // the int payload and select based on a check.
-        let tag_base = self
-            .builder
-            .ins()
-            .iconst(types::I64, 0xFFF8_0000_0000_0000u64 as i64);
-        let is_tagged =
-            self.builder
-                .ins()
-                .icmp(IntCC::UnsignedGreaterThanOrEqual, index_bits, tag_base);
-
-        // Float path: bitcast to f64, convert to i64
-        let as_f64 = self
-            .builder
-            .ins()
-            .bitcast(types::F64, MemFlags::new(), index_bits);
-        let from_float = self.builder.ins().fcvt_to_sint_sat(types::I64, as_f64);
-
-        // Int path: sign-extend lower 48 bits
-        let shifted_left = self.builder.ins().ishl_imm(index_bits, 16);
-        let from_int = self.builder.ins().sshr_imm(shifted_left, 16);
-
-        // Select: if tagged (int), use int extraction; else use float conversion
-        self.builder.ins().select(is_tagged, from_int, from_float)
-    }
+    // #239 / #256 / ADR-020 §6 — `emit_index_to_i64` DELETED.
+    //
+    // It reconstructed the deleted `is_tagged` dispatch inline, from an
+    // `iconst` of `0xFFF8_0000_0000_0000`, without naming a single
+    // ratcheted symbol: `select(bits >= TAG_BASE, sshr(ishl(bits,16),16),
+    // fcvt_to_sint_sat(bitcast_f64(bits)))`. Every symbol row in
+    // `check-no-dynamic-baseline.txt` would have passed while it stood,
+    // which is why the ratchet now carries a bit-pattern row too (design
+    // §3.5.2 / §8: the name rows stop the dialect returning by name, the
+    // bit-pattern row stops it returning by value).
+    //
+    // It was also WRONG post-strict-typing, not merely redundant. An `int`
+    // index is a raw native `i64` in an I64 slot — `3` is far below
+    // `TAG_BASE`, so it took the "float" arm, bitcast `3` to the denormal
+    // 1.5e-323 and `fcvt_to_sint_sat`'d it to **0**. Every legacy
+    // inline-array read through an I64-typed index silently read element 0.
 
     /// Normalize negative array index: if idx < 0, idx = length + idx.
     #[inline]
@@ -559,23 +544,28 @@ impl<'a, 'b> MirToIR<'a, 'b> {
         self.builder.ins().select(is_negative, adjusted, idx)
     }
 
-    /// Convert an index value to i64, specializing for native types.
-    /// For native I32: sextend (1 instruction).
-    /// For NaN-boxed I64: extract payload (7 instructions via emit_index_to_i64).
-    fn index_to_i64(&mut self, index_val: Value) -> Value {
+    /// Widen an index value to i64. Every width is a raw native integer or
+    /// float; there is no boxed form to unwrap (ADR-020 §1).
+    fn index_to_i64(&mut self, index_val: Value) -> Result<Value, String> {
         let idx_type = self.builder.func.dfg.value_type(index_val);
-        if idx_type == types::F64 {
-            // Native F64 index — convert to I64 via fcvt_to_sint_sat
-            self.builder.ins().fcvt_to_sint_sat(types::I64, index_val)
-        } else if idx_type == types::I32 {
-            // Native I32 index — sign-extend to I64
-            self.builder.ins().sextend(types::I64, index_val)
+        if idx_type == types::I64 {
+            // #239: a raw native i64 index IS the index. The deleted
+            // `emit_index_to_i64` treated this as a NaN-box needing a tag
+            // test and turned every small index into 0.
+            Ok(index_val)
+        } else if idx_type == types::F64 {
+            Ok(self.builder.ins().fcvt_to_sint_sat(types::I64, index_val))
+        } else if idx_type == types::I32 || idx_type == types::I16 {
+            Ok(self.builder.ins().sextend(types::I64, index_val))
         } else if idx_type == types::I8 {
-            // Native I8 — zero-extend
-            self.builder.ins().uextend(types::I64, index_val)
+            Ok(self.builder.ins().uextend(types::I64, index_val))
         } else {
-            // I64: NaN-boxed int or NaN-boxed float
-            self.emit_index_to_i64(index_val)
+            Err(format!(
+                "MirToIR: SURFACE — array index has Cranelift type {} , which is not an index \
+                 width. Post-ADR-020 there is no boxed index form to unwrap; the producing site \
+                 must give the index slot a proven scalar kind.",
+                idx_type
+            ))
         }
     }
 
@@ -596,9 +586,9 @@ impl<'a, 'b> MirToIR<'a, 'b> {
     /// (`length + idx`) first; an index still out of range after
     /// normalisation (`final_idx >= length`, unsigned — also catches a
     /// too-negative index that wrapped) raises.
-    fn inline_array_get(&mut self, arr_boxed: Value, index_val: Value) -> Value {
+    fn inline_array_get(&mut self, arr_boxed: Value, index_val: Value) -> Result<Value, String> {
         let (data_ptr, length) = self.emit_array_data_and_len(arr_boxed);
-        let idx_i64 = self.index_to_i64(index_val);
+        let idx_i64 = self.index_to_i64(index_val)?;
         let final_idx = self.normalize_index(idx_i64, length);
 
         let in_bounds_block = self.builder.create_block();
@@ -636,7 +626,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
 
         self.builder.switch_to_block(merge_block);
         self.builder.seal_block(merge_block);
-        self.builder.block_params(merge_block)[0]
+        Ok(self.builder.block_params(merge_block)[0])
     }
 
     /// Inline array element write: arr[index] = value → direct memory store.
@@ -649,9 +639,14 @@ impl<'a, 'b> MirToIR<'a, 'b> {
     /// an OOB write silently corrupted `arr[0]` instead of being rejected
     /// as the VM rejects it. Negative indices are normalised first; an
     /// index still out of range after normalisation raises.
-    fn inline_array_set(&mut self, arr_boxed: Value, index_val: Value, val: Value) {
+    fn inline_array_set(
+        &mut self,
+        arr_boxed: Value,
+        index_val: Value,
+        val: Value,
+    ) -> Result<(), String> {
         let (data_ptr, length) = self.emit_array_data_and_len(arr_boxed);
-        let idx_i64 = self.index_to_i64(index_val);
+        let idx_i64 = self.index_to_i64(index_val)?;
         let final_idx = self.normalize_index(idx_i64, length);
 
         let in_bounds_block = self.builder.create_block();
@@ -682,6 +677,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
         self.builder
             .ins()
             .store(MemFlags::trusted(), val, elem_addr, 0);
+        Ok(())
     }
 
     /// Bounds-check-elided variant of `inline_array_get`.
@@ -692,29 +688,40 @@ impl<'a, 'b> MirToIR<'a, 'b> {
     /// Index normalization is also skipped — the caller must guarantee a
     /// non-negative index. Out-of-bounds reads with this variant are
     /// memory-unsafe; only emit when the elision plan grants trust.
-    fn inline_array_get_unchecked(&mut self, arr_boxed: Value, index_val: Value) -> Value {
+    fn inline_array_get_unchecked(
+        &mut self,
+        arr_boxed: Value,
+        index_val: Value,
+    ) -> Result<Value, String> {
         let (data_ptr, _length) = self.emit_array_data_and_len(arr_boxed);
-        let idx_i64 = self.index_to_i64(index_val);
+        let idx_i64 = self.index_to_i64(index_val)?;
         // No `normalize_index`/`bounds_check` — the elision plan proves
         // `idx >= 0` and `idx < length`.
         let byte_offset = self.builder.ins().ishl_imm(idx_i64, 3);
         let elem_addr = self.builder.ins().iadd(data_ptr, byte_offset);
-        self.builder
+        Ok(self
+            .builder
             .ins()
-            .load(types::I64, MemFlags::trusted(), elem_addr, 0)
+            .load(types::I64, MemFlags::trusted(), elem_addr, 0))
     }
 
     /// Bounds-check-elided variant of `inline_array_set`.
     ///
     /// Same caveats as `inline_array_get_unchecked`.
-    fn inline_array_set_unchecked(&mut self, arr_boxed: Value, index_val: Value, val: Value) {
+    fn inline_array_set_unchecked(
+        &mut self,
+        arr_boxed: Value,
+        index_val: Value,
+        val: Value,
+    ) -> Result<(), String> {
         let (data_ptr, _length) = self.emit_array_data_and_len(arr_boxed);
-        let idx_i64 = self.index_to_i64(index_val);
+        let idx_i64 = self.index_to_i64(index_val)?;
         let byte_offset = self.builder.ins().ishl_imm(idx_i64, 3);
         let elem_addr = self.builder.ins().iadd(data_ptr, byte_offset);
         self.builder
             .ins()
             .store(MemFlags::trusted(), val, elem_addr, 0);
+        Ok(())
     }
 
     /// Is the `Place::Index` currently being lowered a site the bounds-elision
@@ -1180,9 +1187,9 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                 // the unchecked variant. Default empty plan keeps every
                 // access on the checked path — no behaviour change.
                 if self.index_access_is_trusted(base, operand) {
-                    return Ok(self.inline_array_get_unchecked(base_val, index_val));
+                    return self.inline_array_get_unchecked(base_val, index_val);
                 }
-                Ok(self.inline_array_get(base_val, index_val))
+                self.inline_array_get(base_val, index_val)
             }
             Place::Deref(inner) => {
                 let ref_addr = self.read_place(inner)?;
@@ -1391,10 +1398,10 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                 let index_val = self.compile_operand_raw(operand)?;
                 // Bounds-check elision: see the matching read-side path.
                 if self.index_access_is_trusted(base, operand) {
-                    self.inline_array_set_unchecked(base_val, index_val, val);
+                    self.inline_array_set_unchecked(base_val, index_val, val)?;
                     return Ok(());
                 }
-                self.inline_array_set(base_val, index_val, val);
+                self.inline_array_set(base_val, index_val, val)?;
                 Ok(())
             }
             Place::Deref(inner) => {
