@@ -1565,6 +1565,98 @@ producer fix above.
 
 ---
 
+### 6.8 Forward closure-callee resolution — LANDED 2026-08-03
+
+§6.7 named the honest route to `SYN__callvalue-stop-returns-value` and this
+is it. **Acceptance gate 2/5 → 3/5**; the fixture executes 3 native
+dispatches and prints 2, checked against `--mode vm`.
+
+**The gap.** A DIRECT call's destination is stamped by
+`types::named_function_return_kind` from `harvest_return_abi`'s table. An
+INDIRECT call reads its callee from a slot and had no lookup at all — the
+`_ => None` arm of both call-stamp passes — so the destination stayed
+unproven and `call_return_abi_class` surfaced. New module
+`crates/shape-jit/src/mir_compiler/closure_callee.rs` computes which
+indirect callees are statically determined; the two existing call-stamp
+passes gained one arm each that ends at the same return table. No
+inference-policy change, no backward propagation, no default.
+
+**Where the fixture actually blocks, which is not where §6.7 implies.** The
+unproven slot is inside `__closure_1` (`h`), and the callee `g` is a
+CAPTURE, not a local — captures are the body's leading parameters, so no
+statement in that MIR produces the slot. An intra-function rule alone does
+not reach this fixture. Two rules were needed:
+
+- **R1 (intra-function)**: the callee slot's sole writer in this function is
+  a closure or function constant with a known fid. Three spellings —
+  `ClosureCapture { function_id: Some(_) }`, the back-patched
+  `Assign(slot, Use(Const(Function(name))))` (what most MIR the JIT sees
+  actually carries; the placeholder is rewritten at
+  `compiler/functions.rs:1074-1092`), and the unpatched `ClosurePlaceholder`.
+- **R2 (capture-bound)**: the callee is the closure's own capture, resolved
+  at its construction site in another function's MIR — so the pass is
+  whole-program and is built in `compiler/program.rs` / `compiler/strategy.rs`
+  where `&BytecodeProgram` is in scope.
+
+**The correspondence hazard, and how R2 avoids inheriting it.**
+`ClosureCapture.operands` and `ClosureLayout`'s capture indices come from two
+independent passes that each sort capture names alphabetically. They are
+*intended* to agree positionally — `emit_heap_closure` already zips them —
+but the only check is a count comparison, and the two passes filter
+different outer-scope sets. Rather than assume the zip, R2 requires the
+correspondence to be **forced by kinds**: exactly one capture index carries
+`Ptr(HeapKind::Closure)`, exactly one construction-site operand resolves
+under R1, and the counts are equal. `native_kind_from_concrete_type` maps
+both `ConcreteType::Closure(_)` and `ConcreteType::Function(_)` to that
+kind, so every R1-resolvable operand is counted by the first condition — a
+lone callable operand can only be the lone callable capture, under any
+permutation. Plus: exactly one construction site program-wide, and
+`CaptureKind::Immutable` (a `Shared`/`OwnedMutable` capture is a rebindable
+cell, so the construction site does not decide its value). Each condition is
+a refusal; seven unit tests in the module pin the four refusals and the
+three resolutions.
+
+**A trap worth recording.** The stamp was first written as a seed into the
+constructor's `concrete_seed`, next to the frame and capture seeds. It had
+no effect, because `populate_field_byte_offsets_from_schemas` re-runs the
+inference from a deliberately narrow seed (concrete types + slot 0 + param
+slots, to avoid field-kind pollution) and drops every call-destination
+stamp. The direct-call stamp survives that recompute only because it is
+recomputed INSIDE the pass. Anything of this shape must live in the fixpoint
+and the map must be held on `MirToIR`.
+
+**Measured, own runs, same corpus and harness, binaries built from each
+tree.** Baseline `4a760242`: 88/488 native (18.0%), 330 whole-program
+fallbacks, `jit-compile-error=137`, unexpected=0. Branch: **89/488 (18.2%)**,
+329 fallbacks, `jit-compile-error=136`, unexpected=0. Exactly +1, and it is
+the fixture.
+
+**The corpus could not have seen this fix, and that is the #260 point
+biting in practice.** `SYN__callvalue-stop-returns-value` was ALREADY
+classified MATCH on baseline — with the JIT inert, both tiers ran the
+interpreter and agreed trivially. It is `knownRedNowMatching` on both runs.
+Only the native-witness acceptance gate distinguishes them. Any future
+claim about this slice must quote dispatches, not MATCH.
+
+**One classification differs between the runs and it is NOT this change.**
+`ACC__comptime__pb3.shape` went MATCH → DIVERGED. Both binaries produce
+byte-identical output on it (VM surfaces a `GetProp on Ptr(Decimal)`
+NotImplemented; the JIT leg panics inside `rust_decimal`), and running the
+differential on that program alone five times per binary gives 3/5 MATCH on
+BOTH. It is nondeterministic on baseline too — the known
+`__main__`-carries-V2-opcodes-with-no-FrameDescriptor family (`pb3` ×3 in
+the #239 thread). Recorded here so the next lane does not re-diagnose it.
+
+**Not covered, deliberately.** A callee that is a genuine function
+PARAMETER (`fn apply(f: fn(int) -> int, v: int) { return f(v) }`) still
+surfaces: resolving it needs call-site argument resolution, a different
+interprocedural rule. `SYN__datetime-method-native` is also untouched — its
+bail is that `DateTime` used as a function value has NO fid in the JIT
+function table at all, and this machinery consumes fids rather than minting
+them. Both deopt cleanly; neither was narrowed to make a number move.
+
+---
+
 ## 7. The third carrier
 
 `jit_make_closure` (`crates/shape-jit/src/ffi/object/closure.rs:40`) produces
