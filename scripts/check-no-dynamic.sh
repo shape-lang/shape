@@ -11,6 +11,19 @@
 # Scope: source trees only (crates/, bin/, tools/, extensions/). Documentation
 # trees (docs/, CLAUDE.md, plans/) intentionally NOT scanned — they discuss the
 # forbidden patterns by name as part of the enforcement contract.
+#
+# Markdown is excluded from the scan (#256 row audit, 2026-08-03). The scope
+# above is directory-based, but four V2-era audit documents were checked in
+# UNDER crates/ (`crates/shape-vm/src/V2_*.md`,
+# `crates/shape-vm/src/executor/V2_METHOD_DISPATCH_AUDIT.md`,
+# `crates/shape-jit/src/compiler/V2_MIGRATION_STATUS.md`), so their prose was
+# being counted as if it were code. It made the NanBox row 100% vacuous: 17/17
+# of its residue was markdown, 0 was Rust, and those 17 were 17 units of slack
+# a real reintroduction could hide inside. A .md file compiles to nothing —
+# a forbidden construct cannot EXIST there, only be described, and CLAUDE.md
+# §Forbidden Patterns explicitly requires describing deleted code by name.
+# Measured blast radius of the exclusion: NanBox 17→0 and TAG_BOOL_* 52→51.
+# Every other row is unaffected.
 
 set -euo pipefail
 
@@ -27,7 +40,7 @@ fi
 
 count_one() {
   # rg returns exit 1 when there are zero matches; that's not an error here.
-  { rg --no-heading -c -P "$1" "${scope[@]}" 2>/dev/null || true; } \
+  { rg --no-heading -c -P "$1" -g '!*.md' "${scope[@]}" 2>/dev/null || true; } \
     | awk -F: '{s+=$2} END {print s+0}'
 }
 
