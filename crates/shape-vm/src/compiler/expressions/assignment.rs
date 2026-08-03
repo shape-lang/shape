@@ -1419,7 +1419,16 @@ impl BytecodeCompiler {
         Ok(())
     }
 
-    fn field_type_for_assignment_value(&mut self, value: &Expr) -> Option<FieldType> {
+    /// Resolve an expression to a concrete `FieldType`: literal fast path,
+    /// then the resolved inference result for anything else.
+    ///
+    /// #235 stage 1 widened the visibility so the inline-object-literal
+    /// producer in `expressions/collections.rs` can mint schemas from
+    /// resolved types instead of stamping every non-literal field `Any`.
+    pub(in crate::compiler) fn field_type_for_assignment_value(
+        &mut self,
+        value: &Expr,
+    ) -> Option<FieldType> {
         if let Some(field_type) = super::collections::infer_field_type_from_expr(value) {
             return Some(field_type);
         }
@@ -1448,7 +1457,7 @@ impl BytecodeCompiler {
 
     fn field_type_is_strictly_proven(field_type: &FieldType) -> bool {
         match field_type {
-            FieldType::Any => false,
+            FieldType::Any(_) => false,
             FieldType::Object(name) => name != "unknown",
             FieldType::Array(inner) | FieldType::Option(inner) | FieldType::Set(inner) => {
                 Self::field_type_is_strictly_proven(inner)

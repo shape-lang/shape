@@ -67,7 +67,9 @@ pub fn create_state_module() -> ModuleExports {
                 "module_bindings".to_string(),
                 FieldType::HashMap {
                     key: Box::new(FieldType::String),
-                    value: Box::new(FieldType::Any),
+                    value: Box::new(
+                        shape_runtime::type_schema::any_migration::heterogeneous_stdlib_carrier(),
+                    ),
                 },
             ),
             ("instruction_count".to_string(), FieldType::I64),
@@ -77,7 +79,10 @@ pub fn create_state_module() -> ModuleExports {
     module.add_type_schema(TypeSchema::new(
         "ModuleState",
         vec![
-            ("bindings".to_string(), FieldType::Any),
+            (
+                "bindings".to_string(),
+                shape_runtime::type_schema::any_migration::heterogeneous_stdlib_carrier(),
+            ),
             (
                 "schemas".to_string(),
                 FieldType::HashMap {
@@ -92,7 +97,10 @@ pub fn create_state_module() -> ModuleExports {
         "CallPayload",
         vec![
             ("hash".to_string(), FieldType::String),
-            ("args".to_string(), FieldType::Any),
+            (
+                "args".to_string(),
+                shape_runtime::type_schema::any_migration::heterogeneous_stdlib_carrier(),
+            ),
         ],
     ));
 
@@ -103,7 +111,9 @@ pub fn create_state_module() -> ModuleExports {
                 "changed".to_string(),
                 FieldType::HashMap {
                     key: Box::new(FieldType::String),
-                    value: Box::new(FieldType::Any),
+                    value: Box::new(
+                        shape_runtime::type_schema::any_migration::heterogeneous_stdlib_carrier(),
+                    ),
                 },
             ),
             (
@@ -1127,14 +1137,16 @@ mod tests {
             vm_state.get_field("module_bindings").unwrap().field_type,
             FieldType::HashMap {
                 key: Box::new(FieldType::String),
-                value: Box::new(FieldType::Any),
+                value: Box::new(
+                    shape_runtime::type_schema::any_migration::heterogeneous_stdlib_carrier()
+                ),
             }
         );
 
         let mod_state = find_schema(&module, "ModuleState");
         assert_eq!(
             mod_state.get_field("bindings").unwrap().field_type,
-            FieldType::Any
+            shape_runtime::type_schema::any_migration::heterogeneous_stdlib_carrier()
         );
 
         let call = find_schema(&module, "CallPayload");
@@ -1142,6 +1154,9 @@ mod tests {
             call.get_field("hash").unwrap().field_type,
             FieldType::String
         );
-        assert_eq!(call.get_field("args").unwrap().field_type, FieldType::Any);
+        assert_eq!(
+            call.get_field("args").unwrap().field_type,
+            shape_runtime::type_schema::any_migration::heterogeneous_stdlib_carrier()
+        );
     }
 }

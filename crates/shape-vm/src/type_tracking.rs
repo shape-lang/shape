@@ -822,6 +822,24 @@ pub struct TypeTracker {
     /// Compile-time object schema contracts: schema id -> field type annotation.
     ///
     /// Used for callable typed-object fields where runtime schema stores only slot layout.
+    /// Function-typed inline-object field annotations, by schema id.
+    ///
+    /// #235 stage 1 narrowed this from "every field of every inline object"
+    /// to "fields whose annotation is a function type". Before stage 1 the
+    /// inline-object schemas were minted all-`Any`, so this side table was the
+    /// only place the per-field types survived — and the JIT, which reads
+    /// schemas and not this table, saw nothing. The schemas now carry the real
+    /// types, which retires that role.
+    ///
+    /// What does NOT retire: `FieldType` has no function variant, so a field
+    /// declared `() => Table<{...}>` cannot be represented in the schema at
+    /// all. `expressions/function_calls.rs::extract_table_schema_from_callable_field`
+    /// needs that annotation to unwrap the callable's return type and
+    /// propagate the table schema through it. Deleting the table outright was
+    /// measured and fails exactly one test,
+    /// `test_imported_module_typed_callable_field_propagates_table_schema_for_filter_chain`.
+    /// The table dies when `FieldType` can express a function type, which is
+    /// ADR-020 expressiveness work, not #235.
     object_field_contracts: HashMap<SchemaId, HashMap<String, TypeAnnotation>>,
 
     /// v2: Computed C-compatible struct layouts indexed by SchemaId.
@@ -1003,12 +1021,24 @@ impl TypeTracker {
     }
 
     /// Register compile-time field type contracts for an object schema id.
+    /// Record the function-typed subset of an inline object's field
+    /// annotations. Non-function annotations are dropped: the schema carries
+    /// them now (#235 stage 1), and keeping a second copy is how the two
+    /// drifted apart in the first place.
     pub fn register_object_field_contracts(
         &mut self,
         schema_id: SchemaId,
         fields: HashMap<String, TypeAnnotation>,
     ) {
-        self.object_field_contracts.insert(schema_id, fields);
+        let function_typed: HashMap<String, TypeAnnotation> = fields
+            .into_iter()
+            .filter(|(_, ann)| matches!(ann, TypeAnnotation::Function { .. }))
+            .collect();
+        if function_typed.is_empty() {
+            return;
+        }
+        self.object_field_contracts
+            .insert(schema_id, function_typed);
     }
 
     /// Lookup a compile-time field type contract for a schema field.
@@ -1176,56 +1206,6 @@ impl TypeTracker {
     pub fn restore_local_types(&mut self, snapshot: LocalTypesSnapshot) {
         self.local_types = snapshot.local_types;
         self.local_type_scopes = snapshot.local_type_scopes;
-    }
-
-    /// Register an inline object schema from field names.
-    ///
-    /// Creates a TypeSchema for an object literal with the given fields.
-    /// All fields are typed `FieldType::Any` at the schema layer since
-    /// the caller does not provide per-field type info — the
-    /// post_inference_verify pass at
-    /// `crates/shape-vm/src/compiler/post_inference_verify.rs` absorbs
-    /// the resulting `__inline_obj_N` schemas via the W17.2-C narrowed
-    /// transitional whitelist row pre-W17.3 (per audit §4.D.5 + §9.B.3
-    /// supervisor ratify 2026-05-19).
-    ///
-    /// **Deprecation (W17.2-C):** prefer
-    /// [`Self::register_inline_object_schema_typed`] when per-field
-    /// types are known at the call site. The untyped variant routes
-    /// internally through `register_inline_object_schema_typed` with
-    /// each field stamped `FieldType::Any` — same `__inline_obj_N` name
-    /// format + same verification-pass absorber. Per audit §4.D.5
-    /// PROPAGATE disposition: callers SHOULD migrate to the typed
-    /// variant; the verification-pass safety net catches any residual
-    /// Any leakage at user-facing schemas. ADR-006 §2.7.5 producer-side
-    /// stamp.
-    ///
-    /// Returns the SchemaId for use with NewTypedObject opcode.
-    ///
-    /// # Example
-    /// ```ignore
-    /// // For: let x = { a: 1, b: "hello" }
-    /// let schema_id = tracker.register_inline_object_schema(&["a", "b"]);
-    /// // Now emit NewTypedObject with schema_id
-    /// ```
-    #[deprecated(
-        since = "0.3.0",
-        note = "Prefer `register_inline_object_schema_typed` per audit \
-                §4.D.5 W17.2-C (PROPAGATE per-field types at call site). \
-                The untyped variant routes through the typed variant \
-                with FieldType::Any per field; the post_inference_verify \
-                pass absorbs via the __inline_obj_* transitional row."
-    )]
-    pub fn register_inline_object_schema(&mut self, field_names: &[&str]) -> SchemaId {
-        // Route through the typed variant with FieldType::Any per field
-        // — keeps schema-name format (`__inline_obj_N`) + deduplication
-        // identical, while the deprecation nudges callers toward the
-        // typed variant. Per audit §4.D.5 W17.2-C PROPAGATE.
-        let typed_fields: Vec<(&str, FieldType)> = field_names
-            .iter()
-            .map(|name| (*name, FieldType::Any))
-            .collect();
-        self.register_inline_object_schema_typed(&typed_fields)
     }
 
     /// Register an inline object schema with typed fields

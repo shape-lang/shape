@@ -92,6 +92,8 @@ impl BytecodeCompiler {
             closure_capture_drop_locals: Vec::new(),
             type_inference: shape_runtime::type_system::inference::TypeInferenceEngine::new(),
             inference_facts: shape_runtime::type_system::InferenceFacts::default(),
+            inline_object_schema_by_span: std::collections::HashMap::new(),
+            lowering_module_namespace_object: false,
             resolved_expr_types: HashMap::new(),
             inferred_return_annotations: HashMap::new(),
             type_aliases: HashMap::new(),

@@ -513,7 +513,10 @@ pub fn register_builtin_schemas(registry: &mut TypeSchemaRegistry) -> BuiltinSch
     // parallel field-kind track drive reads), matching the
     // `__ComptimeFieldDescriptor.annotations` precedent.
     let _comptime_frozen_erased = TypeSchemaBuilder::new(COMPTIME_FROZEN_ERASED_SCHEMA)
-        .array_field("bounds", FieldType::Any)
+        .array_field(
+            "bounds",
+            crate::type_schema::any_migration::bounds_array_element(),
+        )
         .register(registry);
 
     // ADR-009 (ticket B2, slice S3): reserved opaque carriers for
@@ -865,7 +868,10 @@ pub fn register_builtin_schemas(registry: &mut TypeSchemaRegistry) -> BuiltinSch
     let _comptime_frozen_parameter = TypeSchemaBuilder::new(COMPTIME_FROZEN_PARAMETER_SCHEMA)
         .int_field("identity_high")
         .int_field("identity_low")
-        .array_field("bounds", FieldType::Any)
+        .array_field(
+            "bounds",
+            crate::type_schema::any_migration::bounds_array_element(),
+        )
         .register(registry);
 
     // ADR-009 E2 #18 (slice 2): the typed `item_fn` carrier (E2-D10). This schema
@@ -882,7 +888,13 @@ pub fn register_builtin_schemas(registry: &mut TypeSchemaRegistry) -> BuiltinSch
     let _comptime_field_descriptor = TypeSchemaBuilder::new("__ComptimeFieldDescriptor")
         .string_field("name")
         .string_field("type")
-        .array_field("annotations", FieldType::Any)
+        // Element type is proven at the producer: `comptime_target.rs`
+        // builds `anns_arr` with `nb_object_array(ann_objs)` where every
+        // `ann_obj` is a `__ComptimeAnnotationDescriptor`.
+        .array_field(
+            "annotations",
+            FieldType::Object("__ComptimeAnnotationDescriptor".to_string()),
+        )
         .bool_field("optional")
         .object_field("type_ref", "__ComptimeTypeRef")
         .register(registry);
@@ -896,7 +908,8 @@ pub fn register_builtin_schemas(registry: &mut TypeSchemaRegistry) -> BuiltinSch
 
     let _comptime_annotation_descriptor = TypeSchemaBuilder::new("__ComptimeAnnotationDescriptor")
         .string_field("name")
-        .array_field("args", FieldType::Any)
+        // `comptime_target.rs` builds `args_arr` with `nb_string_array`.
+        .array_field("args", FieldType::String)
         .register(registry);
 
     // comptime-excellence §4.3 line 284: `return_type: OptionString` — a
@@ -914,12 +927,22 @@ pub fn register_builtin_schemas(registry: &mut TypeSchemaRegistry) -> BuiltinSch
     let _comptime_target = TypeSchemaBuilder::new("__ComptimeTarget")
         .string_field("kind")
         .string_field("name")
-        .array_field("fields", FieldType::Any)
-        .array_field("params", FieldType::Any)
+        // All four element types are proven at the producer in
+        // `comptime_target.rs`: `fields`/`params` are `nb_object_array` of
+        // the named descriptor schemas, `annotations`/`captures` are
+        // `nb_string_array`.
+        .array_field(
+            "fields",
+            FieldType::Object("__ComptimeFieldDescriptor".to_string()),
+        )
+        .array_field(
+            "params",
+            FieldType::Object("__ComptimeParamDescriptor".to_string()),
+        )
         .option_string_field("return_type")
         .object_field("return_type_ref", "__ComptimeTypeRef")
-        .array_field("annotations", FieldType::Any)
-        .array_field("captures", FieldType::Any)
+        .array_field("annotations", FieldType::String)
+        .array_field("captures", FieldType::String)
         .register(registry);
 
     // §4.4 comptime-handler `ctx` compile-context record. Read-only build

@@ -1325,7 +1325,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                 | FieldType::Array(_)
                 | FieldType::Option(_)
                 | FieldType::Decimal
-                | FieldType::Any
+                | FieldType::Any(_)
                 | FieldType::HashMap { .. }
                 | FieldType::Set(_) => None,
             }
@@ -1362,7 +1362,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                 | FieldType::Object(_)
                 | FieldType::Array(_)
                 | FieldType::Option(_)
-                | FieldType::Any
+                | FieldType::Any(_)
                 // W17.3-4.1 — HashMap<K, V> / Set<T> elements are
                 // not scalar element types; fall back to legacy
                 // NaN-boxed array path (matches Array/Option shape).
@@ -1373,7 +1373,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
 
         fn object_store_alloc_surface(ft: &FieldType) -> Option<&'static str> {
             match ft {
-                FieldType::Any => Some("Any"),
+                FieldType::Any(_) => Some("Any"),
                 FieldType::HashMap { .. } => Some("HashMap"),
                 FieldType::Set(_) => Some("Set"),
                 // `jit_typed_object_alloc` handles `Option<T>` specially as a

@@ -18,7 +18,7 @@
 
 use crate::marshal::{register_typed_fn_1, register_typed_fn_2_full};
 use crate::module_exports::{ModuleExports, ModuleParam};
-use crate::type_schema::register_predeclared_any_schema;
+use crate::type_schema::{FieldType, register_predeclared_typed_schema};
 use crate::typed_module_exports::{ConcreteReturn, ConcreteType, TypedReturn};
 use shape_value::heap_value::{HeapValue, TypedObjectStorage};
 use shape_value::{NativeKind, ValueSlot};
@@ -200,10 +200,18 @@ pub fn create_csv_module() -> ModuleExports {
                 .map(|h| h.to_string())
                 .collect();
 
-            // Auto-register the schema for this header set. The registry
-            // dedupes by field-name list; subsequent CSV files with the
-            // same header columns reuse the same SchemaId.
-            let schema_id = register_predeclared_any_schema(&headers);
+            // #235 stage 1: every CSV cell is parsed as a string — the
+            // `field_kinds` track built on the very next line is
+            // `vec![NativeKind::String; headers.len()]`, and the heap mask
+            // below says "every field is a string". The column types were
+            // resolved here all along; only the schema claimed not to know
+            // them. Header NAMES are runtime data, so the registration stays
+            // at runtime; the `Any` does not.
+            let typed_headers: Vec<(String, FieldType)> = headers
+                .iter()
+                .map(|h| (h.clone(), FieldType::String))
+                .collect();
+            let schema_id = register_predeclared_typed_schema(&typed_headers);
             let field_kinds: Arc<[NativeKind]> =
                 Arc::from(vec![NativeKind::String; headers.len()].into_boxed_slice());
             // Heap mask: every field is a string (heap-resident).

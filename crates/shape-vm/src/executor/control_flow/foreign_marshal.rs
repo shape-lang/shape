@@ -904,7 +904,7 @@ fn build_field_slot(
         | FieldType::Option(_)
         | FieldType::HashMap { .. }
         | FieldType::Set(_)
-        | FieldType::Any => Err(VMError::NotImplemented(format!(
+        | FieldType::Any(_) => Err(VMError::NotImplemented(format!(
             "foreign_marshal: field '{field_name}' of type {:?} has no \
              FFI unmarshal projection yet (W17-foreign-ffi follow-up). \
              Container kinds (Array, HashMap, Set, Option) defer to \

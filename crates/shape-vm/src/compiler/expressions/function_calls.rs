@@ -655,7 +655,7 @@ pub(crate) fn field_type_contract_annotation(
                 args: vec![elem],
             })
         }
-        FieldType::Any => None,
+        FieldType::Any(_) => None,
     }
 }
 
@@ -778,7 +778,7 @@ impl BytecodeCompiler {
             FieldType::Option(_)
             | FieldType::HashMap { .. }
             | FieldType::Set(_)
-            | FieldType::Any => return None,
+            | FieldType::Any(_) => return None,
         })
     }
 
@@ -1299,26 +1299,20 @@ impl BytecodeCompiler {
         let shape_ast::ast::TypeAnnotation::Object(fields) = ann else {
             return None;
         };
-        // W17.2-C §4.D.5 migration: route through the typed variant
-        // with FieldType::Any per field (NOT per-field type lowering
-        // via type_annotation_to_field_type — that path changes the
-        // schema layout vs the pre-existing Any-typed shape, which
-        // breaks downstream consumers that depend on the legacy
-        // Any-uniform field layout). The `register_object_field_contracts`
-        // call below STILL preserves per-field TypeAnnotation contracts
-        // so downstream callable-field unwrapping + JIT lookups see
-        // the annotated types. The verification-pass safety net
-        // catches via the `__inline_obj_*` transitional row.
-        // Per audit §4.D.5 PROPAGATE deferred to v0.4 W17.3+ for the
-        // per-field-typed schema layout migration. ADR-006 §2.7.5
-        // producer-side stamp preserved at the contract layer
-        // (`register_object_field_contracts`).
+        // #235 stage 1: lower each field's declared annotation, exactly as
+        // the sibling `extract_table_schema_from_annotation` above already
+        // does. The pre-#235 comment here argued that per-field lowering
+        // "changes the schema layout vs the pre-existing Any-typed shape,
+        // which breaks downstream consumers that depend on the legacy
+        // Any-uniform field layout" — that is a downstream coupling with
+        // zero weight under §Greenfield, and it was the coupling keeping
+        // the JIT off every inline-object-annotated value.
         let typed_fields: Vec<(&str, shape_runtime::type_schema::FieldType)> = fields
             .iter()
             .map(|field| {
                 (
                     field.name.as_str(),
-                    shape_runtime::type_schema::FieldType::Any,
+                    Self::type_annotation_to_field_type(&field.type_annotation),
                 )
             })
             .collect();
@@ -1338,9 +1332,9 @@ impl BytecodeCompiler {
     /// function whose canonical inferred signature returns a structural object.
     ///
     /// This is intentionally a projection from `InferenceFacts` at the read
-    /// site, not a parallel function-name side table. The schema remains
-    /// Any-uniform to match object-literal layout, while field contracts carry
-    /// the precise inferred field annotations for downstream field lookups.
+    /// site, not a parallel function-name side table. #235 stage 1 made the
+    /// schema carry the inferred per-field types instead of an Any-uniform
+    /// layout.
     pub(crate) fn inferred_return_object_schema_id(&mut self, call_name: &str) -> Option<u32> {
         use shape_ast::ast::TypeAnnotation;
         use shape_runtime::type_schema::FieldType;
@@ -1385,9 +1379,12 @@ impl BytecodeCompiler {
                 )
             })?;
 
+        // #235 stage 1: `fields` above already holds the lowered
+        // `FieldType` for every field — the pre-#235 shape computed it and
+        // then threw it away for an Any-uniform layout.
         let typed_fields: Vec<(&str, FieldType)> = fields
             .iter()
-            .map(|(name, _)| (name.as_str(), FieldType::Any))
+            .map(|(name, ft)| (name.as_str(), ft.clone()))
             .collect();
         let schema_id = self
             .type_tracker

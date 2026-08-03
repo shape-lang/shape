@@ -93,7 +93,7 @@ pub fn field_type_to_tag(ft: &FieldType) -> u16 {
         FieldType::Array(_) => FIELD_TAG_ARRAY,
         FieldType::Object(_) => FIELD_TAG_OBJECT,
         FieldType::Decimal => FIELD_TAG_DECIMAL,
-        FieldType::Any => FIELD_TAG_ANY,
+        FieldType::Any(_) => FIELD_TAG_ANY,
         // W17.2-B (audit §4.D.1 + §9.B.1 (a) supervisor ratify
         // 2026-05-19): `Option<T>` discriminator. Inner kind lives in
         // the slot's parallel `field_kinds` track per ADR-006 §2.7.7.
@@ -134,16 +134,20 @@ pub(in crate::executor) fn tag_to_field_type(tag: u16) -> Option<FieldType> {
         FIELD_TAG_BOOL => Some(FieldType::Bool),
         FIELD_TAG_STRING => Some(FieldType::String),
         FIELD_TAG_TIMESTAMP => Some(FieldType::Timestamp),
-        FIELD_TAG_ARRAY => Some(FieldType::Array(Box::new(FieldType::Any))),
+        FIELD_TAG_ARRAY => Some(FieldType::Array(Box::new(
+            shape_runtime::type_schema::any_migration::field_tag_roundtrip(),
+        ))),
         FIELD_TAG_OBJECT => Some(FieldType::Object(String::new())),
         FIELD_TAG_DECIMAL => Some(FieldType::Decimal),
-        FIELD_TAG_ANY => Some(FieldType::Any),
+        FIELD_TAG_ANY => Some(shape_runtime::type_schema::any_migration::field_tag_roundtrip()),
         // W17.2-B: coarse Option(Any) reconstruction; the operand
         // doesn't carry inner kind (mirrors FIELD_TAG_ARRAY shape).
         // Consumers needing the precise inner kind read from the
         // parallel `field_kinds` track at slot-read time per ADR-006
         // §2.7.7 / Q9.
-        FIELD_TAG_OPTION => Some(FieldType::Option(Box::new(FieldType::Any))),
+        FIELD_TAG_OPTION => Some(FieldType::Option(Box::new(
+            shape_runtime::type_schema::any_migration::field_tag_roundtrip(),
+        ))),
         // W17.3-4.3 — coarse HashMap/Set reconstruction; the operand
         // doesn't carry K/V/element inner kinds (mirrors FIELD_TAG_ARRAY
         // shape). Consumers needing the precise K/V/element kind read
@@ -151,10 +155,12 @@ pub(in crate::executor) fn tag_to_field_type(tag: u16) -> Option<FieldType> {
         // slot-read time per ADR-006 §2.7.7 / Q9 + the runtime-tier
         // monomorphization story.
         FIELD_TAG_HASHMAP => Some(FieldType::HashMap {
-            key: Box::new(FieldType::Any),
-            value: Box::new(FieldType::Any),
+            key: Box::new(shape_runtime::type_schema::any_migration::field_tag_roundtrip()),
+            value: Box::new(shape_runtime::type_schema::any_migration::field_tag_roundtrip()),
         }),
-        FIELD_TAG_SET => Some(FieldType::Set(Box::new(FieldType::Any))),
+        FIELD_TAG_SET => Some(FieldType::Set(Box::new(
+            shape_runtime::type_schema::any_migration::field_tag_roundtrip(),
+        ))),
         _ => None,
     }
 }
@@ -1534,8 +1540,8 @@ mod tests {
         assert_eq!(
             ft,
             FieldType::HashMap {
-                key: Box::new(FieldType::Any),
-                value: Box::new(FieldType::Any),
+                key: Box::new(shape_runtime::type_schema::any_migration::field_tag_roundtrip()),
+                value: Box::new(shape_runtime::type_schema::any_migration::field_tag_roundtrip()),
             }
         );
     }
@@ -1545,7 +1551,12 @@ mod tests {
     #[test]
     fn tag_to_field_type_set_round_trip() {
         let ft = tag_to_field_type(FIELD_TAG_SET).unwrap();
-        assert_eq!(ft, FieldType::Set(Box::new(FieldType::Any)));
+        assert_eq!(
+            ft,
+            FieldType::Set(Box::new(
+                shape_runtime::type_schema::any_migration::field_tag_roundtrip()
+            ))
+        );
     }
 
     /// W17.3-4.3 §5.B — outer `field_type_to_tag` → `tag_to_field_type`

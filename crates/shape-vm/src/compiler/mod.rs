@@ -1077,6 +1077,35 @@ pub struct BytecodeCompiler {
     /// projections from this carrier directly instead of maintaining parallel
     /// per-param side tables.
     pub(crate) inference_facts: InferenceFacts,
+    /// Inline object-literal schema ids keyed by the literal's AST span.
+    ///
+    /// #235 stage 1. MIR lowering emits `StatementKind::ObjectStore { schema_id:
+    /// None, .. }` and `compiler::mir_schema_threading::back_patch_schema_ids`
+    /// fills it in. For named structs it resolves the name; for anonymous
+    /// literals it used to re-mint an all-`Any` schema from the field-name list,
+    /// producing a second schema that shadowed the typed one the bytecode side
+    /// had already registered — and the JIT read the shadow. This map carries
+    /// the real id across, keyed by the one thing both passes agree on.
+    pub(crate) inline_object_schema_by_span: std::collections::HashMap<shape_ast::ast::Span, u32>,
+    /// Set while the compiler is lowering a synthesized module-namespace
+    /// object — the `Expr::Object` that `compile_module_def` builds from a
+    /// module's exports and pushes through the ordinary object-literal
+    /// producer.
+    ///
+    /// #235: these are NOT user object literals. Their fields are a module's
+    /// exports — constants sitting next to function references — which is the
+    /// definition of a Class B heterogeneous carrier, staged after stage 1 in
+    /// the R-G4 plan. Marking them at the synthesizer is what lets stage 1
+    /// demand a resolved type for every *user* literal field without also
+    /// demanding one for a namespace record. The mark is set by the producer
+    /// and never inferred from a failure to resolve.
+    ///
+    /// A flag rather than a span key because one synthesizer
+    /// (`compiler_impl_reference_model`) builds its object with
+    /// `Span::default()`, which would collide with any other default-spanned
+    /// literal. The synthesized entries are all `Expr::Identifier`, so the
+    /// lowering cannot recurse into a second object literal while set.
+    pub(crate) lowering_module_namespace_object: bool,
 
     /// T1 KEYSTONE (strict-flip, 2026-06-22): POST-SOLVE per-expression type
     /// table keyed by source span, harvested from the reference-model inference

@@ -6029,7 +6029,9 @@ impl BytecodeCompiler {
             // Intermediate-tier Any with the post_inference_verify E0900
             // safety net, same disposition as the other non-storage arms
             // below per audit §4.D.8 explicit-per-variant discipline.
-            TypeAnnotation::Borrow { .. } => FieldType::Any,
+            TypeAnnotation::Borrow { .. } => {
+                shape_runtime::type_schema::any_migration::unprojectable_annotation()
+            }
             TypeAnnotation::Array(inner) => {
                 FieldType::Array(Box::new(Self::type_annotation_to_field_type(inner)))
             }
@@ -6073,7 +6075,9 @@ impl BytecodeCompiler {
                 // Array / HashMap / Set / Option). Malformed arities
                 // for the otherwise-handled containers (e.g. `Option<>`,
                 // `HashMap<K>`, `Set<>`) also land here.
-                "HashMap" | "Map" | "Result" | "Set" | "Option" => FieldType::Any,
+                "HashMap" | "Map" | "Result" | "Set" | "Option" => {
+                    shape_runtime::type_schema::any_migration::unprojectable_annotation()
+                }
                 // User-defined generic structs — preserve the type name
                 other => FieldType::Object(other.to_string()),
             },
@@ -6085,35 +6089,55 @@ impl BytecodeCompiler {
             // route to FieldType::Any at the intermediate-tier and let
             // post_inference_verify surface E0900 if reached at
             // user-facing schemas.
-            TypeAnnotation::Tuple(_) => FieldType::Any,
+            TypeAnnotation::Tuple(_) => {
+                shape_runtime::type_schema::any_migration::unprojectable_annotation()
+            }
             // Object inline annotation (e.g. `{ x: int }` as a field
             // type) — schema construction is at the surrounding caller's
             // scope, not here; intermediate-tier Any with verification-
             // pass safety net.
-            TypeAnnotation::Object(_) => FieldType::Any,
+            TypeAnnotation::Object(_) => {
+                shape_runtime::type_schema::any_migration::unprojectable_annotation()
+            }
             // Function annotation (e.g. `(int) => string`) — closures
             // stored as TypedObject fields require explicit closure-
             // dispatch contract registration (W17-typed-carrier territory).
             // Intermediate Any; verification-pass safety net.
-            TypeAnnotation::Function { .. } => FieldType::Any,
+            TypeAnnotation::Function { .. } => {
+                shape_runtime::type_schema::any_migration::unprojectable_annotation()
+            }
             // Union / Intersection annotations — first-class union types
             // are W17.3/W17.4 territory (per audit §4.D.7 alternate
             // disposition); intermediate Any.
-            TypeAnnotation::Union(_) => FieldType::Any,
-            TypeAnnotation::Intersection(_) => FieldType::Any,
+            TypeAnnotation::Union(_) => {
+                shape_runtime::type_schema::any_migration::unprojectable_annotation()
+            }
+            TypeAnnotation::Intersection(_) => {
+                shape_runtime::type_schema::any_migration::unprojectable_annotation()
+            }
             // Void / Never don't have slot storage; intermediate Any
             // for inference-tier projection; verification-pass catches
             // if they reach user-facing schemas.
-            TypeAnnotation::Void => FieldType::Any,
-            TypeAnnotation::Never => FieldType::Any,
+            TypeAnnotation::Void => {
+                shape_runtime::type_schema::any_migration::unprojectable_annotation()
+            }
+            TypeAnnotation::Never => {
+                shape_runtime::type_schema::any_migration::unprojectable_annotation()
+            }
             // Null / Undefined map to the typed null sentinel at the
             // slot level; schema-side use is intermediate-only.
-            TypeAnnotation::Null => FieldType::Any,
-            TypeAnnotation::Undefined => FieldType::Any,
+            TypeAnnotation::Null => {
+                shape_runtime::type_schema::any_migration::unprojectable_annotation()
+            }
+            TypeAnnotation::Undefined => {
+                shape_runtime::type_schema::any_migration::unprojectable_annotation()
+            }
             // Dyn(Trait) — trait-object dispatch territory (W16.2-B
             // typed-object element kind); intermediate Any here, the
             // trait registry resolves the concrete dispatch downstream.
-            TypeAnnotation::Dyn(_) => FieldType::Any,
+            TypeAnnotation::Dyn(_) => {
+                shape_runtime::type_schema::any_migration::unprojectable_annotation()
+            }
             // ADR-009 B3 (S1): existential descriptor package types
             // (`exists<W...> Descriptor<W...>`) are comptime-only descriptor
             // packages — they never materialize as a runtime field-storage
@@ -6122,7 +6146,9 @@ impl BytecodeCompiler {
             // other non-storable annotation forms above; the reflection
             // representation is the freeze surface's job (S2/S3), not runtime
             // slot storage.
-            TypeAnnotation::Existential { .. } => FieldType::Any,
+            TypeAnnotation::Existential { .. } => {
+                shape_runtime::type_schema::any_migration::unprojectable_annotation()
+            }
         }
     }
 
@@ -7569,7 +7595,11 @@ mod tests {
             args: vec![TypeAnnotation::Basic("int".to_string())],
         };
         let ft = BytecodeCompiler::type_annotation_to_field_type(&ann);
-        assert_ne!(ft, FieldType::Any, "Option<int> must resolve structurally");
+        assert_ne!(
+            ft,
+            shape_runtime::type_schema::any_migration::unprojectable_annotation(),
+            "Option<int> must resolve structurally"
+        );
     }
 
     #[test]
@@ -7588,7 +7618,7 @@ mod tests {
         let ft = BytecodeCompiler::type_annotation_to_field_type(&ann);
         assert_ne!(
             ft,
-            FieldType::Any,
+            shape_runtime::type_schema::any_migration::unprojectable_annotation(),
             "HashMap<string,int> must resolve structurally"
         );
     }
@@ -9793,7 +9823,10 @@ mod w17_3_4_2_type_annotation_lowering_tests {
             args: vec![TypeAnnotation::Basic("int".to_string())],
         };
         let ft = BytecodeCompiler::type_annotation_to_field_type(&ann);
-        assert_eq!(ft, FieldType::Any);
+        assert_eq!(
+            ft,
+            shape_runtime::type_schema::any_migration::unprojectable_annotation()
+        );
     }
 
     /// W17.3-4.2 — `Array<int>` continues to lower correctly through the

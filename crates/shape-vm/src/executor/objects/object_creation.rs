@@ -578,7 +578,7 @@ fn kinded_to_slot(
         // pre-bulldozer behaviour. heap_mask remains 0 — the value is
         // inline, and the popped kind is the source of truth (no
         // schema normalization happened to the bits).
-        Some(FieldType::Any) | None | Some(_) => (ValueSlot::from_raw(bits), false, kind),
+        Some(FieldType::Any(_)) | None | Some(_) => (ValueSlot::from_raw(bits), false, kind),
     }
 }
 

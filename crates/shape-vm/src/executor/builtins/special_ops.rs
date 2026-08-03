@@ -183,7 +183,7 @@ impl VirtualMachine {
                 }
                 FieldType::String
                 | FieldType::Object(_)
-                | FieldType::Any
+                | FieldType::Any(_)
                 | FieldType::Array(_)
                 | FieldType::Option(_)
                 // W17.3-4.1 — HashMap<K, V> / Set<T> heap-resident

@@ -24,7 +24,7 @@
     ]
   },
   "step": "docs/design/typed-comptime/adr011-012-execution-rulings.md — ten required steps, step 4",
-  "source_revision": "7ded3a48e98d81f0f051ed78130645e8ba8d5d14",
+  "source_revision": "23044f2307d6d3712711c279d6bd7465124a32dd",
   "regenerate_with": "node scripts/generate-adr011-012-legacy-baselines.mjs --ticket 134",
   "check_with": "node scripts/check-adr011-012-legacy-baselines.mjs --ticket 134",
   "direction_rule": "Monotonic non-increasing. A set count may fall (migration progress) and may never rise. A new owner path is growth even when the total is unchanged, because it is a new surface carrying old authority.",
@@ -32,9 +32,9 @@
     "source_revision",
     "description"
   ],
-  "total_count": 1063,
+  "total_count": 1049,
   "total_count_note": "Sum of the set counts. Sets may deliberately overlap (a narrowly scoped set can re-count sites a broader set already counts), so this is a ratchet aggregate for reporting movement — never a count of distinct legacy sites.",
-  "sets_sha256": "49a2c46947d1dca553555947a5f45c1d92f1c4980076650308a50812a74a4cc0",
+  "sets_sha256": "d514c142372f211b7a50d9fb5d163e0bec09446c082f386937c3c7c1fcb120c2",
   "sets": [
     {
       "id": "universal-comptime-target",
@@ -158,8 +158,8 @@
       ],
       "exclude": [],
       "pattern": "pseudo_tuple|substitute_\\w*markers?|build_impl_shadow_call",
-      "count": 105,
-      "owner_count": 8,
+      "count": 106,
+      "owner_count": 9,
       "owners": [
         {
           "path": "crates/shape-runtime/stdlib-src/core/remote.shape",
@@ -172,6 +172,10 @@
         {
           "path": "crates/shape-vm/src/compiler/comptime_fragments/checked_template.rs",
           "count": 8
+        },
+        {
+          "path": "crates/shape-vm/src/compiler/expressions/collections.rs",
+          "count": 1
         },
         {
           "path": "crates/shape-vm/src/compiler/expressions/function_calls.rs",
@@ -279,17 +283,19 @@
     {
       "id": "any-typed-carriers",
       "category": "string descriptors",
-      "description": "`FieldType::Any` carrier sites — the untyped hook/descriptor payload ADR-012 replaces with typed per-layer state. Not every occurrence is an annotation carrier; the ratchet's claim is that the total may not grow.",
+      "description": "`FieldType::Any` carrier sites — the untyped hook/descriptor payload ADR-012 replaces with typed per-layer state. Not every occurrence is an annotation carrier; the ratchet's claim is that the total may not grow. #235 day-one (2026-08-02) privatized construction behind `type_schema::any_migration`, so the pattern counts that module's named constructors too: a site that mints an `Any` through `any_migration::class_a_inference_gap()` is exactly as much a carrier as one that used to write the variant literally, and counting only the literal spelling would have booked the privatization itself as a ~60-site shrink.",
       "scope": [
         "crates",
         "bin",
         "tools",
         "extensions"
       ],
-      "exclude": [],
-      "pattern": "FieldType::Any",
-      "count": 223,
-      "owner_count": 36,
+      "exclude": [
+        "crates/shape-runtime/src/type_schema/any_migration.rs"
+      ],
+      "pattern": "FieldType::Any|any_migration::",
+      "count": 206,
+      "owner_count": 34,
       "owners": [
         {
           "path": "bin/shape-cli/tests/stdlib/stdlib_advanced.rs",
@@ -313,15 +319,15 @@
         },
         {
           "path": "crates/shape-runtime/src/type_schema/builtin_schemas.rs",
-          "count": 13
+          "count": 7
         },
         {
           "path": "crates/shape-runtime/src/type_schema/field_types.rs",
-          "count": 22
+          "count": 27
         },
         {
           "path": "crates/shape-runtime/src/type_schema/mod.rs",
-          "count": 2
+          "count": 3
         },
         {
           "path": "crates/shape-runtime/src/type_schema/registry.rs",
@@ -349,15 +355,11 @@
         },
         {
           "path": "crates/shape-vm/src/compiler/expressions/collections.rs",
-          "count": 16
+          "count": 14
         },
         {
           "path": "crates/shape-vm/src/compiler/expressions/function_calls.rs",
-          "count": 5
-        },
-        {
-          "path": "crates/shape-vm/src/compiler/functions.rs",
-          "count": 1
+          "count": 2
         },
         {
           "path": "crates/shape-vm/src/compiler/helpers.rs",
@@ -369,7 +371,7 @@
         },
         {
           "path": "crates/shape-vm/src/compiler/mir_schema_threading.rs",
-          "count": 2
+          "count": 1
         },
         {
           "path": "crates/shape-vm/src/compiler/mod.rs",
@@ -381,7 +383,7 @@
         },
         {
           "path": "crates/shape-vm/src/compiler/patterns/destructure.rs",
-          "count": 7
+          "count": 2
         },
         {
           "path": "crates/shape-vm/src/compiler/post_inference_verify.rs",
@@ -430,10 +432,6 @@
         {
           "path": "crates/shape-vm/src/executor/vm_impl/modules.rs",
           "count": 1
-        },
-        {
-          "path": "crates/shape-vm/src/type_tracking.rs",
-          "count": 5
         }
       ]
     },
@@ -449,7 +447,7 @@
       ],
       "exclude": [],
       "pattern": "format!\\(\"__",
-      "count": 65,
+      "count": 66,
       "owner_count": 33,
       "owners": [
         {
@@ -466,7 +464,7 @@
         },
         {
           "path": "crates/shape-runtime/src/type_schema/registry.rs",
-          "count": 2
+          "count": 3
         },
         {
           "path": "crates/shape-runtime/src/type_schema/schema.rs",
@@ -595,8 +593,8 @@
       ],
       "exclude": [],
       "pattern": "HookDecision|pseudo_tuple|substitute_\\w*markers?|build_impl_shadow_call",
-      "count": 332,
-      "owner_count": 10,
+      "count": 333,
+      "owner_count": 11,
       "owners": [
         {
           "path": "crates/shape-vm/src/compiler/comptime_builtins.rs",
@@ -605,6 +603,10 @@
         {
           "path": "crates/shape-vm/src/compiler/comptime_fragments/checked_template.rs",
           "count": 61
+        },
+        {
+          "path": "crates/shape-vm/src/compiler/expressions/collections.rs",
+          "count": 1
         },
         {
           "path": "crates/shape-vm/src/compiler/expressions/function_calls.rs",
