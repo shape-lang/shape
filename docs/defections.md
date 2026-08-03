@@ -8663,3 +8663,68 @@ so the refutation is mechanical rather than narrative, and the constructive
 route — lower `?` to the `Rvalue::EnumPayload` variant MIR already uses for
 `match Ok(v)` bindings — is recorded in §6.7 as a producer fix to dispatch
 separately. No production code changed in this lane.
+
+## #239 §4.1 method-channel conversion — four compromises refused (2026-08-03)
+
+**REJECTED: labelling the JIT-format cascade's results `NativeKind::UInt64`.**
+The converted shell returns `MethodOutcome::Value(KindedSlot)`, so the legacy
+NaN-box cascade (`call_string_method` / `call_object_method` /
+`call_duration_method` / `call_matrix_method` / `call_time_method`) needed
+*some* kind to keep flowing. `UInt64` is the documented opaque-JIT-bits
+carrier, so labelling its results that reads defensible. It is not:
+`return_abi_class` puts `UInt64` and `Int64` in the SAME `Scalar` class, so
+`classes_agree` would have passed `box_number`'s `f64::to_bits(2.0)` straight
+into an `Int64` destination — the exact silent-wrong (`s.indexOf(..)` → VM 2,
+JIT -4616189618054758400, rc=0) that STAGE-StringJIT existed to refuse,
+re-created one layer below the guard being deleted. A kind that is honest
+about the carrier's *width* and silent about its *encoding* is not a kind.
+Those paths deopt with a named reason instead.
+
+**REJECTED: adding `indexOf` beside `length` in
+`well_known_method_return_kind`.** With the guards deleted, the string fixture
+moved to an unproven-destination bail, and one name in a Rust `match` would
+have turned the gate green. That table is §4.0.3's allowlist — point-patched
+five times already, holding `length` and not `indexOf` for no reason either
+function can state. A sixth arm is the same walk-back with the same shape.
+Instead the kind is read from the stdlib's own declared signature: `extend
+string { method indexOf(needle: string) -> int }`
+(`stdlib-src/core/string_methods.shape:28`) compiles to `string.indexOf`
+carrying that return type, and `user_method_return_kind_from_receiver` already
+resolved `"{type}.{method}"` — it simply could not NAME a receiver that was
+not a `ConcreteType::Struct`. Naming the three `extend` blocks with a fixed
+non-generic spelling (`string` / `int` / `number`) was the whole fix. The
+generic receivers (`Vec<T>`, `HashMap<K, V>`, `Option<T>`, `Result<T, E>`,
+`Table<T>`) were deliberately NOT named: they have no one compiled name per
+receiver, and a guessed spelling is a fabricated name where a proof belongs.
+
+**REJECTED: minting a fid, closure record, or placeholder for `DateTime`.**
+The lane brief asked where the fid for `SYN__datetime-method-native` should
+come from — the method registry, or a synthesized wrapper. Neither: `let x =
+DateTime` is `error[RUNTIME]: Undefined variable: DateTime`. It is not a value
+in Shape at all, so there is no callable to give an id to. The bytecode
+compiler resolves `("DateTime","parse")` at the call site and never
+materialises a receiver; MIR's `Expr::Identifier` arm emits
+`MirConstant::Function("DateTime")` for any non-local identifier. MIR is
+describing an operand the bytecode does not produce. Synthesizing one would
+put a fabricated callable behind a `Ptr(HeapKind::Closure)` stamp — the §6.1
+`ClosurePlaceholder` lie in a new costume, and the §6.2 flip made that arm
+loud precisely so it would not be papered over again. Surfaced with three
+producer-side options in §6.9 instead; the fixture stays red.
+
+**REJECTED: creating `jit_call_method_void` to match the brief's four-tuple.**
+The dispatched task named `{i64,ptr,f64,void}`. Three shipped.
+`dispatch_method_kinded` returns a value on every success path and
+`infer_unit_slots` only unit-classifies destinations of
+`MirConstant::Function` callees, so no method destination is ever unit — a
+`_void` monomorph would be registered, declared, and never given a referenced
+`FuncRef`, which is CHECK 22 R3's exact failure shape and the `jit_v2_release`
+class the check exists to prevent. A unit-classified method destination
+surfaces naming the contradiction rather than being absorbed by a fourth entry
+point built to satisfy a symmetry.
+
+**What was done instead.** The channel is converted (`jit_call_method` →
+`jit_call_method_{i64,ptr,f64}`, reusing `return_abi_class.rs` rather than a
+parallel classifier), STAGE-M1 / STAGE-StringJIT / STAGE-F3 are deleted in
+favour of one `delegates_to_vm_trampoline` classifier with three unit tests
+including a negative, and every value the shell returns carries a
+producer-stamped kind. Acceptance 3/5 → 4/5; corpus unexpected=0.
