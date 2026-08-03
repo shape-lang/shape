@@ -822,6 +822,24 @@ pub struct TypeTracker {
     /// Compile-time object schema contracts: schema id -> field type annotation.
     ///
     /// Used for callable typed-object fields where runtime schema stores only slot layout.
+    /// Function-typed inline-object field annotations, by schema id.
+    ///
+    /// #235 stage 1 narrowed this from "every field of every inline object"
+    /// to "fields whose annotation is a function type". Before stage 1 the
+    /// inline-object schemas were minted all-`Any`, so this side table was the
+    /// only place the per-field types survived — and the JIT, which reads
+    /// schemas and not this table, saw nothing. The schemas now carry the real
+    /// types, which retires that role.
+    ///
+    /// What does NOT retire: `FieldType` has no function variant, so a field
+    /// declared `() => Table<{...}>` cannot be represented in the schema at
+    /// all. `expressions/function_calls.rs::extract_table_schema_from_callable_field`
+    /// needs that annotation to unwrap the callable's return type and
+    /// propagate the table schema through it. Deleting the table outright was
+    /// measured and fails exactly one test,
+    /// `test_imported_module_typed_callable_field_propagates_table_schema_for_filter_chain`.
+    /// The table dies when `FieldType` can express a function type, which is
+    /// ADR-020 expressiveness work, not #235.
     object_field_contracts: HashMap<SchemaId, HashMap<String, TypeAnnotation>>,
 
     /// v2: Computed C-compatible struct layouts indexed by SchemaId.
@@ -1003,12 +1021,24 @@ impl TypeTracker {
     }
 
     /// Register compile-time field type contracts for an object schema id.
+    /// Record the function-typed subset of an inline object's field
+    /// annotations. Non-function annotations are dropped: the schema carries
+    /// them now (#235 stage 1), and keeping a second copy is how the two
+    /// drifted apart in the first place.
     pub fn register_object_field_contracts(
         &mut self,
         schema_id: SchemaId,
         fields: HashMap<String, TypeAnnotation>,
     ) {
-        self.object_field_contracts.insert(schema_id, fields);
+        let function_typed: HashMap<String, TypeAnnotation> = fields
+            .into_iter()
+            .filter(|(_, ann)| matches!(ann, TypeAnnotation::Function { .. }))
+            .collect();
+        if function_typed.is_empty() {
+            return;
+        }
+        self.object_field_contracts
+            .insert(schema_id, function_typed);
     }
 
     /// Lookup a compile-time field type contract for a schema field.

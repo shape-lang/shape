@@ -711,6 +711,51 @@ impl TypeSchemaRegistry {
         fields.join("\u{1f}")
     }
 
+    /// Cache key for a typed predeclared schema.
+    ///
+    /// #235 stage 1: the untyped key above is field NAMES only, which was
+    /// sound while every predeclared schema was all-`Any` (same names implied
+    /// same schema). Once the columns carry real types, two schemas can share
+    /// a field-name list and differ in type, so the key has to include the
+    /// types or the first registration would be handed back to the second.
+    fn predeclared_typed_cache_key(fields: &[(String, FieldType)]) -> String {
+        fields
+            .iter()
+            .map(|(name, ft)| format!("{}\u{1e}{}", name, ft))
+            .collect::<Vec<_>>()
+            .join("\u{1f}")
+    }
+
+    /// Register (or retrieve) a predeclared schema whose columns carry real
+    /// types.
+    ///
+    /// #235 stage 1 (ADR-020 grill R-G4). The `Any`-column sibling below
+    /// exists only for callers that have not been converted yet; a caller that
+    /// knows its column types — and the data-driven ones do, they build a
+    /// `NativeKind` track for the very same fields — registers here instead.
+    pub fn register_predeclared_typed_schema(&self, fields: &[(String, FieldType)]) -> SchemaId {
+        let key = Self::predeclared_typed_cache_key(fields);
+        if let Ok(cache) = self.predeclared_cache.read() {
+            if let Some(id) = cache.get(&key) {
+                return *id;
+            }
+        }
+        let id = self.allocate_id();
+        let names: Vec<&str> = fields.iter().map(|(n, _)| n.as_str()).collect();
+        let schema = TypeSchema::with_id(
+            id,
+            format!("__predecl_{}", names.join("_")),
+            fields.to_vec(),
+        );
+        if let Ok(mut reg) = self.predeclared_by_id.write() {
+            reg.insert(id, schema);
+        }
+        if let Ok(mut cache) = self.predeclared_cache.write() {
+            cache.insert(key, id);
+        }
+        id
+    }
+
     /// Register (or retrieve) a predeclared schema with `FieldType::Any`
     /// columns for the given ordered field set.
     ///

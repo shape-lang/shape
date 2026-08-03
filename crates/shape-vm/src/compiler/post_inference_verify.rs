@@ -437,39 +437,44 @@ pub(crate) const WHITELIST: &[WhitelistEntry] = &[
     //   that uses the `__annotation_ctx_*` prefix and lets the
     //   permanent §4.D.10 whitelist row catch them directly.
     //
-    // SURFACE-AND-STOP per audit §0 + CLAUDE.md §10: the §4.D.10
-    // emission-rename is a NAMED-AND-CITED R5b/R6 follow-up at the
-    // W17.2-C close commit; verification-pass-side absorption stays
-    // in place pre-rename via the narrowed `__inline_obj_*` prefix
-    // row below.
+    // #235 stage 1 (2026-08-03) — MEASURED, NOT REMOVED.
     //
-    // NARROWED from `SchemaNamePrefix("")` (catch-all) to
-    // `SchemaNamePrefix("__inline_obj_")` (bounded). User-named schemas
-    // carrying `FieldType::Any` outside the named-exception classes
-    // now surface E0900 — the post-W17.2-C diagnostic shape.
+    // Stage 1 retired Classes A and C, so a *user* inline object literal no
+    // longer reaches this pass carrying `FieldType::Any`: its schema is minted
+    // from the entry annotation, the enclosing declared type, or the resolved
+    // inference facts, and a field none of those resolve is a compile error at
+    // the producer (`expressions/collections.rs`).
+    //
+    // Deleting this row was tried and reverted. It fails ~40 tests across
+    // `bundle_compiler` and `comptime_builtins::capture_plan`, because two
+    // OTHER producers still emit `__inline_obj_*`-named schemas with `Any`
+    // fields:
+    //
+    //   1. the compiler-synthesized module-namespace object
+    //      (`statements.rs::compile_module_def`), whose fields are a module's
+    //      exports — constants beside function references. That is a Class B
+    //      heterogeneous carrier, which the R-G4 staging plan takes AFTER
+    //      stage 1 and moves to the value-tier kind track (ADR-006 §2.7.7).
+    //   2. fields whose declared annotation has no `FieldType` projection —
+    //      tuples and function types. `FieldType` cannot express either, so
+    //      this is expressiveness work (ADR-020), not carrier migration.
+    //
+    // The row can be narrowed to a named Class B prefix once the
+    // module-namespace object stops borrowing the `__inline_obj_` name, and
+    // deleted with the variant per R-G4.
     WhitelistEntry {
         rule: WhitelistRule::SchemaNamePrefix("__inline_obj_"),
-        section: "§4.D.3 + §4.D.5 + §4.D.10-emission",
+        section: "§4.D.5 carrier + ADR-020 R-G4 Class B",
         permanent: false,
-        reason: "TRANSITIONAL (NARROWED at W17.2-C from empty-prefix \
-                 catch-all to `__inline_obj_*` prefix-only) — \
-                 §4.D.1+§4.D.2+§4.D.4+§4.D.7+§4.D.8+§4.D.9 CLOSED at \
-                 W17.2-B+W17.2-C via FieldType::Option PROPAGATE rebuild \
-                 + collections.rs:975/1004 structured E#### compile \
-                 error + helpers.rs:4901 4-name narrowing + helpers.rs:4905 \
-                 explicit per-variant arms + register_inline_object_schema \
-                 deprecation+caller migration. Surviving territory: \
-                 §4.D.3 (inline-object inference at \
-                 `expressions/collections.rs:509/518` — `__inline_obj_N` \
-                 emission with FieldType::Any per field when RHS is \
-                 non-literal) + §4.D.5 carrier (`type_tracking.rs:1024` \
-                 deprecated untyped variant routes through typed-with-Any) \
-                 + §4.D.10 emission-rename \
-                 (`functions_annotations.rs/expressions/mod.rs` schemas \
-                 use `__inline_obj_*` instead of `__annotation_ctx_*` \
-                 whitelist convention) — R5b/R6 follow-up per audit \
-                 §4.D.10 explicit cite. Take-both at W17.3/R5b/R6 close \
-                 strips this row.",
+        reason: "TRANSITIONAL. #235 stage 1 retired the Class A/C producers \
+                 that made USER inline-object literals land here with \
+                 `FieldType::Any`. Two producers remain, both staged later: \
+                 the module-namespace object (Class B — heterogeneous export \
+                 record, moves to the ADR-006 §2.7.7 value-tier kind track), \
+                 and fields whose annotation is a tuple or function type, \
+                 which `FieldType` has no variant for. Removing the row was \
+                 measured on 2026-08-03: ~40 failures across bundle_compiler \
+                 and comptime_builtins::capture_plan.",
     },
 ];
 

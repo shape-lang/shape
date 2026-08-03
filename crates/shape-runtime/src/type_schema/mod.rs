@@ -116,6 +116,12 @@ pub fn register_predeclared_any_schema(fields: &[String]) -> SchemaId {
     current_registry().register_predeclared_any_schema(fields)
 }
 
+/// Register (or retrieve) a predeclared schema whose columns carry real types.
+/// #235 stage 1 — see `TypeSchemaRegistry::register_predeclared_typed_schema`.
+pub fn register_predeclared_typed_schema(fields: &[(String, FieldType)]) -> SchemaId {
+    current_registry().register_predeclared_typed_schema(fields)
+}
+
 fn lookup_predeclared_schema_by_id(id: SchemaId) -> Option<TypeSchema> {
     current_registry().lookup_predeclared_by_id(id)
 }

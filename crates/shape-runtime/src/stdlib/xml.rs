@@ -42,7 +42,7 @@
 use crate::json_value::JsonValue;
 use crate::marshal::{register_typed_fn_1, register_typed_fn_1_full};
 use crate::module_exports::{ModuleExports, ModuleParam};
-use crate::type_schema::register_predeclared_any_schema;
+use crate::type_schema::{FieldType, register_predeclared_typed_schema};
 use crate::typed_module_exports::{ConcreteReturn, ConcreteType, TypedReturn};
 use quick_xml::events::{BytesEnd, BytesStart, BytesText, Event};
 use quick_xml::{Reader, Writer};
@@ -234,8 +234,32 @@ impl ElementData {
 /// own deduplication). Returns the raw `u32` schema id used by
 /// `TypedObjectStorage::schema_id`.
 fn ensure_xml_node_schema() -> u32 {
-    let owned: Vec<String> = XML_NODE_FIELDS.iter().map(|s| s.to_string()).collect();
-    register_predeclared_any_schema(&owned)
+    // #235 stage 1: an XmlNode's four columns are fixed and known — the
+    // `NativeKind` track in `into_typed_object_arc` below stamps them
+    // String / Ptr(HashMap) / Ptr(TypedArray) / String. The schema now says
+    // the same thing instead of claiming `Any`. `children` is an array of
+    // XmlNode, which is this same schema by name.
+    let typed: Vec<(String, FieldType)> = vec![
+        ("name".to_string(), FieldType::String),
+        (
+            "attributes".to_string(),
+            FieldType::HashMap {
+                key: Box::new(FieldType::String),
+                value: Box::new(FieldType::String),
+            },
+        ),
+        (
+            "children".to_string(),
+            FieldType::Array(Box::new(FieldType::Object("XmlNode".to_string()))),
+        ),
+        ("text".to_string(), FieldType::String),
+    ];
+    debug_assert_eq!(
+        typed.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>(),
+        XML_NODE_FIELDS,
+        "XmlNode schema columns must match XML_NODE_FIELDS order"
+    );
+    register_predeclared_typed_schema(&typed)
 }
 
 /// Parse an XML element recursively from a quick-xml reader.
