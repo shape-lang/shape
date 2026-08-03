@@ -1184,6 +1184,62 @@ constructing the record and calling it before building anything on top; if the
 consumer does reject it, the reason will be visible immediately and is the thing
 to fix first.
 
+### 6.4 The named experiment — MEASURED 2026-08-03 (supersedes §6.3 item 4; corrects §6.3 item 3)
+
+The §6.3 item-4 confirmation ran as five executed probes
+(`#[cfg(test)] mod zero_capture_trampoline_probe`, bottom of
+`crates/shape-jit/src/ffi/control/mod.rs`; commits `fb880ba1` + `5bc23872`,
+merged `956ab462`). Re-derived independently by the supervisor on a freshly
+compiled binary: 5/5. Invocation:
+
+```
+touch crates/shape-jit/src/ffi/control/mod.rs
+direnv exec /home/dev/dev/shape-lang cargo test -p shape-jit --lib \
+    zero_capture_trampoline_probe -- --test-threads=1
+```
+
+**Verdict 1 — dispatch works; #227 slice 2's recorded revert reason is
+refuted by experiment.** A zero-capture record built exactly per §6.3 item 3
+(`alloc_typed_closure(fid, 0, &ClosureLayout::from_capture_types(&[], &[]))`)
+executes through `dispatch_borrowed_closure_via_trampoline_vm` unmodified on
+BOTH arms (interpreter arm: two dispatches, different args, 41→42 and
+1000000→1000001; native arm: capture loop does not execute, result off the
+context stack), and the `Arc<HeapValue::ClosureRaw>` callee round trip —
+the chain `jit_call_value`'s `Ptr(HeapKind::Closure)` arm walks post-flip —
+holds. Mutation-checked: a temporary reject-zero-captures mutation turned
+all four probes red, so the probes can observe the recorded failure mode.
+The consumer inventory shrinks by both trampoline dispatchers.
+
+**Verdict 2 — the flip is NOT thereby divisible: the blocker moved from
+dispatch to OWNERSHIP, and §6.3 item 3's recipe is wrong as written.** The
+consumer retires a share per call (`Arc::<HeapValue>::from_raw` at
+`control/mod.rs:815`, `drop` at `:847`), so a pool holding **one leaked
+permanent share is exhausted by exactly one dispatch** — the second call is
+a use-after-free on a constant, which fits #227 slice 2's recorded malloc
+corruption. The string-constant discipline survives 8 consumptions in the
+same probe because `ownership.rs:933,949,989` emit a **per-consumption
+`arc_string_retain` call into the generated code** on top of the pool's
+compile-time share (an `iconst` of a pooled pointer is evaluated once per
+EXECUTION, not once per compile — the `MirConstant::StringId` arm's own
+comment names the history: "cluster-2-jit-string-const-loop-retain-gap").
+**The flip must emit the closure-pool analog of that per-consumption
+retain.** This is the highest-value correction in this section.
+
+**Implementer notes (seen, not acted on):**
+- The native arm resets `ctx.stack_ptr = 0` before entering the callee and
+  reads the result from `stack[0]` (`control/mod.rs:338-346`; `:768` does
+  the same) — clobbers any live JIT stack; confirmed real behaviour.
+- A zero-capture block gives the frame `upvalues: Some(vec![])`, not
+  `None`; a capture opcode against it bounds-checks to a clean `VMError`
+  (`executor/variables/mod.rs:93`) — reading, not measurement.
+- `type_id = 0` is safe: no dispatch-path consumer;
+  `call_convention.rs:1323-1326` states the placeholder is intentional.
+
+**Not measured, still open:** the native arm ran a stub callee — entry into
+a real Cranelift-compiled body through this path is untested; the producer
+side (emitting the pool `iconst` + retain from generated code) is untouched
+— the share arithmetic models the consumer contract only.
+
 ## 7. The third carrier
 
 `jit_make_closure` (`crates/shape-jit/src/ffi/object/closure.rs:40`) produces
