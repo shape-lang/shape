@@ -3757,4 +3757,106 @@ mod tests {
             "`5 as number` must lower to Rvalue::PrimitiveCast {{ target: \"number\" }}"
         );
     }
+
+    /// Collect every `Assign(Local(d), Use(Move|Copy|MoveExplicit(Local(s))))`
+    /// whose SOURCE is the destination of a `Call` terminator — the shape a
+    /// backward kind-propagation rule would have to key on.
+    fn call_dest_moved_into_local(lowering: &MirLoweringResult) -> Vec<(u16, u16)> {
+        let call_dests: std::collections::HashSet<u16> = lowering
+            .mir
+            .blocks
+            .iter()
+            .filter_map(|b| match &b.terminator.kind {
+                TerminatorKind::Call {
+                    destination: Place::Local(slot),
+                    ..
+                } => Some(slot.0),
+                _ => None,
+            })
+            .collect();
+
+        let mut found = Vec::new();
+        for block in &lowering.mir.blocks {
+            for stmt in &block.statements {
+                let StatementKind::Assign(Place::Local(dst), Rvalue::Use(operand)) = &stmt.kind
+                else {
+                    continue;
+                };
+                let src = match operand {
+                    Operand::Copy(Place::Local(s))
+                    | Operand::Move(Place::Local(s))
+                    | Operand::MoveExplicit(Place::Local(s)) => *s,
+                    _ => continue,
+                };
+                if call_dests.contains(&src.0) {
+                    found.push((dst.0, src.0));
+                }
+            }
+        }
+        found
+    }
+
+    /// #239 backward-kind-propagation premise check.
+    ///
+    /// The proposal was to propagate a proven DESTINATION kind backwards into
+    /// the SOURCE of a bare `Use` move, on the stated premise that "MIR moves
+    /// are kind-preserving by construction — there is no converting move
+    /// rvalue, conversions are `PrimitiveCast`".
+    ///
+    /// This test records the measurement that refutes that premise. The `?`
+    /// operator UNWRAPS `Result<T, E>` to `T` — a kind change from
+    /// `Ptr(HeapKind::Result)` to the payload kind — and `lower_expr_inner`'s
+    /// `Expr::TryOperator` arm lowers it with `assign_copy_from_slot`, i.e. a
+    /// bare `Use(Copy(Local))` whose source is a `Call` destination.
+    ///
+    /// That is the SAME MIR shape as the kind-preserving case the proposal
+    /// targeted (`let h = |y| g(y)`, where a call temp is moved into the proven
+    /// return slot). MIR retains nothing that separates them, so a rule keyed
+    /// on this shape cannot tell an unwrap from a move. The only thing keeping
+    /// the unwrap away from the JIT's inference is `JitResidual::TryUnwrap`
+    /// (`bytecode/jit_residual.rs`), a per-function deopt raised in a different
+    /// subsystem, whose own reason string names this exact hazard: "the `?`
+    /// operator: MIR lowers it as a transparent copy, so the JIT would stamp
+    /// the success type's NativeKind onto heap Result/Option bits".
+    ///
+    /// If this test ever fails because `?` stopped lowering to a bare `Use`,
+    /// the premise is worth re-examining — that is the point of pinning it.
+    #[test]
+    fn try_operator_is_a_kind_changing_bare_use_of_a_call_destination() {
+        let unwrap = lower_parsed_function(
+            r#"
+                fn unwraps() -> Result<int, string> {
+                    let v = fallible()?
+                    return Ok(v + 1)
+                }
+            "#,
+        );
+        let unwrap_moves = call_dest_moved_into_local(&unwrap);
+        assert!(
+            !unwrap_moves.is_empty(),
+            "`let v = fallible()?` must lower the unwrap as a bare `Use` of a \
+             call destination — if this changed, #239's backward-propagation \
+             premise should be re-measured. blocks = {:?}",
+            unwrap.mir.blocks
+        );
+
+        // The kind-PRESERVING shape the proposal targeted produces the same
+        // statement form, from the same collector, with nothing to tell them
+        // apart.
+        let plain = lower_parsed_function(
+            r#"
+                fn forwards() -> int {
+                    let v = g(1)
+                    return v
+                }
+            "#,
+        );
+        let plain_moves = call_dest_moved_into_local(&plain);
+        assert!(
+            !plain_moves.is_empty(),
+            "`let v = g(1)` must lower to a bare `Use` of a call destination. \
+             blocks = {:?}",
+            plain.mir.blocks
+        );
+    }
 }
