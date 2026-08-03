@@ -1127,7 +1127,7 @@ fn user_method_return_kind_from_receiver(
     })
 }
 
-fn resolve_named_function_index(
+pub(crate) fn resolve_named_function_index(
     name: &str,
     function_indices: &HashMap<String, u16>,
 ) -> Option<u16> {

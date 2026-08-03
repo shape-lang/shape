@@ -2309,13 +2309,41 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                 // Write return value to ctx.stack[0] and set return_type_tag
                 // for native type preservation (avoids NaN-boxing on return path).
                 let return_slot = SlotId(0);
+                // ADR-020 §3.3: a function the ABI says returns NO value must
+                // not leave one, whatever its MIR return slot happens to hold.
+                //
+                // The direct-call path already documents this as an invariant —
+                // "a unit-returning callee never writes `ctx.stack[0]` (its
+                // `Return` terminator sets stack_ptr = 0 and stamps
+                // RETURN_TAG_UNIT), so loading it here would read whatever the
+                // previous call left behind" — and then declines to read it. It
+                // was not true. MIR gives every function a return slot, and for
+                // a body whose trailing statement produces a temp (an f-string
+                // handed to `print`, say) that temp is declared at slot 0, so
+                // the arms below stored it and set stack_ptr = 1.
+                //
+                // Nothing noticed while the only readers were direct callers,
+                // which skip the read. #239 §4.1's `_void` monomorph reads the
+                // disagreement instead: `ACC__generics__vprobe_as.shape` — a
+                // `fn main()` ending in `print(f"...")` — returned
+                // `Ptr(HeapKind::String)` into a caller that had classified the
+                // destination unit from `unit_slots`, and the class-agreement
+                // assertion fired. The caller was right; this is the site that
+                // was lying, and it also means the leftover value's share was
+                // being abandoned on the JIT stack.
+                // Resolved with the SAME resolver `infer_unit_slots` uses on
+                // the caller side, so the two sides cannot disagree about which
+                // function a name denotes.
+                let self_returns_unit =
+                    super::types::resolve_named_function_index(&self.mir.name, self.function_indices)
+                        .is_some_and(|fid| self.unit_returning_funcs.contains(&fid));
                 // W11-jit-new-array: when SlotId(0) is not declared, the
                 // program has no value-bearing return (e.g. top-level ending
                 // with `print(x)`). Stamp UNIT so the executor's typed
                 // dispatch maps it to `WireValue::Null` — pre-W11 this
                 // arm left the tag at its zero default (NANBOXED) and the
                 // executor.rs:267 SURFACE fired.
-                if !self.locals.contains_key(&return_slot) {
+                if self_returns_unit || !self.locals.contains_key(&return_slot) {
                     let tag = self
                         .builder
                         .ins()

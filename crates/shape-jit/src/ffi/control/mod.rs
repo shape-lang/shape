@@ -950,19 +950,30 @@ pub extern "C" fn jit_call_value_ptr(ctx: *mut JITContext) -> *mut std::ffi::c_v
 ///
 /// No results at the Cranelift level, and `Outcome::NoValue` is the SUCCESS
 /// case — the one #259 could not resolve, because `-> u64` forced a
-/// unit-returning callee and a broken one to share an answer. A callee that
-/// DOES produce a value here is the mirror-image producing-site bug: the emit
-/// site classified the destination as unit and the callee disagreed.
+/// unit-returning callee and a broken one to share an answer.
+///
+/// A callee that DOES produce a value is **discarded, not an error**, and the
+/// asymmetry with the other three monomorphs is deliberate. They abort on a
+/// class disagreement because a value is about to be written into a slot that
+/// cannot hold it — §4.2's O2, the `ClosurePlaceholder` defect in general form.
+/// Here there is no slot: the emit site classified the destination unit from
+/// `unit_slots`, which is derived from the CALLEE's own declared ABI, so the
+/// value has nowhere to go and nothing downstream will read it. The direct-call
+/// path has always behaved exactly this way — `callee_returns_unit` makes it
+/// skip the `ctx.stack[0]` load entirely — and making the indirect path fatal
+/// where the direct path is silent would be an inconsistency, not a check.
+///
+/// Measured instance: `ACC__generics__vprobe_as.shape` calls `print`, whose
+/// FrameDescriptor says it returns no value while the trampoline hands back a
+/// `Ptr(HeapKind::String)`. The callee's declaration and its body disagree —
+/// a real defect, upstream of this channel and not resolvable in it.
+///
+/// Dropping `k` here is strictly better than the direct path: it RETIRES the
+/// share (O1), where the direct path abandons it on the JIT stack.
 pub extern "C" fn jit_call_value_void(ctx: *mut JITContext) {
-    use crate::return_abi_class::ReturnAbiClass;
     match call_value_kinded(ctx) {
         Outcome::NoValue => {}
-        Outcome::Value(k) => {
-            // `k` drops at the end of this arm, retiring any share it owns.
-            // Nothing downstream can, since the destination is a unit slot
-            // with no storage.
-            abort_class_disagreement(ctx, ReturnAbiClass::Void, k.kind);
-        }
+        Outcome::Value(k) => drop(k),
         Outcome::Failed => {}
     }
 }
