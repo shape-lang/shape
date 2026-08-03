@@ -211,20 +211,30 @@ pub fn compile_osr_loop(
     }
 
     // Map each live local to its NativeKind from the frame descriptor.
-    // Per ADR-006 §2.7.7 the deleted `NativeKind::Unknown` placeholder
-    // is gone — slots whose kind is missing from the frame descriptor
-    // fall back to `Int64` (legacy I64-NaN-box ABI width). OSR entry
-    // is a re-entry into a hot loop; if the descriptor is incomplete
-    // here the caller is in pre-§2.7.7 legacy territory.
-    let local_kinds: Vec<NativeKind> = live_locals
-        .iter()
-        .map(|&slot| {
-            frame_slots
-                .get(slot as usize)
-                .copied()
-                .unwrap_or(NativeKind::Int64)
-        })
-        .collect();
+    // #236 / R-G7: the prior `unwrap_or(NativeKind::Int64)` is deleted.
+    // `local_kinds` is not advisory — the OSR prologue reads each
+    // interpreter local at this width and the epilogue writes it back,
+    // so a fabricated `Int64` over an `f64` local both loads and stores
+    // the wrong thing. A live local with no proven kind means the loop
+    // cannot be entered on-stack; refusing OSR leaves the interpreter
+    // running the loop, which is correct.
+    let mut local_kinds: Vec<NativeKind> = Vec::with_capacity(live_locals.len());
+    for &slot in &live_locals {
+        match frame_slots.get(slot as usize).copied() {
+            Some(k) => local_kinds.push(k),
+            None => {
+                return Err(format!(
+                    "#236 surface-and-stop: SURFACE — OSR live local {} has no proven \
+                     NativeKind in the enclosing FrameDescriptor ({} slots), so the \
+                     on-stack-replacement prologue has no sound width to marshal it in \
+                     at (nor the epilogue to write it back at). Loop stays interpreted \
+                     — ADR-006 §2.7.7.",
+                    slot,
+                    frame_slots.len()
+                ));
+            }
+        }
+    }
 
     let entry_point = OsrEntryPoint {
         bytecode_ip: loop_info.header_idx,

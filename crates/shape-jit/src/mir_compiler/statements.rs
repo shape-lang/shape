@@ -8,7 +8,6 @@ use cranelift::prelude::*;
 
 use super::MirToIR;
 use shape_vm::mir::types::*;
-use shape_vm::type_tracking::NativeKind;
 
 fn dead_readback_destination(place: &Place, rvalue: &Rvalue) -> Option<SlotId> {
     let Place::Local(dst) = place else {
@@ -569,12 +568,12 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                 // the constant arms — every operand the trinity supports
                 // has a proven kind by construction (the bare-form
                 // intercept's operand is a typed local; the qualified
-                // EnumConstructor's operand is a typed expression). When
-                // the kind is genuinely unprovable, the carrier fallback
-                // (NativeKind::UInt64) is the §2.7.5 stable-FFI carrier
-                // kind for raw I64-wide bits — NOT a Bool-default
-                // rationalization per §2.7.7 #9.
-                let payload_kind = self.operand_slot_kind_or_carrier(operand);
+                // EnumConstructor's operand is a typed expression). The
+                // kind_code below is what `jit_v2_make_result_ok/err`
+                // stores as the payload's kind, so an unprovable kind
+                // surfaces (#236 / R-G7) rather than claiming UInt64.
+                let payload_kind = self
+                    .operand_slot_kind_or_surface(operand, "the Ok/Err payload kind_code")?;
                 let kind_code = super::super::ffi::stack_kind_code::encode(payload_kind);
 
                 // Compile the operand to its raw payload bits (the call
@@ -808,9 +807,9 @@ impl<'a, 'b> MirToIR<'a, 'b> {
     ///
     /// Captures are stored at their native Cranelift type so inlined
     /// bodies (Phase C) can consume them without NaN-box round-trips.
-    /// Capture kinds that don't map to a native Cranelift type
-    /// (pointers, strings, unknown) fall back to I64 storage — correct
-    /// since the MIR's `ClosureCapture` slot_kind matches the source.
+    /// Capture kinds whose Cranelift representation is I64 (pointers,
+    /// strings) store at I64 — that is a projection of a PROVEN kind,
+    /// not a default.
     ///
     /// The resulting `StackClosure*` pointer is written to the closure
     /// slot as I64 (NaN-boxed value semantics). After Phase C inlining,
@@ -824,22 +823,27 @@ impl<'a, 'b> MirToIR<'a, 'b> {
         use cranelift::prelude::types as cl_types;
 
         // Determine per-capture Cranelift types + byte offsets.
-        // The MIR operand's root slot kind dictates the native storage
-        // width. Slots with no inferred kind fall back to I64 (same
-        // Cranelift width as the legacy `Unknown`/`Dynamic` arm).
+        // The MIR operand's kind dictates the native storage width AND
+        // the type the capture is read back at (`capture_types` is
+        // recorded in `StackClosureCallInfo` below and consumed by the
+        // direct stack-closure dispatch path). An unproven kind here is
+        // therefore a genuine read/write of a width nobody proved, so it
+        // surfaces — #236 / R-G7. The prior `unwrap_or(Int64)` stored an
+        // f64 capture into an I64 slot and read it back as an integer.
         let mut capture_types: Vec<Type> = Vec::with_capacity(operands.len());
-        for op in operands.iter() {
-            let kind = match op {
-                Operand::Copy(p) | Operand::Move(p) | Operand::MoveExplicit(p) => {
-                    let slot = p.root_local();
-                    super::types::slot_kind_for_local(&self.slot_kinds, slot.0)
-                        .unwrap_or(NativeKind::Int64)
+        for (i, op) in operands.iter().enumerate() {
+            let kind = self.operand_slot_kind(op).ok_or_else(|| {
+                if let Operand::Copy(p) | Operand::Move(p) | Operand::MoveExplicit(p) = op {
+                    self.debug_dump_slot_kinds(p.root_local());
                 }
-                Operand::Constant(MirConstant::Float(_)) => NativeKind::Float64,
-                Operand::Constant(MirConstant::Int(_)) => NativeKind::Int64,
-                Operand::Constant(MirConstant::Bool(_)) => NativeKind::Bool,
-                _ => NativeKind::Int64,
-            };
+                format!(
+                    "#236 surface-and-stop: SURFACE — stack-closure capture {} of function \
+                     {} has no proven NativeKind (operand `{}`), so there is no sound \
+                     Cranelift width to store it at or read it back from. Clean deopt to \
+                     the interpreter — ADR-006 §2.7.5.",
+                    i, function_id, op
+                )
+            })?;
             capture_types.push(super::types::cranelift_type_for_slot(kind));
         }
 
@@ -1397,15 +1401,13 @@ impl<'a, 'b> super::MirToIR<'a, 'b> {
 
         // Carrier-pair ctor: Mutex(bits, kind_code). The kind is
         // sourced from the operand's MIR-inferred kind via §2.7.5
-        // producing-site classification. NOT a Bool-default fallback:
-        // when `operand_slot_kind`'s `None` arm fires (the operand's
-        // kind cannot be proven at MIR-emission time), the call falls
-        // through to the carrier kind `UInt64` per the §2.7.5 stable-
-        // FFI raw-bits carrier convention (the same convention Round 7A
-        // / §2.7.5 conduit uses for Ok/Err/Some/None inner payloads).
-        // The Mutex FFI body itself surface-and-stops on a SENTINEL
-        // kind ord, leaking the inner share rather than fabricating
-        // Bool (`ffi/v2/collection_arc.rs::jit_v2_make_mutex`).
+        // producing-site classification, and an unproven kind surfaces
+        // (#236 / R-G7) — the kind_code is what the Mutex carries for
+        // the lifetime of the value, so a claimed `UInt64` over heap
+        // bits is a metadata lie the drop path acts on. The Mutex FFI
+        // body separately surface-and-stops on a SENTINEL kind ord,
+        // leaking the inner share rather than fabricating Bool
+        // (`ffi/v2/collection_arc.rs::jit_v2_make_mutex`).
         if name == "Mutex" {
             if operands.len() != 1 {
                 return Err(format!(
@@ -1418,7 +1420,8 @@ impl<'a, 'b> super::MirToIR<'a, 'b> {
             }
             let payload_val = self.compile_operand_raw(&operands[0])?;
             let payload_i64 = self.widen_to_i64(payload_val);
-            let payload_kind = self.operand_slot_kind_or_carrier(&operands[0]);
+            let payload_kind = self
+                .operand_slot_kind_or_surface(&operands[0], "the Mutex payload kind_code")?;
             let kind_code = super::super::ffi::stack_kind_code::encode(payload_kind);
             let kind_code_val = self.builder.ins().iconst(types::I8, kind_code as i64);
             let inst = self

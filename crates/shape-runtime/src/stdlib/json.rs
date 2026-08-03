@@ -402,15 +402,20 @@ fn build_typed_object_from_json(
         let (slot, kind, is_heap) = if let Some(jv) = map.get(wire) {
             build_field_slot_from_json(jv, &field.field_type, registry, json_schema_id)?
         } else {
-            // Missing field → `none()` slot. Stamp the declared field's
-            // native kind when it resolves (so a downstream read pushes the
-            // declared kind with null/zero bits, which the clone/drop paths
-            // treat as an absent value), else fall back to `Null`.
-            let declared = field
-                .field_type
-                .to_native_kind()
-                .unwrap_or(NativeKind::Null);
-            (ValueSlot::none(), declared, false)
+            // Missing field → `none()` slot, kind `Null`.
+            //
+            // #236 / R-G7: the `field_type.to_native_kind().unwrap_or(Null)`
+            // that used to stand here is deleted, and the interesting half
+            // was NOT the default — it was the success arm. A resolving
+            // `FieldType::Object` stamped `Ptr(HeapKind::TypedObject)` over
+            // an all-zero slot with no heap_mask bit, i.e. a kind that says
+            // "this is an Arc pointer" over bits that are not one. `Null` is
+            // the ADR-006 §2.7 merged absence sentinel and it is the PROVEN
+            // kind of a slot this function has just constructed as absent —
+            // the declared type describes the field, not the value that
+            // isn't there. Nothing is defaulted: the branch condition is the
+            // proof.
+            (ValueSlot::none(), NativeKind::Null, false)
         };
         slots[field.index as usize] = slot;
         field_kinds[field.index as usize] = kind;

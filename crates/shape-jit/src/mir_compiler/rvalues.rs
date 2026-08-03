@@ -316,15 +316,28 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                 // boundaries — so picking a native width here is safe and
                 // removes the width-extension wrap/unwrap pair.
                 //
-                // For non-native slot kinds (heap / string / unknown),
-                // `cranelift_type_for_slot` returns I64, collapsing to the
-                // legacy 8-byte cell with no behavioural change. Only
-                // `Place::Local` reaches here — `place.root_local()` is the
-                // slot itself, so the reload-after-call is sound.
+                // For heap / string slot kinds `cranelift_type_for_slot`
+                // returns I64 — that is a projection of a PROVEN kind, not a
+                // default. An UNPROVEN kind surfaces (#236 / R-G7): the cell
+                // is both stored into here and reloaded by
+                // `reload_referenced_locals` after every call, so an
+                // unproven width is a genuine mis-sized read/write, not an
+                // inert declaration. Only `Place::Local` reaches here —
+                // `place.root_local()` is the slot itself, so the
+                // reload-after-call is sound.
                 let raw_val = self.read_place(place)?;
                 let root = place.root_local();
                 let kind = super::types::slot_kind_for_local(&self.slot_kinds, root.0)
-                    .unwrap_or(shape_vm::type_tracking::NativeKind::Int64);
+                    .ok_or_else(|| {
+                        self.debug_dump_slot_kinds(root);
+                        format!(
+                            "#236 surface-and-stop: SURFACE — `&`/`&mut` of local slot {} \
+                             whose NativeKind is unproven, so the per-function stack cell \
+                             has no sound width to store and reload it at. Clean deopt to \
+                             the interpreter — ADR-006 §2.7.13.",
+                            root.0
+                        )
+                    })?;
                 let cl_ty = super::types::cranelift_type_for_slot(kind);
                 let size = cl_ty.bytes();
                 // `create_sized_stack_slot` takes the log2 of the alignment;
@@ -578,42 +591,49 @@ impl<'a, 'b> MirToIR<'a, 'b> {
 
     // ── Operand kind helpers ───────────────────────────────────────
 
-    /// Get the NativeKind of an operand's source, falling back to the
-    /// documented §2.7.5 stable-FFI carrier kind `NativeKind::UInt64` when
-    /// the producing-site inference left the slot kind undetermined.
+    /// Get the NativeKind of an operand's source, or a surface-and-stop
+    /// naming the site that demanded the proof.
     ///
-    /// ADR-006 §2.7.5 designates `UInt64` as the "I64-wide raw bits without
-    /// further classification" carrier kind — the same kind
-    /// `dispatch_call_via_trampoline_vm` stamps for function-id-class
-    /// callees and for I64-widened args at the JIT-FFI boundary. It is
-    /// NOT a Bool-default rationalization (§2.7.7 #9 / CLAUDE.md
-    /// "Forbidden rationalizations"); `UInt64` is the documented carrier
-    /// kind for the bit-pattern the JIT actually pushes onto the stack
-    /// (every operand widens to I64 before the push per terminators.rs
-    /// R4.2E inline-widening discipline).
+    /// #236 / R-G7 (owner ruling 2026-08-02): this replaces
+    /// `operand_slot_kind_or_carrier`, which was
+    /// `operand_slot_kind(...).unwrap_or(NativeKind::UInt64)`. That
+    /// default called itself the documented §2.7.5 "I64-wide raw bits"
+    /// carrier kind, and the argument was that widening to I64 before the
+    /// push makes `UInt64` structurally correct. It does not: the pushed
+    /// BITS are I64-wide, but the kind written alongside them is what the
+    /// consumer dispatches on, and the consumer is not free to read
+    /// `Ptr(HeapKind::TypedArray)` bits as an unsigned integer. Every one
+    /// of the nine consumption sites wrote the kind into a track something
+    /// reads back — `JITContext.stack_kinds` (popped at
+    /// `ffi/call_method/mod.rs:658,711,746`), the `kind_code` argument of
+    /// `jit_v2_make_result_ok/err` and `jit_v2_make_mutex`, and
+    /// `emit_call_value_sequence`'s callee/arg classification. The owner
+    /// verdict: if the kind is provable the compiler stamps it; if it is
+    /// not, the default was fabricating. Either way the `unwrap_or` dies.
     ///
-    /// Precise kinds — `Ptr(HeapKind::Closure)` for closure slots seeded by
-    /// `infer_slot_kinds::ClosureCapture`, `Float64` / `Bool` / etc. for
-    /// inferred scalar slots — flow through unchanged. The fallback only
-    /// applies to slots whose producing-site is opaque to MIR inference
-    /// (field reads through heap projections, opaque-source calls, etc.)
-    /// — in those cases the value IS I64-wide raw bits by construction,
-    /// and `UInt64` is the structurally-correct §2.7.5 carrier kind.
-    ///
-    /// For the load-bearing closure-callee classification at
-    /// `jit_call_value`'s indirect-call entry, the §2.7.11/Q12 dispatch
-    /// requires precise `Ptr(HeapKind::Closure)` kinds — seeded via
-    /// `infer_slot_kinds`'s ClosureCapture arm. The `UInt64` fallback at
-    /// other push sites preserves the existing JIT-internal NaN-box
-    /// bit-shape dispatch path inside `jit_call_value` (cases 1 / 2 —
-    /// inline `TAG_FUNCTION` function refs and legacy `HK_CLOSURE`
-    /// unified-heap callees).
-    pub(crate) fn operand_slot_kind_or_carrier(
+    /// `site` names the demanding site in the diagnostic — a bail that says
+    /// only "unproven slot" is what made #236 read as a codegen bug
+    /// (§6.5's method note).
+    pub(crate) fn operand_slot_kind_or_surface(
         &self,
         operand: &Operand,
-    ) -> shape_value::NativeKind {
-        self.operand_slot_kind(operand)
-            .unwrap_or(shape_value::NativeKind::UInt64)
+        site: &str,
+    ) -> Result<shape_value::NativeKind, String> {
+        match self.operand_slot_kind(operand) {
+            Some(k) => Ok(k),
+            None => {
+                if let Operand::Copy(p) | Operand::Move(p) | Operand::MoveExplicit(p) = operand {
+                    self.debug_dump_slot_kinds(p.root_local());
+                }
+                Err(format!(
+                    "#236 surface-and-stop: SURFACE — {} needs the NativeKind of operand \
+                     `{}` and MIR inference proved none. The kind is written into a track \
+                     the consumer dispatches on, so there is nothing sound to stamp. Clean \
+                     deopt to the interpreter — ADR-006 §2.7.5.",
+                    site, operand
+                ))
+            }
+        }
     }
 
     /// Get the NativeKind of an operand's source (before compilation).
@@ -716,10 +736,10 @@ impl<'a, 'b> MirToIR<'a, 'b> {
     ///   into the JIT-side projection map yet. Returns `None` so the
     ///   BinaryOp lowering surfaces honestly rather than papering.
     ///
-    /// Returns `None` when no proof exists at this consumer site;
-    /// callers in `compile_rvalue` then choose between surface-and-stop
-    /// (the dynamic-arith / dynamic-cmp arms) and continuing through the
-    /// `UInt64` carrier fallback in `operand_slot_kind_or_carrier`.
+    /// Returns `None` when no proof exists at this consumer site. Every
+    /// caller surfaces on `None` — the `UInt64` carrier fallback that used
+    /// to absorb it (`operand_slot_kind_or_carrier`) is deleted per #236 /
+    /// R-G7.
     ///
     /// `pub(crate)` so `ownership::refcount_disposition` can project
     /// through `Field` / `Index` to decide retain/release on the value

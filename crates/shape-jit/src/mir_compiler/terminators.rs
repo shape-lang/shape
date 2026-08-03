@@ -736,12 +736,17 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                     // uniform u64 from ctx.stack[sp+i]. No NaN-boxing tagging
                     // is applied — raw bit-patterns only.
                     for (i, arg) in args.iter().enumerate() {
-                        // Source kind for the parallel-kind track,
-                        // falling back to the §2.7.5 carrier kind
-                        // (`UInt64`) for opaque-source operands —
-                        // NOT a Bool-default fallback.
+                        // Source kind for the parallel-kind track. The
+                        // method-dispatch shell pops these back
+                        // (`ffi/call_method/mod.rs:658,711,746`) and
+                        // dispatches on them, so an unproven kind
+                        // surfaces (#236 / R-G7) rather than claiming the
+                        // `UInt64` raw-bits carrier over heap bits.
                         let _ = i;
-                        let arg_kind = self.operand_slot_kind_or_carrier(arg);
+                        let arg_kind = self.operand_slot_kind_or_surface(
+                            arg,
+                            "the method-call VM-stack parallel-kind track",
+                        )?;
 
                         let val = self.compile_operand(arg)?;
                         let val_ty = self.builder.func.dfg.value_type(val);
@@ -1874,14 +1879,18 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                     // neither arm re-runs `compile_operand`'s side effects.
                     // Both blocks are dominated by this one, so the values are
                     // available in each.
-                    let callee_kind = self.operand_slot_kind_or_carrier(func);
+                    let callee_kind = self
+                        .operand_slot_kind_or_surface(func, "the heap-closure fast-path callee")?;
                     let callee_val = self.compile_operand(func)?;
                     let callee_boxed = self.widen_to_i64(callee_val);
 
                     let mut arg_pairs: Vec<(Value, shape_value::NativeKind)> =
                         Vec::with_capacity(args.len());
                     for arg in args.iter() {
-                        let arg_kind = self.operand_slot_kind_or_carrier(arg);
+                        let arg_kind = self.operand_slot_kind_or_surface(
+                            arg,
+                            "a heap-closure fast-path call argument",
+                        )?;
                         let val = self.compile_operand(arg)?;
                         arg_pairs.push((self.widen_to_i64(val), arg_kind));
                     }
@@ -2215,14 +2224,16 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                     // push sequence out so the heap-closure fast path's
                     // guard-failure branch reaches the SAME code rather than a
                     // second copy of it that could drift.
-                    let callee_kind = self.operand_slot_kind_or_carrier(func);
+                    let callee_kind =
+                        self.operand_slot_kind_or_surface(func, "the indirect-call callee")?;
                     let callee_val = self.compile_operand(func)?;
                     let callee_boxed = self.widen_to_i64(callee_val);
 
                     let mut arg_pairs: Vec<(Value, shape_value::NativeKind)> =
                         Vec::with_capacity(args.len());
                     for arg in args.iter() {
-                        let arg_kind = self.operand_slot_kind_or_carrier(arg);
+                        let arg_kind = self
+                            .operand_slot_kind_or_surface(arg, "an indirect-call argument")?;
                         let val = self.compile_operand(arg)?;
                         arg_pairs.push((self.widen_to_i64(val), arg_kind));
                     }
@@ -2505,7 +2516,10 @@ impl<'a, 'b> MirToIR<'a, 'b> {
         let combined: Vec<&shape_vm::mir::types::Operand> =
             receiver_operands.iter().chain(extra_args.iter()).collect();
         for (i, arg) in combined.iter().enumerate() {
-            let arg_kind = self.operand_slot_kind_or_carrier(arg);
+            // #236 / R-G7: the shell pops this back off `stack_kinds` and
+            // dispatches on it (`ffi/call_method/mod.rs:658,711,746`).
+            let arg_kind = self
+                .operand_slot_kind_or_surface(arg, "the method-dispatch VM-stack push")?;
             let val = self.compile_operand(arg)?;
             let val_ty = self.builder.func.dfg.value_type(val);
             let boxed = if val_ty == types::I64 {
@@ -2671,8 +2685,8 @@ impl<'a, 'b> MirToIR<'a, 'b> {
     /// what #188 slice 1 made load-bearing.
     ///
     /// Callers pass values already widened to I64 by `widen_to_i64`, and pass
-    /// each kind from `operand_slot_kind_or_carrier` at the PRODUCING site —
-    /// never re-derived from bits here.
+    /// each kind from `operand_slot_kind_or_surface` at the PRODUCING site —
+    /// never re-derived from bits here, and never defaulted (#236 / R-G7).
     fn emit_call_value_sequence(
         &mut self,
         callee_boxed: Value,
