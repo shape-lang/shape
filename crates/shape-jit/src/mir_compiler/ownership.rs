@@ -990,7 +990,9 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                 if let Some(&idx) = self.function_indices.get(name.as_str()) {
                     let boxed = crate::ffi::object::closure::arc_closure_constant(idx);
                     let bits = self.builder.ins().iconst(types::I64, boxed as i64);
-                    self.builder.ins().call(self.ffi.arc_closure_retain, &[bits]);
+                    self.builder
+                        .ins()
+                        .call(self.ffi.arc_closure_retain, &[bits]);
                     Ok(bits)
                 } else {
                     Err(format!(
@@ -1052,7 +1054,9 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                         // `Function` arm above, and now the same stamp.
                         let boxed = crate::ffi::object::closure::arc_closure_constant(fid);
                         let bits = self.builder.ins().iconst(types::I64, boxed as i64);
-                        self.builder.ins().call(self.ffi.arc_closure_retain, &[bits]);
+                        self.builder
+                            .ins()
+                            .call(self.ffi.arc_closure_retain, &[bits]);
                         return Ok(bits);
                     }
                 }

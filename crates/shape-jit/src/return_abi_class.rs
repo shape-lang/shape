@@ -72,10 +72,9 @@ pub(crate) fn return_abi_class(kind: NativeKind) -> ReturnAbiClass {
         NativeKind::Float64 => ReturnAbiClass::Float,
 
         // Heap carriers — one owned share transfers (O2).
-        NativeKind::Ptr(_)
-        | NativeKind::String
-        | NativeKind::StringV2
-        | NativeKind::DecimalV2 => ReturnAbiClass::Pointer,
+        NativeKind::Ptr(_) | NativeKind::String | NativeKind::StringV2 | NativeKind::DecimalV2 => {
+            ReturnAbiClass::Pointer
+        }
 
         // Everything else is an inline scalar: the signed/unsigned width family
         // and their nullable forms, `Bool`, `Char`, `Float32`, and `Null` (the
@@ -139,7 +138,10 @@ mod tests {
             return_abi_class(NativeKind::NullableFloat64),
             ReturnAbiClass::Scalar
         );
-        assert_eq!(return_abi_class(NativeKind::Float32), ReturnAbiClass::Scalar);
+        assert_eq!(
+            return_abi_class(NativeKind::Float32),
+            ReturnAbiClass::Scalar
+        );
     }
 
     #[test]

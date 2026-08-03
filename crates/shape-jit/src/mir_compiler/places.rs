@@ -933,9 +933,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                 // address (pointer-width I64) — `Rvalue::Borrow`'s short-
                 // circuit + the param-init path both keep that invariant.
                 if self.ref_param_slots.contains(slot) {
-                    let ref_addr = self.builder.use_var(
-                        self.local_var(*slot)?,
-                    );
+                    let ref_addr = self.builder.use_var(self.local_var(*slot)?);
                     return Ok(self
                         .builder
                         .ins()
@@ -1215,9 +1213,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                 // would lose the pointer (and the mutation would never
                 // reach the caller's `a` binding).
                 if self.ref_param_slots.contains(slot) {
-                    let ref_addr = self.builder.use_var(
-                        self.local_var(*slot)?,
-                    );
+                    let ref_addr = self.builder.use_var(self.local_var(*slot)?);
                     self.builder.ins().store(MemFlags::new(), val, ref_addr, 0);
                     return Ok(());
                 }

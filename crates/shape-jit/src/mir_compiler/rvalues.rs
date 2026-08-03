@@ -327,8 +327,8 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                 // reload-after-call is sound.
                 let raw_val = self.read_place(place)?;
                 let root = place.root_local();
-                let kind = super::types::slot_kind_for_local(&self.slot_kinds, root.0)
-                    .ok_or_else(|| {
+                let kind = super::types::slot_kind_for_local(&self.slot_kinds, root.0).ok_or_else(
+                    || {
                         self.debug_dump_slot_kinds(root);
                         format!(
                             "#236 surface-and-stop: SURFACE — `&`/`&mut` of local slot {} \
@@ -337,7 +337,8 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                              the interpreter — ADR-006 §2.7.13.",
                             root.0
                         )
-                    })?;
+                    },
+                )?;
                 let cl_ty = super::types::cranelift_type_for_slot(kind);
                 let size = cl_ty.bytes();
                 // `create_sized_stack_slot` takes the log2 of the alignment;

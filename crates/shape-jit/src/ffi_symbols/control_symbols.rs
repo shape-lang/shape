@@ -15,9 +15,9 @@ use super::super::ffi::control::{
     jit_call_foreign_native_1, jit_call_foreign_native_2, jit_call_foreign_native_3,
     jit_call_foreign_native_4, jit_call_foreign_native_5, jit_call_foreign_native_6,
     jit_call_foreign_native_7, jit_call_foreign_native_8, jit_call_function, jit_call_value_f64,
-    jit_call_value_i64, jit_call_value_ptr, jit_call_value_void,
-    jit_control_every, jit_control_filter, jit_control_find, jit_control_find_index,
-    jit_control_fold, jit_control_foreach, jit_control_map, jit_control_reduce, jit_control_some,
+    jit_call_value_i64, jit_call_value_ptr, jit_call_value_void, jit_control_every,
+    jit_control_filter, jit_control_find, jit_control_find_index, jit_control_fold,
+    jit_control_foreach, jit_control_map, jit_control_reduce, jit_control_some,
 };
 use super::super::ffi::iterator::{jit_iter_done, jit_iter_next};
 

@@ -572,8 +572,8 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                 // kind_code below is what `jit_v2_make_result_ok/err`
                 // stores as the payload's kind, so an unprovable kind
                 // surfaces (#236 / R-G7) rather than claiming UInt64.
-                let payload_kind = self
-                    .operand_slot_kind_or_surface(operand, "the Ok/Err payload kind_code")?;
+                let payload_kind =
+                    self.operand_slot_kind_or_surface(operand, "the Ok/Err payload kind_code")?;
                 let kind_code = super::super::ffi::stack_kind_code::encode(payload_kind);
 
                 // Compile the operand to its raw payload bits (the call
@@ -1450,8 +1450,8 @@ impl<'a, 'b> super::MirToIR<'a, 'b> {
             }
             let payload_val = self.compile_operand_raw(&operands[0])?;
             let payload_i64 = self.widen_to_i64(payload_val);
-            let payload_kind = self
-                .operand_slot_kind_or_surface(&operands[0], "the Mutex payload kind_code")?;
+            let payload_kind =
+                self.operand_slot_kind_or_surface(&operands[0], "the Mutex payload kind_code")?;
             let kind_code = super::super::ffi::stack_kind_code::encode(payload_kind);
             let kind_code_val = self.builder.ins().iconst(types::I8, kind_code as i64);
             let inst = self

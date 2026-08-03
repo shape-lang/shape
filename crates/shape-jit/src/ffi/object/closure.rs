@@ -1235,8 +1235,7 @@ mod closure_constant_pool_tests {
         // one into the other — which is verbatim what a real program produced:
         // "callee stamped Ptr(HeapKind::Closure) but the HeapValue arm is
         // TaskGroup".
-        let discriminant_word_before: u32 =
-            unsafe { std::ptr::read_volatile(bits as *const u32) };
+        let discriminant_word_before: u32 = unsafe { std::ptr::read_volatile(bits as *const u32) };
         let mut copy: u32 = discriminant_word_before;
         copy = copy.wrapping_add(1);
         assert_ne!(
@@ -1298,7 +1297,8 @@ mod closure_constant_pool_tests {
         }
 
         assert_eq!(
-            strong_count(bits), 1,
+            strong_count(bits),
+            1,
             "unretained consumption spends the budget; the next call would free a constant. \
              This is the §6.3 item-3 recipe's failure mode, and it is why the emitted \
              retain is not optional."

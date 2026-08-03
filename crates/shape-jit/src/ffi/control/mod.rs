@@ -779,7 +779,6 @@ fn call_value_kinded(ctx: *mut JITContext) -> Outcome {
                 return Outcome::Failed;
             }
         }
-
     }
 }
 

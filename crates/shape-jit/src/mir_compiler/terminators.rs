@@ -2272,8 +2272,8 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                     let mut arg_pairs: Vec<(Value, shape_value::NativeKind)> =
                         Vec::with_capacity(args.len());
                     for arg in args.iter() {
-                        let arg_kind = self
-                            .operand_slot_kind_or_surface(arg, "an indirect-call argument")?;
+                        let arg_kind =
+                            self.operand_slot_kind_or_surface(arg, "an indirect-call argument")?;
                         let val = self.compile_operand(arg)?;
                         arg_pairs.push((self.widen_to_i64(val), arg_kind));
                     }
@@ -2334,9 +2334,11 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                 // Resolved with the SAME resolver `infer_unit_slots` uses on
                 // the caller side, so the two sides cannot disagree about which
                 // function a name denotes.
-                let self_returns_unit =
-                    super::types::resolve_named_function_index(&self.mir.name, self.function_indices)
-                        .is_some_and(|fid| self.unit_returning_funcs.contains(&fid));
+                let self_returns_unit = super::types::resolve_named_function_index(
+                    &self.mir.name,
+                    self.function_indices,
+                )
+                .is_some_and(|fid| self.unit_returning_funcs.contains(&fid));
                 // W11-jit-new-array: when SlotId(0) is not declared, the
                 // program has no value-bearing return (e.g. top-level ending
                 // with `print(x)`). Stamp UNIT so the executor's typed
@@ -2613,8 +2615,8 @@ impl<'a, 'b> MirToIR<'a, 'b> {
         for (i, arg) in combined.iter().enumerate() {
             // #236 / R-G7: the shell pops this back off `stack_kinds` and
             // dispatches on it (`ffi/call_method/mod.rs:658,711,746`).
-            let arg_kind = self
-                .operand_slot_kind_or_surface(arg, "the method-dispatch VM-stack push")?;
+            let arg_kind =
+                self.operand_slot_kind_or_surface(arg, "the method-dispatch VM-stack push")?;
             let val = self.compile_operand(arg)?;
             let val_ty = self.builder.func.dfg.value_type(val);
             let boxed = if val_ty == types::I64 {
@@ -2899,17 +2901,18 @@ impl<'a, 'b> MirToIR<'a, 'b> {
         if self.unit_slots.contains(slot) {
             return Ok(ReturnAbiClass::Void);
         }
-        let kind = super::types::slot_kind_for_local(&self.slot_kinds, slot.0).ok_or_else(|| {
-            self.debug_dump_slot_kinds(*slot);
-            format!(
-                "ADR-020 §4.1 surface-and-stop: SURFACE — an indirect call's destination slot \
+        let kind =
+            super::types::slot_kind_for_local(&self.slot_kinds, slot.0).ok_or_else(|| {
+                self.debug_dump_slot_kinds(*slot);
+                format!(
+                    "ADR-020 §4.1 surface-and-stop: SURFACE — an indirect call's destination slot \
                  {} has no compile-time-proven NativeKind, so no return-ABI class can be \
                  selected for it: there is no sound representation to bring the callee's \
                  value back in. The producing site must stamp the slot kind (ADR-006 \
                  §2.7.5). No polymorphic fallback, no runtime kind parameter.",
-                slot.0
-            )
-        })?;
+                    slot.0
+                )
+            })?;
         Ok(return_abi_class(kind))
     }
 
