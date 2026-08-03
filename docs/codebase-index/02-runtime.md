@@ -732,12 +732,14 @@ strict-typing bulldozer (option C, all `ValueWord`-bearing variants deleted).
 
 ### `TaskScheduler`
 
-**Path**: `crates/shape-vm/src/executor/task_scheduler.rs:33-44`.
-**Role**: Per-VM scheduler — stores callables by task ID, tracks completion (`TaskStatus::Pending|Completed|Cancelled`), bridges externally-completed Tokio tasks via oneshot channels.
+**Path**: `crates/shape-vm/src/executor/task_scheduler.rs`.
+**Role**: Per-VM scheduler — one `tasks: HashMap<u64, TaskState>` holding every scheduled task by ID, each entry carrying the driver that advances it (callable, external oneshot receiver, or in-flight tokio task) inside its variant.
 **Key rules / invariants**:
-- Inline execution model: tasks run synchronously at await-time. Tokio path layered for remote calls.
-- `external_receivers: HashMap<u64, oneshot::Receiver<Result<ValueWord, String>>>` for externally-completed tasks.
-- `cancel(id)` only effective if status is `Pending`.
+- Status is READ off the entry, never reconstructed by probing parallel maps (#237 / ADR-020 R-G5; the four maps this replaced could not distinguish "pending, driver checked out" from "no such task").
+- `TaskState::{PendingCallable, PendingExternal, PendingAsync, PendingUndriven, Completed, Cancelled}`. `PendingUndriven` = a consumer holds the driver and is running it, or a driver failed and orphaned the entry.
+- Inline execution model: tasks run synchronously at await-time. Tokio path layered for remote calls and real async module calls.
+- `PendingCallable` and `Completed` each own one strong-count share (§2.7.7); replacing an entry releases the displaced share, and `Drop` releases every share the map still holds.
+- `cancel(id)` leaves an entry that already has an outcome alone; otherwise it releases/aborts the driver and records `Cancelled`.
 
 **Related**: `op_spawn_task`, `op_cancel_task`, remote call path.
 

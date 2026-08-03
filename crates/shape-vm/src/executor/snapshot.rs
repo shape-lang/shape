@@ -27,6 +27,7 @@ use std::collections::HashMap;
 use shape_value::VMError;
 
 use crate::bytecode::{Function, FunctionHash};
+use crate::executor::task_scheduler::TaskState;
 
 /// Resolve a function's runtime ID from content-addressed identity.
 ///
@@ -128,6 +129,64 @@ fn w17_snapshot_surface(op: &str) -> String {
     )
 }
 
+/// Plain-language capture-barrier clause for a live `Future` handle, chosen by
+/// the scheduler entry that handle names (#237 / ADR-020 grill R-G5).
+///
+/// Every other barrier family gets curated language from [`render_capture_barrier`];
+/// the Future family used to hand it a whole message to pass through verbatim,
+/// so the user was shown the raw scheduler status — including "unknown
+/// scheduler entry" for a task that existed and was executing normally, which
+/// is what the four-map probe reported once the driver had been checked out.
+/// Each state now has its own sentence, and the internal detail (task id, slot
+/// location, state name) stays on the near side of the
+/// `FUTURE_SNAPSHOT_BARRIER:` marker, which the renderer strips.
+fn future_barrier_clause(state: Option<&TaskState>) -> &'static str {
+    match state {
+        Some(TaskState::PendingCallable(_)) => {
+            "cannot checkpoint while an async task is still waiting to start: pending \
+             async work is not saved by this build. Await or cancel it before \
+             checkpointing."
+        }
+        Some(TaskState::PendingExternal(_)) => {
+            "cannot checkpoint while an async task is still waiting for a result from \
+             outside this program: pending async work is not saved by this build. Await \
+             or cancel it before checkpointing."
+        }
+        Some(TaskState::PendingAsync { .. }) => {
+            "cannot checkpoint while an async task is still running in the background: \
+             pending async work is not saved by this build. Await or cancel it before \
+             checkpointing."
+        }
+        Some(TaskState::PendingUndriven) => {
+            "cannot checkpoint while an async task is part-way through running: a task \
+             that has started but not finished is not saved by this build. Let it \
+             finish, or cancel it, before checkpointing."
+        }
+        Some(TaskState::Completed(_)) => {
+            "cannot checkpoint while a finished async task's handle is still in scope: \
+             this build saves plain values, not task handles. Await the task and keep \
+             its result instead of the handle."
+        }
+        Some(TaskState::Cancelled) => {
+            "cannot checkpoint while a cancelled async task's handle is still in scope: \
+             this build saves plain values, not task handles. Drop the handle before \
+             checkpointing."
+        }
+        // No entry: a handle outliving its task (or naming one that was never
+        // scheduled). Still a handle, still unsaveable.
+        None => {
+            "cannot checkpoint while an async task handle is still in scope: this build \
+             saves plain values, not task handles. Drop the handle before checkpointing."
+        }
+    }
+}
+
+/// The nested-handle counterpart of [`future_barrier_clause`]: a `Future` found
+/// inside a value being serialized, where the scheduler entry is not in hand.
+const NESTED_FUTURE_BARRIER: &str = "cannot checkpoint while a value holding an async task handle is still in scope: \
+     this build saves plain values, not task handles. Await the task and store its \
+     result in place of the handle.";
+
 impl super::VirtualMachine {
     fn guard_future_snapshot_slot(
         &self,
@@ -141,12 +200,13 @@ impl super::VirtualMachine {
         ) {
             return Ok(());
         }
-        let status = self.task_scheduler.future_snapshot_status(bits);
+        let state = self.task_scheduler.task_state(bits);
+        // Internal detail first, curated user text after the marker: the
+        // renderer keeps only the tail (design §4.11 rendering rule).
         Err(VMError::NotImplemented(format!(
-            "FUTURE_SNAPSHOT_BARRIER: cannot checkpoint while Future({bits}) \
-             is still live at {location}: {status}. Await it, cancel it, or \
-             move snapshot() after it resolves; resumable futures are not \
-             implemented yet."
+            "guard_future_snapshot_slot: live Future({bits}) at {location} (scheduler \
+             entry {state:?}). FUTURE_SNAPSHOT_BARRIER: {}",
+            future_barrier_clause(state)
         )))
     }
 
@@ -722,6 +782,11 @@ fn render_capture_barrier(e: &VMError) -> String {
     let lower = raw.to_ascii_lowercase();
 
     // Order matters: match the most specific families first.
+    //
+    // The Future family curates its own text at the point of construction —
+    // `future_barrier_clause` picks the sentence from the scheduler entry, and
+    // everything internal (task id, slot location, `TaskState` name) is on the
+    // near side of the marker. So the tail is already user-facing (#237).
     if let Some((_, message)) = raw.split_once("FUTURE_SNAPSHOT_BARRIER:") {
         return message.trim().to_string();
     }
@@ -1053,9 +1118,11 @@ fn snapshot_frame_upvalues_serializable(
         let sv = match slot_to_serializable(cap_bits, cap_kind, store) {
             Ok(v) => v,
             Err(msg) if msg.contains("Future(") || msg.contains("pending-future state") => {
+                // Internal detail first, curated user text after the marker —
+                // same split as `guard_future_snapshot_slot` (#237).
                 return Err(VMError::NotImplemented(format!(
-                    "FUTURE_SNAPSHOT_BARRIER: cannot checkpoint while a nested \
-                     Future handle is live at call_stack closure upvalue[{idx}]: {msg}"
+                    "capture_closure_upvalues: nested live Future at call_stack closure \
+                     upvalue[{idx}] ({msg}). FUTURE_SNAPSHOT_BARRIER: {NESTED_FUTURE_BARRIER}"
                 )));
             }
             Err(_) => {
@@ -1176,20 +1243,60 @@ mod tests {
     fn render_capture_barrier_never_leaks_internal_jargon() {
         // The two families the refutation observed leaking verbatim, plus a
         // catch-all, each carrying the full internal wrapper text.
-        let leaky = [
+        let mut leaky: Vec<String> = vec![
             "VirtualMachine::snapshot stack[0] kind=Ptr(Reference): serialize_reference: \
              STAGE-R5 KL-4 guard — a non-promoted reference (Local / ModuleBinding / \
              TypedField / IndexedElement) has no owning SharedCell; serializing-through \
              would read its bits as *const SharedCell (a wild-free). Clean-refuse by \
-             design. ADR-006 §2.7.30.7.",
+             design. ADR-006 §2.7.30.7."
+                .to_string(),
             "VirtualMachine::snapshot module_binding[2] kind=Ptr(Closure): \
              slot_to_serializable: W17-snapshot-roundtrip surface — HeapKind::Closure arm \
              has no in-session SerializableVMValue projection. Tracked as \
              W17-snapshot-Closure follow-up per docs/cluster-audits/phase-2d-playbook.md \
-             §3. ADR-006 §2.7.5.1.",
+             §3. ADR-006 §2.7.5.1."
+                .to_string(),
             "VirtualMachine::snapshot stack[4] kind=Ptr(DataTable): SURFACE: some \
-             internal detail ADR-006 §2.7.5.1",
+             internal detail ADR-006 §2.7.5.1"
+                .to_string(),
+            // The nested-handle Future site (#237): its internal half embeds a
+            // whole inner sentinel, jargon and all.
+            format!(
+                "capture_closure_upvalues: nested live Future at call_stack closure \
+                 upvalue[2] (slot_to_serializable: SURFACE: pending-future state ADR-006 \
+                 §2.7.5.1). FUTURE_SNAPSHOT_BARRIER: {NESTED_FUTURE_BARRIER}"
+            ),
         ];
+        // Every Future family state (#237): the internal half carries the task
+        // id, the slot location and the `TaskState` name, all of which must be
+        // stripped along with everything else.
+        let (_stalled_tx, stalled_rx) = std::sync::mpsc::channel();
+        for state in [
+            None,
+            Some(TaskState::PendingCallable((
+                0,
+                shape_value::NativeKind::Int64,
+            ))),
+            Some(TaskState::PendingExternal(
+                tokio::sync::oneshot::channel().1,
+            )),
+            Some(TaskState::PendingAsync {
+                task: crate::executor::task_scheduler::PendingAsyncTask {
+                    completion: crate::executor::task_scheduler::AsyncCompletion::Typed(stalled_rx),
+                    abort: None,
+                },
+                cancel_hook: None,
+            }),
+            Some(TaskState::PendingUndriven),
+            Some(TaskState::Completed((0, shape_value::NativeKind::Int64))),
+            Some(TaskState::Cancelled),
+        ] {
+            leaky.push(format!(
+                "guard_future_snapshot_slot: live Future(18446744073709551615) at stack[3] \
+                 (scheduler entry {state:?}). FUTURE_SNAPSHOT_BARRIER: {}",
+                future_barrier_clause(state.as_ref())
+            ));
+        }
         // Tokens that must never survive into a user-facing message.
         let forbidden = [
             "ADR",
@@ -1206,6 +1313,15 @@ mod tests {
             "wild-free",
             "W17-snapshot",
             "phase-2d-playbook",
+            // #237: the Future family's internal half.
+            "Future(",
+            "guard_future_snapshot_slot",
+            "capture_closure_upvalues",
+            "scheduler entry",
+            "unknown scheduler entry",
+            "stack[",
+            "module_binding[",
+            "upvalue[",
         ];
         for raw in leaky {
             let rendered = render_capture_barrier(&VMError::NotImplemented(raw.to_string()));
@@ -1491,13 +1607,59 @@ mod tests {
             .expect_err("pending Future handle must block snapshot capture");
         let msg = err.to_string();
 
+        // Internal half: the task id, the slot, and the scheduler state, for
+        // whoever is debugging the VM.
         assert!(msg.contains("FUTURE_SNAPSHOT_BARRIER"), "got: {msg}");
         assert!(msg.contains("Future(77)"), "got: {msg}");
         assert!(msg.contains("stack[0]"), "got: {msg}");
-        assert!(msg.contains("pending callable"), "got: {msg}");
+        assert!(msg.contains("PendingCallable"), "got: {msg}");
+
+        // User-facing half: curated language, no internal detail, and state-
+        // specific advice (#237).
+        let rendered = render_capture_barrier(&err);
+        assert_eq!(
+            rendered,
+            "cannot checkpoint while an async task is still waiting to start: pending \
+             async work is not saved by this build. Await or cancel it before \
+             checkpointing.",
+            "got: {rendered}"
+        );
+    }
+
+    /// The state #237 named: a task whose driver has been checked out is
+    /// executing, not absent. The four-map scheduler rendered it as "unknown
+    /// scheduler entry" — telling a user no entry exists for an id whose entry
+    /// does exist.
+    #[test]
+    fn test_snapshot_barrier_names_a_running_task_as_running() {
+        use shape_value::{HeapKind, NativeKind};
+
+        let mut vm = VirtualMachine::new(VMConfig::default());
+        vm.task_scheduler.register(77, 0, NativeKind::Int64);
+        // Check the driver out, as an executing task does.
+        let _driver = vm.task_scheduler.take_callable(77).expect("registered");
+        vm.push_kinded(77, NativeKind::Ptr(HeapKind::Future))
+            .expect("push Future handle");
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let store = SnapshotStore::new(tmp.path()).expect("snapshot store");
+        let err = vm
+            .snapshot(&store)
+            .expect_err("a live Future handle must block snapshot capture");
+
         assert!(
-            msg.contains("resumable futures are not implemented yet"),
-            "got: {msg}"
+            err.to_string().contains("PendingUndriven"),
+            "got: {}",
+            err.to_string()
+        );
+        let rendered = render_capture_barrier(&err);
+        assert!(
+            rendered.contains("part-way through running"),
+            "got: {rendered}"
+        );
+        assert!(
+            !rendered.contains("unknown"),
+            "the conflated 'unknown scheduler entry' string must be gone: {rendered}"
         );
     }
 
@@ -1519,7 +1681,13 @@ mod tests {
         assert!(msg.contains("FUTURE_SNAPSHOT_BARRIER"), "got: {msg}");
         assert!(msg.contains("Future(88)"), "got: {msg}");
         assert!(msg.contains("module_binding[0]"), "got: {msg}");
-        assert!(msg.contains("pending external completion"), "got: {msg}");
+        assert!(msg.contains("PendingExternal"), "got: {msg}");
+
+        let rendered = render_capture_barrier(&err);
+        assert!(
+            rendered.contains("waiting for a result from outside this program"),
+            "got: {rendered}"
+        );
     }
 
     #[test]

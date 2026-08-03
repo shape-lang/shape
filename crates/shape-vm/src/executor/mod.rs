@@ -64,7 +64,7 @@ pub use async_ops::{AsyncExecutionResult, SuspensionInfo, WaitType};
 pub use control_flow::foreign_contract;
 pub use control_flow::foreign_marshal;
 pub use control_flow::native_abi;
-pub use task_scheduler::{TaskScheduler, TaskStatus};
+pub use task_scheduler::{TaskScheduler, TaskState};
 
 // WF-0A gate hardening (2026-07-05): re-export the PHF method registry so
 // shape-jit's return-kind cross-check test
