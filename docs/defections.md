@@ -8517,3 +8517,97 @@ Slice: S8c (commit `4a8a14b2`) + S8d (shape-web branch `adr009-c3-annotations`, 
 **DISCLOSED residual (not fixed here — outside the ordered scope):** the compile-time DIAGNOSTIC tier still renders raw `hygienic:` mints in the specialization-rejection family's template-identity clause (measured during S8d book probing: the zero-param-target rejection, the [C0926] sentence, and the G8 generic-target sentence each name the template as `hygienic:<hash>` and the declared signature with `hygienic:` type params). The S8c order covered the LSP hover tier via the shared query surface; extending the display-safe rendering to the diagnostic producers is surfaced in the slice-7/8 report for disposition — REJECTED in-slice: an unordered compiler-diagnostic rewrite inside a docs/report stage is exactly the undisclosed-scope-move the fence rules stop.
 
 **Book scope bound to annotations.mdx (S8d).** The full truth-gate run against the a3 release binary classified 17 reds, ALL C3-attributable: 7 × `@remote` fences (modules.mdx ×2, stdlib/core/remote.mdx ×2, polyglot-distributed.mdx ×2, execution-server.mdx ×1 — the dark window, ledgered to #68) and 10 × untyped-config annotation spellings (comptime-annotations-cookbook.mdx ×6, comptime.mdx ×1, content-addressed-bytecode.mdx ×2, modules.mdx ×1 — the deleted untyped surface, ledgered to #23/F1). REJECTED: rewriting those pages in-slice (the order names annotations.mdx ONLY; the F1 full-universe enablement is #23's charter); re-marking the annotations page's rejection fences as non-runnable prose (the `expected-fail` gate form pins each rejection sentence as executable book truth instead). Also REJECTED: holding the zero-param observer example out of the book until its JIT deopt is fixed — the observer fence gates green (VM==JIT byte-equal, exit 0) and its whole-program deopt is LOUD (one W36 line naming the un-proven hygienic hook-body return kind, measured during S8d probing, surfaced in the slice-7/8 report as a new proof-gap-family member); the page makes no per-fence nativity claim, and hiding a working documented capability to cosmetically avoid a loud fallback would invert the honesty rule.
+
+## 2026-08-03 — #235 stage 1 (ADR-020 grill R-G4): `FieldType::Any` day-one gate + Classes A/C/F
+
+Branch `c235-any-stage1`, commits `c1b4d091` (day-one) + `23044f23` (A+C) +
+`f9cba066` (F partial).
+
+**The laundering escape was found by probing, not by reading.** The day-one
+gate's first form (`AnyToken` with a private field, `Clone`+`Copy`) blocked
+`FieldType::Any(AnyToken(..))` with E0423 as intended — and a second probe,
+`match ft { FieldType::Any(tok) => FieldType::Any(*tok), .. }`, COMPILED.
+Enum variant fields carry no privacy, so a site holding any `Any` could mint
+new ones. REJECTED: documenting the hole and shipping the weaker gate (the
+lane order said keep the exact property or surface alternatives, and "can't
+create from nothing" is not "can't create"). The token lost `Clone`/`Copy`
+and `FieldType`'s `Clone` is hand-written, routing its `Any` arm back through
+the single mint; the same probe is now E0507. Residual, disclosed: a by-value
+move-through of an owned `Any` still type-checks (propagation — it consumes
+its input, cannot multiply carriers), and `AnyToken: Deserialize` is a
+theoretical mint for anyone willing to write
+`AnyToken::deserialize(..)` — hand-writing `Deserialize` for all 19
+`FieldType` variants to close that was judged disproportionate to a shape no
+reviewer would miss.
+
+**The ratchet would have booked the gate as a ~60-site win.** CHECK 15's
+`any-typed-carriers` set counts the literal spelling `FieldType::Any`, and
+privatization made most construction sites stop spelling it. REJECTED:
+regenerating the baseline and reporting the drop (that is the
+count-is-not-a-close shape — the carriers were all still there). The pattern
+now counts the migration module's constructors too and excludes the mint
+itself; on the corrected rule the day-one commit reads 229 against the old
+223, and stage 1 took it to 206.
+
+**Typing the producer alone would have measured as zero.** The object-literal
+schema and the JIT's schema are minted by two different passes.
+`mir_schema_threading` re-minted an all-`Any` twin from the bare field-name
+list, and because registration interns on structural content (names AND
+types) the twin was a distinct schema — the one the JIT read. REJECTED:
+landing the producer fix and reporting the cliff closed on the strength of
+the schema now being typed; the witness said `sum(native_dispatches)=0` until
+the back-patch also changed. Pairing the two passes by statement ORDER was
+rejected as well (neither pass promises the other's ordering); the join key
+is the literal's AST span, which both passes lower from.
+
+**Three sites that looked like Class A were not, and are routed by name.**
+(i) The module-namespace object — `compile_module_def` synthesizes an
+`Expr::Object` of a module's exports and pushes it through the user-literal
+producer. Its fields are constants beside function references: a Class B
+heterogeneous carrier, staged after stage 1. It is marked at the SYNTHESIZER
+(`lowering_module_namespace_object`), never inferred from a failure to
+resolve — the distinction is the whole point, and a flag was chosen over a
+span key because one synthesizer uses `Span::default()`, which would collide.
+(ii) Fields whose declared annotation has no `FieldType` projection —
+`(int, int, int)` on the synthesized tuple-argument carrier in
+`template_specialization`. The type is known exactly and
+the schema tier cannot write a tuple down; that is the separately-tracked
+`unprojectable_annotation` residue. REJECTED: making it a compile error,
+which would reject programs the checker accepts and regressed two
+`colliding_*` tests. (iii) `Array.zip`'s `Pair`, HashMap's `Entry`, and the
+two DataTable sites — see below.
+
+**Class F is two different problems and only one was tractable.** csv and xml
+were registering all-`Any` schemas while building a `NativeKind` track for
+the same fields one line later — the types were resolved and discarded, so
+they now register typed (with a type-aware predeclared cache key; the
+existing key is field NAMES only, which was sound only while every
+predeclared schema was all-`Any`). The remaining four callers hand
+`typed_object_from_pairs` / `register_predeclared_any_schema` a field-name
+list and would need a `NativeKind -> FieldType` inverse to type it. That
+inverse cannot exist for `Ptr(HeapKind)`: a TypedObject pointer does not
+carry its schema name. REJECTED: minting `Object("unknown")` or any other
+placeholder for the heap arms (a new placeholder is what R-G4 forbids), and
+REJECTED: converting only the scalar cases and leaving the heap arms on the
+untyped helper (a half-converted producer with the untyped helper still live
+is the walk-back shape). Surfaced instead.
+
+**Two removals were measured and reverted rather than forced.** Deleting
+`object_field_contracts` fails exactly one test —
+`extract_table_schema_from_callable_field` needs a `TypeAnnotation::Function`
+and `FieldType` has no function variant — so the table is narrowed to
+function-typed fields only, with the reason recorded at the field. Deleting
+the `__inline_obj_` allow-list row fails ~40 tests across `bundle_compiler`
+and `comptime_builtins::capture_plan`, because the two producers named above
+still emit `__inline_obj_*` schemas with `Any` columns. REJECTED: deleting
+the row and absorbing the failures as "pre-existing"; the row stays with a
+reason that records the measurement instead of the stale W17.2-C narrative.
+
+**The corpus cannot see this fix, and saying so is the finding.** The vm/jit
+corpus measures 11/480 native-executing before AND after (independently
+reproducing the #260 figure). The binding constraint for those programs is
+the post-#257 `write_place` strictness — a `while` loop or a `print` call
+whole-program-deopts every one of them, so the Any-shape cliff was never
+their limiting factor. REJECTED: quoting a corpus MATCH as evidence for this
+lane in either direction. The cliff is measured by a targeted probe pair with
+a declared-type twin as its positive control.
