@@ -310,7 +310,14 @@ pub(crate) fn infer_slot_kinds_with_concrete(
     existing: &[Option<NativeKind>],
     concrete_types: &[ConcreteType],
 ) -> Vec<Option<NativeKind>> {
-    infer_slot_kinds_with_concrete_and_function_returns(mir, existing, concrete_types, None, None)
+    infer_slot_kinds_with_concrete_and_function_returns(
+        mir,
+        existing,
+        concrete_types,
+        None,
+        None,
+        None,
+    )
 }
 
 pub(crate) fn infer_slot_kinds_with_concrete_and_function_returns(
@@ -319,6 +326,7 @@ pub(crate) fn infer_slot_kinds_with_concrete_and_function_returns(
     concrete_types: &[ConcreteType],
     function_indices: Option<&HashMap<String, u16>>,
     function_return_kinds: Option<&HashMap<u16, NativeKind>>,
+    indirect_callee_fids: Option<&HashMap<SlotId, u16>>,
 ) -> Vec<Option<NativeKind>> {
     infer_slot_kinds_with_concrete_function_returns_and_field_kinds(
         mir,
@@ -327,9 +335,16 @@ pub(crate) fn infer_slot_kinds_with_concrete_and_function_returns(
         function_indices,
         function_return_kinds,
         None,
+        indirect_callee_fids,
     )
 }
 
+/// `indirect_callee_fids` maps a callee SLOT to the function id that slot is
+/// statically known to hold (ADR-020 / #239 §6.7, built by
+/// `mir_compiler::closure_callee`). It is the indirect-call counterpart of
+/// the `MirConstant::Function` name in a direct call: both end at the same
+/// `function_return_kinds` table, and a callee absent from the map is left
+/// unproven exactly as an unresolvable name is.
 pub(crate) fn infer_slot_kinds_with_concrete_function_returns_and_field_kinds(
     mir: &MirFunction,
     existing: &[Option<NativeKind>],
@@ -337,6 +352,7 @@ pub(crate) fn infer_slot_kinds_with_concrete_function_returns_and_field_kinds(
     function_indices: Option<&HashMap<String, u16>>,
     function_return_kinds: Option<&HashMap<u16, NativeKind>>,
     schema_field_kinds: Option<&HashMap<String, NativeKind>>,
+    indirect_callee_fids: Option<&HashMap<SlotId, u16>>,
 ) -> Vec<Option<NativeKind>> {
     let n = mir.num_locals as usize;
     let mut kinds: Vec<Option<NativeKind>> = vec![None; n];
@@ -463,6 +479,18 @@ pub(crate) fn infer_slot_kinds_with_concrete_function_returns_and_field_kinds(
                             )
                             .or_else(|| well_known_function_return_kind(name))
                         }
+                        // ADR-020 / #239 §6.7 — an INDIRECT call whose callee
+                        // slot is statically determined stamps from the same
+                        // return table a direct call uses. A unit-returning
+                        // callee is never in that table (`harvest_return_abi`
+                        // routes it to `unit_returning_funcs` instead), so
+                        // ADR-020 §3.3 unit-ness is preserved without a second
+                        // check here.
+                        Operand::Copy(Place::Local(slot))
+                        | Operand::Move(Place::Local(slot))
+                        | Operand::MoveExplicit(Place::Local(slot)) => indirect_callee_fids
+                            .and_then(|m| m.get(slot))
+                            .and_then(|fid| function_return_kinds?.get(fid).copied()),
                         _ => None,
                     };
                     if let Some(k) = ret_kind {
@@ -870,6 +898,13 @@ pub(crate) fn infer_slot_kinds_with_concrete_function_returns_and_field_kinds(
                                     function_return_kinds,
                                 )
                             }
+                            // ADR-020 / #239 §6.7 — see the sibling arm in the
+                            // first call-stamp pass above.
+                            Operand::Copy(Place::Local(slot))
+                            | Operand::Move(Place::Local(slot))
+                            | Operand::MoveExplicit(Place::Local(slot)) => indirect_callee_fids
+                                .and_then(|m| m.get(slot))
+                                .and_then(|fid| function_return_kinds?.get(fid).copied()),
                             _ => None,
                         };
                         if let Some(k) = ret_kind {
