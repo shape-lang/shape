@@ -3,8 +3,19 @@
 //! Exports: http.get, http.delete (Stage C); http.post_text,
 //! http.post_bytes, http.put_text, http.put_bytes (Stage D).
 //!
-//! All functions are async. Uses reqwest under the hood.
-//! Policy gated: requires NetConnect permission.
+//! Uses reqwest under the hood. `get` / `delete` / `post_text` /
+//! `post_bytes` / `put_text` / `put_bytes` are async; `post_json` /
+//! `put_json` are sync bodies that block on a shared runtime.
+//!
+//! **Permission gating (#252, owner ruling 2026-08-02 §R-G3).** Every
+//! function requires `NetConnect`, checked by `check_http_permission`
+//! immediately above its `send()` against the host parsed from that call's
+//! concrete URL — so `ScopeConstraints::allowed_hosts` narrows per request,
+//! not per run. Until #252 this header claimed a gate that did not exist:
+//! the async ABI had no `ModuleContext` (it borrows the VM and cannot cross
+//! an await), so all six async verbs ran unconditionally, and the two sync
+//! JSON verbs simply never called a check despite having a context in hand.
+//! Async bodies now receive an owned `Arc<PermissionContext>` instead.
 //!
 //! Stage C HashMap-marshal P1(b) migration (2026-05-07):
 //! - Outer response shape `{status, headers, body, ok}` returns via
@@ -53,6 +64,64 @@ use crate::marshal::register_typed_fn_3_full;
 use crate::module_exports::{ModuleExports, ModuleParam};
 use crate::typed_module_exports::{ConcreteReturn, ConcreteType, TypedReturn};
 use std::sync::Arc;
+
+/// Extract the authority (`host` or `host:port`) from a request URL.
+///
+/// Deliberately small — `shape-runtime` does not depend on the `url` crate,
+/// and the only consumer is the scope check below, which needs the host and
+/// nothing else. Returns `None` when no authority can be identified, which
+/// the caller turns into a refusal (fail closed: an unparseable URL must not
+/// slip past the host scope check).
+///
+/// Known limitation, shared with `check_net_permission`'s own `split(':')`
+/// and the `io.tcp_*` sites that feed it: a bracketed IPv6 literal
+/// (`http://[::1]:8080/`) does not scope-match correctly. The base
+/// `NetConnect` check is unaffected.
+fn request_authority(url: &str) -> Option<&str> {
+    let after_scheme = match url.find("://") {
+        // A non-empty scheme is required: `://host` is not a URL, and
+        // accepting it would let a malformed input pick up a host.
+        Some(i) if i > 0 => &url[i + 3..],
+        // No scheme: reqwest rejects it, but refuse before we get there.
+        _ => return None,
+    };
+    let authority = after_scheme
+        .find(['/', '?', '#'])
+        .map_or(after_scheme, |i| &after_scheme[..i]);
+    // Strip any `user:pass@` userinfo prefix.
+    let authority = authority
+        .rfind('@')
+        .map_or(authority, |i| &authority[i + 1..]);
+    if authority.is_empty() {
+        return None;
+    }
+    Some(authority)
+}
+
+/// Gate one outbound request against the run's permission envelope.
+///
+/// Called immediately above the `send()` in every `http.*` body, against the
+/// host parsed from that call's concrete URL argument — the same shape the
+/// sync half uses (`stdlib/file.rs`, `stdlib_io/network_ops.rs`). The async
+/// bodies reach it through the owned `Arc<PermissionContext>` the VM hands
+/// them at spawn (#252 owner ruling 2026-08-02, §R-G3); before that ruling
+/// they received no permission context at all and every request ran
+/// unconditionally.
+fn check_http_permission(
+    perms: &crate::module_exports::PermissionContext,
+    url: &str,
+    func: &str,
+) -> Result<(), String> {
+    let authority = request_authority(url).ok_or_else(|| {
+        format!("{func}: cannot determine a host from URL '{url}'; refusing the request")
+    })?;
+    crate::module_exports::check_net_permission(
+        perms,
+        shape_abi_v1::Permission::NetConnect,
+        authority,
+    )
+    .map_err(|e| format!("{func}: {e}"))
+}
 
 /// Build the schemaful HttpResponse pair-list returned by every http.*
 /// function. Schema: `{status: int, headers: HashMap<string, string>,
@@ -170,7 +239,10 @@ pub fn create_http_module() -> ModuleExports {
         "Perform an HTTP GET request",
         [url_param.clone(), options_param.clone()],
         response_ty.clone(),
-        |url: Arc<String>, options: JsonValue| async move {
+        |url: Arc<String>,
+         options: JsonValue,
+         perms: Arc<crate::module_exports::PermissionContext>| async move {
+            check_http_permission(&perms, url.as_str(), "http.get()")?;
             let mut builder = reqwest::Client::new().get(url.as_str());
 
             for (k, v) in extract_headers(&options) {
@@ -209,7 +281,10 @@ pub fn create_http_module() -> ModuleExports {
         "Perform an HTTP DELETE request",
         [url_param, options_param],
         response_ty,
-        |url: Arc<String>, options: JsonValue| async move {
+        |url: Arc<String>,
+         options: JsonValue,
+         perms: Arc<crate::module_exports::PermissionContext>| async move {
+            check_http_permission(&perms, url.as_str(), "http.delete()")?;
             let mut builder = reqwest::Client::new().delete(url.as_str());
 
             for (k, v) in extract_headers(&options) {
@@ -290,7 +365,11 @@ pub fn create_http_module() -> ModuleExports {
             options_param_3.clone(),
         ],
         response_ty_3.clone(),
-        |url: Arc<String>, body: Arc<String>, options: JsonValue| async move {
+        |url: Arc<String>,
+         body: Arc<String>,
+         options: JsonValue,
+         perms: Arc<crate::module_exports::PermissionContext>| async move {
+            check_http_permission(&perms, url.as_str(), "http.post_text()")?;
             let mut builder = reqwest::Client::new()
                 .post(url.as_str())
                 .header(reqwest::header::CONTENT_TYPE, "text/plain; charset=utf-8")
@@ -341,7 +420,11 @@ pub fn create_http_module() -> ModuleExports {
             options_param_3.clone(),
         ],
         response_ty_3.clone(),
-        |url: Arc<String>, body: Vec<i64>, options: JsonValue| async move {
+        |url: Arc<String>,
+         body: Vec<i64>,
+         options: JsonValue,
+         perms: Arc<crate::module_exports::PermissionContext>| async move {
+            check_http_permission(&perms, url.as_str(), "http.post_bytes()")?;
             let body: Vec<u8> = body.into_iter().map(|b| b as u8).collect();
             let mut builder = reqwest::Client::new()
                 .post(url.as_str())
@@ -388,7 +471,11 @@ pub fn create_http_module() -> ModuleExports {
             options_param_3.clone(),
         ],
         response_ty_3.clone(),
-        |url: Arc<String>, body: Arc<String>, options: JsonValue| async move {
+        |url: Arc<String>,
+         body: Arc<String>,
+         options: JsonValue,
+         perms: Arc<crate::module_exports::PermissionContext>| async move {
+            check_http_permission(&perms, url.as_str(), "http.put_text()")?;
             let mut builder = reqwest::Client::new()
                 .put(url.as_str())
                 .header(reqwest::header::CONTENT_TYPE, "text/plain; charset=utf-8")
@@ -433,7 +520,11 @@ pub fn create_http_module() -> ModuleExports {
         "Perform an HTTP PUT request with a binary body",
         [url_param_3, body_bytes_param, options_param_3],
         response_ty_3,
-        |url: Arc<String>, body: Vec<i64>, options: JsonValue| async move {
+        |url: Arc<String>,
+         body: Vec<i64>,
+         options: JsonValue,
+         perms: Arc<crate::module_exports::PermissionContext>| async move {
+            check_http_permission(&perms, url.as_str(), "http.put_bytes()")?;
             let body: Vec<u8> = body.into_iter().map(|b| b as u8).collect();
             let mut builder = reqwest::Client::new()
                 .put(url.as_str())
@@ -522,6 +613,7 @@ pub fn create_http_module() -> ModuleExports {
          body: shape_value::heap_value::TypedObjectPtr,
          options: JsonValue,
          ctx| {
+            check_http_permission(&ctx.permissions, url.as_str(), "http.post_json()")?;
             let json_value = crate::json_value::typed_object_ptr_to_json_value_with_registry(
                 &body,
                 ctx.schemas,
@@ -589,6 +681,7 @@ pub fn create_http_module() -> ModuleExports {
          body: shape_value::heap_value::TypedObjectPtr,
          options: JsonValue,
          ctx| {
+            check_http_permission(&ctx.permissions, url.as_str(), "http.put_json()")?;
             let json_value = crate::json_value::typed_object_ptr_to_json_value_with_registry(
                 &body,
                 ctx.schemas,
@@ -635,4 +728,347 @@ pub fn create_http_module() -> ModuleExports {
     );
 
     module
+}
+
+// ───────────────────── #252 permission-gate tests ─────────────────────
+//
+// Until the #252 owner ruling (2026-08-02, §R-G3) every `http.*` call ran
+// unconditionally: the async ABI carried no permission context, so there was
+// nothing for a body to check against. These tests pin the gate at the
+// dispatch entry point that the VM actually calls — `TypedModuleAsyncFunction
+// ::invoke` — rather than at the helper, so a future ABI change that drops
+// the envelope again fails here.
+//
+// Every refusal test points at a port bound by the test itself and never
+// accepted from. The assertion is therefore two-sided: the call must fail
+// with the permission error AND the listener must have seen no connection at
+// all. Without the second half a passing test could not distinguish "refused
+// before dialling" from "dialled and the connection happened to fail".
+#[cfg(test)]
+mod permission_gate_tests {
+    use super::*;
+    use crate::module_exports::PermissionContext;
+    use crate::typed_module_exports::TypedReturn;
+    use shape_abi_v1::{Permission, PermissionSet, ScopeConstraints};
+    use shape_value::KindedSlot;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+
+    /// Everything granted except `NetConnect` — the envelope an operator gets
+    /// from `[permissions] net.connect = false`.
+    fn without_net_connect() -> Arc<PermissionContext> {
+        let mut set = PermissionSet::full();
+        set.remove(&Permission::NetConnect);
+        Arc::new(PermissionContext::new(Some(set), None))
+    }
+
+    /// `NetConnect` granted, optionally narrowed to `allowed_hosts`.
+    fn with_net_connect(allowed_hosts: Option<Vec<String>>) -> Arc<PermissionContext> {
+        let mut set = PermissionSet::pure();
+        set.insert(Permission::NetConnect);
+        let scope = allowed_hosts.map(|allowed_hosts| {
+            set.insert(Permission::NetScoped);
+            ScopeConstraints {
+                allowed_hosts,
+                ..Default::default()
+            }
+        });
+        Arc::new(PermissionContext::new(Some(set), scope))
+    }
+
+    /// Invoke an async `http.*` export exactly as the VM's `TypedAsync`
+    /// dispatch arm does (`vm_impl/modules.rs`).
+    fn call_async(
+        name: &str,
+        args: Vec<KindedSlot>,
+        perms: Arc<PermissionContext>,
+    ) -> Result<TypedReturn, String> {
+        // The VM installs this at run start; these tests drive the dispatch
+        // entry point directly, so they install it themselves. Guarded by a
+        // `Once` because `initialize_shared_runtime` checks-then-sets a
+        // `OnceCell` and errors with "race condition" when two test threads
+        // interleave there.
+        static RUNTIME: std::sync::Once = std::sync::Once::new();
+        RUNTIME.call_once(|| {
+            crate::sync_bridge::initialize_shared_runtime().expect("shared tokio runtime");
+        });
+        let module = create_http_module();
+        let entry = module
+            .typed_exports()
+            .get_async(name)
+            .unwrap_or_else(|| panic!("http.{name} is not a registered async export"))
+            .clone();
+        crate::sync_bridge::block_on_shared((entry.invoke)(args, perms))
+            .expect("no ambient tokio runtime for the http test")
+    }
+
+    /// A bound-but-never-accepted port. Any connection attempt queues on it,
+    /// so `assert_never_dialled` can tell whether the request left the gate.
+    fn dead_port() -> (TcpListener, String) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback");
+        listener.set_nonblocking(true).expect("set_nonblocking");
+        let url = format!(
+            "http://127.0.0.1:{}/probe",
+            listener.local_addr().unwrap().port()
+        );
+        (listener, url)
+    }
+
+    /// Assert no client ever reached the listener — i.e. the refusal happened
+    /// before any socket work, not after a failed connect.
+    fn assert_never_dialled(listener: &TcpListener) {
+        match listener.accept() {
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
+            Ok((peer, _)) => panic!(
+                "a connection reached the listener from {:?} — the request was NOT refused \
+                 before dialling",
+                peer.peer_addr()
+            ),
+            Err(e) => panic!("unexpected accept error: {e}"),
+        }
+    }
+
+    /// One-shot HTTP/1.1 server returning `200 OK` with body `hi`.
+    fn one_shot_server() -> (String, std::thread::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback");
+        let port = listener.local_addr().unwrap().port();
+        let handle = std::thread::spawn(move || {
+            if let Ok((mut stream, _)) = listener.accept() {
+                let mut buf = [0u8; 4096];
+                let _ = stream.read(&mut buf);
+                let _ = stream.write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nhi",
+                );
+                let _ = stream.flush();
+            }
+        });
+        (format!("http://127.0.0.1:{port}/"), handle)
+    }
+
+    fn status_of(ret: &TypedReturn) -> i64 {
+        let TypedReturn::OkObjectPairs(pairs) = ret else {
+            panic!("expected OkObjectPairs, got {ret:?}");
+        };
+        for (k, v) in pairs {
+            if k == "status" {
+                if let ConcreteReturn::I64(s) = v {
+                    return *s;
+                }
+            }
+        }
+        panic!("no int `status` field in {pairs:?}");
+    }
+
+    // ── refusal: the permission is absent ──────────────────────────────
+
+    #[test]
+    fn http_get_refuses_without_net_connect() {
+        let (listener, url) = dead_port();
+        let err = call_async(
+            "get",
+            vec![KindedSlot::from_string(&url), KindedSlot::none()],
+            without_net_connect(),
+        )
+        .expect_err("http.get must be refused without NetConnect");
+
+        assert!(
+            err.contains("Permission denied") && err.contains("net.connect"),
+            "expected a NetConnect permission refusal, got: {err}"
+        );
+        assert_never_dialled(&listener);
+    }
+
+    #[test]
+    fn http_post_text_refuses_without_net_connect() {
+        let (listener, url) = dead_port();
+        let err = call_async(
+            "post_text",
+            vec![
+                KindedSlot::from_string(&url),
+                KindedSlot::from_string("payload"),
+                KindedSlot::none(),
+            ],
+            without_net_connect(),
+        )
+        .expect_err("http.post_text must be refused without NetConnect");
+
+        assert!(
+            err.contains("Permission denied") && err.contains("net.connect"),
+            "expected a NetConnect permission refusal, got: {err}"
+        );
+        assert_never_dialled(&listener);
+    }
+
+    #[test]
+    fn http_delete_refuses_without_net_connect() {
+        let (listener, url) = dead_port();
+        let err = call_async(
+            "delete",
+            vec![KindedSlot::from_string(&url), KindedSlot::none()],
+            without_net_connect(),
+        )
+        .expect_err("http.delete must be refused without NetConnect");
+
+        assert!(err.contains("Permission denied"), "got: {err}");
+        assert_never_dialled(&listener);
+    }
+
+    // ── refusal: the host is outside ScopeConstraints ──────────────────
+
+    #[test]
+    fn http_get_refuses_host_outside_scope_constraints() {
+        let (listener, url) = dead_port();
+        let err = call_async(
+            "get",
+            vec![KindedSlot::from_string(&url), KindedSlot::none()],
+            with_net_connect(Some(vec!["api.example.com".to_string()])),
+        )
+        .expect_err("http.get must be refused for a host outside allowed_hosts");
+
+        assert!(
+            err.contains("Scope constraint denied") && err.contains("127.0.0.1"),
+            "expected a host scope refusal naming the concrete host, got: {err}"
+        );
+        assert_never_dialled(&listener);
+    }
+
+    #[test]
+    fn http_post_text_refuses_host_outside_scope_constraints() {
+        let (listener, url) = dead_port();
+        let err = call_async(
+            "post_text",
+            vec![
+                KindedSlot::from_string(&url),
+                KindedSlot::from_string("payload"),
+                KindedSlot::none(),
+            ],
+            with_net_connect(Some(vec!["*.trusted.io".to_string()])),
+        )
+        .expect_err("http.post_text must be refused for a host outside allowed_hosts");
+
+        assert!(err.contains("Scope constraint denied"), "got: {err}");
+        assert_never_dialled(&listener);
+    }
+
+    // ── success: the gate is not simply refusing everything ────────────
+
+    #[test]
+    fn http_get_succeeds_with_net_connect() {
+        let (url, server) = one_shot_server();
+        let ret = call_async(
+            "get",
+            vec![KindedSlot::from_string(&url), KindedSlot::none()],
+            with_net_connect(None),
+        )
+        .expect("http.get must succeed once NetConnect is granted");
+
+        assert_eq!(status_of(&ret), 200);
+        server.join().expect("server thread");
+    }
+
+    #[test]
+    fn http_get_succeeds_for_host_inside_scope_constraints() {
+        let (url, server) = one_shot_server();
+        let ret = call_async(
+            "get",
+            vec![KindedSlot::from_string(&url), KindedSlot::none()],
+            with_net_connect(Some(vec!["127.0.0.1".to_string()])),
+        )
+        .expect("an allowed host must pass the scope check");
+
+        assert_eq!(status_of(&ret), 200);
+        server.join().expect("server thread");
+    }
+
+    #[test]
+    fn http_post_text_succeeds_with_net_connect() {
+        let (url, server) = one_shot_server();
+        let ret = call_async(
+            "post_text",
+            vec![
+                KindedSlot::from_string(&url),
+                KindedSlot::from_string("payload"),
+                KindedSlot::none(),
+            ],
+            with_net_connect(None),
+        )
+        .expect("http.post_text must succeed once NetConnect is granted");
+
+        assert_eq!(status_of(&ret), 200);
+        server.join().expect("server thread");
+    }
+
+    // ── the envelope really does reach the body across the await ───────
+
+    #[test]
+    fn unrestricted_envelope_still_permits_http() {
+        // `granted_permissions: None` is the trusted-local `shape run`
+        // posture. It must stay allow-all — the gate is not a blanket
+        // refusal for callers that never installed an envelope.
+        let (url, server) = one_shot_server();
+        let ret = call_async(
+            "get",
+            vec![KindedSlot::from_string(&url), KindedSlot::none()],
+            Arc::new(PermissionContext::unrestricted()),
+        )
+        .expect("an unrestricted envelope must permit http.get");
+
+        assert_eq!(status_of(&ret), 200);
+        server.join().expect("server thread");
+    }
+
+    // ── URL → host extraction ──────────────────────────────────────────
+
+    #[test]
+    fn request_authority_extracts_host_and_port() {
+        assert_eq!(
+            request_authority("http://example.com/a/b"),
+            Some("example.com")
+        );
+        assert_eq!(
+            request_authority("https://api.example.com:8443/v1?q=1"),
+            Some("api.example.com:8443")
+        );
+        assert_eq!(
+            request_authority("https://example.com"),
+            Some("example.com")
+        );
+        assert_eq!(
+            request_authority("https://example.com?q=1"),
+            Some("example.com")
+        );
+        assert_eq!(
+            request_authority("https://example.com#frag"),
+            Some("example.com")
+        );
+        // userinfo must not be mistaken for the host
+        assert_eq!(
+            request_authority("https://user:pass@internal.host/x"),
+            Some("internal.host")
+        );
+    }
+
+    #[test]
+    fn request_authority_refuses_what_it_cannot_parse() {
+        // Fail closed: no authority means no host to scope-check against.
+        assert_eq!(request_authority("example.com/path"), None);
+        assert_eq!(request_authority("://nohost"), None);
+        assert_eq!(request_authority("http:///onlypath"), None);
+        assert_eq!(request_authority(""), None);
+    }
+
+    #[test]
+    fn http_get_refuses_a_url_with_no_parseable_host() {
+        let err = call_async(
+            "get",
+            vec![KindedSlot::from_string("not-a-url"), KindedSlot::none()],
+            with_net_connect(Some(vec!["api.example.com".to_string()])),
+        )
+        .expect_err("an unparseable URL must be refused, not scope-checked against nothing");
+
+        assert!(
+            err.contains("cannot determine a host"),
+            "expected a fail-closed host-parse refusal, got: {err}"
+        );
+    }
 }

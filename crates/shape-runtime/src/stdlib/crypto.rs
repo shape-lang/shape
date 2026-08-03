@@ -192,7 +192,10 @@ pub fn create_crypto_module() -> ModuleExports {
         "int",
         ConcreteType::String,
         |n, ctx| {
-            crate::module_exports::check_permission(ctx, shape_abi_v1::Permission::Random)?;
+            crate::module_exports::check_permission(
+                &ctx.permissions,
+                shape_abi_v1::Permission::Random,
+            )?;
             use rand::RngCore;
             if n < 0 || n > 65536 {
                 return Err("crypto.random_bytes() n must be between 0 and 65536".to_string());
@@ -212,7 +215,10 @@ pub fn create_crypto_module() -> ModuleExports {
         "Generate an Ed25519 keypair, returning an object with hex-encoded public_key and secret_key",
         ConcreteType::Object,
         |ctx| {
-            crate::module_exports::check_permission(ctx, shape_abi_v1::Permission::Random)?;
+            crate::module_exports::check_permission(
+                &ctx.permissions,
+                shape_abi_v1::Permission::Random,
+            )?;
             use rand::RngCore;
             let mut secret = [0u8; 32];
             rand::thread_rng().fill_bytes(&mut secret);

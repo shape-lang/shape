@@ -161,6 +161,55 @@ pub trait RemoteDispatcher {
     ) -> Result<u64, String>;
 }
 
+/// The permission-relevant half of a module-function execution context.
+///
+/// Split out of [`ModuleContext`] per the #252 owner ruling (2026-08-02,
+/// `docs/program/adr020/grill-rulings-2026-08-02.md` §R-G3): `ModuleContext`
+/// borrows from the VM and so cannot cross an await point, which left every
+/// async native export ungated. This half owns its data, so the VM can hand
+/// an `Arc<PermissionContext>` to an async body that outlives the dispatch
+/// borrow and gate its I/O exactly like a sync body does.
+///
+/// The envelope is per-run immutable — `set_granted_permissions` runs once
+/// before execution starts — so the snapshot an async task carries across
+/// its awaits is exact, not a stale copy of something that can change under
+/// it.
+///
+/// `check_permission` / `check_fs_permission` / `check_net_permission` take
+/// this type, so the sync and async halves share one implementation of the
+/// gate rather than each growing their own.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct PermissionContext {
+    /// Permissions granted to the current execution context.
+    /// When `Some`, module functions check this before performing I/O.
+    /// When `None`, all operations are allowed (trusted-local `shape run`
+    /// with no `[permissions]` section declared).
+    pub granted_permissions: Option<shape_abi_v1::PermissionSet>,
+
+    /// Scope constraints for the current execution context.
+    /// Narrows permissions to specific paths, hosts, etc.
+    pub scope_constraints: Option<shape_abi_v1::ScopeConstraints>,
+}
+
+impl PermissionContext {
+    /// An envelope that grants everything — the trusted-local posture used
+    /// when no `[permissions]` section is declared.
+    pub fn unrestricted() -> Self {
+        Self::default()
+    }
+
+    /// Build an envelope from an explicit grant and optional scope narrowing.
+    pub fn new(
+        granted_permissions: Option<shape_abi_v1::PermissionSet>,
+        scope_constraints: Option<shape_abi_v1::ScopeConstraints>,
+    ) -> Self {
+        Self {
+            granted_permissions,
+            scope_constraints,
+        }
+    }
+}
+
 /// Execution context available to module functions during a VM call.
 ///
 /// The VM constructs this before each module function dispatch and passes
@@ -187,14 +236,10 @@ pub struct ModuleContext<'a> {
     /// Provided by the VM when state introspection is needed.
     pub vm_state: Option<&'a dyn VmStateAccessor>,
 
-    /// Permissions granted to the current execution context.
-    /// When `Some`, module functions check this before performing I/O.
-    /// When `None`, all operations are allowed (backwards compatible).
-    pub granted_permissions: Option<shape_abi_v1::PermissionSet>,
-
-    /// Scope constraints for the current execution context.
-    /// Narrows permissions to specific paths, hosts, etc.
-    pub scope_constraints: Option<shape_abi_v1::ScopeConstraints>,
+    /// The permission envelope for this dispatch. Shared with any async
+    /// export spawned from the same VM, which receives its own
+    /// `Arc<PermissionContext>` clone (#252 / §R-G3).
+    pub permissions: std::sync::Arc<PermissionContext>,
 
     /// Callback for `state.resume()` to request full VM state restoration.
     /// The module function stores the snapshot; the dispatch loop applies it
@@ -216,11 +261,15 @@ pub struct ModuleContext<'a> {
 
 /// Check whether the current execution context has a required permission.
 ///
-/// If `granted_permissions` is `None`, all operations are allowed (backwards
-/// compatible with code that predates the permission system). If `Some`, the
-/// specific permission must be present in the set.
+/// If `granted_permissions` is `None`, all operations are allowed
+/// (trusted-local run with no declared `[permissions]` section). If `Some`,
+/// the specific permission must be present in the set.
+///
+/// Takes the [`PermissionContext`] rather than the whole [`ModuleContext`]
+/// so async exports — which cannot hold the VM borrow across an await — gate
+/// through this same function. Sync call sites pass `&ctx.permissions`.
 pub fn check_permission(
-    ctx: &ModuleContext,
+    ctx: &PermissionContext,
     permission: shape_abi_v1::Permission,
 ) -> Result<(), String> {
     if let Some(ref granted) = ctx.granted_permissions {
@@ -242,7 +291,7 @@ pub fn check_permission(
 /// constraints list paths, the target path must match at least one (prefix
 /// match). An empty `allowed_paths` list means all paths are permitted.
 pub fn check_fs_permission(
-    ctx: &ModuleContext,
+    ctx: &PermissionContext,
     permission: shape_abi_v1::Permission,
     path: &str,
 ) -> Result<(), String> {
@@ -276,7 +325,7 @@ pub fn check_fs_permission(
 /// If the scope constraints list hosts, the target address must match at
 /// least one (supports `host:port` and `*.domain.com` wildcards).
 pub fn check_net_permission(
-    ctx: &ModuleContext,
+    ctx: &PermissionContext,
     permission: shape_abi_v1::Permission,
     address: &str,
 ) -> Result<(), String> {

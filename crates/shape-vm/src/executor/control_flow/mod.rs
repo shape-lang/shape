@@ -1542,7 +1542,7 @@ impl VirtualMachine {
         language: &str,
         is_native: bool,
     ) -> Result<(), VMError> {
-        if let Some(granted) = &self.granted_permissions {
+        if let Some(granted) = self.granted_permissions() {
             // Defense-in-depth backstop (§4.8.3): the Deterministic-mode refusal
             // is primarily a LOAD-time gate (`deterministic_foreign_gate`,
             // keyed on the compile-time-derived `required_permissions ∋ Ffi`).
@@ -1570,8 +1570,7 @@ impl VirtualMachine {
         // at link-now instead (§4.8.2).
         if !is_native {
             let opted_in = self
-                .scope_constraints
-                .as_ref()
+                .scope_constraints()
                 .is_some_and(|sc| sc.ffi_languages.iter().any(|l| l == language));
             if self.ffi_receiver_strict {
                 // WF-2F axis C — wire-serve receiver posture (§4.6 / OQ-6,
@@ -1583,8 +1582,7 @@ impl VirtualMachine {
                 // Zero sender trust: the receiver's own scope is the authority.
                 if !opted_in {
                     let allowed: Vec<&str> = self
-                        .scope_constraints
-                        .as_ref()
+                        .scope_constraints()
                         .map(|sc| sc.ffi_languages.iter().map(|s| s.as_str()).collect())
                         .unwrap_or_default();
                     return Err(VMError::RuntimeError(format!(
@@ -1594,7 +1592,7 @@ impl VirtualMachine {
                         name, language, allowed, language
                     )));
                 }
-            } else if let Some(sc) = &self.scope_constraints {
+            } else if let Some(sc) = self.scope_constraints() {
                 // Local posture (ffi-rebuild §4.8.2): an empty list means "all
                 // dynamic foreign allowed" (parity with unscoped `FsRead`); a
                 // non-empty list narrows to the named languages.
@@ -1620,7 +1618,7 @@ impl VirtualMachine {
         name: &str,
         spec: &crate::bytecode::NativeAbiSpec,
     ) -> Result<(), VMError> {
-        let Some(sc) = &self.scope_constraints else {
+        let Some(sc) = self.scope_constraints() else {
             return Ok(());
         };
         if !sc.ffi_libraries.is_empty()

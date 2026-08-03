@@ -118,7 +118,7 @@ pub fn create_csv_module() -> ModuleExports {
         ConcreteType::Result(Box::new(ConcreteType::ArrayStringRows)),
         |path, ctx| {
             crate::module_exports::check_fs_permission(
-                ctx,
+                &ctx.permissions,
                 shape_abi_v1::Permission::FsRead,
                 path.as_str(),
             )?;

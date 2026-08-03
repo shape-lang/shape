@@ -460,8 +460,8 @@ impl VirtualMachine {
                 let func_id = slot_bits as u16;
                 let program = self.program.clone();
                 let config = self.config.clone();
-                let granted = self.granted_permissions.clone();
-                let scope = self.scope_constraints.clone();
+                let granted = self.permissions.granted_permissions.clone();
+                let scope = self.permissions.scope_constraints.clone();
                 // #202: the isolated task VM needs the parent's extension
                 // registry, or a foreign call inside the spawned body fails
                 // link-now with "no extension provides language".

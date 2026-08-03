@@ -74,7 +74,13 @@ pub fn create_time_module() -> ModuleExports {
             ..Default::default()
         }],
         ConcreteType::Unit,
-        |args: Vec<KindedSlot>| async move {
+        // `_perms`: `time.sleep` performs no I/O and no timing observation, so
+        // it gates on nothing — matching its sync siblings `time.now` /
+        // `time.sleep_sync`, which are equally ungated. (Whether the whole
+        // `time` module should require `Permission::Time` is a separate
+        // question from #252; changing only the async half would make the two
+        // disagree.)
+        |args: Vec<KindedSlot>, _perms| async move {
             let ms = args.first().and_then(slot_as_f64).ok_or_else(|| {
                 "time.sleep() requires a number argument (milliseconds)".to_string()
             })?;

@@ -6,28 +6,15 @@
 //! ABI). The structural tests that depended on those helpers are
 //! removed; the permission / visibility tests that exercise the
 //! [`ModuleContext`] surface directly remain.
+//!
+//! #252 (2026-08-02): the permission tests build a [`PermissionContext`]
+//! directly. They used to stand up a whole `ModuleContext` — leaking a
+//! `TypeSchemaRegistry` per test — only to reach its permission half; that
+//! half is now its own type because the async ABI needs to own it.
 
 use super::*;
 use crate::marshal::register_typed_fn_0;
 use crate::typed_module_exports::{ConcreteReturn, ConcreteType, TypedReturn};
-
-/// Build a dummy `ModuleContext` for unit tests that don't need schema
-/// lookup or callable invocation.
-fn test_ctx() -> ModuleContext<'static> {
-    let registry = Box::leak(Box::new(TypeSchemaRegistry::new()));
-    ModuleContext {
-        schemas: registry,
-        invoke_callable: None,
-        raw_invoker: None,
-        function_hashes: None,
-        vm_state: None,
-        granted_permissions: None,
-        scope_constraints: None,
-        set_pending_resume: None,
-        set_pending_frame_resume: None,
-        remote_dispatch: None,
-    }
-}
 
 #[test]
 fn test_module_exports_creation() {
@@ -107,8 +94,8 @@ fn test_new_module_has_empty_extension_fields() {
 
 #[test]
 fn test_check_permission_allows_when_no_permissions_set() {
-    let ctx = test_ctx();
-    // When granted_permissions is None, all permissions are allowed
+    let ctx = PermissionContext::unrestricted();
+    // With no granted set installed, all permissions are allowed
     assert!(check_permission(&ctx, shape_abi_v1::Permission::FsRead).is_ok());
     assert!(check_permission(&ctx, shape_abi_v1::Permission::NetConnect).is_ok());
     assert!(check_permission(&ctx, shape_abi_v1::Permission::Process).is_ok());
@@ -116,21 +103,9 @@ fn test_check_permission_allows_when_no_permissions_set() {
 
 #[test]
 fn test_check_permission_denies_when_not_granted() {
-    let registry = Box::leak(Box::new(TypeSchemaRegistry::new()));
     let mut perms = shape_abi_v1::PermissionSet::pure();
     perms.insert(shape_abi_v1::Permission::FsRead);
-    let ctx = ModuleContext {
-        schemas: registry,
-        invoke_callable: None,
-        raw_invoker: None,
-        function_hashes: None,
-        vm_state: None,
-        granted_permissions: Some(perms),
-        scope_constraints: None,
-        set_pending_resume: None,
-        set_pending_frame_resume: None,
-        remote_dispatch: None,
-    };
+    let ctx = PermissionContext::new(Some(perms), None);
     assert!(check_permission(&ctx, shape_abi_v1::Permission::FsRead).is_ok());
     assert!(check_permission(&ctx, shape_abi_v1::Permission::FsWrite).is_err());
     assert!(check_permission(&ctx, shape_abi_v1::Permission::NetConnect).is_err());
@@ -138,25 +113,13 @@ fn test_check_permission_denies_when_not_granted() {
 
 #[test]
 fn test_check_fs_permission_enforces_scope_constraints() {
-    let registry = Box::leak(Box::new(TypeSchemaRegistry::new()));
     let mut perms = shape_abi_v1::PermissionSet::pure();
     perms.insert(shape_abi_v1::Permission::FsRead);
     let constraints = shape_abi_v1::ScopeConstraints {
         allowed_paths: vec!["/data/**".to_string(), "/tmp/*".to_string()],
         ..Default::default()
     };
-    let ctx = ModuleContext {
-        schemas: registry,
-        invoke_callable: None,
-        raw_invoker: None,
-        function_hashes: None,
-        vm_state: None,
-        granted_permissions: Some(perms),
-        scope_constraints: Some(constraints),
-        set_pending_resume: None,
-        set_pending_frame_resume: None,
-        remote_dispatch: None,
-    };
+    let ctx = PermissionContext::new(Some(perms), Some(constraints));
 
     // Allowed paths
     assert!(check_fs_permission(&ctx, shape_abi_v1::Permission::FsRead, "/data/file.txt").is_ok());
@@ -171,46 +134,22 @@ fn test_check_fs_permission_enforces_scope_constraints() {
 
 #[test]
 fn test_check_fs_permission_allows_all_when_no_constraints() {
-    let registry = Box::leak(Box::new(TypeSchemaRegistry::new()));
     let mut perms = shape_abi_v1::PermissionSet::pure();
     perms.insert(shape_abi_v1::Permission::FsRead);
-    let ctx = ModuleContext {
-        schemas: registry,
-        invoke_callable: None,
-        raw_invoker: None,
-        function_hashes: None,
-        vm_state: None,
-        granted_permissions: Some(perms),
-        scope_constraints: None,
-        set_pending_resume: None,
-        set_pending_frame_resume: None,
-        remote_dispatch: None,
-    };
+    let ctx = PermissionContext::new(Some(perms), None);
 
     assert!(check_fs_permission(&ctx, shape_abi_v1::Permission::FsRead, "/any/path").is_ok());
 }
 
 #[test]
 fn test_check_net_permission_enforces_scope_constraints() {
-    let registry = Box::leak(Box::new(TypeSchemaRegistry::new()));
     let mut perms = shape_abi_v1::PermissionSet::pure();
     perms.insert(shape_abi_v1::Permission::NetConnect);
     let constraints = shape_abi_v1::ScopeConstraints {
         allowed_hosts: vec!["api.example.com".to_string(), "*.trusted.io".to_string()],
         ..Default::default()
     };
-    let ctx = ModuleContext {
-        schemas: registry,
-        invoke_callable: None,
-        raw_invoker: None,
-        function_hashes: None,
-        vm_state: None,
-        granted_permissions: Some(perms),
-        scope_constraints: Some(constraints),
-        set_pending_resume: None,
-        set_pending_frame_resume: None,
-        remote_dispatch: None,
-    };
+    let ctx = PermissionContext::new(Some(perms), Some(constraints));
 
     // Allowed hosts
     assert!(
@@ -246,21 +185,9 @@ fn test_check_net_permission_enforces_scope_constraints() {
 
 #[test]
 fn test_check_net_permission_allows_all_when_no_constraints() {
-    let registry = Box::leak(Box::new(TypeSchemaRegistry::new()));
     let mut perms = shape_abi_v1::PermissionSet::pure();
     perms.insert(shape_abi_v1::Permission::NetConnect);
-    let ctx = ModuleContext {
-        schemas: registry,
-        invoke_callable: None,
-        raw_invoker: None,
-        function_hashes: None,
-        vm_state: None,
-        granted_permissions: Some(perms),
-        scope_constraints: None,
-        set_pending_resume: None,
-        set_pending_frame_resume: None,
-        remote_dispatch: None,
-    };
+    let ctx = PermissionContext::new(Some(perms), None);
 
     assert!(
         check_net_permission(

@@ -2169,11 +2169,14 @@ fn install(
 // with two structural differences enforced by the existing
 // `TypedModuleAsyncFunction` shape (see `typed_module_exports.rs`):
 //
-// 1. **No `&ModuleContext`.** `ModuleContext` borrows from the VM and
-//    cannot cross await points. Permission gating must happen
-//    synchronously upstream of the dispatch site, not inside the async
-//    body. (This matches the pre-bulldozer convention used by
-//    `stdlib_io::async_file_ops` and `stdlib::http`.)
+// 1. **`Arc<PermissionContext>` in place of `&ModuleContext`.**
+//    `ModuleContext` borrows from the VM and cannot cross await points, so
+//    the permission-relevant half is split off as an owned, Arc-backed
+//    context and passed as the body's trailing parameter — the async
+//    analogue of the sync family's trailing `ctx` (#252 owner ruling
+//    2026-08-02, §R-G3). An async body therefore gates its I/O in the same
+//    place a sync body does: immediately above the call, against the
+//    concrete argument.
 // 2. **Body returns `Future + Send + 'static`.** The wrapper boxes and
 //    pins the future so the synchronous dispatch path can block on it.
 //
@@ -2183,6 +2186,7 @@ fn install(
 type TypedAsyncInvoke = Arc<
     dyn Fn(
             Vec<KindedSlot>,
+            Arc<crate::module_exports::PermissionContext>,
         ) -> std::pin::Pin<
             Box<dyn std::future::Future<Output = Result<TypedReturn, String>> + Send>,
         > + Send
@@ -2200,12 +2204,12 @@ pub fn register_typed_async_fn_1<F, Fut, P0>(
     return_type: crate::typed_module_exports::ConcreteType,
     body: F,
 ) where
-    F: Fn(P0) -> Fut + Send + Sync + Clone + 'static,
+    F: Fn(P0, Arc<crate::module_exports::PermissionContext>) -> Fut + Send + Sync + Clone + 'static,
     Fut: std::future::Future<Output = Result<TypedReturn, String>> + Send + 'static,
     P0: FromSlot + Send + Sync + 'static,
 {
     let arg_kinds = vec![P0::NATIVE_KIND];
-    let invoke: TypedAsyncInvoke = Arc::new(move |slots: Vec<KindedSlot>| {
+    let invoke: TypedAsyncInvoke = Arc::new(move |slots: Vec<KindedSlot>, perms| {
         let body = body.clone();
         Box::pin(async move {
             if slots.len() != 1 {
@@ -2216,7 +2220,7 @@ pub fn register_typed_async_fn_1<F, Fut, P0>(
                 .into());
             }
             let p0 = P0::from_kinded(&slots[0])?;
-            body(p0).await
+            body(p0, perms).await
         })
     });
     let params = vec![crate::module_exports::ModuleParam {
@@ -2245,13 +2249,17 @@ pub fn register_typed_async_fn_2<F, Fut, P0, P1>(
     return_type: crate::typed_module_exports::ConcreteType,
     body: F,
 ) where
-    F: Fn(P0, P1) -> Fut + Send + Sync + Clone + 'static,
+    F: Fn(P0, P1, Arc<crate::module_exports::PermissionContext>) -> Fut
+        + Send
+        + Sync
+        + Clone
+        + 'static,
     Fut: std::future::Future<Output = Result<TypedReturn, String>> + Send + 'static,
     P0: FromSlot + Send + Sync + 'static,
     P1: FromSlot + Send + Sync + 'static,
 {
     let arg_kinds = vec![P0::NATIVE_KIND, P1::NATIVE_KIND];
-    let invoke: TypedAsyncInvoke = Arc::new(move |slots: Vec<KindedSlot>| {
+    let invoke: TypedAsyncInvoke = Arc::new(move |slots: Vec<KindedSlot>, perms| {
         let body = body.clone();
         Box::pin(async move {
             if slots.len() != 2 {
@@ -2263,7 +2271,7 @@ pub fn register_typed_async_fn_2<F, Fut, P0, P1>(
             }
             let p0 = P0::from_kinded(&slots[0])?;
             let p1 = P1::from_kinded(&slots[1])?;
-            body(p0, p1).await
+            body(p0, p1, perms).await
         })
     });
     let params = param_names
@@ -2295,14 +2303,18 @@ pub fn register_typed_async_fn_3<F, Fut, P0, P1, P2>(
     return_type: crate::typed_module_exports::ConcreteType,
     body: F,
 ) where
-    F: Fn(P0, P1, P2) -> Fut + Send + Sync + Clone + 'static,
+    F: Fn(P0, P1, P2, Arc<crate::module_exports::PermissionContext>) -> Fut
+        + Send
+        + Sync
+        + Clone
+        + 'static,
     Fut: std::future::Future<Output = Result<TypedReturn, String>> + Send + 'static,
     P0: FromSlot + Send + Sync + 'static,
     P1: FromSlot + Send + Sync + 'static,
     P2: FromSlot + Send + Sync + 'static,
 {
     let arg_kinds = vec![P0::NATIVE_KIND, P1::NATIVE_KIND, P2::NATIVE_KIND];
-    let invoke: TypedAsyncInvoke = Arc::new(move |slots: Vec<KindedSlot>| {
+    let invoke: TypedAsyncInvoke = Arc::new(move |slots: Vec<KindedSlot>, perms| {
         let body = body.clone();
         Box::pin(async move {
             if slots.len() != 3 {
@@ -2315,7 +2327,7 @@ pub fn register_typed_async_fn_3<F, Fut, P0, P1, P2>(
             let p0 = P0::from_kinded(&slots[0])?;
             let p1 = P1::from_kinded(&slots[1])?;
             let p2 = P2::from_kinded(&slots[2])?;
-            body(p0, p1, p2).await
+            body(p0, p1, p2, perms).await
         })
     });
     let params = param_names
@@ -2352,12 +2364,12 @@ pub fn register_typed_async_fn_1_full<F, Fut, P0>(
     return_type: crate::typed_module_exports::ConcreteType,
     body: F,
 ) where
-    F: Fn(P0) -> Fut + Send + Sync + Clone + 'static,
+    F: Fn(P0, Arc<crate::module_exports::PermissionContext>) -> Fut + Send + Sync + Clone + 'static,
     Fut: std::future::Future<Output = Result<TypedReturn, String>> + Send + 'static,
     P0: FromSlot + Send + Sync + 'static,
 {
     let arg_kinds = vec![P0::NATIVE_KIND];
-    let invoke: TypedAsyncInvoke = Arc::new(move |slots: Vec<KindedSlot>| {
+    let invoke: TypedAsyncInvoke = Arc::new(move |slots: Vec<KindedSlot>, perms| {
         let body = body.clone();
         Box::pin(async move {
             if slots.len() != 1 {
@@ -2368,7 +2380,7 @@ pub fn register_typed_async_fn_1_full<F, Fut, P0>(
                 .into());
             }
             let p0 = P0::from_kinded(&slots[0])?;
-            body(p0).await
+            body(p0, perms).await
         })
     });
     install_async(
@@ -2391,13 +2403,17 @@ pub fn register_typed_async_fn_2_full<F, Fut, P0, P1>(
     return_type: crate::typed_module_exports::ConcreteType,
     body: F,
 ) where
-    F: Fn(P0, P1) -> Fut + Send + Sync + Clone + 'static,
+    F: Fn(P0, P1, Arc<crate::module_exports::PermissionContext>) -> Fut
+        + Send
+        + Sync
+        + Clone
+        + 'static,
     Fut: std::future::Future<Output = Result<TypedReturn, String>> + Send + 'static,
     P0: FromSlot + Send + Sync + 'static,
     P1: FromSlot + Send + Sync + 'static,
 {
     let arg_kinds = vec![P0::NATIVE_KIND, P1::NATIVE_KIND];
-    let invoke: TypedAsyncInvoke = Arc::new(move |slots: Vec<KindedSlot>| {
+    let invoke: TypedAsyncInvoke = Arc::new(move |slots: Vec<KindedSlot>, perms| {
         let body = body.clone();
         Box::pin(async move {
             if slots.len() != 2 {
@@ -2409,7 +2425,7 @@ pub fn register_typed_async_fn_2_full<F, Fut, P0, P1>(
             }
             let p0 = P0::from_kinded(&slots[0])?;
             let p1 = P1::from_kinded(&slots[1])?;
-            body(p0, p1).await
+            body(p0, p1, perms).await
         })
     });
     install_async(
@@ -2432,14 +2448,18 @@ pub fn register_typed_async_fn_3_full<F, Fut, P0, P1, P2>(
     return_type: crate::typed_module_exports::ConcreteType,
     body: F,
 ) where
-    F: Fn(P0, P1, P2) -> Fut + Send + Sync + Clone + 'static,
+    F: Fn(P0, P1, P2, Arc<crate::module_exports::PermissionContext>) -> Fut
+        + Send
+        + Sync
+        + Clone
+        + 'static,
     Fut: std::future::Future<Output = Result<TypedReturn, String>> + Send + 'static,
     P0: FromSlot + Send + Sync + 'static,
     P1: FromSlot + Send + Sync + 'static,
     P2: FromSlot + Send + Sync + 'static,
 {
     let arg_kinds = vec![P0::NATIVE_KIND, P1::NATIVE_KIND, P2::NATIVE_KIND];
-    let invoke: TypedAsyncInvoke = Arc::new(move |slots: Vec<KindedSlot>| {
+    let invoke: TypedAsyncInvoke = Arc::new(move |slots: Vec<KindedSlot>, perms| {
         let body = body.clone();
         Box::pin(async move {
             if slots.len() != 3 {
@@ -2452,7 +2472,7 @@ pub fn register_typed_async_fn_3_full<F, Fut, P0, P1, P2>(
             let p0 = P0::from_kinded(&slots[0])?;
             let p1 = P1::from_kinded(&slots[1])?;
             let p2 = P2::from_kinded(&slots[2])?;
-            body(p0, p1, p2).await
+            body(p0, p1, p2, perms).await
         })
     });
     install_async(
@@ -2598,7 +2618,8 @@ pub fn register_typed_function<F>(
 /// Variadic — same shape as [`VariadicTypedBody`] but returning a
 /// `Future`. No `&ModuleContext` (the borrow cannot cross await
 /// points); permission gating must happen synchronously upstream.
-pub type VariadicTypedAsyncBody<Fut> = dyn Fn(Vec<KindedSlot>) -> Fut + Send + Sync;
+pub type VariadicTypedAsyncBody<Fut> =
+    dyn Fn(Vec<KindedSlot>, Arc<crate::module_exports::PermissionContext>) -> Fut + Send + Sync;
 
 /// Register an async native function whose body inspects a variadic
 /// [`KindedSlot`] vector.
@@ -2610,7 +2631,11 @@ pub fn register_typed_async_function<F, Fut>(
     return_type: crate::typed_module_exports::ConcreteType,
     body: F,
 ) where
-    F: Fn(Vec<KindedSlot>) -> Fut + Send + Sync + Clone + 'static,
+    F: Fn(Vec<KindedSlot>, Arc<crate::module_exports::PermissionContext>) -> Fut
+        + Send
+        + Sync
+        + Clone
+        + 'static,
     Fut: std::future::Future<Output = Result<TypedReturn, String>> + Send + 'static,
 {
     use crate::module_exports::ModuleFunction;
@@ -2623,9 +2648,9 @@ pub fn register_typed_async_function<F, Fut>(
     let arg_kinds: Vec<NativeKind> = Vec::new();
     let return_type_str = return_type.shape_type_name();
 
-    let invoke: TypedAsyncInvoke = Arc::new(move |slots: Vec<KindedSlot>| {
+    let invoke: TypedAsyncInvoke = Arc::new(move |slots: Vec<KindedSlot>, perms| {
         let body = body.clone();
-        Box::pin(async move { body(slots).await })
+        Box::pin(async move { body(slots, perms).await })
     });
 
     module.add_schema_only(

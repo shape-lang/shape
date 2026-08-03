@@ -88,7 +88,10 @@ pub fn register_process_io(module: &mut ModuleExports) {
         ],
         ConcreteType::IoHandle,
         |cmd, args, ctx| {
-            crate::module_exports::check_permission(ctx, shape_abi_v1::Permission::Process)?;
+            crate::module_exports::check_permission(
+                &ctx.permissions,
+                shape_abi_v1::Permission::Process,
+            )?;
             let cmd_s = cmd.as_str();
             let mut command = build_command_with_args(cmd_s, Some(args), "io.spawn()")?;
             command
@@ -129,7 +132,10 @@ pub fn register_process_io(module: &mut ModuleExports) {
         ],
         ConcreteType::TypedObject,
         |cmd, args, ctx| {
-            crate::module_exports::check_permission(ctx, shape_abi_v1::Permission::Process)?;
+            crate::module_exports::check_permission(
+                &ctx.permissions,
+                shape_abi_v1::Permission::Process,
+            )?;
             let cmd_s = cmd.as_str();
             let mut command = build_command_with_args(cmd_s, Some(args), "io.exec()")?;
             let output = command
@@ -155,7 +161,10 @@ pub fn register_process_io(module: &mut ModuleExports) {
         "IoHandle",
         ConcreteType::Int,
         |handle, ctx| {
-            crate::module_exports::check_permission(ctx, shape_abi_v1::Permission::Process)?;
+            crate::module_exports::check_permission(
+                &ctx.permissions,
+                shape_abi_v1::Permission::Process,
+            )?;
             let mut guard = handle
                 .resource
                 .lock()
@@ -186,7 +195,10 @@ pub fn register_process_io(module: &mut ModuleExports) {
         "IoHandle",
         ConcreteType::Unit,
         |handle, ctx| {
-            crate::module_exports::check_permission(ctx, shape_abi_v1::Permission::Process)?;
+            crate::module_exports::check_permission(
+                &ctx.permissions,
+                shape_abi_v1::Permission::Process,
+            )?;
             let mut guard = handle
                 .resource
                 .lock()
@@ -229,7 +241,10 @@ pub fn register_process_io(module: &mut ModuleExports) {
         ],
         ConcreteType::Int,
         |handle, data, ctx| {
-            crate::module_exports::check_permission(ctx, shape_abi_v1::Permission::Process)?;
+            crate::module_exports::check_permission(
+                &ctx.permissions,
+                shape_abi_v1::Permission::Process,
+            )?;
             let mut guard = handle
                 .resource
                 .lock()
@@ -284,7 +299,10 @@ pub fn register_process_io(module: &mut ModuleExports) {
         ],
         ConcreteType::String,
         |handle, n, ctx| {
-            crate::module_exports::check_permission(ctx, shape_abi_v1::Permission::Process)?;
+            crate::module_exports::check_permission(
+                &ctx.permissions,
+                shape_abi_v1::Permission::Process,
+            )?;
             let buf_size = if n > 0 { n as usize } else { 65536 };
             let mut guard = handle
                 .resource
@@ -349,7 +367,10 @@ pub fn register_process_io(module: &mut ModuleExports) {
         ],
         ConcreteType::String,
         |handle, n, ctx| {
-            crate::module_exports::check_permission(ctx, shape_abi_v1::Permission::Process)?;
+            crate::module_exports::check_permission(
+                &ctx.permissions,
+                shape_abi_v1::Permission::Process,
+            )?;
             let buf_size = if n > 0 { n as usize } else { 65536 };
             let mut guard = handle
                 .resource
@@ -400,7 +421,10 @@ pub fn register_process_io(module: &mut ModuleExports) {
         "IoHandle",
         ConcreteType::String,
         |handle, ctx| {
-            crate::module_exports::check_permission(ctx, shape_abi_v1::Permission::Process)?;
+            crate::module_exports::check_permission(
+                &ctx.permissions,
+                shape_abi_v1::Permission::Process,
+            )?;
             let mut guard = handle
                 .resource
                 .lock()
@@ -444,7 +468,10 @@ pub fn register_process_io(module: &mut ModuleExports) {
         "Return an IoHandle for the current process's standard input",
         ConcreteType::IoHandle,
         |ctx| {
-            crate::module_exports::check_permission(ctx, shape_abi_v1::Permission::Process)?;
+            crate::module_exports::check_permission(
+                &ctx.permissions,
+                shape_abi_v1::Permission::Process,
+            )?;
             let file = std::fs::OpenOptions::new()
                 .read(true)
                 .open("/dev/stdin")
@@ -463,7 +490,10 @@ pub fn register_process_io(module: &mut ModuleExports) {
         "Return an IoHandle for the current process's standard output",
         ConcreteType::IoHandle,
         |ctx| {
-            crate::module_exports::check_permission(ctx, shape_abi_v1::Permission::Process)?;
+            crate::module_exports::check_permission(
+                &ctx.permissions,
+                shape_abi_v1::Permission::Process,
+            )?;
             let file = std::fs::OpenOptions::new()
                 .write(true)
                 .open("/dev/stdout")
@@ -482,7 +512,10 @@ pub fn register_process_io(module: &mut ModuleExports) {
         "Return an IoHandle for the current process's standard error",
         ConcreteType::IoHandle,
         |ctx| {
-            crate::module_exports::check_permission(ctx, shape_abi_v1::Permission::Process)?;
+            crate::module_exports::check_permission(
+                &ctx.permissions,
+                shape_abi_v1::Permission::Process,
+            )?;
             let file = std::fs::OpenOptions::new()
                 .write(true)
                 .open("/dev/stderr")
@@ -511,7 +544,10 @@ pub fn register_process_io(module: &mut ModuleExports) {
         "IoHandle",
         ConcreteType::String,
         |handle, ctx| {
-            crate::module_exports::check_permission(ctx, shape_abi_v1::Permission::Process)?;
+            crate::module_exports::check_permission(
+                &ctx.permissions,
+                shape_abi_v1::Permission::Process,
+            )?;
             let mut guard = handle
                 .resource
                 .lock()

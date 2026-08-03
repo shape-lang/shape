@@ -43,7 +43,7 @@ pub fn create_file_module_with_provider(fs: Arc<dyn FileSystemProvider>) -> Modu
             ConcreteType::Result(Box::new(ConcreteType::String)),
             move |path_str, ctx| {
                 crate::module_exports::check_fs_permission(
-                    ctx,
+                    &ctx.permissions,
                     shape_abi_v1::Permission::FsRead,
                     path_str.as_str(),
                 )?;
@@ -68,7 +68,7 @@ pub fn create_file_module_with_provider(fs: Arc<dyn FileSystemProvider>) -> Modu
             ConcreteType::Result(Box::new(ConcreteType::Unit)),
             move |path_str, content, ctx| {
                 crate::module_exports::check_fs_permission(
-                    ctx,
+                    &ctx.permissions,
                     shape_abi_v1::Permission::FsWrite,
                     path_str.as_str(),
                 )?;
@@ -91,7 +91,7 @@ pub fn create_file_module_with_provider(fs: Arc<dyn FileSystemProvider>) -> Modu
             ConcreteType::Result(Box::new(ConcreteType::ArrayString)),
             move |path_str, ctx| {
                 crate::module_exports::check_fs_permission(
-                    ctx,
+                    &ctx.permissions,
                     shape_abi_v1::Permission::FsRead,
                     path_str.as_str(),
                 )?;
@@ -117,7 +117,7 @@ pub fn create_file_module_with_provider(fs: Arc<dyn FileSystemProvider>) -> Modu
             ConcreteType::Result(Box::new(ConcreteType::Unit)),
             move |path_str, content, ctx| {
                 crate::module_exports::check_fs_permission(
-                    ctx,
+                    &ctx.permissions,
                     shape_abi_v1::Permission::FsWrite,
                     path_str.as_str(),
                 )?;
