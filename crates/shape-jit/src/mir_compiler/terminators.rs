@@ -1429,10 +1429,27 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                             }
                         }
 
-                        // v2-boundary: None represented as TAG_NULL in NaN-boxed ABI
-                        let none_val = self.builder.ins().iconst(types::I64, 0i64);
-                        self.release_old_value_if_heap(destination)?;
-                        self.write_place(destination, none_val)?;
+                        // ADR-020 §3.3: `print` is a unit call — it produces
+                        // no value, so there is nothing to store. The MIR
+                        // still names a destination; `infer_unit_slots`
+                        // classifies it, `declare_locals` gives it no
+                        // variable, and the moves that carry it are elided.
+                        // The pre-#239 `iconst 0` written here was a unit
+                        // sentinel (§6) into an unproven slot, and after
+                        // #257 refused that write it whole-program bailed
+                        // every top-level program containing a `print`.
+                        if let Place::Local(dst) = destination {
+                            if !self.unit_slots.contains(dst) {
+                                return Err(format!(
+                                    "ADR-020 §3.3 surface-and-stop: SURFACE — `print`'s \
+                                     destination slot {} was not classified as a unit slot, \
+                                     so a consumer expects a value from a call that produces \
+                                     none. `infer_unit_slots` and this lowering disagree \
+                                     about which calls are void.",
+                                    dst.0
+                                ));
+                            }
+                        }
                         self.reload_referenced_locals();
                         let next_block = self.block_map.get(next).ok_or_else(|| {
                             format!("MirToIR: unknown call continuation block {}", next)

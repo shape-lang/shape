@@ -228,10 +228,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                 // path below.
                 if let Place::Local(slot) = place {
                     if self.ref_param_slots.contains(slot) {
-                        let var = *self
-                            .locals
-                            .get(slot)
-                            .ok_or_else(|| format!("MirToIR: unknown local slot {}", slot))?;
+                        let var = self.local_var(*slot)?;
                         // Slot variable carries the caller's cell address
                         // (pointer-width I64); forward as-is. Skip the
                         // `ref_stack_slots` insertion — there is no JIT-
@@ -652,15 +649,20 @@ impl<'a, 'b> MirToIR<'a, 'b> {
             // downstream consumers reaching this stamp run under the W12
             // fall-through to the VM interpreter (VM == JIT).
             Operand::Constant(MirConstant::Decimal(_)) => Some(NativeKind::DecimalV2),
-            // ADR-006 §2.7.11/Q12 function-id-class callee-classification
-            // kind: a `MirConstant::Function(name)` lowers to the JIT-
-            // internal `box_function(fn_id)` shape (TAG_FUNCTION NaN-box),
-            // whose carrier kind across the §2.7.5 stable-FFI boundary is
-            // `NativeKind::UInt64`. The trampoline VM consumer
-            // (`dispatch_call_via_trampoline_vm`) classifies this same
-            // kind as the function-id callee per `call_convention.rs`
-            // UInt64 arm.
-            Operand::Constant(MirConstant::Function(_)) => Some(NativeKind::UInt64),
+            // ADR-020 §3.4 / #239 §6.2 — ONE carrier. A
+            // `MirConstant::Function(name)` lowers to the immortal
+            // zero-capture `Arc<HeapValue::ClosureRaw>` record
+            // (`arc_closure_constant`), so its kind is
+            // `Ptr(HeapKind::Closure)` — identical to the
+            // `ClosurePlaceholder` arm below, because the two now emit the
+            // same thing. Pre-flip this said `UInt64` for a
+            // `box_function(fn_id)` NaN-box tag word; that stamp was
+            // honest ("opaque raw bits") but it was the SECOND carrier,
+            // and which of the two a slot got was decided by which
+            // `MirConstant` variant the MIR happened to use.
+            Operand::Constant(MirConstant::Function(_)) => {
+                Some(NativeKind::Ptr(shape_value::heap_value::HeapKind::Closure))
+            }
             // Method-name string constant. The JIT emits a heap String
             // pointer via `box_string`; carrier kind is `String` (the
             // §2.7.5 String arm — `Arc<String>` raw pointer carrier).

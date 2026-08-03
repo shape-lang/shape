@@ -1240,6 +1240,67 @@ a real Cranelift-compiled body through this path is untested; the producer
 side (emitting the pool `iconst` + retain from generated code) is untouched
 — the share arithmetic models the consumer contract only.
 
+### 6.5 The flip, EXECUTED 2026-08-03 — and the blocker was in neither place we looked
+
+Commits `85b0d3a7` (unit calls), `dc206ded` (the carrier flip), plus
+`#256`'s deletion + ratchet. Measured on this branch by the implementing
+lane; NOT independently re-derived.
+
+**The 11/488 native rate was not the closure carrier and not the method
+channel. It was `print`.** Every acceptance fixture, including
+`SYN__closure-l106`, failed for the same reason, and it was neither
+STAGE-F3 nor STAGE-StringJIT: `write_place` refusing an unproven
+destination (#257) on the slot MIR names for a `print` result. `print`
+returns unit; its lowering stored an `iconst 0` there — the universal unit
+sentinel §6 forbids — and top-level MIR ends by moving the trailing
+statement's result into the return slot, so any program whose last
+statement is a `print` whole-program bailed. That is most of the corpus.
+
+ADR-020 §3.3 was already the answer and was already written down. Making
+unit calls actually void (`infer_unit_slots`; unit slots get no Cranelift
+variable; unit moves elided) moved the rate **11/488 → 80/488** on its
+own, with `unexpected=0`.
+
+**Method note for the next enumeration.** §1.2's denominator caveat was
+right about the corpus but the bail *reason* was never enumerated. The
+whole-program fallback total was known; its attribution was not, and
+`run-diff.mjs`'s new per-class breakdown plus a one-line MIR dump at the
+surface site (`SHAPE_DEBUG_SLOT_KINDS`) found the root in minutes. A bail
+count is not a bail diagnosis, and this document spent two revisions
+reasoning about which carrier was at fault while the dominant term was a
+sentinel word in an unrelated builtin.
+
+**§6.4 verdict 2 held and was load-bearering as written.** The
+per-consumption `jit_arc_closure_retain` is emitted by both `ownership.rs`
+arms; `closure_constant_pool_tests` pins the arithmetic and its control
+shows unretained consumption spending the budget.
+
+**But the retain has NO end-to-end control, and that is worth saying
+plainly.** Removing both emitted retains and rebuilding changes nothing
+observable: no corpus program and none this lane could construct reaches
+the failing shape, because everything that would re-materialise a function
+constant under native dispatch bails first on the indirect-call
+return-kind gap. The retain therefore rests on unit-level arithmetic and
+§6.4's measurement of the consumer contract, not on an end-to-end
+experiment. Run that control when the value-call return channel is
+monomorphized — it becomes constructible then, and until it is run this
+is an absence claim measured with an instrument that cannot distinguish
+absence from non-arrival (§7.1's own lesson, applied to this section).
+
+**#254 variant A is FIXED, non-vacuously.**
+`SYN__closure-calls-closure-alloc` went JIT_FAIL(rc=139) → MATCH with
+`nativeDispatches=1` and `wholeProgramFallback=false`. Its known-red pin
+is retired; the five other entries the run calls "now matching" all have
+zero native dispatches and keep their pins.
+
+**What did NOT move, and why.** The acceptance gate is 1/5. The other four
+are all blocked on ONE thing, and it is not a carrier: `jit_call_value`
+and `jit_call_method` return `-> u64` with no return kind, so an indirect
+call's destination slot has no proven kind and `write_place` refuses it.
+That is §4.1's monomorphization, and it is now the only thing between the
+gate and green. `SYN__datetime-method-native` additionally needs
+`unix_timestamp`'s destination stamped, which is the same channel.
+
 ## 7. The third carrier
 
 `jit_make_closure` (`crates/shape-jit/src/ffi/object/closure.rs:40`) produces

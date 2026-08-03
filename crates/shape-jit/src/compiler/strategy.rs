@@ -178,8 +178,8 @@ impl JITCompiler {
                 // block maps, variables, or default-value instructions exist.
                 mir_compiler.validate_shared_cell_kinds()?;
                 mir_compiler.create_blocks();
-                mir_compiler.declare_locals();
-                mir_compiler.initialize_locals();
+                mir_compiler.declare_locals()?;
+                mir_compiler.initialize_locals()?;
                 // Session 1 Commit 3: allocate Arc<SharedCell>s for
                 // every SharedCow local slot before the body runs.
                 mir_compiler.initialize_shared_local_slots()?;
@@ -360,8 +360,8 @@ impl JITCompiler {
                 // pre-emission Shared-kind gate as the direct strategy route.
                 mir_compiler.validate_shared_cell_kinds()?;
                 mir_compiler.create_blocks();
-                mir_compiler.declare_locals();
-                mir_compiler.initialize_locals();
+                mir_compiler.declare_locals()?;
+                mir_compiler.initialize_locals()?;
                 // Session 1 Commit 3: allocate Arc<SharedCell>s for
                 // every SharedCow local slot before the body runs.
                 mir_compiler.initialize_shared_local_slots()?;

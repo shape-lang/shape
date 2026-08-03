@@ -115,133 +115,14 @@ where
         }
     })
 }
-
-/// Dispatch a function call through the trampoline VM for functions that
-/// aren't JIT-compiled (null entries in the function table).
-///
-/// `upvalue_bits` carries the closure's captures when the callee is a
-/// closure (either VM-format heap or unified-heap `JITClosure`). When the
-/// callee is a bare function (TAG_FUNCTION inline), pass `None` to dispatch
-/// through `call_value_immediate_nb` with a plain function ValueWord.
-///
-/// When captures are present we route through `jit_trampoline_call_closure`
-/// on the interpreter side, which binds them to the callee frame's
-/// upvalues exactly as the `op_call_closure` path does. Without this
-/// path, a closure that fails JIT compilation (null entry in the function
-/// table) would be reconstructed as a bare function, losing its captures
-/// and producing `Null` on return.
-fn dispatch_call_via_trampoline_vm(
-    function_id: u32,
-    upvalue_pairs: Option<&[(u64, shape_value::NativeKind)]>,
-    arg_pairs: &[(u64, shape_value::NativeKind)],
-    jit_ctx: *mut JITContext,
-) -> u64 {
-    use shape_value::NativeKind;
-
-    // §2.7.5 stable-FFI raw-pair shape: each arg / capture pair is
-    // `(u64, NativeKind)`, and the kind is the one the PRODUCING site
-    // stamped into `JITContext.stack_kinds` — read back out by
-    // `jit_call_value` in lockstep with the bits (§2.7.7 / Q9).
-    //
-    // #188: this function used to discard the caller's kinds and
-    // re-stamp every argument `NativeKind::UInt64`. That is the
-    // "I64-wide raw bits without further classification" carrier kind,
-    // which is correct for a function-id-shaped CALLEE and wrong for an
-    // ordinary argument: the callee's frame receives the arg's kind
-    // verbatim through `stack_write_kinded`, so an `f64` argument
-    // arrived labelled as an integer and the callee's first typed read
-    // converted the raw bit pattern instead of the value. Measured at
-    // e12c82d2 with a native `apply(demoted, 0.5)` — VM `Ok(0.5)`,
-    // JIT `Ok(4602678819172647000)` (= the raw f64 bits of 0.5 read as
-    // an int); a `string` argument produced the same class with its
-    // `Arc<String>` pointer. Both are the c4-4B silent-wrong-output
-    // class. The kinds exist at every push site, so the fix is to carry
-    // them, not to re-derive or default them.
-    //
-    // The kind companion is consumed by `jit_trampoline_call_closure`
-    // which wraps each pair as a `KindedSlot` and threads it into the
-    // new frame's locals via `stack_write_kinded`, and by
-    // `call_value_immediate_nb` for the bare-function shape.
-    //
-    // #117 / R15: the covered-fallback dispatch event. Reaching this function
-    // means a native frame handed `function_id` to the bytecode interpreter,
-    // which is exactly the observation that must never be relabelled native.
-    shape_vm::native_witness::record_interpreter_dispatch(function_id as usize);
-
-    with_trampoline_vm_mut(|vm| {
-        let func_id = function_id as u16;
-        match upvalue_pairs {
-            Some(capture_pairs) => {
-                // Shape 2 / 3: closure-with-captures. Route through
-                // `jit_trampoline_call_closure` which materializes a
-                // fresh `OwnedClosureBlock` from the capture pairs and
-                // dispatches via `call_closure_with_nb_args_keepalive`.
-                match vm.jit_trampoline_call_closure(func_id, capture_pairs, arg_pairs, None) {
-                    Ok(bits) => bits,
-                    Err(e) => {
-                        raise_trampoline_error(jit_ctx, e.to_string());
-                        TAG_NULL
-                    }
-                }
-            }
-            None => {
-                // Shape 1: bare function callee (no captures). Use the
-                // VM's `call_value_immediate_nb` with a `NativeKind::
-                // UInt64` callee — the §2.7.11 callee-classification
-                // kind for function-id-shaped callees (per
-                // `call_convention.rs:853-877` UInt64 arm).
-                use shape_value::{KindedSlot, ValueSlot};
-                let callee =
-                    KindedSlot::new(ValueSlot::from_raw(func_id as u64), NativeKind::UInt64);
-                let kinded_args: Vec<KindedSlot> = arg_pairs
-                    .iter()
-                    .map(|(bits, kind)| KindedSlot::new(ValueSlot::from_raw(*bits), *kind))
-                    .collect();
-                match vm.call_value_immediate_nb(&callee, &kinded_args, None) {
-                    Ok(result) => {
-                        let bits = result.slot.raw();
-                        // The result's strong-count share transfers to
-                        // the JIT-side stack slot via the return path.
-                        // `mem::forget` prevents the KindedSlot's Drop
-                        // from retiring the share — the caller's stack
-                        // slot now owns it (same pattern as the runtime
-                        // tier's `dispatch_call_value_immediate` per
-                        // §2.7.11/Q12).
-                        std::mem::forget(result);
-                        // The callee KindedSlot was constructed with
-                        // raw bits (no Arc share); its Drop is a no-op
-                        // for UInt64 kind. Same for the arg KindedSlots
-                        // in this legacy function-id path: the stable
-                        // FFI boundary carries raw I64-wide bits, and the
-                        // VM call has already copied them into the new
-                        // frame.
-                        std::mem::forget(callee);
-                        std::mem::forget(kinded_args);
-                        bits
-                    }
-                    Err(e) => {
-                        raise_trampoline_error(jit_ctx, e.to_string());
-                        TAG_NULL
-                    }
-                }
-            }
-        }
-    })
-    .unwrap_or_else(|| {
-        // `TRAMPOLINE_VM` is null — the JIT-compiled callee could not be
-        // dispatched. Raise `pending_call_error` so the MIR-emitted check
-        // deopts rather than continuing with a value-shaped placeholder.
-        raise_trampoline_error(
-            jit_ctx,
-            format!(
-                "JIT value-call for function {} could not reach the interpreter \
-             trampoline",
-                function_id,
-            ),
-        );
-        TAG_NULL
-    })
-}
+// #239 / ADR-020 §3.4: `dispatch_call_via_trampoline_vm` DELETED. It
+// dispatched a callee by bare function id plus a detached `upvalue_pairs`
+// slice — the shape the two deleted carriers needed, because neither
+// `box_function(fn_id)` nor the legacy `unified_box(HK_CLOSURE)`
+// `JITClosure` carried its captures in a form the VM could bind. The one
+// surviving carrier is an `Arc<HeapValue::ClosureRaw>` whose block already
+// holds its own captures, so `dispatch_borrowed_closure_via_trampoline_vm`
+// below is the only dispatcher left, and it borrows rather than rebuilding.
 
 /// Maximum `[captures..., args...]` count the native closure-call path can
 /// enter directly. Bounded by `call_jit_fn_with_args`'s transmute table, which
@@ -537,8 +418,6 @@ pub extern "C" fn jit_call_function(
 /// - **Resurrecting `ValueWord::clone_from_bits` /
 ///   `value_word_drop::vw_drop`** — CLAUDE.md "Forbidden Patterns" #1.
 pub extern "C" fn jit_call_value(ctx: *mut JITContext) -> u64 {
-    use crate::context::JITClosure;
-    use crate::ffi::jit_kinds::unified_unbox;
     use crate::ffi::stack_kind_code;
     use shape_value::{HeapKind, NativeKind, heap_value::HeapValue};
     use std::sync::Arc;
@@ -697,9 +576,13 @@ pub extern "C" fn jit_call_value(ctx: *mut JITContext) -> u64 {
         // JIT-internal NaN-box pattern (per `value_ffi.rs`). They're
         // shrunk to a narrow legacy compatibility surface; the principled
         // dispatch is by kind.
-        let function_id: u16;
-        let mut vm_captures: Option<Vec<(u64, NativeKind)>> = None;
-
+        // #239 / ADR-020 §3.4: every arm below returns. The post-match
+        // dispatch tail (a `function_id` + `vm_captures` pair feeding the
+        // JIT function-table fast path and `dispatch_call_via_trampoline_vm`)
+        // existed to serve the two deleted JIT-internal carriers; the one
+        // surviving carrier dispatches inside its own arm through
+        // `dispatch_borrowed_closure_via_trampoline_vm`, which does the
+        // function-table fast path itself.
         match callee_kind {
             NativeKind::Ptr(HeapKind::Closure) => {
                 // Case 3 (closed): raw `Arc::into_raw(Arc<HeapValue::
@@ -724,88 +607,22 @@ pub extern "C" fn jit_call_value(ctx: *mut JITContext) -> u64 {
                     ctx_ref.pending_call_error = 1;
                     return ERROR_PLACEHOLDER_BITS;
                 }
-                // W15.2-LANG-4 jit-filter-predicate close (2026-05-18).
-                // Function-typed parameter slots (e.g. `apply(p: (int)=>bool,
-                // ...)`'s `p`) are stamped `Ptr(HeapKind::Closure)` per
-                // the declared `ConcreteType::Function` mapping in
-                // `native_kind_from_concrete_type`. The producing call
-                // signature `apply(pred, ...)` may deliver either runtime
-                // carrier shape per the closure-zero-captures
-                // optimization in the bytecode compiler:
+                // #239 / ADR-020 §3.4 — ONE carrier. The dual-carrier
+                // dispatch that used to stand here is deleted:
                 //
-                //   (a) `Arc::into_raw(Arc<HeapValue::ClosureRaw(block)>)`
-                //       — the §2.7.11/Q12 canonical heap-closure carrier
-                //       (escaping closure with captures OR escaping
-                //       closure without captures routed through
-                //       `emit_heap_closure` + `jit_finalize_heap_closure`).
+                //   (b) `box_function(fn_id)` has no producer any more.
+                //       `MirConstant::Function` and `ClosurePlaceholder`
+                //       both emit `arc_closure_constant`, an immortal
+                //       zero-capture `Arc<HeapValue::ClosureRaw>`.
                 //
-                //   (b) `box_function(fn_id)` — the §2.7.11 NaN-box
-                //       function-ref carrier (the bytecode compiler can
-                //       emit `Operand::Function(fid)` for a `let pred =
-                //       |x| x > 24` shape where `x > 24` has no captures
-                //       AND the binding storage class permits the
-                //       fn-ref-as-callable optimization).
-                //
-                // The carrier shape is determined at producing-site
-                // codegen time but the declared-type-based kind
-                // classification (`ConcreteType::Function` →
-                // `Ptr(HeapKind::Closure)`) can't statically project the
-                // carrier — the kind is the slot's *semantic* type, not
-                // the runtime carrier discriminator. Dispatch on the
-                // bit-shape predicate before falling through to the
-                // `Arc::from_raw` deref to avoid UB on the NaN-box
-                // carrier (which would deref random memory).
-                if is_inline_function(callee_bits) {
-                    function_id = unbox_function_id(callee_bits);
-                    // No captures — bare function ref path.
-                    let args: Vec<u64> = arg_pairs.iter().map(|(b, _)| *b).collect();
-                    if !ctx_ref.function_table.is_null()
-                        && (function_id as usize) < ctx_ref.function_table_len
-                    {
-                        let raw_fn_ptr =
-                            *(ctx_ref.function_table as *const *const u8).add(function_id as usize);
-                        if !raw_fn_ptr.is_null() {
-                            ctx_ref.stack_ptr = 0;
-                            let _signal = call_jit_fn_with_args(raw_fn_ptr, ctx, &args);
-                            if ctx_ref.stack_ptr > 0 {
-                                ctx_ref.stack_ptr -= 1;
-                                let ret_bits = ctx_ref.stack[ctx_ref.stack_ptr];
-                                ctx_ref.stack_kinds[ctx_ref.stack_ptr] = stack_kind_code::SENTINEL;
-                                return ret_bits;
-                            }
-                            // #259 DELIBERATELY NOT CONVERTED — not a
-                            // surface-and-stop path. Reaching here means the
-                            // callee left no value on the stack, which for a
-                            // unit-returning callee is CORRECT (ADR-020 §3.3:
-                            // unit calls are void and the emit site discards
-                            // the result). Setting `pending_call_error` here
-                            // would deopt every unit-returning value call.
-                            //
-                            // `jit_call_value` cannot distinguish "unit callee
-                            // returned nothing" from "non-unit callee failed to
-                            // produce a value", because its `-> u64` signature
-                            // carries no return-kind information — that is the
-                            // channel defect #239 converts. Resolve there, when
-                            // the void monomorph makes the distinction
-                            // expressible in the signature.
-                            //
-                            // Separately suspicious and also #239's: `_signal`
-                            // above discards the callee's JIT signal, so a
-                            // callee that signalled an error is indistinguishable
-                            // from one that returned nothing.
-                            return TAG_NULL;
-                        }
-                    }
-                    // Fall through to trampoline VM for the bare-fn case.
-                    // #188: `arg_pairs` (not the kind-stripped `args`) —
-                    // the trampoline threads each kind into the callee frame.
-                    return dispatch_call_via_trampoline_vm(
-                        function_id as u32,
-                        None,
-                        &arg_pairs,
-                        ctx,
-                    );
-                }
+                // So a `Ptr(HeapKind::Closure)` stamp is now TRUE of the
+                // bits, and the `is_inline_function` bit-shape probe that
+                // guarded this `Arc::from_raw` has nothing left to detect.
+                // The bare-function fast path it selected is not lost —
+                // `dispatch_borrowed_closure_via_trampoline_vm` takes the
+                // same JIT function-table path when the table has a
+                // non-null entry for the record's fid, measured on both
+                // arms in `zero_capture_trampoline_probe` (§6.4 verdict 1).
                 // Take ownership of the callee share that was pushed onto
                 // the JIT stack. `compile_operand` retained for Copy
                 // operands and transferred for Move operands; after the
@@ -875,66 +692,33 @@ pub extern "C" fn jit_call_value(ctx: *mut JITContext) -> u64 {
             | NativeKind::NullableInt64
             | NativeKind::NullableIntSize
             | NativeKind::NullableUIntSize => {
-                // Generic I64-wide raw bits carrier kind (§2.7.5 / §2.7.11).
-                // The bits hold either (a) a NaN-boxed inline function
-                // ref (the JIT MIR emitter pushes `box_function(fn_id)`
-                // when the callee is a `FunctionRef` constant), or (b)
-                // a NaN-boxed `HK_CLOSURE` legacy unified-heap
-                // `JITClosure` allocation. The JIT-internal NaN-box
-                // predicates `is_inline_function` and
-                // `is_heap_kind(_, HK_CLOSURE)` are intentionally
-                // preserved here per ADR-006 §2.7.5 — they operate on
-                // the JIT's own value representation, NOT on the
-                // deleted runtime-tier `tag_bits` dispatch (CLAUDE.md
-                // "Forbidden Patterns" #4 enumerates the deleted runtime
-                // synthesizer / `is_tagged()` handlers; the JIT-internal
-                // NaN-box checks in `value_ffi.rs` are a different
-                // surface and remain valid).
-                if is_inline_function(callee_bits) {
-                    function_id = unbox_function_id(callee_bits);
-                } else if is_heap_kind(callee_bits, HK_CLOSURE) {
-                    let closure = unified_unbox::<JITClosure>(callee_bits);
-                    function_id = closure.function_id;
-                    let count = closure.captures_count as usize;
-                    // Legacy `unified_box(HK_CLOSURE, JITClosure)` carrier
-                    // (`jit_make_closure`, only reachable when the program
-                    // carries no `ClosureLayout` for this function — see
-                    // `mir_compiler/statements.rs` "LEGACY HEAP PATH"). That
-                    // carrier has no parallel-kind track of its own: the
-                    // `JITClosure.captures_ptr` array is bare `u64`. `UInt64`
-                    // here is the §2.7.5 I64-wide-raw-bits carrier kind for
-                    // that source, and it is the ONLY remaining kind-source
-                    // gap on this path (#188 removed the argument one). It is
-                    // not extended to arguments, which do have a kind track.
-                    let mut caps: Vec<(u64, NativeKind)> = Vec::with_capacity(count);
-                    for i in 0..count {
-                        caps.push((*closure.captures_ptr.add(i), NativeKind::UInt64));
-                    }
-                    vm_captures = Some(caps);
-                } else {
-                    tracing::debug!(
-                        target: "shape_jit",
-                        callee_bits,
-                        "jit-call-value SURFACE \u{a7}2.7.5: callee_bits \
-                         stamped UInt64 but is neither inline function \
-                         (TAG_FUNCTION) nor unified-heap HK_CLOSURE. \
-                         Producing site stamped the carrier kind but \
-                         emitted bits that don't match either UInt64-class \
-                         shape.",
-                    );
-                    // #259: a stop that returns a legal value does not stop.
-                    // This is the arm the investigator identified under gdb as
-                    // #259's reproducer and #254's silent variant: it detects
-                    // the carrier violation, describes it accurately, and then
-                    // returned a usable number.
-                    set_jit_runtime_error(
-                        "jit_call_value: callee stamped UInt64 is neither an inline function \
-                         nor a unified-heap closure; native execution aborted"
-                            .to_string(),
-                    );
-                    ctx_ref.pending_call_error = 1;
-                    return ERROR_PLACEHOLDER_BITS;
-                }
+                // #239 / ADR-020 §3.4 — no legal producer. This arm used
+                // to accept two JIT-internal carriers, `box_function(fn_id)`
+                // and the legacy `unified_box(HK_CLOSURE)` `JITClosure`;
+                // both are deleted, and their emit sites with them. A
+                // callee reaching here stamped a scalar kind carries an
+                // integer, not a callable, which is a producing-site bug.
+                //
+                // Its `else` branch is where #259 was found and where #254's
+                // silent variant B lived: it detected the carrier violation,
+                // described it accurately, and then handed `TAG_NULL` back
+                // as a usable number.
+                tracing::debug!(
+                    target: "shape_jit",
+                    callee_bits,
+                    callee_kind = ?callee_kind,
+                    "jit-call-value SURFACE \u{a7}3.4: callee stamped a \
+                     scalar kind. Every function value is one \
+                     Ptr(HeapKind::Closure) carrier since #239; a scalar \
+                     callee means the producing site stamped the wrong kind.",
+                );
+                set_jit_runtime_error(
+                    "jit_call_value: callee is stamped a scalar kind, but every function value \
+                     is an Arc<HeapValue::ClosureRaw> since #239; native execution aborted"
+                        .to_string(),
+                );
+                ctx_ref.pending_call_error = 1;
+                return ERROR_PLACEHOLDER_BITS;
             }
             other => {
                 tracing::debug!(
@@ -958,64 +742,6 @@ pub extern "C" fn jit_call_value(ctx: *mut JITContext) -> u64 {
             }
         }
 
-        // Extract the raw arg bits for dispatch. Per-arg kinds are
-        // already paired into `arg_pairs` and consumed inside the
-        // trampoline VM as `KindedSlot` carriers (see
-        // `dispatch_call_via_trampoline_vm`); we keep raw bits here for
-        // the JIT function-table fast path which uses native Cranelift
-        // call signatures (uniformly I64) and has no kind dependency.
-        let args: Vec<u64> = arg_pairs.iter().map(|(b, _)| *b).collect();
-
-        // ── Dispatch ─────────────────────────────────────────────────────
-
-        // Try the JIT function table fast path first (no trampoline
-        // hop). Only the bare-function shape can use this path —
-        // closures need the trampoline VM for the captures-binding
-        // semantics.
-        if vm_captures.is_none()
-            && !ctx_ref.function_table.is_null()
-            && (function_id as usize) < ctx_ref.function_table_len
-        {
-            let raw_fn_ptr =
-                *(ctx_ref.function_table as *const *const u8).add(function_id as usize);
-            if !raw_fn_ptr.is_null() {
-                // Reset ctx.stack_ptr so the callee starts with a clean
-                // stack frame. The kind track is naturally re-initialized
-                // by the callee's own push sequence — the §2.7.7 / Q9
-                // lockstep invariant only constrains the live region of
-                // the stack (`stack[..stack_ptr]`), not the dead region
-                // beyond.
-                ctx_ref.stack_ptr = 0;
-                let _signal = call_jit_fn_with_args(raw_fn_ptr, ctx, &args);
-                // Result is on ctx.stack[0..sp]; pop the top slot.
-                if ctx_ref.stack_ptr > 0 {
-                    ctx_ref.stack_ptr -= 1;
-                    let ret_bits = ctx_ref.stack[ctx_ref.stack_ptr];
-                    // Return-slot kind is consumed implicitly by the
-                    // executor's RETURN_TAG_* dispatch (see
-                    // `executor.rs::execute_with_jit`); we don't need
-                    // to thread it back through `stack_kinds` because
-                    // the calling MIR slot's kind is set by the
-                    // destination write via `write_place`.
-                    ctx_ref.stack_kinds[ctx_ref.stack_ptr] = stack_kind_code::SENTINEL;
-                    return ret_bits;
-                }
-                // #259 DELIBERATELY NOT CONVERTED — sibling of the
-                // function-table path above; same reasoning. "No value on the
-                // stack" is a legitimate unit return, not a detected
-                // violation, and the `-> u64` signature cannot express the
-                // difference. Resolve in #239 with the void monomorph.
-                return TAG_NULL;
-            }
-        }
-
-        // Fallback: route through the trampoline VM. This handles:
-        //   - JIT-untranslated function bodies (null function-table entry).
-        //   - HK_CLOSURE callees (captures threaded into the new frame).
-        //   - Raw-Arc HeapKind::Closure callees (Case 3 closed via the
-        //     §2.7.11/Q12 kind dispatch above).
-        let upvalues: Option<&[(u64, NativeKind)]> = vm_captures.as_deref();
-        dispatch_call_via_trampoline_vm(function_id as u32, upvalues, &arg_pairs, ctx)
     }
 }
 

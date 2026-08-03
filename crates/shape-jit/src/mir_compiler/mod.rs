@@ -278,6 +278,15 @@ pub struct MirToIR<'a, 'b> {
     /// destination write. Disjoint from `user_func_return_kinds` by
     /// construction (both are built by `harvest_return_abi`).
     pub(crate) unit_returning_funcs: HashSet<u16>,
+    /// ADR-020 §3.3: MIR slots that carry unit — no value at all.
+    ///
+    /// The destination of every void call, plus everything a chain of MIR
+    /// moves carries it into (top-level MIR ends by moving the trailing
+    /// statement's result into the return slot). These slots get NO
+    /// Cranelift variable and NO storage kind: there is nothing to store,
+    /// and inventing a bit pattern for them is the unit sentinel ADR-020
+    /// §6 forbids. Computed by `types::infer_unit_slots`.
+    pub(crate) unit_slots: HashSet<SlotId>,
 
     // ── Borrow support ──────────────────────────────────────────────
     /// MIR SlotId → (Cranelift StackSlot, Cranelift Type) for references
@@ -1021,6 +1030,34 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                 frame_seed[dst_idx] = slot_kinds.get(param_idx).copied().flatten();
             }
         }
+        // #239 §6.1 — capture slots take their kind from the closure's OWN
+        // `ClosureLayout`, which is the thing that decides how the capture
+        // is stored and released. `param_slots` is captures followed by user
+        // params (`compiler/program.rs`), and the bytecode frame descriptor
+        // does not stamp captures, so before this a closure that captured
+        // another closure left the capture slot unproven.
+        //
+        // This seed is only sound BECAUSE of the carrier flip in the same
+        // commit. The layout classifies a captured closure `FieldKind::Ptr`
+        // — true on the VM side, where a closure is always
+        // `Arc<ClosureRaw>`. Stamping `Ptr(HeapKind::Closure)` while the JIT
+        // still emitted `box_function` tag words for capture-less closures
+        // is precisely #254 variant A: the mask-driven retain loop at
+        // `statements.rs` would `atomic_rmw` a tag word. That is why §6.2
+        // says the producer flip and this are one edit or neither.
+        if let Some(fid) = function_indices.get(mir_data.mir.name.as_str()) {
+            if let Some(layout) = closure_function_layouts.get(fid) {
+                for i in 0..layout.capture_count() {
+                    let Some(mir_slot) = mir_data.mir.param_slots.get(i) else {
+                        break;
+                    };
+                    let dst_idx = mir_slot.0 as usize;
+                    if dst_idx < frame_seed.len() && frame_seed[dst_idx].is_none() {
+                        frame_seed[dst_idx] = Some(layout.capture_native_kind(i));
+                    }
+                }
+            }
+        }
         if let Some(current_fn_idx) = function_indices.get(mir_data.mir.name.as_str()) {
             if let Some(return_kind) = user_func_return_kinds.get(current_fn_idx).copied() {
                 if !frame_seed.is_empty() {
@@ -1147,6 +1184,11 @@ impl<'a, 'b> MirToIR<'a, 'b> {
             user_func_refs,
             user_func_arities,
             user_func_return_kinds,
+            unit_slots: types::infer_unit_slots(
+                &mir_data.mir,
+                function_indices,
+                &unit_returning_funcs,
+            ),
             unit_returning_funcs,
             ref_stack_slots: HashMap::new(),
             field_byte_offsets: HashMap::new(),
@@ -1985,7 +2027,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
     pub fn compile(&mut self) -> Result<(), String> {
         self.validate_shared_cell_kinds()?;
         self.create_blocks();
-        self.declare_locals();
+        self.declare_locals()?;
         // Session 1 Commit 3: eagerly materialise Arc<SharedCell>s for
         // every SharedCow local slot. No-op when the set is empty.
         self.initialize_shared_local_slots()?;

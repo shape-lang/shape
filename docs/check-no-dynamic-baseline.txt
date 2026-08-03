@@ -43,3 +43,11 @@
 0	let\s+expected\s*=\s*NativeKind::Bool	W17 Stage-0: no-layout upvalue Bool-default fabrication — ADR-006 §2.7.8/Q10 (design §4.2.4)
 0	^(?!\s*//).*\bTAG_UNIT\b	ADR-020 §3.3/§6 (#224) — unit has no bit encoding; no unit word under any name (comment prose exempt)
 52	^(?!\s*(//|///|\*)).*\bTAG_BOOL_(TRUE|FALSE)\b	ADR-020 §3 clause 2 (#226) — bool is bare 0/1; the residue is the kind-blind JIT FFI dialect (#239 drives it to 0). SHRINK-ONLY: comment prose exempt
+6	^(?!\s*(//|///|\*)).*\bbox_function\b	ADR-020 §3.4 / §6 (#239) — the SECOND function-value carrier. Producer-less: both ownership.rs arms emit arc_closure_constant. SHRINK-ONLY, target 0; residue is value_ffi.rs (def+tests) and the NaN-box typeof/is_type + simulation surface, which the value-channel conversion deletes
+7	^(?!\s*(//|///|\*)).*\bis_inline_function\b	ADR-020 §3.4 / §6 (#239) — the dual-carrier bit-shape probe. Deleted from every closure consumer; residue is the NaN-box typeof/is_type + simulation surface. SHRINK-ONLY, target 0
+2	^(?!\s*(//|///|\*)).*\bunbox_function_id\b	ADR-020 §3.4 / §6 (#239) — fn-id sentinel extraction. Producer-less; residue is value_ffi.rs def+test. SHRINK-ONLY, target 0
+3	^(?!\s*(//|///|\*)).*\bTAG_FUNCTION_BITS\b	ADR-020 §3.4 / §6 (#239) — the function tag. Producer-less. SHRINK-ONLY, target 0
+5	^(?!\s*(//|///|\*)).*\bis_tagged\b	ADR-020 §6 (#256) — the tag test itself. The row #256 records as MISSING (value_ffi.rs:104). SHRINK-ONLY, target 0
+5	^(?!\s*(//|///|\*)).*\bmake_tagged\b	ADR-020 §6 (#239) — tag-word construction. SHRINK-ONLY, target 0
+4	^(?!\s*(//|///|\*)).*\bget_tag\b	ADR-020 §6 (#239) — tag extraction. SHRINK-ONLY, target 0
+4	^(?!\s*(//|///|\*)).*0x[fF]{3}[89a-fA-F]_?0{4}_?0{4}_?0{4}	ADR-020 §6 / design §3.5.2 (#256) — the NaN-box tag pattern as a LITERAL. The name rows stop the dialect returning by name; this one stops it returning by value. It is the only row that would have caught emit_index_to_i64 (places.rs:532), which reconstructed the deleted is_tagged dispatch from an iconst while naming no ratcheted symbol — deleted in #239. Cannot seed at 0: the residue is TAG_BASE/TAG_MASK in value_ffi.rs, the normative pattern in shape-value/src/encoding.rs (ADR-020 §6 makes that table the sole source), and one shape-vm write-barrier test. SHRINK-ONLY

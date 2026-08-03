@@ -169,6 +169,95 @@ pub(crate) fn native_kind_from_concrete_type(ct: &ConcreteType) -> Option<Native
 /// - Assign(slot, BinaryOp(arith, lhs, rhs)) → inherits from operands if both agree
 /// - Assign(slot, Use(Move/Copy(other_slot))) → inherits from other_slot
 /// - Conflicting assignments → keep existing
+/// ADR-020 §3.3 — the slots that carry UNIT, i.e. no value at all.
+///
+/// "Unit — no value. Unit calls are void (zero-return signatures). No
+/// `TAG_UNIT`." MIR still names a destination slot for a void call, but
+/// nothing is produced for it: such a slot gets no Cranelift variable, no
+/// storage kind and no write, and a MIR `Assign` that moves it into another
+/// slot propagates unit-ness rather than a value.
+///
+/// This is the kind-source that `infer_slot_kinds` structurally cannot
+/// supply, because there is no kind to supply — asking it for one is the
+/// question ADR-020 §6 forbids answering with a sentinel word. Before this
+/// existed, `terminators.rs`'s `print` lowering stored an `iconst 0` into
+/// the destination and `write_place` refused it (#257), which whole-program
+/// bailed every top-level program containing a `print` — the dominant term
+/// in the 11/488 native-execution rate measured on 2026-08-03.
+///
+/// Two static proof sources, no name allowlist beyond the one the emit site
+/// already tests:
+///  - a `Call` whose callee resolves to a function index in
+///    `unit_returning_funcs`, which `harvest_return_abi` fills from
+///    `FrameDescriptor::returns_no_value()`;
+///  - the `print` builtin — the same `name == "print"` with no user
+///    function of that name that its own lowering branches on. Mirroring
+///    that one site is not a growing allowlist; if `print` ever stops
+///    being special-cased in codegen this predicate goes with it.
+///
+/// A callee whose return kind is merely *unproven* is NOT unit. That case
+/// still surfaces at `write_place`, which is the whole point of #257.
+pub(crate) fn infer_unit_slots(
+    mir: &MirFunction,
+    function_indices: &HashMap<String, u16>,
+    unit_returning_funcs: &std::collections::HashSet<u16>,
+) -> std::collections::HashSet<SlotId> {
+    let mut unit: std::collections::HashSet<SlotId> = std::collections::HashSet::new();
+
+    for block in &mir.blocks {
+        if let TerminatorKind::Call {
+            func, destination, ..
+        } = &block.terminator.kind
+        {
+            let Place::Local(slot) = destination else {
+                continue;
+            };
+            let produces_no_value = match func {
+                Operand::Constant(MirConstant::Function(name)) => {
+                    match resolve_named_function_index(name, function_indices) {
+                        Some(fid) => unit_returning_funcs.contains(&fid),
+                        None => name == "print",
+                    }
+                }
+                _ => false,
+            };
+            if produces_no_value {
+                unit.insert(*slot);
+            }
+        }
+    }
+
+    // `Assign(dst, Use(Move|Copy(Local(src))))` where `src` is unit makes
+    // `dst` unit too — top-level MIR ends with exactly this shape, moving
+    // the trailing statement's result into the return slot. Iterate to a
+    // fixpoint so a chain of such moves propagates.
+    loop {
+        let mut changed = false;
+        for block in &mir.blocks {
+            for stmt in &block.statements {
+                let StatementKind::Assign(Place::Local(dst), Rvalue::Use(operand)) = &stmt.kind
+                else {
+                    continue;
+                };
+                let src = match operand {
+                    Operand::Copy(p) | Operand::Move(p) | Operand::MoveExplicit(p) => p,
+                    Operand::Constant(_) => continue,
+                };
+                if let Place::Local(src_slot) = src {
+                    if unit.contains(src_slot) && unit.insert(*dst) {
+                        changed = true;
+                    }
+                }
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+
+    unit
+}
+
 pub(crate) fn infer_slot_kinds(
     mir: &MirFunction,
     existing: &[Option<NativeKind>],
@@ -2172,7 +2261,11 @@ fn infer_constant_kind(constant: &MirConstant) -> Option<NativeKind> {
         MirConstant::Decimal(_) => Some(NativeKind::DecimalV2),
         MirConstant::None => None,
         MirConstant::StringId(_) | MirConstant::Str(_) => Some(NativeKind::String),
-        MirConstant::Function(_) => Some(NativeKind::UInt64),
+        // ADR-020 §3.4 / #239 §6.2 — ONE carrier: the immortal zero-capture
+        // `Arc<HeapValue::ClosureRaw>`. Mirror of the `operand_slot_kind`
+        // arm in `rvalues.rs`; both stamps collapse onto the same kind
+        // because both producers now emit the same record.
+        MirConstant::Function(_) => Some(NativeKind::Ptr(HeapKind::Closure)),
         MirConstant::Method(_) => Some(NativeKind::String),
         MirConstant::ClosurePlaceholder => Some(NativeKind::Ptr(HeapKind::Closure)),
     }
