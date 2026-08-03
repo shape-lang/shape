@@ -137,11 +137,21 @@ const MAX_NATIVE_CLOSURE_CALL_ARGS: usize = 8;
 /// capture bits. That is not valid for cell-storage captures:
 /// `OwnedMutable` / `Shared` slots hold transfer-only cell pointers owned by
 /// the original closure block.
+///
+/// ## Return channel (ADR-020 / #239 §4.1)
+///
+/// Returns `Outcome`, not raw `u64`. Both dispatch paths already HAVE the
+/// return kind — the native path in `ctx.stack_kinds[stack_ptr]`, the
+/// interpreter path in the `KindedSlot` `execute_closure` hands back — and the
+/// pre-conversion `-> u64` signature threw it away at the last step. That is
+/// what left the caller unable to pick a representation for the destination,
+/// and unable to tell "unit callee correctly produced nothing" from "non-unit
+/// callee failed to produce anything" (#259's two deferred paths).
 fn dispatch_borrowed_closure_via_trampoline_vm(
     closure_block: &shape_value::v2::closure_raw::OwnedClosureBlock,
     arg_pairs: &[(u64, shape_value::NativeKind)],
     jit_ctx: *mut JITContext,
-) -> u64 {
+) -> Outcome {
     use shape_value::{KindedSlot, ValueSlot};
 
     // #117 / R15 (#188 close): the raw-Arc closure trampoline is a
@@ -219,27 +229,57 @@ fn dispatch_borrowed_closure_via_trampoline_vm(
                     ctx_ref.stack_ptr = 0;
                     let signal =
                         unsafe { call_jit_fn_with_args(raw_fn_ptr, jit_ctx, &native_args) };
-                    if signal >= 0 && ctx_ref.stack_ptr > 0 {
-                        ctx_ref.stack_ptr -= 1;
-                        let ret_bits = ctx_ref.stack[ctx_ref.stack_ptr];
-                        ctx_ref.stack_kinds[ctx_ref.stack_ptr] =
-                            crate::ffi::stack_kind_code::SENTINEL;
-                        return ret_bits;
+                    if signal < 0 {
+                        // A negative signal is the callee's own deopt/error
+                        // signal; it has already been surfaced through
+                        // `pending_call_error` or is a hard JIT error. Report
+                        // it rather than silently re-running the body on the
+                        // interpreter, which would double any side effect the
+                        // native attempt already performed.
+                        raise_trampoline_error(
+                            jit_ctx,
+                            format!(
+                                "JIT closure native dispatch for function {} returned signal {}",
+                                closure_function_id, signal
+                            ),
+                        );
+                        return Outcome::Failed;
                     }
-                    // A negative signal is the callee's own deopt/error
-                    // signal; it has already been surfaced through
-                    // `pending_call_error` or is a hard JIT error. Report it
-                    // rather than silently re-running the body on the
-                    // interpreter, which would double any side effect the
-                    // native attempt already performed.
-                    raise_trampoline_error(
-                        jit_ctx,
-                        format!(
-                            "JIT closure native dispatch for function {} returned signal {}",
-                            closure_function_id, signal
-                        ),
-                    );
-                    return TAG_NULL;
+                    if ctx_ref.stack_ptr == 0 {
+                        // ADR-020 §3.3 + #239 §4.1: the callee produced no
+                        // value. Pre-conversion this was indistinguishable
+                        // from a failure, because the `-> u64` signature had
+                        // nowhere to say "nothing" — a unit-returning callee
+                        // and a broken one both had to be answered with a bit
+                        // pattern. It is decidable now, and the decision is
+                        // deferred to the caller: only the `_void` monomorph
+                        // accepts it.
+                        return Outcome::NoValue;
+                    }
+                    ctx_ref.stack_ptr -= 1;
+                    let ret_bits = ctx_ref.stack[ctx_ref.stack_ptr];
+                    let ret_code = ctx_ref.stack_kinds[ctx_ref.stack_ptr];
+                    ctx_ref.stack_kinds[ctx_ref.stack_ptr] = crate::ffi::stack_kind_code::SENTINEL;
+                    // §2.7.7 / Q9: the kind comes off the parallel track in
+                    // lockstep with the bits. It is NOT re-derived from the
+                    // bits, and a missing stamp is a producing-site gap that
+                    // surfaces rather than defaulting.
+                    let Some(ret_kind) = crate::ffi::stack_kind_code::decode(ret_code) else {
+                        raise_trampoline_error(
+                            jit_ctx,
+                            format!(
+                                "JIT closure native dispatch for function {} returned a value \
+                                 whose parallel-track kind byte is SENTINEL/reserved — the \
+                                 callee's Return lowering must stamp it (ADR-006 §2.7.7 / Q9)",
+                                closure_function_id
+                            ),
+                        );
+                        return Outcome::Failed;
+                    };
+                    return Outcome::Value(KindedSlot::new(
+                        ValueSlot::from_raw(ret_bits),
+                        ret_kind,
+                    ));
                 }
             }
         }
@@ -257,22 +297,20 @@ fn dispatch_borrowed_closure_via_trampoline_vm(
         .collect();
 
     match with_trampoline_vm_mut(|vm| vm.execute_closure(closure_block, kinded_args, None)) {
-        Some(Ok(result)) => {
-            let bits = result.slot.raw();
-            // The returned share transfers to the JIT-side destination slot.
-            std::mem::forget(result);
-            bits
-        }
+        // O1: the returned share transfers to the JIT-side destination slot.
+        // `Outcome::Value` carries it onward without a second claim; the
+        // monomorph that consumes it does not retain (§4.2).
+        Some(Ok(result)) => Outcome::Value(result),
         Some(Err(e)) => {
             raise_trampoline_error(jit_ctx, e.to_string());
-            TAG_NULL
+            Outcome::Failed
         }
         None => {
             raise_trampoline_error(
                 jit_ctx,
                 "JIT closure value-call could not reach the interpreter trampoline".to_string(),
             );
-            TAG_NULL
+            Outcome::Failed
         }
     }
 }
@@ -417,7 +455,7 @@ pub extern "C" fn jit_call_function(
 ///   here (ADR-006 §2.7.14 "Reopen amendment").
 /// - **Resurrecting `ValueWord::clone_from_bits` /
 ///   `value_word_drop::vw_drop`** — CLAUDE.md "Forbidden Patterns" #1.
-pub extern "C" fn jit_call_value(ctx: *mut JITContext) -> u64 {
+fn call_value_kinded(ctx: *mut JITContext) -> Outcome {
     use crate::ffi::stack_kind_code;
     use shape_value::{HeapKind, NativeKind, heap_value::HeapValue};
     use std::sync::Arc;
@@ -426,8 +464,8 @@ pub extern "C" fn jit_call_value(ctx: *mut JITContext) -> u64 {
         if ctx.is_null() {
             // #234 B1: unreachable absent a JIT codegen bug, and there is no
             // context to record `pending_call_error` in — the context IS what
-            // is null. Returns the placeholder, memory-safe by #234.
-            return ERROR_PLACEHOLDER_BITS;
+            // is null.
+            return Outcome::Failed;
         }
         let ctx_ref = &mut *ctx;
 
@@ -447,7 +485,7 @@ pub extern "C" fn jit_call_value(ctx: *mut JITContext) -> u64 {
                 "jit_call_value: operand stack empty while popping arg_count — deopting to interpreter".to_string(),
             );
             ctx_ref.pending_call_error = 1;
-            return ERROR_PLACEHOLDER_BITS;
+            return Outcome::Failed;
         }
         ctx_ref.stack_ptr -= 1;
         let arg_count = ctx_ref.stack[ctx_ref.stack_ptr] as usize;
@@ -469,7 +507,7 @@ pub extern "C" fn jit_call_value(ctx: *mut JITContext) -> u64 {
                     "jit_call_value: operand stack exhausted mid-argument-pop — deopting to interpreter".to_string(),
                 );
                 ctx_ref.pending_call_error = 1;
-                return ERROR_PLACEHOLDER_BITS;
+                return Outcome::Failed;
             }
             ctx_ref.stack_ptr -= 1;
             let bits = ctx_ref.stack[ctx_ref.stack_ptr];
@@ -497,7 +535,7 @@ pub extern "C" fn jit_call_value(ctx: *mut JITContext) -> u64 {
                             .to_string(),
                     );
                     ctx_ref.pending_call_error = 1;
-                    return ERROR_PLACEHOLDER_BITS;
+                    return Outcome::Failed;
                 }
             };
             arg_pairs.push((bits, kind));
@@ -515,7 +553,7 @@ pub extern "C" fn jit_call_value(ctx: *mut JITContext) -> u64 {
                 "jit_call_value: operand stack empty while popping the callee — deopting to interpreter".to_string(),
             );
             ctx_ref.pending_call_error = 1;
-            return ERROR_PLACEHOLDER_BITS;
+            return Outcome::Failed;
         }
         ctx_ref.stack_ptr -= 1;
         let callee_bits = ctx_ref.stack[ctx_ref.stack_ptr];
@@ -541,7 +579,7 @@ pub extern "C" fn jit_call_value(ctx: *mut JITContext) -> u64 {
                         .to_string(),
                 );
                 ctx_ref.pending_call_error = 1;
-                return ERROR_PLACEHOLDER_BITS;
+                return Outcome::Failed;
             }
         };
 
@@ -605,7 +643,7 @@ pub extern "C" fn jit_call_value(ctx: *mut JITContext) -> u64 {
                         "jit_call_value: callee stamped Ptr(HeapKind::Closure) but bits are null — deopting to interpreter".to_string(),
                     );
                     ctx_ref.pending_call_error = 1;
-                    return ERROR_PLACEHOLDER_BITS;
+                    return Outcome::Failed;
                 }
                 // #239 / ADR-020 §3.4 — ONE carrier. The dual-carrier
                 // dispatch that used to stand here is deleted:
@@ -652,13 +690,13 @@ pub extern "C" fn jit_call_value(ctx: *mut JITContext) -> u64 {
                         // (`SYN__closure-infn-tagnull.shape`), each time
                         // handing `TAG_NULL` back as a usable number that the
                         // caller accumulated into an integer overflow.
-                        set_jit_runtime_error(
+                        set_jit_runtime_error(format!(
                             "jit_call_value: callee stamped Ptr(HeapKind::Closure) but the \
-                             HeapValue arm is not ClosureRaw; native execution aborted"
-                                .to_string(),
-                        );
+                             HeapValue arm is {:?}, not ClosureRaw; native execution aborted",
+                            other.kind()
+                        ));
                         ctx_ref.pending_call_error = 1;
-                        ERROR_PLACEHOLDER_BITS
+                        Outcome::Failed
                     }
                 };
                 drop(arc);
@@ -682,7 +720,7 @@ pub extern "C" fn jit_call_value(ctx: *mut JITContext) -> u64 {
                         .to_string(),
                 );
                 ctx_ref.pending_call_error = 1;
-                return ERROR_PLACEHOLDER_BITS;
+                return Outcome::Failed;
             }
             NativeKind::UInt64
             | NativeKind::Int64
@@ -718,7 +756,7 @@ pub extern "C" fn jit_call_value(ctx: *mut JITContext) -> u64 {
                         .to_string(),
                 );
                 ctx_ref.pending_call_error = 1;
-                return ERROR_PLACEHOLDER_BITS;
+                return Outcome::Failed;
             }
             other => {
                 tracing::debug!(
@@ -738,10 +776,194 @@ pub extern "C" fn jit_call_value(ctx: *mut JITContext) -> u64 {
                         .to_string(),
                 );
                 ctx_ref.pending_call_error = 1;
-                return ERROR_PLACEHOLDER_BITS;
+                return Outcome::Failed;
             }
         }
 
+    }
+}
+
+// ===========================================================================
+// ADR-020 / #239 §4.1 — the monomorphized value-call return channel
+// ===========================================================================
+
+/// What an indirect call produced, before a representation is chosen for it.
+///
+/// The three cases are exactly the three the pre-conversion `-> u64` signature
+/// could not tell apart, which is why `jit_call_value` had to answer all of
+/// them with a bit pattern and why #259 had to leave two of its paths alone:
+///
+/// * `Value` — a value, WITH the kind the callee produced it under. The
+///   `KindedSlot` owns the share (O1); whoever consumes it transfers that share
+///   onward without a second claim.
+/// * `NoValue` — the callee correctly produced nothing (ADR-020 §3.3). Only
+///   legal under the `_void` monomorph. This is #259's acceptance criterion: if
+///   this case were still indistinguishable from `Failed`, the channel was not
+///   converted.
+/// * `Failed` — the callee, or the dispatch around it, aborted. The error is
+///   already recorded in `pending_call_error` / the trampoline error slot, and
+///   emitted code deopts on it before touching the returned value.
+enum Outcome {
+    Value(shape_value::KindedSlot),
+    NoValue,
+    Failed,
+}
+
+/// Record a class disagreement and mark the frame for deopt.
+///
+/// The emit site picked its monomorph from the destination slot's PROVEN kind
+/// (`mir_compiler`'s `slot_kind_for_local`), so reaching here means the callee
+/// produced a value of a different ABI class than the destination can hold.
+/// That is a producing-site bug, not a runtime condition to absorb — the
+/// generalized form of the `ClosurePlaceholder` kind/carrier mismatch (§6.1).
+#[cold]
+fn abort_class_disagreement(
+    ctx: *mut JITContext,
+    expected: crate::return_abi_class::ReturnAbiClass,
+    actual: shape_value::NativeKind,
+) {
+    set_jit_runtime_error(format!(
+        "jit_call_value_{}: the callee returned a value of kind {:?}, which is not in the \
+         {:?} ABI class the destination slot's proven kind selected. The producing site \
+         stamped one of the two; native execution aborted (ADR-020 §4.1 / §4.2 O2).",
+        expected.suffix(),
+        actual,
+        expected
+    ));
+    if !ctx.is_null() {
+        // SAFETY: non-null by the check above; the caller owns the context for
+        // the duration of the FFI call.
+        unsafe {
+            (*ctx).pending_call_error = 1;
+        }
+    }
+}
+
+/// Record "the callee produced no value" as a failure for the three
+/// value-producing monomorphs.
+///
+/// Under `_void` this same `Outcome` is the SUCCESS case. The distinction is
+/// structural — it is which entry point emitted code called — which is the
+/// property the untyped channel could not express.
+#[cold]
+fn abort_missing_value(ctx: *mut JITContext, expected: crate::return_abi_class::ReturnAbiClass) {
+    set_jit_runtime_error(format!(
+        "jit_call_value_{}: the callee left no value, but the destination slot expects one. \
+         Before ADR-020 §4.1 this was indistinguishable from a unit-returning callee \
+         behaving correctly; native execution aborted.",
+        expected.suffix()
+    ));
+    if !ctx.is_null() {
+        // SAFETY: non-null by the check above.
+        unsafe {
+            (*ctx).pending_call_error = 1;
+        }
+    }
+}
+
+/// Indirect call whose destination slot's proven kind is `Scalar`-class.
+///
+/// Returns the raw scalar. Transfers nothing: a scalar return owns no share
+/// (§4.2 O2), which is why this signature is `i64` and not `*mut HeapHeader`.
+pub extern "C" fn jit_call_value_i64(ctx: *mut JITContext) -> i64 {
+    use crate::return_abi_class::{ReturnAbiClass, classes_agree};
+    const CLASS: ReturnAbiClass = ReturnAbiClass::Scalar;
+    match call_value_kinded(ctx) {
+        Outcome::Value(k) => {
+            if !classes_agree(CLASS, k.kind) {
+                abort_class_disagreement(ctx, CLASS, k.kind);
+                // `k` drops here, retiring the share it owns — the value never
+                // reaches the destination, so nothing else can retire it.
+                return ERROR_PLACEHOLDER_BITS as i64;
+            }
+            let bits = k.slot.raw();
+            // Scalar: no share to transfer, but `KindedSlot::drop` dispatches
+            // on `kind` and a scalar kind's drop is a no-op, so forgetting and
+            // dropping are equivalent here. Forget deliberately, so this line
+            // reads the same as the pointer monomorph's transfer.
+            std::mem::forget(k);
+            bits as i64
+        }
+        Outcome::NoValue => {
+            abort_missing_value(ctx, CLASS);
+            ERROR_PLACEHOLDER_BITS as i64
+        }
+        Outcome::Failed => ERROR_PLACEHOLDER_BITS as i64,
+    }
+}
+
+/// Indirect call whose destination slot's proven kind is `Float`-class.
+///
+/// Returns an `f64` in an FP register. This is the monomorph that kills
+/// `box_number` on the value-call path: the value is never a bit pattern at the
+/// Cranelift boundary, so there is nothing for a consumer to mis-read as an
+/// integer.
+pub extern "C" fn jit_call_value_f64(ctx: *mut JITContext) -> f64 {
+    use crate::return_abi_class::{ReturnAbiClass, classes_agree};
+    const CLASS: ReturnAbiClass = ReturnAbiClass::Float;
+    match call_value_kinded(ctx) {
+        Outcome::Value(k) => {
+            if !classes_agree(CLASS, k.kind) {
+                abort_class_disagreement(ctx, CLASS, k.kind);
+                return 0.0;
+            }
+            let bits = k.slot.raw();
+            std::mem::forget(k);
+            f64::from_bits(bits)
+        }
+        Outcome::NoValue => {
+            abort_missing_value(ctx, CLASS);
+            0.0
+        }
+        Outcome::Failed => 0.0,
+    }
+}
+
+/// Indirect call whose destination slot's proven kind is `Pointer`-class.
+///
+/// **O1/O2.** Returns exactly one owned share. The emit site releases the
+/// destination's old value and stores this one WITHOUT retaining; the `forget`
+/// below is what makes that balance — dropping the `KindedSlot` instead would
+/// retire the share the destination is about to own.
+pub extern "C" fn jit_call_value_ptr(ctx: *mut JITContext) -> *mut std::ffi::c_void {
+    use crate::return_abi_class::{ReturnAbiClass, classes_agree};
+    const CLASS: ReturnAbiClass = ReturnAbiClass::Pointer;
+    match call_value_kinded(ctx) {
+        Outcome::Value(k) => {
+            if !classes_agree(CLASS, k.kind) {
+                abort_class_disagreement(ctx, CLASS, k.kind);
+                return std::ptr::null_mut();
+            }
+            let bits = k.slot.raw();
+            std::mem::forget(k);
+            bits as *mut std::ffi::c_void
+        }
+        Outcome::NoValue => {
+            abort_missing_value(ctx, CLASS);
+            std::ptr::null_mut()
+        }
+        Outcome::Failed => std::ptr::null_mut(),
+    }
+}
+
+/// Indirect call whose destination carries UNIT (ADR-020 §3.3).
+///
+/// No results at the Cranelift level, and `Outcome::NoValue` is the SUCCESS
+/// case — the one #259 could not resolve, because `-> u64` forced a
+/// unit-returning callee and a broken one to share an answer. A callee that
+/// DOES produce a value here is the mirror-image producing-site bug: the emit
+/// site classified the destination as unit and the callee disagreed.
+pub extern "C" fn jit_call_value_void(ctx: *mut JITContext) {
+    use crate::return_abi_class::ReturnAbiClass;
+    match call_value_kinded(ctx) {
+        Outcome::NoValue => {}
+        Outcome::Value(k) => {
+            // `k` drops at the end of this arm, retiring any share it owns.
+            // Nothing downstream can, since the destination is a unit slot
+            // with no storage.
+            abort_class_disagreement(ctx, ReturnAbiClass::Void, k.kind);
+        }
+        Outcome::Failed => {}
     }
 }
 
@@ -1204,6 +1426,23 @@ mod zero_capture_trampoline_probe {
 
     const ADD_ONE: &str = "fn add_one(x: int) -> int { return x + 1 }\n";
 
+    /// Project an `Outcome` to the raw bits these dispatch tests assert on,
+    /// consuming any share it owns so the test does not leak one.
+    ///
+    /// `None` for `NoValue` / `Failed` — the two cases the pre-conversion
+    /// `-> u64` signature had to answer with `TAG_NULL`, and which every
+    /// assertion below distinguishes from a real value by construction.
+    fn outcome_bits(o: Outcome) -> Option<u64> {
+        match o {
+            Outcome::Value(k) => {
+                let bits = k.slot.raw();
+                std::mem::forget(k);
+                Some(bits)
+            }
+            Outcome::NoValue | Outcome::Failed => None,
+        }
+    }
+
     /// **The named experiment.** A zero-capture record for a NAMED function,
     /// handed straight to `dispatch_borrowed_closure_via_trampoline_vm` with a
     /// null `JITContext` so the native arm declines and the interpreter arm
@@ -1224,16 +1463,16 @@ mod zero_capture_trampoline_probe {
         // a constant or stale return cannot satisfy both assertions.
         let (first, second) = with_trampoline(bytecode, || {
             let block = zero_capture_block(fid);
-            let first = dispatch_borrowed_closure_via_trampoline_vm(
+            let first = outcome_bits(dispatch_borrowed_closure_via_trampoline_vm(
                 &block,
                 &[(41u64, NativeKind::Int64)],
                 std::ptr::null_mut(),
-            );
-            let second = dispatch_borrowed_closure_via_trampoline_vm(
+            ));
+            let second = outcome_bits(dispatch_borrowed_closure_via_trampoline_vm(
                 &block,
                 &[(1_000_000u64, NativeKind::Int64)],
                 std::ptr::null_mut(),
-            );
+            ));
             (first, second)
         });
 
@@ -1242,13 +1481,14 @@ mod zero_capture_trampoline_probe {
             None,
             "the dispatcher recorded a trampoline error for a zero-capture record",
         );
-        assert_ne!(first, TAG_NULL, "zero-capture dispatch returned TAG_NULL");
         assert_eq!(
-            first as i64, 42,
+            first.map(|b| b as i64),
+            Some(42),
             "add_one(41) through a zero-capture closure record",
         );
         assert_eq!(
-            second as i64, 1_000_001,
+            second.map(|b| b as i64),
+            Some(1_000_001),
             "the record is re-entrant: a second dispatch tracks its own argument",
         );
     }
@@ -1284,11 +1524,13 @@ mod zero_capture_trampoline_probe {
             // SAFETY: reclaims the exact share `into_raw` released above.
             let recovered = unsafe { Arc::<HeapValue>::from_raw(callee_bits as *const HeapValue) };
             let bits = match &*recovered {
-                HeapValue::ClosureRaw(block) => dispatch_borrowed_closure_via_trampoline_vm(
-                    block,
-                    &[(41u64, NativeKind::Int64)],
-                    std::ptr::null_mut(),
-                ),
+                HeapValue::ClosureRaw(block) => {
+                    outcome_bits(dispatch_borrowed_closure_via_trampoline_vm(
+                        block,
+                        &[(41u64, NativeKind::Int64)],
+                        std::ptr::null_mut(),
+                    ))
+                }
                 other => panic!("expected HeapValue::ClosureRaw, got {:?}", other.kind()),
             };
             drop(recovered);
@@ -1296,7 +1538,7 @@ mod zero_capture_trampoline_probe {
         });
 
         assert_eq!(take_jit_runtime_error(), None);
-        assert_eq!(bits as i64, 42);
+        assert_eq!(bits.map(|b| b as i64), Some(42));
     }
 
     /// Stand-in for a JIT-compiled closure body: pushes `a0 + 1000` onto the
@@ -1308,7 +1550,11 @@ mod zero_capture_trampoline_probe {
         let ctx = unsafe { &mut *ctx };
         let sp = ctx.stack_ptr;
         ctx.stack[sp] = a0 + 1000;
-        ctx.stack_kinds[sp] = crate::ffi::stack_kind_code::SENTINEL;
+        // ADR-006 §2.7.7 / Q9: a real JIT-compiled callee's `Return` lowering
+        // stamps the parallel-kind track beside the value. This stub stands in
+        // for one, so it stamps too — leaving SENTINEL here would be testing a
+        // callee no compiler emits.
+        ctx.stack_kinds[sp] = crate::ffi::stack_kind_code::encode(NativeKind::Int64);
         ctx.stack_ptr = sp + 1;
         0
     }
@@ -1337,11 +1583,11 @@ mod zero_capture_trampoline_probe {
         ctx.stack_ptr = 0;
 
         let block = zero_capture_block(FID);
-        let bits = dispatch_borrowed_closure_via_trampoline_vm(
+        let bits = outcome_bits(dispatch_borrowed_closure_via_trampoline_vm(
             &block,
             &[(5u64, NativeKind::Int64)],
             &mut *ctx as *mut JITContext,
-        );
+        ));
 
         assert_eq!(
             take_jit_runtime_error(),
@@ -1350,7 +1596,8 @@ mod zero_capture_trampoline_probe {
         );
         assert_eq!(ctx.pending_call_error, 0);
         assert_eq!(
-            bits, 1005,
+            bits,
+            Some(1005),
             "the native arm must marshal [captures..., args...] = [5] and read \
              the callee's result back off the context stack",
         );
@@ -1367,13 +1614,13 @@ mod zero_capture_trampoline_probe {
         unset_trampoline_vm();
 
         let block = zero_capture_block(3);
-        let bits = dispatch_borrowed_closure_via_trampoline_vm(
+        let bits = outcome_bits(dispatch_borrowed_closure_via_trampoline_vm(
             &block,
             &[(41u64, NativeKind::Int64)],
             std::ptr::null_mut(),
-        );
+        ));
 
-        assert_eq!(bits, TAG_NULL);
+        assert_eq!(bits, None);
         assert!(
             take_jit_runtime_error()
                 .is_some_and(|m| m.contains("could not reach the interpreter trampoline")),

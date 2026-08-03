@@ -67,8 +67,12 @@ impl JITCompiler {
             get_prop: r!("jit_get_prop"),
             set_prop: r!("jit_set_prop"),
 
-            // Call dispatch
-            call_value: r!("jit_call_value"),
+            // Call dispatch. ADR-020 / #239 §4.1 — four monomorphs, one per
+            // Cranelift return ABI class; no kind-blind entry point survives.
+            call_value_i64: r!("jit_call_value_i64"),
+            call_value_ptr: r!("jit_call_value_ptr"),
+            call_value_f64: r!("jit_call_value_f64"),
+            call_value_void: r!("jit_call_value_void"),
             call_method: r!("jit_call_method"),
 
             // Arrays

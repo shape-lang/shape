@@ -53,6 +53,9 @@ mod numeric_compiler;
 // dispositions, and the evidence a future re-derivation owes for each, are in
 // docs/program/workstreams/192-dead-opt-dispositions.md.
 pub mod osr_compiler;
+/// ADR-020 / #239 §4.1 — the Cranelift ABI classes the converted
+/// value-producing FFI entry points are monomorphized over.
+pub(crate) mod return_abi_class;
 pub mod worker;
 // #117 / R15: execution-level tripwires for the NativeExecutionWitness. Gated
 // behind `deep-tests` like the other whole-prelude JIT execution tests.

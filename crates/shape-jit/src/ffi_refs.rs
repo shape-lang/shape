@@ -35,7 +35,16 @@ pub struct FFIFuncRefs {
 
     // Call dispatch (value/method path — the other foreign-call variants were
     // retired with the legacy NaN-boxed dispatch helpers).
-    pub(crate) call_value: FuncRef,
+    //
+    // ADR-020 / #239 §4.1: the value-call channel is monomorphized over the
+    // Cranelift return ABI classes. There is no kind-blind `call_value` — the
+    // emit site selects from the destination slot's PROVEN kind via
+    // `MirToIR::call_value_ref_for_class`, and there is no polymorphic
+    // fallback to select when it cannot.
+    pub(crate) call_value_i64: FuncRef,
+    pub(crate) call_value_ptr: FuncRef,
+    pub(crate) call_value_f64: FuncRef,
+    pub(crate) call_value_void: FuncRef,
     pub(crate) call_method: FuncRef,
 
     // Array allocator + hot per-element push.

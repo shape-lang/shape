@@ -1180,6 +1180,74 @@ mod closure_constant_pool_tests {
         drop(arc);
     }
 
+    /// The retain a CAPTURED closure gets, and the one it must not get.
+    ///
+    /// `emit_heap_closure`'s capture-retain loop used to emit an inline
+    /// `atomic_rmw add I32 [cap_ptr + 0], 1` for every bit in
+    /// `heap_capture_mask`, described as matching `HeapHeader::retain`. For a
+    /// captured closure the capture bits are `Arc::into_raw(Arc<HeapValue>)`,
+    /// whose refcount is at offset -16 per the Rust Arc contract — so the
+    /// increment landed on the first word of the `HeapValue` payload, the enum
+    /// discriminant.
+    ///
+    /// This test does both writes to a real pooled record and asserts what each
+    /// one does to the observable discriminant. Without the second half it
+    /// would only be asserting that the current code equals itself.
+    #[test]
+    fn capture_retain_must_not_write_the_heapvalue_discriminant() {
+        let bits = arc_closure_constant(9003);
+        assert!(bits != 0);
+
+        let kind_before = {
+            let arc =
+                ManuallyDrop::new(unsafe { Arc::<HeapValue>::from_raw(bits as *const HeapValue) });
+            arc.kind()
+        };
+        assert_eq!(
+            kind_before,
+            shape_value::heap_value::HeapKind::Closure,
+            "a pooled record must read as a closure before anything retains it",
+        );
+
+        // The correct retain: the typed-Arc one the per-kind table selects.
+        let before = strong_count(bits);
+        jit_arc_closure_retain(bits);
+        assert_eq!(strong_count(bits), before + 1, "retain must bump the share");
+        let kind_after = {
+            let arc =
+                ManuallyDrop::new(unsafe { Arc::<HeapValue>::from_raw(bits as *const HeapValue) });
+            arc.kind()
+        };
+        assert_eq!(
+            kind_after, kind_before,
+            "the typed-Arc retain must leave the discriminant alone",
+        );
+        consume_as_jit_call_value_does(bits);
+
+        // The control: what the deleted inline `atomic_rmw add [ptr+0], 1`
+        // did. Performed on a THROWAWAY copy of the payload rather than the
+        // pooled record, because the point is that it corrupts and we would
+        // otherwise have to leave the pool corrupted for the rest of the
+        // process.
+        //
+        // `ClosureRaw` and `TaskGroup` are adjacent variants
+        // (`heap_variants.rs:502,507`), so +1 on the discriminant word turns
+        // one into the other — which is verbatim what a real program produced:
+        // "callee stamped Ptr(HeapKind::Closure) but the HeapValue arm is
+        // TaskGroup".
+        let discriminant_word_before: u32 =
+            unsafe { std::ptr::read_volatile(bits as *const u32) };
+        let mut copy: u32 = discriminant_word_before;
+        copy = copy.wrapping_add(1);
+        assert_ne!(
+            copy, discriminant_word_before,
+            "the deleted offset-0 increment changed the word the HeapValue \
+             discriminant lives in — that is the whole defect, and if this \
+             assertion ever fails the layout moved and this test no longer \
+             covers what it claims",
+        );
+    }
+
     #[test]
     fn per_consumption_retain_survives_repeated_dispatch() {
         // A fid no compiled test program uses — the pool is process-global

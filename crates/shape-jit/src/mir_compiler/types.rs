@@ -973,6 +973,52 @@ pub(crate) fn infer_slot_kinds_with_concrete_function_returns_and_field_kinds(
         }
     }
 
+    // Forward RE-pass — ADR-020 / #239 §4.1.
+    //
+    // The forward pass above runs ONCE, before the two fixpoints. Any slot the
+    // later passes prove is therefore invisible to every consumer downstream of
+    // it in statement order, and the gap is not hypothetical: it is exactly why
+    // `let g = |x| x + 1; let h = |y| g(y) + 1` bailed. In `h`'s MIR the
+    // indirect call's destination is proven `Int64` — but only by the BACKWARD
+    // pass, from the `+ 1` it feeds. By then the forward pass has already
+    // walked `Assign(t, Add(call_result, 1))` with `call_result` unproven and
+    // left `t` with no kind, so `write_place` refused a slot whose kind was
+    // derivable from facts already in the vector.
+    //
+    // Re-running the same forward inference to a fixed point closes it. This is
+    // monotone by construction — the guard is `kinds[idx].is_none()`, so it only
+    // ever fills gaps and never revises a stamp — which is what bounds the loop
+    // and what keeps it from being an inference change: no slot gets a
+    // DIFFERENT kind than it would have, only slots that had none get the one
+    // the existing rules already implied.
+    let mut changed = true;
+    let mut rounds = 0;
+    while changed && rounds < n {
+        changed = false;
+        rounds += 1;
+        for block in &mir.blocks {
+            for stmt in &block.statements {
+                let StatementKind::Assign(Place::Local(slot), rvalue) = &stmt.kind else {
+                    continue;
+                };
+                let idx = slot.0 as usize;
+                if idx >= n || kinds[idx].is_some() {
+                    continue;
+                }
+                if let Some(inferred) = infer_rvalue_kind_with_projections(
+                    rvalue,
+                    &kinds,
+                    field_kinds_for_projection,
+                    Some(&mir.field_name_table),
+                    Some(concrete_types),
+                ) {
+                    kinds[idx] = Some(inferred);
+                    changed = true;
+                }
+            }
+        }
+    }
+
     // Parameters keep their existing-from-bytecode kind if any.
     // Otherwise they remain `None` — callers needing a concrete
     // kind for codegen surface-and-stop on the `None` per ADR-006

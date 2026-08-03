@@ -1170,15 +1170,35 @@ impl<'a, 'b> MirToIR<'a, 'b> {
             }
         }
 
-        // 5. Atomic retain on each heap-typed capture. Iterates only
-        //    over bits set in `heap_capture_mask` — typed scalars (F64,
-        //    I64, I32, Bool) have zero bits and no retain work.
+        // 5. Retain each heap-typed capture. Iterates only over bits set in
+        //    `heap_capture_mask` — typed scalars (F64, I64, I32, Bool) have
+        //    zero bits and no retain work.
         //
-        //    The retain target is the capture value itself (a pointer
-        //    to another `HeapHeader`), loaded back from the closure at
-        //    the offset we just wrote. Using `atomic_rmw add` on the
-        //    `refcount` u32 at offset 0 of the pointee matches
-        //    `HeapHeader::retain`'s `fetch_add(1, Ordering::Relaxed)`.
+        //    The retain goes through `retain_func_for_kind`, the same per-kind
+        //    table every other retain site in the JIT uses, because "where does
+        //    this carrier keep its refcount" has a different answer per kind
+        //    and this loop used to assume one.
+        //
+        //    MEASURED, 2026-08-03. What stood here was an inline
+        //    `atomic_rmw add I32 [cap_ptr + 0], 1`, described as matching
+        //    `HeapHeader::retain`. That is right for a v2-raw carrier whose
+        //    `HeapHeader` sits at offset 0, and WRONG for every `Arc<T>`
+        //    carrier, whose refcount is at offset -16 per the Rust Arc
+        //    contract. For a captured closure the bits are
+        //    `Arc::into_raw(Arc<HeapValue>)`, so the increment landed on the
+        //    first word of the `HeapValue` payload — the enum DISCRIMINANT.
+        //    `ClosureRaw` and `TaskGroup` are adjacent variants
+        //    (`heap_variants.rs:502,507`), so `ClosureRaw + 1 == TaskGroup`,
+        //    and that is verbatim what
+        //    `let g = |x| x + 1; let h = |y| g(y) + 1; print(h(1))` produced:
+        //    `jit_call_value: callee stamped Ptr(HeapKind::Closure) but the
+        //    HeapValue arm is TaskGroup`. The captured closure was corrupted
+        //    by the very retain meant to keep it alive.
+        //
+        //    `retain_func_for_place`'s Closure arm has documented this exact
+        //    failure since W15.2-LANG-4 — "would write a `fetch_add` at offset
+        //    +4 of the HeapValue payload — corrupting the discriminant" — and
+        //    this loop is simply a site that never consulted it.
         let mut mask = layout.heap_capture_mask;
         while mask != 0 {
             let bit = mask.trailing_zeros() as usize;
@@ -1204,6 +1224,26 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                 closure_ptr,
                 cap_offset,
             );
+            // The carrier is named by the capture OPERAND's proven kind — the
+            // producing site, per ADR-006 §2.7.5 — never by the bits. An
+            // unproven kind surfaces (#236 / R-G7): there is no sound retain to
+            // pick, and picking one anyway is what corrupted the discriminant.
+            let cap_operand = operands.get(bit).ok_or_else(|| {
+                format!(
+                    "MirToIR: SURFACE — heap_capture_mask bit {} at function_id {} has no \
+                     corresponding capture operand ({} operands). The ClosureLayout and the \
+                     MIR ClosureCapture disagree; there is no value whose kind could select \
+                     a retain.",
+                    bit,
+                    function_id,
+                    operands.len()
+                )
+            })?;
+            let cap_kind = self.operand_slot_kind_or_surface(
+                cap_operand,
+                "the heap-capture retain in a closure block",
+            )?;
+            let retain_func = self.retain_func_for_kind(Some(cap_kind));
             // Only retain non-null pointers. A null capture pointer
             // here would indicate a broken layout, but guarding is
             // cheap and avoids crashing the JIT'd code on bugs.
@@ -1216,17 +1256,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                 .brif(is_non_null, retain_block, &[], continue_block, &[]);
             self.builder.switch_to_block(retain_block);
             self.builder.seal_block(retain_block);
-            let one = self.builder.ins().iconst(cl_types::I32, 1);
-            // atomic_rmw Add on the u32 refcount at offset 0. This is
-            // semantically equivalent to HeapHeader::retain's
-            // fetch_add(1, Relaxed).
-            self.builder.ins().atomic_rmw(
-                cl_types::I32,
-                MemFlags::trusted(),
-                cranelift::codegen::ir::AtomicRmwOp::Add,
-                cap_ptr,
-                one,
-            );
+            self.builder.ins().call(retain_func, &[cap_ptr]);
             self.builder.ins().jump(continue_block, &[]);
             self.builder.switch_to_block(continue_block);
             self.builder.seal_block(continue_block);

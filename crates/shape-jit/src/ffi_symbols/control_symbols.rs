@@ -14,7 +14,8 @@ use super::super::ffi::control::{
     jit_call_foreign, jit_call_foreign_dynamic, jit_call_foreign_native, jit_call_foreign_native_0,
     jit_call_foreign_native_1, jit_call_foreign_native_2, jit_call_foreign_native_3,
     jit_call_foreign_native_4, jit_call_foreign_native_5, jit_call_foreign_native_6,
-    jit_call_foreign_native_7, jit_call_foreign_native_8, jit_call_function, jit_call_value,
+    jit_call_foreign_native_7, jit_call_foreign_native_8, jit_call_function, jit_call_value_f64,
+    jit_call_value_i64, jit_call_value_ptr, jit_call_value_void,
     jit_control_every, jit_control_filter, jit_control_find, jit_control_find_index,
     jit_control_fold, jit_control_foreach, jit_control_map, jit_control_reduce, jit_control_some,
 };
@@ -30,7 +31,14 @@ pub fn register_control_symbols(builder: &mut JITBuilder) {
         super::super::ffi::witness::jit_witness_native_entry as *const u8,
     );
     builder.symbol("jit_call_function", jit_call_function as *const u8);
-    builder.symbol("jit_call_value", jit_call_value as *const u8);
+    // ADR-020 / #239 §4.1: one entry point per Cranelift return ABI class.
+    // The kind-blind `jit_call_value` is gone — it could not say which
+    // representation the destination wanted, nor tell "unit callee produced
+    // nothing" from "callee failed to produce anything" (#259).
+    builder.symbol("jit_call_value_i64", jit_call_value_i64 as *const u8);
+    builder.symbol("jit_call_value_f64", jit_call_value_f64 as *const u8);
+    builder.symbol("jit_call_value_ptr", jit_call_value_ptr as *const u8);
+    builder.symbol("jit_call_value_void", jit_call_value_void as *const u8);
     builder.symbol("jit_call_foreign", jit_call_foreign as *const u8);
     builder.symbol(
         "jit_call_foreign_native",
@@ -122,16 +130,30 @@ pub fn declare_control_functions(module: &mut JITModule, ffi_funcs: &mut HashMap
         ffi_funcs.insert("jit_call_function".to_string(), func_id);
     }
 
-    // jit_call_value(ctx: *mut JITContext) -> u64
-    // Reads callee and args from ctx.stack
-    {
+    // ADR-020 / #239 §4.1 — the monomorphized value-call return channel.
+    // Each reads callee and args from ctx.stack identically; they differ only
+    // in the Cranelift type the result comes back in, which is selected at the
+    // emit site from the destination slot's PROVEN kind.
+    //
+    // `_i64` and `_ptr` are the same Cranelift signature deliberately (§4.2):
+    // they cost nothing to keep apart at the ABI, and at the Rust level they
+    // are the only remaining carrier of "this return transfers an owned share"
+    // vs "this return is a number".
+    for (name, ret) in [
+        ("jit_call_value_i64", Some(types::I64)),
+        ("jit_call_value_ptr", Some(types::I64)),
+        ("jit_call_value_f64", Some(types::F64)),
+        ("jit_call_value_void", None),
+    ] {
         let mut sig = module.make_signature();
         sig.params.push(AbiParam::new(types::I64)); // ctx
-        sig.returns.push(AbiParam::new(types::I64)); // result
+        if let Some(ret) = ret {
+            sig.returns.push(AbiParam::new(ret));
+        }
         let func_id = module
-            .declare_function("jit_call_value", Linkage::Import, &sig)
-            .expect("Failed to declare jit_call_value");
-        ffi_funcs.insert("jit_call_value".to_string(), func_id);
+            .declare_function(name, Linkage::Import, &sig)
+            .unwrap_or_else(|e| panic!("Failed to declare {name}: {e}"));
+        ffi_funcs.insert(name.to_string(), func_id);
     }
 
     // jit_call_foreign(ctx: *mut JITContext, foreign_idx: u32, arg_count: usize) -> u64
