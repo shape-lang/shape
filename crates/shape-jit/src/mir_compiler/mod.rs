@@ -20,6 +20,7 @@
 
 mod blocks;
 pub mod bounds_elision;
+pub(crate) mod closure_callee;
 mod conversions;
 mod formatting;
 mod ownership;
@@ -604,6 +605,24 @@ pub struct MirToIR<'a, 'b> {
     /// resolved `function_id` directly), and for functions whose
     /// back-patching already succeeded.
     pub(crate) closure_placeholder_fids: Vec<u16>,
+    /// ADR-020 / #239 §6.7: callee SLOT → the function id that slot is
+    /// statically known to hold, for INDIRECT calls in this function.
+    ///
+    /// The indirect-call counterpart of the name in
+    /// `Operand::Constant(MirConstant::Function(_))`. Both feed the same
+    /// `user_func_return_kinds` table to stamp the call destination's kind;
+    /// without it, a call through a closure value leaves its destination
+    /// unproven and `call_return_abi_class` has no return-ABI class to
+    /// select. Built by `closure_callee` from two dataflow facts (sole
+    /// writer in this function; sole closure-typed immutable capture bound
+    /// at a sole whole-program construction site) — see that module for why
+    /// each is a refusal rather than a preference.
+    ///
+    /// Held on the struct rather than dropped after construction because
+    /// `populate_field_byte_offsets_from_schemas` re-runs the inference from
+    /// a deliberately narrow seed, which would otherwise lose every
+    /// call-destination stamp.
+    pub(crate) indirect_callee_fids: HashMap<SlotId, u16>,
     /// Cursor into `closure_placeholder_fids`. Incremented once per call to
     /// `compile_constant(ClosurePlaceholder)`. Statement visit order during
     /// `compile_body` matches the scan order used by
@@ -977,6 +996,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
             HashMap::new(),
             HashSet::new(),
             closure_function_layouts,
+            closure_callee::ClosureCaptureCallees::new(),
         )
     }
 
@@ -1000,6 +1020,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
         user_func_return_kinds: HashMap<u16, NativeKind>,
         unit_returning_funcs: HashSet<u16>,
         closure_function_layouts: HashMap<u16, Arc<ClosureLayout>>,
+        closure_capture_callees: closure_callee::ClosureCaptureCallees,
     ) -> Self {
         let local_types = mir_data.mir.local_types.clone();
         // Slot-numbering correction: the bytecode compiler's
@@ -1088,6 +1109,58 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                 }
             }
         }
+        // JIT-side fallback for unresolved `ClosurePlaceholder` constants.
+        // See the `closure_placeholder_fids` doc-comment on `MirToIR` for
+        // why this is needed; in short, monomorphization's `compile_function`
+        // clears `closure_function_ids` in the bytecode compiler before the
+        // top-level MIR back-patching runs, so some placeholders leak into
+        // the MIR we receive. This scan produces the same pairing the
+        // bytecode's back-patcher would have, keyed on MIR traversal order.
+        let closure_placeholder_fids =
+            scan_closure_placeholder_fids(&mir_data.mir, function_indices);
+
+        // ADR-020 / #239 §6.7: stamp the destination of an INDIRECT call
+        // whose callee is statically determined. A direct call's destination
+        // is stamped from `harvest_return_abi`'s table by
+        // `types::named_function_return_kind`; a call through a closure VALUE
+        // has no such lookup, so without this the destination stays unproven
+        // and `call_return_abi_class` surfaces — there is no return-ABI class
+        // to select for a kind nobody proved.
+        //
+        // The callee identity is a dataflow fact computed in
+        // `closure_callee`: either the callee slot's sole writer in this
+        // function is a closure construction (R1), or the callee is the
+        // closure's own lone closure-typed immutable capture, bound at a
+        // single whole-program construction site (R2). Anything else is left
+        // unproven on purpose — the surface-and-stop is a clean deopt, a
+        // wrong stamp is silent heap corruption.
+        //
+        // Seeded here rather than inside `infer_slot_kinds` for the same
+        // reason the frame and capture seeds above are: the kind comes from
+        // outside this MIR, so it is an input to the inference rather than
+        // something the inference could derive. The forward statement pass
+        // then carries it into the user-visible binding slot exactly as it
+        // does for a direct call's destination.
+        let indirect_callee_fids = {
+            let mut resolved = closure_callee::local_closure_fids(
+                &mir_data.mir,
+                &closure_placeholder_fids,
+                function_indices,
+            );
+            // The capture rule needs the callee slot to be one of THIS
+            // closure's leading capture params (`compiler/function_abi.rs`).
+            let capture_callee = function_indices
+                .get(mir_data.mir.name.as_str())
+                .and_then(|fid| {
+                    let (capture_idx, callee_fid) = closure_capture_callees.get(fid).copied()?;
+                    let slot = mir_data.mir.param_slots.get(capture_idx).copied()?;
+                    Some((slot, callee_fid))
+                });
+            if let Some((slot, callee_fid)) = capture_callee {
+                resolved.entry(slot).or_insert(callee_fid);
+            }
+            resolved
+        };
         // ADR-006 §2.7.5 producing-site classification: pass the per-
         // slot `ConcreteType` map into the inference so two projections
         // both work end-to-end —
@@ -1110,6 +1183,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
             &concrete_types,
             Some(function_indices),
             Some(&user_func_return_kinds),
+            Some(&indirect_callee_fids),
         );
         // Phase E: pull the set of non-escaping closure slots out of the MIR
         // storage plan so `ClosureCapture` lowering can pick the stack-slot
@@ -1122,16 +1196,6 @@ impl<'a, 'b> MirToIR<'a, 'b> {
             &slot_kinds,
             &closure_function_layouts,
         );
-
-        // JIT-side fallback for unresolved `ClosurePlaceholder` constants.
-        // See the `closure_placeholder_fids` doc-comment on `MirToIR` for
-        // why this is needed; in short, monomorphization's `compile_function`
-        // clears `closure_function_ids` in the bytecode compiler before the
-        // top-level MIR back-patching runs, so some placeholders leak into
-        // the MIR we receive. This scan produces the same pairing the
-        // bytecode's back-patcher would have, keyed on MIR traversal order.
-        let closure_placeholder_fids =
-            scan_closure_placeholder_fids(&mir_data.mir, function_indices);
 
         // W12-jit-binop-after-heap-read-kind-tracker (ADR-006 §2.7.5):
         // pre-pass the MIR for every `StatementKind::ObjectStore` and
@@ -1206,6 +1270,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
             shared_capture_slots: HashMap::new(),
             shared_local_slots,
             closure_placeholder_fids,
+            indirect_callee_fids,
             next_closure_placeholder_idx: std::cell::Cell::new(0),
             bounds_elision: bounds_elision::BoundsElisionPlan::default(),
             // V3-S6c: side-table + caller-id default empty/None; populated
@@ -1901,6 +1966,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
             Some(self.function_indices),
             Some(&self.user_func_return_kinds),
             Some(&self.field_native_kinds),
+            Some(&self.indirect_callee_fids),
         );
         if std::env::var_os("SHAPE_DEBUG_FIELD_STAMPS").is_some()
             && self.mir.name.contains("summary")

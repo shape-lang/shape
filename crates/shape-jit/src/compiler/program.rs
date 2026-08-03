@@ -329,6 +329,15 @@ impl JITCompiler {
                     .enumerate()
                     .filter_map(|(i, opt)| opt.as_ref().map(|l| (i as u16, l.clone())))
                     .collect();
+                // ADR-020 / #239 §6.7: which closure each closure body's lone
+                // closure-typed capture is bound to, resolved over the whole
+                // program's MIR. Consumed only to stamp an indirect call's
+                // destination kind; see `mir_compiler::closure_callee`.
+                let closure_capture_callees =
+                    crate::mir_compiler::closure_callee::resolve_program_closure_capture_callees(
+                        program,
+                        &closure_function_layouts,
+                    );
                 let mut mir_compiler =
                     crate::mir_compiler::MirToIR::new_with_closure_layouts_and_function_returns(
                         &mut builder,
@@ -345,6 +354,7 @@ impl JITCompiler {
                         user_func_return_kinds.clone(),
                         unit_returning_funcs.clone(),
                         closure_function_layouts,
+                        closure_capture_callees,
                     );
                 // V3-S6c-jit-method-monomorph-routing (ADR-006 §2.7.5
                 // stamp-at-compile-time; supervisor 2026-05-15 PATH α-prime
