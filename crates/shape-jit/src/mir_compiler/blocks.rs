@@ -73,6 +73,27 @@ impl<'a, 'b> MirToIR<'a, 'b> {
         Ok(())
     }
 
+    /// `SHAPE_DEBUG_SLOT_KINDS=1` — dump the MIR and the slot-kind vector at
+    /// the point a kind proof was demanded and missing. This is what located
+    /// the ADR-020 §3.3 unit-temp chain behind the 11/488 native rate; the
+    /// bail message alone names a slot number, which is not enough to see
+    /// which MIR shape failed to stamp it. Mirrors `SHAPE_DEBUG_FIELD_STAMPS`.
+    pub(crate) fn debug_dump_slot_kinds(&self, slot_id: shape_vm::mir::types::SlotId) {
+        if std::env::var_os("SHAPE_DEBUG_SLOT_KINDS").is_none() {
+            return;
+        }
+        eprintln!(
+            "[slot-kinds] fn={} unproven_slot={} kinds={:?} unit={:?}",
+            self.mir.name, slot_id.0, self.slot_kinds, self.unit_slots
+        );
+        for b in &self.mir.blocks {
+            for s in &b.statements {
+                eprintln!("[slot-kinds]   stmt {:?}", s.kind);
+            }
+            eprintln!("[slot-kinds]   term {:?}", b.terminator.kind);
+        }
+    }
+
     /// The Cranelift variable backing a MIR local, or a surface-and-stop
     /// describing WHY there isn't one.
     ///
@@ -89,6 +110,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
         if let Some(&var) = self.locals.get(&slot_id) {
             return Ok(var);
         }
+        self.debug_dump_slot_kinds(slot_id);
         if self.unit_slots.contains(&slot_id) {
             return Err(format!(
                 "ADR-020 §3.3 surface-and-stop: SURFACE — local slot {} carries UNIT (it is a \

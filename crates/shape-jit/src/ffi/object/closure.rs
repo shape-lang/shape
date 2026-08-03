@@ -150,27 +150,27 @@ pub unsafe extern "C" fn jit_finalize_heap_closure(
 ///
 /// Returns `0` — meaning "take the ordinary indirect path" — for:
 ///   * null bits;
-///   * the documented zero-capture dual carrier, where a function-typed slot
-///     holds a NaN-boxed `box_function(fn_id)` instead of an Arc (the same
-///     `is_inline_function` bit-shape check `jit_call_value` performs before
-///     its own `Arc::from_raw`, and for the same reason: dereferencing that
-///     carrier as an Arc would read unrelated memory);
 ///   * any other `HeapValue` arm.
 ///
-/// SAFETY: `bits` is either 0, a NaN-boxed inline function ref, or
-/// `Arc::into_raw(Arc<HeapValue>) as u64` from `jit_finalize_heap_closure`.
+/// #239 / ADR-020 §3.4: the zero-capture dual carrier is GONE. Every
+/// function value — named function reference, capture-less closure, or
+/// capturing closure — is one `Arc<HeapValue::ClosureRaw>`, so the
+/// `is_inline_function` bit-shape check that used to guard this deref has
+/// no carrier left to detect and was deleted with its producer.
+///
+/// SAFETY: `bits` is either 0 or `Arc::into_raw(Arc<HeapValue>) as u64`
+/// from `jit_finalize_heap_closure` / `arc_closure_constant`.
 /// The returned pointer borrows from the Arc — it is valid only while the
 /// caller's slot still holds its share, which the emitted call sequence
 /// guarantees by keeping the callee slot live across the call. No share is
 /// taken or released here.
 #[unsafe(no_mangle)]
 pub extern "C" fn jit_closure_block_ptr(bits: u64) -> i64 {
-    use crate::ffi::value_ffi::is_inline_function;
     use shape_value::heap_value::HeapValue;
     use std::mem::ManuallyDrop;
     use std::sync::Arc;
 
-    if bits == 0 || is_inline_function(bits) {
+    if bits == 0 {
         return 0;
     }
     unsafe {
@@ -204,6 +204,72 @@ pub extern "C" fn jit_closure_block_ptr(bits: u64) -> i64 {
 // Result/Option Arc-carrier site, and Round 12 T2/T3's
 // `arc_string_retain` resolved at the String Arc-carrier site.
 
+/// ADR-020 §3.4 / #239 §6.2 — the immortal zero-capture closure record.
+///
+/// "Zero-capture closures and named-function references point to
+/// statically-allocated immortal records: zero allocation, one slot, no
+/// `box_function`, no `fn_id` sentinel, no dual carrier." The record is the
+/// VM's `Arc<HeapValue::ClosureRaw>`, so the JIT adopts the VM's carrier
+/// rather than minting a third.
+///
+/// Immortality is one leaked permanent share (§3.4): the pool holds it, the
+/// count never reaches zero, and there is no header flag and no branch on
+/// the refcount hot path. Structurally the mirror of
+/// `crate::ffi::string::arc_string_constant`.
+///
+/// **The per-consumption retain is the caller's, and it is not optional.**
+/// This function is called once per EMIT SITE (JIT compile time) and bumps
+/// the count once for that site, exactly as `arc_string_constant` does. But
+/// an `iconst` of a pooled pointer is evaluated once per EXECUTION, and the
+/// value-call consumer retires a share per call
+/// (`ffi/control/mod.rs`'s `Arc::<HeapValue>::from_raw` + `drop`). A pool
+/// share plus one compile-time share is therefore exhausted after the
+/// second dispatch — measured, and it fits #227 slice 2's recorded malloc
+/// corruption. Emit sites MUST also emit a `jit_arc_closure_retain` call
+/// into the generated code, which is what `ownership.rs` does and what the
+/// string arms have done since the
+/// cluster-2-jit-string-const-loop-retain-gap fix.
+pub fn arc_closure_constant(fid: u16) -> u64 {
+    use shape_value::heap_value::HeapValue;
+    use shape_value::v2::closure_layout::ClosureLayout;
+    use shape_value::v2::closure_raw::{OwnedClosureBlock, alloc_typed_closure};
+    use std::collections::HashMap;
+    use std::sync::{Arc, Mutex, OnceLock};
+
+    static POOL: OnceLock<Mutex<HashMap<u16, Arc<HeapValue>>>> = OnceLock::new();
+
+    let mut pool = POOL
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .expect("closure-constant pool mutex poisoned");
+
+    let pool_arc = pool.entry(fid).or_insert_with(|| {
+        // §6.3 item 2: `from_capture_types(&[], &[])` is well-formed on
+        // empty slices — length-equality and the ≤64 bound hold, there is
+        // no `ConcreteType::Void` to panic on, and all three masks are 0.
+        // §6.4: `type_id = 0` is safe, mirroring the VM's own placeholder
+        // at `call_convention.rs`.
+        let layout = Arc::new(ClosureLayout::from_capture_types(&[], &[]));
+        // SAFETY: `alloc_typed_closure` mints a fresh block matching
+        // `layout` with refcount 1; `from_raw` takes that one share. The
+        // layout has no capture slots, so no capture writes are owed.
+        let block = unsafe {
+            let ptr = alloc_typed_closure(fid, 0, &layout);
+            OwnedClosureBlock::from_raw(ptr, layout)
+        };
+        Arc::new(HeapValue::ClosureRaw(block))
+    });
+
+    let ptr = Arc::as_ptr(pool_arc) as u64;
+    // The per-emit-site share, mirroring `arc_string_constant`. See the
+    // docstring: this is NOT the per-consumption retain, and it does not
+    // substitute for one.
+    unsafe {
+        Arc::increment_strong_count(ptr as *const HeapValue);
+    }
+    ptr
+}
+
 /// Retain (clone) an `Arc<HeapValue>` strong-count share for a
 /// `NativeKind::Ptr(HeapKind::Closure)` slot. Bumps the standard Rust
 /// Arc refcount at offset -16 of the `Arc::into_raw` pointer.
@@ -222,33 +288,13 @@ pub extern "C" fn jit_arc_closure_retain(bits: u64) {
     if bits == 0 {
         return;
     }
-    // W15.2-LANG-4 dual-carrier dispatch (2026-05-18). The
-    // `NativeKind::Ptr(HeapKind::Closure)` slot's bit-shape is dual at
-    // the JIT carrier tier per the §2.7.5 closure-zero-captures
-    // optimization paths in the bytecode/JIT closure emit:
-    //
-    //   (a) `Arc::into_raw(Arc<HeapValue::ClosureRaw(block)>)` — the
-    //       canonical §2.7.11/Q12 heap-closure shape returned by
-    //       `jit_finalize_heap_closure` (escaping closure with or
-    //       without captures via `emit_heap_closure`).
-    //
-    //   (b) `box_function(fn_id)` — the JIT-internal NaN-box
-    //       function-ref shape emitted when the closure compiler
-    //       optimizes a no-capture, non-escaping closure to a bare
-    //       function reference. Tag bits in the high half of the u64
-    //       mark this shape per `value_ffi.rs::TAG_FUNCTION_BITS`.
-    //
-    // The slot's declared type is `(args) -> ret` / `Function(_)` per
-    // `concrete_type_from_annotation`; both runtime shapes share the
-    // same semantic type. Refcount discipline differs: (a) bumps the
-    // `Arc<HeapValue>` strong count at offset -16; (b) is a no-op (a
-    // bare function reference has no heap state). Mirror of the
-    // §2.7.11/Q12 `jit_call_value` dispatch shell which already
-    // discriminates on the same bit-shape predicate before any deref.
-    if crate::ffi::value_ffi::is_inline_function(bits) {
-        // No-op: bare function reference has no heap state to retain.
-        return;
-    }
+    // #239 / ADR-020 §3.4: ONE carrier. The dual-carrier probe that used
+    // to stand here (`is_inline_function(bits)` → no-op, because a
+    // `box_function(fn_id)` tag word has no heap state) is deleted with its
+    // producer. Every `Ptr(HeapKind::Closure)` slot now holds an
+    // `Arc<HeapValue::ClosureRaw>`, including named-function references and
+    // capture-less closures, which point at the immortal pooled records
+    // `arc_closure_constant` mints.
     // SAFETY: per the §2.7.11/Q12 Closure carrier contract the
     // remaining bits shape is `Arc::into_raw(Arc<HeapValue>) as u64`
     // (post-`jit_finalize_heap_closure`); `Arc::increment_strong_count
@@ -277,14 +323,10 @@ pub extern "C" fn jit_arc_closure_release(bits: u64) {
     if bits == 0 {
         return;
     }
-    // W15.2-LANG-4 dual-carrier dispatch (2026-05-18). Mirror of
-    // `jit_arc_closure_retain` — see that fn's docstring for the
-    // dual-shape (Arc<HeapValue> vs `box_function(fn_id)` NaN-box)
-    // rationale. Bare function reference has no heap state; only the
-    // Arc-shape requires decrement.
-    if crate::ffi::value_ffi::is_inline_function(bits) {
-        return;
-    }
+    // #239 / ADR-020 §3.4: ONE carrier — see `jit_arc_closure_retain`. The
+    // dual-carrier probe is deleted with its producer. Releasing a pooled
+    // immortal record is safe by construction: the pool holds a permanent
+    // share, so the count never reaches zero and the free never runs.
     // SAFETY: see fn docs. Mirror of `executor/vm_impl/stack.rs:697`
     // `HeapKind::Closure` arm in `drop_with_kind`.
     unsafe {
@@ -1098,3 +1140,103 @@ mod a1d_owned_mutable_cell_tests {
 
 #[cfg(test)]
 mod finalizer_tests;
+
+#[cfg(test)]
+mod closure_constant_pool_tests {
+    //! #239 §6.4 verdict 2 — the share arithmetic of the immortal record.
+    //!
+    //! §6.3 item 3's recipe was "leak ONE permanent share". That is wrong,
+    //! and the way it is wrong is a use-after-free on the SECOND dispatch:
+    //! the consumer (`ffi/control/mod.rs`'s `Arc::<HeapValue>::from_raw` +
+    //! `drop`) retires a share per CALL, while the pool's share and the
+    //! `arc_closure_constant` bump are per COMPILE. An `iconst` of a pooled
+    //! pointer is re-materialised on every execution; the share budget is
+    //! not. That fits #227 slice 2's recorded malloc corruption.
+    //!
+    //! The fix is the string-constant precedent — `ownership.rs` emits a
+    //! `jit_arc_closure_retain` call INTO the generated code alongside the
+    //! `iconst`, so each execution supplies the share that execution will
+    //! retire. These tests pin that arithmetic, and the second one states
+    //! what happens without it, so the first is not just an assertion that
+    //! the current code equals itself.
+
+    use super::*;
+    use shape_value::heap_value::HeapValue;
+    use std::mem::ManuallyDrop;
+    use std::sync::Arc;
+
+    /// Read the pooled record's strong count without disturbing it.
+    fn strong_count(bits: u64) -> usize {
+        let arc =
+            ManuallyDrop::new(unsafe { Arc::<HeapValue>::from_raw(bits as *const HeapValue) });
+        Arc::strong_count(&arc)
+    }
+
+    /// One consumption, exactly as `jit_call_value`'s `Ptr(Closure)` arm
+    /// performs it: adopt the share the callee push put on the JIT stack,
+    /// then retire it when the dispatch frame ends.
+    fn consume_as_jit_call_value_does(bits: u64) {
+        let arc = unsafe { Arc::<HeapValue>::from_raw(bits as *const HeapValue) };
+        drop(arc);
+    }
+
+    #[test]
+    fn per_consumption_retain_survives_repeated_dispatch() {
+        // A fid no compiled test program uses — the pool is process-global
+        // and keyed by fid, so a shared key would make this test depend on
+        // whatever else ran first.
+        let bits = arc_closure_constant(9001);
+        assert!(bits != 0);
+        let after_emit = strong_count(bits);
+
+        for _ in 0..64 {
+            // What the emitted code does per execution: re-materialise the
+            // pooled pointer (the `iconst`), then retain (the emitted
+            // `jit_arc_closure_retain` call), then dispatch.
+            jit_arc_closure_retain(bits);
+            consume_as_jit_call_value_does(bits);
+        }
+
+        assert_eq!(
+            strong_count(bits),
+            after_emit,
+            "64 dispatches must leave the share budget where they found it — \
+             the per-consumption retain balances the consumer's per-call drop"
+        );
+
+        // Still a live, well-formed closure record: the point of the
+        // arithmetic is that the constant is still dispatchable, not merely
+        // that a counter looks right.
+        let arc =
+            ManuallyDrop::new(unsafe { Arc::<HeapValue>::from_raw(bits as *const HeapValue) });
+        assert!(
+            matches!(&**arc, HeapValue::ClosureRaw(_)),
+            "pooled constant must still be a ClosureRaw after repeated dispatch"
+        );
+    }
+
+    #[test]
+    fn without_the_retain_the_budget_is_exhausted_by_the_dispatch_count() {
+        // The control for the test above: it must be able to observe the
+        // failure it claims to prevent. Consuming WITHOUT retaining spends
+        // one share per dispatch out of a fixed budget, so the record is
+        // one dispatch from being freed after `budget - 1` calls.
+        let bits = arc_closure_constant(9002);
+        let budget = strong_count(bits);
+        assert!(budget >= 1);
+
+        for _ in 0..(budget - 1) {
+            consume_as_jit_call_value_does(bits);
+        }
+
+        assert_eq!(
+            strong_count(bits), 1,
+            "unretained consumption spends the budget; the next call would free a constant. \
+             This is the §6.3 item-3 recipe's failure mode, and it is why the emitted \
+             retain is not optional."
+        );
+        // Deliberately NOT performing that next call: this test pins the
+        // arithmetic, and running the use-after-free would only prove that
+        // freed memory is freed.
+    }
+}

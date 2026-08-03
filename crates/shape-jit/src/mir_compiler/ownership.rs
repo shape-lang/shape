@@ -949,15 +949,42 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                 Ok(bits)
             }
             MirConstant::Function(name) => {
-                // Resolve function name to index. Per ADR-006 §2.7.5 the
-                // JIT-FFI carrier flows the function-ref kind on the
-                // companion; the boxing helper at the value-ffi boundary
-                // produces the raw u64 the carrier wraps.
+                // ADR-020 §3.4 / #239 §6.2 — THE CARRIER FLIP. A named
+                // function reference is an immortal zero-capture
+                // `Arc<HeapValue::ClosureRaw>` record, the VM's carrier,
+                // stamped `Ptr(HeapKind::Closure)` and true.
+                //
+                // This arm used to emit `box_function(idx)` — a NaN-boxed
+                // tag word `0xfffd_0000_0000_00<fid>` — under a `UInt64`
+                // stamp, while the sibling `ClosurePlaceholder` arm emitted
+                // bit-identical values under `Ptr(HeapKind::Closure)`. Two
+                // carriers selected by which `MirConstant` variant the MIR
+                // happened to use is source-shape-selected semantics, and
+                // the second stamp was a lie: it told every consumer that
+                // trusts the kind that the slot held a refcounted heap
+                // pointer, so capturing such a closure retained a tag word
+                // (#254 variant A, SIGSEGV in the ALLOCATION of the
+                // capturing closure, not in any dispatch).
+                //
+                // Per-consumption retain (§6.4 verdict 2), same discipline
+                // as the string-constant arms above: the pool's share is
+                // per-emit-site, but this `iconst` is evaluated once per
+                // EXECUTION and `jit_call_value` retires a share per call.
+                // Without the retain the second dispatch is a use-after-
+                // free on a constant.
                 if let Some(&idx) = self.function_indices.get(name.as_str()) {
-                    let boxed = crate::ffi::value_ffi::box_function(idx);
-                    Ok(self.builder.ins().iconst(types::I64, boxed as i64))
+                    let boxed = crate::ffi::object::closure::arc_closure_constant(idx);
+                    let bits = self.builder.ins().iconst(types::I64, boxed as i64);
+                    self.builder.ins().call(self.ffi.arc_closure_retain, &[bits]);
+                    Ok(bits)
                 } else {
-                    Ok(self.builder.ins().iconst(types::I64, 0i64))
+                    Err(format!(
+                        "MirToIR: SURFACE — `{}` is used as a function value but is not in the \
+                         JIT function table, so there is no fid to build its closure record \
+                         from. The pre-#239 arm emitted a bare `iconst 0` here, which is a \
+                         null in a slot stamped `Ptr(HeapKind::Closure)` (ADR-020 §3.4).",
+                        name
+                    ))
                 }
             }
             MirConstant::Method(name) => {
@@ -1006,16 +1033,26 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                 let fid_opt = self.closure_placeholder_fids.get(idx).copied();
                 if let Some(fid) = fid_opt {
                     if fid != u16::MAX {
-                        let boxed = crate::ffi::value_ffi::box_function(fid);
-                        return Ok(self.builder.ins().iconst(types::I64, boxed as i64));
+                        // ADR-020 §3.4 / #239 §6.2 — same carrier as the
+                        // `Function` arm above, and now the same stamp.
+                        let boxed = crate::ffi::object::closure::arc_closure_constant(fid);
+                        let bits = self.builder.ins().iconst(types::I64, boxed as i64);
+                        self.builder.ins().call(self.ffi.arc_closure_retain, &[bits]);
+                        return Ok(bits);
                     }
                 }
-                // Exhausted side-table or sentinel (capture-paired placeholder,
-                // whose closure allocation is handled by `emit_heap_closure` /
-                // `emit_stack_closure`; this Assign is a dead store the caller
-                // discards). Preserve the legacy "return null bits" behaviour
-                // so the JIT's error path still matches the pre-fix contract
-                // if the scan misses.
+                // Exhausted side-table or the `u16::MAX` sentinel — a
+                // capture-paired placeholder whose closure allocation is
+                // handled by `emit_heap_closure` / `emit_stack_closure`, so
+                // this Assign is a dead store the caller discards.
+                //
+                // #239: the pre-flip arm emitted `iconst 0` here, which is a
+                // bare null in a slot stamped `Ptr(HeapKind::Closure)` —
+                // §6.2 item 2 names it. It is kept as a null ONLY because
+                // the value is provably discarded; a consumer that read it
+                // would be reading a null closure pointer, which
+                // `jit_call_value`'s `Ptr(Closure)` arm already refuses
+                // fail-closed (`callee_bits == 0` → `pending_call_error`).
                 Ok(self.builder.ins().iconst(types::I64, 0i64))
             }
         }

@@ -1030,6 +1030,34 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                 frame_seed[dst_idx] = slot_kinds.get(param_idx).copied().flatten();
             }
         }
+        // #239 §6.1 — capture slots take their kind from the closure's OWN
+        // `ClosureLayout`, which is the thing that decides how the capture
+        // is stored and released. `param_slots` is captures followed by user
+        // params (`compiler/program.rs`), and the bytecode frame descriptor
+        // does not stamp captures, so before this a closure that captured
+        // another closure left the capture slot unproven.
+        //
+        // This seed is only sound BECAUSE of the carrier flip in the same
+        // commit. The layout classifies a captured closure `FieldKind::Ptr`
+        // — true on the VM side, where a closure is always
+        // `Arc<ClosureRaw>`. Stamping `Ptr(HeapKind::Closure)` while the JIT
+        // still emitted `box_function` tag words for capture-less closures
+        // is precisely #254 variant A: the mask-driven retain loop at
+        // `statements.rs` would `atomic_rmw` a tag word. That is why §6.2
+        // says the producer flip and this are one edit or neither.
+        if let Some(fid) = function_indices.get(mir_data.mir.name.as_str()) {
+            if let Some(layout) = closure_function_layouts.get(fid) {
+                for i in 0..layout.capture_count() {
+                    let Some(mir_slot) = mir_data.mir.param_slots.get(i) else {
+                        break;
+                    };
+                    let dst_idx = mir_slot.0 as usize;
+                    if dst_idx < frame_seed.len() && frame_seed[dst_idx].is_none() {
+                        frame_seed[dst_idx] = Some(layout.capture_native_kind(i));
+                    }
+                }
+            }
+        }
         if let Some(current_fn_idx) = function_indices.get(mir_data.mir.name.as_str()) {
             if let Some(return_kind) = user_func_return_kinds.get(current_fn_idx).copied() {
                 if !frame_seed.is_empty() {

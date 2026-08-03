@@ -1295,18 +1295,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                 // unproven destination surface-and-stops.
                 let target_kind = super::types::slot_kind_for_local(&self.slot_kinds, slot.0)
                     .ok_or_else(|| {
-                        if std::env::var_os("SHAPE_DEBUG_SLOT_KINDS").is_some() {
-                            eprintln!(
-                                "[slot-kinds] fn={} unproven_slot={} kinds={:?}",
-                                self.mir.name, slot.0, self.slot_kinds
-                            );
-                            for b in &self.mir.blocks {
-                                eprintln!("[slot-kinds]   term {:?}", b.terminator.kind);
-                                for s in &b.statements {
-                                    eprintln!("[slot-kinds]   stmt {:?}", s.kind);
-                                }
-                            }
-                        }
+                        self.debug_dump_slot_kinds(*slot);
                         format!(
                             "MirToIR: SURFACE — destination slot {} has no compile-time-proven \
                              NativeKind, so there is no sound width/representation to store into \

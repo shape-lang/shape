@@ -2261,7 +2261,11 @@ fn infer_constant_kind(constant: &MirConstant) -> Option<NativeKind> {
         MirConstant::Decimal(_) => Some(NativeKind::DecimalV2),
         MirConstant::None => None,
         MirConstant::StringId(_) | MirConstant::Str(_) => Some(NativeKind::String),
-        MirConstant::Function(_) => Some(NativeKind::UInt64),
+        // ADR-020 §3.4 / #239 §6.2 — ONE carrier: the immortal zero-capture
+        // `Arc<HeapValue::ClosureRaw>`. Mirror of the `operand_slot_kind`
+        // arm in `rvalues.rs`; both stamps collapse onto the same kind
+        // because both producers now emit the same record.
+        MirConstant::Function(_) => Some(NativeKind::Ptr(HeapKind::Closure)),
         MirConstant::Method(_) => Some(NativeKind::String),
         MirConstant::ClosurePlaceholder => Some(NativeKind::Ptr(HeapKind::Closure)),
     }
