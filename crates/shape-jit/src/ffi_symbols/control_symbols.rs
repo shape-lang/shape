@@ -9,7 +9,9 @@ use cranelift_jit::JITModule;
 use cranelift_module::{FuncId, Linkage, Module};
 use std::collections::HashMap;
 
-use super::super::ffi::call_method::jit_call_method;
+use super::super::ffi::call_method::{
+    jit_call_method_f64, jit_call_method_i64, jit_call_method_ptr,
+};
 use super::super::ffi::control::{
     jit_call_foreign, jit_call_foreign_dynamic, jit_call_foreign_native, jit_call_foreign_native_0,
     jit_call_foreign_native_1, jit_call_foreign_native_2, jit_call_foreign_native_3,
@@ -86,7 +88,19 @@ pub fn register_control_symbols(builder: &mut JITBuilder) {
     );
     builder.symbol("jit_iter_next", jit_iter_next as *const u8);
     builder.symbol("jit_iter_done", jit_iter_done as *const u8);
-    builder.symbol("jit_call_method", jit_call_method as *const u8);
+    // ADR-020 / #239 §4.1: one entry point per Cranelift return ABI class, on
+    // the METHOD channel as on the value channel. The kind-blind
+    // `jit_call_method` is gone — it returned `-> u64`, which is why the VM
+    // trampoline had to discard `dispatch_method_kinded`'s `KindedSlot` kind
+    // and why every scalar-returning method on a `string` receiver had to
+    // whole-function deopt (STAGE-StringJIT).
+    //
+    // There is no `_void`: `dispatch_method_kinded` returns a value on every
+    // success path, and `infer_unit_slots` only unit-classifies destinations of
+    // `MirConstant::Function` callees, so a method destination is never unit.
+    builder.symbol("jit_call_method_i64", jit_call_method_i64 as *const u8);
+    builder.symbol("jit_call_method_f64", jit_call_method_f64 as *const u8);
+    builder.symbol("jit_call_method_ptr", jit_call_method_ptr as *const u8);
     builder.symbol("jit_control_fold", jit_control_fold as *const u8);
     builder.symbol("jit_control_reduce", jit_control_reduce as *const u8);
     builder.symbol("jit_control_map", jit_control_map as *const u8);
@@ -236,17 +250,27 @@ pub fn declare_control_functions(module: &mut JITModule, ffi_funcs: &mut HashMap
         ffi_funcs.insert("jit_iter_done".to_string(), func_id);
     }
 
-    // jit_call_method(ctx: *mut JITContext, stack_count: usize) -> u64
-    // Reads receiver, method_name, and args from ctx.stack
-    {
+    // ADR-020 / #239 §4.1 — the monomorphized METHOD return channel.
+    // Each pops receiver / args / method name / arg count from ctx.stack
+    // identically; they differ only in the Cranelift type the result comes back
+    // in, selected at the emit site from the destination slot's PROVEN kind.
+    //
+    // `_i64` and `_ptr` share a Cranelift signature deliberately (§4.2): free at
+    // the ABI, and at the Rust level the only remaining carrier of "this return
+    // transfers an owned share" vs "this return is a number".
+    for (name, ret) in [
+        ("jit_call_method_i64", types::I64),
+        ("jit_call_method_ptr", types::I64),
+        ("jit_call_method_f64", types::F64),
+    ] {
         let mut sig = module.make_signature();
         sig.params.push(AbiParam::new(types::I64)); // ctx
         sig.params.push(AbiParam::new(types::I64)); // stack_count
-        sig.returns.push(AbiParam::new(types::I64)); // result
+        sig.returns.push(AbiParam::new(ret));
         let func_id = module
-            .declare_function("jit_call_method", Linkage::Import, &sig)
-            .expect("Failed to declare jit_call_method");
-        ffi_funcs.insert("jit_call_method".to_string(), func_id);
+            .declare_function(name, Linkage::Import, &sig)
+            .unwrap_or_else(|e| panic!("Failed to declare {name}: {e}"));
+        ffi_funcs.insert(name.to_string(), func_id);
     }
 
     // Control flow functions (ctx) -> u64

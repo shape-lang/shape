@@ -83,8 +83,8 @@ impl<'a, 'b> MirToIR<'a, 'b> {
             return;
         }
         eprintln!(
-            "[slot-kinds] fn={} unproven_slot={} kinds={:?} unit={:?}",
-            self.mir.name, slot_id.0, self.slot_kinds, self.unit_slots
+            "[slot-kinds] fn={} unproven_slot={} kinds={:?} unit={:?} concrete={:?}",
+            self.mir.name, slot_id.0, self.slot_kinds, self.unit_slots, self.concrete_types
         );
         for b in &self.mir.blocks {
             for s in &b.statements {

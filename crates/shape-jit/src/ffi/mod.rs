@@ -51,7 +51,7 @@ pub use value_ffi::*;
 // DELETED: Finance-specific indicator exports
 // pub use indicator::*;
 pub use async_ops::*;
-pub use call_method::jit_call_method;
+pub use call_method::{jit_call_method_f64, jit_call_method_i64, jit_call_method_ptr};
 pub use control::*;
 pub use conversion::*;
 pub use gc::*;

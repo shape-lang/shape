@@ -1147,6 +1147,34 @@ fn user_method_return_kind_from_receiver(
                 .get(&receiver_slot)
                 .map(String::as_str)
         })?,
+        // ADR-020 / #239 §4.1: a BUILTIN receiver names its `extend` block.
+        //
+        // `crates/shape-runtime/stdlib-src/core/string_methods.shape` declares
+        // `extend string { method indexOf(needle: string) -> int { ... } }`,
+        // which compiles to a function named `string.indexOf` carrying that
+        // declared return type — the same conduit this function already reads
+        // for user structs. Until now the receiver had to be a
+        // `ConcreteType::Struct` to get a name at all, so every builtin-receiver
+        // method call fell through unstamped and the only remaining answer was
+        // `well_known_method_return_kind`'s hand-maintained name list.
+        //
+        // That list is §4.0.3's five-times-patched allowlist: `length` is in it
+        // and `indexOf` is not, for no reason either function can state. Reading
+        // the declared signature instead is the producer-side answer — the kind
+        // comes from Shape source the stdlib author wrote, not from a Rust table
+        // someone has to remember to extend a sixth time.
+        //
+        // Only the three receivers whose `extend` block has a fixed non-generic
+        // spelling are named here (`extend int` / `extend number` /
+        // `extend string`). The generic ones — `Vec<T>`, `HashMap<K, V>`,
+        // `Option<T>`, `Result<T, E>`, `Table<T>` — do not have one compiled
+        // name per receiver, and their return kinds already flow through
+        // `parametric_method_return_kind_from_receiver` and the
+        // monomorphization conduit. Guessing a spelling for them would put a
+        // fabricated name where a proof belongs.
+        Some(ConcreteType::String) => "string",
+        Some(ConcreteType::I64) => "int",
+        Some(ConcreteType::F64) => "number",
         _ => local_struct_type_names
             .get(&receiver_slot)
             .map(String::as_str)?,

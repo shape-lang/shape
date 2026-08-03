@@ -39,58 +39,6 @@ impl<'a, 'b> MirToIR<'a, 'b> {
         found
     }
 
-    /// `true` when `method_name` is a string method whose result is itself a
-    /// string (heap `Arc<String>`), as opposed to a scalar (number / bool /
-    /// int). Used by the STAGE-M1 jit-string-method-return-carrier deopt gate
-    /// in `compile_terminator`'s method-call trampoline path.
-    ///
-    /// The set mirrors the `box_string` arms of
-    /// `crates/shape-jit/src/ffi/call_method/string.rs::call_string_method`
-    /// (the trampoline that runs on a proven-`NativeKind::String` receiver).
-    /// `split` / `chars` produce array carriers (their string.rs arms are
-    /// `todo!()` / SURFACE today) — included so a `String`-receiver call to
-    /// them also deopts cleanly to the interpreter rather than reaching an FFI
-    /// panic. Scalar-returning string methods (`length`/`len`/`contains`/
-    /// `includes`/`startsWith`/`endsWith`/`indexOf`/`lastIndexOf`/`toNumber`/
-    /// `toBool`/`isEmpty`) are deliberately ABSENT — they carry no heap
-    /// pointer, so the trampoline's `box_number`/`TAG_BOOL_*` result matches
-    /// the destination's scalar kind and JIT compilation proceeds.
-    ///
-    /// Both camelCase and snake_case aliases are listed (the checker + UFCS
-    /// register both per commit 67d71387 `register snake_case string-method
-    /// aliases`).
-    pub(crate) fn string_method_returns_string(method_name: &str) -> bool {
-        matches!(
-            method_name,
-            "toUpperCase"
-                | "to_upper_case"
-                | "toLowerCase"
-                | "to_lower_case"
-                | "trim"
-                | "trimStart"
-                | "trim_start"
-                | "trimEnd"
-                | "trim_end"
-                | "replace"
-                | "replaceAll"
-                | "replace_all"
-                | "charAt"
-                | "char_at"
-                | "substring"
-                | "slice"
-                | "concat"
-                | "repeat"
-                | "padStart"
-                | "pad_start"
-                | "padEnd"
-                | "pad_end"
-                // array-carrier results — deopt rather than hit the
-                // `todo!()` / SURFACE FFI arms.
-                | "split"
-                | "chars"
-        )
-    }
-
     /// Compile a MIR terminator.
     pub(crate) fn compile_terminator(&mut self, terminator: &Terminator) -> Result<(), String> {
         match &terminator.kind {
@@ -487,228 +435,33 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                             self.concrete_types
                         );
                     }
-                    // ── STAGE-M1 jit-string-method-return-carrier deopt ──────
-                    // CARRIER-SHAPE MISMATCH (CONFIRMED machine-killer — the
-                    // 804GiB/ASCII-as-pointer heap corruption). When the proven
-                    // receiver kind is `NativeKind::String` and the method
-                    // RETURNS a string, `jit_call_method` (the VM trampoline)
-                    // builds the result via `ffi/call_method/string.rs::
-                    // box_string`, which returns a NaN-boxed `unified_box(
-                    // HK_STRING, Arc<String>)` (TAG_HEAP mantissa-set pointer).
-                    // But every §2.7.5 `NativeKind::String` consumer in the JIT
-                    // (the eventual `acc`/return slot's `jit_arc_string_retain` /
-                    // `_release`, `release_old_value_if_heap` →
-                    // `release_func_for_place`, the VM-trampoline `KindedSlot::
-                    // Drop` for `NativeKind::String`) decodes the carrier as
-                    // `Arc::into_raw(Arc<String>) as u64` — a RAW Arc pointer,
-                    // NOT a NaN-box. The NaN-boxed result propagates out of this
-                    // (possibly inlined / value-returning) function into a real
-                    // `String`-kinded slot, where `Arc::decrement_strong_count(
-                    // boxed_bits as *const String)` dereferences the mantissa-set
-                    // bits as an Arc control block at offset -16 → wild pointer →
-                    // the huge-alloc / double-free / SIGSEGV (under unlimited
-                    // ulimit, the 804GiB OOM that hangs the box).
+                    // ── STAGE-M1 / STAGE-StringJIT / STAGE-F3, RETIRED ──────
+                    // ADR-020 / #239 §4.1. Three receiver-kind guards stood
+                    // here — string-returning string methods (STAGE-M1),
+                    // scalar-returning string methods (STAGE-StringJIT), and
+                    // the seven VM-only typed-Arc receivers (STAGE-F3). All
+                    // three refused to emit at all, and all three named the
+                    // same cause: `jit_call_method` returned `-> u64`, so the
+                    // only thing the trampoline could hand back was a
+                    // `box_number` NaN-boxed f64, a `TAG_BOOL_*` sentinel, a
+                    // `box_string` carrier, or a silent `TAG_NULL` — never the
+                    // raw typed value the proven destination slot expects.
                     //
-                    // The local destination slot's `NativeKind` is often
-                    // unproven (`LocalTypeInfo::Unknown` implicit-return /
-                    // temporary slot → `RefcountDisposition::Skip`), so a
-                    // destination-kind gate does NOT catch it — the corruption is
-                    // realized one frame later. The PROVEN, fabrication-free
-                    // signal available HERE is the receiver's `NativeKind::String`
-                    // (read from the §2.7.5 slot-kind track, not synthesized from
-                    // bits) combined with the statically-known string-RETURNING
-                    // method-name set (`string.rs::call_string_method`'s
-                    // `box_string` arms). Scalar-returning string methods
-                    // (`length`/`len`/`contains`/`startsWith`/`indexOf`/
-                    // `toNumber`/`toBool`/`isEmpty`/...) return Int/Float/Bool —
-                    // no heap carrier, no mismatch — and keep JITing.
+                    // The channel now carries the value's kind
+                    // (`MethodOutcome::Value(KindedSlot)`), and the receivers
+                    // those guards named delegate to the VM's carrier-correct
+                    // PHF registry (`delegates_to_vm_trampoline`). A guard per
+                    // mishandled receiver family was the allowlist shape §4.0.3
+                    // inventories — rescued one name at a time, silently wrong
+                    // for the rest. Deleting the mechanism is the fix; these
+                    // are not being bypassed, the condition they detected no
+                    // longer arises.
                     //
-                    // There is no NaN-box→raw-Arc carrier conversion wired at this
-                    // trampoline return site (adding a bit-reinterpret /
-                    // Convert<X>To<Y> / carrier rename would be a CLAUDE.md
-                    // Forbidden pattern). Per "surface-and-stop, not force": fail
-                    // JIT compilation (whole-function Err → bytecode-interpreter
-                    // fallthrough, whose String-arm method dispatch is correct —
-                    // verified `--mode vm` returns the right value). NO
-                    // bit-reinterpret, NO carrier rename, NO Bool-default.
-                    let receiver_is_string = args
-                        .first()
-                        .map(|recv| {
-                            matches!(
-                                self.operand_slot_kind(recv),
-                                Some(shape_value::NativeKind::String)
-                            )
-                        })
-                        .unwrap_or(false);
-                    if receiver_is_string && Self::string_method_returns_string(method_name) {
-                        return Err(format!(
-                            "MirToIR: string method `.{}(...)` on a proven \
-                             `NativeKind::String` receiver returns a string, but \
-                             the `jit_call_method` VM trampoline produces a \
-                             NaN-boxed `box_string` carrier that does NOT match \
-                             the §2.7.5 `NativeKind::String` raw-Arc retain/release \
-                             contract (`Arc::into_raw(Arc<String>) as u64`). The \
-                             mis-carried result propagates into a `String`-kinded \
-                             slot whose `Arc::decrement_strong_count` then \
-                             dereferences NaN-box bits → heap corruption / SIGSEGV \
-                             (the 804GiB machine-killer). No NaN-box→raw-Arc \
-                             conversion is wired here; surface-and-stop per \
-                             CLAUDE.md \"surface-and-stop, not force\" → \
-                             whole-function deopt to the bytecode interpreter \
-                             (correct String-arm dispatch). \
-                             STAGE-M1 jit-string-method-return-carrier.",
-                            method_name
-                        ));
-                    }
-
-                    // ── STAGE-StringJIT jit-string-scalar-method-deopt ───────
-                    // CARRIER-SHAPE MISMATCH (CONFIRMED silent-wrong, rc=0).
-                    // The companion of the STAGE-M1 string-RETURNING-method
-                    // deopt above, for the SCALAR-returning string methods
-                    // (`length`/`len`/`indexOf`/`lastIndexOf`/`charCodeAt`/
-                    // `toNumber` → `box_number(.. as f64)`;
-                    // `contains`/`startsWith`/`endsWith`/`includes`/`isEmpty`/
-                    // `toBool` → `TAG_BOOL_*`). The M1 doc-comment's claim
-                    // that these scalar methods "keep JITing because the
-                    // trampoline's `box_number`/`TAG_BOOL` result matches the
-                    // destination's scalar kind" is WRONG: `box_number(n)` is
-                    // `f64::to_bits(n)` (a NaN-boxed f64, value_ffi.rs:287) and
-                    // `TAG_BOOL_*` is a tagged sentinel — NEITHER is a RAW
-                    // native scalar. The proven destination slot of an
-                    // `int`-returning method (`fn f(s) -> int { s.indexOf("l") }`)
-                    // is `NativeKind::Int64`, and `write_place` stores the raw
-                    // NaN-box bits into the int slot verbatim — no unbox. Result:
-                    // `s.indexOf("l")` → VM 2, JIT -4616189618054758400
-                    // (`f64::to_bits(2.0)` reinterpreted as i64), rc=0
-                    // silent-wrong (CONFIRMED W11b-F3 surfaced).
-                    //
-                    // Unboxing the trampoline result here (`bitcast f64`+
-                    // `fcvt_to_sint` for the int case, an `unbox_number`
-                    // followed by a width-narrowing conversion) would be a
-                    // Convert<X>To<Y> / IntToNumber carrier conversion — a
-                    // CLAUDE.md Forbidden pattern (the trampoline's f64
-                    // carrier and the slot's `Int64` carrier do not unify;
-                    // int != number never unify). Per "surface-and-stop, not
-                    // force": fail JIT compilation for EVERY method call on a
-                    // proven `string` receiver (the trampoline never produces
-                    // a raw native scalar / raw-Arc carrier for a string —
-                    // every `call_string_method` arm boxes), → whole-function
-                    // deopt to the bytecode interpreter, whose String-arm PHF
-                    // dispatch is correct (`--mode vm` returns the right
-                    // value). NO bit-reinterpret, NO Convert-opcode, NO
-                    // carrier rename, NO Bool-default. The proven receiver
-                    // `NativeKind::String` is the fabrication-free signal.
-                    if receiver_is_string {
-                        return Err(format!(
-                            "MirToIR: scalar-returning string method `.{}(...)` \
-                             on a proven `NativeKind::String` receiver has no \
-                             sound JIT codegen — the `jit_call_method` VM \
-                             trampoline boxes the scalar result via \
-                             `box_number(.. as f64)` (a NaN-boxed f64) or a \
-                             `TAG_BOOL_*` sentinel, NEITHER of which is the raw \
-                             native scalar the proven destination slot expects. \
-                             `write_place` stores the NaN-box bits verbatim into \
-                             the (e.g. `Int64`) slot → garbage (`s.indexOf(..)` \
-                             → VM 2, JIT -4616189618054758400, rc=0 \
-                             silent-wrong). Unboxing here would be a forbidden \
-                             Convert/IntToNumber carrier conversion (int != \
-                             number never unify); surface-and-stop per CLAUDE.md \
-                             \"surface-and-stop, not force\" → whole-function \
-                             deopt to the bytecode interpreter (correct \
-                             String-arm dispatch). STAGE-StringJIT \
-                             jit-string-scalar-method-deopt.",
-                            method_name
-                        ));
-                    }
-
-                    // ── STAGE-F3 jit-vm-only-heap-receiver deopt ─────────────
-                    // CARRIER-SHAPE MISMATCH (CONFIRMED machine-killer — the
-                    // `fn f(d: DateTime) -> int { d.unix_timestamp() + 1 }` SIGSEGV
-                    // under `--mode jit`, rc=139; correct under `--mode vm`).
-                    //
-                    // When the receiver's PROVEN `NativeKind` is a VM-allocated
-                    // typed-Arc heap carrier whose builtin methods live ONLY in
-                    // the VM's PHF registry (DateTime/Temporal, Instant, Decimal,
-                    // BigInt, DataTable, TableView, Content) the method call has
-                    // NO sound JIT dispatch:
-                    //   - The `jit_call_method` dispatch shell's `delegated`
-                    //     match (`ffi/call_method/mod.rs` ~601) routes these
-                    //     `Ptr(_)` kinds to the legacy JIT-format cascade (the
-                    //     `Ptr(_) => false` arm), NOT the VM trampoline.
-                    //   - The JIT-format builtin cascade only resolves these
-                    //     methods through the `UInt64`-carrier `read_heap_kind`
-                    //     prefix path (`HK_TIME => call_time_method`, …). A
-                    //     `Ptr(HeapKind::Temporal)` typed-Arc receiver hits the
-                    //     silent `Ptr(_) => TAG_NULL` builtin arm
-                    //     (`ffi/call_method/mod.rs` ~979) — it never reaches
-                    //     `call_time_method`, and no `pending_call_error` is set.
-                    //   - `try_call_user_method` then builds the UFCS name
-                    //     `"Temporal::unix_timestamp"`, which is not in the JIT
-                    //     function table → `None`.
-                    // The silent `TAG_NULL` placeholder is written into the
-                    // proven-`Int64` destination slot, and the live VM
-                    // `Arc<HeapValue::Temporal>` receiver carried on the JIT
-                    // stack with kind `Ptr(Temporal)` is dropped at frame
-                    // teardown via the wrong carrier path → SIGSEGV (the
-                    // machine-killer). The bytecode VM dispatches these methods
-                    // correctly through its PHF registry (`--mode vm` returns the
-                    // right value).
-                    //
-                    // There is no JIT-format builtin registry for the typed-Arc
-                    // heap carriers and no sound NaN-box↔Arc carrier bridge at
-                    // this trampoline site (adding a bit-reinterpret /
-                    // Convert<X>To<Y> / carrier rename is a CLAUDE.md Forbidden
-                    // pattern). Per "surface-and-stop, not force": fail JIT
-                    // compilation (whole-function `Err` → bytecode-interpreter
-                    // fall-through, whose VM-registry dispatch is correct). Same
-                    // surface-and-stop shape as the STAGE-M1 string-return deopt
-                    // above + the c4-4B TryUnwrap / W17-marshal deopts. NO
-                    // bit-reinterpret, NO carrier rename, NO Bool-default. The
-                    // proven receiver `NativeKind` is the fabrication-free signal
-                    // (read from the §2.7.5 slot-kind track, not synthesized from
-                    // bits).
-                    let receiver_is_vm_only_heap = args
-                        .first()
-                        .map(|recv| {
-                            use shape_value::NativeKind;
-                            use shape_value::heap_value::HeapKind;
-                            matches!(
-                                self.operand_slot_kind(recv),
-                                Some(NativeKind::Ptr(
-                                    HeapKind::Temporal
-                                        | HeapKind::Instant
-                                        | HeapKind::Decimal
-                                        | HeapKind::BigInt
-                                        | HeapKind::DataTable
-                                        | HeapKind::TableView
-                                        | HeapKind::Content
-                                ))
-                            )
-                        })
-                        .unwrap_or(false);
-                    if receiver_is_vm_only_heap {
-                        return Err(format!(
-                            "MirToIR: method `.{}(...)` on a proven VM-only \
-                             typed-Arc heap receiver (DateTime/Temporal, Instant, \
-                             Decimal, BigInt, DataTable, TableView, or Content) has \
-                             no sound JIT dispatch: the `jit_call_method` shell \
-                             routes the `Ptr(_)` carrier to the legacy JIT-format \
-                             cascade (not the VM trampoline), where the builtin \
-                             registry only resolves these methods through the \
-                             `UInt64`-carrier `read_heap_kind` prefix — a typed-Arc \
-                             receiver hits the silent `Ptr(_) => TAG_NULL` arm. The \
-                             `TAG_NULL` placeholder feeds a proven-`Int64` slot \
-                             while the live VM `Arc<HeapValue>` receiver is dropped \
-                             via the wrong carrier at frame teardown → SIGSEGV \
-                             (`fn f(d: DateTime) -> int {{ d.unix_timestamp() + 1 }}` \
-                             rc=139). No NaN-box↔Arc carrier bridge is wired here; \
-                             surface-and-stop per CLAUDE.md \"surface-and-stop, not \
-                             force\" → whole-function deopt to the bytecode \
-                             interpreter (correct VM-PHF-registry dispatch). \
-                             STAGE-F3 jit-vm-only-heap-receiver.",
-                            method_name
-                        ));
-                    }
+                    // What is NOT retired: the JIT-format NaN-box dialect
+                    // itself. A receiver that still routes to it (the `UInt64`
+                    // opaque-bits carrier) reaches the shell, which refuses to
+                    // label dialect bits with a `NativeKind` it does not have
+                    // and deopts cleanly instead (§7 owns the deletion).
 
                     let stack_base_offset = crate::context::STACK_OFFSET as i32;
                     let sp_offset = crate::context::STACK_PTR_OFFSET as i32;
@@ -822,12 +575,18 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                         .ins()
                         .store(MemFlags::new(), new_sp, self.ctx_ptr, sp_offset);
 
-                    // Call jit_call_method(ctx, total_count)
+                    // ADR-020 / #239 §4.1: the monomorph is chosen from the
+                    // DESTINATION's proven kind — the same `ReturnAbiClass`
+                    // table the value channel selects with. No polymorphic
+                    // entry point to fall back to, and no runtime kind
+                    // parameter (that would be the deleted `tag_bits` dispatch
+                    // wearing a parameter instead of a tag word).
+                    let method_ref = self.call_method_ref_for_class(destination)?;
                     let count_val = self.builder.ins().iconst(types::I64, total_items as i64);
                     let inst = self
                         .builder
                         .ins()
-                        .call(self.ffi.call_method, &[self.ctx_ptr, count_val]);
+                        .call(method_ref, &[self.ctx_ptr, count_val]);
                     let result = self.builder.inst_results(inst)[0];
 
                     // Restore stack_ptr to old value
@@ -2688,12 +2447,14 @@ impl<'a, 'b> MirToIR<'a, 'b> {
             .ins()
             .store(MemFlags::new(), new_sp, self.ctx_ptr, sp_offset);
 
-        // Call jit_call_method(ctx, total_count).
+        // ADR-020 / #239 §4.1: monomorph from the destination's proven kind,
+        // same as the `MirConstant::Method` Call-terminator path this mirrors.
+        let method_ref = self.call_method_ref_for_class(destination)?;
         let count_val = self.builder.ins().iconst(types::I64, total_items as i64);
         let inst = self
             .builder
             .ins()
-            .call(self.ffi.call_method, &[self.ctx_ptr, count_val]);
+            .call(method_ref, &[self.ctx_ptr, count_val]);
         let result = self.builder.inst_results(inst)[0];
 
         // Restore stack_ptr to old value.
@@ -2914,6 +2675,44 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                 )
             })?;
         Ok(return_abi_class(kind))
+    }
+
+    /// The `jit_call_method_*` monomorph for a method call landing in
+    /// `destination` (ADR-020 / #239 §4.1, the METHOD channel).
+    ///
+    /// Reuses `call_return_abi_class` — the SAME classifier the value channel
+    /// selects with, anchored on the same `cranelift_type_for_slot` table. A
+    /// second classifier for the method channel would be a second place for the
+    /// kind→ABI mapping to drift from the destination variable's declared
+    /// Cranelift type, which is the one thing the anchoring exists to prevent.
+    ///
+    /// `Void` is not a method-channel class. `dispatch_method_kinded` returns a
+    /// value on every success path, and `infer_unit_slots` only unit-classifies
+    /// destinations of `MirConstant::Function` callees — never a
+    /// `MirConstant::Method` one — so a unit-classified method destination is a
+    /// contradiction upstream of here, not a monomorph to select. Surfacing
+    /// keeps the fourth entry point from existing unreferenced, which is
+    /// separately what CHECK 22's R3 forbids.
+    fn call_method_ref_for_class(
+        &self,
+        destination: &Place,
+    ) -> Result<cranelift::codegen::ir::FuncRef, String> {
+        use crate::return_abi_class::ReturnAbiClass;
+        Ok(match self.call_return_abi_class(destination)? {
+            ReturnAbiClass::Scalar => self.ffi.call_method_i64,
+            ReturnAbiClass::Pointer => self.ffi.call_method_ptr,
+            ReturnAbiClass::Float => self.ffi.call_method_f64,
+            ReturnAbiClass::Void => {
+                return Err(format!(
+                    "ADR-020 §4.1 surface-and-stop: SURFACE — a method call's destination \
+                     {destination} is unit-classified, but a method always produces a value \
+                     (`dispatch_method_kinded` returns a `KindedSlot` on every success path). \
+                     `infer_unit_slots` classifies only `MirConstant::Function` destinations, \
+                     so this is an upstream disagreement rather than a void call. Clean deopt \
+                     to the interpreter."
+                ));
+            }
+        })
     }
 
     /// Emit the `r5c-2-bz-b-jit-err-surface` VM-trampoline error deopt.

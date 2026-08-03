@@ -45,7 +45,12 @@ pub struct FFIFuncRefs {
     pub(crate) call_value_ptr: FuncRef,
     pub(crate) call_value_f64: FuncRef,
     pub(crate) call_value_void: FuncRef,
-    pub(crate) call_method: FuncRef,
+    // ADR-020 / #239 §4.1: the METHOD channel, monomorphized the same way and
+    // over the same `ReturnAbiClass` table. Three classes, not four — a method
+    // always produces a value, so there is no `_void` (see `MethodOutcome`).
+    pub(crate) call_method_i64: FuncRef,
+    pub(crate) call_method_ptr: FuncRef,
+    pub(crate) call_method_f64: FuncRef,
 
     // Array allocator + hot per-element push.
     //
