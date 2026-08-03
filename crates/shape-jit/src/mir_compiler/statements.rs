@@ -116,6 +116,22 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                     return Ok(());
                 }
 
+                // ADR-020 §3.3: moving a unit slot moves no value. Both sides
+                // are unit by `infer_unit_slots`'s fixpoint, so neither has a
+                // Cranelift variable and there is nothing to read or write.
+                // Top-level MIR ends with exactly this statement, carrying a
+                // trailing `print(...)`'s "result" into the return slot.
+                if let Rvalue::Use(
+                    Operand::Move(Place::Local(src))
+                    | Operand::Copy(Place::Local(src))
+                    | Operand::MoveExplicit(Place::Local(src)),
+                ) = rvalue
+                {
+                    if self.unit_slots.contains(src) {
+                        return Ok(());
+                    }
+                }
+
                 let prior_stmt_local_ownership = self.current_stmt_local_ownership;
                 self.current_stmt_local_ownership = match rvalue {
                     Rvalue::Use(

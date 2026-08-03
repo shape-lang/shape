@@ -228,10 +228,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                 // path below.
                 if let Place::Local(slot) = place {
                     if self.ref_param_slots.contains(slot) {
-                        let var = *self
-                            .locals
-                            .get(slot)
-                            .ok_or_else(|| format!("MirToIR: unknown local slot {}", slot))?;
+                        let var = self.local_var(*slot)?;
                         // Slot variable carries the caller's cell address
                         // (pointer-width I64); forward as-is. Skip the
                         // `ref_stack_slots` insertion — there is no JIT-

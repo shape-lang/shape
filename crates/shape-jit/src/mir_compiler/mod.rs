@@ -278,6 +278,15 @@ pub struct MirToIR<'a, 'b> {
     /// destination write. Disjoint from `user_func_return_kinds` by
     /// construction (both are built by `harvest_return_abi`).
     pub(crate) unit_returning_funcs: HashSet<u16>,
+    /// ADR-020 §3.3: MIR slots that carry unit — no value at all.
+    ///
+    /// The destination of every void call, plus everything a chain of MIR
+    /// moves carries it into (top-level MIR ends by moving the trailing
+    /// statement's result into the return slot). These slots get NO
+    /// Cranelift variable and NO storage kind: there is nothing to store,
+    /// and inventing a bit pattern for them is the unit sentinel ADR-020
+    /// §6 forbids. Computed by `types::infer_unit_slots`.
+    pub(crate) unit_slots: HashSet<SlotId>,
 
     // ── Borrow support ──────────────────────────────────────────────
     /// MIR SlotId → (Cranelift StackSlot, Cranelift Type) for references
@@ -1147,6 +1156,11 @@ impl<'a, 'b> MirToIR<'a, 'b> {
             user_func_refs,
             user_func_arities,
             user_func_return_kinds,
+            unit_slots: types::infer_unit_slots(
+                &mir_data.mir,
+                function_indices,
+                &unit_returning_funcs,
+            ),
             unit_returning_funcs,
             ref_stack_slots: HashMap::new(),
             field_byte_offsets: HashMap::new(),
@@ -1985,7 +1999,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
     pub fn compile(&mut self) -> Result<(), String> {
         self.validate_shared_cell_kinds()?;
         self.create_blocks();
-        self.declare_locals();
+        self.declare_locals()?;
         // Session 1 Commit 3: eagerly materialise Arc<SharedCell>s for
         // every SharedCow local slot. No-op when the set is empty.
         self.initialize_shared_local_slots()?;

@@ -927,20 +927,14 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                 // circuit + the param-init path both keep that invariant.
                 if self.ref_param_slots.contains(slot) {
                     let ref_addr = self.builder.use_var(
-                        *self
-                            .locals
-                            .get(slot)
-                            .ok_or_else(|| format!("MirToIR: unknown local slot {}", slot))?,
+                        self.local_var(*slot)?,
                     );
                     return Ok(self
                         .builder
                         .ins()
                         .load(types::I64, MemFlags::new(), ref_addr, 0));
                 }
-                let var = self
-                    .locals
-                    .get(slot)
-                    .ok_or_else(|| format!("MirToIR: unknown local slot {}", slot))?;
+                let var = &self.local_var(*slot)?;
                 // Track A.1D.2: OwnedMutable capture slots hold the raw
                 // `*mut ValueWord` bits of a `Box::into_raw`'d cell
                 // (allocated by `jit_alloc_owned_mut_cell` in
@@ -1215,10 +1209,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                 // reach the caller's `a` binding).
                 if self.ref_param_slots.contains(slot) {
                     let ref_addr = self.builder.use_var(
-                        *self
-                            .locals
-                            .get(slot)
-                            .ok_or_else(|| format!("MirToIR: unknown local slot {}", slot))?,
+                        self.local_var(*slot)?,
                     );
                     self.builder.ins().store(MemFlags::new(), val, ref_addr, 0);
                     return Ok(());
@@ -1253,10 +1244,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                     // the FFI helper which performs `std::ptr::write` at
                     // the cell's native width. No NaN-boxing crosses the
                     // cell boundary.
-                    let var = *self
-                        .locals
-                        .get(slot)
-                        .ok_or_else(|| format!("MirToIR: unknown local slot {}", slot))?;
+                    let var = self.local_var(*slot)?;
                     let cell_ptr = self.builder.use_var(var);
                     let native = self.unbox_for_cell_write(val, kind);
                     let write_func = self.owned_mut_write_func(kind);
@@ -1270,10 +1258,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                 //
                 // SAFETY: see `read_place` Shared branch.
                 if let Some(kind) = self.shared_capture_slots.get(slot).copied() {
-                    let var = *self
-                        .locals
-                        .get(slot)
-                        .ok_or_else(|| format!("MirToIR: unknown local slot {}", slot))?;
+                    let var = self.local_var(*slot)?;
                     let cell_ptr = self.builder.use_var(var);
                     self.emit_shared_payload_write(cell_ptr, val, kind);
                     return Ok(());
@@ -1287,10 +1272,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                 // Shared captures.
                 if self.shared_local_slots.contains_key(slot) {
                     let kind = self.validated_shared_local_kind(*slot)?;
-                    let var = *self
-                        .locals
-                        .get(slot)
-                        .ok_or_else(|| format!("MirToIR: unknown local slot {}", slot))?;
+                    let var = self.local_var(*slot)?;
                     let cell_ptr = self.builder.use_var(var);
                     self.emit_shared_payload_write(cell_ptr, val, kind);
                     return Ok(());
@@ -1313,6 +1295,18 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                 // unproven destination surface-and-stops.
                 let target_kind = super::types::slot_kind_for_local(&self.slot_kinds, slot.0)
                     .ok_or_else(|| {
+                        if std::env::var_os("SHAPE_DEBUG_SLOT_KINDS").is_some() {
+                            eprintln!(
+                                "[slot-kinds] fn={} unproven_slot={} kinds={:?}",
+                                self.mir.name, slot.0, self.slot_kinds
+                            );
+                            for b in &self.mir.blocks {
+                                eprintln!("[slot-kinds]   term {:?}", b.terminator.kind);
+                                for s in &b.statements {
+                                    eprintln!("[slot-kinds]   stmt {:?}", s.kind);
+                                }
+                            }
+                        }
                         format!(
                             "MirToIR: SURFACE — destination slot {} has no compile-time-proven \
                              NativeKind, so there is no sound width/representation to store into \
@@ -1322,10 +1316,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                             slot.0
                         )
                     })?;
-                let var = *self
-                    .locals
-                    .get(slot)
-                    .ok_or_else(|| format!("MirToIR: unknown local slot {}", slot))?;
+                let var = self.local_var(*slot)?;
                 // Convert value to match the slot's declared Cranelift type.
                 let converted = self.ensure_kind(val, target_kind);
                 self.builder.def_var(var, converted);
@@ -1480,11 +1471,15 @@ impl<'a, 'b> MirToIR<'a, 'b> {
         // Only null the root local for simple locals.
         // Field/Index moves don't null the entire container.
         if matches!(place, Place::Local(_)) {
-            let var = self
-                .locals
-                .get(&slot)
-                .ok_or_else(|| format!("MirToIR: unknown local slot {}", slot))?;
-            let kind = self.slot_kind_of(slot);
+            // #236 / ADR-020 §3.3: an undeclared slot carries unit or has no
+            // proven kind, and either way holds nothing to null out. The
+            // `slot_kind_of` that used to stand here fabricated `Int64` for
+            // exactly those slots and then wrote a zero at the wrong width.
+            let Some(var) = self.locals.get(&slot) else {
+                return Ok(());
+            };
+            let kind = super::types::slot_kind_for_local(&self.slot_kinds, slot.0)
+                .ok_or_else(|| self.local_var(slot).unwrap_err())?;
             let null = match kind {
                 shape_vm::type_tracking::NativeKind::Float64 => self.builder.ins().f64const(0.0),
                 shape_vm::type_tracking::NativeKind::Int32

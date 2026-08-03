@@ -423,7 +423,7 @@ impl JITCompiler {
                 mir_compiler.validate_shared_cell_kinds()?;
                 // Set up blocks and locals, then store function parameters.
                 mir_compiler.create_blocks();
-                mir_compiler.declare_locals();
+                mir_compiler.declare_locals()?;
 
                 // Store function parameters to MIR local variables.
                 // MIR slot layout: [return_slot(0), param0(1), param1(2), ..., locals...]
@@ -433,7 +433,7 @@ impl JITCompiler {
                 let param_slots = &mir_data.mir.param_slots;
 
                 // Initialize ALL locals with type-appropriate defaults.
-                mir_compiler.initialize_locals();
+                mir_compiler.initialize_locals()?;
 
                 // Session 1 Commit 3: allocate Arc<SharedCell>s for
                 // every SharedCow local slot (outer-scope `var` bindings
@@ -458,7 +458,7 @@ impl JITCompiler {
                     let native_idx = param_idx + 1; // +1 for ctx_ptr
                     if native_idx < entry_params.len() {
                         if let Some(&var) = mir_compiler.locals.get(&mir_slot) {
-                            let kind = mir_compiler.local_storage_kind(mir_slot);
+                            let kind = mir_compiler.local_storage_kind(mir_slot)?;
                             let param_val = entry_params[native_idx];
                             let converted = match kind {
                                 shape_vm::type_tracking::NativeKind::Float64 => mir_compiler

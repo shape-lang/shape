@@ -816,10 +816,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
             // Bypass the lock-gated read in `read_place` and produce the raw
             // pointer bits held in either carrier origin. The Shared branch in
             // `emit_heap_closure` immediately retains this exact cell pointer.
-            let var = *self
-                .locals
-                .get(&slot)
-                .ok_or_else(|| format!("MirToIR: unknown local slot {}", slot))?;
+            let var = self.local_var(slot)?;
             return Ok(self.builder.use_var(var));
         }
         self.compile_operand(operand)
@@ -1034,10 +1031,7 @@ impl<'a, 'b> MirToIR<'a, 'b> {
         // suppress this required release.
         if let Place::Local(slot_id) = place {
             if self.shared_local_slots.contains_key(slot_id) {
-                let var = *self
-                    .locals
-                    .get(slot_id)
-                    .ok_or_else(|| format!("MirToIR: unknown local slot {}", slot_id))?;
+                let var = self.local_var(*slot_id)?;
                 let cell_ptr = self.builder.use_var(var);
                 self.builder
                     .ins()
