@@ -63,6 +63,7 @@ pub enum TypedFieldValue {
 }
 
 // Module declarations
+pub mod any_migration;
 pub mod builtin_schemas;
 pub mod current;
 pub mod enum_support;
@@ -73,6 +74,7 @@ pub mod registry;
 pub mod schema;
 
 // Re-export public types for backward compatibility
+pub use any_migration::AnyToken;
 pub use builtin_schemas::BuiltinSchemaIds;
 pub use current::{
     SyncRegistryScope, current_registry, default_registry, try_current_registry, with_async_scope,

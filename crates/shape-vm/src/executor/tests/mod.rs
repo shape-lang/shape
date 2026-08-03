@@ -886,7 +886,10 @@ fn test_object_operations() {
     let mut program = BytecodeProgram::default();
     let schema_id = program.type_schema_registry.register_type(
         "__test_obj_x",
-        vec![("x".to_string(), shape_runtime::type_schema::FieldType::Any)],
+        vec![(
+            "x".to_string(),
+            shape_runtime::type_schema::any_migration::test_fixture(),
+        )],
     );
     let schema_u16 = u16::try_from(schema_id).expect("schema id fits in u16 for test");
     program.instructions = vec![

@@ -202,7 +202,7 @@ impl BytecodeCompiler {
 
     pub(super) fn field_type_has_fixed_field_ref_kind(field_type: &FieldType) -> bool {
         match field_type {
-            FieldType::Any | FieldType::Option(_) => false,
+            FieldType::Any(_) | FieldType::Option(_) => false,
             FieldType::F64
             | FieldType::I64
             | FieldType::Bool

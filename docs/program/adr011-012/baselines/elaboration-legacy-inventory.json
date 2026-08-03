@@ -24,7 +24,7 @@
     ]
   },
   "step": "docs/design/typed-comptime/adr011-012-execution-rulings.md — ten required steps, step 4",
-  "source_revision": "7ded3a48e98d81f0f051ed78130645e8ba8d5d14",
+  "source_revision": "1bd4ee481f557f24bd3b391ecac7bbce0802901b",
   "regenerate_with": "node scripts/generate-adr011-012-legacy-baselines.mjs --ticket 134",
   "check_with": "node scripts/check-adr011-012-legacy-baselines.mjs --ticket 134",
   "direction_rule": "Monotonic non-increasing. A set count may fall (migration progress) and may never rise. A new owner path is growth even when the total is unchanged, because it is a new surface carrying old authority.",
@@ -32,9 +32,9 @@
     "source_revision",
     "description"
   ],
-  "total_count": 1063,
+  "total_count": 1069,
   "total_count_note": "Sum of the set counts. Sets may deliberately overlap (a narrowly scoped set can re-count sites a broader set already counts), so this is a ratchet aggregate for reporting movement — never a count of distinct legacy sites.",
-  "sets_sha256": "49a2c46947d1dca553555947a5f45c1d92f1c4980076650308a50812a74a4cc0",
+  "sets_sha256": "85c4813d8d832d818a50b75d4245e2d17bde56333f9f7871c06e689dc7df0ce1",
   "sets": [
     {
       "id": "universal-comptime-target",
@@ -279,16 +279,18 @@
     {
       "id": "any-typed-carriers",
       "category": "string descriptors",
-      "description": "`FieldType::Any` carrier sites — the untyped hook/descriptor payload ADR-012 replaces with typed per-layer state. Not every occurrence is an annotation carrier; the ratchet's claim is that the total may not grow.",
+      "description": "`FieldType::Any` carrier sites — the untyped hook/descriptor payload ADR-012 replaces with typed per-layer state. Not every occurrence is an annotation carrier; the ratchet's claim is that the total may not grow. #235 day-one (2026-08-02) privatized construction behind `type_schema::any_migration`, so the pattern counts that module's named constructors too: a site that mints an `Any` through `any_migration::class_a_inference_gap()` is exactly as much a carrier as one that used to write the variant literally, and counting only the literal spelling would have booked the privatization itself as a ~60-site shrink.",
       "scope": [
         "crates",
         "bin",
         "tools",
         "extensions"
       ],
-      "exclude": [],
-      "pattern": "FieldType::Any",
-      "count": 223,
+      "exclude": [
+        "crates/shape-runtime/src/type_schema/any_migration.rs"
+      ],
+      "pattern": "FieldType::Any|any_migration::",
+      "count": 229,
       "owner_count": 36,
       "owners": [
         {
@@ -317,11 +319,11 @@
         },
         {
           "path": "crates/shape-runtime/src/type_schema/field_types.rs",
-          "count": 22
+          "count": 27
         },
         {
           "path": "crates/shape-runtime/src/type_schema/mod.rs",
-          "count": 2
+          "count": 3
         },
         {
           "path": "crates/shape-runtime/src/type_schema/registry.rs",

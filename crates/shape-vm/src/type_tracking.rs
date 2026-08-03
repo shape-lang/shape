@@ -1223,7 +1223,12 @@ impl TypeTracker {
         // typed variant. Per audit §4.D.5 W17.2-C PROPAGATE.
         let typed_fields: Vec<(&str, FieldType)> = field_names
             .iter()
-            .map(|name| (*name, FieldType::Any))
+            .map(|name| {
+                (
+                    *name,
+                    shape_runtime::type_schema::any_migration::class_a_inference_gap(),
+                )
+            })
             .collect();
         self.register_inline_object_schema_typed(&typed_fields)
     }

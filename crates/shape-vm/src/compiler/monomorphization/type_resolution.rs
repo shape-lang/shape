@@ -3871,7 +3871,10 @@ fn field_type_to_concrete(ft: &shape_runtime::type_schema::FieldType) -> Option<
         }
         // Pointer-backed / dynamic field kinds have no static scalar
         // projection (ADR-006 §2.7.5) — fall through.
-        FieldType::Any | FieldType::Option(_) | FieldType::HashMap { .. } | FieldType::Set(_) => {
+        FieldType::Any(_)
+        | FieldType::Option(_)
+        | FieldType::HashMap { .. }
+        | FieldType::Set(_) => {
             return None;
         }
     })

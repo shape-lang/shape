@@ -116,7 +116,12 @@ pub(crate) fn back_patch_schema_ids(mir: &mut MirFunction, type_tracker: &mut Ty
                 // `__inline_obj_*` transitional row.
                 let typed_fields: Vec<(&str, shape_runtime::type_schema::FieldType)> = field_names
                     .iter()
-                    .map(|s| (s.as_str(), shape_runtime::type_schema::FieldType::Any))
+                    .map(|s| {
+                        (
+                            s.as_str(),
+                            shape_runtime::type_schema::any_migration::class_a_inference_gap(),
+                        )
+                    })
                     .collect();
                 // `register_inline_object_schema_typed` is idempotent: a
                 // second call with the same field ordering + types

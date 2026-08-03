@@ -74,7 +74,7 @@ impl BytecodeCompiler {
                 shape_value::KindedSlot::from_string(value)
             }
             (FieldType::Bool, Literal::Bool(value)) => shape_value::KindedSlot::from_bool(*value),
-            (FieldType::Any | FieldType::Option(_), Literal::None) => {
+            (FieldType::Any(_) | FieldType::Option(_), Literal::None) => {
                 shape_value::KindedSlot::none()
             }
             _ => {
@@ -2444,7 +2444,12 @@ impl BytecodeCompiler {
 
         let fields: Vec<(String, FieldType)> = export_names
             .into_iter()
-            .map(|name| (name, FieldType::Any))
+            .map(|name| {
+                (
+                    name,
+                    shape_runtime::type_schema::any_migration::heterogeneous_stdlib_carrier(),
+                )
+            })
             .collect();
         // Allocate the synthetic `__mod_*` schema ID from the per-bytecode
         // registry's own counter, not the ambient (process-wide / per-Runtime)

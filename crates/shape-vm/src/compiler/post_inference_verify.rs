@@ -576,7 +576,7 @@ fn verify_schema(schema: &TypeSchema, errors: &mut Vec<ShapeError>) {
 /// FieldType variants are schema-layer descriptors only).
 fn field_type_contains_any(ft: &FieldType) -> bool {
     match ft {
-        FieldType::Any => true,
+        FieldType::Any(_) => true,
         FieldType::Array(inner) => field_type_contains_any(inner),
         FieldType::Option(inner) => field_type_contains_any(inner),
         // W17.3-4.2 — per-container recursion. Mirrors the Array /
@@ -709,7 +709,10 @@ mod tests {
             "Row",
             vec![
                 ("timestamp".to_string(), FieldType::Timestamp),
-                ("fields".to_string(), FieldType::Any),
+                (
+                    "fields".to_string(),
+                    shape_runtime::type_schema::any_migration::test_fixture(),
+                ),
             ],
         );
         reg.register(schema);
@@ -729,8 +732,14 @@ mod tests {
             "Delta",
         ] {
             let id = reg.allocate_id();
-            let schema =
-                TypeSchema::with_id(id, *name, vec![("contents".to_string(), FieldType::Any)]);
+            let schema = TypeSchema::with_id(
+                id,
+                *name,
+                vec![(
+                    "contents".to_string(),
+                    shape_runtime::type_schema::any_migration::test_fixture(),
+                )],
+            );
             reg.register(schema);
         }
         assert!(
@@ -750,9 +759,18 @@ mod tests {
             id,
             "__predecl_a_b_c",
             vec![
-                ("a".to_string(), FieldType::Any),
-                ("b".to_string(), FieldType::Any),
-                ("c".to_string(), FieldType::Any),
+                (
+                    "a".to_string(),
+                    shape_runtime::type_schema::any_migration::test_fixture(),
+                ),
+                (
+                    "b".to_string(),
+                    shape_runtime::type_schema::any_migration::test_fixture(),
+                ),
+                (
+                    "c".to_string(),
+                    shape_runtime::type_schema::any_migration::test_fixture(),
+                ),
             ],
         );
         reg.register(schema);
@@ -775,10 +793,15 @@ mod tests {
             id,
             "__inline_obj_0",
             vec![
-                ("state".to_string(), FieldType::Any),
+                (
+                    "state".to_string(),
+                    shape_runtime::type_schema::any_migration::test_fixture(),
+                ),
                 (
                     "event_log".to_string(),
-                    FieldType::Array(Box::new(FieldType::Any)),
+                    FieldType::Array(Box::new(
+                        shape_runtime::type_schema::any_migration::test_fixture(),
+                    )),
                 ),
             ],
         );
@@ -891,7 +914,10 @@ mod tests {
                 name,
                 vec![
                     ("variant".to_string(), FieldType::I64),
-                    ("payload".to_string(), FieldType::Any),
+                    (
+                        "payload".to_string(),
+                        shape_runtime::type_schema::any_migration::test_fixture(),
+                    ),
                 ],
             );
             reg.register(schema);
@@ -912,7 +938,14 @@ mod tests {
     fn negative_user_any_annotation_fires_e0900() {
         let mut reg = TypeSchemaRegistry::new();
         let id = reg.allocate_id();
-        let schema = TypeSchema::with_id(id, "T", vec![("x".to_string(), FieldType::Any)]);
+        let schema = TypeSchema::with_id(
+            id,
+            "T",
+            vec![(
+                "x".to_string(),
+                shape_runtime::type_schema::any_migration::test_fixture(),
+            )],
+        );
         reg.register(schema);
 
         let mut errors = Vec::new();
@@ -939,7 +972,10 @@ mod tests {
             id,
             "__inline_obj_42",
             vec![
-                ("f".to_string(), FieldType::Any),
+                (
+                    "f".to_string(),
+                    shape_runtime::type_schema::any_migration::test_fixture(),
+                ),
                 ("g".to_string(), FieldType::I64),
             ],
         );
@@ -970,8 +1006,14 @@ mod tests {
             id,
             "Person",
             vec![
-                ("name".to_string(), FieldType::Any),
-                ("age".to_string(), FieldType::Any),
+                (
+                    "name".to_string(),
+                    shape_runtime::type_schema::any_migration::test_fixture(),
+                ),
+                (
+                    "age".to_string(),
+                    shape_runtime::type_schema::any_migration::test_fixture(),
+                ),
             ],
         );
         reg.register(schema);
@@ -1006,7 +1048,10 @@ mod tests {
         let schema = TypeSchema::with_id(
             id,
             "MyUserType",
-            vec![("dynamic_field".to_string(), FieldType::Any)],
+            vec![(
+                "dynamic_field".to_string(),
+                shape_runtime::type_schema::any_migration::test_fixture(),
+            )],
         );
         reg.register(schema);
         // Post-W17.2-C: user-named schemas with bare Any fields fire
@@ -1041,7 +1086,10 @@ mod tests {
         let schema = TypeSchema::with_id(
             id,
             "__inline_obj_99",
-            vec![("dynamic_field".to_string(), FieldType::Any)],
+            vec![(
+                "dynamic_field".to_string(),
+                shape_runtime::type_schema::any_migration::test_fixture(),
+            )],
         );
         reg.register(schema);
         assert!(
@@ -1099,7 +1147,12 @@ mod tests {
         let schema = TypeSchema::with_id(
             id,
             "OptionalAnyField",
-            vec![("x".to_string(), FieldType::Option(Box::new(FieldType::Any)))],
+            vec![(
+                "x".to_string(),
+                FieldType::Option(Box::new(
+                    shape_runtime::type_schema::any_migration::test_fixture(),
+                )),
+            )],
         );
         reg.register(schema);
         let mut errors = Vec::new();
@@ -1183,7 +1236,7 @@ mod tests {
                 "tags".to_string(),
                 FieldType::HashMap {
                     key: Box::new(FieldType::String),
-                    value: Box::new(FieldType::Any),
+                    value: Box::new(shape_runtime::type_schema::any_migration::test_fixture()),
                 },
             )],
         );
@@ -1210,7 +1263,7 @@ mod tests {
             vec![(
                 "tags".to_string(),
                 FieldType::HashMap {
-                    key: Box::new(FieldType::Any),
+                    key: Box::new(shape_runtime::type_schema::any_migration::test_fixture()),
                     value: Box::new(FieldType::I64),
                 },
             )],
@@ -1234,7 +1287,12 @@ mod tests {
         let schema = TypeSchema::with_id(
             id,
             "SetOfAny",
-            vec![("ids".to_string(), FieldType::Set(Box::new(FieldType::Any)))],
+            vec![(
+                "ids".to_string(),
+                FieldType::Set(Box::new(
+                    shape_runtime::type_schema::any_migration::test_fixture(),
+                )),
+            )],
         );
         reg.register(schema);
         let mut errors = Vec::new();
@@ -1261,7 +1319,9 @@ mod tests {
                 "x".to_string(),
                 FieldType::Array(Box::new(FieldType::HashMap {
                     key: Box::new(FieldType::String),
-                    value: Box::new(FieldType::Set(Box::new(FieldType::Any))),
+                    value: Box::new(FieldType::Set(Box::new(
+                        shape_runtime::type_schema::any_migration::test_fixture(),
+                    ))),
                 })),
             )],
         );

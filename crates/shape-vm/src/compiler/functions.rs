@@ -1972,7 +1972,7 @@ impl BytecodeCompiler {
                                     .map(|f| {
                                         (
                                             f.name.as_str(),
-                                            shape_runtime::type_schema::FieldType::Any,
+                                            shape_runtime::type_schema::any_migration::class_a_inference_gap(),
                                         )
                                     })
                                     .collect();

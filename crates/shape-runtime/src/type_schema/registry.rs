@@ -408,7 +408,10 @@ impl TypeSchemaRegistry {
             "Row",
             vec![
                 ("timestamp".to_string(), FieldType::Timestamp),
-                ("fields".to_string(), FieldType::Any), // Dynamic fields
+                (
+                    "fields".to_string(),
+                    crate::type_schema::any_migration::heterogeneous_stdlib_carrier(),
+                ), // Dynamic fields
             ],
         );
 
@@ -452,7 +455,10 @@ impl TypeSchemaRegistry {
             "Row",
             vec![
                 ("timestamp".to_string(), FieldType::Timestamp),
-                ("fields".to_string(), FieldType::Any),
+                (
+                    "fields".to_string(),
+                    crate::type_schema::any_migration::heterogeneous_stdlib_carrier(),
+                ),
             ],
         );
 
@@ -578,7 +584,10 @@ impl TypeSchemaRegistry {
             "Row",
             vec![
                 ("timestamp".to_string(), FieldType::Timestamp),
-                ("fields".to_string(), FieldType::Any),
+                (
+                    "fields".to_string(),
+                    crate::type_schema::any_migration::heterogeneous_stdlib_carrier(),
+                ),
             ],
         );
 
@@ -721,7 +730,12 @@ impl TypeSchemaRegistry {
 
         let typed_fields: Vec<(String, FieldType)> = fields
             .iter()
-            .map(|name| (name.clone(), FieldType::Any))
+            .map(|name| {
+                (
+                    name.clone(),
+                    crate::type_schema::any_migration::class_f_runtime_synthesis(),
+                )
+            })
             .collect();
 
         let id = self.allocate_id();
@@ -764,7 +778,12 @@ impl TypeSchemaRegistry {
 
         let typed_fields: Vec<(String, FieldType)> = fields
             .iter()
-            .map(|name| (name.clone(), FieldType::Any))
+            .map(|name| {
+                (
+                    name.clone(),
+                    crate::type_schema::any_migration::class_f_runtime_synthesis(),
+                )
+            })
             .collect();
 
         let schema =
@@ -949,7 +968,10 @@ impl TypeSchemaBuilder {
 
     /// Add a dynamic/any field
     pub fn any_field(mut self, name: impl Into<String>) -> Self {
-        self.fields.push((name.into(), FieldType::Any));
+        self.fields.push((
+            name.into(),
+            crate::type_schema::any_migration::heterogeneous_stdlib_carrier(),
+        ));
         self.field_meta.push(vec![]);
         self
     }

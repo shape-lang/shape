@@ -29,7 +29,9 @@ pub(super) fn infer_field_type_from_expr(expr: &Expr) -> Option<FieldType> {
             // when the surrounding expression's expected type is known.
             // The post_inference_verify pass surfaces the inner Any
             // if it persists past the narrowing window.
-            Literal::None => Some(FieldType::Option(Box::new(FieldType::Any))),
+            Literal::None => Some(FieldType::Option(Box::new(
+                shape_runtime::type_schema::any_migration::unresolved_option_inner(),
+            ))),
             _ => None,
         },
         _ => None,
@@ -38,7 +40,7 @@ pub(super) fn infer_field_type_from_expr(expr: &Expr) -> Option<FieldType> {
 
 fn field_type_is_strictly_proven(ft: &FieldType) -> bool {
     match ft {
-        FieldType::Any => false,
+        FieldType::Any(_) => false,
         FieldType::Object(name) => name != "unknown",
         FieldType::Array(inner) | FieldType::Option(inner) | FieldType::Set(inner) => {
             field_type_is_strictly_proven(inner)
@@ -250,7 +252,7 @@ fn substitute_type_param_field_type(
         | FieldType::String
         | FieldType::Timestamp
         | FieldType::Decimal
-        | FieldType::Any
+        | FieldType::Any(_)
         | FieldType::I8
         | FieldType::U8
         | FieldType::I16
@@ -934,7 +936,9 @@ impl BytecodeCompiler {
             .iter()
             .filter_map(|e| match e {
                 ObjectEntry::Field { key, value, .. } => {
-                    let ft = infer_field_type_from_expr(value).unwrap_or(FieldType::Any);
+                    let ft = infer_field_type_from_expr(value).unwrap_or(
+                        shape_runtime::type_schema::any_migration::class_a_inference_gap(),
+                    );
                     Some((key.as_str(), ft))
                 }
                 ObjectEntry::Spread(_) => None,
@@ -950,7 +954,7 @@ impl BytecodeCompiler {
                 let ft = hoisted_type_lookup
                     .get(h.as_str())
                     .cloned()
-                    .unwrap_or(FieldType::Any);
+                    .unwrap_or(shape_runtime::type_schema::any_migration::class_a_inference_gap());
                 (h.as_str(), ft)
             }))
             .collect();

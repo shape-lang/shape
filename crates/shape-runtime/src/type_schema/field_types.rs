@@ -4,6 +4,7 @@
 //! including primitives (F64, I64, Bool), composite types (String, Array),
 //! and dynamic types (Any).
 
+use crate::type_schema::any_migration::AnyToken;
 use shape_value::{HeapKind, NativeKind};
 
 /// Error returned when a `FieldType` cannot be projected to a strict-typed
@@ -34,7 +35,12 @@ impl std::fmt::Display for FieldKindError {
 impl std::error::Error for FieldKindError {}
 
 /// Type of a field in a schema
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+///
+/// `Clone` is hand-written below rather than derived: see [`AnyToken`] and
+/// `crate::type_schema::any_migration` for why the `Any` payload must not be
+/// `Clone`/`Copy` (issue #235 day-one gate — a derived `Clone` would let any
+/// site launder a token out of an existing `Any` and mint new ones).
+#[derive(Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum FieldType {
     /// 64-bit floating point number
     F64,
@@ -52,8 +58,13 @@ pub enum FieldType {
     Object(String),
     /// Decimal (stored as f64 for TypedObject, reconstructed on read)
     Decimal,
-    /// Any/dynamic type (uses HashMap access)
-    Any,
+    /// Unresolved field type. **Being deleted** — issue #235, owner ruling
+    /// 2026-08-02 (grill R-G4): the schema tier has no unknown state, so a
+    /// schema can only be minted from resolved types. The [`AnyToken`]
+    /// payload makes this variant unconstructible outside
+    /// [`crate::type_schema::any_migration`], which is the whole point:
+    /// no new site can be written while the remaining classes are retired.
+    Any(AnyToken),
     /// Width-specific integer types (stored as i64 in NaN-boxed slot, truncated on write)
     I8,
     U8,
@@ -124,6 +135,42 @@ pub enum FieldType {
     Set(Box<FieldType>),
 }
 
+// #235 day-one gate. Derived `Clone` would require `AnyToken: Clone`, and a
+// public `Clone` on the token is a construction path: a site holding any
+// `Any` value could write `FieldType::Any(tok.clone())` and mint a new one.
+// The token is therefore neither `Clone` nor `Copy`, and cloning a
+// `FieldType::Any` routes back through the migration module's single mint.
+// The exhaustive match is the safety net: a new variant will not compile
+// until it is handled here.
+impl Clone for FieldType {
+    fn clone(&self) -> Self {
+        match self {
+            FieldType::F64 => FieldType::F64,
+            FieldType::I64 => FieldType::I64,
+            FieldType::Bool => FieldType::Bool,
+            FieldType::String => FieldType::String,
+            FieldType::Timestamp => FieldType::Timestamp,
+            FieldType::Array(inner) => FieldType::Array(inner.clone()),
+            FieldType::Object(name) => FieldType::Object(name.clone()),
+            FieldType::Decimal => FieldType::Decimal,
+            FieldType::Any(_) => crate::type_schema::any_migration::clone_of_existing(),
+            FieldType::I8 => FieldType::I8,
+            FieldType::U8 => FieldType::U8,
+            FieldType::I16 => FieldType::I16,
+            FieldType::U16 => FieldType::U16,
+            FieldType::I32 => FieldType::I32,
+            FieldType::U32 => FieldType::U32,
+            FieldType::U64 => FieldType::U64,
+            FieldType::Option(inner) => FieldType::Option(inner.clone()),
+            FieldType::HashMap { key, value } => FieldType::HashMap {
+                key: key.clone(),
+                value: value.clone(),
+            },
+            FieldType::Set(inner) => FieldType::Set(inner.clone()),
+        }
+    }
+}
+
 impl std::fmt::Display for FieldType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -133,7 +180,7 @@ impl std::fmt::Display for FieldType {
             FieldType::String => write!(f, "string"),
             FieldType::Timestamp => write!(f, "timestamp"),
             FieldType::Decimal => write!(f, "decimal"),
-            FieldType::Any => write!(f, "any"),
+            FieldType::Any(_) => write!(f, "any"),
             FieldType::Array(inner) => write!(f, "{}[]", inner),
             FieldType::Object(name) => write!(f, "{}", name),
             FieldType::I8 => write!(f, "i8"),
@@ -170,7 +217,7 @@ impl FieldType {
         if self == value_type {
             return true;
         }
-        if matches!(self, FieldType::Any) || matches!(value_type, FieldType::Any) {
+        if matches!(self, FieldType::Any(_)) || matches!(value_type, FieldType::Any(_)) {
             return true;
         }
         // Allow implicit widening: int → number, int → decimal, width int → I64/F64
@@ -195,7 +242,7 @@ impl FieldType {
             FieldType::Array(_) => 8,  // Pointer
             FieldType::Object(_) => 8, // Pointer
             FieldType::Decimal => 8,   // Stored as f64
-            FieldType::Any => 8,       // NaN-boxed value
+            FieldType::Any(_) => 8,    // NaN-boxed value
             FieldType::I8
             | FieldType::U8
             | FieldType::I16
@@ -233,7 +280,7 @@ impl FieldType {
     pub fn is_potentially_callable(&self) -> bool {
         matches!(
             self,
-            FieldType::Any
+            FieldType::Any(_)
                 | FieldType::Object(_)
                 | FieldType::Array(_)
                 | FieldType::Option(_)
@@ -272,7 +319,7 @@ impl FieldType {
             Self::I32 => Ok(NativeKind::Int32),
             Self::U32 => Ok(NativeKind::UInt32),
             Self::U64 => Ok(NativeKind::UInt64),
-            Self::Any => Err(FieldKindError::AnyTypeNotStrictlyTyped),
+            Self::Any(_) => Err(FieldKindError::AnyTypeNotStrictlyTyped),
             // Option<T>: the schema layer's discriminator is `Option`,
             // but slot storage carries the per-value kind via the
             // parallel `field_kinds` track at storage construction
@@ -547,7 +594,7 @@ mod tests {
         assert_eq!(FieldType::Timestamp.size(), 8);
         assert_eq!(FieldType::Array(Box::new(FieldType::F64)).size(), 8);
         assert_eq!(FieldType::Object("Candle".to_string()).size(), 8);
-        assert_eq!(FieldType::Any.size(), 8);
+        assert_eq!(crate::type_schema::any_migration::test_fixture().size(), 8);
         // W17.2-B: Option<T> NaN-boxed slot; per-value kind from
         // parallel-`field_kinds` track per ADR-006 §2.7.7.
         assert_eq!(FieldType::Option(Box::new(FieldType::F64)).size(), 8);
@@ -657,7 +704,7 @@ mod tests {
         // is_optional=true + Integer (was Any)
         let ft1 = semantic_to_field_type(&SemanticType::Integer, true);
         assert!(
-            !matches!(ft1, FieldType::Any),
+            !matches!(ft1, FieldType::Any(_)),
             "is_optional=true must not return Any; got {:?}",
             ft1
         );
@@ -666,7 +713,7 @@ mod tests {
         let ft2 =
             semantic_to_field_type(&SemanticType::Option(Box::new(SemanticType::Bool)), false);
         assert!(
-            !matches!(ft2, FieldType::Any),
+            !matches!(ft2, FieldType::Any(_)),
             "SemanticType::Option(_) must not return Any; got {:?}",
             ft2
         );
@@ -683,7 +730,7 @@ mod tests {
             other => panic!("expected Array, got {:?}", other),
         };
         assert!(
-            !matches!(unwrapped_array, FieldType::Any),
+            !matches!(unwrapped_array, FieldType::Any(_)),
             "Array<Option<Integer>> inner must not be Any; got {:?}",
             unwrapped_array
         );
@@ -881,7 +928,7 @@ mod tests {
             FieldType::String,
             FieldType::Timestamp,
             FieldType::Decimal,
-            FieldType::Any,
+            crate::type_schema::any_migration::test_fixture(),
             FieldType::I8,
             FieldType::U8,
             FieldType::I16,

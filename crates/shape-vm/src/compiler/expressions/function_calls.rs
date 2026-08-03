@@ -655,7 +655,7 @@ pub(crate) fn field_type_contract_annotation(
                 args: vec![elem],
             })
         }
-        FieldType::Any => None,
+        FieldType::Any(_) => None,
     }
 }
 
@@ -778,7 +778,7 @@ impl BytecodeCompiler {
             FieldType::Option(_)
             | FieldType::HashMap { .. }
             | FieldType::Set(_)
-            | FieldType::Any => return None,
+            | FieldType::Any(_) => return None,
         })
     }
 
@@ -1318,7 +1318,7 @@ impl BytecodeCompiler {
             .map(|field| {
                 (
                     field.name.as_str(),
-                    shape_runtime::type_schema::FieldType::Any,
+                    shape_runtime::type_schema::any_migration::class_a_inference_gap(),
                 )
             })
             .collect();
@@ -1387,7 +1387,12 @@ impl BytecodeCompiler {
 
         let typed_fields: Vec<(&str, FieldType)> = fields
             .iter()
-            .map(|(name, _)| (name.as_str(), FieldType::Any))
+            .map(|(name, _)| {
+                (
+                    name.as_str(),
+                    shape_runtime::type_schema::any_migration::class_a_inference_gap(),
+                )
+            })
             .collect();
         let schema_id = self
             .type_tracker

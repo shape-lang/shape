@@ -838,8 +838,14 @@ mod tests {
         let vmstate_schema = TypeSchema::new(
             "VmState",
             vec![
-                ("frames".to_string(), FieldType::Any),
-                ("module_bindings".to_string(), FieldType::Any),
+                (
+                    "frames".to_string(),
+                    shape_runtime::type_schema::any_migration::test_fixture(),
+                ),
+                (
+                    "module_bindings".to_string(),
+                    shape_runtime::type_schema::any_migration::test_fixture(),
+                ),
                 ("instruction_count".to_string(), FieldType::I64),
             ],
         );

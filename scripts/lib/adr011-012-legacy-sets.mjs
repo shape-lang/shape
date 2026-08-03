@@ -124,9 +124,14 @@ const ELABORATION_SETS = [
     id: "any-typed-carriers",
     category: "string descriptors",
     description:
-      "`FieldType::Any` carrier sites — the untyped hook/descriptor payload ADR-012 replaces with typed per-layer state. Not every occurrence is an annotation carrier; the ratchet's claim is that the total may not grow.",
+      "`FieldType::Any` carrier sites — the untyped hook/descriptor payload ADR-012 replaces with typed per-layer state. Not every occurrence is an annotation carrier; the ratchet's claim is that the total may not grow. #235 day-one (2026-08-02) privatized construction behind `type_schema::any_migration`, so the pattern counts that module's named constructors too: a site that mints an `Any` through `any_migration::class_a_inference_gap()` is exactly as much a carrier as one that used to write the variant literally, and counting only the literal spelling would have booked the privatization itself as a ~60-site shrink.",
     scope: SOURCE_SCOPE,
-    pattern: "FieldType::Any",
+    // The mint itself is excluded — `any_migration.rs` is the one module
+    // allowed to construct the variant, and it names its own constructors
+    // in doc links. Counting it would book the gate's own documentation as
+    // new legacy surface. Everything that *calls* the mint is still counted.
+    exclude: ["crates/shape-runtime/src/type_schema/any_migration.rs"],
+    pattern: "FieldType::Any|any_migration::",
   },
   {
     id: "raw-generated-name-minting",

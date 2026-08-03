@@ -2949,7 +2949,12 @@ fn ensure_module_object_schema(
 
     let fields: Vec<(String, shape_runtime::type_schema::FieldType)> = export_names
         .into_iter()
-        .map(|name| (name, shape_runtime::type_schema::FieldType::Any))
+        .map(|name| {
+            (
+                name,
+                shape_runtime::type_schema::any_migration::heterogeneous_stdlib_carrier(),
+            )
+        })
         .collect();
     bytecode
         .type_schema_registry

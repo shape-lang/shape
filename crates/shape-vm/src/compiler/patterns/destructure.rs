@@ -39,7 +39,12 @@ impl BytecodeCompiler {
         // Verification-pass safety net catches via `__inline_obj_*`.
         let typed_fields: Vec<(&str, shape_runtime::type_schema::FieldType)> = explicit_fields
             .iter()
-            .map(|n| (*n, shape_runtime::type_schema::FieldType::Any))
+            .map(|n| {
+                (
+                    *n,
+                    shape_runtime::type_schema::any_migration::class_a_inference_gap(),
+                )
+            })
             .collect();
         Some(
             self.type_tracker
@@ -72,7 +77,12 @@ impl BytecodeCompiler {
         // available. Route through typed variant with FieldType::Any.
         let typed_fields: Vec<(&str, shape_runtime::type_schema::FieldType)> = ordered_fields
             .iter()
-            .map(|n| (*n, shape_runtime::type_schema::FieldType::Any))
+            .map(|n| {
+                (
+                    *n,
+                    shape_runtime::type_schema::any_migration::class_a_inference_gap(),
+                )
+            })
             .collect();
         Some(
             self.type_tracker
@@ -147,7 +157,7 @@ impl BytecodeCompiler {
             .map(Self::type_annotation_to_field_type);
 
         match (schema_field, contract_field) {
-            (Some(shape_runtime::type_schema::FieldType::Any), Some(contract)) => Some(contract),
+            (Some(shape_runtime::type_schema::FieldType::Any(_)), Some(contract)) => Some(contract),
             (Some(schema), _) => Some(schema),
             (None, Some(contract)) => Some(contract),
             (None, None) => None,
@@ -1175,7 +1185,12 @@ impl BytecodeCompiler {
                 let fields: Vec<String> = obj_fields.iter().map(|f| f.name.clone()).collect();
                 let typed_fields: Vec<(&str, shape_runtime::type_schema::FieldType)> = obj_fields
                     .iter()
-                    .map(|f| (f.name.as_str(), shape_runtime::type_schema::FieldType::Any))
+                    .map(|f| {
+                        (
+                            f.name.as_str(),
+                            shape_runtime::type_schema::any_migration::class_a_inference_gap(),
+                        )
+                    })
                     .collect();
                 let schema_id = self
                     .type_tracker
@@ -1210,7 +1225,7 @@ impl BytecodeCompiler {
                         let typed_fields: Vec<(&str, shape_runtime::type_schema::FieldType)> =
                             fields
                                 .iter()
-                                .map(|n| (n.as_str(), shape_runtime::type_schema::FieldType::Any))
+                                .map(|n| (n.as_str(), shape_runtime::type_schema::any_migration::class_a_inference_gap()))
                                 .collect();
                         self.type_tracker
                             .register_inline_object_schema_typed(&typed_fields)

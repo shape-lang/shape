@@ -236,7 +236,12 @@ impl TypeSchema {
         for i in 0..max_payload {
             let field_name = format!("__payload_{}", i);
             let offset = 8 + (i as usize * 8);
-            fields.push(FieldDef::new(&field_name, FieldType::Any, offset, i + 1));
+            fields.push(FieldDef::new(
+                &field_name,
+                crate::type_schema::any_migration::enum_payload_slot(),
+                offset,
+                i + 1,
+            ));
             field_map.insert(field_name, i as usize + 1);
         }
 
@@ -465,7 +470,7 @@ fn is_compatible(field_type: &FieldType, arrow_type: &DataType) -> bool {
         (FieldType::Timestamp, DataType::Int64) => true, // timestamps are i64 internally
         (FieldType::Decimal, DataType::Float64) => true, // Decimal stored as f64
         (FieldType::Decimal, DataType::Int64) => true,   // numeric promotion
-        (FieldType::Any, _) => true,                     // Any matches everything
+        (FieldType::Any(_), _) => true,                  // Any matches everything
         _ => false,
     }
 }
@@ -739,7 +744,10 @@ mod tests {
                 ("f32_as_f64".to_string(), FieldType::F64),
                 ("i32_as_i64".to_string(), FieldType::I64),
                 ("ts".to_string(), FieldType::Timestamp),
-                ("any_field".to_string(), FieldType::Any),
+                (
+                    "any_field".to_string(),
+                    crate::type_schema::any_migration::test_fixture(),
+                ),
             ],
         );
 

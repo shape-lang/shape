@@ -1448,7 +1448,7 @@ impl BytecodeCompiler {
 
     fn field_type_is_strictly_proven(field_type: &FieldType) -> bool {
         match field_type {
-            FieldType::Any => false,
+            FieldType::Any(_) => false,
             FieldType::Object(name) => name != "unknown",
             FieldType::Array(inner) | FieldType::Option(inner) | FieldType::Set(inner) => {
                 Self::field_type_is_strictly_proven(inner)
