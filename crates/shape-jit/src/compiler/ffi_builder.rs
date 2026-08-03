@@ -73,7 +73,9 @@ impl JITCompiler {
             call_value_ptr: r!("jit_call_value_ptr"),
             call_value_f64: r!("jit_call_value_f64"),
             call_value_void: r!("jit_call_value_void"),
-            call_method: r!("jit_call_method"),
+            call_method_i64: r!("jit_call_method_i64"),
+            call_method_ptr: r!("jit_call_method_ptr"),
+            call_method_f64: r!("jit_call_method_f64"),
 
             // Arrays
             //

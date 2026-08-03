@@ -815,16 +815,23 @@ enum Outcome {
 /// produced a value of a different ABI class than the destination can hold.
 /// That is a producing-site bug, not a runtime condition to absorb — the
 /// generalized form of the `ClosurePlaceholder` kind/carrier mismatch (§6.1).
+///
+/// `entry` is the entry-point family the caller belongs to (`jit_call_value` /
+/// `jit_call_method`). Shared by both converted channels deliberately: the
+/// check is the same §4.2 O2 assertion on both, and a second copy would be a
+/// second place for the wording and the `pending_call_error` write to drift.
 #[cold]
-fn abort_class_disagreement(
+pub(crate) fn abort_class_disagreement(
     ctx: *mut JITContext,
+    entry: &str,
     expected: crate::return_abi_class::ReturnAbiClass,
     actual: shape_value::NativeKind,
 ) {
     set_jit_runtime_error(format!(
-        "jit_call_value_{}: the callee returned a value of kind {:?}, which is not in the \
+        "{}_{}: the call returned a value of kind {:?}, which is not in the \
          {:?} ABI class the destination slot's proven kind selected. The producing site \
          stamped one of the two; native execution aborted (ADR-020 §4.1 / §4.2 O2).",
+        entry,
         expected.suffix(),
         actual,
         expected
@@ -870,7 +877,7 @@ pub extern "C" fn jit_call_value_i64(ctx: *mut JITContext) -> i64 {
     match call_value_kinded(ctx) {
         Outcome::Value(k) => {
             if !classes_agree(CLASS, k.kind) {
-                abort_class_disagreement(ctx, CLASS, k.kind);
+                abort_class_disagreement(ctx, "jit_call_value", CLASS, k.kind);
                 // `k` drops here, retiring the share it owns — the value never
                 // reaches the destination, so nothing else can retire it.
                 return ERROR_PLACEHOLDER_BITS as i64;
@@ -903,7 +910,7 @@ pub extern "C" fn jit_call_value_f64(ctx: *mut JITContext) -> f64 {
     match call_value_kinded(ctx) {
         Outcome::Value(k) => {
             if !classes_agree(CLASS, k.kind) {
-                abort_class_disagreement(ctx, CLASS, k.kind);
+                abort_class_disagreement(ctx, "jit_call_value", CLASS, k.kind);
                 return 0.0;
             }
             let bits = k.slot.raw();
@@ -930,7 +937,7 @@ pub extern "C" fn jit_call_value_ptr(ctx: *mut JITContext) -> *mut std::ffi::c_v
     match call_value_kinded(ctx) {
         Outcome::Value(k) => {
             if !classes_agree(CLASS, k.kind) {
-                abort_class_disagreement(ctx, CLASS, k.kind);
+                abort_class_disagreement(ctx, "jit_call_value", CLASS, k.kind);
                 return std::ptr::null_mut();
             }
             let bits = k.slot.raw();

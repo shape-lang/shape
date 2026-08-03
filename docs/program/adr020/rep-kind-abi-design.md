@@ -1655,6 +1655,200 @@ bail is that `DateTime` used as a function value has NO fid in the JIT
 function table at all, and this machinery consumes fids rather than minting
 them. Both deopt cleanly; neither was narrowed to make a number move.
 
+### 6.9 The METHOD channel, CONVERTED 2026-08-03 — and the DateTime blocker is not a missing fid
+
+Acceptance **3/5 → 4/5**. `SYN__string-scalar-method-native` executes 3
+native dispatches and prints `5` / `2`, matching `--mode vm`. Measured by the
+implementing lane on a release binary built from its own tree; NOT
+independently re-derived.
+
+**The same defect as §6.6, in its other half — with one difference.** The
+value channel's `-> u64` was not discarding a kind; `Return` lowering had
+never stamped one (§6.6). The method channel's `-> u64` *was* discarding one.
+`VirtualMachine::jit_trampoline_call_method` ended:
+
+```rust
+let bits = result.slot.raw();
+std::mem::forget(result);
+Ok(bits)          // "the kind is discarded — the JIT caller knows the
+                  //  static return kind from the callee method signature"
+```
+
+The caller did not know it, because the signature had nowhere to put one.
+`dispatch_method_kinded` returns a `KindedSlot`; the kind died one line before
+the FFI boundary. Returning the carrier intact is the whole conversion, and
+the three monomorphs are that plus a class assertion.
+
+**Three ABI classes, not four.** `jit_call_method_{i64,ptr,f64}`. There is no
+`_void`: `dispatch_method_kinded` returns a value on every success path, and
+`infer_unit_slots` only unit-classifies destinations of
+`MirConstant::Function` callees — never a `MirConstant::Method` one. A fourth
+entry point would sit unreferenced, which CHECK 22's R3 forbids independently.
+`return_abi_class.rs` is REUSED, not duplicated: a second classifier is a
+second place for the kind→ABI mapping to drift from the destination
+variable's declared Cranelift type, which is the one thing anchoring on
+`cranelift_type_for_slot` exists to prevent.
+
+**STAGE-M1, STAGE-StringJIT and STAGE-F3 are retired by deletion.** All three
+were emit-site guards that refused to compile a whole function, and all three
+named this same cause in their own text. What replaces them is not a bypass:
+the receivers they named now delegate to the VM's carrier-correct PHF
+registry, so the condition they detected no longer arises. The load-bearing
+detail is the String carrier — a `NativeKind::String` slot holds
+`Arc::into_raw(Arc<String>)` (`ownership.rs::retain_func_for_kind`'s String
+arm is `Arc::increment_strong_count::<String>`), which is exactly what
+`STRING_METHODS` reads and exactly what the JIT-format `call_string_method`
+does not. Routing String to the legacy cascade was the mismatch; STAGE-M1 and
+STAGE-StringJIT were its two symptoms.
+
+**One classifier, and the correspondence hazard is removed rather than
+documented.** `delegates_to_vm_trampoline` replaces both the shell's inline
+130-line `match` and the guards' independent copy of that same decision in
+another module. §6.8 had to *avoid inheriting* a positional correspondence it
+could not verify; here the two copies could simply be collapsed into one.
+Three unit tests pin the flip, including a negative (`UInt64` and
+`TypedObject` must NOT delegate) so the set cannot degenerate to
+`fn(_) -> true`.
+
+**Every value the shell returns now carries a PRODUCER-stamped kind**, from
+one of exactly two sources: the VM's dispatch result, or a JIT-compiled UFCS
+callee's own §2.7.7/Q9 return-slot stamp — read in `try_call_user_method`
+before the slot is reset, which §6.6's `Return`-lowering fix made possible.
+The JIT-format NaN-box cascade can supply neither, so a path that would hand
+back its bits deopts instead of labelling them. Labelling them `UInt64` was
+considered and refused: `UInt64` and `Int64` are the same ABI class, so
+`classes_agree` would have passed `f64::to_bits(2.0)` into an `Int64`
+destination — the exact silent-wrong STAGE-StringJIT existed to refuse,
+re-created one layer down. Four `TAG_NULL` returns that were value-shaped
+placeholders with no error recorded now set `pending_call_error` (§5's
+bare-bail shape).
+
+**The destination stamp came from the stdlib's own declared signatures, not a
+sixth allowlist arm.** With the guards gone, `SYN__string-scalar-method-native`
+moved to a new bail: the call destination had no proven kind. `length` is in
+`well_known_method_return_kind` and `indexOf` is not, for no reason either
+function can state — §4.0.3's five-times-patched allowlist, presenting its
+sixth patch. It was refused. `extend string { method indexOf(needle: string)
+-> int { ... } }` (`stdlib-src/core/string_methods.shape:28`) compiles to a
+function named `string.indexOf` carrying that declared return type, and
+`user_method_return_kind_from_receiver` already resolves `"{type}.{method}"`
+through the function-return conduit — it just could not name a receiver that
+was not a `ConcreteType::Struct`. Naming the three builtin receivers whose
+`extend` block has a fixed non-generic spelling (`string` / `int` / `number`)
+is all that was needed. The generic ones (`Vec<T>`, `HashMap<K, V>`,
+`Option<T>`, `Result<T, E>`, `Table<T>`) are deliberately absent: they have no
+one compiled name per receiver, and guessing a spelling would put a fabricated
+name where a proof belongs.
+
+#### Numbers, with the invocations
+
+```bash
+direnv exec /home/dev/dev/shape-lang cargo build --release --bin shape -j 8
+node tools/vmjit-diff/run-diff.mjs --fresh --report <path>.json
+direnv exec /home/dev/dev/shape-lang bash scripts/check-jit-native-acceptance.sh --report-only
+```
+
+- Corpus: **MATCH=487 DIVERGED=1 VM_FAIL=0 JIT_FAIL=0 TIMEOUT=0,
+  unexpected=0** — the divergence is the pinned nondeterministic
+  `ACC__comptime__pb3` (§6.8 records it flapping on both binaries).
+- Nativity: **90/488 (18.4%)**, 328 whole-program fallbacks, against 89/488
+  on the `f52f39d2` base. `jit-compile-error` 136 → 135.
+- Acceptance: **4/5**.
+- `check-no-dynamic` rows all FLAT at baseline (`TAG_BOOL_*` 51,
+  `box_function` 6, `is_inline_function` 7, `unbox_function_id` 2). No
+  growth, and **no honest shrink**: `call_string_method`'s `TAG_BOOL_*` arms
+  stay reachable from `UInt64`-carrier receivers, so deleting them belongs
+  with the dialect (§7), not here.
+
+**The nativity number understates the conversion and the corpus cannot fix
+that** — #260 again. A method call only benefits once its destination is
+stamped, and `well_known_method_return_kind` plus the three builtin receiver
+names is not the whole method surface. The corpus moved by one program; the
+acceptance fixture moved from a refused compile to 3 native dispatches with
+checked values. Quote the fixture, not the corpus, for this slice.
+
+#### `SYN__datetime-method-native` — the premise is refuted, and there is no fid to produce
+
+The brief for this slice inherited §6.6's framing: *"`DateTime` used as a
+function value with no fid in the JIT function table"*, and asked where the
+fid should come from — the method registry, or a synthesized wrapper.
+
+**Neither. `DateTime` is not a function, and the honest answer is that
+nothing should be minted.** Measured:
+
+```shape
+from std::core::intrinsics use { DateTime }
+let x = DateTime
+```
+```
+error[RUNTIME]: Undefined variable: DateTime.
+```
+
+`DateTime` is not a first-class value in Shape at all. The bytecode compiler
+never materialises it: `compile_type_namespace_builtin_call`
+(`compiler/expressions/function_calls.rs:3273`) recognises the pair
+`("DateTime", "parse")` at the CALL SITE and emits
+`BuiltinFunction::DateTimeParse`, with no receiver operand. Its own comment
+records that `Foo.new()` — parsed as a `MethodCall` on `Identifier("Foo")` —
+routes there.
+
+MIR lowering has no counterpart. `Expr::MethodCall` lowers its receiver with
+`lower_expr_as_moved_operand` (`mir/lowering/expr.rs:2640`), which reaches the
+`Expr::Identifier` arm; that arm treats any identifier which is not a local as
+a function-name-as-value and emits `MirConstant::Function(name)`
+(`expr.rs:2038`). Its comment already concedes the gap — *"A name that is NOT
+a function ... still lowers to `0` bits in `compile_constant`"* — which was
+true while that arm emitted `iconst 0`. The §6.2 carrier flip made it a hard
+SURFACE, because a `0` in a slot stamped `Ptr(HeapKind::Closure)` is a null
+lie (ADR-020 §3.4). The flip did not create the defect; it stopped the defect
+being silent.
+
+**So this is a producer disagreement, not a consumer gap: the MIR describes an
+operand the bytecode never produces.** That is §6.7's shape exactly — `?`
+lowering to a bare `Use` instead of `Rvalue::EnumPayload` — and it earns the
+same verdict. Patching the JIT to invent a fid, a closure record, or a
+placeholder for `DateTime` would put a fabricated callable behind a
+`Ptr(HeapKind::Closure)` stamp, which is the `ClosurePlaceholder` lie (§6.1)
+in a new costume. **Not taken.**
+
+**STAGE-F3's routing is implemented but has NO end-to-end control**, and that
+is worth stating plainly rather than claiming the guard is retired in
+practice. The seven typed-Arc receivers delegate (pinned by unit test), but no
+program this lane could construct reaches that dispatch: every route to a
+`DateTime` value goes through a static namespace constructor, which bails
+first. This is the same instrument problem §6.5 recorded for the
+constant-site retain — an absence measured with an instrument that cannot
+distinguish absence from non-arrival. It becomes constructible when the
+namespace lowering is fixed.
+
+**Options for whoever takes it, none of which this lane should pick
+unilaterally** — the choice is a language-level one about what a type
+namespace *is*, not a JIT detail:
+
+1. **Mirror the bytecode classifier in MIR lowering.** Give `Expr::MethodCall`
+   a static-namespace arm keyed the same way
+   `compile_type_namespace_builtin_call` is, lowering `DateTime.parse(x)` as a
+   direct builtin call with no receiver operand. Truest to what executes;
+   costs a second copy of the namespace table unless the two are made to share
+   one, and leaves the JIT needing a `DateTimeParse` builtin path (~6 DateTime
+   + ~8 Content + `Color.rgb` entries) or a clean per-function surface.
+2. **Give the namespace its own MIR spelling** (`MirConstant::TypeNamespace`),
+   so no consumer can mistake it for a callable. Cheap, honest, and it makes
+   the JIT's refusal name the real thing; but it only relabels the bail unless
+   a dispatch path follows, and the VM has no namespace receiver in its
+   runtime model to delegate to.
+3. **Fix the `Expr::Identifier` arm's classification.** It emits
+   `MirConstant::Function` for *any* non-local identifier and cannot tell a
+   function from a type name. Narrowing it to names that are actually
+   functions would fix this family at the root — including whatever else it
+   currently mislabels — but MIR lowering does not have the function table in
+   scope today.
+
+Option 1 is the one that matches what the machine does; option 3 is the one
+that fixes the class. Either is a producer-side slice with its own evidence,
+and should be dispatched as one rather than folded in under time pressure —
+which is the ruling §6.7 already earned for this exact shape.
+
 ---
 
 ## 7. The third carrier

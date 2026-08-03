@@ -1368,7 +1368,7 @@ impl VirtualMachine {
     }
 
     /// Trampoline entry: dispatch a method call on a kinded receiver +
-    /// kinded args, returning the result as raw `u64` bits.
+    /// kinded args, returning the result as a `KindedSlot`.
     ///
     /// **W12-jit-call-method-shell-rebuild (Phase 3 cluster-0 Round 10 /
     /// 8B.2 close).** Sibling to [`jit_trampoline_call_closure`]; same
@@ -1403,11 +1403,21 @@ impl VirtualMachine {
     /// retain ownership of the JIT-pre-incremented shares throughout
     /// dispatch. When the carriers `Drop` at end of scope, each kind's
     /// `drop_with_kind` releases its share — balancing the JIT-side
-    /// retain-before-crossing pattern. The returned `KindedSlot`'s share
-    /// is transferred back to the JIT caller as raw u64 bits via
-    /// `mem::forget`; the kind is discarded — the JIT caller knows the
-    /// static return kind from the callee method signature at the
-    /// §2.7.5 stamp-at-compile-time producing site.
+    /// retain-before-crossing pattern. The returned `KindedSlot` owns the
+    /// result share (O1) and is handed to the caller intact; whoever
+    /// consumes it transfers that share onward without a second claim.
+    ///
+    /// **ADR-020 / #239 §4.1 — the kind is no longer discarded here.** This
+    /// function used to end `let bits = result.slot.raw(); forget(result);
+    /// Ok(bits)` under the comment "the JIT caller knows the static return
+    /// kind from the callee method signature". It did not: `jit_call_method`
+    /// returned `-> u64`, so the kind died at this line and the emit site had
+    /// nothing to check its destination against. That is the METHOD channel's
+    /// half of the defect the value channel's `-> u64` had — with the
+    /// difference that here a real kind existed and was thrown away, where
+    /// `Return` lowering never stamped one at all (§6.6). Returning the
+    /// carrier is what lets `jit_call_method_{i64,ptr,f64}` assert
+    /// `classes_agree` against the destination's PROVEN kind.
     ///
     /// **Lifetime accounting contrast vs. `jit_trampoline_call_closure`.**
     /// The closure trampoline's `mem::forget(kinded_args)` (line 1035)
@@ -1425,7 +1435,7 @@ impl VirtualMachine {
         receiver: (u64, NativeKind),
         args: &[(u64, NativeKind)],
         ctx: Option<&mut shape_runtime::context::ExecutionContext>,
-    ) -> Result<u64, VMError> {
+    ) -> Result<KindedSlot, VMError> {
         // Wrap receiver + args as transient `&[KindedSlot]` per the
         // §2.7.10 / Q11 dispatch-slice form (`args[0]` is the receiver,
         // `args[1..]` are the call args). No Arc bump: the JIT
@@ -1441,18 +1451,11 @@ impl VirtualMachine {
 
         let result = self.dispatch_method_kinded(&kinded_args, method_name, ctx)?;
 
-        // Transfer the result share back to the JIT caller as raw bits.
-        // The kind is discarded — the JIT caller knows the static return
-        // kind from the callee method signature at the §2.7.5 stamp-at-
-        // compile-time producing site.
-        let bits = result.slot.raw();
-        std::mem::forget(result);
-
         // `kinded_args` drops here. `KindedSlot::Drop` dispatches on
         // each entry's kind and retires the JIT-pre-incremented share
         // via `drop_with_kind` — no bare `vw_drop`, no Bool-default
         // (forbidden §2.7.7 #9), no decode (forbidden §2.7.7 #4 / #7).
-        Ok(bits)
+        Ok(result)
     }
 
     /// Fast-path frame setup: args are already on the value stack at
