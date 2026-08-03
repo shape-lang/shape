@@ -736,12 +736,17 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                     // uniform u64 from ctx.stack[sp+i]. No NaN-boxing tagging
                     // is applied — raw bit-patterns only.
                     for (i, arg) in args.iter().enumerate() {
-                        // Source kind for the parallel-kind track,
-                        // falling back to the §2.7.5 carrier kind
-                        // (`UInt64`) for opaque-source operands —
-                        // NOT a Bool-default fallback.
+                        // Source kind for the parallel-kind track. The
+                        // method-dispatch shell pops these back
+                        // (`ffi/call_method/mod.rs:658,711,746`) and
+                        // dispatches on them, so an unproven kind
+                        // surfaces (#236 / R-G7) rather than claiming the
+                        // `UInt64` raw-bits carrier over heap bits.
                         let _ = i;
-                        let arg_kind = self.operand_slot_kind_or_carrier(arg);
+                        let arg_kind = self.operand_slot_kind_or_surface(
+                            arg,
+                            "the method-call VM-stack parallel-kind track",
+                        )?;
 
                         let val = self.compile_operand(arg)?;
                         let val_ty = self.builder.func.dfg.value_type(val);
@@ -1870,18 +1875,28 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                 };
 
                 if let Some((info, closure_func_ref)) = heap_closure_fast {
+                    // ADR-020 / #239 §4.1. BOTH arms of this diamond have to
+                    // deliver the value in the representation the destination
+                    // holds, so the class is fixed once here and drives the
+                    // merge-block parameter, the fast arm's read, and the slow
+                    // arm's monomorph selection alike.
+                    let class = self.call_return_abi_class(destination)?;
                     // Compile the callee and args ONCE, before the branch, so
                     // neither arm re-runs `compile_operand`'s side effects.
                     // Both blocks are dominated by this one, so the values are
                     // available in each.
-                    let callee_kind = self.operand_slot_kind_or_carrier(func);
+                    let callee_kind = self
+                        .operand_slot_kind_or_surface(func, "the heap-closure fast-path callee")?;
                     let callee_val = self.compile_operand(func)?;
                     let callee_boxed = self.widen_to_i64(callee_val);
 
                     let mut arg_pairs: Vec<(Value, shape_value::NativeKind)> =
                         Vec::with_capacity(args.len());
                     for arg in args.iter() {
-                        let arg_kind = self.operand_slot_kind_or_carrier(arg);
+                        let arg_kind = self.operand_slot_kind_or_surface(
+                            arg,
+                            "a heap-closure fast-path call argument",
+                        )?;
                         let val = self.compile_operand(arg)?;
                         arg_pairs.push((self.widen_to_i64(val), arg_kind));
                     }
@@ -1896,7 +1911,17 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                     let fast_block = self.builder.create_block();
                     let slow_block = self.builder.create_block();
                     let merge_block = self.builder.create_block();
-                    self.builder.append_block_param(merge_block, types::I64);
+                    // The merged value's Cranelift type IS the class's return
+                    // type — a void call merges no value at all, and a float
+                    // destination merges an F64 rather than its bit pattern.
+                    let merge_ty = match class {
+                        crate::return_abi_class::ReturnAbiClass::Void => None,
+                        crate::return_abi_class::ReturnAbiClass::Float => Some(types::F64),
+                        _ => Some(types::I64),
+                    };
+                    if let Some(ty) = merge_ty {
+                        self.builder.append_block_param(merge_block, ty);
+                    }
 
                     // Guard 1: the accessor refused (null bits, the
                     // zero-capture NaN-box dual carrier, or a non-ClosureRaw
@@ -1972,32 +1997,55 @@ impl<'a, 'b> MirToIR<'a, 'b> {
 
                     self.builder.switch_to_block(fast_continue);
                     self.builder.seal_block(fast_continue);
-                    let stack_offset = crate::context::STACK_OFFSET as i32;
-                    let fast_result = self.builder.ins().load(
-                        types::I64,
-                        MemFlags::new(),
-                        self.ctx_ptr,
-                        stack_offset,
-                    );
-                    self.builder.ins().jump(merge_block, &[fast_result.into()]);
+                    match merge_ty {
+                        None => {
+                            // ADR-020 §3.3: a unit-returning callee never
+                            // writes `ctx.stack[0]`, so reading it here would
+                            // pick up whatever the previous call left behind.
+                            self.builder.ins().jump(merge_block, &[]);
+                        }
+                        Some(ty) => {
+                            let stack_offset = crate::context::STACK_OFFSET as i32;
+                            let raw = self.builder.ins().load(
+                                types::I64,
+                                MemFlags::new(),
+                                self.ctx_ptr,
+                                stack_offset,
+                            );
+                            // The native callee leaves the f64's IEEE-754 bits
+                            // on the JIT stack; the merge carries the f64
+                            // itself, so bitcast here rather than downstream.
+                            let fast_result = if ty == types::F64 {
+                                self.builder.ins().bitcast(types::F64, MemFlags::new(), raw)
+                            } else {
+                                raw
+                            };
+                            self.builder.ins().jump(merge_block, &[fast_result.into()]);
+                        }
+                    }
 
-                    // ── SLOW: the ordinary indirect path, unchanged ────────
+                    // ── SLOW: the ordinary indirect path ──────────────────
                     self.builder.switch_to_block(slow_block);
                     self.builder.seal_block(slow_block);
                     let slow_result =
-                        self.emit_call_value_sequence(callee_boxed, callee_kind, &arg_pairs);
-                    self.builder.ins().jump(merge_block, &[slow_result.into()]);
+                        self.emit_call_value_sequence(callee_boxed, callee_kind, &arg_pairs, class);
+                    match slow_result {
+                        None => self.builder.ins().jump(merge_block, &[]),
+                        Some(v) => self.builder.ins().jump(merge_block, &[v.into()]),
+                    };
 
                     self.builder.switch_to_block(merge_block);
                     self.builder.seal_block(merge_block);
-                    let result = self.builder.block_params(merge_block)[0];
+                    let result = merge_ty.map(|_| self.builder.block_params(merge_block)[0]);
 
                     // Shared wind-down. The trampoline error check runs on the
                     // merged path because the fast arm's callee can itself have
                     // made a trampoline call that set the flag.
                     self.emit_pending_call_error_deopt();
-                    self.release_old_value_if_heap(destination)?;
-                    self.write_place(destination, result)?;
+                    if let Some(result) = result {
+                        self.release_old_value_if_heap(destination)?;
+                        self.write_place(destination, result)?;
+                    }
                     self.reload_referenced_locals();
 
                     let next_block = self.block_map.get(next).ok_or_else(|| {
@@ -2215,19 +2263,22 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                     // push sequence out so the heap-closure fast path's
                     // guard-failure branch reaches the SAME code rather than a
                     // second copy of it that could drift.
-                    let callee_kind = self.operand_slot_kind_or_carrier(func);
+                    let class = self.call_return_abi_class(destination)?;
+                    let callee_kind =
+                        self.operand_slot_kind_or_surface(func, "the indirect-call callee")?;
                     let callee_val = self.compile_operand(func)?;
                     let callee_boxed = self.widen_to_i64(callee_val);
 
                     let mut arg_pairs: Vec<(Value, shape_value::NativeKind)> =
                         Vec::with_capacity(args.len());
                     for arg in args.iter() {
-                        let arg_kind = self.operand_slot_kind_or_carrier(arg);
+                        let arg_kind = self
+                            .operand_slot_kind_or_surface(arg, "an indirect-call argument")?;
                         let val = self.compile_operand(arg)?;
                         arg_pairs.push((self.widen_to_i64(val), arg_kind));
                     }
 
-                    Some(self.emit_call_value_sequence(callee_boxed, callee_kind, &arg_pairs))
+                    self.emit_call_value_sequence(callee_boxed, callee_kind, &arg_pairs, class)
                 };
 
                 // ── r5c-2-bz-b-jit-err-surface: VM-trampoline error deopt ──
@@ -2258,13 +2309,41 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                 // Write return value to ctx.stack[0] and set return_type_tag
                 // for native type preservation (avoids NaN-boxing on return path).
                 let return_slot = SlotId(0);
+                // ADR-020 §3.3: a function the ABI says returns NO value must
+                // not leave one, whatever its MIR return slot happens to hold.
+                //
+                // The direct-call path already documents this as an invariant —
+                // "a unit-returning callee never writes `ctx.stack[0]` (its
+                // `Return` terminator sets stack_ptr = 0 and stamps
+                // RETURN_TAG_UNIT), so loading it here would read whatever the
+                // previous call left behind" — and then declines to read it. It
+                // was not true. MIR gives every function a return slot, and for
+                // a body whose trailing statement produces a temp (an f-string
+                // handed to `print`, say) that temp is declared at slot 0, so
+                // the arms below stored it and set stack_ptr = 1.
+                //
+                // Nothing noticed while the only readers were direct callers,
+                // which skip the read. #239 §4.1's `_void` monomorph reads the
+                // disagreement instead: `ACC__generics__vprobe_as.shape` — a
+                // `fn main()` ending in `print(f"...")` — returned
+                // `Ptr(HeapKind::String)` into a caller that had classified the
+                // destination unit from `unit_slots`, and the class-agreement
+                // assertion fired. The caller was right; this is the site that
+                // was lying, and it also means the leftover value's share was
+                // being abandoned on the JIT stack.
+                // Resolved with the SAME resolver `infer_unit_slots` uses on
+                // the caller side, so the two sides cannot disagree about which
+                // function a name denotes.
+                let self_returns_unit =
+                    super::types::resolve_named_function_index(&self.mir.name, self.function_indices)
+                        .is_some_and(|fid| self.unit_returning_funcs.contains(&fid));
                 // W11-jit-new-array: when SlotId(0) is not declared, the
                 // program has no value-bearing return (e.g. top-level ending
                 // with `print(x)`). Stamp UNIT so the executor's typed
                 // dispatch maps it to `WireValue::Null` — pre-W11 this
                 // arm left the tag at its zero default (NANBOXED) and the
                 // executor.rs:267 SURFACE fired.
-                if !self.locals.contains_key(&return_slot) {
+                if self_returns_unit || !self.locals.contains_key(&return_slot) {
                     let tag = self
                         .builder
                         .ins()
@@ -2407,6 +2486,33 @@ impl<'a, 'b> MirToIR<'a, 'b> {
                             .store(MemFlags::new(), tag, self.ctx_ptr, tag_offset);
                     }
 
+                    // ADR-006 §2.7.7 / Q9 lockstep + ADR-020 / #239 §4.1: stamp
+                    // the parallel-kind track for the slot the value was just
+                    // pushed into.
+                    //
+                    // Every OTHER push in this file has always written the kind
+                    // track beside the bits; the return path did not, and it is
+                    // the one push a value-call consumer reads back. That gap
+                    // is why the value channel had no return kind to carry:
+                    // `dispatch_borrowed_closure_via_trampoline_vm`'s native arm
+                    // popped `ctx.stack[sp]` with nothing beside it, so the
+                    // `-> u64` signature was not throwing information away, it
+                    // never had any. `return_type_tag` is a different channel —
+                    // it is the whole-program HOST marshalling tag read once by
+                    // `executor.rs`, not a per-slot kind, and it cannot
+                    // distinguish the heap arms.
+                    //
+                    // An unproven return kind stamps nothing and leaves the
+                    // SENTINEL: that is the top-level `print(x)` shape whose
+                    // tag is RETURN_TAG_UNIT, and a consumer treating it as a
+                    // value surfaces (no fabricated default, #236 / R-G7).
+                    if let Some(kind) =
+                        super::types::slot_kind_for_local(&self.slot_kinds, return_slot.0)
+                    {
+                        let zero_idx = self.builder.ins().iconst(types::I64, 0);
+                        self.emit_kind_track_write(zero_idx, kind);
+                    }
+
                     // Set stack_ptr to 1
                     let one = self.builder.ins().iconst(types::I64, 1);
                     let sp_offset = crate::context::STACK_PTR_OFFSET as i32;
@@ -2505,7 +2611,10 @@ impl<'a, 'b> MirToIR<'a, 'b> {
         let combined: Vec<&shape_vm::mir::types::Operand> =
             receiver_operands.iter().chain(extra_args.iter()).collect();
         for (i, arg) in combined.iter().enumerate() {
-            let arg_kind = self.operand_slot_kind_or_carrier(arg);
+            // #236 / R-G7: the shell pops this back off `stack_kinds` and
+            // dispatches on it (`ffi/call_method/mod.rs:658,711,746`).
+            let arg_kind = self
+                .operand_slot_kind_or_surface(arg, "the method-dispatch VM-stack push")?;
             let val = self.compile_operand(arg)?;
             let val_ty = self.builder.func.dfg.value_type(val);
             let boxed = if val_ty == types::I64 {
@@ -2671,14 +2780,15 @@ impl<'a, 'b> MirToIR<'a, 'b> {
     /// what #188 slice 1 made load-bearing.
     ///
     /// Callers pass values already widened to I64 by `widen_to_i64`, and pass
-    /// each kind from `operand_slot_kind_or_carrier` at the PRODUCING site —
-    /// never re-derived from bits here.
+    /// each kind from `operand_slot_kind_or_surface` at the PRODUCING site —
+    /// never re-derived from bits here, and never defaulted (#236 / R-G7).
     fn emit_call_value_sequence(
         &mut self,
         callee_boxed: Value,
         callee_kind: shape_value::NativeKind,
         args: &[(Value, shape_value::NativeKind)],
-    ) -> Value {
+        class: crate::return_abi_class::ReturnAbiClass,
+    ) -> Option<Value> {
         let stack_base_offset = crate::context::STACK_OFFSET as i32;
         let sp_offset = crate::context::STACK_PTR_OFFSET as i32;
 
@@ -2740,11 +2850,67 @@ impl<'a, 'b> MirToIR<'a, 'b> {
             .ins()
             .store(MemFlags::new(), new_sp, self.ctx_ptr, sp_offset);
 
-        let inst = self
-            .builder
-            .ins()
-            .call(self.ffi.call_value, &[self.ctx_ptr]);
-        self.builder.inst_results(inst)[0]
+        // ADR-020 / #239 §4.1: the monomorph is chosen from the DESTINATION's
+        // proven kind, upstream of here. There is no polymorphic entry point
+        // to fall back to and no runtime kind parameter — the latter would be
+        // the deleted `tag_bits` dispatch wearing a parameter instead of a tag
+        // word (CLAUDE.md §Forbidden).
+        use crate::return_abi_class::ReturnAbiClass;
+        let callee_ref = match class {
+            ReturnAbiClass::Scalar => self.ffi.call_value_i64,
+            ReturnAbiClass::Pointer => self.ffi.call_value_ptr,
+            ReturnAbiClass::Float => self.ffi.call_value_f64,
+            ReturnAbiClass::Void => self.ffi.call_value_void,
+        };
+        let inst = self.builder.ins().call(callee_ref, &[self.ctx_ptr]);
+        match class {
+            ReturnAbiClass::Void => None,
+            _ => Some(self.builder.inst_results(inst)[0]),
+        }
+    }
+
+    /// The ABI class the value-producing FFI monomorph must be selected from,
+    /// for a call whose result lands in `destination` (ADR-020 / #239 §4.1).
+    ///
+    /// `Void` when the destination carries unit (ADR-020 §3.3 — there is no
+    /// value, so there is nothing to represent). Otherwise the class of the
+    /// destination's PROVEN `NativeKind`; an unproven destination surfaces
+    /// here rather than at `write_place`, so the diagnostic names the call
+    /// that produced the value instead of the store that could not place it.
+    ///
+    /// Reads `slot_kind_for_local` directly and never `slot_kind_of` — the
+    /// latter was itself a fabricating `unwrap_or(Int64)` and is deleted
+    /// (#236 / R-G7). Routing an unproven `f64` destination into the scalar
+    /// monomorph is precisely the reshaped defect §4.0.1 warns about.
+    fn call_return_abi_class(
+        &self,
+        destination: &Place,
+    ) -> Result<crate::return_abi_class::ReturnAbiClass, String> {
+        use crate::return_abi_class::{ReturnAbiClass, return_abi_class};
+        let Place::Local(slot) = destination else {
+            return Err(format!(
+                "ADR-020 §4.1 surface-and-stop: SURFACE — an indirect call's destination is \
+                 `{destination}`, a projection rather than a local. The return-channel \
+                 monomorph is selected from the destination slot's proven kind, and a \
+                 projection's kind lives in the field/element tables rather than \
+                 `slot_kinds`. Clean deopt to the interpreter."
+            ));
+        };
+        if self.unit_slots.contains(slot) {
+            return Ok(ReturnAbiClass::Void);
+        }
+        let kind = super::types::slot_kind_for_local(&self.slot_kinds, slot.0).ok_or_else(|| {
+            self.debug_dump_slot_kinds(*slot);
+            format!(
+                "ADR-020 §4.1 surface-and-stop: SURFACE — an indirect call's destination slot \
+                 {} has no compile-time-proven NativeKind, so no return-ABI class can be \
+                 selected for it: there is no sound representation to bring the callee's \
+                 value back in. The producing site must stamp the slot kind (ADR-006 \
+                 §2.7.5). No polymorphic fallback, no runtime kind parameter.",
+                slot.0
+            )
+        })?;
+        Ok(return_abi_class(kind))
     }
 
     /// Emit the `r5c-2-bz-b-jit-err-surface` VM-trampoline error deopt.

@@ -2162,7 +2162,19 @@ impl<'a, 'b> MirToIR<'a, 'b> {
     }
 }
 
-pub(crate) mod v2_call_abi;
+// #236 / R-G7: `mod v2_call_abi` is DELETED. Its
+// `resolve_function_signature` carried a `legacy_default =
+// NativeKind::Int64` consumed at six sites (two param-vector `resize`s,
+// two `return_kind.unwrap_or`s, and the no-descriptor-at-all arm), which
+// the ruling names as one of the nine fabricating defaults. There was no
+// site to surface at: the whole module was dead — its only callers were
+// its own two tests, and its NativeKind→Cranelift table was a third,
+// DIVERGENT copy of `types::cranelift_type_for_slot` (it mapped Char→I32,
+// Float32→F32, Null→I8 where the live one maps all three to I64 via its
+// catch-all). Its own header still said the call sites "will be updated in
+// a follow-up change"; they never were. A signature builder for #229's
+// typed returns should be written against the live table, not resurrected
+// from this one.
 
 /// Reconstruct the bytecode compiler's back-patch pairing for unresolved
 /// `ClosurePlaceholder` constants in a MIR function, keyed on statement

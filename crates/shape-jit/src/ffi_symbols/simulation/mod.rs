@@ -7,7 +7,6 @@
 //! invocation, while keeping the iteration loop in native code for efficiency.
 
 use crate::context::JITContext;
-use crate::ffi::control::jit_call_value;
 use crate::ffi::value_ffi::*;
 use shape_value::encoding::ERROR_PLACEHOLDER_BITS;
 
@@ -47,37 +46,47 @@ pub extern "C" fn jit_run_simulation(ctx: *mut JITContext, config_bits: u64) -> 
             return TAG_NULL;
         }
 
-        let handler_bits = config_bits;
-        let mut state = TAG_NULL;
-        let base_sp = ctx_ref.stack_ptr;
+        let _ = (config_bits, row_count);
 
-        // Simulation loop: call handler(state, row_index) for each row.
-        // The handler is invoked via jit_call_value which supports both
-        // bare functions and closures (including those with dynamic captures).
-        for row_idx in 0..row_count {
-            // Ensure we have stack space (handler + 2 args + arg_count = 4 slots)
-            if ctx_ref.stack_ptr + 4 > ctx_ref.stack.len() {
-                break;
-            }
-
-            // Push: callee, state, row_index, arg_count.
-            // ABI: arg_count is a raw i64 (see jit_call_value decode).
-            ctx_ref.stack[ctx_ref.stack_ptr] = handler_bits;
-            ctx_ref.stack_ptr += 1;
-            ctx_ref.stack[ctx_ref.stack_ptr] = state;
-            ctx_ref.stack_ptr += 1;
-            ctx_ref.stack[ctx_ref.stack_ptr] = box_number(row_idx as f64);
-            ctx_ref.stack_ptr += 1;
-            ctx_ref.stack[ctx_ref.stack_ptr] = 2u64; // arg_count = 2 (raw i64)
-            ctx_ref.stack_ptr += 1;
-
-            state = jit_call_value(ctx);
-
-            // Restore stack pointer to base after each call to prevent accumulation
-            ctx_ref.stack_ptr = base_sp;
-        }
-
-        state
+        // ADR-020 / #239 §4.1 surface-and-stop: SURFACE.
+        //
+        // The per-row loop that used to stand here hand-rolled the value-call
+        // push protocol — callee, args, arg_count — and called `jit_call_value`
+        // directly. It cannot be migrated to the converted channel as written,
+        // for two independent reasons, and neither is a plumbing detail:
+        //
+        //   1. It pushed bits WITHOUT stamping the §2.7.7 / Q9 parallel-kind
+        //      track, so every callee and argument would arrive at the dispatch
+        //      shell carrying a SENTINEL kind byte, which surfaces. The loop
+        //      was already inoperable in that sense before this conversion.
+        //   2. It selected the callee with the deleted dual-carrier
+        //      bit-shape probes (`is_inline_function` /
+        //      `is_heap_kind(_, HK_CLOSURE)`) and boxed the row index with
+        //      `box_number`. Both are pre-#239 carriers: since the flip
+        //      (ADR-020 §3.4) every function value is one
+        //      `Arc<HeapValue::ClosureRaw>`, so those predicates have no
+        //      producer to recognize.
+        //
+        // Nor is a monomorph selectable here even in principle: the handler's
+        // return kind is a property of the handler, and this entry point has no
+        // destination slot whose proven kind could choose one. The interpreter
+        // runs `DataTable.simulate()` correctly, which is where this falls to.
+        //
+        // `jit_run_simulation` is NOT in `compiler/ffi_builder.rs`'s `r!()` set,
+        // so no Cranelift-emitted code can reach it (#226's reachability
+        // finding — registration is not reachability). This surface is what the
+        // body should say regardless.
+        crate::ffi::control::set_jit_runtime_error(
+            "jit_run_simulation: the per-row handler loop pushed callee/args without the \
+             ADR-006 §2.7.7 parallel-kind stamps and classified the handler with the \
+             pre-#239 dual-carrier bit-shape probes, neither of which has a \
+             producer since ADR-020 §3.4. There is also no destination slot here whose \
+             proven kind could select a §4.1 return monomorph. Native execution aborted; \
+             `DataTable.simulate()` runs on the interpreter."
+                .to_string(),
+        );
+        ctx_ref.pending_call_error = 1;
+        ERROR_PLACEHOLDER_BITS
     }
 }
 

@@ -688,9 +688,24 @@ impl<'a, 'b> MirToIR<'a, 'b> {
     /// (Array / TypedObject / Closure / etc. — still on
     /// `UnifiedValue<T>` HeapHeader at offset 4).
     pub(crate) fn retain_func_for_place(&self, place: &Place) -> cranelift::codegen::ir::FuncRef {
+        self.retain_func_for_kind(self.place_native_kind(place))
+    }
+
+    /// The retain entry point for a value of `kind`, keyed on the carrier the
+    /// kind names.
+    ///
+    /// Split out of `retain_func_for_place` so sites that hold a kind without a
+    /// `Place` — notably `emit_heap_closure`'s capture retain, which retains
+    /// values it has just written into a closure block — reach the SAME table.
+    /// The table is the only correct answer to "where does this carrier keep
+    /// its refcount", and every arm below exists because some site got it
+    /// wrong by assuming one layout for all of them.
+    pub(crate) fn retain_func_for_kind(
+        &self,
+        kind: Option<shape_vm::type_tracking::NativeKind>,
+    ) -> cranelift::codegen::ir::FuncRef {
         use shape_value::heap_value::HeapKind;
         use shape_vm::type_tracking::NativeKind;
-        let kind = self.place_native_kind(place);
         match kind {
             Some(NativeKind::Ptr(HeapKind::Result)) => self.ffi.arc_result_retain,
             Some(NativeKind::Ptr(HeapKind::Option)) => self.ffi.arc_option_retain,
