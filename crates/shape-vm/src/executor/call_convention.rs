@@ -83,7 +83,7 @@
 use shape_value::v2::closure_raw::{OwnedClosureBlock, typed_closure_function_id};
 use shape_value::{HeapKind, HeapValue, KindedSlot, NativeKind, VMError, ValueSlot};
 
-use super::task_scheduler::TaskStatus;
+use super::task_scheduler::TaskState;
 use super::vm_impl::stack::clone_with_kind;
 
 use super::{CallFrame, VirtualMachine};
@@ -458,8 +458,8 @@ impl VirtualMachine {
     ///   the non-closure entry-point in this module's frame-setup
     ///   family (W7-frame-setup, Round 1 close).
     ///
-    /// **Cached fast-path.** If `task_scheduler.get_result(task_id)`
-    /// returns `TaskStatus::Completed((bits, kind))`, the cached share
+    /// **Cached fast-path.** If `task_scheduler.task_state(task_id)`
+    /// returns `TaskState::Completed((bits, kind))`, the cached share
     /// is cloned via `clone_with_kind` and returned directly — same
     /// pattern as `TaskScheduler::resolve_task` (cached entry retains
     /// its share; caller gets a fresh share). Cancelled tasks surface
@@ -481,21 +481,28 @@ impl VirtualMachine {
         // Cached fast-path — the scheduler already holds a Completed
         // share for this task. Hand out a fresh share via
         // `clone_with_kind` so the cached entry retains its own.
-        match self.task_scheduler.get_result(task_id) {
-            Some(TaskStatus::Completed((bits, kind))) => {
+        match self.task_scheduler.task_state(task_id) {
+            Some(TaskState::Completed((bits, kind))) => {
                 let bits = *bits;
                 let kind = *kind;
                 clone_with_kind(bits, kind);
                 return Ok(KindedSlot::new(ValueSlot::from_raw(bits), kind));
             }
-            Some(TaskStatus::Cancelled) => {
+            Some(TaskState::Cancelled) => {
                 return Err(VMError::RuntimeError(format!(
                     "Task {} was cancelled",
                     task_id
                 )));
             }
-            // Pending or unknown — fall through to the take-callable path.
-            Some(TaskStatus::Pending) | None => {}
+            // Still pending, or no such task — fall through to the
+            // take-callable path, which surfaces the precise failure.
+            Some(
+                TaskState::PendingCallable(_)
+                | TaskState::PendingExternal(_)
+                | TaskState::PendingAsync { .. }
+                | TaskState::PendingUndriven,
+            )
+            | None => {}
         }
 
         // Take ownership of the callable share — `take_callable`

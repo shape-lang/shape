@@ -26,12 +26,22 @@
 //!   `F: FnOnce((u64, NativeKind)) -> Result<(u64, NativeKind), VMError>`
 //!
 //! Refcount discipline (playbook §3 drop discipline): every share stored
-//! in the scheduler's maps owns one strong-count for heap-bearing kinds.
+//! in the scheduler owns one strong-count for heap-bearing kinds.
 //! `take_callable`, `take_external_receiver`, `try_resolve_external`, and
 //! `Drop` transfer that share to the caller (or release it). `register`,
 //! `complete`, and the cached-result paths in `resolve_task` /
 //! `resolve_task_group` use `clone_with_kind` when handing the share to
 //! a second consumer.
+//!
+//! ## One map, one state (#237 / ADR-020 grill R-G5)
+//!
+//! Tasks live in a single `task_id -> `[`TaskState`] map whose entry carries
+//! the driver — callable, external receiver, or in-flight tokio task —
+//! *inside* the variant. Status is read off the entry. The four parallel maps
+//! this replaced (callables / results / external_receivers / pending_async)
+//! made a task's apparent status depend on which map was consulted first, and
+//! could not tell "pending, driver checked out" from "no such task": both
+//! rendered as "unknown scheduler entry" in the user-facing snapshot barrier.
 //!
 //! Out-of-territory callers (`call_convention.rs::resolve_spawned_task`,
 //! `async_ops/mod.rs::op_await` / `op_spawn_task` / `op_join_await`,
@@ -142,45 +152,117 @@ impl AsyncCompletion {
     }
 }
 
-/// Completion status of a spawned task.
-#[derive(Debug, Clone)]
-pub enum TaskStatus {
-    /// Task has been spawned but not yet executed.
-    Pending,
-    /// Task finished successfully with a result value (kinded pair).
+/// The complete state of one scheduled task — the scheduler's single
+/// discriminator for a `task_id`.
+///
+/// One entry per task, and the entry OWNS whatever drives that task forward:
+/// the callable to run, the channel a background thread will answer on, or
+/// the in-flight tokio task itself. A task's status is therefore *read* off
+/// its entry. It is never reconstructed by consulting several parallel maps
+/// in priority order — the shape this type replaced, where a task's apparent
+/// status depended on which of four maps happened to answer first, and where
+/// "pending, driver checked out" was indistinguishable from "no such task"
+/// (#237 / ADR-020 grill R-G5; the #233 "no runtime inference" ruling applies
+/// at this site).
+///
+/// # Driver ownership
+///
+/// Every pending variant except [`TaskState::PendingUndriven`] holds the
+/// task's driver. Handing that driver to a consumer
+/// (`take_callable` / `take_external_receiver` / `take_pending_async`) leaves
+/// `PendingUndriven` behind: the entry still exists and the task is still
+/// pending, but the scheduler no longer holds anything that can advance it.
+/// That covers both a task executing right now and a task orphaned by a
+/// driver that failed without recording an outcome — from the scheduler's
+/// side those are the same fact, and neither is "not started".
+///
+/// # Share accounting (§2.7.7 retain-on-store)
+///
+/// [`TaskState::PendingCallable`] and [`TaskState::Completed`] each own
+/// exactly one strong-count share of their kinded pair. Replacing an entry
+/// releases the share the displaced entry owned; [`TaskScheduler::drop`]
+/// releases every share the map still holds.
+///
+/// # Extending this enum (W17 resume)
+///
+/// The W17 whole-VM restore path will be the first code to really branch on
+/// these states, and the axis it needs is the axis that already separates the
+/// variants: whether the state's payload is a plain value a snapshot can
+/// persist (`Completed`'s kinded pair, `Cancelled`'s absence of one) or a live
+/// host resource that cannot cross a checkpoint (`PendingExternal`'s oneshot
+/// receiver, `PendingAsync`'s tokio task, and `PendingUndriven`'s driver,
+/// which is off-map entirely and so cannot even be inspected). A new variant
+/// lands on one side or the other and inherits that side's contract — a
+/// resume-side "completed, value restored from the snapshot" arm sits next to
+/// `Completed` and reuses its share-owning rule verbatim. Adding one needs no
+/// change to this type's shape: the exhaustive matches in this file, plus the
+/// capture barrier in `executor/snapshot.rs`, are the complete list of sites
+/// the compiler will make you account for.
+pub enum TaskState {
+    /// Pending; the scheduler holds the callable that will produce the result.
+    /// Owns one share of the pair.
+    PendingCallable(Kinded),
+    /// Pending; the scheduler holds the receiver a background task will
+    /// deliver the result on (remote calls and other externally-completed
+    /// futures). The in-transit share lives on the channel, not here.
+    PendingExternal(tokio::sync::oneshot::Receiver<Result<Kinded, String>>),
+    /// Pending; a real tokio task is in flight on the shared runtime and the
+    /// scheduler holds its completion channel and abort handle.
+    PendingAsync {
+        task: PendingAsyncTask,
+        /// Best-effort notification to an external owner that this task was
+        /// cancelled (`remote::call_async` sends a receiver-side cancellation
+        /// keyed by the internal wire call id). Consumed at most once, by
+        /// explicit cancellation or by VM teardown while still pending;
+        /// ordinary await/join completion drops it unrun.
+        cancel_hook: Option<Box<dyn FnOnce() + Send + 'static>>,
+    },
+    /// Pending, with the driver checked out of the scheduler: a consumer took
+    /// it and is executing it right now, or a consumer took it and failed
+    /// without recording an outcome (`resolve_task`'s `executor_fn` returned
+    /// `Err`; `try_resolve_external` saw the delivery channel error or close).
+    /// Owns nothing.
+    PendingUndriven,
+    /// Finished with a result. Owns one share of the pair.
     Completed(Kinded),
-    /// Task was cancelled before completion.
+    /// Cancelled before completion. Owns nothing.
     Cancelled,
 }
 
-/// Snapshot-facing status of a `Future(id)` handle.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum FutureSnapshotStatus {
-    /// No scheduler entry exists for this id.
-    Unknown,
-    /// A callable is registered and has not yet run.
-    PendingCallable,
-    /// An external completion receiver is still waiting.
-    PendingExternal,
-    /// A module/user/remote async body is in flight on the shared runtime.
-    PendingAsync,
-    /// The future's result has been cached, but the handle itself still needs
-    /// scheduler state to be meaningful after restore.
-    Completed,
-    /// The task was cancelled.
-    Cancelled,
-}
-
-impl std::fmt::Display for FutureSnapshotStatus {
+impl std::fmt::Debug for TaskState {
+    /// Variant name only — the payloads are a callable's raw bits, a channel,
+    /// and a tokio handle, none of which are meaningful in a diagnostic. Used
+    /// by the internal (non-user-facing) half of the capture-barrier message
+    /// in `executor/snapshot.rs`.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Unknown => write!(f, "unknown scheduler entry"),
-            Self::PendingCallable => write!(f, "pending callable"),
-            Self::PendingExternal => write!(f, "pending external completion"),
-            Self::PendingAsync => write!(f, "pending async task"),
-            Self::Completed => write!(f, "completed result handle"),
-            Self::Cancelled => write!(f, "cancelled task"),
+        f.write_str(match self {
+            Self::PendingCallable(_) => "PendingCallable",
+            Self::PendingExternal(_) => "PendingExternal",
+            Self::PendingAsync { .. } => "PendingAsync",
+            Self::PendingUndriven => "PendingUndriven",
+            Self::Completed(_) => "Completed",
+            Self::Cancelled => "Cancelled",
+        })
+    }
+}
+
+/// Release the share a displaced entry owned (§2.7.7 retain-on-store).
+///
+/// Replacement only — a displaced `PendingAsync` is dropped exactly as the
+/// four-map scheduler dropped it: its cancel hook is discarded unrun and its
+/// tokio task is NOT aborted (dropping the receiver closes the completion
+/// channel, so the task's send fails silently). Cancellation and teardown are
+/// the two paths that abort, and they say so explicitly in `cancel` and
+/// `Drop`.
+fn release_displaced(state: TaskState) {
+    match state {
+        TaskState::PendingCallable((bits, kind)) | TaskState::Completed((bits, kind)) => {
+            drop_with_kind(bits, kind);
         }
+        TaskState::PendingExternal(_)
+        | TaskState::PendingAsync { .. }
+        | TaskState::PendingUndriven
+        | TaskState::Cancelled => {}
     }
 }
 
@@ -193,40 +275,25 @@ impl std::fmt::Display for FutureSnapshotStatus {
 /// Supports both inline tasks (callable executed synchronously at await-time)
 /// and external tasks (completed by background Tokio tasks via oneshot channels).
 pub struct TaskScheduler {
-    /// Map from task_id to the callable kinded pair (Closure or Function bits
-    /// plus its `NativeKind`) that was passed to `spawn`. Consumed on first
-    /// execution.
-    callables: HashMap<u64, Kinded>,
-
-    /// Map from task_id to its completion status.
-    results: HashMap<u64, TaskStatus>,
-
-    /// External completion channels — Tokio background tasks send results here.
-    /// Used for remote calls and other externally-completed futures.
-    /// Result is a kinded pair on success.
-    external_receivers: HashMap<u64, tokio::sync::oneshot::Receiver<Result<Kinded, String>>>,
-
-    /// In-flight async module-function tasks (WF-2D real concurrency). Each
-    /// entry is a `time::sleep`-style future already running on the shared
-    /// background runtime; the interpreter thread collects the result via the
-    /// task's `completion` channel at `await`/`join` time.
-    pending_async: HashMap<u64, PendingAsyncTask>,
-
-    /// Optional side effects to notify external owners that a pending async
-    /// task was cancelled. Used by `remote::call_async` to send a best-effort
-    /// receiver cancellation keyed by the internal wire call id.
-    pending_async_cancel_hooks: HashMap<u64, Box<dyn FnOnce() + Send + 'static>>,
+    /// Every scheduled task, by id. One entry per task, carrying both its
+    /// status and (for the pending states) the driver that will advance it —
+    /// see [`TaskState`].
+    tasks: HashMap<u64, TaskState>,
 }
 
 impl TaskScheduler {
     /// Create a new, empty scheduler.
     pub fn new() -> Self {
         Self {
-            callables: HashMap::new(),
-            results: HashMap::new(),
-            external_receivers: HashMap::new(),
-            pending_async: HashMap::new(),
-            pending_async_cancel_hooks: HashMap::new(),
+            tasks: HashMap::new(),
+        }
+    }
+
+    /// Install `state` as the entry for `task_id`, releasing whatever share
+    /// the displaced entry owned (§2.7.7 retain-on-store).
+    fn set_state(&mut self, task_id: u64, state: TaskState) {
+        if let Some(displaced) = self.tasks.insert(task_id, state) {
+            release_displaced(displaced);
         }
     }
 
@@ -238,9 +305,13 @@ impl TaskScheduler {
     /// so scope-tracking / `is_resolved` behave uniformly with the other task
     /// kinds, and stores the completion channel + abort handle.
     pub fn store_pending_async(&mut self, task_id: u64, task: PendingAsyncTask) {
-        self.results.insert(task_id, TaskStatus::Pending);
-        self.pending_async_cancel_hooks.remove(&task_id);
-        self.pending_async.insert(task_id, task);
+        self.set_state(
+            task_id,
+            TaskState::PendingAsync {
+                task,
+                cancel_hook: None,
+            },
+        );
     }
 
     /// Attach a cancellation hook to an already-registered pending async task.
@@ -253,46 +324,46 @@ impl TaskScheduler {
         task_id: u64,
         hook: Box<dyn FnOnce() + Send + 'static>,
     ) {
-        if self.pending_async.contains_key(&task_id) {
-            self.pending_async_cancel_hooks.insert(task_id, hook);
+        if let Some(TaskState::PendingAsync { cancel_hook, .. }) = self.tasks.get_mut(&task_id) {
+            *cancel_hook = Some(hook);
         }
     }
 
     /// Whether `task_id` names an in-flight async module-function task.
     pub fn has_pending_async(&self, task_id: u64) -> bool {
-        self.pending_async.contains_key(&task_id)
+        matches!(
+            self.tasks.get(&task_id),
+            Some(TaskState::PendingAsync { .. })
+        )
     }
 
-    /// Snapshot-facing status for a `Future(id)` handle.
+    /// The scheduler entry for `task_id`, or `None` when no task by that id
+    /// has ever been registered.
     ///
-    /// VM snapshots do not persist scheduler state yet, so any live future
-    /// handle is non-restorable. This introspection keeps the capture-side
-    /// diagnostic precise without exposing scheduler internals to the
-    /// serializer.
-    pub fn future_snapshot_status(&self, task_id: u64) -> FutureSnapshotStatus {
-        if self.pending_async.contains_key(&task_id) {
-            return FutureSnapshotStatus::PendingAsync;
-        }
-        if self.external_receivers.contains_key(&task_id) {
-            return FutureSnapshotStatus::PendingExternal;
-        }
-        match self.results.get(&task_id) {
-            Some(TaskStatus::Pending) if self.callables.contains_key(&task_id) => {
-                FutureSnapshotStatus::PendingCallable
-            }
-            Some(TaskStatus::Pending) => FutureSnapshotStatus::Unknown,
-            Some(TaskStatus::Completed(_)) => FutureSnapshotStatus::Completed,
-            Some(TaskStatus::Cancelled) => FutureSnapshotStatus::Cancelled,
-            None => FutureSnapshotStatus::Unknown,
-        }
+    /// The one read accessor: callers match on [`TaskState`] rather than
+    /// asking a question per map. `None` is a real answer here — "there is no
+    /// such task" is distinct from every pending state, including
+    /// [`TaskState::PendingUndriven`].
+    pub fn task_state(&self, task_id: u64) -> Option<&TaskState> {
+        self.tasks.get(&task_id)
     }
 
     /// Take (remove) the in-flight async task so the caller can drive its
     /// completion channel. Ownership of the receiver + abort handle transfers
-    /// out.
+    /// out, leaving the entry [`TaskState::PendingUndriven`].
+    ///
+    /// The cancel hook is dropped unrun: collecting a task's result is not
+    /// cancelling it.
     pub fn take_pending_async(&mut self, task_id: u64) -> Option<PendingAsyncTask> {
-        self.pending_async_cancel_hooks.remove(&task_id);
-        self.pending_async.remove(&task_id)
+        let entry = self.tasks.get_mut(&task_id)?;
+        match std::mem::replace(entry, TaskState::PendingUndriven) {
+            TaskState::PendingAsync { task, .. } => Some(task),
+            // Not an in-flight async task — put the entry back untouched.
+            other => {
+                *entry = other;
+                None
+            }
+        }
     }
 
     /// Non-blocking poll of an in-flight async task's completion channel
@@ -303,9 +374,10 @@ impl TaskScheduler {
         &mut self,
         task_id: u64,
     ) -> Option<Result<AsyncTaskOutcome, std::sync::mpsc::TryRecvError>> {
-        self.pending_async
-            .get_mut(&task_id)
-            .map(|task| task.completion.try_recv())
+        match self.tasks.get_mut(&task_id) {
+            Some(TaskState::PendingAsync { task, .. }) => Some(task.completion.try_recv()),
+            _ => None,
+        }
     }
 
     /// Register a callable for a given task_id.
@@ -313,73 +385,78 @@ impl TaskScheduler {
     /// Called by `op_spawn_task` when a new task is spawned. The caller
     /// transfers one strong-count share for the kinded pair into the
     /// scheduler; on `take_callable` (or `Drop`) the share transfers back
-    /// out (or is released).
+    /// out (or is released). Any prior entry for this id is displaced and its
+    /// share released.
     pub fn register(&mut self, task_id: u64, callable_bits: u64, callable_kind: NativeKind) {
-        // Replace any prior callable to preserve refcount discipline.
-        if let Some((old_bits, old_kind)) = self.callables.remove(&task_id) {
-            drop_with_kind(old_bits, old_kind);
-        }
-        self.callables
-            .insert(task_id, (callable_bits, callable_kind));
-        self.results.insert(task_id, TaskStatus::Pending);
+        self.set_state(
+            task_id,
+            TaskState::PendingCallable((callable_bits, callable_kind)),
+        );
     }
 
-    /// Take (remove) the callable for `task_id` so it can be executed.
+    /// Take (remove) the callable for `task_id` so it can be executed,
+    /// leaving the entry [`TaskState::PendingUndriven`].
     ///
-    /// Returns `None` if the task was already consumed or never registered.
-    /// Ownership of the kinded pair transfers to the caller.
+    /// Returns `None` if the task was already consumed, never registered, or
+    /// is not driven by a callable. Ownership of the kinded pair transfers to
+    /// the caller.
     pub fn take_callable(&mut self, task_id: u64) -> Option<Kinded> {
-        self.callables.remove(&task_id)
-    }
-
-    /// Record a completed result for a task.
-    ///
-    /// The caller transfers one strong-count share into the scheduler. If
-    /// a completion was already recorded, the prior share is released.
-    pub fn complete(&mut self, task_id: u64, value_bits: u64, value_kind: NativeKind) {
-        // Releasing a prior result preserves refcount discipline if a task
-        // is somehow completed twice (defensive — should not normally happen).
-        if let Some(TaskStatus::Completed((old_bits, old_kind))) = self
-            .results
-            .insert(task_id, TaskStatus::Completed((value_bits, value_kind)))
-        {
-            drop_with_kind(old_bits, old_kind);
-        }
-    }
-
-    /// Mark a task as cancelled.
-    pub fn cancel(&mut self, task_id: u64) {
-        // In-flight async module task: abort the underlying tokio task so a
-        // cancelled `time::sleep` really stops rather than run to completion
-        // unobserved (WF-2D real cancellation).
-        if let Some(hook) = self.pending_async_cancel_hooks.remove(&task_id) {
-            hook();
-        }
-        if let Some(task) = self.pending_async.remove(&task_id)
-            && let Some(abort) = task.abort
-        {
-            abort.abort();
-        }
-        // Only cancel if still pending
-        if let Some(TaskStatus::Pending) = self.results.get(&task_id) {
-            self.results.insert(task_id, TaskStatus::Cancelled);
-            // Release the callable's share if still present.
-            if let Some((bits, kind)) = self.callables.remove(&task_id) {
-                drop_with_kind(bits, kind);
+        let entry = self.tasks.get_mut(&task_id)?;
+        match std::mem::replace(entry, TaskState::PendingUndriven) {
+            TaskState::PendingCallable(callable) => Some(callable),
+            // Not callable-driven — put the entry back untouched.
+            other => {
+                *entry = other;
+                None
             }
         }
     }
 
-    /// Get the result for a task, if it has completed.
-    pub fn get_result(&self, task_id: u64) -> Option<&TaskStatus> {
-        self.results.get(&task_id)
+    /// Record a completed result for a task.
+    ///
+    /// The caller transfers one strong-count share into the scheduler. Any
+    /// prior entry is displaced and its share released — including the
+    /// defensive double-completion case.
+    pub fn complete(&mut self, task_id: u64, value_bits: u64, value_kind: NativeKind) {
+        self.set_state(task_id, TaskState::Completed((value_bits, value_kind)));
     }
 
-    /// Check whether a task has a stored result (completed or cancelled).
+    /// Mark a task as cancelled, releasing or aborting whatever was driving it.
+    ///
+    /// A task that already has an outcome (completed or cancelled) keeps it.
+    pub fn cancel(&mut self, task_id: u64) {
+        let Some(entry) = self.tasks.get_mut(&task_id) else {
+            return;
+        };
+        match std::mem::replace(entry, TaskState::Cancelled) {
+            // The callable will never run; release its share.
+            TaskState::PendingCallable((bits, kind)) => drop_with_kind(bits, kind),
+            // Dropping the receiver closes the channel, so the background
+            // task's delivery fails instead of resurrecting a cancelled task.
+            TaskState::PendingExternal(_) => {}
+            // Abort the underlying tokio task so a cancelled `time::sleep`
+            // really stops rather than run to completion unobserved (WF-2D
+            // real cancellation), and notify any external owner.
+            TaskState::PendingAsync { task, cancel_hook } => {
+                if let Some(hook) = cancel_hook {
+                    hook();
+                }
+                if let Some(abort) = task.abort {
+                    abort.abort();
+                }
+            }
+            // Whoever holds the driver will find the entry cancelled.
+            TaskState::PendingUndriven => {}
+            // Already resolved — restore the outcome we just displaced.
+            resolved @ (TaskState::Completed(_) | TaskState::Cancelled) => *entry = resolved,
+        }
+    }
+
+    /// Check whether a task has an outcome (completed or cancelled).
     pub fn is_resolved(&self, task_id: u64) -> bool {
         matches!(
-            self.results.get(&task_id),
-            Some(TaskStatus::Completed(_)) | Some(TaskStatus::Cancelled)
+            self.tasks.get(&task_id),
+            Some(TaskState::Completed(_) | TaskState::Cancelled)
         )
     }
 
@@ -393,8 +470,7 @@ impl TaskScheduler {
         task_id: u64,
     ) -> tokio::sync::oneshot::Sender<Result<Kinded, String>> {
         let (tx, rx) = tokio::sync::oneshot::channel();
-        self.results.insert(task_id, TaskStatus::Pending);
-        self.external_receivers.insert(task_id, rx);
+        self.set_state(task_id, TaskState::PendingExternal(rx));
         tx
     }
 
@@ -408,45 +484,50 @@ impl TaskScheduler {
     /// (`clone_with_kind`) so both the scheduler entry and the returned
     /// pair own independent shares — caller drops/uses freely.
     pub fn try_resolve_external(&mut self, task_id: u64) -> Option<Result<Kinded, VMError>> {
-        if let Some(TaskStatus::Completed((bits, kind))) = self.results.get(&task_id).cloned() {
+        if let Some(TaskState::Completed((bits, kind))) = self.tasks.get(&task_id) {
             // Hand out a fresh share — the cached entry retains its own.
+            let (bits, kind) = (*bits, *kind);
             clone_with_kind(bits, kind);
             return Some(Ok((bits, kind)));
         }
-        if let Some(rx) = self.external_receivers.get_mut(&task_id) {
-            match rx.try_recv() {
-                Ok(Ok((bits, kind))) => {
-                    // The result share transferred from the background task.
-                    // Cache one share (clone) and hand out the original.
-                    clone_with_kind(bits, kind);
-                    self.results
-                        .insert(task_id, TaskStatus::Completed((bits, kind)));
-                    self.external_receivers.remove(&task_id);
-                    Some(Ok((bits, kind)))
-                }
-                Ok(Err(e)) => {
-                    self.external_receivers.remove(&task_id);
-                    Some(Err(VMError::RuntimeError(e)))
-                }
-                Err(tokio::sync::oneshot::error::TryRecvError::Empty) => None,
-                Err(tokio::sync::oneshot::error::TryRecvError::Closed) => {
-                    self.external_receivers.remove(&task_id);
-                    Some(Err(VMError::RuntimeError(
-                        "Remote task cancelled".to_string(),
-                    )))
-                }
+        let delivery = match self.tasks.get_mut(&task_id) {
+            Some(TaskState::PendingExternal(rx)) => rx.try_recv(),
+            _ => return None,
+        };
+        match delivery {
+            Ok(Ok((bits, kind))) => {
+                // The result share transferred from the background task.
+                // Cache one share (clone) and hand out the original.
+                clone_with_kind(bits, kind);
+                self.set_state(task_id, TaskState::Completed((bits, kind)));
+                Some(Ok((bits, kind)))
             }
-        } else {
-            None
+            // The delivery failed, so the task has no outcome and nothing
+            // left to drive it — exactly `PendingUndriven`.
+            Ok(Err(e)) => {
+                self.set_state(task_id, TaskState::PendingUndriven);
+                Some(Err(VMError::RuntimeError(e)))
+            }
+            Err(tokio::sync::oneshot::error::TryRecvError::Empty) => None,
+            Err(tokio::sync::oneshot::error::TryRecvError::Closed) => {
+                self.set_state(task_id, TaskState::PendingUndriven);
+                Some(Err(VMError::RuntimeError(
+                    "Remote task cancelled".to_string(),
+                )))
+            }
         }
     }
 
     /// Check whether a task has an external receiver (is externally-completed).
     pub fn has_external(&self, task_id: u64) -> bool {
-        self.external_receivers.contains_key(&task_id)
+        matches!(
+            self.tasks.get(&task_id),
+            Some(TaskState::PendingExternal(_))
+        )
     }
 
-    /// Take the external receiver for async awaiting.
+    /// Take the external receiver for async awaiting, leaving the entry
+    /// [`TaskState::PendingUndriven`].
     ///
     /// Used by `execute_with_async` when it needs to truly `.await` an external
     /// task's completion.
@@ -454,7 +535,15 @@ impl TaskScheduler {
         &mut self,
         task_id: u64,
     ) -> Option<tokio::sync::oneshot::Receiver<Result<Kinded, String>>> {
-        self.external_receivers.remove(&task_id)
+        let entry = self.tasks.get_mut(&task_id)?;
+        match std::mem::replace(entry, TaskState::PendingUndriven) {
+            TaskState::PendingExternal(rx) => Some(rx),
+            // Not externally driven — put the entry back untouched.
+            other => {
+                *entry = other;
+                None
+            }
+        }
     }
 
     /// Resolve a single task by executing its callable on a fresh VM executor.
@@ -471,15 +560,19 @@ impl TaskScheduler {
         F: FnOnce(Kinded) -> Result<Kinded, VMError>,
     {
         // If already resolved, hand out a clone of the cached share.
-        if let Some(TaskStatus::Completed((bits, kind))) = self.results.get(&task_id).cloned() {
-            clone_with_kind(bits, kind);
-            return Ok((bits, kind));
-        }
-        if let Some(TaskStatus::Cancelled) = self.results.get(&task_id) {
-            return Err(VMError::RuntimeError(format!(
-                "Task {} was cancelled",
-                task_id
-            )));
+        match self.tasks.get(&task_id) {
+            Some(TaskState::Completed((bits, kind))) => {
+                let (bits, kind) = (*bits, *kind);
+                clone_with_kind(bits, kind);
+                return Ok((bits, kind));
+            }
+            Some(TaskState::Cancelled) => {
+                return Err(VMError::RuntimeError(format!(
+                    "Task {} was cancelled",
+                    task_id
+                )));
+            }
+            _ => {}
         }
 
         // Take the callable (consume it — share transfers to executor_fn).
@@ -490,10 +583,11 @@ impl TaskScheduler {
         // Execute synchronously — share transfers in, share transfers out.
         let (bits, kind) = executor_fn(callable)?;
 
-        // Cache a clone of the result; hand the original share back.
+        // Cache a clone of the result; hand the original share back. (On an
+        // `executor_fn` error the `?` above leaves the entry `PendingUndriven`,
+        // where `take_callable` put it: pending, orphaned by a failed driver.)
         clone_with_kind(bits, kind);
-        self.results
-            .insert(task_id, TaskStatus::Completed((bits, kind)));
+        self.set_state(task_id, TaskState::Completed((bits, kind)));
         Ok((bits, kind))
     }
 
@@ -597,42 +691,57 @@ impl Drop for TaskScheduler {
     /// if the scheduler is dropped before consumers retire those shares,
     /// `drop_with_kind` releases them here.
     fn drop(&mut self) {
-        for (_, (bits, kind)) in self.callables.drain() {
-            drop_with_kind(bits, kind);
-        }
-        for (_, status) in self.results.drain() {
-            if let TaskStatus::Completed((bits, kind)) = status {
-                drop_with_kind(bits, kind);
+        for (_, state) in self.tasks.drain() {
+            match state {
+                TaskState::PendingCallable((bits, kind)) | TaskState::Completed((bits, kind)) => {
+                    drop_with_kind(bits, kind);
+                }
+                // Abort any still-in-flight async task so its background tokio
+                // task stops when the VM tears down (WF-2D), and notify any
+                // external owner. Dropping the receiver also closes the
+                // completion channel; the aborted task's send (if any) fails
+                // silently.
+                TaskState::PendingAsync { task, cancel_hook } => {
+                    if let Some(hook) = cancel_hook {
+                        hook();
+                    }
+                    if let Some(abort) = task.abort {
+                        abort.abort();
+                    }
+                }
+                // An external receiver owns no scheduler-side share: the share
+                // is in transit on the channel, and the dropping receiver
+                // releases it on the sender side. `PendingUndriven` handed its
+                // share to whoever took the driver; `Cancelled` owns nothing.
+                TaskState::PendingExternal(_)
+                | TaskState::PendingUndriven
+                | TaskState::Cancelled => {}
             }
         }
-        // pending_async: abort any still-in-flight async module tasks so their
-        // background tokio tasks stop when the VM tears down (WF-2D). Dropping
-        // the receiver also closes the completion channel; the aborted task's
-        // send (if any) fails silently.
-        for (task_id, task) in self.pending_async.drain() {
-            if let Some(hook) = self.pending_async_cancel_hooks.remove(&task_id) {
-                hook();
-            }
-            if let Some(abort) = task.abort {
-                abort.abort();
-            }
-        }
-        self.pending_async_cancel_hooks.clear();
-        // external_receivers: Receivers do not own scheduler-side shares;
-        // the share is in transit on the channel and the dropping receiver
-        // releases it on the sender side.
     }
 }
 
 impl std::fmt::Debug for TaskScheduler {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut counts: [usize; 6] = [0; 6];
+        for state in self.tasks.values() {
+            counts[match state {
+                TaskState::PendingCallable(_) => 0,
+                TaskState::PendingExternal(_) => 1,
+                TaskState::PendingAsync { .. } => 2,
+                TaskState::PendingUndriven => 3,
+                TaskState::Completed(_) => 4,
+                TaskState::Cancelled => 5,
+            }] += 1;
+        }
         f.debug_struct("TaskScheduler")
-            .field("callables", &format!("[{} pending]", self.callables.len()))
-            .field("results", &format!("[{} entries]", self.results.len()))
-            .field(
-                "external_receivers",
-                &format!("[{} pending]", self.external_receivers.len()),
-            )
+            .field("tasks", &self.tasks.len())
+            .field("pending_callable", &counts[0])
+            .field("pending_external", &counts[1])
+            .field("pending_async", &counts[2])
+            .field("pending_undriven", &counts[3])
+            .field("completed", &counts[4])
+            .field("cancelled", &counts[5])
             .finish()
     }
 }
@@ -923,7 +1032,10 @@ mod tests {
         let mut sched = TaskScheduler::new();
         let (bits, kind) = function_callable(42);
         sched.register(1, bits, kind);
-        assert!(matches!(sched.get_result(1), Some(TaskStatus::Pending)));
+        assert!(matches!(
+            sched.task_state(1),
+            Some(TaskState::PendingCallable(_))
+        ));
 
         let callable = sched.take_callable(1);
         assert!(callable.is_some());
@@ -1002,7 +1114,10 @@ mod tests {
         let mut sched = TaskScheduler::new();
         let tx = sched.register_external(100);
         assert!(sched.has_external(100));
-        assert!(matches!(sched.get_result(100), Some(TaskStatus::Pending)));
+        assert!(matches!(
+            sched.task_state(100),
+            Some(TaskState::PendingExternal(_))
+        ));
 
         // Not yet resolved
         assert!(sched.try_resolve_external(100).is_none());
@@ -1057,51 +1172,179 @@ mod tests {
         assert!(!sched.has_external(400));
     }
 
+    /// Helper: an in-flight-async entry that never delivers. Nothing in these
+    /// tests polls the channel — they exercise classification and ownership,
+    /// not collection.
+    fn stalled_pending_async() -> PendingAsyncTask {
+        let (_tx, rx) = std::sync::mpsc::channel();
+        PendingAsyncTask {
+            completion: AsyncCompletion::Typed(rx),
+            abort: None,
+        }
+    }
+
     #[test]
-    fn test_future_snapshot_status_classifies_scheduler_entries() {
+    fn task_state_classifies_every_scheduler_entry() {
         let mut sched = TaskScheduler::new();
 
-        assert_eq!(
-            sched.future_snapshot_status(900),
-            FutureSnapshotStatus::Unknown
-        );
+        // No entry is its own answer, distinct from every state below.
+        assert!(sched.task_state(900).is_none());
 
         sched.register(10, 0, NativeKind::Int64);
-        assert_eq!(
-            sched.future_snapshot_status(10),
-            FutureSnapshotStatus::PendingCallable
-        );
+        assert!(matches!(
+            sched.task_state(10),
+            Some(TaskState::PendingCallable(_))
+        ));
 
         let _external_tx = sched.register_external(11);
-        assert_eq!(
-            sched.future_snapshot_status(11),
-            FutureSnapshotStatus::PendingExternal
-        );
+        assert!(matches!(
+            sched.task_state(11),
+            Some(TaskState::PendingExternal(_))
+        ));
 
-        let (_tx, rx) = std::sync::mpsc::channel();
-        sched.store_pending_async(
-            12,
-            PendingAsyncTask {
-                completion: crate::executor::task_scheduler::AsyncCompletion::Typed(rx),
-                abort: None,
-            },
-        );
-        assert_eq!(
-            sched.future_snapshot_status(12),
-            FutureSnapshotStatus::PendingAsync
-        );
+        sched.store_pending_async(12, stalled_pending_async());
+        assert!(matches!(
+            sched.task_state(12),
+            Some(TaskState::PendingAsync { .. })
+        ));
 
         sched.complete(13, 99, NativeKind::Int64);
-        assert_eq!(
-            sched.future_snapshot_status(13),
-            FutureSnapshotStatus::Completed
-        );
+        assert!(matches!(
+            sched.task_state(13),
+            Some(TaskState::Completed(_))
+        ));
 
         sched.register(14, 0, NativeKind::Int64);
         sched.cancel(14);
+        assert!(matches!(sched.task_state(14), Some(TaskState::Cancelled)));
+    }
+
+    /// The state #237 was really about. The four-map scheduler reported this
+    /// as `FutureSnapshotStatus::Unknown` — "no scheduler entry exists" — for
+    /// a task that exists, is pending, and is executing right now. Both the
+    /// issue body's "NotStarted" and the downgrade comment's "Registered"
+    /// named it wrong: the driver is gone precisely because it is *running*.
+    #[test]
+    fn taking_a_driver_leaves_the_entry_pending_and_undriven() {
+        let mut sched = TaskScheduler::new();
+
+        sched.register(1, 0, NativeKind::Int64);
+        let _callable = sched.take_callable(1).expect("registered");
+        assert!(matches!(
+            sched.task_state(1),
+            Some(TaskState::PendingUndriven)
+        ));
+        assert!(!sched.is_resolved(1), "taking the driver resolves nothing");
+
+        let _tx = sched.register_external(2);
+        let _rx = sched.take_external_receiver(2).expect("registered");
+        assert!(matches!(
+            sched.task_state(2),
+            Some(TaskState::PendingUndriven)
+        ));
+
+        sched.store_pending_async(3, stalled_pending_async());
+        let _task = sched.take_pending_async(3).expect("registered");
+        assert!(matches!(
+            sched.task_state(3),
+            Some(TaskState::PendingUndriven)
+        ));
+
+        // And none of them collapsed into "no such task".
+        assert!(sched.task_state(1).is_some());
+        assert!(sched.task_state(2).is_some());
+        assert!(sched.task_state(3).is_some());
+        assert!(sched.task_state(900).is_none());
+    }
+
+    /// The other half of the same state: a driver that was taken and then
+    /// failed without recording an outcome orphans the entry. Same fact from
+    /// the scheduler's side — pending, nothing here can advance it.
+    #[test]
+    fn a_failed_driver_orphans_the_entry_as_undriven() {
+        let mut sched = TaskScheduler::new();
+        sched.register(1, 0, NativeKind::Int64);
+
+        let err = sched.resolve_task(1, |_| {
+            Err(VMError::RuntimeError("body blew up".to_string()))
+        });
+        assert!(err.is_err());
+        assert!(matches!(
+            sched.task_state(1),
+            Some(TaskState::PendingUndriven)
+        ));
+        assert!(!sched.is_resolved(1));
+
+        // An external delivery that errors lands in the same state.
+        let tx = sched.register_external(2);
+        tx.send(Err("connection refused".to_string())).unwrap();
+        assert!(sched.try_resolve_external(2).expect("ready").is_err());
+        assert!(matches!(
+            sched.task_state(2),
+            Some(TaskState::PendingUndriven)
+        ));
+    }
+
+    /// Cancelling an external task takes its receiver out of the scheduler, so
+    /// a late delivery cannot resurrect it. The four-map scheduler left the
+    /// receiver in `external_receivers` and only flipped `results` to
+    /// `Cancelled`, so `future_snapshot_status` still answered
+    /// `PendingExternal` (the external map was consulted first) and a later
+    /// `try_resolve_external` overwrote `Cancelled` with `Completed`.
+    #[test]
+    fn cancelling_an_external_task_drops_its_receiver() {
+        let mut sched = TaskScheduler::new();
+        let tx = sched.register_external(1);
+
+        sched.cancel(1);
+        assert!(matches!(sched.task_state(1), Some(TaskState::Cancelled)));
+        assert!(!sched.has_external(1));
+
+        // The background task's delivery now fails instead of landing.
+        assert!(tx.send(Ok(float_result(1.0))).is_err());
+        assert!(sched.try_resolve_external(1).is_none());
+        assert!(matches!(sched.task_state(1), Some(TaskState::Cancelled)));
+    }
+
+    // The two share-accounting cases the four parallel maps could not cover:
+    // a displaced entry of a DIFFERENT kind than the one being installed. The
+    // old `register` dropped a displaced callable but discarded the return of
+    // `results.insert(Pending)`, so a displaced `Completed` share leaked; the
+    // old `complete` was the mirror image. One map, one release path, no gap.
+
+    #[test]
+    fn registering_over_a_completed_task_releases_the_result_share() {
+        let (result, result_kind) = heap_probe();
+        clone_with_kind(result, result_kind);
+        let mut sched = TaskScheduler::new();
+        sched.complete(1, result, result_kind);
+        assert_eq!(probe_rc(result), 2);
+
+        sched.register(1, 0, NativeKind::Int64);
         assert_eq!(
-            sched.future_snapshot_status(14),
-            FutureSnapshotStatus::Cancelled
+            probe_rc(result),
+            1,
+            "the displaced result's share must be released, not leaked"
         );
+        drop(sched);
+        drop_with_kind(result, result_kind);
+    }
+
+    #[test]
+    fn completing_a_task_that_still_holds_a_callable_releases_it() {
+        let (callable, callable_kind) = heap_probe();
+        clone_with_kind(callable, callable_kind);
+        let mut sched = TaskScheduler::new();
+        sched.register(1, callable, callable_kind);
+        assert_eq!(probe_rc(callable), 2);
+
+        sched.complete(1, 99, NativeKind::Int64);
+        assert_eq!(
+            probe_rc(callable),
+            1,
+            "the displaced callable's share must be released, not leaked"
+        );
+        drop(sched);
+        drop_with_kind(callable, callable_kind);
     }
 }
